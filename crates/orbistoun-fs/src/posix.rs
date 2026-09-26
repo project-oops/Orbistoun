@@ -48,15 +48,25 @@ const FAILED: u64 = -1_i64 as u64;
 ///
 /// The top layer's copy, copied up from a lower layer first when that is the only one, so a write
 /// never lands in the base tree or a staged title's library files (D722).
-fn writable_host_path(address: u64) -> Option<std::path::PathBuf> {
-    let guest = crate::read_guest_path(address)?;
+///
+/// # Safety
+///
+/// `address` is a guest path, under the `orbistoun_mem::guest` contract.
+unsafe fn writable_host_path(address: u64) -> Option<std::path::PathBuf> {
+    // SAFETY: the caller's contract.
+    let guest = unsafe { orbistoun_mem::guest::read_path(address) }?;
     mount::resolve_for_write(&guest)
 }
 
 /// The host path a guest may create, remove or rename a name at: the top layer's, and only while no
 /// lower layer also holds the name, because removing it there would need a whiteout (D722).
-fn removable_host_path(address: u64) -> Option<std::path::PathBuf> {
-    let guest = crate::read_guest_path(address)?;
+///
+/// # Safety
+///
+/// `address` is a guest path, under the `orbistoun_mem::guest` contract.
+unsafe fn removable_host_path(address: u64) -> Option<std::path::PathBuf> {
+    // SAFETY: the caller's contract.
+    let guest = unsafe { orbistoun_mem::guest::read_path(address) }?;
     mount::resolve_for_removal(&guest)
 }
 
@@ -86,7 +96,8 @@ fn answered(worked: bool) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `mkdir(2)`.
 fn mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = removable_host_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(host) = (unsafe { removable_host_path(args[0]) }) else {
         return FAILED;
     };
     answered(std::fs::create_dir(host).is_ok())
@@ -100,7 +111,8 @@ fn mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `rmdir(2)`.
 fn rmdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = removable_host_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(host) = (unsafe { removable_host_path(args[0]) }) else {
         return FAILED;
     };
     answered(std::fs::remove_dir(host).is_ok())
@@ -114,7 +126,8 @@ fn rmdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `unlink(2)`.
 fn unlink(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = removable_host_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(host) = (unsafe { removable_host_path(args[0]) }) else {
         return FAILED;
     };
     if host.is_dir() {
@@ -131,7 +144,8 @@ fn unlink(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: ISO C `remove`; POSIX.1-2008 `remove(3)`.
 fn remove(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = removable_host_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(host) = (unsafe { removable_host_path(args[0]) }) else {
         return FAILED;
     };
     let worked = if host.is_dir() {
@@ -150,8 +164,12 @@ fn remove(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `rename(2)`.
 fn rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (Some(from), Some(to)) = (removable_host_path(args[0]), removable_host_path(args[1]))
-    else {
+    // SAFETY: both are paths the guest passed, whose call contract is a NUL-terminated string
+    // in guest memory.
+    let from = unsafe { removable_host_path(args[0]) };
+    // SAFETY: as above.
+    let to = unsafe { removable_host_path(args[1]) };
+    let (Some(from), Some(to)) = (from, to) else {
         return FAILED;
     };
     answered(std::fs::rename(from, to).is_ok())
@@ -169,7 +187,8 @@ fn rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `access(2)`; `W_OK` from `sys/sys/unistd.h`.
 fn access(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(guest) = crate::read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return FAILED;
     };
     let Some(host) = mount::resolve_existing(&guest) else {
@@ -188,7 +207,8 @@ fn access(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `truncate(2)`.
 fn truncate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = writable_host_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(host) = (unsafe { writable_host_path(args[0]) }) else {
         return FAILED;
     };
     let Ok(file) = std::fs::OpenOptions::new().write(true).open(host) else {
@@ -305,7 +325,8 @@ fn pwritev(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// reason `open`'s is not here: this layer has no permission model to apply it to, and
 /// pretending otherwise would report an access control that does not exist.
 fn creat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(path) = crate::read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return FAILED;
     };
     crate::descriptor::create(&path).unwrap_or(FAILED)
@@ -425,7 +446,8 @@ fn dup2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: POSIX.1-2008 `chmod(2)`.
 fn chmod(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(host) = writable_host_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(host) = (unsafe { writable_host_path(args[0]) }) else {
         return FAILED;
     };
     // Existence still decides, because `chmod` on a path that is not there fails.

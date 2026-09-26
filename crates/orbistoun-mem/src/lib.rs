@@ -28,6 +28,7 @@
 //! without touching the host address space at all.
 
 pub mod blocks;
+pub mod guest;
 pub mod platform;
 pub mod stack;
 pub mod test_bases;

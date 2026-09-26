@@ -144,6 +144,7 @@ guest_module! {
 
 use crate::packet;
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
+use orbistoun_mem::guest;
 
 /// Successful return, as the guest reads it.
 const OK: u64 = 0;
@@ -152,54 +153,6 @@ const OK: u64 = 0;
 /// which null-checks rdi/rsi/rdx and answers this for any of them (D556). Returned when a required
 /// pointer argument is null, rather than writing through it.
 const BAD_ARGUMENT: u64 = 0x8a6c_000a;
-
-/// Writes a little-endian quadword into guest memory at `at`, under the identity mapping (D014).
-///
-/// # Safety
-///
-/// `at` must address eight bytes of guest-owned, writable memory. The AGC out-parameters are
-/// buffers the guest supplies and the call is contracted to fill, so the guest owns them by
-/// construction.
-unsafe fn poke_u64(at: u64, value: u64) {
-    let Ok(at) = usize::try_from(at) else {
-        return;
-    };
-    // SAFETY: the caller guarantees `at` addresses eight writable guest bytes; unaligned because
-    // these object fields carry no alignment promise.
-    unsafe {
-        std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(at), value);
-    }
-}
-
-/// Writes a little-endian dword into guest memory at `at`, under the identity mapping (D014).
-///
-/// # Safety
-///
-/// `at` must address four bytes of guest-owned, writable memory - see [`poke_u64`].
-unsafe fn poke_u32(at: u64, value: u32) {
-    let Ok(at) = usize::try_from(at) else {
-        return;
-    };
-    // SAFETY: the caller guarantees `at` addresses four writable guest bytes; unaligned for the
-    // same reason as the quadword write.
-    unsafe {
-        std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u32>(at), value);
-    }
-}
-
-/// Reads a little-endian quadword from guest memory at `at`, under the identity mapping (D014).
-///
-/// # Safety
-///
-/// `at` must address eight bytes of readable guest memory.
-unsafe fn peek_u64(at: u64) -> u64 {
-    let Ok(at) = usize::try_from(at) else {
-        return 0;
-    };
-    // SAFETY: the caller guarantees eight readable guest bytes at `at`; unaligned because these
-    // object fields carry no alignment promise - the same contract `peek_u32` states below.
-    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at)) }
-}
 
 /// `sceAgcCreateShader(out, header, bytecode, flags)`.
 ///
@@ -219,7 +172,7 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return BAD_ARGUMENT;
     }
     // SAFETY: `out` is the guest stack slot the call fills with the object pointer (D556).
-    unsafe { poke_u64(out, header) };
+    unsafe { guest::write_u64(out, header) };
     // SAFETY: `header` is the guest-owned object region (>= 0x130 bytes).
     // obSCEne measured that hardware changes exactly 0x2c (44) bytes within the header
     // (obSCEne 166-agc/create-shader):
@@ -230,27 +183,27 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     //   the loop below and worklog 748)
     // - Sub-table entries at sub_table[0..5]: relative offsets relocated to header pointers
     // Note: +0x50 and other fields are asset metadata (e.g. counts) and are not touched.
-    unsafe { poke_u64(header.wrapping_add(0x10), bytecode) };
+    unsafe { guest::write_u64(header.wrapping_add(0x10), bytecode) };
 
     // SAFETY: `header` is the guest-owned object region, at least 0x130 bytes (the extent obSCEne
     // measured), so the quadword at +0x8 is inside it.
-    let off_8 = unsafe { peek_u64(header.wrapping_add(0x8)) };
+    let off_8 = unsafe { guest::read_u64(header.wrapping_add(0x8)) }.unwrap_or(0);
     if off_8 != 0 && off_8 < 0x1000 {
         let sub_table = header.wrapping_add(off_8).wrapping_add(8);
         // SAFETY: the same +0x8 quadword just read, written back as an absolute pointer.
-        unsafe { poke_u64(header.wrapping_add(0x8), sub_table) };
+        unsafe { guest::write_u64(header.wrapping_add(0x8), sub_table) };
         for i in 0..5 {
             let entry_addr = sub_table.wrapping_add(i * 8);
             // SAFETY: `sub_table` is inside the guest's own header object - it is that object's
             // own relative offset, rejected above unless it is non-zero and under 0x1000 - and
             // `i * 8 < 40`, so the entry is within the region hardware itself dereferences here
             // (measured, obSCEne 166-agc/create-shader). Unaligned for the field's sake.
-            let rel = unsafe { peek_u64(entry_addr) };
+            let rel = unsafe { guest::read_u64(entry_addr) }.unwrap_or(0);
             if rel != 0 && rel < 0x1000 {
                 // Self-relative, like every offset in this object: the entry's own address plus
                 // its offset (measured: obSCEne `166-agc/create-shader`, `shader-obj`).
                 // SAFETY: the same entry just read, written back as an absolute pointer.
-                unsafe { poke_u64(entry_addr, entry_addr.wrapping_add(rel)) };
+                unsafe { guest::write_u64(entry_addr, entry_addr.wrapping_add(rel)) };
             }
         }
     }
@@ -267,18 +220,18 @@ fn create_shader(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let field = header.wrapping_add(offset);
         // SAFETY: `offset` is one of 0x18..0x38, inside the guest-owned header object whose measured
         // extent is 0x130 bytes.
-        let rel = unsafe { peek_u64(field) };
+        let rel = unsafe { guest::read_u64(field) }.unwrap_or(0);
         if rel != 0 && rel < 0x1000 {
             // Self-relative: the field's own address plus its offset. Measured: obSCEne
             // `166-agc/create-shader` wrote `header + 0x90` back over `0x70` at `+0x20`, and
             // `header + 0x60` over `0x38` at `+0x28`.
             // SAFETY: the same field just read, written back as an absolute pointer.
-            unsafe { poke_u64(field, field.wrapping_add(rel)) };
+            unsafe { guest::write_u64(field, field.wrapping_add(rel)) };
         }
     }
     // SAFETY: `+0x20` is inside the guest-owned header object (extent 0x130), read after the loop
     // above relocated it.
-    let registers = unsafe { peek_u64(header.wrapping_add(0x20)) };
+    let registers = unsafe { guest::read_u64(header.wrapping_add(0x20)) }.unwrap_or(0);
     // SAFETY: `registers` points into the same guest-owned header object - the relocation above
     // made it a pointer into it - and `patch_program_address` writes only its first four dwords.
     unsafe { patch_program_address(registers, bytecode) };
@@ -300,30 +253,17 @@ unsafe fn patch_program_address(registers: u64, payload: u64) {
         return;
     }
     // SAFETY: the caller guarantees sixteen readable bytes at `registers`.
-    if unsafe { peek_u32(registers) } == 0 {
+    if unsafe { guest::read_u32(registers) }.unwrap_or(0) == 0 {
         return;
     }
     // SAFETY: as above, writable; the second and fourth dwords of the descriptor.
     unsafe {
-        poke_u32(registers.wrapping_add(4), (payload >> 8) as u32);
+        guest::write_u32(registers.wrapping_add(4), (payload >> 8) as u32);
     }
     // SAFETY: as above.
     unsafe {
-        poke_u32(registers.wrapping_add(12), (payload >> 40) as u32);
+        guest::write_u32(registers.wrapping_add(12), (payload >> 40) as u32);
     }
-}
-
-/// Reads a little-endian dword from guest memory at `at`, under the identity mapping (D014).
-///
-/// # Safety
-///
-/// `at` must address four bytes of readable guest memory.
-unsafe fn peek_u32(at: u64) -> u32 {
-    let Ok(at) = usize::try_from(at) else {
-        return 0;
-    };
-    // SAFETY: the caller guarantees four readable guest bytes at `at`; unaligned for the field's sake.
-    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(at)) }
 }
 
 /// The PS-input interpolant table is thirty-two quadwords.
@@ -344,7 +284,7 @@ unsafe fn write_default_interpolants(at: u64) {
     for i in 0..INTERPOLANT_ENTRIES {
         let entry = (i << 32) | (0x191 + i);
         // SAFETY: the caller guarantees 256 writable bytes at `at`; `i * 8 < 256` by construction.
-        unsafe { poke_u64(at.wrapping_add(i * 8), entry) };
+        unsafe { guest::write_u64(at.wrapping_add(i * 8), entry) };
     }
 }
 
@@ -361,9 +301,9 @@ unsafe fn write_default_interpolants(at: u64) {
 unsafe fn set_topology(sec_state: u64, topology: u32) {
     let field = sec_state.wrapping_add(0x14);
     // SAFETY: the caller guarantees `sec_state + 0x14` is a readable guest dword.
-    let prev = unsafe { peek_u32(field) };
+    let prev = unsafe { guest::read_u32(field) }.unwrap_or(0);
     // SAFETY: same field, writable by the same guarantee.
-    unsafe { poke_u32(field, (prev & !0x1f) | (topology & 0x1f)) };
+    unsafe { guest::write_u32(field, (prev & !0x1f) | (topology & 0x1f)) };
 }
 
 /// `sceAgcCreateInterpolantMapping(mapping, vs, ps)`.
@@ -451,7 +391,7 @@ fn link_shaders(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: `link_state` is the guest-owned out-buffer (>= 0x110 bytes) the call fills.
     unsafe { write_default_interpolants(link_state) };
     // SAFETY: same buffer; `+0x108` is the measured routing quadword's slot.
-    unsafe { poke_u64(link_state.wrapping_add(0x108), LINK_STAGE_ROUTING) };
+    unsafe { guest::write_u64(link_state.wrapping_add(0x108), LINK_STAGE_ROUTING) };
     OK
 }
 
@@ -512,9 +452,9 @@ fn dcb_append(dcb: u64, words: &[u32]) -> u64 {
     }
     // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and the
     // limit are quadwords at its `+0x10` and `+0x18`, the offsets hardware itself reads.
-    let cur = unsafe { peek_u64(dcb.wrapping_add(dcb::CUR)) };
+    let cur = unsafe { guest::read_u64(dcb.wrapping_add(dcb::CUR)) }.unwrap_or(0);
     // SAFETY: the same handle, the adjacent field.
-    let limit = unsafe { peek_u64(dcb.wrapping_add(dcb::LIMIT)) };
+    let limit = unsafe { guest::read_u64(dcb.wrapping_add(dcb::LIMIT)) }.unwrap_or(0);
     let length = words.len() as u64 * 4;
     if cur == 0 || limit == 0 || cur.wrapping_add(length) > limit {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
@@ -522,10 +462,10 @@ fn dcb_append(dcb: u64, words: &[u32]) -> u64 {
     for (i, word) in words.iter().enumerate() {
         // SAFETY: every offset written is below `length`, and `cur + length <= limit` was checked
         // above, so each dword lands inside the guest's own command buffer.
-        unsafe { poke_u32(cur.wrapping_add(i as u64 * 4), *word) };
+        unsafe { guest::write_u32(cur.wrapping_add(i as u64 * 4), *word) };
     }
     // SAFETY: the cursor field of the same handle, advanced by what was just written.
-    unsafe { poke_u64(dcb.wrapping_add(dcb::CUR), cur.wrapping_add(length)) };
+    unsafe { guest::write_u64(dcb.wrapping_add(dcb::CUR), cur.wrapping_add(length)) };
     cur
 }
 
@@ -657,7 +597,7 @@ fn agc_phantom_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out != 0 {
         // SAFETY: `out` is the guest-supplied out-parameter stack slot (worklog 725),
         // eight bytes long and aligned to hold the workload size.
-        unsafe { poke_u64(out, 0xa8) };
+        unsafe { guest::write_u64(out, 0xa8) };
     }
     OK
 }
@@ -870,7 +810,7 @@ fn cb_set_sh_register_range_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     for i in 0..count {
         // SAFETY: `values` is the guest's own array of `count` dwords, the argument this call is
         // defined by; `count` is bounded above so the walk cannot run away.
-        run.push(unsafe { peek_u32(values.wrapping_add(i * 4)) });
+        run.push(unsafe { guest::read_u32(values.wrapping_add(i * 4)) }.unwrap_or(0));
     }
     dcb_append(
         args[0],

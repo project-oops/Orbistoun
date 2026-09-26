@@ -334,7 +334,8 @@ fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if source == 0 || destination == 0 {
         return NOT_AN_ADDRESS;
     }
-    let Some(text) = crate::read_guest_path(source) else {
+    // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
+    let Some(text) = (unsafe { orbistoun_mem::guest::read_path(source) }) else {
         return NOT_AN_ADDRESS;
     };
     let parsed: Vec<u8> = if sixteen_byte {

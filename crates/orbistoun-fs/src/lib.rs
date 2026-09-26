@@ -108,29 +108,6 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 /// Successful return, as the guest reads it.
 const OK: u64 = 0;
 
-/// Reads a NUL-terminated path the guest passed.
-pub(crate) fn read_guest_path(address: u64) -> Option<String> {
-    /// Longer than any path observed, and short enough to stay near its own page.
-    const MAX_PATH: usize = 1024;
-
-    let at = usize::try_from(address).ok()?;
-    if at == 0 {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    for offset in 0..MAX_PATH {
-        // SAFETY: a guest-supplied string under the identity mapping (D014), read one
-        // byte at a time so the scan cannot straddle the end of a mapping by more than
-        // it reads.
-        let byte = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u8>(at + offset)) };
-        if byte == 0 {
-            break;
-        }
-        bytes.push(byte);
-    }
-    String::from_utf8(bytes).ok()
-}
-
 /// A guest buffer, as a slice.
 ///
 /// # Safety
@@ -164,7 +141,8 @@ fn kernel_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // **A refused path answers the same way a refused open does.** This returned an
     // argument error, which is a small positive number, which a caller reads as a perfectly
     // good descriptor - so a null path "opened successfully" and the probe said so (D273).
-    let Some(path) = read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         // A null (or unreadable) path pointer is `EFAULT` on hardware, not a made-up descriptor:
         // obSCEne's `040-file/open-rejects-null` measured `0x8002000e` (D439).
         return u64::from(GuestError::vendor(orbistoun_core::errno::FAULT).as_raw());
@@ -307,7 +285,8 @@ fn kernel_lseek(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// like every other write (D250, D251) - and anywhere else answers the code the console answers,
 /// `0x8002_00xx`, which a caller can test rather than mistake for a handle.
 fn kernel_mkdir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(path) = read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
     if mount::is_writable(&path) {
@@ -379,7 +358,8 @@ const STATFS_BLOCK: u64 = 4096;
 /// the caller had it, because this knows none of them and the structure's real length on the
 /// target has never been measured.
 fn kernel_statfs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(path) = read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
     let into = args[1];

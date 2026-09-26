@@ -136,7 +136,8 @@ fn fmodf(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTER
 /// parser is stricter than C's - it will not accept a trailing suffix - so the longest
 /// parsable prefix is found rather than handing the whole string over and failing.
 fn strtod(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
-    let Some(text) = crate::read_guest_path(ints[0]) else {
+    // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
+    let Some(text) = (unsafe { orbistoun_mem::guest::read_path(ints[0]) }) else {
         return ret(0.0);
     };
     let trimmed = text.trim_start();
@@ -241,7 +242,8 @@ fn sincosf(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTE
 /// Parsed as an `f32` rather than narrowed from the `f64` [`strtod`] produces: narrowing
 /// rounds twice, and a value exactly between two `f32`s would land on the wrong one.
 fn strtof(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
-    let Some(text) = crate::read_guest_path(ints[0]) else {
+    // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
+    let Some(text) = (unsafe { orbistoun_mem::guest::read_path(ints[0]) }) else {
         return ret_f32(0.0);
     };
     let trimmed = text.trim_start();

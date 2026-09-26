@@ -575,20 +575,10 @@ mod tests {
 
     /// Reads a NUL-terminated string back from a host address one of these answered.
     fn read_c_string(address: u64) -> String {
-        let mut bytes = Vec::new();
-        let mut at = address as usize as *const u8;
-        loop {
-            // SAFETY: a pointer this module just returned into its own thread-local buffer,
-            // read one byte at a time up to the terminator it wrote.
-            let byte = unsafe { *at };
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            // SAFETY: still inside the buffer, advancing toward the terminator.
-            at = unsafe { at.add(1) };
-        }
-        String::from_utf8(bytes).expect("asctime writes ASCII")
+        // SAFETY: a pointer this module just returned into its own thread-local buffer, which
+        // holds a terminator.
+        let bytes = unsafe { orbistoun_mem::guest::read_cstr(address, usize::MAX) };
+        String::from_utf8(bytes.expect("a non-null answer")).expect("asctime writes ASCII")
     }
 
     /// Runs `asctime(localtime(&t))` and returns the rendered string.

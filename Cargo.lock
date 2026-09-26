@@ -3198,6 +3198,7 @@ dependencies = [
  "orbistoun-env",
  "orbistoun-hle",
  "orbistoun-kernel",
+ "orbistoun-mem",
 ]
 
 [[package]]
@@ -3913,10 +3914,15 @@ name = "selfish-abi"
 version = "0.1.0"
 
 [[package]]
+name = "selfish-bytes"
+version = "0.1.0"
+
+[[package]]
 name = "selfish-container"
 version = "0.1.0"
 dependencies = [
  "selfish-abi",
+ "selfish-bytes",
  "selfish-elf",
 ]
 
@@ -3925,6 +3931,7 @@ name = "selfish-elf"
 version = "0.1.0"
 dependencies = [
  "selfish-abi",
+ "selfish-bytes",
  "selfish-nid",
  "zerocopy",
 ]

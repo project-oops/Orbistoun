@@ -225,7 +225,8 @@ fn put_timespec(block: &mut [u8], at: usize, seconds: u64, nanos: u32) {
 /// Reference: POSIX.1-2008 `stat(2)`; the structure from `sys/sys/stat.h`, and which
 /// generation of it is a setting (D374).
 fn stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(guest) = crate::read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return FAILED;
     };
     let Some(facts) = facts_of(&guest) else {
@@ -259,7 +260,8 @@ fn stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// registration beside the POSIX ones offered it under the wrong library, and the crate's own
 /// `every_implementation_is_also_declared_here_or_says_why_not` refused it (D525).
 pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(guest) = crate::read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return u64::from(
             orbistoun_core::GuestError::vendor(orbistoun_core::errno::INVALID).as_raw(),
         );
@@ -426,7 +428,8 @@ pub(crate) fn clear() {
 ///
 /// Reference: POSIX.1-2008 `opendir(3)`.
 fn opendir(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(guest) = crate::read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return 0;
     };
     let Some(entries) = listing(&guest) else {

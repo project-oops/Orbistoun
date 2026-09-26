@@ -36,6 +36,7 @@ use std::sync::{Mutex, OnceLock};
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
+use orbistoun_mem::guest;
 
 /// The user-level threading library, declared here because its objects rest on the same `sync`
 /// primitives libkernel's pthread and the C-runtime `_Mtx_*` families do.
@@ -550,7 +551,8 @@ fn execute_once(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if flag == 0 || callback == 0 {
         return 0;
     }
-    if read_word(flag) == Some(DONE) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if unsafe { guest::read_u64(flag) } == Some(DONE) {
         return SUCCESS;
     }
     // The callback is an `InitOnce`-shaped `int(*)(void*, void*, void**)`: the flag as the handle,
@@ -563,7 +565,8 @@ fn execute_once(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let ran = unsafe { thread::call_guest(callback, [flag, context, leftover_ptr]) };
     match ran {
         Some(rc) if rc != 0 => {
-            write_word(flag, DONE);
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::write_u64(flag, DONE) };
             SUCCESS
         }
         _ => 0,
@@ -605,7 +608,8 @@ fn c_runtime_handle(arg: u64, exists: impl Fn(u64) -> bool) -> Option<u64> {
     if exists(arg) {
         return Some(arg);
     }
-    let inner = read_word(arg)?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let inner = unsafe { guest::read_u64(arg) }?;
     exists(inner).then_some(inner)
 }
 
@@ -622,7 +626,8 @@ fn c_mtx_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return thrd::ERROR;
     }
     let handle = sync::create(sync::Recursion::Allowed, "std::mutex");
-    if !write_word(mtx, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(mtx, handle) } {
         return thrd::ERROR;
     }
     thrd::SUCCESS
@@ -681,7 +686,8 @@ fn c_cnd_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return thrd::ERROR;
     }
     let handle = sync::create_cond("std::condition_variable");
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return thrd::ERROR;
     }
     thrd::SUCCESS
@@ -762,8 +768,10 @@ fn c_cnd_broadcast(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Read an `xtime{ sec: i64, nsec: i64 }` the runtime passes by pointer, as a duration since the
 /// epoch. `None` for a null or unreadable pointer.
 fn read_xtime(pointer: u64) -> Option<std::time::Duration> {
-    let sec = read_word(pointer)?;
-    let nsec = read_word(pointer + 8)?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let sec = unsafe { guest::read_u64(pointer) }?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let nsec = unsafe { guest::read_u64(pointer + 8) }?;
     Some(std::time::Duration::new(
         sec,
         u32::try_from(nsec % 1_000_000_000).unwrap_or(0),
@@ -892,8 +900,10 @@ fn ult_construct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create_ult_object(&read_name(name), args[2], args[3]);
-    if !write_word(out, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_ult_object(&unsafe { read_name(name) }, args[2], args[3]);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -905,8 +915,10 @@ fn ult_mutex_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create(sync::Recursion::Allowed, &read_name(name));
-    if !write_word(out, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create(sync::Recursion::Allowed, &unsafe { read_name(name) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -953,7 +965,8 @@ fn ult_mutex_trylock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn ult_mutex_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if let Some(handle) = mutex_at(args[0]) {
         sync::destroy(handle);
-        write_word(args[0], 0);
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(args[0], 0) };
     }
     OK
 }
@@ -976,8 +989,10 @@ fn ult_cond_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create_cond(&read_name(name));
-    if !write_word(out, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_cond(&unsafe { read_name(name) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     if let Ok(mut map) = ult_cond_mutex().lock() {
@@ -1035,7 +1050,8 @@ fn ult_cond_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if let Ok(mut map) = ult_cond_mutex().lock() {
             map.remove(&handle);
         }
-        write_word(args[0], 0);
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(args[0], 0) };
     }
     OK
 }
@@ -1065,7 +1081,8 @@ fn ult_ulthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if !write_word(out, next_ult_thread()) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, next_ult_thread()) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -1154,7 +1171,8 @@ fn allocate_main_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     drop(guard);
 
-    if !write_word(out, address) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, address) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -1431,7 +1449,8 @@ fn map_named_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // `void **` the answer is written back through - a stack address - and recording it as a base
     // put a guest stack pointer in a list of mappings. Read through it for what the guest
     // actually requested, which is zero when it expressed no preference (D604).
-    let requested = read_word(args[0]).unwrap_or(0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let requested = unsafe { guest::read_u64(args[0]) }.unwrap_or(0);
     let outcome = map_named_direct_memory_inner(args);
     if outcome != OK {
         mapped::note_failed(
@@ -1462,7 +1481,8 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             && existing_len >= len
         {
             drop(mapped);
-            return if write_word(out, existing) {
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            return if unsafe { guest::write_u64(out, existing) } {
                 OK
             } else {
                 u64::from(GuestError::InvalidArgument.as_raw())
@@ -1481,7 +1501,8 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // "anywhere". Honoured rather than overridden - a guest that asked for an address and
     // silently got a different one corrupts itself in ways that look like anything except
     // a mapping bug.
-    let requested = read_word(out).unwrap_or(0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let requested = unsafe { guest::read_u64(out) }.unwrap_or(0);
     let base = if requested == 0 {
         next_mapping_base(len)
     } else {
@@ -1555,7 +1576,8 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     mapping_placed(base, len, protection, requested != 0);
     note_requested_protection(base, len, prot);
 
-    if !write_word(out, base) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, base) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     if let Ok(mut mapped) = physical_mappings().lock() {
@@ -1608,10 +1630,14 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             break;
         };
         let (Some(vaddr), Some(paddr), Some(len), Some(prot_word)) = (
-            read_word(entry),
-            read_word(entry.wrapping_add(8)),
-            read_word(entry.wrapping_add(16)),
-            read_word(entry.wrapping_add(24)),
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::read_u64(entry) },
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::read_u64(entry.wrapping_add(8)) },
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::read_u64(entry.wrapping_add(16)) },
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::read_u64(entry.wrapping_add(24)) },
         ) else {
             outcome = u64::from(GuestError::InvalidArgument.as_raw());
             break;
@@ -1627,7 +1653,8 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // **Written whatever the outcome.** The count is how a caller tells a partial map from a total
     // failure, so a stopped batch must still say how far it got - our own SDK reads it back.
-    let _ = write_word(completed, done);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let _ = unsafe { guest::write_u64(completed, done) };
     outcome
 }
 
@@ -1810,7 +1837,8 @@ fn run_initialisers(initialisers: ModuleInitialisers) -> u64 {
     }
     for slot in 0..initialisers.count {
         let at = initialisers.array.saturating_add(slot.saturating_mul(8));
-        let Some(entry) = read_word(at) else {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let Some(entry) = (unsafe { guest::read_u64(at) }) else {
             // The array is outside anything readable, so the recorded address is wrong
             // rather than the module being empty. Stop, rather than walk further into it.
             break;
@@ -2201,127 +2229,17 @@ fn protection_from_guest(prot: u64) -> orbistoun_mem::Protection {
     }
 }
 
-/// Reads a machine word out of guest memory.
+/// The longest thread or object name read from the guest.
+const MAX_NAME: usize = 64;
+
+/// A NUL-terminated guest name of at most [`MAX_NAME`] bytes, lossily decoded; empty for null.
 ///
-/// The mapping is identity, so a guest address is a host address (D014). An address the
-/// guest never mapped faults here exactly as it would have faulted in the guest, and the
-/// worker's fault reporter names it - which is more useful than a check that would turn
-/// a guest bug into a quiet zero.
-fn read_word(address: u64) -> Option<u64> {
-    let at = usize::try_from(address).ok()?;
-    if at == 0 {
-        return None;
-    }
-    // SAFETY: the guest supplied this address as somewhere it keeps a word, which is the
-    // same contract the real call has. Read unaligned because nothing guarantees the
-    // guest aligned it, and an unaligned read through a `*const u64` is undefined
-    // behaviour where the instruction itself is fine.
-    Some(unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(at)) })
-}
-
-/// Writes a 32-bit value where a guest expects an `int`.
+/// # Safety
 ///
-/// **Four bytes, not eight, and the difference has bitten this crate twice.** A semaphore
-/// handle is an `int` and writing a whole word through it put the top half in whatever the
-/// guest kept next door (D210). The mutex attribute `Gettype` out-parameter is the same
-/// shape - and there the neighbour was the caller's loop counter, so an eight-byte write
-/// reset it every iteration and the check ran until the call budget stopped it (D272).
-fn write_int(address: u64, value: u32) -> bool {
-    let Ok(at) = usize::try_from(address) else {
-        return false;
-    };
-    if at == 0 {
-        return false;
-    }
-    // SAFETY: as `write_word`, but four bytes - a guest-supplied `int *` under an identity
-    // mapping, written unaligned because the guest's alignment is its own business.
-    unsafe {
-        std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u32>(at), value);
-    }
-    true
-}
-
-/// Reads a guest `int` - four bytes, not eight.
-///
-/// The counterpart to [`write_int`], and it exists for the same reason (D272): a `sched_param`
-/// is a four-byte structure and the guest packs it right against its neighbour. Reading eight
-/// would take the neighbour with it.
-fn read_int(address: u64) -> Option<u32> {
-    let at = usize::try_from(address).ok()?;
-    if at == 0 {
-        return None;
-    }
-    // SAFETY: as `read_word`, but four bytes - a guest-supplied `int *` under an identity
-    // mapping, read unaligned because the guest's alignment is its own business.
-    Some(unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(at)) })
-}
-
-/// Writes a machine word into guest memory.
-fn write_word(address: u64, value: u64) -> bool {
-    let Ok(at) = usize::try_from(address) else {
-        return false;
-    };
-    if at == 0 {
-        return false;
-    }
-    // SAFETY: as `read_word` - a guest-supplied destination under an identity mapping,
-    // written unaligned because the guest's alignment is its own business.
-    unsafe {
-        std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<u64>(at), value);
-    }
-    true
-}
-
-/// Writes a block of bytes into guest memory.
-///
-/// For the structures a guest hands a buffer for and expects filled - a delivered event, here.
-/// Refuses a null destination for the same reason [`write_word`] does.
-fn write_block(address: u64, bytes: &[u8]) -> bool {
-    let Ok(at) = usize::try_from(address) else {
-        return false;
-    };
-    if at == 0 {
-        return false;
-    }
-    // SAFETY: as `write_word` - a guest-supplied destination under an identity mapping, and
-    // `bytes.len()` bytes of it, which is the size the guest asked to be filled.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            std::ptr::with_exposed_provenance_mut::<u8>(at),
-            bytes.len(),
-        );
-    }
-    true
-}
-
-/// Reads a NUL-terminated name the guest passed.
-///
-/// Bounded, because an unterminated string would otherwise walk until it hit an unmapped
-/// page - and a name is cosmetic, so the trade is obvious. A truncated name in a trace is
-/// a small annoyance; a fault raised while fetching one is a fault attributed to the
-/// wrong thing entirely.
-fn read_name(address: u64) -> String {
-    /// Longer than any thread name observed, and short enough to stay within one page
-    /// from almost any starting point.
-    const MAX_NAME: usize = 64;
-
-    let Ok(at) = usize::try_from(address) else {
-        return String::new();
-    };
-    if at == 0 {
-        return String::new();
-    }
-    let mut bytes = Vec::new();
-    for offset in 0..MAX_NAME {
-        // SAFETY: a guest-supplied string under the identity mapping, read one byte at a
-        // time so the scan cannot straddle the end of a mapping by more than it reads.
-        let byte = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u8>(at + offset)) };
-        if byte == 0 {
-            break;
-        }
-        bytes.push(byte);
-    }
+/// `address` is under the `orbistoun_mem::guest` contract.
+unsafe fn read_name(address: u64) -> String {
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { guest::read_cstr(address, MAX_NAME) }.unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -2389,7 +2307,8 @@ fn tls_values()
 fn pthread_key_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // args[1] is the destructor, which is intentionally not stored - see the family note.
     let key = NEXT_TLS_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if !write_int(args[0], key) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u32(args[0], key) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -2428,7 +2347,8 @@ fn pthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out == 0 || entry == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let name = read_name(name);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let name = unsafe { read_name(name) };
     let start = thread::Start { entry, argument };
     // The attribute block the guest built through `scePthreadAttrSet*`, honoured where obSCEne
     // measured that the console honours it (`031-stackattr`, REQ-...c2e9): a live thread read back
@@ -2445,7 +2365,8 @@ fn pthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
     match spawned {
         Ok(handle) => {
-            if !write_word(out, handle) {
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            if !unsafe { guest::write_u64(out, handle) } {
                 return u64::from(GuestError::InvalidArgument.as_raw());
             }
             OK
@@ -2509,8 +2430,10 @@ fn thread_attributes(attr: u64) -> (thread::Affinity, u64) {
             orbistoun_mem::stack::DEFAULT_STACK_SIZE,
         );
     };
-    let stack_field = read_word(object + ATTR_STACK_SIZE).unwrap_or(0);
-    let affinity_field = read_word(object + ATTR_AFFINITY).unwrap_or(0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let stack_field = unsafe { guest::read_u64(object + ATTR_STACK_SIZE) }.unwrap_or(0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let affinity_field = unsafe { guest::read_u64(object + ATTR_AFFINITY) }.unwrap_or(0);
     spawn_parameters(stack_field, affinity_field)
 }
 
@@ -2531,7 +2454,8 @@ fn pthread_join(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
     if value != 0 {
-        write_word(value, thread::exit_value(handle));
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(value, thread::exit_value(handle)) };
     }
     OK
 }
@@ -2572,7 +2496,8 @@ fn create_semaphore(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let ceiling = u32::try_from(args[4])
         .unwrap_or(u32::from(u16::MAX))
         .max(initial);
-    let name = read_name(args[1]);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let name = unsafe { read_name(args[1]) };
 
     let handle = sync::create_semaphore(initial, ceiling, &name);
     // **Eight bytes, and that reverses D210 on a measurement.**
@@ -2645,9 +2570,11 @@ fn pthread_mutex_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let name = read_name(name);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let name = unsafe { read_name(name) };
     let handle = sync::create(mutex_recursion_from_attr(attr), &name);
-    if !write_word(out, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -2666,7 +2593,8 @@ fn mutex_recursion_from_attr(attr: u64) -> sync::Recursion {
     let Some(object) = attr_at(attr) else {
         return sync::Recursion::Forbidden;
     };
-    match read_word(object + ATTR_TYPE) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    match unsafe { guest::read_u64(object + ATTR_TYPE) } {
         Some(2) => sync::Recursion::Allowed,
         Some(4) => sync::Recursion::Errorcheck,
         _ => sync::Recursion::Forbidden,
@@ -2682,7 +2610,8 @@ fn mutex_recursion_from_attr(attr: u64) -> sync::Recursion {
 /// the critical section at once, and the corruption would be blamed on whatever the lock
 /// was protecting (principle 3).
 fn mutex_at(pointer: u64) -> Option<sync::MutexHandle> {
-    let handle = read_word(pointer)?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = unsafe { guest::read_u64(pointer) }?;
     (handle != sync::NO_MUTEX).then_some(handle)
 }
 
@@ -2769,7 +2698,8 @@ fn pthread_mutex_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // Cleared, so a guest that destroys twice is told the handle is gone rather than being
     // handed a freed one - and so a use-after-destroy shows up here rather than as
     // corruption somewhere the lock was protecting.
-    write_word(args[0], sync::NO_MUTEX);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(args[0], sync::NO_MUTEX) };
     OK
 }
 
@@ -3020,7 +2950,8 @@ fn sigemptyset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     for word in 0..SIGSET_WORDS {
-        if !write_word(args[0].saturating_add(word * 8), 0) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        if !unsafe { guest::write_u64(args[0].saturating_add(word * 8), 0) } {
             return u64::from(GuestError::InvalidArgument.as_raw());
         }
     }
@@ -3055,7 +2986,8 @@ fn sigprocmask(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // what it installed.
     if args[2] != 0 {
         for (index, word) in mask.iter().enumerate() {
-            if !write_word(args[2].saturating_add(index as u64 * 8), *word) {
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            if !unsafe { guest::write_u64(args[2].saturating_add(index as u64 * 8), *word) } {
                 return u64::from(GuestError::InvalidArgument.as_raw());
             }
         }
@@ -3066,7 +2998,9 @@ fn sigprocmask(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     let mut incoming = [0_u64; SIGSET_WORDS as usize];
     for (index, word) in incoming.iter_mut().enumerate() {
-        let Some(read) = read_word(args[1].saturating_add(index as u64 * 8)) else {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let Some(read) = (unsafe { guest::read_u64(args[1].saturating_add(index as u64 * 8)) })
+        else {
             return u64::from(GuestError::InvalidArgument.as_raw());
         };
         *word = read;
@@ -3117,7 +3051,8 @@ fn kernel_uuid_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // byte 8 - the two fields a reader checks to decide it is looking at a UUID at all.
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    if !write_block(args[0], &bytes) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_bytes(args[0], &bytes) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3148,7 +3083,8 @@ fn sigfillset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     for word in 0..SIGSET_WORDS {
-        if !write_word(args[0].saturating_add(word * 8), u64::MAX) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        if !unsafe { guest::write_u64(args[0].saturating_add(word * 8), u64::MAX) } {
             return u64::from(GuestError::InvalidArgument.as_raw());
         }
     }
@@ -3161,10 +3097,12 @@ fn sigaddset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     let at = args[0].saturating_add(word * 8);
-    let Some(current) = read_word(at) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(current) = (unsafe { guest::read_u64(at) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if !write_word(at, current | bit) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(at, current | bit) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3176,10 +3114,12 @@ fn sigdelset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     let at = args[0].saturating_add(word * 8);
-    let Some(current) = read_word(at) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(current) = (unsafe { guest::read_u64(at) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if !write_word(at, current & !bit) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(at, current & !bit) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3195,7 +3135,8 @@ fn sigismember(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (Some((word, bit)), true) = (signal_bit(args[1]), args[0] != 0) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    let Some(current) = read_word(args[0].saturating_add(word * 8)) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(current) = (unsafe { guest::read_u64(args[0].saturating_add(word * 8)) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     u64::from(current & bit != 0)
@@ -3203,7 +3144,8 @@ fn sigismember(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// Resolves the condition variable a guest pointer refers to.
 fn cond_at(pointer: u64) -> Option<sync::CondHandle> {
-    let handle = read_word(pointer)?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = unsafe { guest::read_u64(pointer) }?;
     (handle != 0).then_some(handle)
 }
 
@@ -3212,8 +3154,10 @@ fn pthread_cond_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create_cond(&read_name(args[2]));
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_cond(&unsafe { read_name(args[2]) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3269,13 +3213,15 @@ fn pthread_cond_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !sync::cond_destroy(handle) {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
-    write_word(args[0], 0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(args[0], 0) };
     OK
 }
 
 /// Resolves the read/write lock a guest pointer refers to.
 fn rwlock_at(pointer: u64) -> Option<sync::RwlockHandle> {
-    let handle = read_word(pointer)?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = unsafe { guest::read_u64(pointer) }?;
     (handle != 0).then_some(handle)
 }
 
@@ -3300,8 +3246,10 @@ fn rwlock_init(lock: u64, name: u64) -> u64 {
     if lock == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create_rwlock(&read_name(name));
-    if !write_word(lock, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_rwlock(&unsafe { read_name(name) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(lock, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3365,7 +3313,8 @@ fn pthread_rwlock_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !sync::rwlock_destroy(handle) {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
-    write_word(args[0], 0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(args[0], 0) };
     OK
 }
 
@@ -3392,8 +3341,10 @@ fn barrier_init(barrier: u64, count: u64, name: u64) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     let needed = u32::try_from(count).unwrap_or(1);
-    let handle = sync::create_barrier(needed, &read_name(name));
-    if !write_word(barrier, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_barrier(needed, &unsafe { read_name(name) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(barrier, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3401,7 +3352,8 @@ fn barrier_init(barrier: u64, count: u64, name: u64) -> u64 {
 
 /// `scePthreadBarrierWait(barrier)`.
 fn pthread_barrier_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(handle) = read_word(args[0]).filter(|h| *h != 0) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(handle) = unsafe { guest::read_u64(args[0]) }.filter(|h| *h != 0) else {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
     match sync::barrier_wait(handle) {
@@ -3412,13 +3364,15 @@ fn pthread_barrier_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `scePthreadBarrierDestroy(barrier)`.
 fn pthread_barrier_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(handle) = read_word(args[0]).filter(|h| *h != 0) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(handle) = unsafe { guest::read_u64(args[0]) }.filter(|h| *h != 0) else {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
     if !sync::barrier_destroy(handle) {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
-    write_word(args[0], 0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(args[0], 0) };
     OK
 }
 
@@ -3427,8 +3381,10 @@ fn kernel_create_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create_event_flag(args[3], &read_name(args[1]));
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_event_flag(args[3], &unsafe { read_name(args[1]) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3455,11 +3411,13 @@ fn kernel_clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some((seconds, nanos)) = orbistoun_hle::clocks::reading(args[0] as i64) else {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
-    if args[1] == 0 || !write_word(args[1], seconds) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u64(args[1], seconds) } {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     }
     // The second field of the structure the caller described, eight bytes on.
-    if !write_word(args[1].saturating_add(8), nanos) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[1].saturating_add(8), nanos) } {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     }
     OK
@@ -3482,8 +3440,10 @@ fn kernel_create_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let handle = sync::create_equeue(&read_name(args[1]));
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = sync::create_equeue(&unsafe { read_name(args[1]) });
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3531,8 +3491,10 @@ fn pthread_getschedparam(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[1] == 0 || args[2] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if !write_int(args[1], record.requested_policy as u32)
-        || !write_int(args[2], record.requested_priority as u32)
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u32(args[1], record.requested_policy as u32) }
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        || !unsafe { guest::write_u32(args[2], record.requested_priority as u32) }
     {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
@@ -3552,7 +3514,8 @@ fn pthread_setschedparam(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !thread::is_issued(args[0]) {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
-    let Some(priority) = read_int(args[2]) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(priority) = (unsafe { guest::read_u32(args[2]) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     let policy = i32::from_ne_bytes((args[1] as u32).to_ne_bytes());
@@ -3595,7 +3558,8 @@ fn pthread_rename(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[1] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if thread::rename(args[0], &read_name(args[1])) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if thread::rename(args[0], &unsafe { read_name(args[1]) }) {
         OK
     } else {
         u64::from(GuestError::InvalidHandle.as_raw())
@@ -3618,7 +3582,8 @@ fn posix_pthread_setcancelstate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(previous) = thread::swap_cancel_state(thread::current(), state) else {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
-    if args[1] != 0 && !write_int(args[1], previous as u32) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] != 0 && !unsafe { guest::write_u32(args[1], previous as u32) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3674,7 +3639,8 @@ fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let until = if args[4] == 0 {
         sync::Blocking::Forever
     } else {
-        match read_word(args[4]) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        match unsafe { guest::read_u64(args[4]) } {
             Some(micros) => sync::Blocking::Until(
                 std::time::Instant::now() + std::time::Duration::from_micros(micros),
             ),
@@ -3689,14 +3655,17 @@ fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     for (index, event) in events.iter().enumerate() {
         let at = args[1].saturating_add((index * sync::EVENT_BYTES) as u64);
-        if !write_block(at, &event.to_bytes()) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        if !unsafe { guest::write_bytes(at, &event.to_bytes()) } {
             return u64::from(GuestError::InvalidArgument.as_raw());
         }
     }
     // The count is written through `arg3` and the return is a status - the shape the argument
     // roles establish. Zero delivered is written as zero rather than skipped: a caller reading
     // a stale count would act on an event it was never given.
-    if args[3] != 0 && !write_block(args[3], &(events.len() as u32).to_le_bytes()) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[3] != 0 && !unsafe { guest::write_bytes(args[3], &(events.len() as u32).to_le_bytes()) }
+    {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -3753,7 +3722,8 @@ fn kernel_poll_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match outcome {
         Some(bits) => {
             if args[3] != 0 {
-                write_word(args[3], bits);
+                // SAFETY: an address the guest passed for this call, valid by its contract.
+                unsafe { guest::write_u64(args[3], bits) };
             }
             OK
         }
@@ -3782,7 +3752,8 @@ fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let timeout = if timeout_ptr == 0 {
         None
     } else {
-        read_word(timeout_ptr).map(std::time::Duration::from_micros)
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::read_u64(timeout_ptr) }.map(std::time::Duration::from_micros)
     };
     // The same refusal its polling twin makes, for the same reason: the two differ in whether
     // they wait and in nothing else, so a mode one refuses and the other reads as `or` would be
@@ -3807,7 +3778,8 @@ fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match outcome {
         Some(bits) => {
             if result != 0 {
-                write_word(result, bits);
+                // SAFETY: an address the guest passed for this call, valid by its contract.
+                unsafe { guest::write_u64(result, bits) };
             }
             OK
         }
@@ -3963,7 +3935,8 @@ fn sync_on_address_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let outcome = sync::wait_on_address(
         address,
         expected,
-        || read_word(address),
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        || unsafe { guest::read_u64(address) },
         sync::Blocking::Forever,
     );
     thread::set_parked(was);
@@ -4017,7 +3990,8 @@ fn sync_on_address_wake(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// host primitives are `orbistoun-kernel`'s own `sync` semaphores, shared with the vendor
 /// calls above.
 fn posix_sema_at(sem: u64) -> Option<sync::SemaphoreHandle> {
-    sema_at(read_word(sem)?)
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    sema_at(unsafe { guest::read_u64(sem) }?)
 }
 
 /// `sem_init(sem, pshared, value)` - POSIX unnamed semaphore, initialised in place.
@@ -4033,7 +4007,8 @@ fn sem_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let handle = sync::create_semaphore(initial, u32::MAX, "");
     // Stored as a word and read back by `posix_sema_at`; a fresh handle is a small positive
     // id, so this round-trips through `sema_at`'s `i32` unchanged.
-    if !write_word(sem, u64::try_from(handle).unwrap_or(0)) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(sem, u64::try_from(handle).unwrap_or(0)) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4117,7 +4092,8 @@ fn pthread_condattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // From the one region every guest-visible handle comes from, so it repeats (D584).
     let handle = orbistoun_mem::blocks::block(4);
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4141,8 +4117,10 @@ fn pthread_mutexattr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // guest that initialises an attribute and asks what it holds was being told the wrong
     // thing here - and a guest that *acts* on the answer builds a different kind of lock
     // (D398).
-    write_word(handle + ATTR_TYPE, DEFAULT_MUTEX_TYPE);
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(handle + ATTR_TYPE, DEFAULT_MUTEX_TYPE) };
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4158,7 +4136,8 @@ const DEFAULT_MUTEX_TYPE: u64 = 1;
 
 /// Resolves the attribute object a guest pointer refers to.
 fn attr_at(pointer: u64) -> Option<u64> {
-    let handle = read_word(pointer)?;
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let handle = unsafe { guest::read_u64(pointer) }?;
     (handle != 0).then_some(handle)
 }
 
@@ -4182,7 +4161,8 @@ fn pthread_mutexattr_settype(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[1] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if !write_word(object + ATTR_TYPE, args[1]) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(object + ATTR_TYPE, args[1]) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4193,10 +4173,12 @@ fn pthread_mutexattr_gettype(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    let Some(value) = read_word(object + ATTR_TYPE) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(value) = (unsafe { guest::read_u64(object + ATTR_TYPE) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if args[1] == 0 || !write_int(args[1], value as u32) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u32(args[1], value as u32) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4207,7 +4189,8 @@ fn pthread_mutexattr_setprotocol(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if !write_word(object + ATTR_PROTOCOL, args[1]) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(object + ATTR_PROTOCOL, args[1]) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4218,10 +4201,12 @@ fn pthread_mutexattr_getprotocol(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    let Some(value) = read_word(object + ATTR_PROTOCOL) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(value) = (unsafe { guest::read_u64(object + ATTR_PROTOCOL) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if args[1] == 0 || !write_int(args[1], value as u32) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u32(args[1], value as u32) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4260,7 +4245,8 @@ fn allocate_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         guard.release(address, len);
         return u64::from(GuestError::NoMemory.as_raw());
     }
-    if !write_word(out, address) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, address) } {
         guard.release(address, len);
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
@@ -4359,7 +4345,8 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // **A fresh range this owns, not the guest's hint.** The hint names where the guest would like
     // the range; honouring a low, specific one put the reservation where the guest's own allocator
     // then wrote just outside it. orbistoun hands out address space from its own high arena.
-    let hint = read_word(addr_out).unwrap_or(0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let hint = unsafe { guest::read_u64(addr_out) }.unwrap_or(0);
     let align = alignment
         .max(orbistoun_mem::allocation_granularity())
         .max(orbistoun_core::GUEST_PAGE_SIZE);
@@ -4411,7 +4398,8 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // The reserved base, written back through the `void **` the guest passed - the documented shape,
     // status returned separately as success.
-    if write_word(addr_out, base) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if unsafe { guest::write_u64(addr_out, base) } {
         OK
     } else {
         vendor(orbistoun_core::errno::INVALID)
@@ -4447,7 +4435,8 @@ fn virtual_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // the console never hands back.
     let encoded = region.encode();
     let len = usize::try_from(size).map_or(encoded.len(), |s| s.min(encoded.len()));
-    if write_block(info, &encoded[..len]) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if unsafe { guest::write_bytes(info, &encoded[..len]) } {
         OK
     } else {
         vendor(orbistoun_core::errno::INVALID)
@@ -4775,7 +4764,8 @@ fn available_flexible_memory_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if !write_word(args[0], direct::flexible_available()) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], direct::flexible_available()) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4792,7 +4782,8 @@ fn configured_flexible_memory_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if !write_word(args[0], direct::flexible_configured()) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], direct::flexible_configured()) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -4852,7 +4843,9 @@ fn map_flexible_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if result == OK {
         direct::record_flexible_map(len);
         // Mapped through the direct path, and still flexible memory to a query.
-        if let (Some(base), Ok(mut flexible)) = (read_word(out), flexible_mappings().lock()) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let base = unsafe { guest::read_u64(out) };
+        if let (Some(base), Ok(mut flexible)) = (base, flexible_mappings().lock()) {
             flexible.push(base);
         }
     }
@@ -4886,10 +4879,12 @@ fn pthread_attr_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     //
     // The address stays zero, which the same run also measured: the two fields have different
     // defaults and answering one for both is how a plausible value gets invented (D585).
-    if !write_word(handle + ATTR_STACK_SIZE, DEFAULT_ATTR_STACK_SIZE) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(handle + ATTR_STACK_SIZE, DEFAULT_ATTR_STACK_SIZE) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if !write_word(args[0], handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5016,7 +5011,8 @@ fn lockattr_init(pointer: u64) -> u64 {
     }
     // From the one region every guest-visible handle comes from, so it repeats (D584).
     let handle = orbistoun_mem::blocks::block(4);
-    if !write_word(pointer, handle) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(pointer, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5190,7 +5186,8 @@ fn pthread_once(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if control == 0 || routine == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    if read_word(control) == Some(DONE) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if unsafe { guest::read_u64(control) } == Some(DONE) {
         return OK;
     }
     // SAFETY: `routine` is a guest function pointer the caller handed over, and `call_guest`
@@ -5200,7 +5197,8 @@ fn pthread_once(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if ran.is_none() {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    write_word(control, DONE);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(control, DONE) };
     OK
 }
 
@@ -5336,7 +5334,8 @@ fn sem_getvalue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(value) = posix_sema_at(sem).and_then(sync::semaphore_value) else {
         return u64::from(GuestError::InvalidHandle.as_raw());
     };
-    if write_int(out, value) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if unsafe { guest::write_u32(out, value) } {
         OK
     } else {
         u64::from(GuestError::InvalidArgument.as_raw())
@@ -5381,7 +5380,8 @@ fn attr_set(args: &[u64; GUEST_ARG_REGISTERS], field: u64) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if !write_word(object + field, args[1]) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(object + field, args[1]) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5392,12 +5392,14 @@ fn attr_get(args: &[u64; GUEST_ARG_REGISTERS], field: u64) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    let Some(value) = read_word(object + field) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(value) = (unsafe { guest::read_u64(object + field) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
     // Four bytes: the out-parameter is an `int`, and eight would take the caller's
     // neighbouring variable with it (D272).
-    if args[1] == 0 || !write_int(args[1], value as u32) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u32(args[1], value as u32) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5415,10 +5417,12 @@ fn pthread_attr_getstacksize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    let Some(value) = read_word(object + ATTR_STACK_SIZE) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(value) = (unsafe { guest::read_u64(object + ATTR_STACK_SIZE) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if args[1] == 0 || !write_word(args[1], value) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u64(args[1], value) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5468,7 +5472,8 @@ fn pthread_attr_get(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         (ATTR_GUARD_SIZE, orbistoun_mem::stack::GUARD_SIZE),
     ];
     for (field, value) in fields {
-        if !write_word(object + field, value) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        if !unsafe { guest::write_u64(object + field, value) } {
             return u64::from(GuestError::InvalidArgument.as_raw());
         }
     }
@@ -5484,10 +5489,12 @@ fn pthread_attr_getstackaddr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(object) = attr_at(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    let Some(value) = read_word(object + ATTR_STACK_ADDR) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(value) = (unsafe { guest::read_u64(object + ATTR_STACK_ADDR) }) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    if args[1] == 0 || !write_word(args[1], value) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u64(args[1], value) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5577,7 +5584,8 @@ fn pthread_setaffinity(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// after setting it on a running thread.
 fn pthread_getaffinity(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mask = thread::record(args[0]).map_or(0, |record| record.requested_affinity.0);
-    if args[1] == 0 || !write_word(args[1], mask) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u64(args[1], mask) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5597,7 +5605,8 @@ fn pthread_attr_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if attr_at(args[0]).is_none() {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    write_word(args[0], 0);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(args[0], 0) };
     OK
 }
 
@@ -5721,10 +5730,12 @@ fn is_stack(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Null is how a caller says it does not want one, which the probe's own second
         // witness relies on - it passes both and reads neither when the call is absent.
         if args[1] != 0 {
-            write_word(args[1], base);
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::write_u64(args[1], base) };
         }
         if args[2] != 0 {
-            write_word(args[2], base.saturating_add(len));
+            // SAFETY: an address the guest passed for this call, valid by its contract.
+            unsafe { guest::write_u64(args[2], base.saturating_add(len)) };
         }
     }
     // **Zero whether or not the address is in it**, which is what twenty-three runs measured
@@ -5773,7 +5784,8 @@ fn get_module_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             );
         }
     }
-    if !write_int(written, count as u32) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u32(written, count as u32) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5908,11 +5920,13 @@ const FAILED_STATUS: u64 = -1_i64 as u64;
 /// nothing there. That is the remaining work, and it is what stands between PPSA02664 and
 /// `il2cpp_init`.
 fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let path = read_name(args[0]);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let path = unsafe { read_name(args[0]) };
 
     // libkernel is always resident, at the handle every guest reaches it by (D264, D400).
     if path.contains("libkernel") {
-        write_int(args[5], 0);
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u32(args[5], 0) };
         return LIBKERNEL_MODULE_HANDLE;
     }
 
@@ -5946,7 +5960,8 @@ fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // handle, which is what a guest keys its later calls on.
     if path.starts_with("/app0/") {
         let handle = NEXT_MODULE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        write_int(args[5], 0);
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u32(args[5], 0) };
         // **And now the `Start` half.** The module is already placed, relocated and
         // protected - `place_title_modules` does that before the guest runs - so starting it
         // is running its `DT_INIT` and `DT_INIT_ARRAY`, which is how a C++ module's static
@@ -6114,7 +6129,8 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if name == 0 || out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
-    let name = read_name(name);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let name = unsafe { read_name(name) };
     // **The thunk table first, then the guest's own exports.** Purely additive: every name that
     // resolved before resolves to the same address, and a name that did not now reaches the
     // guest's own code instead of an error.
@@ -6208,7 +6224,8 @@ fn dlsym(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             orbistoun_core::route::NAME_NOT_RESOLVED
         });
     };
-    if !write_word(out, address) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, address) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -6502,10 +6519,13 @@ const CONTEXT_WRITTEN: u64 = 0x180;
 fn exception_context(signum: u64, low: u64) -> u64 {
     let base = low.saturating_add(CONTEXT_INTO_STACK);
     for offset in (0..CONTEXT_WRITTEN).step_by(8) {
-        write_word(base + offset, 0);
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(base + offset, 0) };
     }
-    write_word(base + CONTEXT_SIGNAL, signum);
-    write_word(base + CONTEXT_INNER, base + CONTEXT_INNER_DELTA);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(base + CONTEXT_SIGNAL, signum) };
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    unsafe { guest::write_u64(base + CONTEXT_INNER, base + CONTEXT_INNER_DELTA) };
     base
 }
 
@@ -6606,14 +6626,16 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// structure is never overrun.
 fn mapper_get_param(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out = args[0];
-    let Some(declared) = read_word(out) else {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(declared) = (unsafe { guest::read_u64(out) }) else {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
     let room = usize::try_from(declared)
         .unwrap_or(0)
         .min(MAPPER_PARAM.len() + 8);
     let body = room.saturating_sub(8);
-    if body > 0 && !write_block(out + 8, &MAPPER_PARAM[..body]) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if body > 0 && !unsafe { guest::write_bytes(out + 8, &MAPPER_PARAM[..body]) } {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     }
     OK
@@ -6968,34 +6990,18 @@ const STORAGE_SCAN_WORDS: u64 = 1024;
 /// reports a sample rather than eight kibibytes on the guest's own stack (principle 9).
 const MOST_STORAGE_REPORTED: usize = 16;
 
-/// How far a guest path is followed when reporting one.
-///
-/// Longer than [`read_name`]'s window, because a title's asset paths are longer than a thread
-/// name and truncating one here would hide the part that says which file it is.
+/// How far a guest path is followed when reporting one: longer than [`MAX_NAME`], because an
+/// asset path's distinguishing part is at its end.
 const MAX_PATH: usize = 256;
 
-/// A NUL-terminated guest string, bounded.
+/// A NUL-terminated guest path of at most [`MAX_PATH`] bytes, lossily decoded; empty for null.
 ///
-/// Bounded for the reason `read_name` gives: an unterminated string would walk until it hit an
-/// unmapped page, and a fault raised while fetching a name is a fault attributed to the wrong
-/// thing entirely.
-fn read_path(address: u64) -> String {
-    let Ok(at) = usize::try_from(address) else {
-        return String::new();
-    };
-    if at == 0 {
-        return String::new();
-    }
-    let mut bytes = Vec::new();
-    for offset in 0..MAX_PATH {
-        // SAFETY: a guest-supplied string under the identity mapping (D014), read one byte at a
-        // time so the scan cannot straddle the end of a mapping by more than it reads.
-        let byte = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u8>(at + offset)) };
-        if byte == 0 {
-            break;
-        }
-        bytes.push(byte);
-    }
+/// # Safety
+///
+/// `address` is under the `orbistoun_mem::guest` contract.
+unsafe fn read_path(address: u64) -> String {
+    // SAFETY: the caller's contract.
+    let bytes = unsafe { guest::read_cstr(address, MAX_PATH) }.unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
@@ -7014,16 +7020,21 @@ fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mut paths = Vec::new();
     let mut all_resolved = true;
     for entry in 0..count {
-        let path = read_word(array + entry * 8)
-            .map(read_path)
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let path = unsafe { guest::read_u64(array + entry * 8) }
+            // SAFETY: each entry of the guest's path array is a path under the call's contract.
+            .map(|path| unsafe { read_path(path) })
             .unwrap_or_default();
         let answer = apr::look_up(&path);
         let (id, size) = answer.map_or((u32::MAX, 0), |(id, size)| (id as u32, size));
         all_resolved &= answer.is_some();
         // Written per entry: arrays of `count` elements at their measured widths.
-        let _ = write_int(ids + entry * 4, id);
-        let _ = write_word(sizes + entry * 8, size);
-        let _ = write_int(statuses + entry * 4, 0);
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let _ = unsafe { guest::write_u32(ids + entry * 4, id) };
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let _ = unsafe { guest::write_u64(sizes + entry * 8, size) };
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        let _ = unsafe { guest::write_u32(statuses + entry * 4, 0) };
         if entry < MOST_PATHS_REPORTED {
             match answer {
                 Some((id, size)) => {
@@ -7067,7 +7078,8 @@ const MOST_PATHS_REPORTED: u64 = 16;
 fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let buffer = args[0];
     let words: Vec<String> = (0..8)
-        .filter_map(|i| read_word(buffer + i * 8))
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        .filter_map(|i| unsafe { guest::read_u64(buffer + i * 8) })
         .map(|w| format!("{w:#x}"))
         .collect();
     eprintln!(
@@ -7081,7 +7093,8 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mut nonzero = Vec::new();
     for word in -8_i64..64 {
         let at = buffer.wrapping_add_signed(word * 8);
-        if let Some(value) = read_word(at) {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        if let Some(value) = unsafe { guest::read_u64(at) } {
             if value != 0 {
                 nonzero.push(format!("{:+#x}:{value:#x}", word * 8));
             }
@@ -7106,10 +7119,12 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if orbistoun_env::APR_DELIVER.is_set() {
         deliver_resolved_file(buffer);
     }
-    if let Some(inner) = read_word(buffer + 0x10) {
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if let Some(inner) = unsafe { guest::read_u64(buffer + 0x10) } {
         if orbistoun_thunk::readable_span(inner, 32) {
             let head: Vec<String> = (0..8)
-                .filter_map(|i| read_word(inner + i * 8))
+                // SAFETY: an address the guest passed for this call, valid by its contract.
+                .filter_map(|i| unsafe { guest::read_u64(inner + i * 8) })
                 .map(|w| format!("{w:#x}"))
                 .collect();
             eprintln!(
@@ -7123,7 +7138,8 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             // once (D594).
             let mut found = Vec::new();
             for word in 0..(STORAGE_SCAN_WORDS) {
-                let Some(value) = read_word(inner + word * 8) else {
+                // SAFETY: an address the guest passed for this call, valid by its contract.
+                let Some(value) = (unsafe { guest::read_u64(inner + word * 8) }) else {
                     break;
                 };
                 if value != 0 {
@@ -7181,7 +7197,11 @@ fn deliver_resolved_file(buffer: u64) {
         eprintln!("orbistoun: asked to deliver a file, and no resolve named one");
         return;
     };
-    let (Some(most), Some(into)) = (read_word(buffer + 0x0c), read_word(buffer + 0x10)) else {
+    // SAFETY: two words of the command header the guest submitted, valid by the call's contract.
+    let most = unsafe { guest::read_u64(buffer + 0x0c) };
+    // SAFETY: as above.
+    let into = unsafe { guest::read_u64(buffer + 0x10) };
+    let (Some(most), Some(into)) = (most, into) else {
         eprintln!("orbistoun: asked to deliver {path}, and the command header could not be read");
         return;
     };

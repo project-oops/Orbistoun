@@ -1208,34 +1208,6 @@ fn cxa_guard_abort(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// Everything this crate implements, by symbol name.
-/// Reads a NUL-terminated string the guest passed.
-///
-/// Bounded by the same reasoning as everything else here: an unterminated buffer would
-/// otherwise walk until it faults, and the fault would look like a bug in string handling
-/// rather than in whatever produced the buffer.
-pub(crate) fn read_guest_path(address: u64) -> Option<String> {
-    /// Longer than any path observed, and short enough to stay near its own page.
-    const MAX_PATH: usize = 1024;
-
-    let at = usize::try_from(address).ok()?;
-    if at == 0 {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    for offset in 0..MAX_PATH {
-        // SAFETY: a guest-supplied string under the identity mapping (D014), read one
-        // byte at a time so the scan cannot straddle the end of a mapping by more than
-        // it reads.
-        let byte = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u8>(at + offset)) };
-        if byte == 0 {
-            break;
-        }
-        bytes.push(byte);
-    }
-    String::from_utf8(bytes).ok()
-}
-
 /// Why a formatted write could not be honoured.
 ///
 /// **Enumerated rather than collapsed into "failed", because the two need opposite
@@ -3423,7 +3395,8 @@ fn operator_delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// be writing into the user's own title directory. Opening that up is a decision with
 /// consequences, not an omission to be quietly corrected.
 fn fopen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(path) = read_guest_path(args[0]) else {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return 0;
     };
     // Null rather than an error code: the caller reads this as a pointer, so an error

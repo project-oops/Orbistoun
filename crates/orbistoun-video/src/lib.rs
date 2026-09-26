@@ -50,6 +50,7 @@ guest_module! {
 }
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
+use orbistoun_mem::guest;
 
 /// Successful return, as the guest reads it.
 const OK: u64 = 0;
@@ -317,8 +318,11 @@ fn video_out_register_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return video_error::INVALID_HANDLE;
     }
     // v1 hands a raw `void*[]` at arg2: one guest address every eight bytes.
-    let read = read_buffer_addresses(addresses, clamp_count(start_index, count), 8);
-    register_buffer_set(handle, start_index, &read, count, attribute)
+    // SAFETY: the guest's address array, `count` entries by the call's contract, clamped.
+    let read = unsafe { read_buffer_addresses(addresses, clamp_count(start_index, count), 8) };
+    // SAFETY: the guest's attribute block, by the call's contract.
+    let shape = unsafe { decode_attribute(attribute) };
+    register_buffer_set(handle, start_index, &read, count, attribute, shape)
 }
 
 /// `sceVideoOutRegisterBuffers2(handle, _, _, buffers, count, attribute, ...)`.
@@ -339,12 +343,17 @@ fn video_out_register_buffers2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // v2 hands a `SceVideoOutBuffer[]`: the address is the `data` field at the start of each 32-byte
     // struct, so the stride is the struct size and the address sits at its offset zero.
-    let read = read_buffer_addresses(
-        buffers,
-        clamp_count(start_index, count),
-        SCE_VIDEO_OUT_BUFFER_SIZE,
-    );
-    register_buffer_set(handle, start_index, &read, count, attribute)
+    // SAFETY: the guest's buffer array, `count` entries by the call's contract, clamped.
+    let read = unsafe {
+        read_buffer_addresses(
+            buffers,
+            clamp_count(start_index, count),
+            SCE_VIDEO_OUT_BUFFER_SIZE,
+        )
+    };
+    // SAFETY: the guest's attribute block, by the call's contract.
+    let shape = unsafe { decode_attribute(attribute) };
+    register_buffer_set(handle, start_index, &read, count, attribute, shape)
 }
 
 /// Bytes one `SceVideoOutBuffer` occupies: `{ data, metadata, reserved[2] }`, the buffer's address
@@ -365,29 +374,34 @@ fn clamp_count(start_index: u64, count: u64) -> usize {
 /// Reads `count` buffer addresses from a guest array at `array`, one every `stride` bytes with the
 /// address at each element's start - a raw `void*[]` (stride 8) for `RegisterBuffers`, or a
 /// `SceVideoOutBuffer[]` (stride 32, address in `data` at offset 0) for `RegisterBuffers2`.
-fn read_buffer_addresses(array: u64, count: usize, stride: u64) -> Vec<u64> {
+///
+/// # Safety
+///
+/// Each element's first eight bytes are under the `orbistoun_mem::guest` contract.
+unsafe fn read_buffer_addresses(array: u64, count: usize, stride: u64) -> Vec<u64> {
     (0..count)
-        .map(|i| read_guest_u64(array.wrapping_add(i as u64 * stride)))
+        // SAFETY: the caller's contract, per element.
+        .map(|i| unsafe { guest::read_u64(array.wrapping_add(i as u64 * stride)) }.unwrap_or(0))
         .collect()
 }
 
 /// Records a registered buffer set against `handle`: the addresses from `start_index`, the count on
 /// the port, and the shape decoded from `attribute`. The shared body of both register entry points,
 /// which differ only in how the guest hands over the addresses.
+///
+/// The shape is decoded by the caller while the guest still holds the block; a zero pointer, or a
+/// block a guest never filled, decodes to a zeroed shape rather than a fault.
 fn register_buffer_set(
     handle: u64,
     start_index: u64,
     addresses: &[u64],
     count_field: u64,
     attribute: u64,
+    shape: BufferShape,
 ) -> u64 {
     let start = usize::try_from(start_index)
         .unwrap_or(MAX_REGISTERED_BUFFERS)
         .min(MAX_REGISTERED_BUFFERS);
-    // Decode the block the attribute pointer describes now, while the guest still holds it, into the
-    // extent, format and tiling a flipped buffer needs (REQ-...a6b3). A zero pointer, or a block a
-    // guest never filled, decodes to a zeroed shape rather than a fault.
-    let shape = decode_attribute(attribute);
     match port::with(handle, |p| {
         p.registered = count_field;
         p.attribute = attribute;
@@ -403,58 +417,25 @@ fn register_buffer_set(
     }
 }
 
-/// Reads the little-endian `u32` a guest wrote at `addr` under the identity mapping (D014).
-fn read_guest_u32(addr: u64) -> u32 {
-    // SAFETY: `addr` is a guest address under the identity mapping; the four bytes there are the
-    // guest's own attribute block, which it owns for the duration of the call. Unaligned, because a
-    // guest guarantees no more than its own alignment (as `video_out_register_buffers` reads).
-    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(addr as usize)) }
-}
-
-/// Reads the little-endian `u64` a guest wrote at `addr` under the identity mapping (D014).
-fn read_guest_u64(addr: u64) -> u64 {
-    // SAFETY: as [`read_guest_u32`], for the eight bytes of a `u64` field.
-    unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u64>(addr as usize)) }
-}
-
-/// Writes `value` as a little-endian `u32` into the guest block at `addr` under the identity
-/// mapping (D014).
-fn write_guest_u32(addr: u64, value: u32) {
-    // SAFETY: `addr` is within the guest's own 80-byte attribute block, which it owns for the
-    // duration of the call; a `u32` store there stays inside the measured extent. Unaligned, as a
-    // guest guarantees no more than its own alignment.
-    unsafe {
-        std::ptr::write_unaligned(
-            std::ptr::with_exposed_provenance_mut::<u32>(addr as usize),
-            value,
-        );
-    }
-}
-
-/// Writes `value` as a little-endian `u64` into the guest block at `addr` under the identity
-/// mapping (D014).
-fn write_guest_u64(addr: u64, value: u64) {
-    // SAFETY: as [`write_guest_u32`], for the eight bytes of a `u64` field.
-    unsafe {
-        std::ptr::write_unaligned(
-            std::ptr::with_exposed_provenance_mut::<u64>(addr as usize),
-            value,
-        );
-    }
-}
-
 /// Decodes the shape a guest wrote into an attribute block with
 /// [`sceVideoOutSetBufferAttribute2`](video_out_set_buffer_attribute2), at the offsets obSCEne
 /// `-83df` measured. A zero pointer yields a zeroed [`BufferShape`].
-fn decode_attribute(attribute: u64) -> BufferShape {
+///
+/// # Safety
+///
+/// A non-zero `attribute` is a block under the `orbistoun_mem::guest` contract.
+unsafe fn decode_attribute(attribute: u64) -> BufferShape {
+    // SAFETY: the caller's contract, here and for each field below; null reads as zero.
+    let word = |at: u64| unsafe { guest::read_u32(at) }.unwrap_or(0);
     if attribute == 0 {
         return BufferShape::default();
     }
     BufferShape {
-        tiling: read_guest_u32(attribute + 0x4),
-        width: read_guest_u32(attribute + 0xc),
-        height: read_guest_u32(attribute + 0x10),
-        format: read_guest_u64(attribute + 0x20),
+        tiling: word(attribute + 0x4),
+        width: word(attribute + 0xc),
+        height: word(attribute + 0x10),
+        // SAFETY: the caller's contract: the format field at 0x20.
+        format: unsafe { guest::read_u64(attribute + 0x20) }.unwrap_or(0),
     }
 }
 
@@ -481,11 +462,15 @@ fn video_out_set_buffer_attribute2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if attr == 0 {
         return video_error::INVALID_HANDLE;
     }
-    write_guest_u32(attr + 0x4, tiling as u32);
-    write_guest_u32(attr + 0xc, width as u32);
-    write_guest_u32(attr + 0x10, height as u32);
-    write_guest_u64(attr + 0x18, option);
-    write_guest_u64(attr + 0x20, pixelformat);
+    let fields = [(0x4, tiling), (0xc, width), (0x10, height)];
+    for (offset, value) in fields {
+        // SAFETY: a field inside the guest's 80-byte attribute block, by the call's contract.
+        unsafe { guest::write_u32(attr + offset, value as u32) };
+    }
+    // SAFETY: as above.
+    unsafe { guest::write_u64(attr + 0x18, option) };
+    // SAFETY: as above.
+    unsafe { guest::write_u64(attr + 0x20, pixelformat) };
     OK
 }
 
