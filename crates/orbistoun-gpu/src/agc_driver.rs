@@ -928,6 +928,14 @@ struct Deferred {
     memory_then: Arc<Vec<u8>>,
 }
 
+/// Whether any guest memory is guarded for a deferred copy, so reading it would fault into the
+/// copy's handler. `true` when the list cannot be read at once: the answer is asked from inside a
+/// fault handler, where waiting could deadlock and guessing no could fault.
+#[must_use]
+pub fn guards_guest_memory() -> bool {
+    deferred().try_lock().map_or(true, |copies| !copies.is_empty())
+}
+
 fn deferred() -> &'static Mutex<Vec<Deferred>> {
     static DEFERRED: Mutex<Vec<Deferred>> = Mutex::new(Vec::new());
     &DEFERRED

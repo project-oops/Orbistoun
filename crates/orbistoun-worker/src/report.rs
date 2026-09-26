@@ -2163,7 +2163,9 @@ fn flipped_frame_written() -> bool {
     if crate::render::drawn_frame_presented() {
         return true;
     }
-    if crate::render::any_frame_drawn() {
+    // A drawn run's targets, or any page a deferred copy guards, fault on a read from here, which
+    // may be a fault handler already.
+    if crate::render::any_frame_drawn() || orbistoun_gpu::agc_driver::guards_guest_memory() {
         return false;
     }
     let Some((address, shape)) = orbistoun_video::last_flipped_buffer() else {
