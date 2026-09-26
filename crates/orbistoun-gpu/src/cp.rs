@@ -15,6 +15,20 @@ use crate::packet::{self, PacketKind, build::measured};
 /// writes it by hand to the public layout.
 pub const WAIT_REG_MEM: u8 = 0x3c;
 
+/// `PKT3_CLEAR_STATE` (`sid.h:41`): resets register state to its defaults. radeonsi's preamble
+/// emits it with one zero body word (`si_state.c:4880-4881`); it touches no memory.
+pub const CLEAR_STATE: u8 = 0x12;
+/// `PKT3_CONTEXT_CONTROL` (`sid.h:64`): two words, load enables then shadow enables
+/// (`cp_pm4_table_data_gfx11.json:1219`).
+pub const CONTEXT_CONTROL: u8 = 0x28;
+/// The shadow enables of `CONTEXT_CONTROL`'s second word - `shadow_global_config` (0),
+/// `shadow_per_context_state` (1), `shadow_global_uconfig` (15), `shadow_gfx_sh_regs` (16) and
+/// `shadow_cs_sh_regs` (24) (`cp_pm4_table_data_gfx11.json:1273-1308`). With any set, the command
+/// processor writes register state to a shadow in memory, which is not carried out here. Bit 31,
+/// `update_shadow_enables`, only says the word is to be applied. The first word's load enables
+/// select what later `LOAD_*_REG` packets read, and touch no memory themselves.
+const CONTEXT_CONTROL_SHADOW_ENABLES: u32 = (1 << 0) | (1 << 1) | (1 << 15) | (1 << 16) | (1 << 24);
+
 /// `DMA_DATA` `SRC_SEL` values (`sid.h:178`, bits 30:29): the source is the packet's own data word.
 const SRC_SEL_DATA: u32 = 2;
 /// `DMA_DATA` `SRC_SEL`: the source is an address - direct, or through L2 (`sid.h:178`). Both are
@@ -180,6 +194,7 @@ fn is_memory_inert(opcode: u8, body_dwords: usize) -> bool {
             | measured::SET_SH_REG_INDIRECT
             | measured::SET_UCONFIG_REG_INDIRECT
             | measured::STALL_COMMAND_BUFFER_PARSER
+            | CLEAR_STATE
     ) || (opcode == measured::EVENT_WRITE && body_dwords == 1)
 }
 
@@ -242,6 +257,7 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             WAIT_REG_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 wait_reg_mem(&body, memory, &mut result)
             }),
+            CONTEXT_CONTROL => context_control(&body),
             _ => Err(Stop::NeedsGpu),
         };
         if let Err(stop) = step {
@@ -404,6 +420,18 @@ fn release_mem(
     }
     result.releases += 1;
     result.bytes_written += written.len() as u64;
+    Ok(())
+}
+
+/// `CONTEXT_CONTROL`: register state unless it enables a shadow, which writes register state to
+/// memory and is refused.
+fn context_control(body: &[u32]) -> Result<(), Stop> {
+    let [_load, shadow, ..] = *body else {
+        return Err(Stop::Malformed);
+    };
+    if shadow & CONTEXT_CONTROL_SHADOW_ENABLES != 0 {
+        return Err(Stop::NeedsGpu);
+    }
     Ok(())
 }
 
@@ -705,6 +733,54 @@ mod tests {
         );
         assert_eq!(memory.asked, 0, "the executor is never asked");
         assert_eq!(memory.inner.word(fence), 0);
+    }
+
+    /// A `CONTEXT_CONTROL` that only updates its load and shadow enables, as radeonsi's preamble
+    /// writes it, and a `CLEAR_STATE`, are register state: the fence after them retires.
+    #[test]
+    fn context_control_without_shadowing_and_clear_state_are_register_state() {
+        let fence = 0x1000_u64;
+        let mut stream = vec![
+            command_header(super::CONTEXT_CONTROL, 2),
+            0x8000_0000,
+            0x8000_0000,
+            command_header(super::CLEAR_STATE, 1),
+            0,
+        ];
+        stream.extend(release(fence, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(fence), 0xbeef_cafe);
+    }
+
+    /// A `CONTEXT_CONTROL` enabling any shadow writes register state to memory, which is not
+    /// carried out here: it stops, and names itself.
+    #[test]
+    fn context_control_enabling_a_shadow_stops_the_stream() {
+        for bit in [0, 1, 15, 16, 24] {
+            let mut stream = vec![
+                command_header(super::CONTEXT_CONTROL, 2),
+                0x8000_0000,
+                0x8000_0000 | (1 << bit),
+            ];
+            stream.extend(release(0x1000, 1, 0xbeef_cafe));
+            let mut memory = Fake::default();
+
+            let done = execute(&bytes(&stream), &mut memory);
+
+            assert_eq!(
+                done.stopped,
+                Stopped::NeedsGpu {
+                    offset: 0,
+                    opcode: super::CONTEXT_CONTROL
+                },
+                "shadow bit {bit}"
+            );
+            assert_eq!(memory.word(0x1000), 0);
+        }
     }
 
     /// A wait that cannot hold stops the stream; memory out of bounds is refused, not written.
