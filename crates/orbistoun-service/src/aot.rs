@@ -212,7 +212,10 @@ mod tests {
             b"level"
         );
         assert_eq!(Manifest::read(&out), Some(manifest.clone()));
-        assert!(out.join(".portable").is_dir(), "a build keeps its data beside it");
+        assert!(
+            out.join(".portable").is_dir(),
+            "a build keeps its data beside it"
+        );
 
         let inside = title.join("build");
         assert!(write_build(&title.join("eboot.bin"), &inside, &launcher, "x", &manifest).is_err());
