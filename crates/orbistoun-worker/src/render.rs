@@ -131,6 +131,19 @@ const SCANOUT_BGRA8: u64 = 0x8000_0000_0000_0000;
 pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     perf::count(perf::Count::Flips);
+    if let Some(first) = perf::close_first_frame() {
+        let ms = |phase| std::time::Duration::from_nanos(first.spent(phase)).as_secs_f64() * 1000.0;
+        let parts: Vec<String> = perf::Phase::ALL
+            .iter()
+            .filter(|&&phase| phase != perf::Phase::Submit && first.spent(phase) > 0)
+            .map(|&phase| format!("{} {:.1}", phase.label(), ms(phase)))
+            .collect();
+        tracing::info!(
+            "first frame: {:.1} ms of host submit work; ms: {}",
+            ms(perf::Phase::Submit),
+            parts.join(", ")
+        );
+    }
     let listening = LIVE_EVENTS.get().copied().zip(frames_dir());
     let due = listening.is_some()
         && LAST.lock().is_ok_and(|mut last| {

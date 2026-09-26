@@ -107,6 +107,28 @@ pub fn measure<T>(phase: Phase, work: impl FnOnce() -> T) -> T {
 pub fn add(phase: Phase, spent: std::time::Duration) {
     let nanos = u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX);
     SPENT[phase as usize].fetch_add(nanos, Ordering::Relaxed);
+    if !FIRST_FLIPPED.load(Ordering::Relaxed) {
+        FIRST_FRAME[phase as usize].fetch_add(nanos, Ordering::Relaxed);
+    }
+}
+
+/// Nanoseconds per phase from the start of the run to its first flip, kept apart from the
+/// windowed totals: the first frame pays for every translation and pipeline the title needs.
+static FIRST_FRAME: [AtomicU64; PHASES] = [const { AtomicU64::new(0) }; PHASES];
+
+/// Whether the first flip has been seen, which closes [`FIRST_FRAME`].
+static FIRST_FLIPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Closes the first frame at a flip: the host time each phase took up to the first one, or `None`
+/// at every later flip.
+pub fn close_first_frame() -> Option<Snapshot> {
+    if FIRST_FLIPPED.swap(true, Ordering::Relaxed) {
+        return None;
+    }
+    Some(Snapshot {
+        spent: std::array::from_fn(|i| FIRST_FRAME[i].load(Ordering::Relaxed)),
+        counted: [0; COUNTS],
+    })
 }
 
 /// Counts one of `what`.
@@ -338,6 +360,17 @@ mod tests {
         assert_eq!(counted, 1);
         assert!(spent >= 1_000_000);
         super::set_detail(false);
+    }
+
+    /// The first frame keeps what was added before the first flip, survives a take, and closes
+    /// once.
+    #[test]
+    fn the_first_frame_closes_at_the_first_flip() {
+        super::add(Phase::Build, std::time::Duration::from_millis(2));
+        let _ = super::take();
+        let first = super::close_first_frame().expect("the first flip closes it");
+        assert!(first.spent(Phase::Build) >= 2_000_000);
+        assert_eq!(super::close_first_frame(), None);
     }
 
     /// What is added is what is taken, and taking resets it.
