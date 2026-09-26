@@ -1019,7 +1019,8 @@ impl RenderBackend for VulkanBackend {
                 let session = session
                     .lock()
                     .map_err(|_| BackendError::Device("Vulkan session lock poisoned".to_owned()))?;
-                let info = vk::ShaderModuleCreateInfo::default().code(spirv);
+                let words = compute::for_this_device(spirv);
+                let info = vk::ShaderModuleCreateInfo::default().code(&words);
                 // SAFETY: `info` is fully initialised and borrows `spirv` for the length of the
                 // call; the device is live for the length of the locked session.
                 let module = unsafe { session.device.create_shader_module(&info, None) }

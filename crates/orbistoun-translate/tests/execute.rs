@@ -2718,6 +2718,44 @@ fn the_division_fixup_replaces_the_indeterminate_forms() {
     );
 }
 
+/// `v_mul_f32` over raw bit patterns, run on lane zero.
+fn run_mul(a: u32, b: u32) -> u32 {
+    let mut program = [v_mov_literal(1, a), v_mov_literal(2, b)].concat();
+    program.push(vop2_vv("v_mul_f32_e32", 3, 1, 2));
+    program.push(s_endpgm());
+    vector(&run(&program), 3)
+}
+
+/// Infinities, NaNs and a negative zero survive arithmetic, as the guest's IEEE results keep them:
+/// every translated module declares `SignedZeroInfNanPreserve`, so the driver may not fold them.
+#[test]
+fn infinities_nans_and_signed_zero_survive_a_multiply() {
+    if !device_or_skip("infinities_nans_and_signed_zero_survive_a_multiply") {
+        return;
+    }
+    let two = 0x4000_0000;
+    assert_eq!(
+        run_mul(BITS_POSITIVE_INF, two),
+        BITS_POSITIVE_INF,
+        "+inf * 2"
+    );
+    assert_eq!(
+        run_mul(BITS_NEGATIVE_INF, two),
+        BITS_NEGATIVE_INF,
+        "-inf * 2"
+    );
+    let nan = run_mul(BITS_QUIET_NAN, two);
+    assert!(
+        nan & 0x7F80_0000 == 0x7F80_0000 && nan & 0x007F_FFFF != 0,
+        "NaN * 2 is a NaN, got {nan:#x}"
+    );
+    assert_eq!(
+        run_mul(BITS_NEGATIVE_ZERO, BITS_1),
+        BITS_NEGATIVE_ZERO,
+        "-0 * 1"
+    );
+}
+
 /// The division fixup gives zero and infinity the operands' signs.
 #[test]
 fn the_division_fixup_gives_zero_and_infinity_their_signs() {

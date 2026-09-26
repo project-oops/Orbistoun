@@ -356,6 +356,11 @@ pub mod capability {
     /// From `SPV_KHR_float_controls`. A device that does not offer it refuses the module rather
     /// than computing zero where the guest expected a subnormal.
     pub const DENORM_PRESERVE: u32 = 4464;
+    /// Permits a module to require that signed zeros, infinities and NaNs survive its arithmetic.
+    ///
+    /// From `SPV_KHR_float_controls`. Without it a driver may assume no infinity or NaN occurs and
+    /// fold them away; the guest's hardware keeps them.
+    pub const SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4466;
     /// Invocations may ask about their subgroup at all.
     pub const GROUP_NON_UNIFORM: u32 = 61;
     /// Invocations may take a ballot across their subgroup.
@@ -439,6 +444,8 @@ pub mod mode {
     ///
     /// Takes the bit width as its literal operand, so a module can ask for 32 bits alone.
     pub const DENORM_PRESERVE: u32 = 4459;
+    /// Signed zeros, infinities and NaNs of the given width are preserved. Takes the bit width.
+    pub const SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4461;
     /// The most vertices a mesh shader's workgroup will emit. One literal operand.
     pub const OUTPUT_VERTICES: u32 = 26;
     /// The most primitives a mesh shader's workgroup will emit. One literal operand.
@@ -449,6 +456,40 @@ pub mod mode {
     pub const OUTPUT_LINES_EXT: u32 = 5269;
     /// A mesh shader's primitives are triangles. No operand.
     pub const OUTPUT_TRIANGLES_EXT: u32 = 5298;
+}
+
+/// A module without its `SignedZeroInfNanPreserve` declarations: the execution modes, the
+/// capability and the float-controls extension, for a device that cannot honour them.
+///
+/// Every other instruction is kept word for word. A malformed stream is returned unchanged, so a
+/// module this cannot read is refused by the device rather than altered here.
+#[must_use]
+pub fn without_inf_nan_preserve(words: &[u32]) -> Vec<u32> {
+    let extension = Builder::literal_string(FLOAT_CONTROLS);
+    let mut out = Vec::with_capacity(words.len());
+    let Some(header) = words.get(..5) else {
+        return words.to_vec();
+    };
+    out.extend_from_slice(header);
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        let opcode = (words[at] & 0xffff) as u16;
+        let Some(instruction) = words.get(at..at + count).filter(|_| count > 0) else {
+            return words.to_vec();
+        };
+        let drop = match opcode {
+            op::CAPABILITY => instruction.get(1) == Some(&capability::SIGNED_ZERO_INF_NAN_PRESERVE),
+            op::EXECUTION_MODE => instruction.get(2) == Some(&mode::SIGNED_ZERO_INF_NAN_PRESERVE),
+            op::EXTENSION => instruction[1..] == extension[..],
+            _ => false,
+        };
+        if !drop {
+            out.extend_from_slice(instruction);
+        }
+        at += count;
+    }
+    out
 }
 
 /// How many ordered slots the header is kept in.
@@ -2336,6 +2377,41 @@ mod tests {
         Builder, Id, MAGIC, ModuleError, VERSION_1_0, decoration, minimal_compute_module, op,
         storage,
     };
+
+    /// Stripping removes exactly the float-controls declaration: the capability, the extension and
+    /// the execution mode go, and every other word stays.
+    #[test]
+    fn stripping_removes_only_the_inf_nan_declaration() {
+        let plain = minimal_compute_module([1, 1, 1]);
+        let mut words = plain.clone();
+        let main = 1_u32;
+        let name = Builder::literal_string(super::FLOAT_CONTROLS);
+        let mut extension = vec![(((name.len() + 1) as u32) << 16) | u32::from(op::EXTENSION)];
+        extension.extend(name);
+        let capability = [
+            (2 << 16) | u32::from(op::CAPABILITY),
+            super::capability::SIGNED_ZERO_INF_NAN_PRESERVE,
+        ];
+        let mode = [
+            (4 << 16) | u32::from(op::EXECUTION_MODE),
+            main,
+            super::mode::SIGNED_ZERO_INF_NAN_PRESERVE,
+            32,
+        ];
+        words.extend_from_slice(&capability);
+        words.extend_from_slice(&extension);
+        words.extend_from_slice(&mode);
+        assert_eq!(super::without_inf_nan_preserve(&words), plain);
+        assert_eq!(super::without_inf_nan_preserve(&plain), plain);
+    }
+
+    /// A stream that cannot be walked is handed back unchanged, for the device to refuse.
+    #[test]
+    fn a_malformed_stream_is_not_altered() {
+        let mut words = minimal_compute_module([1, 1, 1]);
+        words.push(0x00ff_0011);
+        assert_eq!(super::without_inf_nan_preserve(&words), words);
+    }
 
     /// A module starts with the magic word, and its header carries a bound.
     #[test]

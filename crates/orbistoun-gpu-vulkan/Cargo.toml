@@ -17,11 +17,12 @@ orbistoun-gpu = { workspace = true }
 ash = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# Removing a float-controls declaration a device cannot honour.
+orbistoun-spirv = { workspace = true }
 # A batch's draw words, written into the mapped draw-data buffer as bytes (D718).
 zerocopy = { workspace = true }
 
 [dev-dependencies]
-orbistoun-spirv = { workspace = true }
 # Only for the end-to-end test: a module that reached a device by way of a command
 # stream, rather than by being handed to the translator directly.
 orbistoun-translate = { workspace = true }

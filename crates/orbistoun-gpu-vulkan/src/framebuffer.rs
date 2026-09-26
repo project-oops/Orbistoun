@@ -3221,11 +3221,15 @@ fn create_shader_modules(
     shaders: (&[u32], &[u32]),
 ) -> Result<(vk::ShaderModule, vk::ShaderModule), DispatchError> {
     let (vertex_words, fragment_words) = shaders;
-    let vertex_info = vk::ShaderModuleCreateInfo::default().code(vertex_words);
+    let (vertex_words, fragment_words) = (
+        crate::compute::for_this_device(vertex_words),
+        crate::compute::for_this_device(fragment_words),
+    );
+    let vertex_info = vk::ShaderModuleCreateInfo::default().code(&vertex_words);
     // SAFETY: the words outlive the call and the device is live.
     let vertex = unsafe { device.create_shader_module(&vertex_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module(vertex)", e))?;
-    let fragment_info = vk::ShaderModuleCreateInfo::default().code(fragment_words);
+    let fragment_info = vk::ShaderModuleCreateInfo::default().code(&fragment_words);
     // SAFETY: as above.
     let fragment = unsafe { device.create_shader_module(&fragment_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module(fragment)", e))?;

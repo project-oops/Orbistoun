@@ -386,6 +386,22 @@ pub enum Interpolation {
     Flat,
 }
 
+/// Declares that the module's 32-bit arithmetic keeps signed zeros, infinities and NaNs, as the
+/// guest's does: its IEEE results propagate them (AMD's published RDNA ISA), and without the
+/// declaration a driver may fold them away. A device that cannot honour it gets the module with
+/// the declaration removed (`orbistoun_spirv::without_inf_nan_preserve`).
+pub(crate) fn declare_inf_nan_preserve(b: &mut Builder, main: Id) {
+    b.header(op::CAPABILITY, &[capability::SIGNED_ZERO_INF_NAN_PRESERVE]);
+    b.header(
+        op::EXTENSION,
+        &Builder::literal_string(orbistoun_spirv::FLOAT_CONTROLS),
+    );
+    b.header(
+        op::EXECUTION_MODE,
+        &[main.0, mode::SIGNED_ZERO_INF_NAN_PRESERVE, 32],
+    );
+}
+
 /// Emits the module header: capabilities, the memory model, the entry point and its execution mode,
 /// and a fragment output's location.
 fn emit_header(
@@ -405,6 +421,7 @@ fn emit_header(
         b.header(op::CAPABILITY, &[capability::SHADER]);
     }
 
+    declare_inf_nan_preserve(b, main);
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
     match stage {

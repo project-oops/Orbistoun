@@ -49,6 +49,11 @@ pub struct Properties {
     /// depends on it: on a flushing device its subnormal tests both answer false and the scaling is
     /// skipped.
     pub subnormals_preserved: bool,
+    /// Whether 32-bit signed zeros, infinities and NaNs survive a module that declares they must.
+    ///
+    /// Every translated module declares it; on a device without it the declaration is removed
+    /// before the module is created ([`for_this_device`]).
+    pub inf_nan_preserved: bool,
     /// How many invocations share a subgroup on this device.
     ///
     /// Reported rather than assumed: the guest's wavefront is 32 or 64 lanes, and the ratio to the
@@ -209,6 +214,19 @@ struct BoundPipeline {
     set: vk::DescriptorSet,
 }
 
+/// Whether the device took up the float-controls guarantee, recorded when its properties are read.
+static INF_NAN_PRESERVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// A module as this device can take it: translated modules declare `SignedZeroInfNanPreserve`, and
+/// a device that does not offer it gets the module without that declaration.
+pub(crate) fn for_this_device(words: &[u32]) -> std::borrow::Cow<'_, [u32]> {
+    if INF_NAN_PRESERVED.load(std::sync::atomic::Ordering::Relaxed) {
+        std::borrow::Cow::Borrowed(words)
+    } else {
+        std::borrow::Cow::Owned(orbistoun_spirv::without_inf_nan_preserve(words))
+    }
+}
+
 /// Builds a compute pipeline bound to one storage buffer at set 0, binding 0.
 fn build_pipeline(
     device: &ash::Device,
@@ -217,7 +235,8 @@ fn build_pipeline(
     size: vk::DeviceSize,
     (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
 ) -> Result<BoundPipeline, DispatchError> {
-    let shader_info = vk::ShaderModuleCreateInfo::default().code(module);
+    let module = for_this_device(module);
+    let shader_info = vk::ShaderModuleCreateInfo::default().code(&module);
     // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an error, which
     // makes this usable as a check.
     let shader = unsafe { device.create_shader_module(&shader_info, None) }
@@ -526,6 +545,17 @@ impl Session {
                 |s| s.to_string_lossy().into_owned(),
             ),
             subnormals_preserved: float_controls.shader_denorm_preserve_float32 == vk::TRUE,
+            inf_nan_preserved: {
+                let preserved =
+                    float_controls.shader_signed_zero_inf_nan_preserve_float32 == vk::TRUE;
+                INF_NAN_PRESERVED.store(preserved, std::sync::atomic::Ordering::Relaxed);
+                if !preserved {
+                    tracing::warn!(
+                        "this device cannot preserve 32-bit infinities and NaNs on request; translated shaders run without the guarantee"
+                    );
+                }
+                preserved
+            },
             subgroup_size: subgroup.subgroup_size,
             // Derived from the creation request, so the report follows whatever was enabled.
             fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,

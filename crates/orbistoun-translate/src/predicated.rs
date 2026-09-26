@@ -121,6 +121,7 @@ pub struct Predicated<'a> {
 /// well as declared, or the module is rejected.
 fn declare_entry_point(builder: &mut Builder, main: Id, lane_input: Option<Id>, group: u32) {
     builder.header(op::CAPABILITY, &[capability::SHADER]);
+    crate::wavefront::declare_inf_nan_preserve(builder, main);
 
     builder.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
