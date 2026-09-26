@@ -36,7 +36,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 ## Linking
 
 - An orbistoun-aot build has been run only on the machine that built it (D724).
-- `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725).
+- `extrq` and `insertq` are not rewritten, so a title using them faults on a host CPU without SSE4a (D725); PPSA25872 also carries one `monitorx`/`mwaitx` pair, undefined on any non-AMD host.
 
 ## Kernel, libraries and filesystem
 
