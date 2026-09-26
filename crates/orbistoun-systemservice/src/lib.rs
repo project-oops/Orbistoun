@@ -289,15 +289,36 @@ fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Always succeeds: the loader resolves every library a title imports before the guest runs, so
 /// the requested module is already callable. Answers `0`; a positive placeholder would read as a
-/// module handle the guest might dereference.
-fn sysmodule_load_module(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// module handle the guest might dereference. The id is remembered, so [`sysmodule_is_loaded`]
+/// answers for this process.
+fn sysmodule_load_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Ok(mut loaded) = loaded_modules().lock() {
+        loaded.insert(args[0] as u32);
+    }
     OK
 }
 
-/// `sceSysmoduleUnloadModule(id)` - a no-op that succeeds, since loading paged nothing in.
-fn sysmodule_unload_module(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// `sceSysmoduleUnloadModule(id)` - succeeds, since loading paged nothing in, and forgets the id.
+fn sysmodule_unload_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Ok(mut loaded) = loaded_modules().lock() {
+        loaded.remove(&(args[0] as u32));
+    }
     OK
 }
+
+/// The module ids this process has loaded and not unloaded.
+fn loaded_modules() -> &'static std::sync::Mutex<std::collections::BTreeSet<u32>> {
+    static LOADED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<u32>>> =
+        std::sync::OnceLock::new();
+    LOADED.get_or_init(Default::default)
+}
+
+/// `SCE_SYSMODULE_ERROR_UNLOADED` for a valid id this process has not loaded.
+///
+/// Guest-observed: the retail titles compare the answer against this constant (ten or more sites
+/// in each Unity title) and load and initialise the module when it matches; a reference emulator
+/// predicts it too. Not yet measured for a valid id.
+const SYSMODULE_NOT_LOADED: u64 = 0x805a_1001;
 
 /// `SCE_SYSMODULE_ERROR_UNLOADED` - answered for an identifier that names no loaded module.
 ///
@@ -307,13 +328,17 @@ const SYSMODULE_UNLOADED: u64 = 0x805a_1000;
 
 /// `sceSysmoduleIsLoaded(id)` - whether a module is loaded.
 ///
-/// A valid identifier answers `0` (loaded), since the loader resolves every module. Identifier 0
-/// is not a loadable module and answers the measured [`SYSMODULE_UNLOADED`].
+/// Loaded (`0`) for an id this process loaded, and [`SYSMODULE_NOT_LOADED`] for one it did not:
+/// a title that is told a module is loaded skips loading and initialising it. Identifier 0 is not
+/// a loadable module and answers the measured [`SYSMODULE_UNLOADED`].
 fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return SYSMODULE_UNLOADED;
     }
-    OK
+    let loaded = loaded_modules()
+        .lock()
+        .is_ok_and(|loaded| loaded.contains(&(args[0] as u32)));
+    if loaded { OK } else { SYSMODULE_NOT_LOADED }
 }
 
 /// Implementations this crate provides, by symbol name. Names rather than hashes, so the table can
@@ -356,6 +381,24 @@ mod tests {
         args[1] = buffer.as_mut_ptr() as u64;
         args[2] = size;
         args
+    }
+
+    /// A module is loaded only between its load and its unload; a zero id keeps its measured code.
+    #[test]
+    fn a_module_is_loaded_only_after_this_process_loads_it() {
+        let id = |id: u64| {
+            let mut args = [0; GUEST_ARG_REGISTERS];
+            args[0] = id;
+            args
+        };
+        // An id no other test loads, since the set is process-wide.
+        let module = id(0x00a4);
+        assert_eq!(super::sysmodule_is_loaded(&module), 0x805a_1001);
+        assert_eq!(super::sysmodule_load_module(&module), 0);
+        assert_eq!(super::sysmodule_is_loaded(&module), 0);
+        assert_eq!(super::sysmodule_unload_module(&module), 0);
+        assert_eq!(super::sysmodule_is_loaded(&module), 0x805a_1001);
+        assert_eq!(super::sysmodule_is_loaded(&id(0)), 0x805a_1000);
     }
 
     /// The two calls that report who is signed in never disagree.
