@@ -200,6 +200,14 @@ pub struct Status {
     /// The day it was measured.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub measured_on: String,
+    /// The digest of the link plan the run applied (D724).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link_plan: String,
+    /// How that plan stood against the one stored for the title: `new`, `match` or `mismatch`.
+    ///
+    /// A `mismatch` is a loader defect, whatever the rest of the entry says.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub link_plan_stored: String,
     /// Anything a person should know that the numbers do not say.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
@@ -547,6 +555,14 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
     let _ = writeln!(out, "| Standing | {}% |", s.standing);
     let _ = writeln!(out, "| Frames to the output layer | {} |", s.frames);
     let _ = writeln!(out, "| Measured on | {} |", s.measured_on);
+    if !s.link_plan.is_empty() {
+        let stood = if s.link_plan_stored.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", s.link_plan_stored)
+        };
+        let _ = writeln!(out, "| Link plan | `{}`{stood} |", s.link_plan);
+    }
     let _ = writeln!(out, "\nThis is {from}.\n");
     if !notes.is_empty() {
         let _ = writeln!(out, "> {}\n", md_cell(notes));
@@ -1217,6 +1233,8 @@ reason = "..."
             limit_seconds: Some(20),
             build: "0.1.0".to_owned(),
             measured_on: "2026-08-21".to_owned(),
+            link_plan: String::new(),
+            link_plan_stored: String::new(),
             notes: String::new(),
         }
     }
@@ -1261,6 +1279,28 @@ reason = "..."
         assert!(
             md.contains("![far](screenshots/far.png)"),
             "the screenshot is embedded"
+        );
+    }
+
+    /// A title's page shows the link plan its record was made under, and nothing for a record that
+    /// predates plans.
+    #[test]
+    fn a_title_page_shows_the_link_plan() {
+        let mut row = Row {
+            name: None,
+            title: "t".to_owned(),
+            status: status(Reach::Entered, 1, 1),
+            experiment: false,
+            screenshot: None,
+        };
+        assert!(
+            !super::render_title_page(&row, &super::Title::default(), "").contains("Link plan")
+        );
+        row.status.link_plan = "0123456789abcdef".to_owned();
+        row.status.link_plan_stored = "match".to_owned();
+        assert!(
+            super::render_title_page(&row, &super::Title::default(), "")
+                .contains("| Link plan | `0123456789abcdef` (match) |")
         );
     }
 

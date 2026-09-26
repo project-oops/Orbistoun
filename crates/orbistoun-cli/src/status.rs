@@ -130,19 +130,23 @@ fn titles_block(dir: &std::path::Path) -> Result<String> {
         return Ok(out);
     }
 
-    let _ = writeln!(out, "| Title | Reach | Imports | Calls | Standing | Ends |");
-    let _ = writeln!(out, "|---|---|---|---|---|---|");
+    let _ = writeln!(
+        out,
+        "| Title | Reach | Imports | Calls | Standing | Ends | Link plan |"
+    );
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|");
     // Ranked in the library, so this table and `compat list` agree on which title is closest to
     // running (D034).
     for (title, status) in orbistoun_overrides::frontier(honest) {
         let _ = writeln!(
             out,
-            "| {title} | {} | {} | {} | {}% | `{}` |",
+            "| {title} | {} | {} | {} | {}% | `{}` | {} |",
             status.reach.label(),
             status.imports,
             grouped(status.calls),
             status.standing,
-            status.outcome
+            status.outcome,
+            link_plan_cell(&status)
         );
     }
 
@@ -165,6 +169,16 @@ fn titles_block(dir: &std::path::Path) -> Result<String> {
     }
     let _ = write!(out, "\n{TITLES_CLOSE}");
     Ok(out)
+}
+
+/// A record's link plan for the table: its digest and how it stood, or a dash when the record
+/// predates plans (D724).
+fn link_plan_cell(status: &orbistoun_overrides::Status) -> String {
+    match (status.link_plan.as_str(), status.link_plan_stored.as_str()) {
+        ("", _) => "-".to_owned(),
+        (digest, "") => format!("`{digest}`"),
+        (digest, stood) => format!("`{digest}` {stood}"),
+    }
 }
 
 /// The block itself, as markdown.

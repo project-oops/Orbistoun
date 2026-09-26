@@ -424,6 +424,8 @@ mod tests {
             limit_seconds: Some(12),
             build: "0.1.0".to_owned(),
             measured_on: "2026-08-27".to_owned(),
+            link_plan: String::new(),
+            link_plan_stored: String::new(),
             notes: String::new(),
         }
     }

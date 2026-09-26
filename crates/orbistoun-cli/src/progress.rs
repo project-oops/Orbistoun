@@ -24,6 +24,7 @@ pub(crate) fn report_progress(
         print_standing(after);
         print_quiet(after);
         print_abi(after);
+        print_link_plan(after);
         print_said(after);
         print_wall(after);
         return;
@@ -66,12 +67,20 @@ pub(crate) fn report_progress(
         println!("             that it moved - ORBISTOUN_WATCH is what answers that");
     }
     print_abi(after);
+    print_link_plan(after);
     print_formats(after);
     print_fault_detail(after);
     print_unattached_dumps(after);
     print_said(after);
     print_findings(after);
     print_wall(after);
+}
+
+/// The link plan the run applied and how it stood against the stored one (D724).
+fn print_link_plan(trace: &orbistoun_report::trace::CallTrace) {
+    if let Some(line) = trace.conditions.describe_link_plan() {
+        println!("  {line}");
+    }
 }
 
 /// What the guest was doing when it faulted: the operation, the address and the registers the trace

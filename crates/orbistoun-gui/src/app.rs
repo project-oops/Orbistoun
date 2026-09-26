@@ -1213,6 +1213,14 @@ impl App {
                     ),
                 );
             }
+            // The words the report uses, from the same place (D724).
+            if let Some(line) = trace.conditions.describe_link_plan() {
+                if trace.conditions.link_plan_mismatched() {
+                    ui.colored_label(egui::Color32::LIGHT_RED, line);
+                } else {
+                    ui.label(line);
+                }
+            }
 
             if trace.fault.is_some() && !trace.tail.is_empty() {
                 ui.separator();

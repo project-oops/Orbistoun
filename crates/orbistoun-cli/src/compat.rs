@@ -322,8 +322,8 @@ enum Kept {
     NotBetter {
         /// Which slot was compared against.
         slot: &'static str,
-        /// What it holds.
-        previous: orbistoun_overrides::Status,
+        /// What it holds, boxed because a status is much larger than a path.
+        previous: Box<orbistoun_overrides::Status>,
     },
 }
 
@@ -355,7 +355,7 @@ fn keep_status(
     };
     if let Some(previous) = previous {
         if !force && !status.worth_recording(previous) {
-            let previous = previous.clone();
+            let previous = Box::new(previous.clone());
             // The refreshed metadata is saved even when the status is not.
             if !meta.is_empty() {
                 write_compat(dir, title, &file)?;
@@ -565,6 +565,8 @@ mod tests {
             limit_seconds: None,
             build: String::new(),
             measured_on: String::new(),
+            link_plan: String::new(),
+            link_plan_stored: String::new(),
             frames: 0,
             unanswered: None,
             notes: String::new(),

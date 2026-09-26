@@ -584,6 +584,31 @@ impl Conditions {
         !self.default_return.is_empty() && self.default_return != "unimplemented"
     }
 
+    /// The link plan the run applied and how it stood against the stored one, in one line, or
+    /// `None` when the run recorded no plan (D724).
+    pub fn describe_link_plan(&self) -> Option<String> {
+        if self.link_plan.is_empty() {
+            return None;
+        }
+        let stood = match self.link_plan_stored.as_str() {
+            "new" => ", stored as the title's plan",
+            "match" => ", matching the stored plan",
+            "mismatch" => ", differing from the plan stored under the same key - a loader defect",
+            _ => ", not stored",
+        };
+        let syscalls = match self.link_syscalls {
+            0 => String::new(),
+            1 => "; 1 raw syscall site".to_owned(),
+            n => format!("; {n} raw syscall sites"),
+        };
+        Some(format!("link plan {}{stood}{syscalls}", self.link_plan))
+    }
+
+    /// Whether the run linked differently from the plan stored under the same key.
+    pub fn link_plan_mismatched(&self) -> bool {
+        self.link_plan_stored == "mismatch"
+    }
+
     /// What differs from an earlier run, in words a report can print directly.
     ///
     /// Empty means the two are comparable. Sentences, because the only consumer prints them
@@ -866,6 +891,8 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
         limit_seconds: trace.conditions.limit_seconds,
         build: trace.conditions.build.clone(),
         measured_on,
+        link_plan: trace.conditions.link_plan.clone(),
+        link_plan_stored: trace.conditions.link_plan_stored.clone(),
         notes: String::new(),
     }
 }
@@ -1704,6 +1731,24 @@ mod tests {
         let changed = compare(Some(&before), &after).conditions_changed;
         assert_eq!(changed.len(), 1);
         assert!(changed[0].contains("10s") && changed[0].contains("30s"));
+    }
+
+    /// The link plan line says how the plan stood, and a mismatch is called a loader defect.
+    #[test]
+    fn the_link_plan_is_described_by_how_it_stood() {
+        let mut conditions = Conditions::default();
+        assert_eq!(conditions.describe_link_plan(), None);
+        conditions.link_plan = "0123456789abcdef".to_owned();
+        conditions.link_plan_stored = "match".to_owned();
+        assert_eq!(
+            conditions.describe_link_plan().as_deref(),
+            Some("link plan 0123456789abcdef, matching the stored plan")
+        );
+        conditions.link_plan_stored = "mismatch".to_owned();
+        conditions.link_syscalls = 1;
+        let line = conditions.describe_link_plan().expect("a plan");
+        assert!(line.contains("loader defect") && line.ends_with("; 1 raw syscall site"));
+        assert!(conditions.link_plan_mismatched());
     }
 
     #[test]
