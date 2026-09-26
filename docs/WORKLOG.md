@@ -321,3 +321,19 @@ One entry per milestone. Commit messages hold the rest.
   `errno`.
 - Watchpoints follow every guest thread, execute breakpoints count their own hits, and a peek can
   start from a fault register.
+
+## 2026-09-26 - Link plans checked, translations kept
+
+- Every run stores its link plan in the title library, keyed by the executable's SHA-256, the
+  build and the host CPU features, and checks each later link against it; a plan that differs
+  under the same key heads the findings as a loader defect, naming the slots by import.
+- `orbistoun-cli link` stores a plan without running the guest and `run --relink` replaces one;
+  both go through the service's one linking path.
+- The plan lists raw `syscall` sites: one each in PPSA99980 and the native obSCEne probe.
+- The stored plan is a check, not a cache: resolving and relocating take 5 ms of a 20 s
+  GLCB00001 run and 30 ms of a 1.6 s PPSA21564 run.
+- Finding a title's modules stat-ed every file under its root; taking the kind from the listing
+  cut PPSA21564's run from 5.2 s to 1.6 s.
+- Shader translations are kept per title with the shader and its context, and made again before
+  the guest starts when the build changed; GLCB00001's first-frame shader preparation falls from
+  5.1 ms to 2.6 ms of about 200 ms, most of which lies outside translation.
