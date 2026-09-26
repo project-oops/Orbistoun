@@ -40,6 +40,18 @@ followed by ranked findings. Arguments after `--` go to `orbistoun-cli run`.
 The desktop shell is `orbistoun-gui`; [docs/features/](docs/features/README.md) describes each
 screen beside its command-line equivalent.
 
+## A title as its own program
+
+`orbistoun-cli link <eboot> --native <dir> --name <name>` writes an orbistoun-aot build: the
+title's folder with orbistoun's window beside it as `<name>.exe`, which plays only that title and
+keeps everything it writes beneath the folder (D724). A commercial title's build stays on the
+machine that made it ([docs/SCOPE.md](docs/SCOPE.md)).
+
+[neverball-aot-portable-win.zip](https://github.com/project-oops/Orbistoun/releases/download/aot-demo/neverball-aot-portable-win.zip)
+is one: Neverball, built from source with oops-sdk, packed by the manually run
+[aot-neverball workflow](.github/workflows/aot-neverball.yml). It needs 64-bit Windows and a GPU
+whose Vulkan driver has mesh shaders.
+
 ## Querying what Orbistoun knows
 
 `./bin/orbistoun cli <args>` runs `orbistoun-cli`.

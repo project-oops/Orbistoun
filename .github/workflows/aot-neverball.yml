@@ -1,0 +1,165 @@
+name: Neverball orbistoun-aot build
+
+# Packs Neverball as an orbistoun-aot build (D724): the title's own files with orbistoun's
+# window beside them as `neverball.exe`, zipped as `neverball-aot-portable-win.zip` and
+# published to the `aot-demo` prerelease, whose URL the README links.
+#
+# Neverball is homebrew built from source with oops-sdk, so the build is shareable (SCOPE.md,
+# "Not a way to ship titles"); no commercial title is ever packed here. The title comes from
+# oops-apps' `latest-main` release, or from `title_url`.
+#
+# Manual only for now: a build copies about 265 MB and the runner has no GPU to play it on, so
+# the packed build is checked by hand. The push trigger below is what automating it would take.
+
+on:
+  workflow_dispatch:
+    inputs:
+      title_url:
+        description: "Neverball's title zip (NVRB00001/ at its root)"
+        required: true
+        default: "https://github.com/project-oops/oops-apps/releases/download/latest-main/neverball-title-prospero.zip"
+      title_sha256:
+        description: "SHA-256 the title zip must have; empty checks nothing and prints it"
+        required: false
+        default: ""
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "crates/orbistoun-service/src/aot.rs"
+  #     - "crates/orbistoun-service/src/linkplan.rs"
+  #     - "crates/orbistoun-gui/src/main.rs"
+  #     - "crates/orbistoun-cli/src/run.rs"
+  #     - ".github/workflows/aot-neverball.yml"
+
+concurrency:
+  group: aot-neverball
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Which tree produced the launcher, stamped into the binary (D222).
+  ORBISTOUN_COMMIT: ${{ github.sha }}
+
+jobs:
+  build:
+    name: Build neverball-aot-portable-win.zip
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The standard OOPS preamble: the collection, this repository into it, then the
+      # siblings. See docs/BUILDING.md.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/OOPS
+          path: OOPS
+      - uses: actions/checkout@v4
+        with:
+          path: OOPS/orbistoun
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: OOPS/orbistoun
+          key: aot-windows
+      - name: Siblings this build needs
+        run: OOPS/bin/oops bootstrap orbistoun
+        env:
+          OOPS_CI_TOKEN: ${{ secrets.OOPS_CI_TOKEN }}
+
+      # The window is the build's launcher; the CLI links the title and writes the build.
+      - name: Build the CLI and the window
+        run: cargo build --release -p orbistoun-cli -p orbistoun-gui
+        working-directory: OOPS/orbistoun
+
+      - name: Fetch Neverball
+        working-directory: OOPS/orbistoun
+        env:
+          TITLE_URL: ${{ inputs.title_url }}
+          TITLE_SHA256: ${{ inputs.title_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p aot-work
+          curl -fsSL "$TITLE_URL" -o aot-work/title.zip
+          got=$(sha256sum aot-work/title.zip | cut -d' ' -f1)
+          echo "title zip sha256: $got"
+          if [ -n "$TITLE_SHA256" ] && [ "$got" != "$TITLE_SHA256" ]; then
+            echo "::error::the title zip is $got, not the $TITLE_SHA256 asked for" >&2
+            exit 1
+          fi
+          unzip -q aot-work/title.zip -d aot-work/title
+          test -f aot-work/title/NVRB00001/eboot.bin
+
+      # Staged: Neverball writes its settings and replays into /app0, as it may when the
+      # hardware stages homebrew (D722).
+      - name: Write the build
+        working-directory: OOPS/orbistoun
+        run: |
+          set -euo pipefail
+          ./target/release/orbistoun-cli link aot-work/title/NVRB00001/eboot.bin \
+            --native dist/neverball-aot --name neverball --staged
+
+      # Neverball is GPL-2.0-or-later: its licence texts travel with it, and the README says
+      # where the exact source is.
+      - name: Licences and the README
+        working-directory: OOPS/orbistoun
+        run: |
+          set -euo pipefail
+          lock=$(curl -fsSL https://raw.githubusercontent.com/project-oops/oops-apps/main/src/oops-titles/neverball/upstream.lock)
+          rev=$(printf '%s\n' "$lock" | sed -n 's/^UPSTREAM_REV=//p')
+          test -n "$rev"
+          git clone -q --filter=blob:none --no-checkout https://github.com/Neverball/neverball aot-work/neverball
+          git -C aot-work/neverball sparse-checkout set --no-cone LICENSE.md 'doc/legal/*'
+          git -C aot-work/neverball checkout -q "$rev"
+          out=dist/neverball-aot/LICENSES
+          mkdir -p "$out/neverball" "$out/orbistoun"
+          cp aot-work/neverball/LICENSE.md aot-work/neverball/doc/legal/* "$out/neverball/"
+          cp LICENSE-MIT LICENSE-APACHE "$out/orbistoun/"
+          cat > dist/neverball-aot/README.txt <<EOF
+          Neverball, as an orbistoun-aot build
+          ====================================
+
+          Run neverball.exe. This is Neverball built for another platform with oops-sdk,
+          played through orbistoun, which answers its system calls and draws its graphics
+          with Vulkan. It demonstrates orbistoun-aot; upstream Neverball has its own native
+          Windows build.
+
+          Needs: 64-bit Windows, a GPU whose Vulkan driver has mesh shaders (VK_EXT_mesh_shader),
+          and a recent x86-64 CPU. Everything it writes stays in the .portable folder here.
+
+          Neverball is GPL-2.0-or-later (LICENSES/neverball). Its source is
+          https://github.com/Neverball/neverball at $rev, built by
+          https://github.com/project-oops/oops-apps (src/oops-titles/neverball).
+          orbistoun is MIT or Apache-2.0 (LICENSES/orbistoun), source at
+          https://github.com/${{ github.repository }} at ${{ github.sha }}.
+          EOF
+
+      - name: Pack
+        shell: pwsh
+        working-directory: OOPS/orbistoun/dist
+        run: Compress-Archive -Path neverball-aot -DestinationPath neverball-aot-portable-win.zip
+
+      - name: Replace the previous aot-demo release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete aot-demo --yes --cleanup-tag --repo "${{ github.repository }}" || true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: aot-demo
+          name: "Neverball, as an orbistoun-aot build"
+          prerelease: true
+          make_latest: "false"
+          draft: false
+          target_commitish: ${{ github.sha }}
+          files: OOPS/orbistoun/dist/neverball-aot-portable-win.zip
+          body: |
+            Neverball packed as an orbistoun-aot build from `${{ github.sha }}`: the title's
+            files with orbistoun's window beside them as `neverball.exe`. Unzip and run it.
+
+            Needs 64-bit Windows and a GPU whose Vulkan driver has mesh shaders. Built by a
+            manual run of `aot-neverball.yml`; the runner cannot play it, so each build is
+            checked by hand.

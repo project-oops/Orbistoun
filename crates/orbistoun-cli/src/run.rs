@@ -58,7 +58,7 @@ pub(crate) fn cmd_link(
 pub(crate) fn cmd_native_build(
     path: &std::path::Path,
     out: &std::path::Path,
-    name: Option<&str>,
+    (name, staged): (Option<&str>, bool),
     link_plan: String,
 ) -> Result<()> {
     let launcher = std::env::current_exe()
@@ -70,7 +70,8 @@ pub(crate) fn cmd_native_build(
         launcher.display()
     );
     let staging = orbistoun_paths::Paths::resolve().staged_titles_dir();
-    let manifest = orbistoun_service::aot::Manifest::for_title(path, &staging, link_plan);
+    let mut manifest = orbistoun_service::aot::Manifest::for_title(path, &staging, link_plan);
+    manifest.staged |= staged;
     let name = name.unwrap_or(&manifest.title).to_owned();
     let build = orbistoun_service::aot::write_build(path, out, &launcher, &name, &manifest)
         .with_context(|| format!("writing the build into {}", out.display()))?;

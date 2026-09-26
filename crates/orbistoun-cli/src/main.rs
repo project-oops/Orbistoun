@@ -139,6 +139,10 @@ enum Command {
         /// What to name the build's launcher; the title's id when omitted.
         #[arg(long, requires = "native")]
         name: Option<String>,
+        /// Build it as a staged title, with a writable `/app0`, wherever its folder lies: for
+        /// homebrew unpacked outside the library's `data/homebrew` (D722).
+        #[arg(long, requires = "native")]
+        staged: bool,
     },
     /// Execute a guest, in a worker process.
     Run {
@@ -952,10 +956,11 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             relink,
             ref native,
             ref name,
+            staged,
         } => {
             let summary = cmd_link(path, cli.symbols_db.as_deref(), relink)?;
             if let Some(out) = native {
-                cmd_native_build(path, out, name.as_deref(), summary.digest)?;
+                cmd_native_build(path, out, (name.as_deref(), staged), summary.digest)?;
             }
         }
         Command::Names {
