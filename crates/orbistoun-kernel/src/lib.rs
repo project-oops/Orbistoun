@@ -6650,25 +6650,54 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceKernelMapperGetParam(out)`.
+/// `sceKernelMapperGetParam(out)` - fills a size-prefixed structure and answers `0`.
 ///
-/// Returns `0x8002_0006` - the code obSCEne measured on retail hardware (REQ-...0925Z-7b3c). The
-/// mapper's parameters are gated on the AGC driver resource-registration subsystem, which is a stub
-/// on retail (`sceAgcDriverRegisterOwner` and friends return `0x8a6c9018`), so `GetParam` cannot
-/// answer and refuses rather than filling the caller's size-prefixed struct - it writes nothing, as
-/// the cold-call measurement in b7e2 also showed. This is the measured value and orbistoun returns it
-/// for fidelity (principle 1).
+/// **Measured on FW 12.40, twice in one sweep** (obSCEne `report-1790100990`,
+/// `137-kernelcall/mapper-param` and `166-agc/mapper-after-init`): `rc 0x0`, and the 56-byte
+/// structure whose first quadword is its size (`0x38`) came back with the 48 bytes after the size
+/// filled - [`MAPPER_PARAM`]. The size word itself is left as the caller wrote it (`changed 48`).
 ///
-/// It does **not** clear PPSA28061's abort, and the honest reason is a divergence worth naming. The
-/// guest branches on this return: `sceKernelMapperGetParam:0x0` reaches 59 imports (D643), while the
-/// measured `0x80020006` aborts seventy-seven bytes after the call, the same as the placeholder did
-/// (worklog 505, 515). `0x0` is a value nothing measured - forbidden by principle 3 - so it is not an
-/// option; but that means the console ships with a return the guest here cannot survive. Either the
-/// in-boot mapper call returns something the cold call did not, or the guest's tolerance depends on
-/// state orbistoun is not reproducing. Faithful return, open divergence (raised to obSCEne, worklog 515).
-fn mapper_get_param(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    0x8002_0006
+/// The `0x8002_0006` this answered before was an earlier cold call (b7e2, worklog 505) that a later
+/// sweep superseded; Earthion aborts on any non-zero answer here (D677), which is what that stale
+/// value produced (worklog 877).
+///
+/// Only the bytes the caller's own size declares are written, so a smaller structure is never
+/// overrun; a size the measurement did not cover gets the prefix of the measured bytes it has room
+/// for.
+fn mapper_get_param(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let out = args[0];
+    let Some(declared) = read_word(out) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    };
+    let room = usize::try_from(declared)
+        .unwrap_or(0)
+        .min(MAPPER_PARAM.len() + 8);
+    let body = room.saturating_sub(8);
+    if body > 0 && !write_block(out + 8, &MAPPER_PARAM[..body]) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    OK
 }
+
+/// The 48 bytes `sceKernelMapperGetParam` writes after the size quadword, as the console wrote them:
+/// `0x80000000000`, then `0x88000000000` three times, then `0x40` and `0x2663`.
+const MAPPER_PARAM: [u8; 48] = {
+    let words: [u64; 6] = [
+        0x0000_0800_0000_0000,
+        0x0000_0880_0000_0000,
+        0x0000_0880_0000_0000,
+        0x0000_0880_0000_0000,
+        0x40,
+        0x2663,
+    ];
+    let mut bytes = [0u8; 48];
+    let mut i = 0;
+    while i < 48 {
+        bytes[i] = words[i / 8].to_le_bytes()[i % 8];
+        i += 1;
+    }
+    bytes
+};
 
 /// Implementations this crate provides, by symbol name.
 ///
@@ -7694,6 +7723,36 @@ mod tests {
         assert_eq!(&ids[4..], &[0xa1; 4], "the second is untouched");
         assert_eq!(&sizes[8..], &[0xb2; 8]);
         assert_eq!(&statuses[4..], &[0xc3; 4]);
+    }
+
+    /// **The mapper answers what the console wrote** (obSCEne `166-agc/mapper-after-init`): `rc 0`,
+    /// the size quadword untouched, the 48 bytes after it byte for byte - and a smaller declared
+    /// size is never overrun.
+    #[test]
+    fn the_mapper_fills_what_the_console_filled() {
+        let mut buffer = [0u8; 64];
+        buffer[..8].copy_from_slice(&0x38u64.to_le_bytes());
+        buffer[56..].copy_from_slice(&[0xee; 8]);
+        let at = buffer.as_mut_ptr() as usize as u64;
+        assert_eq!(super::mapper_get_param(&args([at, 0, 0, 0])), super::OK);
+        let console = hex(concat!(
+            "38000000000000000000000000080000",
+            "00000000800800000000000080080000",
+            "00000000800800004000000000000000",
+            "6326000000000000"
+        ));
+        assert_eq!(&buffer[..56], console.as_slice());
+        assert_eq!(&buffer[56..], &[0xee; 8], "nothing past the declared size");
+
+        let mut small = [0u8; 24];
+        small[..8].copy_from_slice(&0x18u64.to_le_bytes());
+        let at = small.as_mut_ptr() as usize as u64;
+        assert_eq!(super::mapper_get_param(&args([at, 0, 0, 0])), super::OK);
+        assert_eq!(
+            &small[8..],
+            &console[8..24],
+            "only what the declared size has room for"
+        );
     }
 
     /// **A fresh reservation is answered uncommitted and inaccessible.** The Unity allocator tests

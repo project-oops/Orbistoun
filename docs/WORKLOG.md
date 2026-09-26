@@ -891,3 +891,4 @@ context cannot re-derive.
 | - | [874. sceAgcCreateShader patches the program address; the APR resolve stops at its first miss](worklog/874-create-shader-patches-the-program-address.md) |
 | - | [875. The POSIX file calls fail the POSIX way](worklog/875-posix-file-calls-fail-the-posix-way.md) |
 | - | [876. A peek can start from a fault register](worklog/876-a-peek-can-start-from-a-fault-register.md) |
+| - | [877. sceKernelMapperGetParam answers its measured success, and PPSA28061 moves](worklog/877-the-mapper-answers-its-measured-success.md) |
