@@ -29,6 +29,18 @@ pub const CONTEXT_CONTROL: u8 = 0x28;
 /// select what later `LOAD_*_REG` packets read, and touch no memory themselves.
 const CONTEXT_CONTROL_SHADOW_ENABLES: u32 = (1 << 0) | (1 << 1) | (1 << 15) | (1 << 16) | (1 << 24);
 
+/// `PKT3_WRITE_DATA` (`sid.h:83`): a control word, a destination, then the data words
+/// (`cp_pm4_table_data_gfx11.json:6677`).
+pub const WRITE_DATA: u8 = 0x37;
+/// `WRITE_DATA` `DST_SEL` (control bits 11:8, `sid.h:84`) values naming memory: `1`, memory
+/// synchronised across GRBM (`pkt3.json:26`), `2`, through L2, and `5`, memory
+/// (`cp_pm4_table_data_gfx11.json:6680-6696`). The same memory here; Mesa's IB parser treats these
+/// three, and only these, as memory addresses (`parse_cp_pm4_table_data_json.py:77-79`). `0` is a
+/// memory-mapped register.
+const WRITE_DATA_DST_SEL_MEMORY: [u32; 3] = [1, 2, 5];
+/// `WRITE_DATA` `ADDR_INCR` (control bit 16): set, every word goes to the same address.
+const WRITE_DATA_NO_INCREMENT: u32 = 1 << 16;
+
 /// `DMA_DATA` `SRC_SEL` values (`sid.h:178`, bits 30:29): the source is the packet's own data word.
 const SRC_SEL_DATA: u32 = 2;
 /// `DMA_DATA` `SRC_SEL`: the source is an address - direct, or through L2 (`sid.h:178`). Both are
@@ -258,6 +270,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
                 wait_reg_mem(&body, memory, &mut result)
             }),
             CONTEXT_CONTROL => context_control(&body),
+            WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
+                write_data(&body, memory, &mut result)
+            }),
             _ => Err(Stop::NeedsGpu),
         };
         if let Err(stop) = step {
@@ -432,6 +447,36 @@ fn context_control(body: &[u32]) -> Result<(), Stop> {
     if shadow & CONTEXT_CONTROL_SHADOW_ENABLES != 0 {
         return Err(Stop::NeedsGpu);
     }
+    Ok(())
+}
+
+/// `WRITE_DATA`: control, destination low (bits 31:2) and high, then the data words
+/// (`cp_pm4_table_data_gfx11.json:6677-6834`). `WR_CONFIRM` and the cache policy change nothing
+/// here: the write has landed when this returns, and there is no cache before guest memory. A
+/// register destination needs the GPU's registers.
+fn write_data(
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [control, addr_low, addr_high, ref data @ ..] = *body else {
+        return Err(Stop::Malformed);
+    };
+    if !WRITE_DATA_DST_SEL_MEMORY.contains(&((control >> 8) & 0xf)) {
+        return Err(Stop::NeedsGpu);
+    }
+    let destination = address(addr_low & !0x3, addr_high);
+    // Without increment the words land one over another, and the last is what memory keeps.
+    let words: &[u32] = if control & WRITE_DATA_NO_INCREMENT != 0 {
+        data.last().map(std::slice::from_ref).unwrap_or_default()
+    } else {
+        data
+    };
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    if !bytes.is_empty() && !memory.write(destination, &bytes) {
+        return Err(Stop::OutOfBounds);
+    }
+    result.bytes_written += bytes.len() as u64;
     Ok(())
 }
 
@@ -781,6 +826,80 @@ mod tests {
             );
             assert_eq!(memory.word(0x1000), 0);
         }
+    }
+
+    fn write_data(control: u32, dst: u64, data: &[u32]) -> Vec<u32> {
+        let body = u32::try_from(3 + data.len()).expect("small");
+        let mut out = vec![
+            command_header(super::WRITE_DATA, body),
+            control,
+            dst as u32,
+            (dst >> 32) as u32,
+        ];
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// `WRITE_DATA` to memory - through L2, direct, or synchronised across GRBM - writes its data
+    /// words at the address, in order, as radeonsi emits it (`ac_cmdbuf_cp.c:62-66`: `DST_SEL`,
+    /// `WR_CONFIRM` and `ENGINE_SEL` in the control word).
+    #[test]
+    fn write_data_to_memory_writes_its_words() {
+        for dst_sel in [1_u32, 2, 5] {
+            let control = (dst_sel << 8) | (1 << 20) | (1 << 30);
+            let mut stream = write_data(control, 0x2004, &[0x1111_1111, 0x2222_2222, 0x3333_3333]);
+            stream.extend(release(0x1000, 1, 0xbeef_cafe));
+            let mut memory = Fake::default();
+
+            let done = execute(&bytes(&stream), &mut memory);
+
+            assert_eq!(
+                done.stopped,
+                Stopped::Completed,
+                "dst_sel {dst_sel}: {done:?}"
+            );
+            assert_eq!(
+                [
+                    memory.word(0x2004),
+                    memory.word(0x2008),
+                    memory.word(0x200c)
+                ],
+                [0x1111_1111, 0x2222_2222, 0x3333_3333]
+            );
+            assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+            assert_eq!(done.bytes_written, 12 + 4);
+        }
+    }
+
+    /// With `ADDR_INCR` set to "do not increment" every word goes to the same address, so the last
+    /// one is what memory holds.
+    #[test]
+    fn write_data_without_increment_leaves_the_last_word() {
+        let control = (5 << 8) | (1 << 16);
+        let stream = write_data(control, 0x2000, &[1, 2, 3]);
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!((memory.word(0x2000), memory.word(0x2004)), (3, 0));
+    }
+
+    /// A register destination needs the GPU's registers; an unmapped destination is refused.
+    #[test]
+    fn write_data_to_a_register_or_unmapped_memory_stops() {
+        let stream = write_data(0, 0x2000, &[1]);
+        let done = execute(&bytes(&stream), &mut Fake::default());
+        assert_eq!(
+            done.stopped,
+            Stopped::NeedsGpu {
+                offset: 0,
+                opcode: super::WRITE_DATA
+            }
+        );
+        let stream = write_data(5 << 8, 0xdead_0000, &[1]);
+        let done = execute(&bytes(&stream), &mut Fake::default());
+        assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
     }
 
     /// A wait that cannot hold stops the stream; memory out of bounds is refused, not written.
