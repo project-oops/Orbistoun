@@ -99,7 +99,9 @@ pub struct Build {
 }
 
 /// Makes `out` an orbistoun-aot build of the title whose executable is `executable`: the title's
-/// folder copied in, `launcher` beside it as `<name>.exe`, and the manifest.
+/// folder copied in, `launcher` beside it as `<name>.exe`, and the manifest. The build is portable:
+/// everything its runs write stays beneath it, so it carries no state from the machine that made
+/// it and leaves none on the one that plays it.
 ///
 /// # Errors
 ///
@@ -126,6 +128,7 @@ pub fn write_build(
     let named = out.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(launcher, &named)?;
     manifest.write(out)?;
+    orbistoun_paths::enable_portable_sentinel(out)?;
     Ok(Build {
         launcher: named,
         files,
@@ -209,6 +212,7 @@ mod tests {
             b"level"
         );
         assert_eq!(Manifest::read(&out), Some(manifest.clone()));
+        assert!(out.join(".portable").is_dir(), "a build keeps its data beside it");
 
         let inside = title.join("build");
         assert!(write_build(&title.join("eboot.bin"), &inside, &launcher, "x", &manifest).is_err());
