@@ -2156,16 +2156,16 @@ fn frame_written_against(address: u64, regions: &[(u64, u64, bool)], cap: u64) -
 /// direct-memory map, and the whole frame the decoded shape describes is read: a guest drawing over
 /// black leaves the first rows zero.
 fn flipped_frame_written() -> bool {
+    /// Bytes per pixel the extent is taken at. Every scanout format registered in the corpus is
+    /// four bytes a pixel; a wider one is read only as far as its first four bytes a pixel reach.
+    const BYTES_PER_PIXEL: u64 = 4;
+
     if crate::render::drawn_frame_presented() {
         return true;
     }
     if crate::render::any_frame_drawn() {
         return false;
     }
-    /// Bytes per pixel the extent is taken at. Every scanout format registered in the corpus is
-    /// four bytes a pixel; a wider one is read only as far as its first four bytes a pixel reach.
-    const BYTES_PER_PIXEL: u64 = 4;
-
     let Some((address, shape)) = orbistoun_video::last_flipped_buffer() else {
         return false;
     };
