@@ -150,6 +150,14 @@ fn serve_requests<W: Write>(
                     )?;
                 }
             },
+            Request::Link {
+                path,
+                symbols_db,
+                relink,
+            } => write_message(
+                &mut output,
+                &link_ahead(service, &path, symbols_db.as_deref(), relink),
+            )?,
             Request::Run {
                 path,
                 symbols_db,
@@ -361,7 +369,7 @@ struct Limits {
 /// `title-data/` recognises it by.
 fn install_filesystem(module: &str) {
     let paths = orbistoun_paths::Paths::resolve();
-    let title = title_of(Path::new(module));
+    let title = orbistoun_service::linkplan::title_of(Path::new(module));
     // The sandbox is established as one thing, in orbistoun-fs: this crate supplies where the bytes
     // live and the retention policy, and the fs crate owns the order (D423). The retention default
     // is `Retain`, so what a guest wrote persists; `ORBISTOUN_SANDBOX=ephemeral` empties it each
@@ -402,12 +410,20 @@ fn install_filesystem(module: &str) {
     }
 }
 
-/// The title a module belongs to: the name of the directory holding it.
-fn title_of(module: &Path) -> String {
-    module.parent().and_then(|d| d.file_name()).map_or_else(
-        || "unknown".to_owned(),
-        |n| n.to_string_lossy().into_owned(),
-    )
+/// Links a title and stores its plan without entering it (`Request::Link`, D724).
+fn link_ahead(service: &Service, path: &Path, symbols_db: Option<&Path>, relink: bool) -> Event {
+    let bases = orbistoun_service::TitleBases {
+        modules: TITLE_MODULE_BASE,
+        thunks: THUNK_TABLE_BASE,
+        data: DATA_BLOCK_BASE,
+    };
+    let symbols = symbol_database(symbols_db);
+    match service.link_ahead(path, DEFAULT_MODULE_BASE, bases, &symbols, relink) {
+        Ok(summary) => Event::Linked(summary),
+        Err(e) => Event::Failed {
+            error: e.to_string(),
+        },
+    }
 }
 
 /// Whether the current run asked to replace its stored link plan (`Request::Run::relink`), set from
@@ -551,174 +567,51 @@ fn symbol_database(symbols_db: Option<&Path>) -> orbistoun_nid::SymbolDbFile {
         .unwrap_or_else(orbistoun_nid::SymbolDbFile::builtin)
 }
 
-/// Weak imports that nothing answers, which bind to zero under the ELF gABI (D676).
-///
-/// An import binds to zero when:
-/// 1. its binding is weak ([`orbistoun_elf::dynamic::Binding::Weak`]);
-/// 2. no module the title ships answers it (`!title.bound.contains_key(&sym_index)`);
-/// 3. the platform does not answer it (host implementation or symbol database:
-///    `!service.is_named_with(...)`).
-fn unanswered_weak_imports(
-    service: &Service,
-    bytes: &[u8],
-    title: &orbistoun_service::LinkedTitle,
-    symbols: &orbistoun_nid::SymbolDbFile,
-) -> std::collections::BTreeSet<usize> {
-    let Ok(imports) = service.raw_imports_of(bytes) else {
-        return std::collections::BTreeSet::new();
-    };
-    let db = orbistoun_nid::SymbolDb::from_file(symbols).map(|(db, _)| db);
-    imports
-        .into_iter()
-        .filter(|imp| {
-            imp.binding == orbistoun_elf::dynamic::Binding::Weak
-                && !title.bound.contains_key(&imp.symbol_index)
-                && !service.is_named_with(orbistoun_nid::Nid::from_raw(imp.nid), db.as_ref())
-        })
-        .map(|imp| imp.symbol_index as usize)
-        .collect()
-}
-
-/// Applies the executable's relocations against the title's code, then the stubs.
-///
-/// The title's own modules answer first, for the imports the caller decided they should, and
-/// everything else falls through to the stub table: a stub answering for a function relocated in
-/// the title's own code hands the guest a placeholder it uses as an address (D483). The resolvers
-/// are built here because they borrow the tables, and the borrow ends before the run report starts.
-fn relocate_the_executable(
-    service: &Service,
-    image: &Image,
-    bytes: &[u8],
-    title: &orbistoun_service::LinkedTitle,
-    refuse: Option<&std::collections::BTreeSet<usize>>,
-    weak_zero: Option<&std::collections::BTreeSet<usize>>,
-) -> Result<orbistoun_loader::relocate::Applied, orbistoun_service::ServiceError> {
-    // No offset: the executable is module 0, so its symbol index is its slot (D484).
-    let stubs = orbistoun_loader::relocate::ImportResolver {
-        thunks: &title.thunks,
-        data: &title.data,
-        refuse,
-        weak_zero,
-    };
-    let resolver = orbistoun_loader::relocate::TitleResolver {
-        bound: &title.bound,
-        inner: &stubs,
-    };
-    service.relocate_image_recorded(image, bytes, &resolver)
-}
-
 /// Records the title's link plan: the executable first, then the modules it ships (D724).
 ///
 /// The digest reaches the run's conditions, so a verdict between two runs that linked differently
-/// says so rather than crediting the difference to an implementation. The plan is compared with
-/// the one stored in the title library and stored when none is kept under its key.
+/// says so rather than crediting the difference to an implementation. The plan is settled against
+/// the one stored in the title library, and on a mismatch the report names what differed.
 fn record_link_plan(
+    service: &Service,
     image: &Image,
     writes: Vec<orbistoun_loader::plan::SlotWrite>,
     title: &orbistoun_service::LinkedTitle,
     executable: (&Path, &[u8]),
 ) {
-    use orbistoun_loader::plan;
-    let mut modules = vec![plan::ModulePlan::of("", image, writes)];
-    modules.extend(title.plans.iter().cloned());
-    let fresh = plan::LinkPlan { modules };
-    let digest = fresh.digest();
-    let (path, bytes) = executable;
-    let key = plan::PlanKey::for_executable(bytes, orbistoun_env::build::line());
-    let stored = orbistoun_paths::Paths::resolve().title_link_plan_file(&title_of(path));
+    let plan = orbistoun_service::linkplan::plan_of(image, writes, title);
     let relink = RUN_RELINK.load(std::sync::atomic::Ordering::Relaxed);
-    let settled = if relink {
-        plan::relink(&stored, &key, &fresh)
-    } else {
-        plan::settle(&stored, &key, &fresh)
-    };
-    let (standing, previous) = match settled {
-        Ok((standing, previous)) => (standing.word(), previous),
-        Err(e) => {
-            tracing::warn!(
-                "the link plan could not be stored at {}: {e}",
-                stored.display()
-            );
-            ("", None)
-        }
-    };
+    let summary = service.settle_link_plan(executable, &plan, title, relink);
     tracing::info!(
-        "link plan {digest} ({standing}): {} modules, {} relocation writes",
-        fresh.modules.len(),
-        fresh.write_count()
+        "link plan {} ({}): {} modules, {} relocation writes",
+        summary.digest,
+        summary.stored,
+        summary.modules,
+        summary.writes
     );
-    // A mismatch is named in the report; a relink shows what it replaced whatever the key was.
-    let differs = match previous {
-        Some(previous) if relink || standing == plan::Standing::Mismatch.word() => {
-            let difference = previous.plan.differences(&fresh);
-            describe_plan_difference(&difference, &title.thunks, &title.labels)
-        }
-        _ => Vec::new(),
-    };
     if relink {
-        if differs.is_empty() {
-            tracing::info!("relinked: the stored plan is now {digest}, and nothing differed");
+        if summary.differs.is_empty() {
+            tracing::info!(
+                "relinked: the stored plan is now {}, and nothing differed",
+                summary.digest
+            );
         } else {
-            tracing::info!("relinked: the stored plan is now {digest}; what differed:");
+            tracing::info!(
+                "relinked: the stored plan is now {}; what differed:",
+                summary.digest
+            );
         }
-        for line in &differs {
+        for line in &summary.differs {
             tracing::info!("  {line}");
         }
     }
-    let differs = if standing == plan::Standing::Mismatch.word() {
-        differs
+    let mismatch = summary.stored == orbistoun_loader::plan::Standing::Mismatch.word();
+    let differs = if mismatch {
+        summary.differs
     } else {
         Vec::new()
     };
-    report::note_link_plan(digest, standing, differs);
-}
-
-/// How many differing slots a mismatch names before it only counts the rest.
-const PLAN_DIFFERENCES_NAMED: usize = 8;
-
-/// Two plans' differences in words: each module placed differently, then the first differing slots
-/// named by the import whose stub either plan wrote there.
-fn describe_plan_difference(
-    difference: &orbistoun_loader::plan::PlanDifference,
-    thunks: &orbistoun_thunk::ThunkTable,
-    labels: &[String],
-) -> Vec<String> {
-    let module = |library: &str| {
-        if library.is_empty() {
-            "the executable".to_owned()
-        } else {
-            library.to_owned()
-        }
-    };
-    let value = |v: Option<u64>| v.map_or_else(|| "nothing".to_owned(), |v| format!("{v:#x}"));
-    let mut lines: Vec<String> = difference
-        .placements
-        .iter()
-        .map(|library| format!("{} is placed differently", module(library)))
-        .collect();
-    for slot in difference.slots.iter().take(PLAN_DIFFERENCES_NAMED) {
-        let label = [slot.fresh, slot.stored]
-            .into_iter()
-            .flatten()
-            .filter_map(|v| thunks.index_of(v))
-            .find_map(|index| labels.get(index).filter(|l| !l.is_empty()))
-            .cloned()
-            .unwrap_or_else(|| format!("{} slot", module(&slot.library)));
-        lines.push(format!(
-            "{label} at {:#x}: stored {}, now {}",
-            slot.at,
-            value(slot.stored),
-            value(slot.fresh)
-        ));
-    }
-    let rest = difference
-        .slots
-        .len()
-        .saturating_sub(PLAN_DIFFERENCES_NAMED);
-    if rest > 0 {
-        lines.push(format!("and {rest} more slots"));
-    }
-    lines
+    report::note_link_plan(summary.digest, summary.stored, differs);
 }
 
 /// Fills the globals a guest reads without ever calling anything that could fill them.
@@ -806,9 +699,15 @@ fn place_and_relocate<W: Write>(
     publish_what_the_guest_reads(service);
     let (tally, unnameable) =
         match relocate_with_refusals(service, &image, bytes, &title, &database, symbols_db) {
-            Ok((applied, unnameable)) => {
-                record_link_plan(&image, applied.writes, &title, (path, bytes));
-                (applied.tally, unnameable)
+            Ok(linked) => {
+                record_link_plan(
+                    service,
+                    &image,
+                    linked.applied.writes,
+                    &title,
+                    (path, bytes),
+                );
+                (linked.applied.tally, linked.refused)
             }
             Err(e) => {
                 return halt(
@@ -902,29 +801,10 @@ fn relocate_with_refusals(
     title: &orbistoun_service::LinkedTitle,
     database: &orbistoun_nid::SymbolDbFile,
     symbols_db: Option<&Path>,
-) -> Result<
-    (
-        orbistoun_loader::relocate::Applied,
-        Option<std::collections::BTreeSet<usize>>,
-    ),
-    orbistoun_service::ServiceError,
-> {
-    // Weak imports that are unanswered bind to zero under the ELF gABI (D676).
-    let weak_zero = unanswered_weak_imports(service, bytes, title, database);
+) -> Result<orbistoun_service::linkplan::ExecutableLink, orbistoun_service::ServiceError> {
     // Which imports this run will refuse, if it was asked to refuse any (D392).
-    let mut unnameable = unnameable_imports(service, bytes, symbols_db);
-    if let Some(refused) = unnameable.as_mut() {
-        refused.retain(|idx| !weak_zero.contains(idx));
-    }
-    let applied = relocate_the_executable(
-        service,
-        image,
-        bytes,
-        title,
-        unnameable.as_ref(),
-        Some(&weak_zero),
-    )?;
-    Ok((applied, unnameable))
+    let refuse = unnameable_imports(service, bytes, symbols_db);
+    service.relocate_executable(image, bytes, title, database, refuse)
 }
 
 /// Notes the placement and relocation lines and builds the one-line summary of a placed image.
@@ -3008,7 +2888,7 @@ impl WorkerHandle {
 
     /// Sends a request and collects events until a terminal one arrives.
     ///
-    /// Terminal means [`Event::SurveyComplete`], [`Event::Terminated`], or
+    /// Terminal means [`Event::SurveyComplete`], [`Event::Linked`], [`Event::Terminated`], or
     /// [`Event::Failed`] - anything that ends the exchange.
     pub fn request(&mut self, request: &Request) -> io::Result<Vec<Event>> {
         self.request_streaming(request, |_| {})
@@ -3032,7 +2912,10 @@ impl WorkerHandle {
             on_event(&event);
             let terminal = matches!(
                 event,
-                Event::SurveyComplete(_) | Event::Terminated { .. } | Event::Failed { .. }
+                Event::SurveyComplete(_)
+                    | Event::Linked(_)
+                    | Event::Terminated { .. }
+                    | Event::Failed { .. }
             );
             events.push(event);
             if terminal {
@@ -3575,6 +3458,26 @@ mod tests {
         );
     }
 
+    /// A link of a missing executable fails the request and leaves the worker serving.
+    #[test]
+    fn a_link_of_a_missing_executable_fails_the_request() {
+        let events = exchange(&[
+            Request::Link {
+                path: "no/such/file".into(),
+                symbols_db: None,
+                relink: false,
+            },
+            Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+        ]);
+        assert!(matches!(events[0], Event::Failed { .. }), "{events:?}");
+        assert!(
+            matches!(events[1], Event::Hello { .. }),
+            "the loop kept going"
+        );
+    }
+
     /// A bare ELF with one loadable segment, generated rather than extracted (D051).
     fn minimal_loadable_elf() -> Vec<u8> {
         const EHDR: usize = 64;
@@ -3621,46 +3524,5 @@ mod stop_wording {
             orbistoun_core::StopReason::Exited.label(),
             "the ladder matches a string core no longer produces - Reach::Exited is now unreachable"
         );
-    }
-
-    /// A differing slot is named by the import whose stub either plan wrote there; a slot holding
-    /// no stub is named by its module, and slots past the first few are counted.
-    #[test]
-    fn a_plan_difference_names_slots_by_their_import() {
-        use orbistoun_loader::plan::{PlanDifference, SlotDifference};
-        use orbistoun_mem::test_bases::{Range, crates};
-        static RANGE: Range = Range::nth(crates::WORKER);
-        let thunks = orbistoun_thunk::ThunkTable::build(RANGE.take(), 2, 0x1000).expect("reserves");
-        let labels = vec![
-            "libkernel::sceKernelUsleep".to_owned(),
-            "libc::malloc".to_owned(),
-        ];
-        let slot = |library: &str, at, stored, fresh| SlotDifference {
-            library: library.to_owned(),
-            at,
-            stored,
-            fresh,
-        };
-        let mut slots = vec![
-            slot("", 0x10, thunks.address_of(0), thunks.address_of(1)),
-            slot("libfoo", 0x20, None, Some(0x1234)),
-        ];
-        slots.extend(
-            (0..super::PLAN_DIFFERENCES_NAMED)
-                .map(|i| slot("", 0x100 + i as u64, Some(1), Some(2))),
-        );
-        let difference = PlanDifference {
-            placements: vec![String::new()],
-            slots,
-        };
-        let lines = super::describe_plan_difference(&difference, &thunks, &labels);
-        assert_eq!(lines[0], "the executable is placed differently");
-        assert!(
-            lines[1].starts_with("libc::malloc at 0x10: stored 0x"),
-            "{}",
-            lines[1]
-        );
-        assert_eq!(lines[2], "libfoo slot at 0x20: stored nothing, now 0x1234");
-        assert_eq!(lines.last().map(String::as_str), Some("and 2 more slots"));
     }
 }

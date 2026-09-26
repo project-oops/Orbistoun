@@ -23,6 +23,61 @@ fn set_profile_for_run(profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `link` - link a title in a worker process and store its plan, entering nothing (D724).
+pub(crate) fn cmd_link(
+    path: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+    relink: bool,
+) -> Result<()> {
+    let mut worker =
+        orbistoun_worker::WorkerHandle::spawn_self().context("spawning a worker process")?;
+    let events = worker
+        .request(&orbistoun_proto::Request::Link {
+            path: std::path::absolute(path)?,
+            symbols_db: symbols_db.map(std::path::Path::to_path_buf),
+            relink,
+        })
+        .context("driving the worker")?;
+    worker.shutdown().context("shutting the worker down")?;
+    for event in events {
+        match event {
+            orbistoun_proto::Event::Linked(summary) => {
+                for line in describe_link(&summary, relink) {
+                    println!("{line}");
+                }
+                return Ok(());
+            }
+            orbistoun_proto::Event::Failed { error } => anyhow::bail!("linking failed: {error}"),
+            _ => {}
+        }
+    }
+    anyhow::bail!("the worker ended without reporting a link")
+}
+
+/// What a link decided, one line per fact, then what differed.
+fn describe_link(summary: &orbistoun_proto::LinkSummary, relink: bool) -> Vec<String> {
+    let stored = if summary.stored.is_empty() {
+        "not stored: no title library"
+    } else {
+        summary.stored.as_str()
+    };
+    let mut lines = vec![
+        format!("modules  {}", summary.modules),
+        format!("writes   {}", summary.writes),
+        format!("digest   {}", summary.digest),
+        format!("stored   {stored}"),
+    ];
+    if !summary.differs.is_empty() {
+        lines.push(if relink {
+            "replaced a stored plan that differed:".to_owned()
+        } else {
+            "differs from the stored plan under the same key - a loader defect:".to_owned()
+        });
+        lines.extend(summary.differs.iter().map(|d| format!("  {d}")));
+    }
+    lines
+}
+
 /// `run` - execute a guest in a worker process.
 ///
 /// The CLI has no in-process path: every shim runs guests through the worker (D033).
@@ -223,4 +278,26 @@ pub(crate) struct Run<'a> {
     /// Every distinct first argument across the run, so the line can say when `arg0` was not the
     /// only one.
     pub(crate) firsts: std::collections::BTreeSet<u64>,
+}
+
+#[cfg(test)]
+mod link_tests {
+    /// A link prints its counts and digest, and a mismatch is called a loader defect.
+    #[test]
+    fn a_link_is_described_in_lines() {
+        let summary = orbistoun_proto::LinkSummary {
+            digest: "0123456789abcdef".to_owned(),
+            modules: 3,
+            writes: 564_184,
+            stored: "mismatch".to_owned(),
+            differs: vec!["libc::malloc at 0x10: stored 0x1, now 0x2".to_owned()],
+        };
+        let lines = super::describe_link(&summary, false);
+        assert_eq!(lines[0], "modules  3");
+        assert_eq!(lines[1], "writes   564184");
+        assert_eq!(lines[2], "digest   0123456789abcdef");
+        assert_eq!(lines[3], "stored   mismatch");
+        assert!(lines[4].contains("loader defect"));
+        assert_eq!(lines[5], "  libc::malloc at 0x10: stored 0x1, now 0x2");
+    }
 }

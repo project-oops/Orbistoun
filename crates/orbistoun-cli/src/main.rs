@@ -34,7 +34,7 @@ use crate::module::{
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
 use crate::questions::cmd_questions;
-use crate::run::{cmd_handoff, cmd_run};
+use crate::run::{cmd_handoff, cmd_link, cmd_run};
 use crate::shaders::cmd_shaders;
 use crate::status::cmd_status;
 use crate::submit::dispatch_submit;
@@ -121,6 +121,17 @@ enum Command {
         /// Modules link at zero and need one; executables carry absolute addresses and want zero.
         #[arg(long, default_value = "0", value_parser = parse_address)]
         base: u64,
+    },
+    /// Link a title and store its plan in the title library, without entering it (D724).
+    ///
+    /// Prints the modules linked, the relocation writes and the plan's digest, and how the plan
+    /// stood against the one already stored.
+    Link {
+        /// Path to the title's executable.
+        path: std::path::PathBuf,
+        /// Replace the stored plan whatever its key, printing what differed.
+        #[arg(long)]
+        relink: bool,
     },
     /// Execute a guest, in a worker process.
     Run {
@@ -831,6 +842,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         Command::Serve { bind, no_key, once } => cmd_serve(service, &bind, no_key, once)?,
         Command::Turn { .. }
         | Command::Run { .. }
+        | Command::Link { .. }
         | Command::Handoff { .. }
         | Command::Names { .. }
         | Command::Learn(..) => dispatch_guest(cli, service)?,
@@ -928,6 +940,9 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             fields,
             limit,
         } => cmd_handoff(path, fields, limit)?,
+        Command::Link { ref path, relink } => {
+            cmd_link(path, cli.symbols_db.as_deref(), relink)?;
+        }
         Command::Names {
             ref path,
             threads,

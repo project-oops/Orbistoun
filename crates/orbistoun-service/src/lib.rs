@@ -7,6 +7,7 @@
 //! assembling the module registry, surveying a container, resolving overrides, and turning results
 //! into reportable shapes. Not here: presentation, argument parsing or transports.
 
+pub mod linkplan;
 pub mod respond;
 pub mod titlemodules;
 pub mod titleplacement;

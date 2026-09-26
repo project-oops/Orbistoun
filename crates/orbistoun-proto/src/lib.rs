@@ -89,6 +89,16 @@ pub enum Request {
         #[serde(default)]
         relink: bool,
     },
+    /// Link a title and store its plan without entering it (D724).
+    Link {
+        /// Path to the guest executable.
+        path: PathBuf,
+        /// Symbol database to name imports with, as for [`Self::Run`].
+        symbols_db: Option<PathBuf>,
+        /// Replace the stored plan whatever its key, as `Run::relink` does.
+        #[serde(default)]
+        relink: bool,
+    },
     /// Carry a shell action into a running session.
     ///
     /// The worker is inside the guest for the whole of a run, so this is answered on the reading
@@ -146,6 +156,8 @@ pub enum Event {
     },
     /// A survey finished.
     SurveyComplete(SurveySummary),
+    /// A title was linked without being entered.
+    Linked(LinkSummary),
     /// The run ended.
     Terminated {
         /// How it ended.
@@ -432,6 +444,21 @@ pub struct ExportRecord {
     /// Code or data. Binding data as a function hands the guest a thunk where it expects a value.
     #[serde(default)]
     pub kind: ImportKind,
+}
+
+/// What linking a title decided, and how that stood against the plan stored for it (D724).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkSummary {
+    /// The plan's digest.
+    pub digest: String,
+    /// Modules linked, the executable included.
+    pub modules: usize,
+    /// Relocation writes across every module.
+    pub writes: usize,
+    /// `new`, `match` or `mismatch` against the stored plan, or empty when none could be kept.
+    pub stored: String,
+    /// What differed from the stored plan, on a mismatch or a relink, in words.
+    pub differs: Vec<String>,
 }
 
 /// What a module needs, determined without executing it.

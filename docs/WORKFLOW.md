@@ -104,6 +104,7 @@ orbistoun-cli questions --json            # for a probe or an agent
 orbistoun-cli imports <module>            # what a module imports, without running it
 orbistoun-cli imports <module> --own      # the modules the title ships that answer its imports
 orbistoun-cli report <module>             # survey a module, persist a report, show the delta
+orbistoun-cli link <module> [--relink]    # link a title, store its plan, print modules, writes, digest
 orbistoun-cli compat list                 # how far each title got, furthest first
 ```
 
