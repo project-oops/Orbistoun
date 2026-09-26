@@ -1226,10 +1226,6 @@ fn note_page(line: &mut Line, address: u64) {
 /// Shared by both platforms so the wording, and the region attribution, cannot drift
 /// between them. `kind` carries its own preposition - "read of" wants the address
 /// straight after it, "illegal instruction at" does not - so nothing is inserted here.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one linear report builder; each block appends one labelled section and splitting them would scatter the fault report across functions for no reader's benefit"
-)]
 #[cfg(windows)]
 fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: Registers) {
     use std::io::Write as _;
@@ -1237,6 +1233,66 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     if REPORTED.swap(true, Ordering::Relaxed) {
         return;
     }
+    let inside = write_fault_line(kind, faulting_address, instruction_pointer, &registers);
+
+    // The faulting page as the host holds it, and what this process did to its protection: a
+    // page left inaccessible or read-only by orbistoun's own guards and a page the guest never
+    // had look alike from the fault alone. Its own line, still allocation-free.
+    if faulting_address != u64::MAX {
+        let mut page = Line::new();
+        note_page(&mut page, faulting_address);
+        // Written directly for the same reason as the line above: still allocation-free.
+        let _ = std::io::stderr().write_all(page.as_bytes());
+        let _ = std::io::stderr().flush();
+    }
+
+    // **Guest memory dumped at the fault, if asked (`ORBISTOUN_DUMP`).** After the no-alloc message
+    // and in the same allocating context as the trace below - it reads its own env var, allocates
+    // for the hex, and reads guest memory the readable-checked way the byte windows above do. The
+    // point is the code around a fault in a *runtime mapping*, which no static disassembly of the
+    // module file reaches (worklog 724).
+    dump_at_fault(&registers);
+    caller_stacks_at_fault();
+
+    // **The host stack, but only when the fault is ours.**
+    //
+    // The lines above are allocation-free and are out of the door before this runs, because
+    // capturing a backtrace allocates, takes locks, and reads the symbol file - none of which
+    // a fault handler should do before it has said the thing that matters.
+    //
+    // Only when the fault is in orbistoun's own code. A guest that faults on its own pointer
+    // has a host stack of *this emulator's dispatch machinery*, which is noise; a guest that
+    // faulted this process has one that is the whole answer, and naming the nearest
+    // implementation stops short of it (D381).
+    if inside.is_some() {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let mut said = String::from("  the host stack that got there:");
+        for one in backtrace.to_string().lines().take(40) {
+            said.push_str("\n  ");
+            said.push_str(one);
+        }
+        tracing::warn!("{said}");
+    }
+
+    // What the guest asked the kernel for directly, which a fault is very often the end of.
+    // Same trade as the trace below: this allocates, and it runs after everything that must
+    // not.
+    what_the_guest_asked_for();
+
+    persist_fault_trace(kind, faulting_address, instruction_pointer, registers);
+}
+
+/// Writes the allocation-free first line of a fault report and returns the import it was inside.
+#[cfg(windows)]
+#[inline]
+fn write_fault_line(
+    kind: &str,
+    faulting_address: u64,
+    instruction_pointer: u64,
+    registers: &Registers,
+) -> Option<&'static str> {
+    use std::io::Write as _;
+
     let mut line = Line::new();
     line.text("orbistoun: guest fault: ").text(kind).text(" ");
     line.address(faulting_address);
@@ -1345,51 +1401,17 @@ fn emit(kind: &str, faulting_address: u64, instruction_pointer: u64, registers: 
     // handler, which must be out of the door before anything that allocates or locks runs.
     let _ = std::io::stderr().write_all(line.as_bytes());
     let _ = std::io::stderr().flush();
+    inside
+}
 
-    // The faulting page as the host holds it, and what this process did to its protection: a
-    // page left inaccessible or read-only by orbistoun's own guards and a page the guest never
-    // had look alike from the fault alone. Its own line, still allocation-free.
-    if faulting_address != u64::MAX {
-        let mut page = Line::new();
-        note_page(&mut page, faulting_address);
-        // Written directly for the same reason as the line above: still allocation-free.
-        let _ = std::io::stderr().write_all(page.as_bytes());
-        let _ = std::io::stderr().flush();
-    }
-
-    // **Guest memory dumped at the fault, if asked (`ORBISTOUN_DUMP`).** After the no-alloc message
-    // and in the same allocating context as the trace below - it reads its own env var, allocates
-    // for the hex, and reads guest memory the readable-checked way the byte windows above do. The
-    // point is the code around a fault in a *runtime mapping*, which no static disassembly of the
-    // module file reaches (worklog 724).
-    dump_at_fault(&registers);
-    caller_stacks_at_fault();
-
-    // **The host stack, but only when the fault is ours.**
-    //
-    // The lines above are allocation-free and are out of the door before this runs, because
-    // capturing a backtrace allocates, takes locks, and reads the symbol file - none of which
-    // a fault handler should do before it has said the thing that matters.
-    //
-    // Only when the fault is in orbistoun's own code. A guest that faults on its own pointer
-    // has a host stack of *this emulator's dispatch machinery*, which is noise; a guest that
-    // faulted this process has one that is the whole answer, and naming the nearest
-    // implementation stops short of it (D381).
-    if inside.is_some() {
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let mut said = String::from("  the host stack that got there:");
-        for one in backtrace.to_string().lines().take(40) {
-            said.push_str("\n  ");
-            said.push_str(one);
-        }
-        tracing::warn!("{said}");
-    }
-
-    // What the guest asked the kernel for directly, which a fault is very often the end of.
-    // Same trade as the trace below: this allocates, and it runs after everything that must
-    // not.
-    what_the_guest_asked_for();
-
+/// Collects the call trace with the fault site attached and persists it.
+#[cfg(windows)]
+fn persist_fault_trace(
+    kind: &str,
+    faulting_address: u64,
+    instruction_pointer: u64,
+    registers: Registers,
+) {
     // Then the call trace, which is the part worth having. A guest that faults has
     // still said what it wanted, and losing that means the run produced nothing.
     //
@@ -1811,7 +1833,7 @@ pub(crate) fn syscalls_asked_for() {
 mod imp {
     use super::emit;
     use windows_sys::Win32::System::Diagnostics::Debug::{
-        AddVectoredExceptionHandler, EXCEPTION_POINTERS,
+        AddVectoredExceptionHandler, CONTEXT, EXCEPTION_POINTERS,
     };
 
     /// Let the exception carry on to whatever would otherwise have handled it.
@@ -1843,10 +1865,6 @@ mod imp {
     /// A fetch from a page with no execute permission.
     const ACCESS_WAS_EXECUTE: usize = 8;
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one linear exception dispatcher: watchpoint, TLS backstop, interrupt service, then the fault report - each a labelled block, and splitting the register copies into helpers would scatter one context read/write across functions"
-    )]
     unsafe extern "system" fn handler(info: *mut EXCEPTION_POINTERS) -> i32 {
         // Read one field per block, as the lints require. Verbose, but each read is a
         // separate dereference of a pointer the operating system owns, and stating that
@@ -1870,54 +1888,14 @@ mod imp {
         // per-field version was doing sixteen times.
         let ctx = unsafe { *context };
 
-        let registers = super::Registers {
-            rax: ctx.Rax,
-            rbx: ctx.Rbx,
-            rcx: ctx.Rcx,
-            rdx: ctx.Rdx,
-            rsi: ctx.Rsi,
-            rdi: ctx.Rdi,
-            rbp: ctx.Rbp,
-            rsp: ctx.Rsp,
-            r8: ctx.R8,
-            r9: ctx.R9,
-            r10: ctx.R10,
-            r11: ctx.R11,
-            r12: ctx.R12,
-            r13: ctx.R13,
-            r14: ctx.R14,
-            r15: ctx.R15,
-        };
+        let registers = registers_of(&ctx);
 
         // Taken before anything else, because a watched access is not a failure and must not
         // be reported as one. The debug-status register says which watchpoints fired; it is
         // cleared before resuming so the next trap is not read as this one repeating.
         if code == SINGLE_STEP {
-            match crate::watchpoint::note(ctx.Dr6, rip, &registers) {
-                crate::watchpoint::Trap::NotOurs => return CONTINUE_SEARCH,
-                crate::watchpoint::Trap::Data => {
-                    // SAFETY: the context record is the one the operating system passed in,
-                    // live for this call, and this writes a single field it owns before resuming.
-                    unsafe {
-                        (*context).Dr6 = 0;
-                    }
-                    return CONTINUE_EXECUTION;
-                }
-                crate::watchpoint::Trap::Execute { disarm } => {
-                    // An execute breakpoint is one-shot: clearing its enable bit lets the
-                    // instruction it sits on run now instead of trapping again, without any
-                    // resume-flag or single-step dance.
-                    // SAFETY: the OS's context, live for this call; a field it owns.
-                    unsafe {
-                        (*context).Dr6 = 0;
-                    }
-                    // SAFETY: as above; clears the enable bits of the fired execute slots.
-                    unsafe {
-                        (*context).Dr7 &= !disarm;
-                    }
-                    return CONTINUE_EXECUTION;
-                }
-            }
+            // SAFETY: `context` is the operating system's live context record for this call.
+            return unsafe { resume_watched(context, ctx.Dr6, rip, &registers) };
         }
 
         // A guest thread-local access whose `fs` base the host reset out from under it (D433): put
@@ -1965,60 +1943,145 @@ mod imp {
         // kernel's own interrupt gate would. `orbistoun-kernel`'s table is empty until obSCEne
         // measures a vector's semantics, so today every `int` still falls through here - this is the
         // mechanism, in place and ready for the one-line registration that follows the measurement.
-        if matches!(code, ACCESS_VIOLATION | ILLEGAL_INSTRUCTION) {
-            let (opcode, len) = super::instruction_bytes(rip);
-            let frame = orbistoun_kernel::interrupt::InterruptFrame {
-                rax: ctx.Rax,
-                rbx: ctx.Rbx,
-                rcx: ctx.Rcx,
-                rdx: ctx.Rdx,
-                rsi: ctx.Rsi,
-                rdi: ctx.Rdi,
-                rbp: ctx.Rbp,
-                rsp: ctx.Rsp,
-                r8: ctx.R8,
-                r9: ctx.R9,
-                r10: ctx.R10,
-                r11: ctx.R11,
-                r12: ctx.R12,
-                r13: ctx.R13,
-                r14: ctx.R14,
-                r15: ctx.R15,
-                rip,
-            };
-            if let Some(resumed) = super::serviced_interrupt(&opcode[..len], frame) {
-                // The register fields are updated on a **copy** of the context - which is safe,
-                // ordinary struct assignment - and the whole record is written back in one store,
-                // so the guest resumes with the handler's answers. Building the copy here rather
-                // than seventeen writes through the raw pointer keeps the single unsafe operation
-                // that the discipline wants (principle 4).
-                let mut next = ctx;
-                next.Rax = resumed.rax;
-                next.Rbx = resumed.rbx;
-                next.Rcx = resumed.rcx;
-                next.Rdx = resumed.rdx;
-                next.Rsi = resumed.rsi;
-                next.Rdi = resumed.rdi;
-                next.Rbp = resumed.rbp;
-                next.Rsp = resumed.rsp;
-                next.R8 = resumed.r8;
-                next.R9 = resumed.r9;
-                next.R10 = resumed.r10;
-                next.R11 = resumed.r11;
-                next.R12 = resumed.r12;
-                next.R13 = resumed.r13;
-                next.R14 = resumed.r14;
-                next.R15 = resumed.r15;
-                next.Rip = resumed.rip;
-                // SAFETY: `context` is the operating system's live context record for this call;
-                // writing the whole record it owns is what resuming a serviced interrupt is.
-                unsafe {
-                    *context = next;
-                }
-                return CONTINUE_EXECUTION;
+        if matches!(code, ACCESS_VIOLATION | ILLEGAL_INSTRUCTION)
+            && let Some(next) = serviced_context(&ctx, rip)
+        {
+            // SAFETY: `context` is the operating system's live context record for this call;
+            // writing the whole record it owns is what resuming a serviced interrupt is.
+            unsafe {
+                *context = next;
             }
+            return CONTINUE_EXECUTION;
         }
 
+        let Some((kind, at)) = fault_kind(code, count, &parameters, rip) else {
+            return CONTINUE_SEARCH;
+        };
+
+        emit(kind, at, rip, registers);
+        CONTINUE_SEARCH
+    }
+
+    /// Copies the general-purpose registers out of a host context record.
+    #[inline]
+    fn registers_of(ctx: &CONTEXT) -> super::Registers {
+        super::Registers {
+            rax: ctx.Rax,
+            rbx: ctx.Rbx,
+            rcx: ctx.Rcx,
+            rdx: ctx.Rdx,
+            rsi: ctx.Rsi,
+            rdi: ctx.Rdi,
+            rbp: ctx.Rbp,
+            rsp: ctx.Rsp,
+            r8: ctx.R8,
+            r9: ctx.R9,
+            r10: ctx.R10,
+            r11: ctx.R11,
+            r12: ctx.R12,
+            r13: ctx.R13,
+            r14: ctx.R14,
+            r15: ctx.R15,
+        }
+    }
+
+    /// Answers a debug exception: resumes a watched access, or passes on one that is not ours.
+    ///
+    /// # Safety
+    ///
+    /// `context` is the operating system's live context record for the current exception.
+    #[inline]
+    unsafe fn resume_watched(
+        context: *mut CONTEXT,
+        dr6: u64,
+        rip: u64,
+        registers: &super::Registers,
+    ) -> i32 {
+        match crate::watchpoint::note(dr6, rip, registers) {
+            crate::watchpoint::Trap::NotOurs => CONTINUE_SEARCH,
+            crate::watchpoint::Trap::Data => {
+                // SAFETY: the context record is the one the operating system passed in,
+                // live for this call, and this writes a single field it owns before resuming.
+                unsafe {
+                    (*context).Dr6 = 0;
+                }
+                CONTINUE_EXECUTION
+            }
+            crate::watchpoint::Trap::Execute { disarm } => {
+                // An execute breakpoint is one-shot: clearing its enable bit lets the
+                // instruction it sits on run now instead of trapping again, without any
+                // resume-flag or single-step dance.
+                // SAFETY: the OS's context, live for this call; a field it owns.
+                unsafe {
+                    (*context).Dr6 = 0;
+                }
+                // SAFETY: as above; clears the enable bits of the fired execute slots.
+                unsafe {
+                    (*context).Dr7 &= !disarm;
+                }
+                CONTINUE_EXECUTION
+            }
+        }
+    }
+
+    /// Runs a registered software-interrupt handler and returns the context to resume with.
+    #[inline]
+    fn serviced_context(ctx: &CONTEXT, rip: u64) -> Option<CONTEXT> {
+        let (opcode, len) = super::instruction_bytes(rip);
+        let frame = orbistoun_kernel::interrupt::InterruptFrame {
+            rax: ctx.Rax,
+            rbx: ctx.Rbx,
+            rcx: ctx.Rcx,
+            rdx: ctx.Rdx,
+            rsi: ctx.Rsi,
+            rdi: ctx.Rdi,
+            rbp: ctx.Rbp,
+            rsp: ctx.Rsp,
+            r8: ctx.R8,
+            r9: ctx.R9,
+            r10: ctx.R10,
+            r11: ctx.R11,
+            r12: ctx.R12,
+            r13: ctx.R13,
+            r14: ctx.R14,
+            r15: ctx.R15,
+            rip,
+        };
+        let resumed = super::serviced_interrupt(&opcode[..len], frame)?;
+        // The register fields are updated on a **copy** of the context - which is safe,
+        // ordinary struct assignment - and the whole record is written back in one store,
+        // so the guest resumes with the handler's answers. Building the copy here rather
+        // than seventeen writes through the raw pointer keeps the single unsafe operation
+        // that the discipline wants (principle 4).
+        let mut next = *ctx;
+        next.Rax = resumed.rax;
+        next.Rbx = resumed.rbx;
+        next.Rcx = resumed.rcx;
+        next.Rdx = resumed.rdx;
+        next.Rsi = resumed.rsi;
+        next.Rdi = resumed.rdi;
+        next.Rbp = resumed.rbp;
+        next.Rsp = resumed.rsp;
+        next.R8 = resumed.r8;
+        next.R9 = resumed.r9;
+        next.R10 = resumed.r10;
+        next.R11 = resumed.r11;
+        next.R12 = resumed.r12;
+        next.R13 = resumed.r13;
+        next.R14 = resumed.r14;
+        next.R15 = resumed.r15;
+        next.Rip = resumed.rip;
+        Some(next)
+    }
+
+    /// Names the fault and the address it concerns, or `None` for an exception that is not ours.
+    #[inline]
+    fn fault_kind(
+        code: i32,
+        count: u32,
+        parameters: &[usize; 15],
+        rip: u64,
+    ) -> Option<(&'static str, u64)> {
         // An access violation reports what was attempted and where; the others carry no
         // parameters, so the faulting address is the instruction itself.
         // Taken from the two lists on `FaultSite` rather than written out again here.
@@ -2045,11 +2108,9 @@ mod imp {
             // Anything else is not ours to explain. Debuggers and language runtimes
             // raise exceptions routinely, and reporting those as guest faults would be
             // noise at best and misleading at worst.
-            _ => return CONTINUE_SEARCH,
+            _ => return None,
         };
-
-        emit(kind, at, rip, registers);
-        CONTINUE_SEARCH
+        Some((kind, at))
     }
 
     pub(super) fn install() -> bool {

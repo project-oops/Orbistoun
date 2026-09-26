@@ -1642,79 +1642,12 @@ unsafe extern "sysv64" fn on_guest_call(
 
     record_alignment(sequence, index, entry_rsp);
 
-    if let Some(counts) = COUNTS.get() {
-        if let Some(counter) = counts.get(index as usize) {
-            // `fetch_add` hands back the count *before* this call, so the first
-            // `SHAPE_SAMPLE_LIMIT` calls of each import contribute their argument shapes and the
-            // millions after them pay only the increment - the shape is settled long before the
-            // limit (principle 9).
-            let seen = counter.fetch_add(1, Ordering::Relaxed);
-            if seen < SHAPE_SAMPLE_LIMIT {
-                if let Some(shapes) = SHAPES.get() {
-                    let base = index as usize * SAVED_ARGUMENT_REGISTERS;
-                    for register in 0..SAVED_ARGUMENT_REGISTERS {
-                        // SAFETY: the caller guarantees `SAVED_ARGUMENT_REGISTERS` readable values
-                        // in register order, and `register` is bounded by that count - so the
-                        // offset stays inside the array the caller provided.
-                        let at = unsafe { args.add(register) };
-                        // SAFETY: `at` is inside the caller's array, per the block above, and
-                        // these are plain integers - no alignment or validity demand beyond
-                        // being readable.
-                        let value = unsafe { at.read() };
-                        if let Some(slot) = shapes.get(base + register) {
-                            slot.fetch_or(classify_arg(value), Ordering::Relaxed);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // SAFETY: `args` is this function's own parameter, forwarded unchanged, so it still points
+    // at the `SAVED_ARGUMENT_REGISTERS` values the trampoline spilled.
+    unsafe { sample_argument_shapes(index, args) };
 
-    if let Ok(position) = usize::try_from(sequence) {
-        // The opening, kept whole and never overwritten - a separate, tiny record so that making
-        // the main ring circular did not cost the other question (D571).
-        if let Some(opening) = RING_OPENING.get(position) {
-            // The call site first, so a reader that sees a populated index never finds a stale
-            // address beside it - the same ordering the main ring uses three lines below.
-            if let Some(from) = RING_OPENING_FROM.get(position) {
-                from.store(call_site(entry_rsp), Ordering::Relaxed);
-            }
-            opening.store(index + 1, Ordering::Relaxed);
-        }
-        {
-            let slot = position % MAX_RECORDED_CALLS;
-            for register in 0..SAVED_ARGUMENT_REGISTERS {
-                // SAFETY: the caller guarantees `SAVED_ARGUMENT_REGISTERS` readable values in
-                // register order, and `register` is bounded by that count - so the offset stays
-                // inside the array the caller provided.
-                let at = unsafe { args.add(register) };
-                // SAFETY: `at` is inside the caller's array, per the block above, and these are
-                // plain integers - no alignment or validity demand beyond being readable.
-                let value = unsafe { at.read() };
-                RING_ARGS[slot * SAVED_ARGUMENT_REGISTERS + register]
-                    .store(value, Ordering::Relaxed);
-            }
-            RING_FROM[slot].store(call_site(entry_rsp), Ordering::Relaxed);
-            RING_THREAD[slot].store(host_thread(), Ordering::Relaxed);
-            // **The previous occupant's answer is retired before this call claims the slot.**
-            // Nothing cleared it, so a call still running in a recycled slot reported the answer
-            // of whichever call held it last - and `recorded_return`'s whole contract is that a
-            // call which has not returned reads as unknown.
-            //
-            // Invisible while every call returned promptly, because the window was a few
-            // instructions wide. `sceKernelWaitEqueue` learning to block held one slot open for
-            // the length of a wait, and the trace tail started reporting a mapping address as
-            // the answer to an event-queue wait (D613).
-            //
-            // Ordered before the sequence with `Release`, so a reader that sees this call's
-            // number can never still see the last call's flag.
-            RING_RETURNED[slot].store(0, Ordering::Release);
-            RING_SEQ[slot].store(sequence.wrapping_add(1), Ordering::Relaxed);
-            // Written after the argument and the sequence, so a reader never sees a populated
-            // index pointing at a stale argument or at the wrong call's number.
-            RING[slot].store(index.wrapping_add(1), Ordering::Relaxed);
-        }
-    }
+    // SAFETY: as above; `args` is forwarded unchanged.
+    unsafe { record_call(sequence, index, args, entry_rsp) };
 
     // Only for calls nothing implements: an implemented function's arguments are not a
     // mystery, and skipping them is what keeps this off the hot path entirely - the
@@ -1761,6 +1694,104 @@ unsafe extern "sysv64" fn on_guest_call(
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
     INSIDE.with(|inside| inside.set(outer));
 
+    record_return(sequence, answer);
+
+    answer
+}
+
+/// Counts one call of `index` and, for its first calls, folds its argument shapes in.
+///
+/// # Safety
+///
+/// As [`on_guest_call`]: `args` points to [`SAVED_ARGUMENT_REGISTERS`] readable `u64` values.
+#[inline]
+unsafe fn sample_argument_shapes(index: u64, args: *const u64) {
+    if let Some(counts) = COUNTS.get() {
+        if let Some(counter) = counts.get(index as usize) {
+            // `fetch_add` hands back the count *before* this call, so the first
+            // `SHAPE_SAMPLE_LIMIT` calls of each import contribute their argument shapes and the
+            // millions after them pay only the increment - the shape is settled long before the
+            // limit (principle 9).
+            let seen = counter.fetch_add(1, Ordering::Relaxed);
+            if seen < SHAPE_SAMPLE_LIMIT {
+                if let Some(shapes) = SHAPES.get() {
+                    let base = index as usize * SAVED_ARGUMENT_REGISTERS;
+                    for register in 0..SAVED_ARGUMENT_REGISTERS {
+                        // SAFETY: the caller guarantees `SAVED_ARGUMENT_REGISTERS` readable values
+                        // in register order, and `register` is bounded by that count - so the
+                        // offset stays inside the array the caller provided.
+                        let at = unsafe { args.add(register) };
+                        // SAFETY: `at` is inside the caller's array, per the block above, and
+                        // these are plain integers - no alignment or validity demand beyond
+                        // being readable.
+                        let value = unsafe { at.read() };
+                        if let Some(slot) = shapes.get(base + register) {
+                            slot.fetch_or(classify_arg(value), Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Writes one call into the opening record and the circular ring.
+///
+/// # Safety
+///
+/// As [`on_guest_call`]: `args` points to [`SAVED_ARGUMENT_REGISTERS`] readable `u64` values.
+#[inline]
+unsafe fn record_call(sequence: u64, index: u64, args: *const u64, entry_rsp: u64) {
+    if let Ok(position) = usize::try_from(sequence) {
+        // The opening, kept whole and never overwritten - a separate, tiny record so that making
+        // the main ring circular did not cost the other question (D571).
+        if let Some(opening) = RING_OPENING.get(position) {
+            // The call site first, so a reader that sees a populated index never finds a stale
+            // address beside it - the same ordering the main ring uses three lines below.
+            if let Some(from) = RING_OPENING_FROM.get(position) {
+                from.store(call_site(entry_rsp), Ordering::Relaxed);
+            }
+            opening.store(index + 1, Ordering::Relaxed);
+        }
+        {
+            let slot = position % MAX_RECORDED_CALLS;
+            for register in 0..SAVED_ARGUMENT_REGISTERS {
+                // SAFETY: the caller guarantees `SAVED_ARGUMENT_REGISTERS` readable values in
+                // register order, and `register` is bounded by that count - so the offset stays
+                // inside the array the caller provided.
+                let at = unsafe { args.add(register) };
+                // SAFETY: `at` is inside the caller's array, per the block above, and these are
+                // plain integers - no alignment or validity demand beyond being readable.
+                let value = unsafe { at.read() };
+                RING_ARGS[slot * SAVED_ARGUMENT_REGISTERS + register]
+                    .store(value, Ordering::Relaxed);
+            }
+            RING_FROM[slot].store(call_site(entry_rsp), Ordering::Relaxed);
+            RING_THREAD[slot].store(host_thread(), Ordering::Relaxed);
+            // **The previous occupant's answer is retired before this call claims the slot.**
+            // Nothing cleared it, so a call still running in a recycled slot reported the answer
+            // of whichever call held it last - and `recorded_return`'s whole contract is that a
+            // call which has not returned reads as unknown.
+            //
+            // Invisible while every call returned promptly, because the window was a few
+            // instructions wide. `sceKernelWaitEqueue` learning to block held one slot open for
+            // the length of a wait, and the trace tail started reporting a mapping address as
+            // the answer to an event-queue wait (D613).
+            //
+            // Ordered before the sequence with `Release`, so a reader that sees this call's
+            // number can never still see the last call's flag.
+            RING_RETURNED[slot].store(0, Ordering::Release);
+            RING_SEQ[slot].store(sequence.wrapping_add(1), Ordering::Relaxed);
+            // Written after the argument and the sequence, so a reader never sees a populated
+            // index pointing at a stale argument or at the wrong call's number.
+            RING[slot].store(index.wrapping_add(1), Ordering::Relaxed);
+        }
+    }
+}
+
+/// Records a call's answer in its ring slot, if the slot is still that call's.
+#[inline]
+fn record_return(sequence: u64, answer: u64) {
     // The other half of the record, and the half nothing captured until now: what the call
     // answered. Written *after* the handler ran, so a slot read before then reads as
     // *unknown* rather than as this slot's initial zero - which `OK` also is (D459).
@@ -1777,8 +1808,6 @@ unsafe extern "sysv64" fn on_guest_call(
             RING_RETURNED[slot].store(1, Ordering::Release);
         }
     }
-
-    answer
 }
 
 /// Dispatches one already-recorded call to whatever answers it and returns what goes back to

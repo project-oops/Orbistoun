@@ -381,46 +381,51 @@ fn faulted(trace: &CallTrace) -> Option<Finding> {
         // it does not - but stated as a lead with both readings, never a verdict, because the
         // immediately-preceding call answering the dereferenced value is a sound observation and
         // not a sound accusation (an implemented function answering zero is usually correct).
-        action: Some(if let Some(c) = copy {
-            // A copy that faulted reading its source is a faithful primitive, not the gap. Route to
-            // whatever produced the source pointer and say so, so the reader does not "fix" memcpy -
-            // the confident-wrong turn a copy line invites (principle 3; a wall is orbistoun's).
-            format!(
-                concat!(
-                    "{} is a faithful byte copy - it moved what it was given. The gap is whatever ",
-                    "produced its source pointer {:#x}; read the calls on this thread before it for ",
-                    "the lookup or allocation that should have answered a valid pointer there, not ",
-                    "the copy itself"
-                ),
-                c.label, c.args[1],
-            )
-        } else {
-            source.map_or_else(
-                || {
-                    concat!(
-                        "read the calls just before it and the arguments they were given - ",
-                        "the value that became this address was answered by one of them"
-                    )
-                    .to_owned()
-                },
-                |c| {
-                    format!(
-                        concat!(
-                            "the guest used {}'s answer as a pointer without checking it. If {} ",
-                            "should answer a pointer here, it is the gap - implement or fix it; if ",
-                            "its answer is correct, the guest reached this path from an earlier ",
-                            "wrong value, so read the calls further back"
-                        ),
-                        c.label, c.label
-                    )
-                },
-            )
-        }),
+        action: Some(fault_action(copy, source)),
         // Weighted like `gave_up`, because they are the same class of statement: how the
         // run ended. Ranked below them it sat under findings about functions called twice,
         // which is the opposite of what a reader opening a failed run wants first.
         weight: trace.total_calls,
     })
+}
+
+/// What to do about a memory fault: follow a copy's source, or the call that supplied the pointer.
+fn fault_action(copy: Option<&TracedCall>, source: Option<&TracedCall>) -> String {
+    if let Some(c) = copy {
+        // A copy that faulted reading its source is a faithful primitive, not the gap. Route to
+        // whatever produced the source pointer and say so, so the reader does not "fix" memcpy -
+        // the confident-wrong turn a copy line invites (principle 3; a wall is orbistoun's).
+        format!(
+            concat!(
+                "{} is a faithful byte copy - it moved what it was given. The gap is whatever ",
+                "produced its source pointer {:#x}; read the calls on this thread before it for ",
+                "the lookup or allocation that should have answered a valid pointer there, not ",
+                "the copy itself"
+            ),
+            c.label, c.args[1],
+        )
+    } else {
+        source.map_or_else(
+            || {
+                concat!(
+                    "read the calls just before it and the arguments they were given - ",
+                    "the value that became this address was answered by one of them"
+                )
+                .to_owned()
+            },
+            |c| {
+                format!(
+                    concat!(
+                        "the guest used {}'s answer as a pointer without checking it. If {} ",
+                        "should answer a pointer here, it is the gap - implement or fix it; if ",
+                        "its answer is correct, the guest reached this path from an earlier ",
+                        "wrong value, so read the calls further back"
+                    ),
+                    c.label, c.label
+                )
+            },
+        )
+    }
 }
 
 /// The finding for a fault whose instruction is a trap - a kernel entry, or a guest-raised abort.

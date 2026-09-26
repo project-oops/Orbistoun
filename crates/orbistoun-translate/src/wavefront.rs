@@ -1050,45 +1050,35 @@ impl Wavefront<'_> {
     }
 }
 
-impl<'a> Wavefront<'a> {
-    /// Prepares the module and sets every lane active.
-    pub fn new(encodings: &'a EncodingTable, width: Width) -> Self {
-        Self::for_stage(
-            encodings,
-            width,
-            Stage::Compute,
-            MeshPrimitive::default(),
-            &[],
-            &[],
-            (Window::default(), UserData::default()),
-        )
-    }
+/// The identifiers a module reserves first, in the order it reserves them.
+#[derive(Debug, Clone, Copy)]
+struct Reserved {
+    void: Id,
+    fn_type: Id,
+    u32_type: Id,
+    f32_type: Id,
+    bool_type: Id,
+    main: Id,
+    entry_block: Id,
+    wave_count: Id,
+    register_count: Id,
+    observed_count: Id,
+    memory_count: Id,
+    counter_ptr: Id,
+    counter: Id,
+    counter_zero: Id,
+    scc: Id,
+    m0: Id,
+    local_count: Id,
+    local_array: Id,
+    local_array_ptr: Id,
+    local_ptr: Id,
+    local: Id,
+}
 
-    /// Prepares the module for a named stage.
-    // Six helpers are already out of this - the header, the local share, the counts, the
-    // colour output, the input reservation and the buffers. What is left is twenty-two
-    // identifier reservations, each needed by the line after it: extracting those means a
-    // helper returning a twenty-two field struct, which moves the length rather than
-    // removing it and hides the order, which is the one thing a builder must show.
-    #[allow(clippy::too_many_lines)]
-    pub fn for_stage(
-        encodings: &'a EncodingTable,
-        width: Width,
-        stage: Stage,
-        primitive: MeshPrimitive,
-        attributes: &[(u32, Interpolation)],
-        parameters: &[u32],
-        (window, user_data): (Window, UserData),
-    ) -> Self {
-        // A mesh module declares 1.4, which its extension requires; everything else stays at
-        // 1.3, where an entry point lists only its inputs and outputs (worklog 557).
-        let version = if stage == Stage::Mesh {
-            orbistoun_spirv::VERSION_1_4
-        } else {
-            orbistoun_spirv::VERSION_1_3
-        };
-        let mut b = Builder::new().with_version(version);
-
+impl Reserved {
+    /// Reserves every identifier, in field order.
+    fn new(b: &mut Builder) -> Self {
         let void = b.id();
         let fn_type = b.id();
         let u32_type = b.id();
@@ -1111,6 +1101,179 @@ impl<'a> Wavefront<'a> {
         let local_array_ptr = b.id();
         let local_ptr = b.id();
         let local = b.id();
+        Self {
+            void,
+            fn_type,
+            u32_type,
+            f32_type,
+            bool_type,
+            main,
+            entry_block,
+            wave_count,
+            register_count,
+            observed_count,
+            memory_count,
+            counter_ptr,
+            counter,
+            counter_zero,
+            scc,
+            m0,
+            local_count,
+            local_array,
+            local_array_ptr,
+            local_ptr,
+            local,
+        }
+    }
+}
+
+/// Declares the private words, the local share, the counts, the register files and the two
+/// storage buffers.
+fn declare_state(
+    b: &mut Builder,
+    ids: &Reserved,
+    stage: Stage,
+    width: Width,
+    window: Window,
+) -> (Files, buffer::StorageBuffer, buffer::StorageBuffer) {
+    let u32_type = ids.u32_type;
+    let (counter_ptr, counter_zero) = (ids.counter_ptr, ids.counter_zero);
+    // The program counter, the scalar condition code and m0: one private word each,
+    // sharing a pointer type and a zero initialiser. Zero so the shader starts at its
+    // first block rather than at whatever the driver left in the variable.
+    b.declare(op::TYPE_POINTER, &[counter_ptr.0, PRIVATE, u32_type.0]);
+    b.declare(op::CONSTANT, &[u32_type.0, counter_zero.0, 0]);
+    for word in [ids.counter, ids.scc, ids.m0] {
+        b.declare(
+            op::VARIABLE,
+            &[counter_ptr.0, word.0, PRIVATE, counter_zero.0],
+        );
+    }
+
+    declare_local_share(
+        b,
+        u32_type,
+        ids.local_count,
+        ids.local_array,
+        ids.local_array_ptr,
+        ids.local_ptr,
+        ids.local,
+    );
+    declare_counts(
+        b,
+        u32_type,
+        [
+            ids.wave_count,
+            ids.register_count,
+            ids.observed_count,
+            ids.memory_count,
+        ],
+        simulated_lanes(stage, width),
+        window.words(),
+    );
+
+    let files = declare_files(b, u32_type, ids.register_count, ids.wave_count);
+    let (observation, guest_memory) =
+        declare_buffers(b, u32_type, ids.observed_count, ids.memory_count);
+    (files, observation, guest_memory)
+}
+
+/// The variables a 1.4 mesh module's entry point names beyond its inputs and outputs.
+fn mesh_interface(
+    ids: &Reserved,
+    files: &Files,
+    (observation, guest_memory): (&buffer::StorageBuffer, &buffer::StorageBuffer),
+    user_data_source: Option<UserDataSource>,
+) -> Vec<u32> {
+    let mut interface = vec![
+        ids.counter.0,
+        ids.scc.0,
+        ids.m0.0,
+        ids.local.0,
+        files.vectors.0,
+        files.scalars.0,
+        observation.buffer.0,
+        guest_memory.buffer.0,
+    ];
+    if let Some(source) = user_data_source {
+        interface.extend(source.interface());
+    }
+    interface
+}
+
+/// Declares the block a draw's user data arrives in, when the stage reads any.
+fn declare_user_data_source(
+    b: &mut Builder,
+    stage: Stage,
+    u32_type: Id,
+    user_data: UserData,
+) -> Option<UserDataSource> {
+    // The block a draw's user data arrives in, declared only when this stage reads some - so
+    // every module that reads none is word for word what it was (worklog 826).
+    //
+    // **A mesh module reads its words per draw** (D718): one host dispatch carries a run of
+    // guest draws, one workgroup each, so the words are in the draw-data buffer at the
+    // workgroup's stride rather than in the push-constant block every workgroup shares.
+    (user_data.count > 0).then(|| {
+        if stage == Stage::Mesh {
+            let words = b.id();
+            b.declare(
+                op::CONSTANT,
+                &[
+                    u32_type.0,
+                    words.0,
+                    orbistoun_spirv::DRAW_DATA_MOST_DRAWS * orbistoun_spirv::DRAW_DATA_STRIDE_WORDS,
+                ],
+            );
+            let buffer = buffer::declare(b, u32_type, words, orbistoun_spirv::DRAW_DATA_BINDING);
+            UserDataSource::Draws {
+                buffer,
+                workgroup: declare_workgroup_id(b, u32_type),
+            }
+        } else {
+            let words = b.id();
+            b.declare(op::CONSTANT, &[u32_type.0, words.0, USER_DATA_BLOCK_WORDS]);
+            UserDataSource::Push(buffer::declare_push_constants(b, u32_type, words))
+        }
+    })
+}
+
+impl<'a> Wavefront<'a> {
+    /// Prepares the module and sets every lane active.
+    pub fn new(encodings: &'a EncodingTable, width: Width) -> Self {
+        Self::for_stage(
+            encodings,
+            width,
+            Stage::Compute,
+            MeshPrimitive::default(),
+            &[],
+            &[],
+            (Window::default(), UserData::default()),
+        )
+    }
+
+    /// Prepares the module for a named stage.
+    pub fn for_stage(
+        encodings: &'a EncodingTable,
+        width: Width,
+        stage: Stage,
+        primitive: MeshPrimitive,
+        attributes: &[(u32, Interpolation)],
+        parameters: &[u32],
+        (window, user_data): (Window, UserData),
+    ) -> Self {
+        // A mesh module declares 1.4, which its extension requires; everything else stays at
+        // 1.3, where an entry point lists only its inputs and outputs (worklog 557).
+        let version = if stage == Stage::Mesh {
+            orbistoun_spirv::VERSION_1_4
+        } else {
+            orbistoun_spirv::VERSION_1_3
+        };
+        let mut b = Builder::new().with_version(version);
+
+        let ids = Reserved::new(&mut b);
+        let (void, fn_type, main) = (ids.void, ids.fn_type, ids.main);
+        let (u32_type, f32_type, bool_type) = (ids.u32_type, ids.f32_type, ids.bool_type);
 
         // The colour output, for a fragment module. Reserved before the entry point because
         // an output variable must be named in the entry point's interface, and a module that
@@ -1146,68 +1309,8 @@ impl<'a> Wavefront<'a> {
             primitive,
             &mesh_reserved,
         );
-        // The program counter, the scalar condition code and m0: one private word each,
-        // sharing a pointer type and a zero initialiser. Zero so the shader starts at its
-        // first block rather than at whatever the driver left in the variable.
-        b.declare(op::TYPE_POINTER, &[counter_ptr.0, PRIVATE, u32_type.0]);
-        b.declare(op::CONSTANT, &[u32_type.0, counter_zero.0, 0]);
-        for word in [counter, scc, m0] {
-            b.declare(
-                op::VARIABLE,
-                &[counter_ptr.0, word.0, PRIVATE, counter_zero.0],
-            );
-        }
-
-        declare_local_share(
-            &mut b,
-            u32_type,
-            local_count,
-            local_array,
-            local_array_ptr,
-            local_ptr,
-            local,
-        );
-        declare_counts(
-            &mut b,
-            u32_type,
-            [wave_count, register_count, observed_count, memory_count],
-            simulated_lanes(stage, width),
-            window.words(),
-        );
-
-        let files = declare_files(&mut b, u32_type, register_count, wave_count);
-        let (observation, guest_memory) =
-            declare_buffers(&mut b, u32_type, observed_count, memory_count);
-        // The block a draw's user data arrives in, declared only when this stage reads some - so
-        // every module that reads none is word for word what it was (worklog 826).
-        //
-        // **A mesh module reads its words per draw** (D718): one host dispatch carries a run of
-        // guest draws, one workgroup each, so the words are in the draw-data buffer at the
-        // workgroup's stride rather than in the push-constant block every workgroup shares.
-        let user_data_source = (user_data.count > 0).then(|| {
-            if stage == Stage::Mesh {
-                let words = b.id();
-                b.declare(
-                    op::CONSTANT,
-                    &[
-                        u32_type.0,
-                        words.0,
-                        orbistoun_spirv::DRAW_DATA_MOST_DRAWS
-                            * orbistoun_spirv::DRAW_DATA_STRIDE_WORDS,
-                    ],
-                );
-                let buffer =
-                    buffer::declare(&mut b, u32_type, words, orbistoun_spirv::DRAW_DATA_BINDING);
-                UserDataSource::Draws {
-                    buffer,
-                    workgroup: declare_workgroup_id(&mut b, u32_type),
-                }
-            } else {
-                let words = b.id();
-                b.declare(op::CONSTANT, &[u32_type.0, words.0, USER_DATA_BLOCK_WORDS]);
-                UserDataSource::Push(buffer::declare_push_constants(&mut b, u32_type, words))
-            }
-        });
+        let (files, observation, guest_memory) = declare_state(&mut b, &ids, stage, width, window);
+        let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
 
         // Every variable this module has, now that every one of them exists. What the entry
         // point is allowed to name depends on the version: 1.4 and above want all of them,
@@ -1216,24 +1319,17 @@ impl<'a> Wavefront<'a> {
         interface.extend(output.map(|(_, colour)| colour.0));
         interface.extend(mesh_reserved.interface(stage));
         if stage == Stage::Mesh {
-            interface.extend([
-                counter.0,
-                scc.0,
-                m0.0,
-                local.0,
-                files.vectors.0,
-                files.scalars.0,
-                observation.buffer.0,
-                guest_memory.buffer.0,
-            ]);
-            if let Some(source) = user_data_source {
-                interface.extend(source.interface());
-            }
+            interface.extend(mesh_interface(
+                &ids,
+                &files,
+                (&observation, &guest_memory),
+                user_data_source,
+            ));
         }
         emit_entry_point(&mut b, stage, main, &interface);
 
         b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
-        b.function(op::LABEL, &[entry_block.0]);
+        b.function(op::LABEL, &[ids.entry_block.0]);
 
         let mut this = Self {
             stage,
@@ -1267,11 +1363,11 @@ impl<'a> Wavefront<'a> {
             buffer: observation.buffer,
             memory_element_ptr: guest_memory.element_ptr,
             memory: guest_memory.buffer,
-            local,
-            local_ptr,
-            program_counter: counter,
-            condition_code: scc,
-            m0,
+            local: ids.local,
+            local_ptr: ids.local_ptr,
+            program_counter: ids.counter,
+            condition_code: ids.scc,
+            m0: ids.m0,
             translated: 0,
         };
 
@@ -1285,54 +1381,60 @@ impl<'a> Wavefront<'a> {
         // **The user data, where the hardware would have put it** (worklog 826): word `i` of this
         // stage's range in the block into `s[first + i]`, before the first instruction runs.
         if let Some(source) = user_data_source {
-            let member = this.constant(0);
-            // Where this stage's words begin: its share of the push-constant block, or this
-            // workgroup's stride of the draw-data buffer (D718).
-            let (block, first_word) = match source {
-                UserDataSource::Push(block) => (block, None),
-                UserDataSource::Draws { buffer, workgroup } => {
-                    let (uvec3, input) = workgroup;
-                    let id = this.builder.id();
-                    this.builder.function(op::LOAD, &[uvec3.0, id.0, input.0]);
-                    let x = this.builder.id();
-                    this.builder
-                        .function(op::COMPOSITE_EXTRACT, &[u32_type.0, x.0, id.0, 0]);
-                    let stride = this.constant(orbistoun_spirv::DRAW_DATA_STRIDE_WORDS);
-                    let first = this.builder.id();
-                    this.builder
-                        .function(op::IMUL, &[u32_type.0, first.0, x.0, stride.0]);
-                    (buffer, Some(first))
-                }
-            };
-            for i in 0..user_data.count {
-                let index = match first_word {
-                    None => this.constant(user_data.block_offset + i),
-                    Some(first) => {
-                        let within = this.constant(i);
-                        let index = this.builder.id();
-                        this.builder
-                            .function(op::IADD, &[u32_type.0, index.0, first.0, within.0]);
-                        index
-                    }
-                };
-                let pointer = this.builder.id();
-                this.builder.function(
-                    op::ACCESS_CHAIN,
-                    &[
-                        block.element_ptr.0,
-                        pointer.0,
-                        block.buffer.0,
-                        member.0,
-                        index.0,
-                    ],
-                );
-                let value = this.builder.id();
-                this.builder
-                    .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
-                this.store_scalar(user_data.first_register + i, value);
-            }
+            this.load_user_data(source, user_data);
         }
         this
+    }
+
+    /// Loads each user-data word from `source` into its scalar register, at entry.
+    fn load_user_data(&mut self, source: UserDataSource, user_data: UserData) {
+        let u32_type = self.u32_type;
+        let member = self.constant(0);
+        // Where this stage's words begin: its share of the push-constant block, or this
+        // workgroup's stride of the draw-data buffer (D718).
+        let (block, first_word) = match source {
+            UserDataSource::Push(block) => (block, None),
+            UserDataSource::Draws { buffer, workgroup } => {
+                let (uvec3, input) = workgroup;
+                let id = self.builder.id();
+                self.builder.function(op::LOAD, &[uvec3.0, id.0, input.0]);
+                let x = self.builder.id();
+                self.builder
+                    .function(op::COMPOSITE_EXTRACT, &[u32_type.0, x.0, id.0, 0]);
+                let stride = self.constant(orbistoun_spirv::DRAW_DATA_STRIDE_WORDS);
+                let first = self.builder.id();
+                self.builder
+                    .function(op::IMUL, &[u32_type.0, first.0, x.0, stride.0]);
+                (buffer, Some(first))
+            }
+        };
+        for i in 0..user_data.count {
+            let index = match first_word {
+                None => self.constant(user_data.block_offset + i),
+                Some(first) => {
+                    let within = self.constant(i);
+                    let index = self.builder.id();
+                    self.builder
+                        .function(op::IADD, &[u32_type.0, index.0, first.0, within.0]);
+                    index
+                }
+            };
+            let pointer = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[
+                    block.element_ptr.0,
+                    pointer.0,
+                    block.buffer.0,
+                    member.0,
+                    index.0,
+                ],
+            );
+            let value = self.builder.id();
+            self.builder
+                .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+            self.store_scalar(user_data.first_register + i, value);
+        }
     }
 
     fn constant(&mut self, value: u32) -> Id {

@@ -717,7 +717,6 @@ fn describe_title_modules(title: &orbistoun_service::LinkedTitle) {
     orbistoun_thunk::note_readable_range(base, len);
 }
 
-#[allow(clippy::too_many_lines)]
 fn place_and_relocate<W: Write>(
     output: &mut W,
     service: &Service,
@@ -763,30 +762,17 @@ fn place_and_relocate<W: Write>(
     // install here would be ignored, and writing one would read as though it were doing
     // something (D344, D484).
     publish_what_the_guest_reads(service);
-    // Weak imports that are unanswered bind to zero under the ELF gABI (D676).
-    let weak_zero = unanswered_weak_imports(service, bytes, &title, &database);
-    // Which imports this run will refuse, if it was asked to refuse any (D392).
-    let mut unnameable = unnameable_imports(service, bytes, symbols_db);
-    if let Some(refused) = unnameable.as_mut() {
-        refused.retain(|idx| !weak_zero.contains(idx));
-    }
-    let tally = match relocate_the_executable(
-        service,
-        &image,
-        bytes,
-        &title,
-        unnameable.as_ref(),
-        Some(&weak_zero),
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            return halt(
-                output,
-                Phase::Mapped,
-                format!("{placed}; relocation failed: {e}"),
-            );
-        }
-    };
+    let (tally, unnameable) =
+        match relocate_with_refusals(service, &image, bytes, &title, &database, symbols_db) {
+            Ok(t) => t,
+            Err(e) => {
+                return halt(
+                    output,
+                    Phase::Mapped,
+                    format!("{placed}; relocation failed: {e}"),
+                );
+            }
+        };
     let relocations = describe_relocations(&tally, data);
 
     // **A refusal is not a failure to link.** Under `ORBISTOUN_RESOLVE=named` this run
@@ -832,18 +818,7 @@ fn place_and_relocate<W: Write>(
         }
     };
 
-    orbistoun_core::klog::note(&format!("orbistoun: {placed}"));
-    orbistoun_core::klog::note(&format!("orbistoun: {relocations}"));
-    let summary = format!(
-        "{placed}; {relocations}; protected {} runs ({} bytes executable, {} writable, {} both); {} import stubs at {:#x}, {} implemented",
-        protection.runs,
-        protection.executable,
-        protection.writable,
-        protection.writable_and_executable,
-        thunks.len(),
-        thunks.base(),
-        orbistoun_thunk::implemented_count_within(thunks.len())
-    );
+    let summary = placement_summary(&placed, &relocations, &protection, thunks);
 
     name_guest_functions_from(bytes);
 
@@ -884,6 +859,60 @@ fn place_and_relocate<W: Write>(
     )
 }
 
+/// Relocates the executable, refusing the imports this run was asked to leave unnamed.
+fn relocate_with_refusals(
+    service: &Service,
+    image: &Image,
+    bytes: &[u8],
+    title: &orbistoun_service::LinkedTitle,
+    database: &orbistoun_nid::SymbolDbFile,
+    symbols_db: Option<&Path>,
+) -> Result<
+    (
+        orbistoun_elf::reloc::RelocationTally,
+        Option<std::collections::BTreeSet<usize>>,
+    ),
+    orbistoun_service::ServiceError,
+> {
+    // Weak imports that are unanswered bind to zero under the ELF gABI (D676).
+    let weak_zero = unanswered_weak_imports(service, bytes, title, database);
+    // Which imports this run will refuse, if it was asked to refuse any (D392).
+    let mut unnameable = unnameable_imports(service, bytes, symbols_db);
+    if let Some(refused) = unnameable.as_mut() {
+        refused.retain(|idx| !weak_zero.contains(idx));
+    }
+    let tally = relocate_the_executable(
+        service,
+        image,
+        bytes,
+        title,
+        unnameable.as_ref(),
+        Some(&weak_zero),
+    )?;
+    Ok((tally, unnameable))
+}
+
+/// Notes the placement and relocation lines and builds the one-line summary of a placed image.
+fn placement_summary(
+    placed: &str,
+    relocations: &str,
+    protection: &orbistoun_loader::protect::ProtectionTally,
+    thunks: &orbistoun_thunk::ThunkTable,
+) -> String {
+    orbistoun_core::klog::note(&format!("orbistoun: {placed}"));
+    orbistoun_core::klog::note(&format!("orbistoun: {relocations}"));
+    format!(
+        "{placed}; {relocations}; protected {} runs ({} bytes executable, {} writable, {} both); {} import stubs at {:#x}, {} implemented",
+        protection.runs,
+        protection.executable,
+        protection.writable,
+        protection.writable_and_executable,
+        thunks.len(),
+        thunks.base(),
+        orbistoun_thunk::implemented_count_within(thunks.len())
+    )
+}
+
 /// Arranges everything a run needs in order to explain itself afterwards.
 ///
 /// All of it must happen **before** the guest is entered: names, regions, and the trace
@@ -913,67 +942,9 @@ fn prepare_diagnostics(
     limits: Limits,
     labels: &[String],
 ) {
-    // What this run is subject to, recorded before anything can fault. A verdict comparing
-    // two runs is only evidence when these match, and neither the wall-clock limit nor the
-    // stub policy is visible in any number the run reports (D181).
-    let (default_return, overrides, propping) = service.policy_summary();
-    // Read once and used three times below - to record what the run is under, to install
-    // each diagnostic, and to warn about a variable that is nearly one. Reading the
-    // environment separately at each site is how the three of these came to disagree about
-    // what a run was doing (D220).
-    let experiments = experiment::Experiments::from_env();
+    let experiments = record_run_conditions(service, limits);
 
-    for name in orbistoun_env::unknown() {
-        // A command-line flag typed wrongly is refused; a variable typed wrongly is simply
-        // absent, and the run reports an ordinary result. Saying so is the only defence.
-        tracing::warn!("{name} is not a diagnostic this build understands - ignored");
-    }
-    report::record_conditions(orbistoun_report::trace::Conditions {
-        limit_seconds: limits.seconds,
-        call_budget: limits.calls,
-        // Filled in when the run ends, once the counts exist: nothing has applied yet.
-        did_nothing: Vec::new(),
-        default_return,
-        overrides,
-        propping,
-        experiments: experiments.describe(),
-        intervened: experiments.intervenes(),
-        // Read from the map that was actually built, not from the setting that asked for it -
-        // a shape that fell back because its regions did not fit would otherwise be recorded
-        // as the shape nobody got (D357).
-        memory_map: orbistoun_kernel::direct::map()
-            .lock()
-            .map(|m| {
-                m.regions()
-                    .iter()
-                    .map(|r| (r.start, r.end, r.allocated))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        // The commit the worker was built from (with `-dirty` for an uncommitted tree), not the
-        // crate version - so a run record names the tree that produced it and a regression can be
-        // bisected from the records (8ae5). `env!("CARGO_PKG_VERSION")` was `0.1.0` on every record.
-        build: orbistoun_env::build::line(),
-    });
-
-    // Hand the graphics submit path the regions the guest can read, so a submitted command buffer
-    // and the shader addresses it names resolve against the guest's own allocated memory rather than
-    // being read blind - the difference between an unresolved count that measures D101 and one fixed
-    // at "all unresolved" (5bff). Set before the guest is entered, from the same map recorded above.
-    if let Ok(map) = orbistoun_kernel::direct::map().lock() {
-        orbistoun_gpu::agc_driver::set_guest_regions(
-            map.regions()
-                .iter()
-                .filter(|r| r.allocated)
-                .map(|r| (r.start, r.end))
-                .collect(),
-        );
-    }
-    // And the live answer for everything the guest maps after this point - a GL context's command
-    // buffer among it (worklog 815).
-    orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
-    // And where the command processor may write - a fill, a copy, a fence (worklog 816).
-    orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
+    install_guest_region_lookups();
     install_presentation();
 
     // Where the trace goes. Named after the module so a sweep over a directory of
@@ -1030,45 +1001,7 @@ fn prepare_diagnostics(
     // by hash where there is not - which is the whole point for a function nobody has
     // named (D218).
     if !experiments.write.is_empty() {
-        let mut writes: Vec<Vec<orbistoun_thunk::Plant>> = vec![Vec::new(); thunks.total()];
-        let mut matched = 0_usize;
-        // Counted per clause, not per import. A list where one clause names a function that
-        // is not there and the rest are fine would otherwise report a match and plant less
-        // than it was asked to - and the missing plant is invisible in the result.
-        let mut unmatched: Vec<&str> = Vec::new();
-        for (target, slot, offset, value) in &experiments.write {
-            let mut hits = 0_usize;
-            for (index, plants) in writes.iter_mut().enumerate() {
-                let Some(label) = report::label_of(index) else {
-                    continue;
-                };
-                if target.matches(label) {
-                    plants.push(orbistoun_thunk::Plant {
-                        position: *slot,
-                        offset: *offset,
-                        value: *value,
-                    });
-                    hits += 1;
-                }
-            }
-            if hits == 0 {
-                unmatched.push(target.as_str());
-            }
-            matched += hits;
-        }
-        for name in &unmatched {
-            tracing::warn!("ORBISTOUN_WRITE matched no import called {name:?}");
-        }
-        if matched == 0 {
-            // Said out loud rather than left to be inferred from an unchanged run. This is
-            // the shape D187 and D191 both took: an experiment that never reached the thing
-            // under test, reporting no change and being believed.
-            tracing::warn!("nothing was planted");
-        } else {
-            orbistoun_thunk::install_forced_writes(
-                writes.into_iter().map(Vec::into_boxed_slice).collect(),
-            );
-        }
+        plant_forced_writes(&experiments, thunks);
     }
 
     // Consulted before the policy's own answer, and matched the same way as the writes -
@@ -1092,6 +1025,121 @@ fn prepare_diagnostics(
         thunks.base(),
         (thunks.total() as u64).saturating_mul(orbistoun_thunk::THUNK_SIZE),
     );
+}
+
+/// Records the conditions this run is under and returns the diagnostics it was asked for.
+fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Experiments {
+    // What this run is subject to, recorded before anything can fault. A verdict comparing
+    // two runs is only evidence when these match, and neither the wall-clock limit nor the
+    // stub policy is visible in any number the run reports (D181).
+    let (default_return, overrides, propping) = service.policy_summary();
+    // Read once and used three times below - to record what the run is under, to install
+    // each diagnostic, and to warn about a variable that is nearly one. Reading the
+    // environment separately at each site is how the three of these came to disagree about
+    // what a run was doing (D220).
+    let experiments = experiment::Experiments::from_env();
+
+    for name in orbistoun_env::unknown() {
+        // A command-line flag typed wrongly is refused; a variable typed wrongly is simply
+        // absent, and the run reports an ordinary result. Saying so is the only defence.
+        tracing::warn!("{name} is not a diagnostic this build understands - ignored");
+    }
+    report::record_conditions(orbistoun_report::trace::Conditions {
+        limit_seconds: limits.seconds,
+        call_budget: limits.calls,
+        // Filled in when the run ends, once the counts exist: nothing has applied yet.
+        did_nothing: Vec::new(),
+        default_return,
+        overrides,
+        propping,
+        experiments: experiments.describe(),
+        intervened: experiments.intervenes(),
+        // Read from the map that was actually built, not from the setting that asked for it -
+        // a shape that fell back because its regions did not fit would otherwise be recorded
+        // as the shape nobody got (D357).
+        memory_map: orbistoun_kernel::direct::map()
+            .lock()
+            .map(|m| {
+                m.regions()
+                    .iter()
+                    .map(|r| (r.start, r.end, r.allocated))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // The commit the worker was built from (with `-dirty` for an uncommitted tree), not the
+        // crate version - so a run record names the tree that produced it and a regression can be
+        // bisected from the records (8ae5). `env!("CARGO_PKG_VERSION")` was `0.1.0` on every record.
+        build: orbistoun_env::build::line(),
+    });
+    experiments
+}
+
+/// Hands the graphics submit path the guest's readable and writable regions.
+fn install_guest_region_lookups() {
+    // Hand the graphics submit path the regions the guest can read, so a submitted command buffer
+    // and the shader addresses it names resolve against the guest's own allocated memory rather than
+    // being read blind - the difference between an unresolved count that measures D101 and one fixed
+    // at "all unresolved" (5bff). Set before the guest is entered, from the same map recorded above.
+    if let Ok(map) = orbistoun_kernel::direct::map().lock() {
+        orbistoun_gpu::agc_driver::set_guest_regions(
+            map.regions()
+                .iter()
+                .filter(|r| r.allocated)
+                .map(|r| (r.start, r.end))
+                .collect(),
+        );
+    }
+    // And the live answer for everything the guest maps after this point - a GL context's command
+    // buffer among it (worklog 815).
+    orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
+    // And where the command processor may write - a fill, a copy, a fence (worklog 816).
+    orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
+}
+
+/// Plants the `ORBISTOUN_WRITE` values on every import each clause names.
+fn plant_forced_writes(
+    experiments: &experiment::Experiments,
+    thunks: &orbistoun_thunk::ThunkTable,
+) {
+    let mut writes: Vec<Vec<orbistoun_thunk::Plant>> = vec![Vec::new(); thunks.total()];
+    let mut matched = 0_usize;
+    // Counted per clause, not per import. A list where one clause names a function that
+    // is not there and the rest are fine would otherwise report a match and plant less
+    // than it was asked to - and the missing plant is invisible in the result.
+    let mut unmatched: Vec<&str> = Vec::new();
+    for (target, slot, offset, value) in &experiments.write {
+        let mut hits = 0_usize;
+        for (index, plants) in writes.iter_mut().enumerate() {
+            let Some(label) = report::label_of(index) else {
+                continue;
+            };
+            if target.matches(label) {
+                plants.push(orbistoun_thunk::Plant {
+                    position: *slot,
+                    offset: *offset,
+                    value: *value,
+                });
+                hits += 1;
+            }
+        }
+        if hits == 0 {
+            unmatched.push(target.as_str());
+        }
+        matched += hits;
+    }
+    for name in &unmatched {
+        tracing::warn!("ORBISTOUN_WRITE matched no import called {name:?}");
+    }
+    if matched == 0 {
+        // Said out loud rather than left to be inferred from an unchanged run. This is
+        // the shape D187 and D191 both took: an experiment that never reached the thing
+        // under test, reporting no change and being believed.
+        tracing::warn!("nothing was planted");
+    } else {
+        orbistoun_thunk::install_forced_writes(
+            writes.into_iter().map(Vec::into_boxed_slice).collect(),
+        );
+    }
 }
 
 /// Writes the initial process stack and answers where the entry point's `rsp` goes.
@@ -1245,62 +1293,8 @@ pub fn serve_as_worker_process() -> Result<(), Error> {
     // found the device present and permanently empty - which is the same experience as it
     // not existing (D389, D396).
     orbistoun_core::klog::note(&machine);
-    // **The firmware skeleton, stood up when a firmware is being presented.**
-    // (profile applied above, before this note is composed - see the settings load.) A run that names a
-    // firmware is one prepared to meet a guest that reaches past the named interface into the
-    // memory image beneath it - the post-exploitation payloads do exactly that (D404). Reserving
-    // the region here means their address arithmetic lands in mapped, observable memory this
-    // project owns, rather than in an unmapped marker; a run that presents no firmware pays
-    // nothing. Failure to reserve is reported and not fatal: the run proceeds exactly as it did
-    // before this existed, with those accesses faulting as unmapped.
-    if settings.machine.firmware != 0 {
-        if let Err(e) = orbistoun_firmware::present() {
-            tracing::warn!(
-                "could not stand up the firmware skeleton: {e} - firmware accesses will fault as unmapped"
-            );
-        } else {
-            tracing::debug!(
-                "firmware skeleton mapped at {:#x}, base handed to guests at {:#x}",
-                orbistoun_firmware::FIRMWARE_BASE,
-                orbistoun_firmware::handed_base()
-            );
-        }
-    }
-    // **The console's own syscall gadget, served whether or not a firmware is presented.** A
-    // first-party payload routes every system call through a gadget inside libkernel, and when it
-    // cannot resolve that gadget by name it falls back to a hardcoded address
-    // (`orbistoun_firmware::console_gadget_address`). A proper module reaches that path during its
-    // own startup - the open-toolchain cube issues its first `klog` there - so this is not tied to
-    // the firmware skeleton the elfldr payloads need, and is set up unconditionally. Placing a
-    // trampoline into this run's syscall gadget there turns the guest's `callq *<gadget>` into a
-    // dispatch-and-return instead of a fault on an unmapped instruction fetch. One page, and a
-    // reservation failure is reported and not fatal: the run proceeds as before, the call faulting
-    // exactly as it did.
-    {
-        let dispatch: unsafe extern "sysv64" fn(*const u64) -> u64 =
-            orbistoun_thunk::syscall::orbistoun_syscall_dispatch;
-        match orbistoun_abi::enter::syscall_gadget(
-            dispatch as *const () as usize as u64,
-            orbistoun_thunk::syscall::SAVED,
-        ) {
-            Some(gadget) => {
-                let trampoline = compact_trampoline(gadget);
-                if let Err(e) = orbistoun_firmware::present_console_gadget(&trampoline) {
-                    tracing::warn!(
-                        "could not serve the console syscall gadget: {e} - a payload's fallback syscall path will fault as unmapped"
-                    );
-                } else {
-                    tracing::debug!(
-                        "console syscall gadget served at {:#x}",
-                        orbistoun_firmware::console_gadget_address()
-                    );
-                }
-            }
-            None => {
-                tracing::warn!("no syscall gadget built, cannot serve the console gadget address");
-            }
-        }
-    }
+    stand_up_firmware(&settings);
+    serve_console_gadget();
     orbistoun_core::machine::present(settings.machine.clone());
     orbistoun_systemservice::console::configure(
         settings,
@@ -1336,6 +1330,68 @@ pub fn serve_as_worker_process() -> Result<(), Error> {
         end_orphaned_worker,
     )
     .map_err(Error::WorkerLoop)
+}
+
+/// Stands up the firmware skeleton when the run presents a firmware.
+fn stand_up_firmware(settings: &orbistoun_shell::Settings) {
+    // **The firmware skeleton, stood up when a firmware is being presented.**
+    // (profile applied above, before this note is composed - see the settings load.) A run that names a
+    // firmware is one prepared to meet a guest that reaches past the named interface into the
+    // memory image beneath it - the post-exploitation payloads do exactly that (D404). Reserving
+    // the region here means their address arithmetic lands in mapped, observable memory this
+    // project owns, rather than in an unmapped marker; a run that presents no firmware pays
+    // nothing. Failure to reserve is reported and not fatal: the run proceeds exactly as it did
+    // before this existed, with those accesses faulting as unmapped.
+    if settings.machine.firmware != 0 {
+        if let Err(e) = orbistoun_firmware::present() {
+            tracing::warn!(
+                "could not stand up the firmware skeleton: {e} - firmware accesses will fault as unmapped"
+            );
+        } else {
+            tracing::debug!(
+                "firmware skeleton mapped at {:#x}, base handed to guests at {:#x}",
+                orbistoun_firmware::FIRMWARE_BASE,
+                orbistoun_firmware::handed_base()
+            );
+        }
+    }
+}
+
+/// Serves the console's syscall gadget address with a trampoline into this run's dispatcher.
+fn serve_console_gadget() {
+    // **The console's own syscall gadget, served whether or not a firmware is presented.** A
+    // first-party payload routes every system call through a gadget inside libkernel, and when it
+    // cannot resolve that gadget by name it falls back to a hardcoded address
+    // (`orbistoun_firmware::console_gadget_address`). A proper module reaches that path during its
+    // own startup - the open-toolchain cube issues its first `klog` there - so this is not tied to
+    // the firmware skeleton the elfldr payloads need, and is set up unconditionally. Placing a
+    // trampoline into this run's syscall gadget there turns the guest's `callq *<gadget>` into a
+    // dispatch-and-return instead of a fault on an unmapped instruction fetch. One page, and a
+    // reservation failure is reported and not fatal: the run proceeds as before, the call faulting
+    // exactly as it did.
+    let dispatch: unsafe extern "sysv64" fn(*const u64) -> u64 =
+        orbistoun_thunk::syscall::orbistoun_syscall_dispatch;
+    match orbistoun_abi::enter::syscall_gadget(
+        dispatch as *const () as usize as u64,
+        orbistoun_thunk::syscall::SAVED,
+    ) {
+        Some(gadget) => {
+            let trampoline = compact_trampoline(gadget);
+            if let Err(e) = orbistoun_firmware::present_console_gadget(&trampoline) {
+                tracing::warn!(
+                    "could not serve the console syscall gadget: {e} - a payload's fallback syscall path will fault as unmapped"
+                );
+            } else {
+                tracing::debug!(
+                    "console syscall gadget served at {:#x}",
+                    orbistoun_firmware::console_gadget_address()
+                );
+            }
+        }
+        None => {
+            tracing::warn!("no syscall gadget built, cannot serve the console gadget address");
+        }
+    }
 }
 
 /// Exit status of a worker that ended because its parent went away (D715).
@@ -2903,6 +2959,19 @@ fn enter<W: Write>(
         }
     }
 
+    let returned = transfer_to_guest(entry, entry_stack, argument, second, entry_settings);
+
+    finish_returned_run(output, image, summary, module, reporting, returned)
+}
+
+/// Adopts the guest float environment, runs asked-for initialisers, and jumps to the entry.
+fn transfer_to_guest(
+    entry: u64,
+    entry_stack: u64,
+    argument: u64,
+    second: u64,
+    entry_settings: &process::EntrySettings,
+) -> u64 {
     // The float environment the console starts a title in: denormals-are-zero,
     // flush-to-zero, every exception masked. Guest code runs natively, so without this it
     // inherits the host thread's - which has DAZ and FTZ clear, and quietly computes
@@ -2927,10 +2996,20 @@ fn enter<W: Write>(
 
     // SAFETY: as above, but called as an ordinary function - the other hypothesis about
     // what this entry point is (D153). `stack` and the image both outlive the call.
-    let returned = unsafe {
+    unsafe {
         orbistoun_abi::enter::enter_guest_with_arguments(entry, entry_stack, argument, second)
-    };
+    }
+}
 
+/// Records and renders what a guest that returned by itself left behind, then halts the run.
+fn finish_returned_run<W: Write>(
+    output: &mut W,
+    image: &Image,
+    summary: &str,
+    module: &str,
+    reporting: bool,
+    returned: u64,
+) -> io::Result<()> {
     // Persisted on the ordinary path as well, so a guest that stops by itself is
     // recorded exactly as fully as one that had to be stopped.
     report::what_the_guest_asked_for();

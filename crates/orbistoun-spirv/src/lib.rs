@@ -2273,39 +2273,182 @@ static SHAPES: &[ShapeEntry] = &[
 /// The geometry is the same triangle every other oracle here draws - one that covers the
 /// viewport from three corners - so a frame from this is comparable with a frame from the
 /// vertex-shader path pixel for pixel.
-// A module is a linear sequence of declarations, each needed by the line after it. The same
-// judgement the other builders here record: splitting it moves the length rather than removing
-// it and hides the order, which is the one property a builder has to show.
-#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     // 1.4, because `SPV_EXT_mesh_shader` requires it - said by `spirv-val` on the first
     // attempt, which is the kind of thing this project would rather be told than assume.
     let mut b = Builder::new().with_version(VERSION_1_4);
 
-    let void = b.id();
-    let fn_type = b.id();
-    let f32_type = b.id();
-    let u32_type = b.id();
-    let vec4 = b.id();
-    let uvec3 = b.id();
-    let per_vertex = b.id();
-    let vertex_array = b.id();
-    let vertex_array_ptr = b.id();
-    let vertices = b.id();
-    let colour_array = b.id();
-    let colour_array_ptr = b.id();
-    let colours = b.id();
-    let index_array = b.id();
-    let index_array_ptr = b.id();
-    let indices = b.id();
-    let output_vec4 = b.id();
-    let output_uvec3 = b.id();
-    let (zero, one, two, three) = (b.id(), b.id(), b.id(), b.id());
-    let triangle = b.id();
-    let main = b.id();
-    let entry_block = b.id();
+    let ids = MeshIds::new(&mut b);
+    emit_mesh_header(&mut b, &ids);
+    declare_mesh_types(&mut b, &ids);
+    let MeshIds {
+        void,
+        fn_type,
+        f32_type,
+        vec4,
+        vertices,
+        colours,
+        indices,
+        output_vec4,
+        output_uvec3,
+        zero,
+        one,
+        two,
+        three,
+        triangle,
+        main,
+        entry_block,
+        ..
+    } = ids;
 
+    // The corner positions and their colours, as constants, one composite each.
+    let positions = [
+        [-1.0f32, -1.0, 0.0, 1.0],
+        [3.0, -1.0, 0.0, 1.0],
+        [-1.0, 3.0, 0.0, 1.0],
+    ];
+    let mut position_ids = Vec::new();
+    let mut colour_ids = Vec::new();
+    for (place, colour) in positions.into_iter().zip(corners) {
+        position_ids.push(constant_vec4(&mut b, f32_type, vec4, place));
+        colour_ids.push(constant_vec4(&mut b, f32_type, vec4, colour));
+    }
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+
+    // **Before anything is written**: three vertices, one primitive. A mesh shader that wrote
+    // outputs it had not declared would be writing past what the stage allocated for it.
+    b.function(op::SET_MESH_OUTPUTS_EXT, &[three.0, one.0]);
+
+    let slots = [zero, one, two];
+    for (slot, (place, colour)) in slots
+        .into_iter()
+        .zip(position_ids.into_iter().zip(colour_ids))
+    {
+        let position_ptr = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[output_vec4.0, position_ptr.0, vertices.0, slot.0, zero.0],
+        );
+        b.function(op::STORE, &[position_ptr.0, place.0]);
+
+        let colour_ptr = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[output_vec4.0, colour_ptr.0, colours.0, slot.0],
+        );
+        b.function(op::STORE, &[colour_ptr.0, colour.0]);
+    }
+
+    let index_ptr = b.id();
+    b.function(
+        op::ACCESS_CHAIN,
+        &[output_uvec3.0, index_ptr.0, indices.0, zero.0],
+    );
+    b.function(op::STORE, &[index_ptr.0, triangle.0]);
+
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+    b.finish()
+}
+
+/// The identifiers the mesh oracle reserves before it writes anything, in reservation order.
+#[derive(Clone, Copy)]
+struct MeshIds {
+    void: Id,
+    fn_type: Id,
+    f32_type: Id,
+    u32_type: Id,
+    vec4: Id,
+    uvec3: Id,
+    per_vertex: Id,
+    vertex_array: Id,
+    vertex_array_ptr: Id,
+    vertices: Id,
+    colour_array: Id,
+    colour_array_ptr: Id,
+    colours: Id,
+    index_array: Id,
+    index_array_ptr: Id,
+    indices: Id,
+    output_vec4: Id,
+    output_uvec3: Id,
+    zero: Id,
+    one: Id,
+    two: Id,
+    three: Id,
+    triangle: Id,
+    main: Id,
+    entry_block: Id,
+}
+
+impl MeshIds {
+    /// Reserves every identifier, in field order.
+    fn new(b: &mut Builder) -> Self {
+        let void = b.id();
+        let fn_type = b.id();
+        let f32_type = b.id();
+        let u32_type = b.id();
+        let vec4 = b.id();
+        let uvec3 = b.id();
+        let per_vertex = b.id();
+        let vertex_array = b.id();
+        let vertex_array_ptr = b.id();
+        let vertices = b.id();
+        let colour_array = b.id();
+        let colour_array_ptr = b.id();
+        let colours = b.id();
+        let index_array = b.id();
+        let index_array_ptr = b.id();
+        let indices = b.id();
+        let output_vec4 = b.id();
+        let output_uvec3 = b.id();
+        let (zero, one, two, three) = (b.id(), b.id(), b.id(), b.id());
+        let triangle = b.id();
+        let main = b.id();
+        let entry_block = b.id();
+        Self {
+            void,
+            fn_type,
+            f32_type,
+            u32_type,
+            vec4,
+            uvec3,
+            per_vertex,
+            vertex_array,
+            vertex_array_ptr,
+            vertices,
+            colour_array,
+            colour_array_ptr,
+            colours,
+            index_array,
+            index_array_ptr,
+            indices,
+            output_vec4,
+            output_uvec3,
+            zero,
+            one,
+            two,
+            three,
+            triangle,
+            main,
+            entry_block,
+        }
+    }
+}
+
+/// Writes the mesh oracle's capability, extension, entry point, execution modes and decorations.
+fn emit_mesh_header(b: &mut Builder, ids: &MeshIds) {
+    let MeshIds {
+        per_vertex,
+        vertices,
+        colours,
+        indices,
+        main,
+        ..
+    } = *ids;
     // `MeshShadingEXT` implies `Shader`, so it is declared alone - as the reference does.
     b.header(op::CAPABILITY, &[capability::MESH_SHADING_EXT]);
     let mut extension = Vec::new();
@@ -2344,7 +2487,36 @@ pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
             built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
         ],
     );
+}
 
+/// Declares the mesh oracle's types, constants and output variables.
+fn declare_mesh_types(b: &mut Builder, ids: &MeshIds) {
+    let MeshIds {
+        void,
+        fn_type,
+        f32_type,
+        u32_type,
+        vec4,
+        uvec3,
+        per_vertex,
+        vertex_array,
+        vertex_array_ptr,
+        vertices,
+        colour_array,
+        colour_array_ptr,
+        colours,
+        index_array,
+        index_array_ptr,
+        indices,
+        output_vec4,
+        output_uvec3,
+        zero,
+        one,
+        two,
+        three,
+        triangle,
+        ..
+    } = *ids;
     b.declare(op::TYPE_VOID, &[void.0]);
     b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
     b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
@@ -2397,57 +2569,6 @@ pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
         op::CONSTANT_COMPOSITE,
         &[uvec3.0, triangle.0, zero.0, one.0, two.0],
     );
-
-    // The corner positions and their colours, as constants, one composite each.
-    let positions = [
-        [-1.0f32, -1.0, 0.0, 1.0],
-        [3.0, -1.0, 0.0, 1.0],
-        [-1.0, 3.0, 0.0, 1.0],
-    ];
-    let mut position_ids = Vec::new();
-    let mut colour_ids = Vec::new();
-    for (place, colour) in positions.into_iter().zip(corners) {
-        position_ids.push(constant_vec4(&mut b, f32_type, vec4, place));
-        colour_ids.push(constant_vec4(&mut b, f32_type, vec4, colour));
-    }
-
-    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
-    b.function(op::LABEL, &[entry_block.0]);
-
-    // **Before anything is written**: three vertices, one primitive. A mesh shader that wrote
-    // outputs it had not declared would be writing past what the stage allocated for it.
-    b.function(op::SET_MESH_OUTPUTS_EXT, &[three.0, one.0]);
-
-    let slots = [zero, one, two];
-    for (slot, (place, colour)) in slots
-        .into_iter()
-        .zip(position_ids.into_iter().zip(colour_ids))
-    {
-        let position_ptr = b.id();
-        b.function(
-            op::ACCESS_CHAIN,
-            &[output_vec4.0, position_ptr.0, vertices.0, slot.0, zero.0],
-        );
-        b.function(op::STORE, &[position_ptr.0, place.0]);
-
-        let colour_ptr = b.id();
-        b.function(
-            op::ACCESS_CHAIN,
-            &[output_vec4.0, colour_ptr.0, colours.0, slot.0],
-        );
-        b.function(op::STORE, &[colour_ptr.0, colour.0]);
-    }
-
-    let index_ptr = b.id();
-    b.function(
-        op::ACCESS_CHAIN,
-        &[output_uvec3.0, index_ptr.0, indices.0, zero.0],
-    );
-    b.function(op::STORE, &[index_ptr.0, triangle.0]);
-
-    b.function(op::RETURN, &[]);
-    b.function(op::FUNCTION_END, &[]);
-    b.finish()
 }
 
 /// How many vertices the mesh oracle emits. Three, because it draws one triangle.

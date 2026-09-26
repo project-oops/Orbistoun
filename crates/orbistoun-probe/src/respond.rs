@@ -136,14 +136,6 @@ impl Outcome {
     reason = "one arm per record kind; splitting it scatters the wire order"
 )]
 pub fn render(record: &Record) -> String {
-    let join = |kind: &str, fields: &[String]| {
-        let mut line = format!("{}{}{kind}", crate::RECORD, crate::SEPARATOR);
-        for field in fields {
-            line.push(crate::SEPARATOR);
-            line.push_str(field);
-        }
-        line
-    };
     match record {
         Record::Ack { seq, verb } => join("ack", &[seq.to_string(), verb.clone()]),
         Record::Hello {
@@ -278,23 +270,42 @@ pub fn render(record: &Record) -> String {
             value,
             detail,
             provenance,
-        } => join(
-            "res",
-            &[
-                check.clone(),
-                status.token().to_owned(),
-                value.clone(),
-                detail.clone(),
-                // Absent stays absent. Writing a default grade onto a record that claimed
-                // none would manufacture provenance, which is the failure this whole crate
-                // is arranged to prevent.
-                provenance
-                    .as_ref()
-                    .map_or_else(String::new, |p| p.token().to_owned()),
-            ],
-        ),
+        } => render_res(check, status, value, detail, provenance.as_ref()),
         Record::Other { kind, fields } => join(kind, fields),
     }
+}
+
+/// Joins a record kind and its fields into one wire line.
+fn join(kind: &str, fields: &[String]) -> String {
+    let mut line = format!("{}{}{kind}", crate::RECORD, crate::SEPARATOR);
+    for field in fields {
+        line.push(crate::SEPARATOR);
+        line.push_str(field);
+    }
+    line
+}
+
+/// Renders a `res` record.
+fn render_res(
+    check: &str,
+    status: &Status,
+    value: &str,
+    detail: &str,
+    provenance: Option<&Provenance>,
+) -> String {
+    join(
+        "res",
+        &[
+            check.to_owned(),
+            status.token().to_owned(),
+            value.to_owned(),
+            detail.to_owned(),
+            // Absent stays absent. Writing a default grade onto a record that claimed
+            // none would manufacture provenance, which is the failure this whole crate
+            // is arranged to prevent.
+            provenance.map_or_else(String::new, |p| p.token().to_owned()),
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------------------

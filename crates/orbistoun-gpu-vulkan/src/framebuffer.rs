@@ -3288,12 +3288,6 @@ struct Devices<'a> {
     device: &'a ash::Device,
 }
 
-// A pipeline is a linear sequence of create-infos, each needed by the one after it: the
-// descriptor layout the pipeline layout names, the pool the set comes from, the stages the
-// pipeline is built out of. Extracting halves means helpers passing six handles apiece, which
-// moves the length rather than removing it and hides the order - the one property a builder
-// has to show. The same judgement `Wavefront::for_stage` records for the same reason.
-#[allow(clippy::too_many_lines)]
 fn build_pipeline(
     devices: Devices<'_>,
     render_pass: vk::RenderPass,
@@ -3303,9 +3297,51 @@ fn build_pipeline(
     bound: Bound<'_>,
 ) -> Result<Pipeline, DispatchError> {
     let device = devices.device;
-    let windows = bound.windows;
+    let (vertex, fragment) = create_shader_modules(device, shaders)?;
+    let resources = create_bound_resources(devices, bound)?;
+    let set_layout = create_set_layout(device)?;
+    let set_layouts = [set_layout];
+    let layout = create_pipeline_layout(device, &set_layouts, geometry)?;
+    let (descriptor_pool, set) = allocate_set(device, &set_layouts)?;
+    write_descriptor_set(device, set, bound.windows, &resources);
+    let handle = create_graphics_pipeline(
+        device,
+        render_pass,
+        (vertex, fragment),
+        layout,
+        size,
+        geometry,
+        bound,
+    )?;
+
+    Ok(Pipeline {
+        vertex,
+        fragment,
+        layout,
+        handle,
+        set_layout,
+        descriptor_pool,
+        set,
+        buffers: resources.buffers,
+        texture: resources.texture,
+        second_texture: resources.second_texture,
+        storage_image: resources.storage_image,
+        geometry,
+        owns_guest_memory: resources.owns_guest_memory,
+        user_data: *bound.user_data,
+        textures_uploaded: false,
+        window_offset: bound
+            .guest_buffer
+            .map_or(0, |guest| u32::try_from(guest.offset).unwrap_or(0)),
+    })
+}
+
+/// Creates the vertex (or mesh) and fragment shader modules, in that order.
+fn create_shader_modules(
+    device: &ash::Device,
+    shaders: (&[u32], &[u32]),
+) -> Result<(vk::ShaderModule, vk::ShaderModule), DispatchError> {
     let (vertex_words, fragment_words) = shaders;
-    let (width, height) = size;
     let vertex_info = vk::ShaderModuleCreateInfo::default().code(vertex_words);
     // SAFETY: the words outlive the call and the device is live.
     let vertex = unsafe { device.create_shader_module(&vertex_info, None) }
@@ -3314,7 +3350,26 @@ fn build_pipeline(
     // SAFETY: as above.
     let fragment = unsafe { device.create_shader_module(&fragment_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module(fragment)", e))?;
+    Ok((vertex, fragment))
+}
 
+/// The buffers and images a pipeline's descriptor set points at.
+struct BoundResources {
+    buffers: [(vk::Buffer, vk::DeviceMemory); 2],
+    owns_guest_memory: bool,
+    texture: Texture,
+    second_texture: Texture,
+    storage_image: StorageImage,
+    draw_data_info: [vk::DescriptorBufferInfo; 1],
+}
+
+/// Creates the storage buffers, textures, storage image and draw-data span a draw binds.
+fn create_bound_resources(
+    devices: Devices<'_>,
+    bound: Bound<'_>,
+) -> Result<BoundResources, DispatchError> {
+    let device = devices.device;
+    let windows = bound.windows;
     // The two storage buffers every translated module declares, at set 0 bindings 0 and 1:
     // the observation window and the guest-memory window. A fragment module writes neither by
     // default - its epilogue is skipped (D553) - but a guest's pixel shader writes guest
@@ -3362,7 +3417,18 @@ fn build_pipeline(
         .buffer(ensure_draw_data(devices)?)
         .offset(0)
         .range(DRAW_DATA_RANGE)];
+    Ok(BoundResources {
+        buffers,
+        owns_guest_memory,
+        texture,
+        second_texture,
+        storage_image,
+        draw_data_info,
+    })
+}
 
+/// Creates the descriptor set layout every draw pipeline shares.
+fn create_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, DispatchError> {
     // Both stages, because either may use a binding: a guest's pixel shader writes its canary
     // and so does its primitive shader. Declaring only the fragment stage made a mesh pipeline
     // invalid, which the layer said and the picture did not (worklog 559).
@@ -3414,8 +3480,15 @@ fn build_pipeline(
     // SAFETY: the create info outlives the call.
     let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
+    Ok(set_layout)
+}
 
-    let set_layouts = [set_layout];
+/// Creates the pipeline layout: the one set layout and the user-data push range.
+fn create_pipeline_layout(
+    device: &ash::Device,
+    set_layouts: &[vk::DescriptorSetLayout],
+    geometry: Geometry,
+) -> Result<vk::PipelineLayout, DispatchError> {
     // The user-data block every stage may read at entry (worklog 826): 128 bytes, the size every
     // device takes, visible to the geometry stage this pipeline has and to the fragment stage. A
     // module that declares no block ignores it.
@@ -3424,12 +3497,19 @@ fn build_pipeline(
         .offset(0)
         .size(USER_DATA_BLOCK_BYTES)];
     let layout_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(&set_layouts)
+        .set_layouts(set_layouts)
         .push_constant_ranges(&push_ranges);
     // SAFETY: the create info outlives the call and the device is live.
     let layout = unsafe { device.create_pipeline_layout(&layout_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_pipeline_layout", e))?;
+    Ok(layout)
+}
 
+/// Creates a descriptor pool sized for one set and allocates that set from it.
+fn allocate_set(
+    device: &ash::Device,
+    set_layouts: &[vk::DescriptorSetLayout],
+) -> Result<(vk::DescriptorPool, vk::DescriptorSet), DispatchError> {
     let pool_sizes = [
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
@@ -3452,12 +3532,26 @@ fn build_pipeline(
         .map_err(|e| DispatchError::Vulkan("create_descriptor_pool", e))?;
     let allocate_sets = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
-        .set_layouts(&set_layouts);
+        .set_layouts(set_layouts);
     // SAFETY: the pool has room for exactly this one set.
     let sets = unsafe { device.allocate_descriptor_sets(&allocate_sets) }
         .map_err(|e| DispatchError::Vulkan("allocate_descriptor_sets", e))?;
     let set = sets[0];
+    Ok((descriptor_pool, set))
+}
 
+/// Points every binding of `set` at its buffer or image.
+fn write_descriptor_set(
+    device: &ash::Device,
+    set: vk::DescriptorSet,
+    windows: [usize; 2],
+    resources: &BoundResources,
+) {
+    let buffers = resources.buffers;
+    let texture = &resources.texture;
+    let second_texture = &resources.second_texture;
+    let storage_image = &resources.storage_image;
+    let draw_data_info = resources.draw_data_info;
     let observation = [vk::DescriptorBufferInfo::default()
         .buffer(buffers[0].0)
         .offset(0)
@@ -3516,7 +3610,20 @@ fn build_pipeline(
     ];
     // SAFETY: the set came from the pool above and the buffers outlive the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
+}
 
+/// Creates the graphics pipeline from its stages and fixed-function state.
+fn create_graphics_pipeline(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    modules: (vk::ShaderModule, vk::ShaderModule),
+    layout: vk::PipelineLayout,
+    size: (u32, u32),
+    geometry: Geometry,
+    bound: Bound<'_>,
+) -> Result<vk::Pipeline, DispatchError> {
+    let (vertex, fragment) = modules;
+    let (width, height) = size;
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
             .stage(match geometry {
@@ -3591,27 +3698,7 @@ fn build_pipeline(
     let pipelines =
         unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &infos, None) }
             .map_err(|(_, e)| DispatchError::Vulkan("create_graphics_pipelines", e))?;
-
-    Ok(Pipeline {
-        vertex,
-        fragment,
-        layout,
-        handle: pipelines[0],
-        set_layout,
-        descriptor_pool,
-        set,
-        buffers,
-        texture,
-        second_texture,
-        storage_image,
-        geometry,
-        owns_guest_memory,
-        user_data: *bound.user_data,
-        textures_uploaded: false,
-        window_offset: bound
-            .guest_buffer
-            .map_or(0, |guest| u32::try_from(guest.offset).unwrap_or(0)),
-    })
+    Ok(pipelines[0])
 }
 
 /// Clears an attachment to `clear`, draws three vertices through the given shaders, and reads

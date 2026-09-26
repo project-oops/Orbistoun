@@ -496,6 +496,27 @@ impl Session {
         let instance = unsafe { entry.create_instance(&instance_info, None) }
             .map_err(|e| ("create_instance", e))?;
 
+        let (physical, family) = Self::compute_family(&instance)?;
+        let (device, wanted_features, mesh_enabled) =
+            Self::create_device(&instance, physical, family)?;
+        // SAFETY: the family index came from this device own queue properties.
+        let queue = unsafe { device.get_device_queue(family, 0) };
+        let properties = Self::properties(&instance, physical, &wanted_features, mesh_enabled);
+
+        Ok(Self {
+            instance,
+            physical,
+            device,
+            queue,
+            family,
+            properties,
+        })
+    }
+
+    /// Picks the first physical device and its first queue family that can compute.
+    fn compute_family(
+        instance: &ash::Instance,
+    ) -> Result<(vk::PhysicalDevice, u32), (&'static str, vk::Result)> {
         // SAFETY: the instance is live.
         let physical = unsafe { instance.enumerate_physical_devices() }
             .map_err(|e| ("enumerate_physical_devices", e))?
@@ -514,7 +535,17 @@ impl Session {
             .ok_or(("compute queue", vk::Result::ERROR_FEATURE_NOT_PRESENT))?;
         let family =
             u32::try_from(family).map_err(|_| ("compute queue", vk::Result::ERROR_UNKNOWN))?;
+        Ok((physical, family))
+    }
 
+    /// Creates the logical device with the features and extensions the emitted modules
+    /// declare, returning the core features requested and whether mesh shading was enabled.
+    fn create_device(
+        instance: &ash::Instance,
+        physical: vk::PhysicalDevice,
+        family: u32,
+    ) -> Result<(ash::Device, vk::PhysicalDeviceFeatures, vk::Bool32), (&'static str, vk::Result)>
+    {
         let priorities = [1.0_f32];
         let queue_info = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
@@ -599,9 +630,16 @@ impl Session {
         // SAFETY: the physical device is valid and the create info outlives the call.
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
-        // SAFETY: the family index came from this device own queue properties.
-        let queue = unsafe { device.get_device_queue(family, 0) };
+        Ok((device, wanted_features, wanted_mesh.mesh_shader))
+    }
 
+    /// Reads what the device reports and what was enabled into [`Properties`].
+    fn properties(
+        instance: &ash::Instance,
+        physical: vk::PhysicalDevice,
+        wanted_features: &vk::PhysicalDeviceFeatures,
+        mesh_enabled: vk::Bool32,
+    ) -> Properties {
         let mut float_controls = vk::PhysicalDeviceFloatControlsProperties::default();
         let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
         let mut reported = vk::PhysicalDeviceProperties2::default()
@@ -611,7 +649,7 @@ impl Session {
         // call - they are locals declared immediately above it.
         unsafe { instance.get_physical_device_properties2(physical, &mut reported) };
 
-        let properties = Properties {
+        Properties {
             device: reported.properties.device_name_as_c_str().map_or_else(
                 |_| "unnamed device".to_owned(),
                 |s| s.to_string_lossy().into_owned(),
@@ -623,20 +661,11 @@ impl Session {
             // that enabling it later updates this by construction.
             fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,
             // Enabled, not merely offered - the same rule every other row here follows.
-            mesh_shading: wanted_mesh.mesh_shader == vk::TRUE,
+            mesh_shading: mesh_enabled == vk::TRUE,
             storage_image_write: wanted_features.shader_storage_image_write_without_format
                 == vk::TRUE,
             compressed_textures: wanted_features.texture_compression_bc == vk::TRUE,
-        };
-
-        Ok(Self {
-            instance,
-            physical,
-            device,
-            queue,
-            family,
-            properties,
-        })
+        }
     }
 }
 

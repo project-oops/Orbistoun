@@ -2045,6 +2045,17 @@ pub fn instruction<M: Model + ?Sized>(
         // The message a primitive shader opens with, which is a mesh module's first act too.
         "s_sendmsg" => send_message(model, instruction),
 
+        _ => scalar_instruction(model, instruction, name),
+    }
+}
+
+/// Translates the scalar ALU instructions, passing any other on to the vector family.
+fn scalar_instruction<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    match name {
         // s_mov_b32: once for the whole wavefront, since scalar registers are uniform.
         // The scalar moves. Split out for the same reason the memory instructions
         // were: the combined match outgrew a screen, and these two ask a question the
@@ -2082,6 +2093,17 @@ pub fn instruction<M: Model + ?Sized>(
         "s_cmp_eq_i32" | "s_cmp_lg_i32" | "s_cmp_gt_i32" | "s_cmp_ge_i32" | "s_cmp_lt_i32"
         | "s_cmp_le_i32" => scalar_compare(model, instruction, name),
 
+        _ => vector_instruction(model, instruction, name),
+    }
+}
+
+/// Translates the vector ALU instructions, passing any other on to the memory family.
+fn vector_instruction<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    match name {
         // Comparisons, which is where a mask comes from. Every lane compares, and the
         // sixty-four answers become one value the shader can then and into `exec`.
         "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_lt_u32_e32" => {
@@ -2174,6 +2196,17 @@ pub fn instruction<M: Model + ?Sized>(
         "v_sqrt_f32_e32" | "v_rsq_f32_e32" | "v_sin_f32_e32" | "v_cos_f32_e32"
         | "v_exp_f32_e32" | "v_log_f32_e32" => float_unary(model, instruction, name),
 
+        _ => memory_instruction(model, instruction, name),
+    }
+}
+
+/// Translates the memory and image instructions, refusing any other.
+fn memory_instruction<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    match name {
         // Anything that reaches guest memory. Split out because the two halves ask
         // different questions - one is about registers and arithmetic, the other about
         // addresses - and because the combined match outgrew what fits on a screen.
@@ -3106,15 +3139,57 @@ fn exponent_is_zero<M: Model + ?Sized>(model: &mut M, value: Id) -> Id {
 /// pattern - unlike the fixup, where it gives one - so the canonical quiet NaN is used.
 /// Nothing downstream can observe the difference: this result feeds the reciprocal and
 /// then `v_div_fixup_f32`, which replaces any NaN with a quietened operand of its own.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one algorithm - the division pre-scale's subnormal cases are a single decision table, and splitting it to satisfy a line count would put half a rule in each half"
-)]
 fn division_scale<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let modifiers = Modifiers::read(instruction, true)?;
+    let operands = &instruction.operands;
+    let (register, mask_name) = division_scale_destinations(instruction)?;
+    let sources: Vec<Operand> = operands[2..].to_vec();
+    let [first, second, third] = sources.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "the division pre-scale does not have three sources",
+        });
+    };
+
+    let constants = ScaleConstants::new(model);
+
+    // Started from zero rather than from the mask's current contents: the reference
+    // opens with `VCC = 0` and every lane is then written, so anything already there is
+    // overwritten in full.
+    let mut halves = (constants.zero, constants.zero);
+
+    // Every lane: this writes a mask as well as values (see `carry_arithmetic`).
+    for lane in 0..model.lanes() {
+        let (value, set) = division_scale_lane(
+            model,
+            instruction,
+            [first, second, third],
+            modifiers,
+            &constants,
+            lane,
+        )?;
+        halves = model.set_lane_bit(halves, lane, set);
+        model.write_vector_lane(register, lane, value);
+    }
+
+    // The flag, where the instruction asked for one. It is still computed either way: the value
+    // and the flag come out of the same selects, so there is nothing to skip and nothing gained
+    // by skipping it - only the write is conditional.
+    if let Some(mask_name) = mask_name {
+        model.write_lane_mask(mask_name, halves.0, halves.1)?;
+    }
+    model.count();
+    Ok(())
+}
+
+/// Reads the division pre-scale's vector destination register and the lane mask its flag goes
+/// to, `None` when the shader discards the flag.
+fn division_scale_destinations(
+    instruction: &Instruction,
+) -> Result<(u32, Option<&'static str>), TranslateError> {
     let operands = &instruction.operands;
     let (Some(Operand::Vector(destination)), Some(scalar_destination)) =
         (operands.first(), operands.get(1))
@@ -3149,118 +3224,150 @@ fn division_scale<M: Model + ?Sized>(
             });
         }
     };
-    let sources: Vec<Operand> = operands[2..].to_vec();
-    let [first, second, third] = sources.as_slice() else {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "the division pre-scale does not have three sources",
-        });
-    };
+    Ok((register, mask_name))
+}
 
-    let magnitude = model.constant(0x7FFF_FFFF);
-    let zero = model.constant(0);
-    let canonical_nan = model.constant(0x7FC0_0000);
-    // Two to the sixty-fourth and its reciprocal, both exact.
-    let up = model.constant(0x5F80_0000);
-    let down = model.constant(0x1F80_0000);
-    let shift = model.constant(23);
-    let exponent_mask = model.constant(0xFF);
-    let ninety_six = model.constant(96);
-    let twenty_three = model.constant(23);
-    // The flag is carried as a word so it can go through the same selects as the value,
-    // and is turned back into a bit at the end. Selecting between booleans would need a
-    // second select shape for no gain.
-    let truth = model.constant(1);
-    let falsehood = zero;
+/// The constants every lane of the division pre-scale uses, declared once before the lanes.
+struct ScaleConstants {
+    magnitude: Id,
+    zero: Id,
+    canonical_nan: Id,
+    up: Id,
+    down: Id,
+    shift: Id,
+    exponent_mask: Id,
+    ninety_six: Id,
+    twenty_three: Id,
+    truth: Id,
+    falsehood: Id,
+}
 
-    // Started from zero rather than from the mask's current contents: the reference
-    // opens with `VCC = 0` and every lane is then written, so anything already there is
-    // overwritten in full.
-    let mut halves = (zero, zero);
-
-    // Every lane: this writes a mask as well as values (see `carry_arithmetic`).
-    for lane in 0..model.lanes() {
-        let scaled_input = model.read_source(instruction, first, lane)?;
-        let scaled_input = apply_modifiers(model, scaled_input, modifiers, 0);
-        let denominator = model.read_source(instruction, second, lane)?;
-        let denominator = apply_modifiers(model, denominator, modifiers, 1);
-        let numerator = model.read_source(instruction, third, lane)?;
-        let numerator = apply_modifiers(model, numerator, modifiers, 2);
-
-        let denominator_magnitude = model.binary(op::BITWISE_AND, denominator, magnitude);
-        let numerator_magnitude = model.binary(op::BITWISE_AND, numerator, magnitude);
-        let denominator_zero = model.compare(op::IEQUAL, denominator_magnitude, zero);
-        let numerator_zero = model.compare(op::IEQUAL, numerator_magnitude, zero);
-
-        let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, denominator, shift);
-        let denominator_exponent = model.binary(op::BITWISE_AND, shifted, exponent_mask);
-        let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, numerator, shift);
-        let numerator_exponent = model.binary(op::BITWISE_AND, shifted, exponent_mask);
-
-        // A subnormal denominator: exponent all zeroes, but not the value zero.
-        let denominator_flat = model.compare(op::IEQUAL, denominator_exponent, zero);
-        let not_zero = negate(model, denominator_zero);
-        let denominator_subnormal = both(model, denominator_flat, not_zero);
-
-        // The quotient is near the top of the range.
-        let spread = model.binary(op::ISUB, numerator_exponent, denominator_exponent);
-        let very_wide = model.compare(op::SGREATER_THAN_EQUAL, spread, ninety_six);
-        let numerator_tiny = model.compare(op::SLESS_THAN_EQUAL, numerator_exponent, twenty_three);
-
-        // The two questions that need an actual division. See `exponent_is_zero`.
-        let one = model.constant(0x3F80_0000);
-        let reciprocal = model.f32_binary(op::FDIV, one, denominator);
-        let reciprocal_subnormal = exponent_is_zero(model, reciprocal);
-        let quotient = model.f32_binary(op::FDIV, numerator, denominator);
-        let quotient_subnormal = exponent_is_zero(model, quotient);
-        let both_subnormal = both(model, reciprocal_subnormal, quotient_subnormal);
-
-        let scaled_is_denominator = model.compare(op::IEQUAL, scaled_input, denominator);
-        let scaled_is_numerator = model.compare(op::IEQUAL, scaled_input, numerator);
-
-        let scaled_up = model.f32_binary(op::FMUL, scaled_input, up);
-        let scaled_down = model.f32_binary(op::FMUL, scaled_input, down);
-        let up_if_denominator = pick(model, scaled_is_denominator, scaled_up, scaled_input);
-        let up_if_numerator = pick(model, scaled_is_numerator, scaled_up, scaled_input);
-
-        // Built from the default upwards, so the last applied is the first branch.
-        let mut value = scaled_input;
-        let mut flag = falsehood;
-
-        value = pick(model, numerator_tiny, scaled_up, value);
-
-        value = pick(model, quotient_subnormal, up_if_numerator, value);
-        flag = pick(model, quotient_subnormal, truth, flag);
-
-        value = pick(model, reciprocal_subnormal, scaled_down, value);
-        flag = pick(model, reciprocal_subnormal, falsehood, flag);
-
-        value = pick(model, both_subnormal, up_if_denominator, value);
-        flag = pick(model, both_subnormal, truth, flag);
-
-        value = pick(model, denominator_subnormal, scaled_up, value);
-        flag = pick(model, denominator_subnormal, falsehood, flag);
-
-        value = pick(model, very_wide, up_if_denominator, value);
-        flag = pick(model, very_wide, truth, flag);
-
-        let either_zero = model.either(denominator_zero, numerator_zero);
-        value = pick(model, either_zero, canonical_nan, value);
-        flag = pick(model, either_zero, falsehood, flag);
-
-        let set = model.is_not_zero(flag);
-        halves = model.set_lane_bit(halves, lane, set);
-        model.write_vector_lane(register, lane, value);
+impl ScaleConstants {
+    /// Declares the constants, in field order.
+    fn new<M: Model + ?Sized>(model: &mut M) -> Self {
+        let magnitude = model.constant(0x7FFF_FFFF);
+        let zero = model.constant(0);
+        let canonical_nan = model.constant(0x7FC0_0000);
+        // Two to the sixty-fourth and its reciprocal, both exact.
+        let up = model.constant(0x5F80_0000);
+        let down = model.constant(0x1F80_0000);
+        let shift = model.constant(23);
+        let exponent_mask = model.constant(0xFF);
+        let ninety_six = model.constant(96);
+        let twenty_three = model.constant(23);
+        // The flag is carried as a word so it can go through the same selects as the value,
+        // and is turned back into a bit at the end. Selecting between booleans would need a
+        // second select shape for no gain.
+        let truth = model.constant(1);
+        let falsehood = zero;
+        Self {
+            magnitude,
+            zero,
+            canonical_nan,
+            up,
+            down,
+            shift,
+            exponent_mask,
+            ninety_six,
+            twenty_three,
+            truth,
+            falsehood,
+        }
     }
+}
 
-    // The flag, where the instruction asked for one. It is still computed either way: the value
-    // and the flag come out of the same selects, so there is nothing to skip and nothing gained
-    // by skipping it - only the write is conditional.
-    if let Some(mask_name) = mask_name {
-        model.write_lane_mask(mask_name, halves.0, halves.1)?;
-    }
-    model.count();
-    Ok(())
+/// Computes one lane of the division pre-scale: the scaled value, and whether it scaled.
+fn division_scale_lane<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    [first, second, third]: [&Operand; 3],
+    modifiers: Modifiers,
+    constants: &ScaleConstants,
+    lane: u32,
+) -> Result<(Id, Id), TranslateError> {
+    let ScaleConstants {
+        magnitude,
+        zero,
+        canonical_nan,
+        up,
+        down,
+        shift,
+        exponent_mask,
+        ninety_six,
+        twenty_three,
+        truth,
+        falsehood,
+    } = *constants;
+    let scaled_input = model.read_source(instruction, first, lane)?;
+    let scaled_input = apply_modifiers(model, scaled_input, modifiers, 0);
+    let denominator = model.read_source(instruction, second, lane)?;
+    let denominator = apply_modifiers(model, denominator, modifiers, 1);
+    let numerator = model.read_source(instruction, third, lane)?;
+    let numerator = apply_modifiers(model, numerator, modifiers, 2);
+
+    let denominator_magnitude = model.binary(op::BITWISE_AND, denominator, magnitude);
+    let numerator_magnitude = model.binary(op::BITWISE_AND, numerator, magnitude);
+    let denominator_zero = model.compare(op::IEQUAL, denominator_magnitude, zero);
+    let numerator_zero = model.compare(op::IEQUAL, numerator_magnitude, zero);
+
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, denominator, shift);
+    let denominator_exponent = model.binary(op::BITWISE_AND, shifted, exponent_mask);
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, numerator, shift);
+    let numerator_exponent = model.binary(op::BITWISE_AND, shifted, exponent_mask);
+
+    // A subnormal denominator: exponent all zeroes, but not the value zero.
+    let denominator_flat = model.compare(op::IEQUAL, denominator_exponent, zero);
+    let not_zero = negate(model, denominator_zero);
+    let denominator_subnormal = both(model, denominator_flat, not_zero);
+
+    // The quotient is near the top of the range.
+    let spread = model.binary(op::ISUB, numerator_exponent, denominator_exponent);
+    let very_wide = model.compare(op::SGREATER_THAN_EQUAL, spread, ninety_six);
+    let numerator_tiny = model.compare(op::SLESS_THAN_EQUAL, numerator_exponent, twenty_three);
+
+    // The two questions that need an actual division. See `exponent_is_zero`.
+    let one = model.constant(0x3F80_0000);
+    let reciprocal = model.f32_binary(op::FDIV, one, denominator);
+    let reciprocal_subnormal = exponent_is_zero(model, reciprocal);
+    let quotient = model.f32_binary(op::FDIV, numerator, denominator);
+    let quotient_subnormal = exponent_is_zero(model, quotient);
+    let both_subnormal = both(model, reciprocal_subnormal, quotient_subnormal);
+
+    let scaled_is_denominator = model.compare(op::IEQUAL, scaled_input, denominator);
+    let scaled_is_numerator = model.compare(op::IEQUAL, scaled_input, numerator);
+
+    let scaled_up = model.f32_binary(op::FMUL, scaled_input, up);
+    let scaled_down = model.f32_binary(op::FMUL, scaled_input, down);
+    let up_if_denominator = pick(model, scaled_is_denominator, scaled_up, scaled_input);
+    let up_if_numerator = pick(model, scaled_is_numerator, scaled_up, scaled_input);
+
+    // Built from the default upwards, so the last applied is the first branch.
+    let mut value = scaled_input;
+    let mut flag = falsehood;
+
+    value = pick(model, numerator_tiny, scaled_up, value);
+
+    value = pick(model, quotient_subnormal, up_if_numerator, value);
+    flag = pick(model, quotient_subnormal, truth, flag);
+
+    value = pick(model, reciprocal_subnormal, scaled_down, value);
+    flag = pick(model, reciprocal_subnormal, falsehood, flag);
+
+    value = pick(model, both_subnormal, up_if_denominator, value);
+    flag = pick(model, both_subnormal, truth, flag);
+
+    value = pick(model, denominator_subnormal, scaled_up, value);
+    flag = pick(model, denominator_subnormal, falsehood, flag);
+
+    value = pick(model, very_wide, up_if_denominator, value);
+    flag = pick(model, very_wide, truth, flag);
+
+    let either_zero = model.either(denominator_zero, numerator_zero);
+    value = pick(model, either_zero, canonical_nan, value);
+    flag = pick(model, either_zero, falsehood, flag);
+
+    let set = model.is_not_zero(flag);
+    Ok((value, set))
 }
 
 /// Writes the low half of a lane mask, leaving the upper half as it was.
