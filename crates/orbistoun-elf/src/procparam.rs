@@ -1,7 +1,7 @@
 //! The process parameter block, which a console loader reads before the first guest
 //! instruction runs.
 //!
-//! A launching executable carries a `PT_SCE_PROCPARAM` segment ([`crate::SCE_PROCPARAM`])
+//! A launching executable carries a `PT_SCE_PROCPARAM` segment ([`crate::segment::SCE_PROCPARAM`])
 //! whose bytes are a small fixed header followed by pointers to three further blocks the
 //! title chose - libc parameters, kernel-memory parameters, and one more. The loader reads
 //! this to learn the SDK version and, through the memory-parameter block, the flexible

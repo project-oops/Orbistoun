@@ -51,8 +51,7 @@ progress. [docs/THE_LOOP.md](docs/THE_LOOP.md) describes each step;
 
 - The symbol and library name strings inside `guest_module!` declarations are ABI
   identifiers (the NID is computed from them) and stay as they are.
-- Our own types carry no vendor prefix: `GuestError`, `GuestResult`, `guest_module!`,
-  `is_vendor_segment`.
+- Our own types carry no vendor prefix: `GuestError`, `GuestResult`, `guest_module!`.
 
 ### Honest failure
 

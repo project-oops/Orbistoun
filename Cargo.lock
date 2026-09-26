@@ -3000,9 +3000,9 @@ dependencies = [
 name = "orbistoun-nid"
 version = "0.1.0"
 dependencies = [
+ "selfish-nid",
  "serde",
  "serde_json",
- "sha1",
 ]
 
 [[package]]

@@ -117,7 +117,7 @@ fn a_header_pointing_past_the_end_of_the_file_locates_nothing() {
 /// two headers over the same low range. An address in the image means the image.
 #[test]
 fn a_load_is_preferred_over_a_vendor_segment_claiming_the_same_address() {
-    const SCE_DYNLIBDATA: u32 = 0x6100_0000;
+    use orbistoun_elf::segment::SCE_DYNLIBDATA;
     let bytes = bare_elf(
         &[(SCE_DYNLIBDATA, 0x300, 0x0, 0x100), (1, 0x200, 0x0, 0x200)],
         0x400,
@@ -133,7 +133,7 @@ fn a_load_is_preferred_over_a_vendor_segment_claiming_the_same_address() {
 /// A vendor segment is still reachable when nothing else covers the address.
 #[test]
 fn a_vendor_segment_resolves_when_no_load_covers_the_address() {
-    const SCE_DYNLIBDATA: u32 = 0x6100_0000;
+    use orbistoun_elf::segment::SCE_DYNLIBDATA;
     let bytes = bare_elf(
         &[
             (1, 0x200, 0x1000, 0x100),
@@ -175,8 +175,7 @@ fn a_bare_container_still_reports_no_wrapper_mapped_segments() {
 /// caught by writing this, which is the point of writing it.
 #[test]
 fn a_vendor_hash_table_at_offset_zero_is_still_found() {
-    /// `PT_SCE_DYNLIBDATA`.
-    const VENDOR_DATA: u32 = 0x6100_0000;
+    use orbistoun_elf::segment::SCE_DYNLIBDATA as VENDOR_DATA;
     const SCE_HASH: u64 = 0x6100_0025;
     const SCE_STRTAB: u64 = 0x6100_0035;
     const SCE_SYMTAB: u64 = 0x6100_0039;
@@ -225,7 +224,7 @@ fn a_vendor_hash_table_at_offset_zero_is_still_found() {
 fn title_shaped() -> Vec<u8> {
     const PT_LOAD: u32 = 1;
     const PT_DYNAMIC: u32 = 2;
-    const PT_SCE_DYNLIBDATA: u32 = 0x6100_0000;
+    use orbistoun_elf::segment::SCE_DYNLIBDATA as PT_SCE_DYNLIBDATA;
     bare_elf(
         &[
             (PT_LOAD, 0x200, 0x1000, 0x100),

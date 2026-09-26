@@ -24,9 +24,8 @@ use orbistoun_service::{Service, ServiceConfig};
 struct Cli {
     /// Hex-encoded NID hash suffix, overriding the one orbistoun ships with.
     ///
-    /// Rarely needed. The shipped value is documented in
-    /// `crates/orbistoun-nid/data/hash-suffix.toml` and verifies itself against
-    /// published C library names. See docs/SYMBOLS.md.
+    /// Rarely needed. The shipped value is `selfish-nid`'s, documented in selfish's
+    /// `data/hash-suffix.toml`. See docs/SYMBOLS.md.
     #[arg(long, global = true, default_value = "")]
     suffix_hex: String,
 

@@ -132,7 +132,7 @@ pub struct Elf64Header {
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
 pub struct Elf64ProgramHeader {
-    /// Segment type. See [`is_vendor_segment`].
+    /// Segment type. See [`segment::is_vendor`].
     pub p_type: little_endian::U32,
     /// Segment permission flags.
     pub flags: little_endian::U32,
@@ -150,34 +150,8 @@ pub struct Elf64ProgramHeader {
     pub align: little_endian::U64,
 }
 
-/// The OS-specific `p_type` range, per the ELF specification.
-///
-/// Everything vendor-defined lives in here - but so do the GNU extensions, which are
-/// ordinary and not vendor data at all.
-pub const OS_SPECIFIC_RANGE: std::ops::RangeInclusive<u32> = 0x6000_0000..=0x6FFF_FFFF;
-
-/// GNU extension segment types that fall inside [`OS_SPECIFIC_RANGE`] but are not
-/// vendor data.
-///
-/// Excluding these is not cosmetic: real material carries `PT_GNU_EH_FRAME` and
-/// `PT_GNU_RELRO` alongside genuine vendor segments, and counting them as vendor data
-/// overstates how much is unhandled.
-pub const GNU_SEGMENT_TYPES: [u32; 3] = [0x6474_e550, 0x6474_e551, 0x6474_e552];
-
-/// Whether a `p_type` is a vendor extension.
-///
-/// Originally asserted as `0x61000000..=0x61FFFFFF`, which real material showed to be
-/// too narrow: an ordinary module carries vendor segments at `0x61000002` *and* at
-/// `0x6fffff00`/`0x6fffff01`. The narrow range saw one of three.
-pub fn is_vendor_segment(p_type: u32) -> bool {
-    OS_SPECIFIC_RANGE.contains(&p_type) && !GNU_SEGMENT_TYPES.contains(&p_type)
-}
-
-/// `PT_SCE_PROCPARAM` - the segment carrying the process parameter block.
-///
-/// A launching title places its process parameters here; a console loader reads them before
-/// the first guest instruction. See [`procparam`] for the block's layout and provenance.
-pub const SCE_PROCPARAM: u32 = 0x6100_0001;
+/// Program header types, including the vendor's, from the format's owner.
+pub use selfish_elf::segment;
 
 /// A parsed container, borrowing the file bytes.
 ///
@@ -340,7 +314,7 @@ impl<'a> Container<'a> {
         Ok(self
             .program_headers()?
             .into_iter()
-            .filter(|ph| is_vendor_segment(ph.p_type.get()))
+            .filter(|ph| segment::is_vendor(ph.p_type.get()))
             .collect())
     }
 
@@ -538,7 +512,7 @@ impl<'a> Container<'a> {
     }
 
     /// The process parameter block's bytes, if the container carries a `PT_SCE_PROCPARAM`
-    /// segment ([`SCE_PROCPARAM`]).
+    /// segment ([`segment::SCE_PROCPARAM`]).
     ///
     /// Located the same way [`Self::dynamic_bytes`] locates the dynamic table: through the
     /// wrapper's descriptor table when wrapped (the header's own `p_offset` points into the
@@ -547,7 +521,7 @@ impl<'a> Container<'a> {
     /// it by address.
     pub fn proc_param_bytes<'b>(&self, whole: &'b [u8]) -> Result<Option<&'b [u8]>, ElfError> {
         for ph in self.program_headers()? {
-            if ph.p_type.get() != SCE_PROCPARAM {
+            if ph.p_type.get() != segment::SCE_PROCPARAM {
                 continue;
             }
             let at = if self.wrapper.is_some() {
@@ -602,9 +576,8 @@ impl<'a> Container<'a> {
     /// `PT_SCE_DYNLIBDATA`. The vendor's dynamic tags are offsets into this rather than
     /// virtual addresses, so without it they cannot be resolved at all (D247).
     pub fn vendor_data_offset(&self, whole: &[u8]) -> Result<Option<usize>, ElfError> {
-        const PT_SCE_DYNLIBDATA: u32 = 0x6100_0000;
         for (index, ph) in self.program_headers()?.iter().enumerate() {
-            if ph.p_type.get() != PT_SCE_DYNLIBDATA {
+            if ph.p_type.get() != segment::SCE_DYNLIBDATA {
                 continue;
             }
             // In a wrapper container the header's own file offset is a logical inner-ELF

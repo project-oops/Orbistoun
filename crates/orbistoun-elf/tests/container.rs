@@ -20,7 +20,8 @@
 //! relocations came to report two of an unsupported type (D247). Both dialects are built
 //! below, from the same layout, so the difference between them is the only variable.
 
-use orbistoun_elf::{Container, ElfError, dynamic, is_vendor_segment};
+use orbistoun_elf::segment::SCE_DYNLIBDATA as PT_SCE_DYNLIBDATA;
+use orbistoun_elf::{Container, ElfError, dynamic};
 
 const EHDR: usize = 64;
 const PHDR: usize = 56;
@@ -30,7 +31,6 @@ const DYN_ENTRY: usize = 16;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
-const PT_SCE_DYNLIBDATA: u32 = 0x6100_0000;
 
 // The layout every fixture shares. Virtual address equals file offset throughout, because
 // one `PT_LOAD` covers the whole image from zero - so an address that resolves wrongly
@@ -358,25 +358,6 @@ fn an_empty_program_header_table_is_not_an_error() {
 }
 
 // --- segments ---------------------------------------------------------------------------
-
-/// A GNU segment sits in the OS-specific range and is not vendor data.
-///
-/// Not cosmetic: real material carries these alongside genuine vendor segments, and
-/// counting them overstates how much of a module is unhandled.
-#[test]
-fn a_gnu_segment_is_not_counted_as_vendor_data() {
-    assert!(is_vendor_segment(PT_SCE_DYNLIBDATA));
-    assert!(is_vendor_segment(0x6fff_ff00));
-    for gnu in orbistoun_elf::GNU_SEGMENT_TYPES {
-        assert!(
-            orbistoun_elf::OS_SPECIFIC_RANGE.contains(&gnu),
-            "{gnu:#x} should be inside the OS-specific range"
-        );
-        assert!(!is_vendor_segment(gnu), "{gnu:#x} is a GNU extension");
-    }
-    assert!(!is_vendor_segment(PT_LOAD));
-    assert!(!is_vendor_segment(0x7000_0000));
-}
 
 /// The vendor data segment is found among headers that include a GNU one.
 #[test]

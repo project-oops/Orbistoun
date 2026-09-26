@@ -174,7 +174,9 @@ pub fn solve_patterns(
                         for (pattern, &len) in patterns.iter().zip(&lens) {
                             if offset < len {
                                 if pattern.write_at(offset, &mut name) {
-                                    let nid = hasher.hash_bytes(&name);
+                                    let text = std::str::from_utf8(&name)
+                                        .expect("a candidate is a concatenation of strings");
+                                    let nid = hasher.hash(text);
                                     if targets.wants(nid) {
                                         // Allocated only on a match, which is rare
                                         // enough to be free.

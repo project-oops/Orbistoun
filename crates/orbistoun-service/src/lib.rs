@@ -592,7 +592,7 @@ fn proc_param_info(
     let headers = container.program_headers()?;
     let Some(header) = headers
         .iter()
-        .find(|h| h.p_type.get() == orbistoun_elf::SCE_PROCPARAM)
+        .find(|h| h.p_type.get() == orbistoun_elf::segment::SCE_PROCPARAM)
     else {
         return Ok(None);
     };

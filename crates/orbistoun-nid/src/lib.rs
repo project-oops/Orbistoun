@@ -1,30 +1,22 @@
 //! NID hashing and symbol-name resolution.
 //!
-//! Guest modules do not import by name. A guest module's dynamic table
-//! references a library plus a **NID**: a 64-bit hash derived from the symbol
-//! name, encoded in a custom base64 alphabet. Resolving an import therefore has
-//! two halves, and this crate owns both:
+//! A guest module imports a library plus a **NID**: a 64-bit hash of the symbol name,
+//! encoded in a base64 alphabet. Resolving an import has two halves:
 //!
-//! 1. **Forward**: name -> NID, so a known symbol can be matched against what a
-//!    module actually asks for. This is [`NidHasher`].
-//! 2. **Reverse**: NID -> name, which is only possible by lookup. A hash is not
-//!    invertible, so unknown NIDs stay unknown. This is [`SymbolDb`].
+//! 1. **Forward**: name -> NID, to match a known symbol against what a module asks for.
+//!    This is [`NidHasher`], which applies `selfish-nid`'s hash with a configurable suffix.
+//! 2. **Reverse**: NID -> name, by lookup only, since a hash is not invertible. This is
+//!    [`SymbolDb`].
 //!
-//! # Why the hash suffix is data, not a constant
+//! The hash suffix is runtime data supplied with the symbol database (D071); the default is
+//! `selfish-nid`'s committed suffix. `docs/SYMBOLS.md` describes the file format.
 //!
-//! The algorithm appends a fixed byte suffix to the symbol name before hashing.
-//! That suffix is a publicly documented constant from console
-//! reverse-engineering work, but it is deliberately **not** baked into this
-//! source: it is supplied at construction from the same file as the symbol
-//! database. Two reasons - it keeps a magic constant out of the source tree, and
-//! it makes the hasher testable against any suffix without a recompile.
-//!
-//! See `docs/SYMBOLS.md` for the expected file format and where to obtain it.
+//! [`Nid`] holds the first digest byte as its most significant byte, the reverse of
+//! `selfish_nid::Nid`; the two convert with one byte swap and encode to the same characters.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
 
 /// A 64-bit symbol hash as it appears in a guest module import table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -42,20 +34,23 @@ impl Nid {
     }
 }
 
+impl From<selfish_nid::Nid> for Nid {
+    fn from(nid: selfish_nid::Nid) -> Self {
+        Self(nid.value().swap_bytes())
+    }
+}
+
+impl From<Nid> for selfish_nid::Nid {
+    fn from(nid: Nid) -> Self {
+        Self::from_value(nid.0.swap_bytes())
+    }
+}
+
 impl std::fmt::Display for Nid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#018x}", self.0)
     }
 }
-
-/// Alphabet used to encode a NID inside a dynamic symbol name.
-///
-/// Standard base64 ordering with `+` and `-` as the final two characters.
-pub const NID_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
-
-/// Characters of encoded NID that precede the `#` separators.
-pub const ENCODED_NID_LEN: usize = 11;
 
 /// An import as it appears in a dynamic symbol name.
 ///
@@ -72,82 +67,22 @@ pub struct EncodedImport {
     pub module_id: u16,
 }
 
-/// Decodes one base64 character to its 6-bit value.
-fn b64_value(c: u8) -> Option<u8> {
-    NID_ALPHABET
-        .iter()
-        .position(|a| *a == c)
-        .and_then(|p| u8::try_from(p).ok())
-}
-
-/// Decodes a small base64-encoded integer, as used for library and module ids.
-fn decode_small(text: &str) -> Option<u16> {
-    let mut value: u32 = 0;
-    for c in text.bytes() {
-        value = value
-            .checked_mul(64)?
-            .checked_add(u32::from(b64_value(c)?))?;
-    }
-    u16::try_from(value).ok()
-}
-
 /// Decodes a dynamic symbol name of the form `<nid>#<library>#<module>`.
 ///
 /// Returns `None` for any name that is not in that form - ordinary symbol names exist
 /// too, and a name that does not encode an import is not an error.
-///
-/// # Byte order
-///
-/// The eleven encoded characters carry 66 bits, of which the low two are padding. The
-/// The eight bytes are byte-swapped into the order [`NidHasher`] produces. This is
-/// **independently verified**: hashing published C names with the shipped suffix
-/// matches dozens of real imports in a real executable, and any other combination of
-/// byte order matches none (D070).
 pub fn decode_symbol_name(name: &str) -> Option<EncodedImport> {
-    let mut parts = name.split('#');
-    let encoded = parts.next()?;
-    let library = parts.next()?;
-    let module = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-
+    let import = selfish_nid::decode_symbol_name(name)?;
     Some(EncodedImport {
-        // The length check lives in `decode_nid`, so the two decoders cannot disagree
-        // about what an encoded hash is - which is exactly the drift D070 was about.
-        nid: decode_nid(encoded)?,
-        library_id: decode_small(library)?,
-        module_id: decode_small(module)?,
+        nid: import.nid.into(),
+        library_id: import.library_id,
+        module_id: import.module_id,
     })
 }
 
-/// The suffix orbistoun uses unless told otherwise, with its documentation.
-///
-/// Embedded rather than read from disk so a portable single-binary build carries it
-/// with nothing to lose. See the file itself for what the value is, what it is not, and
-/// how it verifies itself.
-const HASH_SUFFIX_FILE: &str = include_str!("../data/hash-suffix.toml");
-
-/// The default hash suffix, decoded from the shipped data file.
-///
-/// Every emulator of this target necessarily contains this value - resolving imports is
-/// the central act of high-level emulation - so requiring a user to supply it would add
-/// a setup step that protects nothing (D071).
-///
-/// # Panics
-///
-/// If the shipped file is malformed, which a test in this crate rules out.
+/// The suffix orbistoun uses unless told otherwise: `selfish-nid`'s committed one.
 pub fn default_suffix() -> Vec<u8> {
-    let line = HASH_SUFFIX_FILE
-        .lines()
-        .map(str::trim)
-        .find(|l| l.starts_with("suffix_hex"))
-        .expect("the shipped suffix file must define suffix_hex");
-    let hex = line
-        .split('"')
-        .nth(1)
-        .expect("suffix_hex must be a quoted string");
-    decode_hex(hex).expect("the shipped suffix must be valid hex")
+    selfish_nid::suffix()
 }
 
 /// Decodes an even-length hex string.
@@ -164,46 +99,19 @@ pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Decodes the eleven-character form on its own, with no library and module beside it.
+/// Decodes a bare eleven-character NID, with no library or module beside it.
 ///
-/// The exact inverse of [`encode_nid`], and the form a hash arrives in when it did not
-/// come out of an import table: a conformance probe reading a console's own export table
-/// has a hash and an address and nothing else to say about either.
-///
-/// Returns `None` unless the input is exactly [`ENCODED_NID_LEN`] characters of the
-/// alphabet - the same refusal [`decode_symbol_name`] makes, for the same reason. A
-/// shorter or longer string decodes to a perfectly plausible number, and a plausible
-/// number here is a hash that agrees with nothing (D070).
+/// The form a conformance probe reading an export table has. `None` unless the input is
+/// exactly eleven characters of the alphabet: any other length decodes to a plausible
+/// number that agrees with nothing.
 #[must_use]
 pub fn decode_nid(encoded: &str) -> Option<Nid> {
-    if encoded.len() != ENCODED_NID_LEN {
-        return None;
-    }
-    let mut bits: u128 = 0;
-    for c in encoded.bytes() {
-        bits = (bits << 6) | u128::from(b64_value(c)?);
-    }
-    // 11 characters is 66 bits; the low two are padding.
-    let value = (bits >> 2) as u64;
-    Some(Nid::from_raw(value.swap_bytes()))
+    selfish_nid::Nid::decode(encoded).ok().map(Nid::from)
 }
+
 /// Encodes a NID into the eleven-character form a symbol name carries.
-///
-/// The exact inverse of [`decode_symbol_name`]'s first field, and it exists mainly so
-/// that inverse can be **tested**. A hasher and a decoder that disagree about byte
-/// order are each perfectly self-consistent, so nothing catches the disagreement until
-/// something checks that a hash survives the round trip (D070).
 pub fn encode_nid(nid: Nid) -> String {
-    // Undo the swap the decoder applies, then re-add the two padding bits that make
-    // 64 bits into the 66 that eleven six-bit characters carry.
-    let bits = u128::from(nid.as_raw().swap_bytes()) << 2;
-    (0..ENCODED_NID_LEN)
-        .map(|i| {
-            let shift = 6 * (ENCODED_NID_LEN - 1 - i);
-            let index = ((bits >> shift) & 0x3F) as usize;
-            NID_ALPHABET[index] as char
-        })
-        .collect()
+    selfish_nid::Nid::from(nid).encode()
 }
 
 /// Renders bytes as lowercase hex.
@@ -262,57 +170,9 @@ impl NidHasher {
         }
     }
 
-    /// Hashes `name` to the NID a guest module would import it by.
-    ///
-    /// The first eight bytes of the SHA-1 digest, packed so that **`digest[0]` is the most
-    /// significant byte** - matching how the encoded form is unpacked from an import table, which
-    /// a round-trip test pins ([`encode_nid`]).
-    ///
-    /// **This said "little-endian" and the function below it says "big-endian", one screen
-    /// apart.** The implementation is `hash_bytes` and has always been `from_be_bytes`; the
-    /// wording here was simply wrong. It is stated in terms of which digest byte lands where
-    /// because "little-endian" and "big-endian" describe the *packing*, and two projects reading
-    /// the same eight bytes into a `u64` the two ways each called their own order the natural one
-    /// and the other one incorrect - in mirror-image notes, in two repositories (D657).
+    /// Hashes `name` to the NID a guest module imports it by.
     pub fn hash(&self, name: &str) -> Nid {
-        self.hash_bytes(name.as_bytes())
-    }
-
-    /// Hashes a name already held as bytes.
-    ///
-    /// The form a brute-force search wants. Turning each candidate into a `String`
-    /// first allocates once per candidate, and a search that tests billions of them
-    /// spends more time in the allocator than in SHA-1 - so the caller builds names in
-    /// a buffer it reuses and passes the bytes straight through.
-    ///
-    /// A symbol name is bytes to the hash; validity as UTF-8 is the caller's business
-    /// and never affects the result.
-    ///
-    /// # Byte order
-    ///
-    /// **Big-endian - `digest[0]` becomes the most significant byte** - and reading it the other
-    /// way round was wrong here for a long time. It produces a perfectly plausible hash that
-    /// agrees with nothing, and nothing caught it because every test hashed with an arbitrary
-    /// suffix and compared against its own output - self-consistent and self-consistently wrong.
-    /// What exposed it was hashing published C names against a real import table, where the right
-    /// order matches dozens and the wrong order matches none (D070).
-    ///
-    /// **"Wrong here", and the qualifier is not modesty.** This paragraph said "wrong" flatly,
-    /// and a sibling project reading the same eight bytes into a `u64` the other way wrote the
-    /// exact mirror of it about this one - two warnings, each true locally and each phrased as
-    /// though it were universal. The `u64` is an internal representation; both projects unpack
-    /// the same digest and arrive at the same eleven characters. What is fixed is the *pairing* -
-    /// this crate hashes and decodes the same way round, which is what `encode_nid`'s round trip
-    /// tests (D657).
-    pub fn hash_bytes(&self, name: &[u8]) -> Nid {
-        let mut h = Sha1::new();
-        h.update(name);
-        h.update(&self.suffix);
-        let digest = h.finalize();
-
-        let mut bytes = [0_u8; 8];
-        bytes.copy_from_slice(&digest[..8]);
-        Nid(u64::from_be_bytes(bytes))
+        selfish_nid::Nid::with_suffix(name, &self.suffix).into()
     }
 }
 
@@ -875,9 +735,11 @@ impl SymbolDb {
 mod tests {
     use std::collections::BTreeMap;
 
+    use selfish_nid::ENCODED_LEN as ENCODED_NID_LEN;
+
     use super::{
-        ENCODED_NID_LEN, Nid, NidHasher, SymbolDb, SymbolDbFile, decode_hex, decode_nid,
-        decode_symbol_name, default_suffix, encode_nid,
+        Nid, NidHasher, SymbolDb, SymbolDbFile, decode_hex, decode_nid, decode_symbol_name,
+        default_suffix, encode_nid,
     };
 
     #[test]

@@ -13,6 +13,6 @@ description = "NID symbol hashing and name resolution - the 64-bit hashes guest 
 workspace = true
 
 [dependencies]
-sha1 = { workspace = true }
+selfish-nid = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true }
