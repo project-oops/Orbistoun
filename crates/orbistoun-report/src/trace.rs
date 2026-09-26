@@ -570,6 +570,10 @@ pub struct Conditions {
     /// each in words: a placement, or a slot named by the import it answers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_plan_differs: Vec<String>,
+    /// Raw `syscall` instructions the plan listed in the title's code: kernel entries no import
+    /// routes, found before the guest ran.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub link_syscalls: usize,
 }
 
 impl Conditions {
@@ -636,6 +640,12 @@ impl Conditions {
         }
         changed
     }
+}
+
+/// Whether a count is zero, so an unrecorded one stays out of the serialised conditions.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(count: &usize) -> bool {
+    *count == 0
 }
 
 /// How to write the diagnostics a run was under, including none.
@@ -1757,6 +1767,7 @@ mod tests {
             link_plan: "0123456789abcdef".to_owned(),
             link_plan_stored: "new".to_owned(),
             link_plan_differs: Vec::new(),
+            link_syscalls: 0,
         };
         let before = under(conditions.clone());
         // The first run stored the plan the second matched: the same link.

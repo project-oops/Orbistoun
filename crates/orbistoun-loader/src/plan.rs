@@ -46,6 +46,9 @@ pub struct ModulePlan {
     pub segments: Vec<SegmentPlan>,
     /// Every relocation write, ordered by address.
     pub writes: Vec<SlotWrite>,
+    /// Every raw `syscall` instruction in the module's executable segments, by address.
+    #[serde(default)]
+    pub syscalls: Vec<u64>,
 }
 
 impl ModulePlan {
@@ -68,7 +71,16 @@ impl ModulePlan {
                 })
                 .collect(),
             writes,
+            syscalls: Vec::new(),
         }
+    }
+
+    /// The same plan, with the module's raw `syscall` sites listed.
+    #[must_use]
+    pub fn with_syscalls(mut self, mut syscalls: Vec<u64>) -> Self {
+        syscalls.sort_unstable();
+        self.syscalls = syscalls;
+        self
     }
 }
 
@@ -104,6 +116,10 @@ impl LinkPlan {
                 hash.update(write.at.to_le_bytes());
                 hash.update(write.value.to_le_bytes());
             }
+            hash.update((module.syscalls.len() as u64).to_le_bytes());
+            for site in &module.syscalls {
+                hash.update(site.to_le_bytes());
+            }
         }
         let digest = hash.finalize();
         let mut name = String::with_capacity(16);
@@ -134,12 +150,21 @@ impl LinkPlan {
             if was.map(placed) != now.map(placed) {
                 difference.placements.push(library.to_owned());
             }
+            if was.map(|m| &m.syscalls) != now.map(|m| &m.syscalls) {
+                difference.syscalls.push(library.to_owned());
+            }
             let empty = Vec::new();
             let was = was.map_or(&empty, |m| &m.writes);
             let now = now.map_or(&empty, |m| &m.writes);
             difference.slots.extend(slot_differences(library, was, now));
         }
         difference
+    }
+
+    /// Raw `syscall` sites across every module.
+    #[must_use]
+    pub fn syscall_count(&self) -> usize {
+        self.modules.iter().map(|m| m.syscalls.len()).sum()
     }
 
     /// Total relocation writes across every module.
@@ -167,6 +192,8 @@ pub struct SlotDifference {
 pub struct PlanDifference {
     /// Modules placed differently or present in only one plan, by library name.
     pub placements: Vec<String>,
+    /// Modules whose raw `syscall` sites differ, by library name.
+    pub syscalls: Vec<String>,
     /// Slots written differently, executable first, each module's by address.
     pub slots: Vec<SlotDifference>,
 }
@@ -175,7 +202,7 @@ impl PlanDifference {
     /// Whether the two plans agree.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.placements.is_empty() && self.slots.is_empty()
+        self.placements.is_empty() && self.syscalls.is_empty() && self.slots.is_empty()
     }
 }
 
@@ -499,6 +526,21 @@ mod tests {
         assert!(stored.differences(&stored).is_empty());
     }
 
+    /// A module whose `syscall` sites moved is named apart from its placement.
+    #[test]
+    fn differences_name_moved_syscall_sites() {
+        let stored = LinkPlan {
+            modules: vec![module(Vec::new()).with_syscalls(vec![0x10])],
+        };
+        let fresh = LinkPlan {
+            modules: vec![module(Vec::new()).with_syscalls(vec![0x20])],
+        };
+        let difference = stored.differences(&fresh);
+        assert_eq!(difference.syscalls, vec![String::new()]);
+        assert!(difference.placements.is_empty());
+        assert_ne!(stored.digest(), fresh.digest());
+    }
+
     /// A module placed elsewhere is named as a placement, executable first.
     #[test]
     fn differences_name_a_moved_module() {
@@ -539,6 +581,7 @@ mod tests {
                 flags: 5,
             }],
             writes,
+            syscalls: Vec::new(),
         }
     }
 

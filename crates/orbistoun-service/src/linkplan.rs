@@ -31,15 +31,34 @@ pub struct ExecutableLink {
 }
 
 /// The plan for a relocated executable followed by the title's own modules.
-#[must_use]
+///
+/// # Errors
+///
+/// When the executable cannot be parsed for its `syscall` sites.
 pub fn plan_of(
     image: &orbistoun_loader::Image,
+    bytes: &[u8],
     writes: Vec<SlotWrite>,
     title: &LinkedTitle,
-) -> LinkPlan {
-    let mut modules = vec![ModulePlan::of("", image, writes)];
+) -> Result<LinkPlan, ServiceError> {
+    let mut modules = vec![module_plan("", image, bytes, writes)?];
     modules.extend(title.plans.iter().cloned());
-    LinkPlan { modules }
+    Ok(LinkPlan { modules })
+}
+
+/// One module's plan: where it was placed, what relocation wrote, and its raw `syscall` sites.
+///
+/// # Errors
+///
+/// When the module cannot be parsed for its `syscall` sites.
+pub fn module_plan(
+    library: &str,
+    image: &orbistoun_loader::Image,
+    bytes: &[u8],
+    writes: Vec<SlotWrite>,
+) -> Result<ModulePlan, ServiceError> {
+    let syscalls = orbistoun_loader::inventory::syscall_sites(bytes, image.base())?;
+    Ok(ModulePlan::of(library, image, writes).with_syscalls(syscalls))
 }
 
 /// How many differing slots are named before the rest are only counted.
@@ -66,6 +85,12 @@ pub fn describe_plan_difference(
         .iter()
         .map(|library| format!("{} is placed differently", module(library)))
         .collect();
+    lines.extend(
+        difference
+            .syscalls
+            .iter()
+            .map(|library| format!("{} lists different syscall sites", module(library))),
+    );
     for slot in difference.slots.iter().take(PLAN_DIFFERENCES_NAMED) {
         let label = [slot.fresh, slot.stored]
             .into_iter()
@@ -180,6 +205,7 @@ impl Service {
             digest: plan.digest(),
             modules: plan.modules.len(),
             writes: plan.write_count(),
+            syscalls: plan.syscall_count(),
             ..LinkSummary::default()
         };
         let Some(file) = self.link_plan_file(path) else {
@@ -234,7 +260,7 @@ impl Service {
         let image = self.place_image(&bytes, executable_base)?;
         let title = self.link_title_modules(executable, bases, symbols)?;
         let linked = self.relocate_executable(&image, &bytes, &title, symbols, None)?;
-        let plan = plan_of(&image, linked.applied.writes, &title);
+        let plan = plan_of(&image, &bytes, linked.applied.writes, &title)?;
         Ok(self.settle_link_plan((executable, &bytes), &plan, &title, relink))
     }
 }
@@ -270,6 +296,7 @@ mod tests {
         );
         let difference = PlanDifference {
             placements: vec![String::new()],
+            syscalls: Vec::new(),
             slots,
         };
         let lines = super::describe_plan_difference(&difference, &thunks, &labels);

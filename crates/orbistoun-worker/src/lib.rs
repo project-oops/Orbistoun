@@ -579,15 +579,23 @@ fn record_link_plan(
     title: &orbistoun_service::LinkedTitle,
     executable: (&Path, &[u8]),
 ) {
-    let plan = orbistoun_service::linkplan::plan_of(image, writes, title);
+    let (path, bytes) = executable;
+    let plan = match orbistoun_service::linkplan::plan_of(image, bytes, writes, title) {
+        Ok(plan) => plan,
+        Err(e) => {
+            tracing::warn!("no link plan for {}: {e}", path.display());
+            return;
+        }
+    };
     let relink = RUN_RELINK.load(std::sync::atomic::Ordering::Relaxed);
     let summary = service.settle_link_plan(executable, &plan, title, relink);
     tracing::info!(
-        "link plan {} ({}): {} modules, {} relocation writes",
+        "link plan {} ({}): {} modules, {} relocation writes, {} raw syscall sites",
         summary.digest,
         summary.stored,
         summary.modules,
-        summary.writes
+        summary.writes,
+        summary.syscalls
     );
     if relink {
         if summary.differs.is_empty() {
@@ -605,13 +613,12 @@ fn record_link_plan(
             tracing::info!("  {line}");
         }
     }
-    let mismatch = summary.stored == orbistoun_loader::plan::Standing::Mismatch.word();
-    let differs = if mismatch {
-        summary.differs
-    } else {
-        Vec::new()
-    };
-    report::note_link_plan(summary.digest, summary.stored, differs);
+    let mut summary = summary;
+    // Only a mismatch is a finding; a relink's differences were printed above.
+    if summary.stored != orbistoun_loader::plan::Standing::Mismatch.word() {
+        summary.differs.clear();
+    }
+    report::note_link_plan(summary);
 }
 
 /// Fills the globals a guest reads without ever calling anything that could fill them.
@@ -948,6 +955,7 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
         link_plan: String::new(),
         link_plan_stored: String::new(),
         link_plan_differs: Vec::new(),
+        link_syscalls: 0,
     });
     experiments
 }

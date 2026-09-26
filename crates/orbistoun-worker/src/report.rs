@@ -2569,21 +2569,22 @@ pub fn note_experiments(what: String) {
 /// The digest of the link plan this run applied (D724).
 ///
 /// A third slot, because linking happens after the conditions are recorded.
-static LINK_PLAN: std::sync::OnceLock<(String, String, Vec<String>)> = std::sync::OnceLock::new();
+static LINK_PLAN: std::sync::OnceLock<orbistoun_proto::LinkSummary> = std::sync::OnceLock::new();
 
 /// Records which link plan the run applied, how it stood against the stored one, and on a mismatch
 /// what differed, for the run conditions.
-pub fn note_link_plan(digest: String, stored: String, differs: Vec<String>) {
-    let _ = LINK_PLAN.set((digest, stored, differs));
+pub fn note_link_plan(summary: orbistoun_proto::LinkSummary) {
+    let _ = LINK_PLAN.set(summary);
 }
 
 /// The recorded conditions, with the link plan merged in.
 fn linked_conditions() -> Conditions {
     let mut conditions = CONDITIONS.get().cloned().unwrap_or_default();
-    if let Some((plan, stored, differs)) = LINK_PLAN.get() {
-        conditions.link_plan.clone_from(plan);
-        conditions.link_plan_stored.clone_from(stored);
-        conditions.link_plan_differs.clone_from(differs);
+    if let Some(summary) = LINK_PLAN.get() {
+        conditions.link_plan.clone_from(&summary.digest);
+        conditions.link_plan_stored.clone_from(&summary.stored);
+        conditions.link_plan_differs.clone_from(&summary.differs);
+        conditions.link_syscalls = summary.syscalls;
     }
     conditions
 }

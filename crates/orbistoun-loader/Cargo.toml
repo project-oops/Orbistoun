@@ -18,6 +18,8 @@ serde = { workspace = true }
 sha2 = { workspace = true }
 # The stored link plan (D724).
 serde_json = { workspace = true }
+# The plan's raw `syscall` inventory (D724).
+iced-x86 = { workspace = true }
 orbistoun-elf = { workspace = true }
 orbistoun-nid = { workspace = true }
 orbistoun-thunk = { workspace = true }

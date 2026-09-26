@@ -1904,11 +1904,12 @@ impl Service {
                 inner: &shifted,
             };
             let applied = self.relocate_image_recorded(image, bytes, &resolver)?;
-            plans.push(orbistoun_loader::plan::ModulePlan::of(
+            plans.push(linkplan::module_plan(
                 library,
                 image,
+                bytes,
                 applied.writes,
-            ));
+            )?);
             tallies.push((library.clone(), applied.tally));
         }
         // Protected only now: relocation writes into text, so protecting earlier would fault those

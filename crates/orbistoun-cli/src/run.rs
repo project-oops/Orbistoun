@@ -64,6 +64,7 @@ fn describe_link(summary: &orbistoun_proto::LinkSummary, relink: bool) -> Vec<St
     let mut lines = vec![
         format!("modules  {}", summary.modules),
         format!("writes   {}", summary.writes),
+        format!("syscalls {}", summary.syscalls),
         format!("digest   {}", summary.digest),
         format!("stored   {stored}"),
     ];
@@ -289,15 +290,17 @@ mod link_tests {
             digest: "0123456789abcdef".to_owned(),
             modules: 3,
             writes: 564_184,
+            syscalls: 1,
             stored: "mismatch".to_owned(),
             differs: vec!["libc::malloc at 0x10: stored 0x1, now 0x2".to_owned()],
         };
         let lines = super::describe_link(&summary, false);
         assert_eq!(lines[0], "modules  3");
         assert_eq!(lines[1], "writes   564184");
-        assert_eq!(lines[2], "digest   0123456789abcdef");
-        assert_eq!(lines[3], "stored   mismatch");
-        assert!(lines[4].contains("loader defect"));
-        assert_eq!(lines[5], "  libc::malloc at 0x10: stored 0x1, now 0x2");
+        assert_eq!(lines[2], "syscalls 1");
+        assert_eq!(lines[3], "digest   0123456789abcdef");
+        assert_eq!(lines[4], "stored   mismatch");
+        assert!(lines[5].contains("loader defect"));
+        assert_eq!(lines[6], "  libc::malloc at 0x10: stored 0x1, now 0x2");
     }
 }
