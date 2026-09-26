@@ -73,9 +73,10 @@ the file is shown absent from the place the run reads: the resolved data directo
 
 2. `./bin/orbistoun run <title-id>` rebuilds, refreshes names if they are stale, runs the
    guest under a time limit, and reports.
-3. orbistoun reuses the title's stored link plan when the executable, the loader and the host
-   CPU are the ones it was built from, and otherwise parses the container and builds a new
-   one (D724). Either way it lists every system function the module imports.
+3. orbistoun parses the container, links it, and checks the link plan against the one stored
+   for the title; a plan that differs under the same executable, loader and host CPU is a
+   loader defect and heads the findings (D724). It lists every system function the module
+   imports.
 4. The imports are 64-bit hashes rather than names, because that is how the guest links, so
    each is looked up in the symbol database.
 5. For hashes nothing names, the name search generates candidates from a grammar and reads

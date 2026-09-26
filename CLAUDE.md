@@ -89,9 +89,10 @@ progress. [docs/THE_LOOP.md](docs/THE_LOOP.md) describes each step;
 - **Interception is linking.** The loader resolves each NID import and writes the address
   into the guest relocation slot. There is no instrumentation pass, hook, patch or
   trampoline step.
-- **One link plan, two times to apply it.** The loader's result is a link plan; a run applies
-  it at load, or reuses one stored ahead of time, or writes it as a native host executable
-  (D724). The only guest code the plan changes is an instruction the host CPU lacks (D725).
+- **One link plan, two times to apply it.** The loader's result is a link plan; a run builds
+  it at load and checks it against the one stored for the title, and a native host executable
+  is the same plan written ahead of time (D724). The only guest code the plan changes is an
+  instruction the host CPU lacks (D725).
 - **Tests.** Pure contracts come first, test-first: NID hashing, address-space validation,
   policy resolution, container parsing. Prefer a pure decision function plus a thin
   effectful wrapper, as in `orbistoun-mem`.
