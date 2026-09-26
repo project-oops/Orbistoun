@@ -1353,8 +1353,22 @@ pub struct ExecutionRecord {
     pub drawn: u64,
     /// Bytes written to guest memory across them all.
     pub bytes_written: u64,
-    /// The most recent submission's execution.
+    /// Submissions not carried out because one before them on the queue stopped (D710).
+    pub held_back: u64,
+    /// The most recent submission's execution - once the queue has stopped, the one that stopped
+    /// it, since that is where its work ends.
     pub last: Option<cp::CpExecution>,
+}
+
+/// The execution of the first submission on the queue that did not run to completion, once one
+/// has not.
+///
+/// The command processor retires its queue in order, and nothing here ever runs the packet a
+/// submission stopped at, so everything submitted after it waits forever: none of it is carried
+/// out, and no fence after it is written (D705, D710).
+fn queue_stall() -> &'static Mutex<Option<cp::CpExecution>> {
+    static STALL: Mutex<Option<cp::CpExecution>> = Mutex::new(None);
+    &STALL
 }
 
 fn execution_record() -> &'static Mutex<ExecutionRecord> {
@@ -1621,6 +1635,19 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
     }
     let submission = submission;
+    // A queue an earlier submission stopped retires nothing more (D710).
+    let stalled = *queue_stall()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stalled.is_some() {
+        if let Ok(mut record) = execution_record().lock() {
+            record.held_back += 1;
+        }
+        if let Ok(mut slot) = last_submission().lock() {
+            *slot = Some(submission);
+        }
+        return SUBMIT_OK;
+    }
     // The command processor's own memory work, carried out synchronously as the submit returns. It
     // stops at the first packet needing the GPU, so a fence is written only when everything before
     // it ran (D705); draws are such work once an executor is installed and they can run as one into
@@ -1645,6 +1672,11 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         record.drawn += u64::from(executed.draws > 0);
         record.bytes_written += executed.bytes_written;
         record.last = Some(executed);
+    }
+    if executed.stopped != cp::Stopped::Completed {
+        *queue_stall()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executed);
     }
     if let Ok(mut slot) = last_submission().lock() {
         *slot = Some(submission);
@@ -1950,7 +1982,57 @@ mod tests {
     /// time. A poisoned lock is recovered rather than cascading a panic across the others.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+        let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        // Each test starts on a queue nothing has stopped.
+        *super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        guard
+    }
+
+    /// A submission that stops holds up every later one on the queue: the fence stream submitted
+    /// after it is not carried out, so its fence stays unwritten (D705, D710). A command processor
+    /// retires its stream in order, and nothing runs the stopped packet.
+    #[test]
+    fn a_stopped_submission_holds_back_every_later_one() {
+        let _guard = serial();
+        let fence: &'static mut [u8] = Box::leak(vec![0u8; 64].into_boxed_slice());
+        let fence_at = fence.as_ptr() as usize as u64;
+        allow_writes_to(fence_at, 64);
+        let words = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        // An indirect draw: its arguments are in memory at execution time, never carried out here.
+        let stopping = words(&[crate::packet::build::command_header(0x24, 4), 0, 0, 0, 0]);
+        let release = words(&[
+            crate::packet::build::command_header(crate::packet::build::measured::RELEASE_MEM, 7),
+            0x0660_3514,
+            1 << 29,
+            fence_at as u32,
+            (fence_at >> 32) as u32,
+            0xbeef_cafe,
+            0,
+            0,
+        ]);
+        set_guest_regions(vec![
+            region_of(&stopping),
+            region_of(&release),
+            region_of(fence),
+        ]);
+
+        let desc = descriptor(&stopping);
+        assert_eq!(submit_dcb(&args(desc.as_ptr() as usize as u64)), SUBMIT_OK);
+        let desc = descriptor(&release);
+        assert_eq!(submit_dcb(&args(desc.as_ptr() as usize as u64)), SUBMIT_OK);
+
+        assert_eq!(&fence[..4], &[0; 4], "no fence for a queue that stopped");
+        let record = super::execution();
+        assert!(
+            matches!(
+                record.last.map(|l| l.stopped),
+                Some(crate::cp::Stopped::NeedsGpu { opcode: 0x24, .. })
+            ),
+            "the wall is the stopped submission, not the one behind it: {record:?}"
+        );
+        assert!(record.held_back >= 1, "{record:?}");
     }
 
     /// The `(start, end)` region a heap buffer occupies, its address exposed for the handler's

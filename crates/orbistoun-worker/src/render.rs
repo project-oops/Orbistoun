@@ -975,8 +975,16 @@ fn log_execution() {
         ),
         Some(other) => format!("stopped: {other:?}"),
     };
+    let held = if record.held_back == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {} later submission(s) wait behind it and were not carried out",
+            record.held_back
+        )
+    };
     tracing::info!(
-        "the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}",
+        "the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}{held}",
         record.completed,
         record.submissions,
         record.drawn,
