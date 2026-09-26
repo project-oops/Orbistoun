@@ -107,6 +107,7 @@ fn compat_rows(
                 status,
                 experiment,
                 screenshot,
+                hardware: file.hardware.clone(),
             },
             file.title,
             notes,

@@ -409,6 +409,19 @@ pub struct Row {
     pub experiment: bool,
     /// A screenshot for a guest with graphical output, as a path relative to the written file.
     pub screenshot: Option<String>,
+    /// What the hardware does with the title, where somebody attested it (D708).
+    pub hardware: Option<Hardware>,
+}
+
+impl Row {
+    /// The hardware attestation in a table cell: what it does, or `unknown` where nobody attested.
+    #[must_use]
+    pub fn on_hardware(&self) -> String {
+        self.hardware
+            .as_ref()
+            .filter(|h| !h.does.trim().is_empty())
+            .map_or_else(|| "unknown".to_owned(), |h| md_cell(&h.does))
+    }
 }
 
 /// The compatibility table as markdown, ranked closest-to-running first.
@@ -429,9 +442,9 @@ pub fn render_markdown(rows: &[Row]) -> String {
 
     let mut out = String::new();
     out.push_str(
-        "| Title | Reach | Imports | Answered | Calls | Standing | Outcome | From | Measured |\n",
+        "| Title | Reach | Imports | Answered | Calls | Standing | Outcome | From | Measured | On hardware |\n",
     );
-    out.push_str("|---|---|--:|--:|--:|--:|---|---|---|\n");
+    out.push_str("|---|---|--:|--:|--:|--:|---|---|---|---|\n");
     for r in &ranked {
         let mark = if r.screenshot.is_some() { " 📷" } else { "" };
         // Linked to the page, so the table leads to it.
@@ -447,7 +460,7 @@ pub fn render_markdown(rows: &[Row]) -> String {
         };
         let _ = writeln!(
             out,
-            "| {}{} | {} | {} | {} | {} | {}% | {} | {} | {} |",
+            "| {}{} | {} | {} | {} | {} | {}% | {} | {} | {} | {} |",
             shown,
             mark,
             r.status.reach.label(),
@@ -458,6 +471,7 @@ pub fn render_markdown(rows: &[Row]) -> String {
             md_cell(&r.status.outcome),
             from,
             md_cell(&r.status.measured_on),
+            r.on_hardware(),
         );
     }
 
@@ -555,6 +569,17 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
     let _ = writeln!(out, "| Standing | {}% |", s.standing);
     let _ = writeln!(out, "| Frames to the output layer | {} |", s.frames);
     let _ = writeln!(out, "| Measured on | {} |", s.measured_on);
+    let hardware = row.hardware.as_ref().map_or_else(
+        || "_unknown - nobody has attested it_".to_owned(),
+        |h| {
+            let when =
+                h.on.as_deref()
+                    .map(|on| format!(", {on}"))
+                    .unwrap_or_default();
+            format!("{} ({}{when})", md_cell(&h.does), md_cell(&h.attested_by))
+        },
+    );
+    let _ = writeln!(out, "| On hardware | {hardware} |");
     if !s.link_plan.is_empty() {
         let stood = if s.link_plan_stored.is_empty() {
             String::new()
@@ -1249,6 +1274,7 @@ reason = "..."
                 status: status(Reach::Linked, 0, 0),
                 experiment: true,
                 screenshot: None,
+                hardware: None,
             },
             Row {
                 name: None,
@@ -1256,6 +1282,7 @@ reason = "..."
                 status: status(Reach::Entered, 100, 5000),
                 experiment: false,
                 screenshot: Some("screenshots/far.png".to_owned()),
+                hardware: None,
             },
         ];
         let md = render_markdown(&rows);
@@ -1292,6 +1319,7 @@ reason = "..."
             status: status(Reach::Entered, 1, 1),
             experiment: false,
             screenshot: None,
+            hardware: None,
         };
         assert!(
             !super::render_title_page(&row, &super::Title::default(), "").contains("Link plan")
@@ -1304,6 +1332,44 @@ reason = "..."
         );
     }
 
+    /// The table and a title page show the hardware attestation: what it does where one exists,
+    /// an attested failure as written, and `unknown` where nobody attested.
+    #[test]
+    fn the_hardware_attestation_is_shown_in_all_three_states() {
+        let mut row = Row {
+            name: None,
+            title: "t".to_owned(),
+            status: status(Reach::Entered, 1, 1),
+            experiment: false,
+            screenshot: None,
+            hardware: None,
+        };
+        assert_eq!(row.on_hardware(), "unknown");
+        assert!(render_markdown(std::slice::from_ref(&row)).contains("| unknown |"));
+        assert!(
+            super::render_title_page(&row, &super::Title::default(), "")
+                .contains("| On hardware | _unknown - nobody has attested it_ |")
+        );
+        row.hardware = Some(Hardware {
+            does: "renders".to_owned(),
+            attested_by: "operator".to_owned(),
+            on: Some("2026-09-19".to_owned()),
+            note: None,
+        });
+        assert!(render_markdown(std::slice::from_ref(&row)).contains("| renders |"));
+        assert!(
+            super::render_title_page(&row, &super::Title::default(), "")
+                .contains("| On hardware | renders (operator, 2026-09-19) |")
+        );
+        row.hardware = Some(Hardware {
+            does: "faults at boot".to_owned(),
+            attested_by: "operator".to_owned(),
+            on: None,
+            note: None,
+        });
+        assert_eq!(row.on_hardware(), "faults at boot");
+    }
+
     /// The markdown says so when there are no screenshots.
     #[test]
     fn the_markdown_says_so_when_there_are_no_screenshots() {
@@ -1313,6 +1379,7 @@ reason = "..."
             status: status(Reach::Entered, 1, 1),
             experiment: false,
             screenshot: None,
+            hardware: None,
         }];
         let md = render_markdown(&rows);
         assert!(md.contains("## Screenshots"));
@@ -1634,6 +1701,7 @@ reason = "..."
                 status: status.clone(),
                 experiment: false,
                 screenshot: None,
+                hardware: None,
             })
             .collect();
         let table = render_markdown(&rows);
