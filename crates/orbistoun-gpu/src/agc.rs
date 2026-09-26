@@ -449,26 +449,27 @@ fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Bytes from a packet's start to the payload a caller fills in, for the packet kinds
-/// [`agc_packet_payload`] accepts: a data `NOP` (header and tag) and a register write (header and
-/// register offset) both carry two dwords before it.
-const PACKET_PAYLOAD_OFFSET: u64 = 8;
+/// Bytes from a register write's start to its values: the measured `SET_SH_REG` packet is a
+/// header, the register offset, then the values (`166-agc/dcb-set-sh-reg-direct`).
+const REGISTER_PAYLOAD_OFFSET: u64 = 8;
+
+/// The kind [`agc_packet_payload`] is asked with for a register write.
+const REGISTER_WRITE_KIND: u64 = 1;
 
 /// `0x7d86501b8094ef57(out, packet, kind)`: where the payload of a packet the guest reserved
 /// begins.
 ///
-/// Guest-observed: PPSA02664 calls it with a packet in the command buffer it is building, kind 1
-/// right after reserving a shader-register run with no values, and patches the answer as an
-/// address. Kinds 0 and 1 answer `packet + 8` and any other kind is refused, as a reference
-/// emulator (prosper) models it; AnyPS5 gives `packet + 4` for kind 0 and null when the packet's
-/// count is the placeholder `0x3fff`.
+/// Guest-observed: PPSA02664 calls it with kind 1 on the register write it just reserved with no
+/// values, then fills the values through the answer, so kind 1 answers the measured payload
+/// offset. It also calls it with kind 0 on a data `NOP`, whose layout is unmeasured; that kind is
+/// refused until obSCEne measures it.
 fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, packet, kind) = (args[0], args[1], args[2]);
-    if out == 0 || packet == 0 || kind > 1 {
+    if out == 0 || packet == 0 || kind != REGISTER_WRITE_KIND {
         return BAD_ARGUMENT;
     }
     // SAFETY: `out` is the guest-supplied pointer-sized out-parameter.
-    unsafe { guest::write_u64(out, packet.wrapping_add(PACKET_PAYLOAD_OFFSET)) };
+    unsafe { guest::write_u64(out, packet.wrapping_add(REGISTER_PAYLOAD_OFFSET)) };
     OK
 }
 
@@ -1105,23 +1106,23 @@ mod tests {
         );
     }
 
-    /// `0x7d86501b8094ef57` answers a packet's payload, two dwords in, for kinds 0 and 1, and
-    /// refuses any other kind without writing.
+    /// `0x7d86501b8094ef57` answers a register write's values, two dwords in, and refuses the
+    /// unmeasured kinds without writing.
     #[test]
-    fn the_payload_of_a_reserved_packet_starts_two_dwords_in() {
+    fn the_payload_of_a_reserved_register_write_starts_two_dwords_in() {
         let mut slot: u64 = 0;
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = std::ptr::addr_of_mut!(slot) as u64;
         args[1] = 0x7400_0218_7e30;
-        for kind in [0, 1] {
+        args[2] = 1;
+        assert_eq!(agc_packet_payload(&args), OK);
+        assert_eq!(slot, 0x7400_0218_7e38);
+        for kind in [0, 2] {
+            slot = 0;
             args[2] = kind;
-            assert_eq!(agc_packet_payload(&args), OK);
-            assert_eq!(slot, 0x7400_0218_7e38);
+            assert_eq!(agc_packet_payload(&args), BAD_ARGUMENT);
+            assert_eq!(slot, 0);
         }
-        slot = 0;
-        args[2] = 2;
-        assert_eq!(agc_packet_payload(&args), BAD_ARGUMENT);
-        assert_eq!(slot, 0);
     }
 
     /// `sceAgcInit` returns 0 for version 13, and 0x8a6c0004 for other versions.

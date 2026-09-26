@@ -3,17 +3,15 @@ library = "libSceAgc"
 [[function]]
 name = "0x7d86501b8094ef57"
 arity = 3
-purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing packet + 8 through out for kinds 0 (data NOP: header and tag) and 1 (register write: header and offset)."
+purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing the payload address through out."
 edge_cases = [
-    "GUEST-OBSERVED SHAPE. PPSA02664 passes a packet inside the command buffer it is building (arg1 0x740002187e30, a NOP whose count field is the placeholder 0x3fff, with kind 0) and later the packet returned by sceAgcCbSetShRegisterRangeDirect called with a null values array (kind 1), then patches the answer as an address (sceAgcQueueEndOfPipeActionPatchAddress takes it as its address argument). So it answers a pointer, not the size 0xa8 an earlier reading planted.",
-    "ORACLES DISAGREE ON KIND 0. prosper answers packet + 8 for kinds 0 and 1 and invalid-argument otherwise, noting packet + 4 crashes another title; AnyPS5 answers packet + 8 for a non-zero kind, and for kind 0 packet + 4, or null when the count field is 0x3fff. orbistoun follows prosper, which reaches gameplay on PPSA02664; kind 0 with a placeholder count is exactly the case they split on.",
+    "GUEST-OBSERVED: PPSA02664 calls it with kind 1 on the SET_SH_REG packet sceAgcCbSetShRegisterRangeDirect returned for a null values array, then writes the register values through the answer. The measured SET_SH_REG layout (header, register offset, values; check 166-agc/dcb-set-sh-reg-direct) puts them at packet + 8, which is what kind 1 answers.",
+    "Kind 0 is called on a data NOP (header 0xffff1000: count field 0x3fff) and the answer is later passed as an address to sceAgcQueueEndOfPipeActionPatchAddress. Its layout is unmeasured, so kind 0 and every other kind are refused until obSCEne measures them.",
     "NON-EXPORT NID. Imported directly as raw hex NID 0x7d86501b8094ef57 with no declared C export. obSCEne 166-agc/cb-unnamed-ef57 (sweep 20260920-110931) measures a bare synthetic import of it binding null on retail; the probe null-checks before calling, so it reports call-executed 0x0, reason slot-is-null - the probe's caution, not the platform refusing the call.",
     "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fault earlier, fetching an instruction from 0x0: it calls the slot with no null-check of its own (worklog 729).",
 ]
-assumptions = [
-    "The kind-0 answer for a NOP whose count is the placeholder 0x3fff: prosper's packet + 8 is taken over AnyPS5's null, on the strength of prosper reaching gameplay on PPSA02664. Reference emulators are oracles, not facts; no hardware measurement exists, since the NID is not exported to a probe.",
-]
-known_by = "assumed"
+known_by = "guest-observed"
+cites = "PPSA02664 call arguments captured with ORBISTOUN_DUMP (kind 1 on the reserved SET_SH_REG packet, kind 0 on a data NOP); obSCEne sweep 20260914-100833, check 166-agc/dcb-set-sh-reg-direct (the SET_SH_REG layout); worklog 729 (null-slot test); obSCEne sweep 20260920-110931, check 166-agc/cb-unnamed-ef57."
 found_on = "2026-09-20"
 
 [[function]]
