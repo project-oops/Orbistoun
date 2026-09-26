@@ -84,6 +84,8 @@ pub mod sync_on_address {
 
 guest_module! {
     "libkernel" {
+        // (object, op, value, uaddr, uaddr2): FreeBSD's futex and lock primitive.
+        "_umtx_op" => 5,
         "sceKernelAllocateDirectMemory" => 6,
         // A module handle, a name, and where to put the address, measured from a guest's calls (D366).
         "sceKernelDlsym" => 3,
@@ -3274,6 +3276,77 @@ fn sync_on_address_wake(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `_umtx_op(object, op, value, uaddr, uaddr2)`: FreeBSD's futex, the wait and wake family.
+///
+/// `UMTX_OP_WAIT` compares the `long` at `object`, `UMTX_OP_WAIT_UINT` and its `_PRIVATE` twin the
+/// `u_int`; each sleeps only while the word equals `value` and answers zero at once when it already
+/// differs, as `do_wait` does. `UMTX_OP_WAKE` and `UMTX_OP_WAKE_PRIVATE` wake up to `value`
+/// sleepers. Private and shared keys coincide: this is one process. The waits share
+/// [`sync::wait_on_address`] with `sceKernelSyncOnAddressWait`, so a wake from either reaches both.
+///
+/// A timed wait (a non-null `uaddr2`) and every other op (the umutex, condition-variable,
+/// rwlock and semaphore families) are refused with the placeholder rather than approximated.
+///
+/// Reference: FreeBSD `sys/sys/umtx.h` (op numbers), `sys/kern/kern_umtx.c` (`__umtx_op_wait`,
+/// `__umtx_op_wait_uint`, `__umtx_op_wake`, `do_wait`).
+fn umtx_op(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    const UMTX_OP_WAIT: u64 = 2;
+    const UMTX_OP_WAKE: u64 = 3;
+    const UMTX_OP_WAIT_UINT: u64 = 11;
+    const UMTX_OP_WAIT_UINT_PRIVATE: u64 = 15;
+    const UMTX_OP_WAKE_PRIVATE: u64 = 16;
+    let (object, op, value, timeout) = (args[0], args[1] & 0xFFFF_FFFF, args[2], args[4]);
+    if object == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    let whole_word = match op {
+        UMTX_OP_WAIT => true,
+        UMTX_OP_WAIT_UINT | UMTX_OP_WAIT_UINT_PRIVATE => false,
+        UMTX_OP_WAKE | UMTX_OP_WAKE_PRIVATE => {
+            // `value` is an int; INT_MAX, the usual "everybody", fits.
+            let count = u32::try_from(value & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+            return if sync::wake_on_address(object, count).is_some() {
+                OK
+            } else {
+                u64::from(GuestError::InvalidArgument.as_raw())
+            };
+        }
+        _ => return u64::from(GuestError::Unimplemented.as_raw()),
+    };
+    if timeout != 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let expected = if whole_word {
+        value
+    } else {
+        value & 0xFFFF_FFFF
+    };
+    let was = thread::set_parked(true);
+    let outcome = sync::wait_on_address(
+        object,
+        expected,
+        || {
+            if whole_word {
+                // SAFETY: an address the guest passed for this call, valid by its contract.
+                unsafe { guest::read_u64(object) }
+            } else {
+                // SAFETY: as above, a 32-bit word.
+                unsafe { guest::read_u32(object) }.map(u64::from)
+            }
+        },
+        sync::Blocking::Forever,
+    );
+    thread::set_parked(was);
+    match outcome {
+        Some(sync::AddressWait::Woken | sync::AddressWait::Mismatch) => OK,
+        // Unreachable under `Forever`; kept so the match stays total.
+        Some(sync::AddressWait::TimedOut) => {
+            u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw())
+        }
+        None => u64::from(GuestError::InvalidArgument.as_raw()),
+    }
+}
+
 /// The POSIX unnamed-semaphore family: `sem_init` and the calls built on it.
 ///
 /// POSIX `sem_init` initialises the guest's `sem_t` in place, where `sceKernelCreateSema` writes a
@@ -5573,6 +5646,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelSignalSema", kernel_signal_sema),
     ("sceKernelWaitSema", kernel_wait_sema),
     ("sceKernelDeleteSema", kernel_delete_sema),
+    ("_umtx_op", umtx_op),
     ("sceKernelSyncOnAddressWait", sync_on_address_wait),
     ("sceKernelSyncOnAddressWake", sync_on_address_wake),
     // POSIX unnamed semaphores, with no vendor twin, served under their POSIX names via
