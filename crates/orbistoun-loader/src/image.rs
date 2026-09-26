@@ -209,38 +209,6 @@ fn layout(
     Ok((loadable, span_base, span_len))
 }
 
-/// A container the host's own loader already mapped at `base`, as a native executable is (D724):
-/// the image [`place`] would have produced, with nothing copied or zeroed here.
-///
-/// # Errors
-///
-/// When the container cannot be parsed, has nothing to load, or its span is not mapped.
-pub fn adopt(whole: &[u8], base: u64, page: u64) -> Result<Image, LoadError> {
-    let container = Container::parse(whole)?;
-    let (loadable, span_base, span_len) = layout(&container, base, page)?;
-    let mut space = AddressSpace::new();
-    space.adopt(span_base, span_len, Protection::READ_WRITE)?;
-    let mut segments = Vec::new();
-    for (index, ph) in loadable {
-        let data = container.segment_data(whole, index)?.unwrap_or(&[]);
-        let copied = u64::try_from(data.len()).unwrap_or(0).min(ph.filesz.get());
-        segments.push(PlacedSegment {
-            index,
-            address: base.saturating_add(ph.vaddr.get()),
-            copied,
-            zeroed: ph.memsz.get().saturating_sub(copied),
-            flags: ph.flags.get(),
-        });
-    }
-    Ok(Image {
-        space,
-        base,
-        entry: base.saturating_add(container.entry()),
-        span: (span_base, span_len),
-        segments,
-    })
-}
-
 /// Places every loadable segment of a container at `base`.
 ///
 /// The whole span is reserved once rather than per segment, then written through.
@@ -401,37 +369,6 @@ mod tests {
 
     /// Far from anything a normal process maps.
     const TEST_BASE: u64 = 0x0000_5000_0000_0000;
-
-    /// An image the host already mapped is adopted with the span and segments placing would give,
-    /// and a range nothing mapped is refused.
-    #[test]
-    fn an_already_mapped_image_is_adopted_as_placing_would_describe_it() {
-        // Its own two bases: placing at the shared one races the tests that use it.
-        const PLACE_BASE: u64 = 0x0000_5100_0000_0000;
-        const ADOPT_BASE: u64 = 0x0000_5200_0000_0000;
-        let bytes = elf_with_segment(0x1000, 64, 0x3000, 0xAB);
-        let placed = place(&bytes, PLACE_BASE, 4096).expect("place");
-        let (placed_span, placed_segments) = (placed.span(), placed.segments().to_vec());
-        drop(placed);
-
-        assert!(
-            super::adopt(&bytes, ADOPT_BASE, 4096).is_err(),
-            "nothing is mapped there yet"
-        );
-        let mut host = orbistoun_mem::AddressSpace::new();
-        let (span_base, span_len) = (placed_span.0 - PLACE_BASE + ADOPT_BASE, placed_span.1);
-        host.reserve(span_base, span_len, orbistoun_mem::Protection::READ_WRITE)
-            .expect("the host's own mapping");
-        let adopted = super::adopt(&bytes, ADOPT_BASE, 4096).expect("adopt");
-        assert_eq!(adopted.span(), (span_base, span_len));
-        assert_eq!(adopted.entry(), ADOPT_BASE + 0x1000);
-        for (a, p) in adopted.segments().iter().zip(&placed_segments) {
-            assert_eq!(a.address - ADOPT_BASE, p.address - PLACE_BASE);
-            assert_eq!((a.copied, a.zeroed, a.flags), (p.copied, p.zeroed, p.flags));
-        }
-        drop(adopted);
-        drop(host);
-    }
 
     /// Segment bytes land at the guest's expected address.
     #[test]

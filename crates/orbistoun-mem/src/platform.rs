@@ -146,33 +146,6 @@ mod imp {
         u64::from(info.dwAllocationGranularity)
     }
 
-    pub(super) fn committed(base: u64, len: u64) -> bool {
-        use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
-        let end = base.saturating_add(len);
-        let mut at = base;
-        while at < end {
-            let Ok(addr) = usize::try_from(at) else {
-                return false;
-            };
-            // SAFETY: all-zero is a legal value for this plain C struct; the call overwrites it.
-            let mut info: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-            // SAFETY: `VirtualQuery` reads no memory at the address, only its bookkeeping, and
-            // writes at most the given size into a live local.
-            let got = unsafe {
-                VirtualQuery(
-                    addr as *const core::ffi::c_void,
-                    &raw mut info,
-                    size_of::<MEMORY_BASIC_INFORMATION>(),
-                )
-            };
-            if got == 0 || info.State != MEM_COMMIT || info.RegionSize == 0 {
-                return false;
-            }
-            at = (info.BaseAddress as u64).saturating_add(info.RegionSize as u64);
-        }
-        true
-    }
-
     pub(super) fn release(r: &Reservation) {
         let Ok(addr) = usize::try_from(r.base) else {
             return;
@@ -277,12 +250,6 @@ mod imp {
         rustix::param::page_size() as u64
     }
 
-    pub(super) fn committed(_base: u64, _len: u64) -> bool {
-        // Only a Windows image loader maps a guest image before orbistoun does (D724); nothing on
-        // this host adopts a mapping, so there is nothing to check.
-        true
-    }
-
     pub(super) fn release(r: &Reservation) {
         let (Ok(addr), Ok(size)) = (usize::try_from(r.base), usize::try_from(r.len)) else {
             return;
@@ -306,11 +273,6 @@ pub fn allocation_granularity() -> u64 {
 /// Reserves `len` bytes at exactly `base`, or fails.
 pub fn reserve(base: u64, len: u64, protection: Protection) -> Result<Reservation, MemError> {
     imp::reserve(base, len, protection)
-}
-
-/// Whether every page of `[base, base + len)` is committed in this process, by whoever mapped it.
-pub fn committed(base: u64, len: u64) -> bool {
-    imp::committed(base, len)
 }
 
 /// Changes the protection of an already-reserved range.
