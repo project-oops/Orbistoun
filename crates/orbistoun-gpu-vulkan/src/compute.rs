@@ -52,7 +52,7 @@ pub struct Properties {
     /// Whether 32-bit signed zeros, infinities and NaNs survive a module that declares they must.
     ///
     /// Every translated module declares it; on a device without it the declaration is removed
-    /// before the module is created ([`for_this_device`]).
+    /// before the module is created (`for_this_device`).
     pub inf_nan_preserved: bool,
     /// How many invocations share a subgroup on this device.
     ///

@@ -345,18 +345,19 @@ pub fn take_spans() -> [(u64, u64); SPANS] {
 mod tests {
     use super::{Count, Phase, Span};
 
-    /// A span is measured only when detail is on, and taking resets it.
+    /// A span is measured only when detail is on, and taking resets it. `Drive` because nothing in
+    /// this crate enters it: the counters are global, and a copy test beside this one would count.
     #[test]
     fn a_span_counts_only_with_detail_on() {
         super::set_detail(false);
         let _ = super::take_spans();
-        super::span(Span::Copy, || ());
-        assert_eq!(super::take_spans()[Span::Copy as usize], (0, 0));
+        super::span(Span::Drive, || ());
+        assert_eq!(super::take_spans()[Span::Drive as usize], (0, 0));
         super::set_detail(true);
-        super::span(Span::Copy, || {
+        super::span(Span::Drive, || {
             std::thread::sleep(std::time::Duration::from_millis(1));
         });
-        let (spent, counted) = super::take_spans()[Span::Copy as usize];
+        let (spent, counted) = super::take_spans()[Span::Drive as usize];
         assert_eq!(counted, 1);
         assert!(spent >= 1_000_000);
         super::set_detail(false);

@@ -933,7 +933,9 @@ struct Deferred {
 /// fault handler, where waiting could deadlock and guessing no could fault.
 #[must_use]
 pub fn guards_guest_memory() -> bool {
-    deferred().try_lock().map_or(true, |copies| !copies.is_empty())
+    deferred()
+        .try_lock()
+        .map_or(true, |copies| !copies.is_empty())
 }
 
 fn deferred() -> &'static Mutex<Vec<Deferred>> {
