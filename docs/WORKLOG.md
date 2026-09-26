@@ -337,3 +337,15 @@ One entry per milestone. Commit messages hold the rest.
 - Shader translations are kept per title with the shader and its context, and made again before
   the guest starts when the build changed; GLCB00001's first-frame shader preparation falls from
   5.1 ms to 2.6 ms of about 200 ms, most of which lies outside translation.
+
+## 2026-09-26 - A title as its own program
+
+- `orbistoun-cli link --native` writes an orbistoun-aot build: the title's folder with the window
+  beside it as `<name>.exe`, a manifest, and a portable root, so its runs write nothing outside it.
+- The build's window plays only its title, shows the keyboard controls first, and runs with no
+  limits; `--headless` runs it in-process as a check.
+- Neverball's build plays through to gameplay, and headless it matches `run`: the same link plan,
+  53 distinct imports and 92 submissions writing 863,437,904 bytes.
+- A manually run workflow packs it as `neverball-aot-portable-win.zip` with its licences and
+  sources; guests run only on Windows, because the thread pointer shares `fs` with the host on
+  Linux.
