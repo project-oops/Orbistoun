@@ -829,19 +829,25 @@ const CB_COLOR0_BASE: u32 = 0xA318;
 /// [`crate::tiling`] slices before detiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColourTarget {
-    /// Base byte address of the surface in guest memory.
+    /// Base byte address of the surface in guest memory - for a `64KB_R_X` surface, its first
+    /// block.
     pub base: u64,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+    /// The surface's pipe-bank XOR, which moves 256-byte runs within each block
+    /// ([`crate::tiling`]); zero for a surface without one.
+    pub pipe_bank_xor: u8,
 }
 
 /// The colour target a submission set up, from the live values of `CB_COLOR0_BASE` and
 /// `CB_COLOR0_ATTRIB2` among the writes.
 ///
 /// [`None`] unless both were set: a missing half is not invented (D010). The most recent write to
-/// each wins.
+/// each wins. A `64KB_R_X` surface starts on a 64 KiB block, so the low byte of its 256-byte base
+/// is not address: radeonsi ORs the surface's pipe-bank XOR in there (`ac_descriptors.c:1477-1481`,
+/// `cb_color_base |= tile_swizzle`), and it is split out.
 #[must_use]
 pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     let base = writes
@@ -850,10 +856,85 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         .find(|write| write.register == CB_COLOR0_BASE)?
         .value;
     let extent = colour_target_extent_at(writes)?;
+    let (base, pipe_bank_xor) = match colour_swizzle_mode_at(writes) {
+        Some(SwizzleMode::Tiled64KbRX) => (base & !0xFF, (base & 0xFF) as u8),
+        _ => (base, 0),
+    };
     Some(ColourTarget {
         base: u64::from(base) << 8,
         width: extent.width,
         height: extent.height,
+        pipe_bank_xor,
+    })
+}
+
+/// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
+/// `SLICE_MAX` 25:13, `MIP_LEVEL` 29:26.
+const CB_COLOR0_VIEW: u32 = 0xA31B;
+/// `CB_COLOR0_ATTRIB` (`gfx103.json`, byte `167028`, dword `0xA31D`): `NUM_SAMPLES` 14:12,
+/// `NUM_FRAGMENTS` 16:15.
+const CB_COLOR0_ATTRIB: u32 = 0xA31D;
+/// `CB_COLOR0_DCC_BASE` (`gfx103.json`, byte `167060`, dword `0xA325`), in 256-byte units.
+const CB_COLOR0_DCC_BASE: u32 = 0xA325;
+/// `CB_COLOR0_DCC_BASE_EXT` (`gfx103.json`, byte `167584`, dword `0xA3A8`): address bits 47:40 in
+/// `BASE_256B` 7:0.
+const CB_COLOR0_DCC_BASE_EXT: u32 = 0xA3A8;
+/// `CB_COLOR0_INFO.DCC_ENABLE`, bit 28 (`gfx103.json`).
+const INFO_DCC_ENABLE: u32 = 1 << 28;
+/// `CB_COLOR0_ATTRIB3.DCC_PIPE_ALIGNED`, bit 30 (`gfx103.json`).
+const ATTRIB3_DCC_PIPE_ALIGNED: u32 = 1 << 30;
+/// `CB_COLOR0_ATTRIB3.RESOURCE_TYPE`'s value for a 2D surface, `ADDR_RSRC_TEX_2D`
+/// (`addrtypes.h:310`), which radeonsi writes there (`ac_descriptors.c:1328-1329`).
+const RESOURCE_TYPE_2D: u32 = 1;
+
+/// Colour target zero's delta colour compression, when `CB_COLOR0_INFO.DCC_ENABLE` is set: where
+/// its keys are, and whether the target is the single-level, single-slice, single-sample 2D
+/// surface whose keys are one run of whole metadata blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColourTargetDcc {
+    /// The keys' base and layout.
+    pub dcc: crate::dcc::Dcc,
+    /// One 2D slice and one mip level: `ATTRIB2.MAX_MIP`, `CB_COLOR0_VIEW` and
+    /// `ATTRIB3.MIP0_DEPTH` all zero, `ATTRIB3.RESOURCE_TYPE` 2D.
+    pub single_level: bool,
+    /// `CB_COLOR0_ATTRIB`'s sample and fragment counts both one.
+    pub single_sample: bool,
+}
+
+/// Colour target zero's DCC from the live registers, or `None` when `CB_COLOR0_INFO` is unset or
+/// does not enable it. An unwritten `VIEW`, `ATTRIB` or `DCC_BASE_EXT` reads as its reset value,
+/// zero, which `CLEAR_STATE` leaves them at.
+#[must_use]
+pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc> {
+    let last = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    if last(CB_COLOR0_INFO)? & INFO_DCC_ENABLE == 0 {
+        return None;
+    }
+    let base = (u64::from(last(CB_COLOR0_DCC_BASE_EXT).unwrap_or(0) & 0xFF) << 40)
+        | (u64::from(last(CB_COLOR0_DCC_BASE)?) << 8);
+    let attrib3 = last(CB_COLOR0_ATTRIB3)?;
+    let max_mip = last(CB_COLOR0_ATTRIB2)? >> 28;
+    // `ATTRIB3.MIP0_DEPTH` 12:0, `RESOURCE_TYPE` 25:24.
+    let mip0_depth = attrib3 & 0x1FFF;
+    let single_level = max_mip == 0
+        && last(CB_COLOR0_VIEW).unwrap_or(0) == 0
+        && mip0_depth == 0
+        && (attrib3 >> 24) & 0x3 == RESOURCE_TYPE_2D;
+    // `NUM_SAMPLES` and `NUM_FRAGMENTS`, as `log2`, together in 16:12.
+    let samples_and_fragments = (last(CB_COLOR0_ATTRIB).unwrap_or(0) >> 12) & 0x1F;
+    Some(ColourTargetDcc {
+        dcc: crate::dcc::Dcc {
+            base,
+            pipe_aligned: attrib3 & ATTRIB3_DCC_PIPE_ALIGNED != 0,
+        },
+        single_level,
+        single_sample: samples_and_fragments == 0,
     })
 }
 
@@ -2494,6 +2575,7 @@ mod tests {
                 base: 0x2_000e_0000,
                 width: 64,
                 height: 64,
+                pipe_bank_xor: 0,
             })
         );
         // A base with no extent cannot be sized; an extent with no base cannot be placed. Both
@@ -2506,6 +2588,85 @@ mod tests {
             colour_target_at(&[write(0xA3B0, 0x000f_c03f)]).is_none(),
             "no base"
         );
+    }
+
+    /// A `64KB_R_X` target's base register carries its pipe-bank XOR in the low byte
+    /// (`ac_descriptors.c:1477-1481`): Craft's third texture writes `0x040286c0`, whose surface
+    /// starts at the 64 KiB block `0x4_0286_0000` with XOR `0xc0`. A linear target's low byte is
+    /// address.
+    #[test]
+    fn a_tiled_target_s_base_splits_into_its_block_and_its_pipe_bank_xor() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let tiled = [
+            write(0xA318, 0x0402_86c0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_at(&tiled),
+            Some(ColourTarget {
+                base: 0x4_0286_0000,
+                width: 256,
+                height: 256,
+                pipe_bank_xor: 0xc0,
+            })
+        );
+        let linear = [
+            write(0xA318, 0x0402_86c0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0),
+        ];
+        assert_eq!(
+            colour_target_at(&linear).map(|t| (t.base, t.pipe_bank_xor)),
+            Some((0x4_0286_c000, 0))
+        );
+    }
+
+    /// Craft's fourth texture target, as its stream writes it: DCC enabled, pipe-aligned keys at
+    /// `0x4_028a_0000`, one level of one 2D slice. Without `DCC_ENABLE` there is none; a mip chain
+    /// or a view of one level is not single-level.
+    #[test]
+    fn a_dcc_target_decodes_its_keys_and_its_shape() {
+        use super::{ColourTargetDcc, colour_target_dcc_at};
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let craft = vec![
+            write(0xA318, 0x0402_86c0),
+            write(0xA31B, 0),
+            write(0xA31C, 0x1002_8028),
+            write(0xA31D, 0),
+            write(0xA325, 0x0402_8a00),
+            write(0xA3A8, 0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_dcc_at(&craft),
+            Some(ColourTargetDcc {
+                dcc: crate::dcc::Dcc {
+                    base: 0x4_028a_0000,
+                    pipe_aligned: true,
+                },
+                single_level: true,
+                single_sample: true,
+            })
+        );
+        let mut plain = craft.clone();
+        plain.push(write(0xA31C, 0x0002_8028));
+        assert_eq!(colour_target_dcc_at(&plain), None);
+        let mut chain = craft.clone();
+        chain.push(write(0xA3B0, 0x303f_c0ff));
+        assert!(!colour_target_dcc_at(&chain).expect("dcc").single_level);
+        let mut view = craft;
+        view.push(write(0xA31B, 1 << 26));
+        assert!(!colour_target_dcc_at(&view).expect("dcc").single_level);
     }
 
     #[test]

@@ -26,9 +26,10 @@ use crate::registers::{
     BlendControl, ColourTarget, ColourTargetExtent, ColourTargetFormat, DepthControl, DrawCall,
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
     Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at, colour_target_at,
-    colour_target_bases_in, colour_target_extent_at, colour_target_format_at, decode_blend_control,
-    decode_image_descriptor, depth_control_at, dispatch_calls, draw_calls, primitive_topology_at,
-    register_writes, scissor_at, shader_candidates, stencil_control_at, viewport_transform_from,
+    colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at, colour_target_format_at,
+    decode_blend_control, decode_image_descriptor, depth_control_at, dispatch_calls, draw_calls,
+    primitive_topology_at, register_writes, scissor_at, shader_candidates, stencil_control_at,
+    viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -311,6 +312,9 @@ pub struct Submission {
     /// Colour target zero's element layout (`CB_COLOR0_INFO`), the byte order a frame written back
     /// into it must use. `None` when the stream set none.
     pub colour_target_format: Option<ColourTargetFormat>,
+    /// Colour target zero's delta colour compression (`CB_COLOR0_INFO.DCC_ENABLE`), `None` when
+    /// the target has none.
+    pub colour_target_dcc: Option<crate::registers::ColourTargetDcc>,
     /// How many distinct colour target zero bases the stream wrote: one frame is written back only
     /// when all draws went to one target.
     pub colour_target_bases: usize,
@@ -703,6 +707,7 @@ impl Pipeline {
         submission.colour_target = colour_target_at(&writes);
         submission.colour_target_tiling = colour_swizzle_mode_at(&writes);
         submission.colour_target_format = colour_target_format_at(&writes);
+        submission.colour_target_dcc = colour_target_dcc_at(&writes);
         // The draws, found once for every pass that walks them.
         let draws = draw_calls(&walked, stream);
         let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();

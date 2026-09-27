@@ -389,6 +389,7 @@ fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Even
         &tiled,
         width,
         height,
+        0,
         scanout_rgba,
     );
     let bytes = zerocopy::IntoBytes::as_bytes(linear.as_slice());
