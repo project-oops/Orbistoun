@@ -76,7 +76,8 @@ struct Interface {
 /// A UDP socket pointed at RFC 5737 `TEST-NET-1`, reserved and routed nowhere, picks a route
 /// and a source address without sending anything; the source address is the answer. [`None`]
 /// on a host with no route out, which is a real state.
-fn outward_address() -> Option<Ipv4Addr> {
+#[must_use]
+pub fn outward_address() -> Option<Ipv4Addr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
     match socket.local_addr().ok()? {

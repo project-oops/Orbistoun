@@ -238,6 +238,10 @@ windows-sys = { version = "0.61", features = [
     # something rather than an address that moves every reboot (worklog 594).
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    # The host adapter `sceNetCtlGetInfo` reports: GetAdaptersAddresses and its structures.
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     # Free space on the volume backing a guest mount, for `statfs` (worklog 599).
     "Win32_Storage_FileSystem",
     "Win32_System_SystemInformation",

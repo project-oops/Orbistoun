@@ -9,6 +9,7 @@
 //! network (D727); the account-service libraries are listed in `SERVES_NOTHING`. Online
 //! services are out of scope (`docs/SCOPE.md`).
 
+pub mod host;
 pub mod http;
 pub mod http2;
 pub mod netctl;
