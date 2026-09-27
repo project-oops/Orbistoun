@@ -520,38 +520,30 @@ assumptions = [
 
 [[function]]
 name = "sceAgcGetRegisterDefaults2"
-purpose = "Returns a pointer to a GPU context-register reset-defaults descriptor for a register set, which the caller searches by register id. sceAgcGetRegisterDefaults2(version) -> descriptor*."
-region = { via = "return", bytes = 256 }
+arity = 1
+purpose = "Returns a pointer to the library's register-defaults descriptor for a version: sceAgcGetRegisterDefaults2(version) -> descriptor*."
 edge_cases = [
-    "RETURN CONTRACT, decoded from PPSA28061's call site (eboot image+0x10b9e0). The function answers a pointer the caller dereferences as a descriptor: it reads count at +0x38 (u32), and only when that is non-zero reads records* at +0x30 and walks a table of 12-byte {id:u32, value:u64} records looking for register id 0xe24f806d. The placeholder-as-pointer fault this replaces was a read of +0x38 through orbistoun's 0xf7ff0001 stub answer.",
-    "NO OUTPUT BUFFER - the descriptor is library-owned. The caller sets only edi=set_id before the call (PPSA28061 image+0x10eb44: `mov edi, 0xd; call`), leaving the other argument registers stale; the report's inferred (u32, ptr, ptr...) arity is those leftovers, not real arguments. So the function returns storage it owns, and orbistoun reserves a zeroed region (via = return) and hands the base back rather than filling a caller buffer. A fresh reservation reads as zero, which is the whole of the answer here.",
-    "count = 0 IS A GRACEFUL, TITLE-DESIGNED PATH, not a fake success. With count == 0 the caller takes its own `je` branch (image+0x10b9ef -> 0x10ba2b), writes -1 (unset) into ~90 register-default slots at image+0x1f5a88.. and continues (jmp image+0x10cbc3); it applies no override for 0xe24f806d and proceeds. That is a real answer the title is built to handle - no default for that register - distinct from the placeholder pointer that crashes. The alternative, a records table for set 0xd containing 0xe24f806d's default, is a later sourced step (registers.rs is packet decode, not reset defaults).",
-    "MEASURED SHAPE (obSCEne -4d8a, check 166-agc/register-defaults2-v0xd, sweep 20260927-153242): a static import resolves (0x800595ed0); the argument is a version in edi and the answer a pointer to a library-owned 64-byte descriptor - four table pointers at +0x00..+0x18 (the fourth null), three words at +0x20..+0x28, the record array at +0x30 and the count at +0x38. Version 0xd answers count 0x89, version 0xc count 0x80; records are 12 bytes, the first {0xe24f806d, 0x00040400, 0}. PPSA02664 resolves a record's second word as table loc & 3, entry (loc & 0x3fc) / 4 of that table (image+0x3dc26).",
-    "orbistoun STILL ANSWERS COUNT 0, knowingly short of hardware: the records' values live behind the table pointers, which the sweep dumped only the first 64 bytes of, and a count without them would hand a title pointers to nothing. The size 256 of the zeroed descriptor stays a number in this file.",
+    "MEASURED WHOLE. The descriptor is 64 bytes the library owns: four table pointers at +0x00..+0x18, the tables' entry counts at +0x20..+0x2c, the record array at +0x30 and its count at +0x38. Records are 12 bytes {id, loc, third}; a title resolves one through table loc & 3, slot (loc & 0x3fc) / 4, and reads 8 or 16 bytes at the entry the slot holds (PPSA02664 image+0x3dc26, PPSA28061 image+0x10b9e0). Version 0xd has 0x89 records, 0xc 0x80, 8 0x7f; the fourth table is null in all three.",
+    "orbistoun rebuilds each walked descriptor from crates/orbistoun-gpu/data/register-defaults.toml in memory it owns: the records as measured, each table at its measured length, the entries' measured bytes at their measured distances from one another. Table slots no record names were not read and stay null, which both call sites seen check before reading through. The same address answers every call for a version, as the library's static descriptor does.",
+    "A version no probe walked is refused by name. PPSA02664 asks for version 8 (after its init gate accepts 8), PPSA28061 for 0xd.",
 ]
-known_by = "assumed"
-found_in = ["PPSA28061-app0"]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2310Z-4d8a (sweep 20260927-153242, check 166-agc/register-defaults2-v0xd) and REQ-20260927T1735Z-4e9b (sweep 20260927-185507, check 166-agc/register-defaults-walk-4e9b, log lines 6350-8382: every record of versions 0xd, 0xc and 8, its entry and the 16 bytes there); PPSA02664 image+0x3dc26 (how a title walks it)."
+found_in = ["PPSA28061-app0", "PPSA02664-app0"]
 found_on = "2026-09-21"
-assumptions = [
-    "That answering count 0 - no defaults - is an acceptable stand-in for the 0x89 records hardware returns for version 0xd until obSCEne walks them (REQ-20260927T1735Z-4e9b); a title then takes its own no-default path.",
-    "That 256 bytes covers everything the caller reads through the returned pointer; only +0x30 and +0x38 are seen at the decoded call site.",
-]
 
 [[function]]
 name = "sceAgcGetRegisterDefaults2Internal"
-purpose = "Inner variant of sceAgcGetRegisterDefaults2: returns a pointer to a register reset-defaults descriptor for a register set, searched by the caller for a different register id. sceAgcGetRegisterDefaults2Internal(version) -> descriptor*."
-region = { via = "return", bytes = 256 }
+arity = 1
+purpose = "Returns a pointer to the library's inner register-defaults descriptor for a version: sceAgcGetRegisterDefaults2Internal(version) -> descriptor*."
 edge_cases = [
-    "SAME RETURN CONTRACT AS sceAgcGetRegisterDefaults2, one register apart. Decoded from PPSA28061's call site (eboot image+0x10ebc0): the guest reads count at +0x38 (u32), and only when non-zero reads records* at +0x30 and walks 12-byte {id:u32, value:u64} records - here searching for register id 0x6ac156ef (the outer variant searched 0xe24f806d). The run reaches this call immediately after the outer variant's count-zero descriptor was accepted (commit d1502d2), which is what confirmed the two share a shape.",
-    "NO OUTPUT BUFFER - library-owned storage, so orbistoun answers it with a reserved zeroed region (via = return) rather than filling a caller buffer, exactly as the outer variant. count = 0 is the graceful path: the caller takes its `je` branch (image+0x10ebcf -> 0x10ec0b), writes -1 (unset) into its register-default slots at image+0x1f6150.. and continues, applying no override for 0x6ac156ef.",
-    "MEASURED SHAPE (obSCEne -4d8a, sweep 20260927-153242): resolves statically (0x8005960b0) and answers the same 64-byte descriptor shape as the outer variant, all four table pointers set; count 0x18 for version 0xd and 0x1c for 0xc. orbistoun still answers count 0, for the reason the outer entry gives.",
+    "MEASURED WHOLE, the same descriptor shape as sceAgcGetRegisterDefaults2 (see that entry for how it is rebuilt): version 0xd has 0x18 records and all four tables, 0xc 0x1c records, 8 0x16 records with its third table null (length 0).",
+    "A version no probe walked is refused by name.",
 ]
-known_by = "assumed"
-found_in = ["PPSA28061-app0"]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2310Z-4d8a (sweep 20260927-153242, check 166-agc/register-defaults2-v0xd) and REQ-20260927T1735Z-4e9b (sweep 20260927-185507, check 166-agc/register-defaults-walk-4e9b, log lines 6350-8382: every record of versions 0xd, 0xc and 8, its entry and the 16 bytes there); PPSA02664 image+0x3dc26 (how a title walks it)."
+found_in = ["PPSA28061-app0", "PPSA02664-app0"]
 found_on = "2026-09-21"
-assumptions = [
-    "That answering count 0 is an acceptable stand-in for the 0x18 records hardware returns for version 0xd until obSCEne walks them (REQ-20260927T1735Z-4e9b).",
-]
 
 [[function]]
 name = "sceAgcInit"

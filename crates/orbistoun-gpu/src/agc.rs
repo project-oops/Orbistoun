@@ -65,8 +65,8 @@ guest_module! {
         "sceAgcDmaDataPatchSetDstAddressOrOffset" => 6,
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate" => 6,
         "sceAgcGetIsTrinityMode" => 0,
-        "sceAgcGetRegisterDefaults2" => 6,
-        "sceAgcGetRegisterDefaults2Internal" => 6,
+        "sceAgcGetRegisterDefaults2" => 1,
+        "sceAgcGetRegisterDefaults2Internal" => 1,
         "0x53bbd82b51d172db" => 2,
         "sceAgcInit" => 2,
         "sceAgcQueueEndOfPipeActionPatchAddress" => 6,
@@ -643,6 +643,25 @@ fn agc_init_raw(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     answer
 }
 
+/// A register-defaults descriptor for `version`, or a refusal by name for a version no probe walked.
+fn register_defaults(function: &str, version: u64) -> u64 {
+    u32::try_from(version)
+        .ok()
+        .and_then(|version| crate::register_defaults::descriptor(function, version))
+        .unwrap_or_else(|| u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()))
+}
+
+/// `sceAgcGetRegisterDefaults2(version)`: the library-owned descriptor for `version`, as measured
+/// (`-4d8a`, `-4e9b`).
+fn defaults2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    register_defaults("sceAgcGetRegisterDefaults2", args[0])
+}
+
+/// `sceAgcGetRegisterDefaults2Internal(version)`: the inner variant's descriptor, as measured.
+fn defaults2_internal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    register_defaults("sceAgcGetRegisterDefaults2Internal", args[0])
+}
+
 /// `sceAgcGetIsTrinityMode()` - whether the GPU is the faster revision of this generation.
 ///
 /// The graphics-side twin of `sceKernelIsNeoMode`, answered from the presented machine (D394): `0`
@@ -969,6 +988,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("0x53bbd82b51d172db", agc_init_raw),
         ("sceAgcInit", agc_init),
         ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
+        ("sceAgcGetRegisterDefaults2", defaults2),
+        ("sceAgcGetRegisterDefaults2Internal", defaults2_internal),
     ]
 }
 

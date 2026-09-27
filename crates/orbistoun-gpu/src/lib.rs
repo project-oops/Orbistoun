@@ -20,6 +20,7 @@ pub mod packet;
 pub mod perf;
 pub mod pipeline;
 mod pixel_inputs;
+pub mod register_defaults;
 pub mod registers;
 mod render;
 pub mod tiling;
