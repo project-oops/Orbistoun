@@ -1753,17 +1753,30 @@ fn viewport_within_limits(
     let (width, height) = (viewport.width.abs(), viewport.height.abs());
     if width > f32_from(max_width) || height > f32_from(max_height) {
         return Err(DispatchError::Unsupported(format!(
-            "a viewport of {width}x{height} exceeds the device's maxViewportDimensions of \
-             {max_width}x{max_height}"
+            concat!(
+                "a viewport of {width}x{height} exceeds the device's maxViewportDimensions of ",
+                "{max_width}x{max_height}",
+            ),
+            width = width,
+            height = height,
+            max_width = max_width,
+            max_height = max_height,
         )));
     }
     let x = [viewport.x, viewport.x + viewport.width];
     let y = [viewport.y, viewport.y + viewport.height];
     if x.into_iter().chain(y).any(|edge| edge < low || edge > high) {
         return Err(DispatchError::Unsupported(format!(
-            "a viewport from ({}, {}) of {}x{} reaches outside the device's viewportBoundsRange \
-             [{low}, {high}]",
-            viewport.x, viewport.y, viewport.width, viewport.height
+            concat!(
+                "a viewport from ({}, {}) of {}x{} reaches outside the device's ",
+                "viewportBoundsRange [{low}, {high}]",
+            ),
+            viewport.x,
+            viewport.y,
+            viewport.width,
+            viewport.height,
+            low = low,
+            high = high,
         )));
     }
     Ok(())

@@ -119,7 +119,7 @@ const fn xor_words(pipe_bank_xor: u8) -> usize {
 }
 
 /// [`detile_surface_64kb_rx_bpp4`] for a surface with pipe-bank XOR `pipe_bank_xor` (see
-/// [`xor_words`]), passing each texel through `map` (a component swap) in the same pass, and
+/// `xor_words`), passing each texel through `map` (a component swap) in the same pass, and
 /// assuming `tiled` covers the surface.
 ///
 /// One thread per row of blocks: each row is a contiguous run of `tiled` and of the linear image,
@@ -190,7 +190,7 @@ fn tile_mapped(
 }
 
 /// [`tile_surface_64kb_rx_bpp4`] for a surface with pipe-bank XOR `pipe_bank_xor` (see
-/// [`xor_words`]), passing each texel through `map` (a component swap) in the same pass.
+/// `xor_words`), passing each texel through `map` (a component swap) in the same pass.
 ///
 /// # Errors
 ///

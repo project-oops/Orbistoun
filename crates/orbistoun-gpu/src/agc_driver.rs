@@ -381,8 +381,10 @@ impl GuestCp<'_> {
         };
         let (target, swap) = writable_target(submission).ok_or_else(|| {
             format!(
-                "its colour target is not one a frame can be written back to exactly: {:?}, \
-                 {:?}, {:?}, {} base(s), {} extent(s)",
+                concat!(
+                    "its colour target is not one a frame can be written back to exactly: ",
+                    "{:?}, {:?}, {:?}, {} base(s), {} extent(s)",
+                ),
                 submission.colour_target,
                 submission.colour_target_tiling,
                 submission.colour_target_format,
