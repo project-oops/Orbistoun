@@ -168,6 +168,26 @@ opcode = 2
 name = "s_load_dwordx4"
 
 [[mnemonic]]
+family = "SMEM"
+opcode = 8
+name = "s_buffer_load_dword"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 9
+name = "s_buffer_load_dwordx2"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 10
+name = "s_buffer_load_dwordx4"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 11
+name = "s_buffer_load_dwordx8"
+
+[[mnemonic]]
 family = "SOP1"
 opcode = 3
 name = "s_mov_b32"
@@ -546,6 +566,11 @@ name = "v_cmp_ge_f32_e32"
 family = "VOPC"
 opcode = 13
 name = "v_cmp_neq_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 133
+name = "v_cmp_ne_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"

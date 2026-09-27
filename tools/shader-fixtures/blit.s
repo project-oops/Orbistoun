@@ -57,4 +57,17 @@ image_load_mip v[0:3], v[2:4], s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm
 image_load_mip v[4:5], v[6:8], s[16:23] dmask:0x3 dim:SQ_RSRC_IMG_2D unorm
 s_waitcnt_vscnt null, 0x0
 s_waitcnt_vscnt null, 0x3
+
+// ---- The clear: a not-equal corner select, and the colour from a constant buffer ---
+//
+// radeonsi's clear primitive shader selects a corner with a signed not-equal compare as well
+// as the unsigned one; its pixel shader builds a raw buffer descriptor over the colour from its
+// user SGPRs and reads all four channels with one scalar buffer load. The shader itself has no
+// offset (`null`); these carry immediates, which the comparison prints the same way it decodes.
+v_cmp_ne_i32_e32 vcc, 1, v5
+v_cmp_ne_i32_e32 vcc, s4, v200
+s_buffer_load_dword s4, s[0:3], 0x8
+s_buffer_load_dwordx2 s[4:5], s[8:11], 0x10
+s_buffer_load_dwordx4 s[0:3], s[0:3], 0x0
+s_buffer_load_dwordx8 s[8:15], s[4:7], 0x20
 s_endpgm

@@ -59,6 +59,10 @@ pub const SUPPORTED: &[&str] = &[
     "s_barrier",
     "s_bfe_u32",
     "s_bfm_b64",
+    "s_buffer_load_dword",
+    "s_buffer_load_dwordx2",
+    "s_buffer_load_dwordx4",
+    "s_buffer_load_dwordx8",
     "s_branch",
     "s_cbranch_execnz",
     "s_cbranch_execz",
@@ -110,6 +114,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_lt_f32_e32",
     "v_cmp_lt_u32_e32",
     "v_cmp_ge_u32_e32",
+    "v_cmp_ne_i32_e32",
     "v_cmp_ne_i32_e64",
     "v_cndmask_b32_e32",
     "v_cndmask_b32_e64",
@@ -1779,7 +1784,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // Comparisons, which produce masks: every lane compares, and the answers become one value
         // the shader can and into `exec`.
         "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_lt_u32_e32"
-        | "v_cmp_ge_u32_e32" => compare(model, instruction, name),
+        | "v_cmp_ge_u32_e32" | "v_cmp_ne_i32_e32" => compare(model, instruction, name),
 
         // The long-form integer compare, into a register pair or a named mask.
         "v_cmp_ne_i32_e64" => compare_long(model, instruction, name),
@@ -1918,6 +1923,10 @@ fn memory_instruction<M: Model + ?Sized>(
         | "s_load_dwordx2"
         | "s_load_dwordx4"
         | "s_load_dwordx8"
+        | "s_buffer_load_dword"
+        | "s_buffer_load_dwordx2"
+        | "s_buffer_load_dwordx4"
+        | "s_buffer_load_dwordx8"
         | "global_load_dword"
         | "global_load_dwordx2"
         | "global_load_dwordx4"
@@ -3338,7 +3347,7 @@ fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), 
         "v_cmp_gt_f32_e32" => Ok((op::FORD_GREATER_THAN, true)),
         "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
         "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
-        "v_cmp_ne_i32_e64" => Ok((op::INOT_EQUAL, false)),
+        "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "no translation for this comparison",
@@ -3578,6 +3587,84 @@ fn local_share<M: Model + ?Sized>(
 
 /// `ds_read_b32`.
 const DS_READ: &str = "ds_read_b32";
+
+/// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
+/// offset register. The code the operand numbering gives `null`, and the one LLVM encodes when a
+/// probe gives only an immediate.
+const SOFFSET_NULL: u32 = 125;
+
+/// `s_buffer_load_dword` and its wider forms: consecutive words from a buffer descriptor's base
+/// plus a byte offset, into consecutive scalar registers.
+///
+/// The descriptor is read as the vector buffer accesses read it ([`read_buffer_resource`]). Each
+/// word is range-checked against the record count in bytes as a raw buffer's access is, a word at a
+/// time, and one that does not fit reads zero: from GFX8 a scalar access out of bounds does not
+/// reach memory (Mesa `ac_gpu_info.h:187`, `ac_nir_lower_mem_access_bit_sizes.c:212-217`, which
+/// clamps the offset to the record count on the generations where it does). A descriptor with a
+/// stride, or asking for addressing no access here models, reads zero, as D147 has the vector
+/// accesses do.
+///
+/// Refused by name: an offset register (`SOFFSET` other than `null`), which the solved layout has
+/// no operand for, and offset bits above the sixteen the probes solved.
+fn scalar_buffer_load<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let words = access_words(name);
+    let (destination, base, offset) = three_operands(instruction)?;
+    let (Operand::Scalar(register), Operand::Scalar(base_register), Operand::Immediate(bytes)) =
+        (destination, base, offset)
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a scalar buffer load needs a scalar destination, a descriptor and an immediate",
+        });
+    };
+    let second = instruction.second_word.unwrap_or(0);
+    if (second >> 25) & 0x7f != SOFFSET_NULL {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a scalar buffer load adding an offset register is not modelled",
+        });
+    }
+    if (second >> 16) & 0x1f != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a scalar buffer load's offset sets bits above the sixteen the probes solved",
+        });
+    }
+    let bytes = u32::try_from(*bytes).map_err(|_| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "negative load offset",
+    })?;
+    let register = u32::from(*register);
+    if register + words > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a scalar load runs past the end of the register file",
+        });
+    }
+
+    let resource = read_buffer_resource(model, u32::from(*base_register));
+    let zero = model.constant(0);
+    let strided = model.is_not_zero(resource.stride);
+    let unsupported = model.is_not_zero(resource.unsupported);
+    let refused = model.either(strided, unsupported);
+    for word in 0..words {
+        let at = model.constant(bytes + word * 4);
+        let end = model.constant(bytes + word * 4 + 4);
+        let past = model.compare(op::UGREATER_THAN, end, resource.records);
+        let outside = model.either(past, refused);
+        let address = model.add(resource.base, at);
+        let index = model.word_index(address);
+        let loaded = model.read_memory(index);
+        let value = model.select(outside, zero, loaded);
+        model.write_scalar(register + word, value);
+    }
+    model.count();
+    Ok(())
+}
 
 /// How many consecutive words a multi-word access carries, from its name.
 ///
@@ -5592,6 +5679,11 @@ fn memory<M: Model + ?Sized>(
             model.count();
             Ok(())
         }
+
+        "s_buffer_load_dword"
+        | "s_buffer_load_dwordx2"
+        | "s_buffer_load_dwordx4"
+        | "s_buffer_load_dwordx8" => scalar_buffer_load(model, instruction, name),
 
         // Flat memory: a per-lane address rather than a uniform one.
         "global_load_dword"

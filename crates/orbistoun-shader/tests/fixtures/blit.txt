@@ -34,4 +34,10 @@
 0x000098 8 image_load_mip v[4:5], v[6:8], s[16:23] dmask:0x3 dim:SQ_RSRC_IMG_2D unorm
 0x0000a0 4 s_waitcnt_vscnt null, 0x0
 0x0000a4 4 s_waitcnt_vscnt null, 0x3
-0x0000a8 4 s_endpgm
+0x0000a8 4 v_cmp_ne_i32_e32 vcc, 1, v5
+0x0000ac 4 v_cmp_ne_i32_e32 vcc, s4, v200
+0x0000b0 8 s_buffer_load_dword s4, s[0:3], 0x8
+0x0000b8 8 s_buffer_load_dwordx2 s[4:5], s[8:11], 0x10
+0x0000c0 8 s_buffer_load_dwordx4 s[0:3], s[0:3], null
+0x0000c8 8 s_buffer_load_dwordx8 s[8:15], s[4:7], 0x20
+0x0000d0 4 s_endpgm

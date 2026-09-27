@@ -61,3 +61,34 @@ image_load_mip v200, v[250:252], s[80:87] dmask:0x1 dim:SQ_RSRC_IMG_2D
 image_load_mip v[100:101], v[2:4], s[40:47] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_load_mip v[30:32], v[190:192], s[92:99] dmask:0x7 dim:SQ_RSRC_IMG_2D unorm
 image_load_mip v[8:11], v[12:14], s[16:23] dmask:0xf dim:SQ_RSRC_IMG_2D
+
+// ---- v_cmp_ne_i32_e32: the clear's other corner compare ---------------------------
+//
+// As v_cmp_ge_u32_e32 above: `vcc` implicit, the sources varied across the field.
+v_cmp_ne_i32_e32 vcc, 1, v5
+v_cmp_ne_i32_e32 vcc, v100, v200
+v_cmp_ne_i32_e32 vcc, s30, v255
+v_cmp_ne_i32_e32 vcc, -1, v77
+v_cmp_ne_i32_e32 vcc, v190, v12
+
+// ---- s_buffer_load_dword*: a destination, a descriptor quad and a byte offset -------
+//
+// As `memory.s`'s s_load samples, with a four-register descriptor in place of the address
+// pair: high destinations and bases pin the field widths, and offsets reaching 0x3fc the
+// immediate's. The clear's own `null` offset is not a name the solver resolves.
+s_buffer_load_dword s5, s[8:11], 0x10
+s_buffer_load_dword s9, s[12:15], 0x24
+s_buffer_load_dword s100, s[96:99], 0x3fc
+s_buffer_load_dword s33, s[68:71], 0x94
+s_buffer_load_dword s21, s[20:23], 0x1c8
+s_buffer_load_dwordx2 s[2:3], s[8:11], 0x40
+s_buffer_load_dwordx2 s[12:13], s[16:19], 0x88
+s_buffer_load_dwordx2 s[60:61], s[12:15], 0x2c
+s_buffer_load_dwordx2 s[98:99], s[92:95], 0x3f8
+s_buffer_load_dwordx4 s[8:11], s[20:23], 0x30
+s_buffer_load_dwordx4 s[40:43], s[60:63], 0x140
+s_buffer_load_dwordx4 s[16:19], s[4:7], 0x8
+s_buffer_load_dwordx4 s[96:99], s[88:91], 0x3f0
+s_buffer_load_dwordx8 s[24:31], s[36:39], 0x60
+s_buffer_load_dwordx8 s[48:55], s[8:11], 0xc4
+s_buffer_load_dwordx8 s[88:95], s[96:99], 0x3e0

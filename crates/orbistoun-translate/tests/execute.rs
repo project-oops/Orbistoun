@@ -840,6 +840,110 @@ fn the_models_agree_about_a_wide_scalar_load() {
     );
 }
 
+/// `s_buffer_load_dwordxN sDst, s[base:base+3], offset` with no scalar offset register: the
+/// layout `s_load` has, and `null` (code 125) in the second word's `SOFFSET` field, bits 31:25,
+/// as radeonsi's clear shader encodes it.
+fn s_buffer_load(name: &str, dst: u32, base: u32, offset: u32) -> [u32; 2] {
+    [head(name) | (dst << 6) | (base / 2), offset | (125 << 25)]
+}
+
+/// Seeds `values` at byte 16 onwards and a raw buffer descriptor over them in s[4:7]: base 16,
+/// stride zero, `records` bytes, no flags. The destinations sit below it, since the observed
+/// scalars stop at s7.
+fn seeded_buffer(values: [u32; 4], records: u32) -> Vec<u32> {
+    let mut program = Vec::new();
+    for (address, value) in (16u32..).step_by(4).zip(values) {
+        program.push(v_mov_inline(0, address));
+        program.push(v_mov_inline(1, value));
+        program.extend(global_store(0, 1));
+    }
+    program.extend([
+        s_mov_inline(4, 16),
+        s_mov_inline(5, 0),
+        s_mov_inline(6, records),
+        s_mov_inline(7, 0),
+    ]);
+    program
+}
+
+/// radeonsi's clear colour: `s_buffer_load_dwordx4` reads four consecutive words from its
+/// descriptor's base plus the offset, and a dword load at an offset reads the word there.
+#[test]
+fn a_scalar_buffer_load_reads_from_its_descriptor_s_base() {
+    if !device_or_skip("a_scalar_buffer_load_reads_from_its_descriptor_s_base") {
+        return;
+    }
+    let mut program = seeded_buffer([11, 22, 33, 44], 16);
+    program.extend(s_buffer_load("s_buffer_load_dwordx4", 0, 4, 0));
+    // The last load may overwrite the descriptor it reads.
+    program.extend(s_buffer_load("s_buffer_load_dword", 4, 4, 8));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|n| scalar(&registers, n)),
+        [11, 22, 33, 44, 33]
+    );
+}
+
+/// A scalar buffer load reads zero for each word that does not fit within the descriptor's record
+/// count, in bytes for a raw buffer - the range check the vector raw-buffer access makes, applied a
+/// word at a time: from GFX8 a scalar access out of bounds does not reach memory
+/// (`ac_gpu_info.h:187`, `ac_nir_lower_mem_access_bit_sizes.c:212-217`).
+#[test]
+fn a_scalar_buffer_load_past_its_records_reads_zero() {
+    if !device_or_skip("a_scalar_buffer_load_past_its_records_reads_zero") {
+        return;
+    }
+    let mut program = seeded_buffer([11, 22, 33, 44], 12);
+    program.extend(s_buffer_load("s_buffer_load_dwordx4", 0, 4, 0));
+    program.extend(s_buffer_load("s_buffer_load_dwordx2", 6, 4, 8));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [0, 1, 2, 3, 6, 7].map(|n| scalar(&registers, n)),
+        [11, 22, 33, 0, 33, 0]
+    );
+}
+
+/// A scalar buffer load adding a scalar offset register is refused by name: the solved layout
+/// has no field for it, so its value would be dropped.
+#[test]
+fn a_scalar_buffer_load_with_an_offset_register_is_refused() {
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let [first, second] = s_buffer_load("s_buffer_load_dwordx4", 4, 0, 0);
+    // SOFFSET s5 rather than null.
+    let program = [first, (second & !(0x7f << 25)) | (5 << 25), s_endpgm()];
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let error = translate(&decoded, &table, Strategy::default())
+        .expect_err("an offset register must be refused");
+    assert!(
+        error.to_string().contains("offset register"),
+        "the error should name the offset register, got: {error}"
+    );
+}
+
+/// radeonsi's clear primitive shader also picks corners with a signed not-equal compare into
+/// `vcc`.
+#[test]
+fn a_not_equal_compare_into_vcc_selects_per_lane() {
+    if !device_or_skip("a_not_equal_compare_into_vcc_selects_per_lane") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(5, 1)];
+    program.extend(v_mov_literal(6, 0xaaaa));
+    // v_cmp_ne_i32_e32 vcc, 1, v5: 1 != 1 is false, so v_cndmask picks 3.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 1));
+    program.push(head("v_cndmask_b32_e32") | (1 << 17) | (6 << 9) | (128 + 3));
+    // v_cmp_ne_i32_e32 vcc, 2, v5: 2 != 1, so v6.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 2));
+    program.push(head("v_cndmask_b32_e32") | (2 << 17) | (6 << 9) | (128 + 3));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!([1, 2].map(|n| vector(&registers, n)), [3, 0xaaaa]);
+}
+
 /// A store reaches guest memory at its address and nowhere else.
 #[test]
 fn a_store_reaches_guest_memory() {
