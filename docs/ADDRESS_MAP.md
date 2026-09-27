@@ -25,6 +25,7 @@ to the next base collides without failing it.
 |---|---|---|---|
 | `0x0000_0000_6000_0000` | `TRIAL_REGION_BASE` | `orbistoun-turn` | A trial region, for a change the loop tries without a person |
 | `0x0000_0008_0000_0000` | `CONSOLE_SYSCALL_GADGET_BASE` | `orbistoun-firmware` | The hardware's own libkernel base, where a payload runtime's fallback syscall gadget sits at `+0x4ea`; not chosen by this project |
+| `0x0000_000C_8000_40A0` | `FLIP_LABEL_BASE` | `orbistoun-video` | The display's flip labels, eight bytes per buffer, which a command-buffer flip releases (D728); the hardware's address, not chosen by this project |
 | `0x0000_00F0_0000_0000` | `FIRMWARE_BASE` | `orbistoun-firmware` | The firmware skeleton, placed so an address in it is recognisable as firmware |
 | `0x0000_4000_0000_0000` | `DEFAULT_MODULE_BASE` | `orbistoun-worker` | A module that links at zero |
 | `0x0000_4800_0000_0000` | `TITLE_MODULE_BASE` | `orbistoun-worker` | The modules a title ships with itself |

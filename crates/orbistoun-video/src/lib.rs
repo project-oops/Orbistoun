@@ -7,6 +7,7 @@
 use orbistoun_hle::guest_module;
 
 pub mod av_player;
+pub mod queued;
 pub mod recording;
 
 guest_module! {
@@ -407,7 +408,13 @@ fn video_out_set_buffer_attribute2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `buffer_index` is recorded as the port's last-flipped index. `flip_mode` is not modelled:
 /// when a flip is shown is a property of a scanout that does not exist.
 fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (handle, buffer_index, flip_arg) = (args[0], args[1], args[3]);
+    flip(args[0], args[1], args[3])
+}
+
+/// Presents `buffer_index` on port `handle` and posts its completion - the body a flip submitted
+/// on the CPU and one carried out from a command buffer (D728) share. The port's answer: `0`, or
+/// the bad-handle code.
+pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
     if port::with(handle, |p| {
         p.flips += 1;
         p.last_flip = Some(buffer_index);
@@ -431,15 +438,14 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // unfed queue does when its wait completes. It is off by default and recorded as an
     // intervention, so a verdict under it is not a measurement (D227).
     let completion = orbistoun_kernel::sync::PendingEvent {
-        ident: handle,
-        // The filter identifying a video-out completion is unestablished and left at zero rather
-        // than invented (D010).
-        filter: 0,
-        flags: 0,
+        ident: FLIP_EVENT_IDENT,
+        filter: EVFILT_VIDEO_OUT,
+        flags: FLIP_EVENT_FLAGS,
         fflags: 0,
-        // The caller's flip argument, the only per-flip value the guest supplies. Carrying it in
-        // `data` is an assumption.
-        data: i64::from_ne_bytes(flip_arg.to_ne_bytes()),
+        // The flip argument in bits 16..63, so a guest's arithmetic `>> 16` gives it back, -1
+        // included. The low sixteen bits vary from flip to flip on hardware in a way not yet
+        // established, and are left zero.
+        data: i64::from_ne_bytes(flip_arg.to_ne_bytes()) << 16,
         // Replaced by the registration's own word on delivery.
         udata: 0,
     };
@@ -451,6 +457,15 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     orbistoun_kernel::sync::post_event(handle, completion);
     OK
 }
+
+/// The filter a flip completion carries: `EVFILT_VIDEO_OUT`, read on hardware as -13 (obSCEne
+/// `-4e20`, `080-video/visual-flip`).
+const EVFILT_VIDEO_OUT: i16 = -13;
+/// A flip completion's flags word, `0x20` on hardware for every flip argument tried (`-4e20`).
+const FLIP_EVENT_FLAGS: u16 = 0x20;
+/// A flip completion's ident, `0x0006_0100_0000_0000` on hardware (`-4e20`). One port was
+/// observed, so whether it varies with the port is not established.
+const FLIP_EVENT_IDENT: u64 = 0x0006_0100_0000_0000;
 
 /// `sceVideoOutAddFlipEvent(equeue, handle, udata)`.
 ///
@@ -801,6 +816,101 @@ mod tests {
             port::with(handle, |p| p.buffers.clone()).expect("the port"),
             vec![0x2_0300_0000, 0x2_0301_0000],
             "the two data addresses read back in order"
+        );
+    }
+
+    /// A flip completion is the event obSCEne read on hardware (`-4e20`, `080-video/visual-flip`):
+    /// filter -13, flags 0x20, the flip ident, the registration's udata, and the flip argument in
+    /// bits 16..63 of `data`, whose arithmetic shift back gives it again - -1 and a full 48 bits
+    /// included.
+    #[test]
+    fn a_flip_completion_carries_the_measured_event() {
+        let _guard = serial();
+        let handle = open_on(10);
+        let queue = orbistoun_kernel::sync::create_equeue("flip-test");
+        let mut add = [0_u64; GUEST_ARG_REGISTERS];
+        add[..3].copy_from_slice(&[queue, handle, 0xabcd]);
+        assert_eq!(super::video_out_add_flip_event(&add), 0);
+        let addresses: [u64; 2] = [0x2_0400_0000, 0x2_0401_0000];
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, addresses.as_ptr() as u64, 2])),
+            0
+        );
+        for flip_arg in [0x12_3456_789a_i64, -1, 0x7fff_ffff_ffff] {
+            assert_eq!(
+                video_out_submit_flip(&args([handle, 0, 1, flip_arg as u64])),
+                0
+            );
+            let events = orbistoun_kernel::sync::take_events(queue, 4);
+            assert_eq!(events.len(), 1, "one completion per flip");
+            let event = events[0];
+            assert_eq!(event.filter, -13, "EVFILT_VIDEO_OUT");
+            assert_eq!(event.flags, 0x20);
+            assert_eq!(event.fflags, 0);
+            assert_eq!(event.ident, 0x0006_0100_0000_0000);
+            assert_eq!(event.udata, 0xabcd, "the registration's word");
+            assert_eq!(
+                event.data >> 16,
+                flip_arg,
+                "the argument comes back through sar 16"
+            );
+        }
+    }
+
+    /// A flip queued in a command buffer is performed at its release (D728): the completion is
+    /// posted with its argument, the port records the buffer, and the label of the buffer it
+    /// replaced on screen reads `0` again. A release under another context id, or for a port or
+    /// buffer that is not there, performs nothing.
+    #[test]
+    fn a_queued_flip_is_performed_at_its_release() {
+        use super::queued;
+        let _guard = serial();
+        let handle = open_on(11);
+        let queue = orbistoun_kernel::sync::create_equeue("queued-flip-test");
+        let mut add = [0_u64; GUEST_ARG_REGISTERS];
+        add[..3].copy_from_slice(&[queue, handle, 0x77]);
+        assert_eq!(super::video_out_add_flip_event(&add), 0);
+        let addresses: [u64; 2] = [0x2_0500_0000, 0x2_0501_0000];
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, addresses.as_ptr() as u64, 2])),
+            0
+        );
+        assert_eq!(queued::queue(handle, 4, 1), None, "an unregistered buffer");
+        assert_eq!(queued::queue(0xdead, 0, 1), None, "a port that is not open");
+
+        let (first, label0) = queued::queue(handle, 0, 5).expect("buffer 0 queues");
+        assert_eq!(label0, queued::FLIP_LABEL_BASE);
+        assert!(
+            !queued::released(label0, first.wrapping_add(1000)),
+            "another context id"
+        );
+        // The command processor stores the released value before it reports the release.
+        // SAFETY: the label region `queue` mapped.
+        assert!(unsafe { orbistoun_mem::guest::write_u64(label0, 1) });
+        assert!(queued::released(label0, first));
+        assert!(!queued::released(label0, first), "a flip is performed once");
+        let events = orbistoun_kernel::sync::take_events(queue, 4);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data >> 16, 5);
+        assert_eq!(
+            port::with(handle, |p| p.last_flip).expect("the port"),
+            Some(0)
+        );
+
+        let (second, label1) = queued::queue(handle, 1, 6).expect("buffer 1 queues");
+        assert_eq!(label1, queued::FLIP_LABEL_BASE + 8);
+        assert!(second > first, "context ids rise");
+        assert!(queued::released(label1, second));
+        // SAFETY: the label region `queue` mapped.
+        let cleared = unsafe { orbistoun_mem::guest::read_u64(label0) };
+        assert_eq!(
+            cleared,
+            Some(0),
+            "buffer 0 left the screen, so its label is clear"
+        );
+        assert_eq!(
+            port::with(handle, |p| p.last_flip).expect("the port"),
+            Some(1)
         );
     }
 

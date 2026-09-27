@@ -234,6 +234,7 @@ fn build_pipeline(
     buffer: vk::Buffer,
     size: vk::DeviceSize,
     (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
+    push_bytes: u32,
 ) -> Result<BoundPipeline, DispatchError> {
     let module = for_this_device(module);
     let shader_info = vk::ShaderModuleCreateInfo::default().code(&module);
@@ -260,7 +261,15 @@ fn build_pipeline(
         .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
 
     let set_layouts = [set_layout];
-    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+    // A module reading user data declares the push-constant block; one that reads none declares
+    // none and gets no range.
+    let push_ranges = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        .offset(0)
+        .size(push_bytes)];
+    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(if push_bytes == 0 { &[] } else { &push_ranges });
     // SAFETY: the create info outlives the call.
     let layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_pipeline_layout", e))?;
@@ -598,14 +607,17 @@ fn dispatch_core(
     module: &[u32],
     binding0: &DispatchBuffer,
     binding1: &DispatchBuffer,
-    groups: [u32; 3],
+    (groups, push): ([u32; 3], &[u32]),
 ) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
+    let push_bytes = u32::try_from(push.len() * 4)
+        .map_err(|_| DispatchError::Vulkan("push constants", vk::Result::ERROR_UNKNOWN))?;
     let bound = build_pipeline(
         device,
         module,
         binding0.buffer,
         binding0.size,
         (binding1.buffer, binding1.offset, binding1.size),
+        push_bytes,
     )?;
     let pipeline = bound.pipeline;
     let pipeline_layout = bound.layout;
@@ -643,6 +655,18 @@ fn dispatch_core(
             &sets,
             &[],
         );
+    }
+    if !push.is_empty() {
+        // SAFETY: recording is open, and the range is the one the pipeline layout declares.
+        unsafe {
+            device.cmd_push_constants(
+                command,
+                pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                zerocopy::IntoBytes::as_bytes(push),
+            );
+        }
     }
     // SAFETY: recording is open and a pipeline is bound.
     unsafe { device.cmd_dispatch(command, groups[0], groups[1], groups[2]) };
@@ -733,8 +757,15 @@ pub fn dispatch(
     };
 
     // On an error the buffers leak with everything else, per the successful-path-only release.
-    let (observed, guest_memory) =
-        dispatch_core(device, queue, family, module, &binding0, &binding1, groups)?;
+    let (observed, guest_memory) = dispatch_core(
+        device,
+        queue,
+        family,
+        module,
+        &binding0,
+        &binding1,
+        (groups, &[]),
+    )?;
 
     // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
     unsafe { device.destroy_buffer(buffer, None) };
@@ -774,7 +805,15 @@ pub(crate) fn dispatch_bound(
         family,
         ..
     } = *session;
-    dispatch_core(device, queue, family, module, observation, window, groups)
+    dispatch_core(
+        device,
+        queue,
+        family,
+        module,
+        observation,
+        window,
+        (groups, &[]),
+    )
 }
 
 /// Runs a compute dispatch over a caller-owned guest-memory window at binding 1, with a throwaway
@@ -812,7 +851,15 @@ pub(crate) fn dispatch_reading_window(
         offset: 0,
     };
 
-    let result = dispatch_core(device, queue, family, module, &observation, window, groups);
+    let result = dispatch_core(
+        device,
+        queue,
+        family,
+        module,
+        &observation,
+        window,
+        (groups, &[]),
+    );
 
     // The throwaway observation is destroyed whether or not the dispatch succeeded.
     //
@@ -822,6 +869,110 @@ pub(crate) fn dispatch_reading_window(
     unsafe { device.free_memory(scratch_memory, None) };
 
     result
+}
+
+/// What a guest dispatch left: guest memory as the window holds it after, and whether any lane
+/// made an access the module could not place exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestDispatch {
+    /// The window's words after the dispatch.
+    pub memory: Vec<u32>,
+    /// Whether an access left the window or went through a descriptor whose addressing is not
+    /// modelled; the result is then not the guest's and must not reach its memory.
+    pub escaped: bool,
+}
+
+/// Words of the observation a guest dispatch module declares: the register-observation layout,
+/// whose word zero it uses for its escape flag.
+const GUEST_OBSERVATION_WORDS: usize = 16;
+
+/// Runs a guest compute dispatch's module: `memory` is the window's contents before, uploaded to
+/// binding 1; `push` is the user-data block; the module runs `groups` workgroups, one wave each.
+///
+/// # Errors
+///
+/// No device, or a device that refused the module or a step of the dispatch.
+pub fn dispatch_guest(
+    module: &[u32],
+    memory: &[u32],
+    push: &[u32],
+    groups: [u32; 3],
+) -> Result<GuestDispatch, DispatchError> {
+    // Draws already queued finish first: the window was read from guest memory they write.
+    crate::framebuffer::settle_session()?;
+    let session = session()?;
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Session {
+        ref instance,
+        physical,
+        ref device,
+        queue,
+        family,
+        ..
+    } = *session;
+
+    let observation_size = (GUEST_OBSERVATION_WORDS * 4) as vk::DeviceSize;
+    let memory_size = (memory.len().max(1) * 4) as vk::DeviceSize;
+    let (observation_buffer, observation_memory) = create_host_buffer(
+        instance,
+        physical,
+        device,
+        observation_size,
+        GUEST_OBSERVATION_WORDS,
+    )?;
+    let (memory_buffer, memory_memory) =
+        create_host_buffer(instance, physical, device, memory_size, memory.len())?;
+    // SAFETY: the memory is host-visible, holds `memory_size` bytes and is not mapped.
+    let mapped =
+        unsafe { device.map_memory(memory_memory, 0, memory_size, vk::MemoryMapFlags::empty()) }
+            .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
+    // SAFETY: the mapping covers `memory.len()` whole words, and the two ranges cannot overlap:
+    // one is device memory, the other the caller's slice.
+    unsafe {
+        std::ptr::copy_nonoverlapping(memory.as_ptr(), mapped.cast::<u32>(), memory.len());
+    }
+    // SAFETY: mapped immediately above and not used after unmapping.
+    unsafe { device.unmap_memory(memory_memory) };
+
+    let observation = DispatchBuffer {
+        buffer: observation_buffer,
+        memory: observation_memory,
+        size: observation_size,
+        words: GUEST_OBSERVATION_WORDS,
+        offset: 0,
+    };
+    let window = DispatchBuffer {
+        buffer: memory_buffer,
+        memory: memory_memory,
+        size: memory_size,
+        words: memory.len(),
+        offset: 0,
+    };
+    let (observed, after) = dispatch_core(
+        device,
+        queue,
+        family,
+        module,
+        &observation,
+        &window,
+        (groups, push),
+    )?;
+
+    // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
+    unsafe { device.destroy_buffer(observation_buffer, None) };
+    // SAFETY: as above.
+    unsafe { device.destroy_buffer(memory_buffer, None) };
+    // SAFETY: the memory is unmapped and nothing is bound to it any longer.
+    unsafe { device.free_memory(observation_memory, None) };
+    // SAFETY: as above.
+    unsafe { device.free_memory(memory_memory, None) };
+
+    Ok(GuestDispatch {
+        memory: after,
+        escaped: observed.first().is_some_and(|&flag| flag != 0),
+    })
 }
 
 #[cfg(test)]

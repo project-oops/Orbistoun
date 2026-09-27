@@ -12,6 +12,8 @@
 mod backend;
 pub mod cp;
 pub mod depth;
+pub mod dispatch;
+pub mod display;
 pub mod packet;
 pub mod perf;
 pub mod pipeline;

@@ -363,6 +363,38 @@ fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     count
 }
 
+/// `wmemchr(s, c, n)` - the address of the first of the `n` wide characters at `s` equal to `c`,
+/// or null.
+///
+/// Reference: ISO/IEC 9899:2011 7.29.4.5.8. `n` counts wide characters, and a zero among them is
+/// an ordinary character, not a terminator; `c` is compared as a full 32-bit value, the target's
+/// `wchar_t` being 32-bit as on every FreeBSD-derived system.
+fn wmemchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (text, wanted, count) = (args[0], args[1] as u32, args[2]);
+    if text == 0 {
+        return 0;
+    }
+    for index in 0..count {
+        let Some(at) = index
+            .checked_mul(4)
+            .and_then(|offset| text.checked_add(offset))
+        else {
+            return 0;
+        };
+        let Ok(address) = usize::try_from(at) else {
+            return 0;
+        };
+        // SAFETY: a guest-supplied array of `n` wide characters under the identity mapping, read
+        // one character at a time and never past the first match.
+        let wide =
+            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(address)) };
+        if wide == wanted {
+            return at;
+        }
+    }
+    0
+}
+
 /// `wcsrchr(s, c)` - the address of the last wide character in `s` equal to `c`, or null.
 ///
 /// The terminator is part of the string, so `wcsrchr(s, 0)` answers a pointer to it, as the
@@ -753,6 +785,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("strncpy_s", strncpy_s),
         ("wcsncpy_s", wcsncpy_s),
         ("wcsrchr", wcsrchr),
+        ("wmemchr", wmemchr),
     ]
 }
 

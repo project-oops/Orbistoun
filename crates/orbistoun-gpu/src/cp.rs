@@ -15,6 +15,37 @@ use crate::packet::{self, PacketKind, build::measured};
 /// writes it by hand to the public layout.
 pub const WAIT_REG_MEM: u8 = 0x3c;
 
+/// `PKT3_CLEAR_STATE` (`sid.h:41`): resets register state to its defaults. radeonsi's preamble
+/// emits it with one zero body word (`si_state.c:4880-4881`); it touches no memory.
+pub const CLEAR_STATE: u8 = 0x12;
+/// `PKT3_CONTEXT_CONTROL` (`sid.h:64`): two words, load enables then shadow enables
+/// (`cp_pm4_table_data_gfx11.json:1219`).
+pub const CONTEXT_CONTROL: u8 = 0x28;
+/// The shadow enables of `CONTEXT_CONTROL`'s second word - `shadow_global_config` (0),
+/// `shadow_per_context_state` (1), `shadow_global_uconfig` (15), `shadow_gfx_sh_regs` (16) and
+/// `shadow_cs_sh_regs` (24) (`cp_pm4_table_data_gfx11.json:1275-1309`). With any set, the command
+/// processor writes register state to a shadow in memory, which is not carried out here. The first
+/// word's load enables select what later `LOAD_*_REG` packets read, and touch no memory themselves.
+const CONTEXT_CONTROL_SHADOW_ENABLES: u32 = (1 << 0) | (1 << 1) | (1 << 15) | (1 << 16) | (1 << 24);
+/// `update_shadow_enables`, bit 31 of the second word (`cp_pm4_table_data_gfx11.json:1315`): the
+/// shadow enables are applied only with it set, so without it the word changes nothing.
+const CONTEXT_CONTROL_UPDATE_SHADOW_ENABLES: u32 = 1 << 31;
+
+/// `PKT3_WRITE_DATA` (`sid.h:83`): a control word, a destination, then the data words
+/// (`cp_pm4_table_data_gfx11.json:6677`).
+pub const WRITE_DATA: u8 = 0x37;
+/// `WRITE_DATA` `DST_SEL` (control bits 11:8, `sid.h:84`) values naming memory: `1`, memory
+/// synchronised across GRBM (`pkt3.json:26`), `2`, through L2, and `5`, memory
+/// (`cp_pm4_table_data_gfx11.json:6680-6696`). The same memory here; Mesa's IB parser treats these
+/// three, and only these, as memory addresses (`parse_cp_pm4_table_data_json.py:77-79`). `0` is a
+/// memory-mapped register.
+const WRITE_DATA_DST_SEL_MEMORY: [u32; 3] = [1, 2, 5];
+/// `WRITE_DATA` `DST_SEL` 0, `mem_mapped_register` (`cp_pm4_table_data_gfx11.json:6680`): the
+/// destination is a register, not memory.
+const WRITE_DATA_DST_SEL_REGISTER: u32 = 0;
+/// `WRITE_DATA` `ADDR_INCR` (control bit 16): set, every word goes to the same address.
+const WRITE_DATA_NO_INCREMENT: u32 = 1 << 16;
+
 /// `DMA_DATA` `SRC_SEL` values (`sid.h:178`, bits 30:29): the source is the packet's own data word.
 const SRC_SEL_DATA: u32 = 2;
 /// `DMA_DATA` `SRC_SEL`: the source is an address - direct, or through L2 (`sid.h:178`). Both are
@@ -48,6 +79,10 @@ pub trait CpMemory {
     fn write(&mut self, address: u64, bytes: &[u8]) -> bool;
     /// The 64-bit GPU clock counter a `RELEASE_MEM` with `DATA_SEL` 3 writes.
     fn timestamp(&mut self) -> u64;
+    /// A `RELEASE_MEM` stored its value at `address` and raised the interrupt with context id
+    /// `context` - what the display acts on for a flip queued in the stream (D728). The default
+    /// has no display to tell.
+    fn released(&mut self, _address: u64, _context: u32) {}
     /// Whether the memory at `address` holds exactly `expected`, asked of a whole colour target to
     /// see whether anything wrote it. The default reads a copy; guest memory compares in place.
     fn holds(&self, address: u64, expected: &[u8]) -> bool {
@@ -95,6 +130,51 @@ pub trait CpMemory {
     fn run_draws(&mut self) -> bool {
         false
     }
+    /// Carries out one compute dispatch, its writes landing in guest memory, answering whether
+    /// that happened exactly. The default carries out nothing, which leaves the dispatch as a
+    /// stop.
+    fn run_dispatch(&mut self, _dispatch: &Dispatch<'_>) -> bool {
+        false
+    }
+}
+
+/// A compute dispatch as the stream asks for it: where it is, so the registers set before it can
+/// be read from the stream, its grid, and its dispatch initiator.
+#[derive(Debug, Clone, Copy)]
+pub struct Dispatch<'a> {
+    /// The whole stream, whose register writes before [`Self::offset`] are the dispatch's state.
+    pub stream: &'a [u8],
+    /// Byte offset of the `DISPATCH_DIRECT` packet.
+    pub offset: u32,
+    /// Groups in x, y and z.
+    pub groups: [u32; 3],
+    /// `COMPUTE_DISPATCH_INITIATOR`.
+    pub initiator: u32,
+}
+
+/// `DISPATCH_DIRECT`'s body: the grid then the initiator (`sid.h:43`; the measured builder in
+/// `packet::build::dispatch_direct`).
+fn dispatch_direct(
+    stream: &[u8],
+    offset: u32,
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [x, y, z, initiator, ..] = *body else {
+        return Err(Stop::Malformed);
+    };
+    let dispatch = Dispatch {
+        stream,
+        offset,
+        groups: [x, y, z],
+        initiator,
+    };
+    if !memory.run_dispatch(&dispatch) {
+        return Err(Stop::NeedsGpu);
+    }
+    result.dispatches += 1;
+    Ok(())
 }
 
 /// The draw packets a submission's draws are carried out for together: `DRAW_INDEX_2` and
@@ -156,6 +236,8 @@ pub struct CpExecution {
     pub waits: usize,
     /// Draw packets carried out, through [`CpMemory::run_draws`].
     pub draws: usize,
+    /// Compute dispatches carried out, through [`CpMemory::run_dispatch`].
+    pub dispatches: usize,
     /// Bytes written to guest memory.
     pub bytes_written: u64,
     /// Where it stopped.
@@ -180,6 +262,7 @@ fn is_memory_inert(opcode: u8, body_dwords: usize) -> bool {
             | measured::SET_SH_REG_INDIRECT
             | measured::SET_UCONFIG_REG_INDIRECT
             | measured::STALL_COMMAND_BUFFER_PARSER
+            | CLEAR_STATE
     ) || (opcode == measured::EVENT_WRITE && body_dwords == 1)
 }
 
@@ -241,6 +324,13 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             }),
             WAIT_REG_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 wait_reg_mem(&body, memory, &mut result)
+            }),
+            CONTEXT_CONTROL => context_control(&body),
+            packet::build::DISPATCH_DIRECT => {
+                dispatch_direct(stream, offset, &body, memory, &mut result)
+            }
+            WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
+                write_data(&body, memory, &mut result)
             }),
             _ => Err(Stop::NeedsGpu),
         };
@@ -339,7 +429,36 @@ pub fn fill_of(body: &[u32]) -> Option<Fill> {
     })
 }
 
+/// `DMA_DATA`'s `DST_SEL` "nowhere" (`cp_pm4_table_data_gfx11.json:1979`, `dst_nowhere` = 2): the
+/// source is read into L2 and nothing is written - radeonsi's shader prefetch
+/// (`si_state_draw.cpp:659-664`).
+const DST_SEL_NOWHERE: u32 = 2;
+
+/// A prefetch writes nothing; the only thing it can do to the stream is fault on a source that is
+/// not memory, so an unreadable source is refused.
+fn dma_prefetch(body: &[u32], memory: &dyn CpMemory) -> Option<Result<(), Stop>> {
+    let [control, src_low, src_high, _, _, command, ..] = *body else {
+        return None;
+    };
+    if (control >> 20) & 0x3 != DST_SEL_NOWHERE {
+        return None;
+    }
+    if !SRC_SEL_ADDRESS.contains(&((control >> 29) & 0x3)) {
+        return Some(Err(Stop::NeedsGpu));
+    }
+    let count = (command & BYTE_COUNT_MASK) as usize;
+    let readable = count == 0 || memory.read(address(src_low, src_high), count).is_some();
+    Some(if readable {
+        Ok(())
+    } else {
+        Err(Stop::OutOfBounds)
+    })
+}
+
 fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -> Result<(), Stop> {
+    if let Some(prefetched) = dma_prefetch(body, memory) {
+        return prefetched;
+    }
     let DmaData {
         src_sel,
         src_low,
@@ -402,8 +521,59 @@ fn release_mem(
     if !written.is_empty() && !memory.write(destination, &written) {
         return Err(Stop::OutOfBounds);
     }
+    // The last body dword is the interrupt's context id (`INT_CTXID`).
+    memory.released(destination, body.get(6).copied().unwrap_or(0));
     result.releases += 1;
     result.bytes_written += written.len() as u64;
+    Ok(())
+}
+
+/// `CONTEXT_CONTROL`: register state unless it enables a shadow, which writes register state to
+/// memory and is refused.
+fn context_control(body: &[u32]) -> Result<(), Stop> {
+    let [_load, shadow, ..] = *body else {
+        return Err(Stop::Malformed);
+    };
+    if shadow & CONTEXT_CONTROL_UPDATE_SHADOW_ENABLES != 0
+        && shadow & CONTEXT_CONTROL_SHADOW_ENABLES != 0
+    {
+        return Err(Stop::NeedsGpu);
+    }
+    Ok(())
+}
+
+/// `WRITE_DATA`: control, destination low (bits 31:2) and high, then the data words
+/// (`cp_pm4_table_data_gfx11.json:6677-6834`). `WR_CONFIRM` and the cache policy change nothing
+/// here: the write has landed when this returns, and there is no cache before guest memory. A
+/// register destination is register state, passed over as every `SET_*_REG` is; a reserved one
+/// stops.
+fn write_data(
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [control, addr_low, addr_high, ref data @ ..] = *body else {
+        return Err(Stop::Malformed);
+    };
+    let dst_sel = (control >> 8) & 0xf;
+    if dst_sel == WRITE_DATA_DST_SEL_REGISTER {
+        return Ok(());
+    }
+    if !WRITE_DATA_DST_SEL_MEMORY.contains(&dst_sel) {
+        return Err(Stop::NeedsGpu);
+    }
+    let destination = address(addr_low & !0x3, addr_high);
+    // Without increment the words land one over another, and the last is what memory keeps.
+    let words: &[u32] = if control & WRITE_DATA_NO_INCREMENT != 0 {
+        data.last().map(std::slice::from_ref).unwrap_or_default()
+    } else {
+        data
+    };
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    if !bytes.is_empty() && !memory.write(destination, &bytes) {
+        return Err(Stop::OutOfBounds);
+    }
+    result.bytes_written += bytes.len() as u64;
     Ok(())
 }
 
@@ -448,6 +618,8 @@ mod tests {
     struct Fake {
         bytes: BTreeMap<u64, u8>,
         clock: u64,
+        /// Every release reported, `(address, context)`.
+        released: Vec<(u64, u32)>,
     }
 
     impl Fake {
@@ -481,6 +653,40 @@ mod tests {
             self.clock += 1;
             0x1_0000_0000 + self.clock
         }
+        fn released(&mut self, address: u64, context: u32) {
+            self.released.push((address, context));
+        }
+    }
+
+    /// A release that lands reports its address and interrupt context id, which is how a flip
+    /// queued in the stream reaches the display (D728); one that cannot land reports nothing.
+    #[test]
+    fn a_release_reports_its_address_and_context_id() {
+        let packet = |dst: u64| -> Vec<u32> {
+            vec![
+                command_header(measured::RELEASE_MEM, 7),
+                0x0620_0504,
+                0x4201_0000,
+                dst as u32,
+                (dst >> 32) as u32,
+                1,
+                0,
+                0x0800_0101,
+            ]
+        };
+        let mut memory = Fake::default();
+        let ran = execute(&bytes(&packet(0x2000)), &mut memory);
+        assert_eq!(ran.stopped, Stopped::Completed);
+        assert_eq!(memory.released, vec![(0x2000, 0x0800_0101)]);
+        assert_eq!(memory.word(0x2000), 1, "the label holds the released value");
+
+        let mut memory = Fake::default();
+        let ran = execute(&bytes(&packet(0xC_8000_40A0)), &mut memory);
+        assert!(matches!(ran.stopped, Stopped::OutOfBounds { .. }));
+        assert!(
+            memory.released.is_empty(),
+            "a release that did not land is not reported"
+        );
     }
 
     fn fill(dst: u64, value: u32, bytes: u32) -> Vec<u32> {
@@ -705,6 +911,259 @@ mod tests {
         );
         assert_eq!(memory.asked, 0, "the executor is never asked");
         assert_eq!(memory.inner.word(fence), 0);
+    }
+
+    /// A `CONTEXT_CONTROL` that only updates its load and shadow enables, as radeonsi's preamble
+    /// writes it, and a `CLEAR_STATE`, are register state: the fence after them retires.
+    #[test]
+    fn context_control_without_shadowing_and_clear_state_are_register_state() {
+        let fence = 0x1000_u64;
+        let mut stream = vec![
+            command_header(super::CONTEXT_CONTROL, 2),
+            0x8000_0000,
+            0x8000_0000,
+            command_header(super::CLEAR_STATE, 1),
+            0,
+        ];
+        stream.extend(release(fence, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(fence), 0xbeef_cafe);
+    }
+
+    /// Shadow bits in a word whose `update_shadow_enables` (bit 31) is clear are not applied, so
+    /// the packet changes nothing: a stream that sets them without the update bit retires.
+    #[test]
+    fn context_control_shadow_bits_without_their_update_bit_change_nothing() {
+        let mut stream = vec![
+            command_header(super::CONTEXT_CONTROL, 2),
+            0x200,
+            0x0101_8003,
+        ];
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+    }
+
+    /// A `DMA_DATA` with `DST_SEL` "nowhere" is radeonsi's L2 prefetch
+    /// (`si_state_draw.cpp:659-664`): it reads its source and writes nothing.
+    #[test]
+    fn a_dma_prefetch_writes_nothing_and_retires() {
+        let prefetch = vec![
+            command_header(measured::DMA_DATA, 6),
+            (3 << 29) | (2 << 20),
+            0x2000,
+            0,
+            0x2000,
+            0,
+            0x0400_0100,
+        ];
+        let mut stream = prefetch.clone();
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+        memory.write(0x2000, &[7; 0x100]);
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x2000), 0x0707_0707, "nothing written over it");
+        assert_eq!(done.bytes_written, 4, "only the fence");
+
+        // A prefetch of memory that is not there faults on the hardware; here it is refused.
+        let mut unmapped = prefetch;
+        unmapped[2] = 0xdead_0000;
+        let done = execute(&bytes(&unmapped), &mut Fake::default());
+        assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
+    }
+
+    /// A `CONTEXT_CONTROL` enabling any shadow writes register state to memory, which is not
+    /// carried out here: it stops, and names itself.
+    #[test]
+    fn context_control_enabling_a_shadow_stops_the_stream() {
+        for bit in [0, 1, 15, 16, 24] {
+            let mut stream = vec![
+                command_header(super::CONTEXT_CONTROL, 2),
+                0x8000_0000,
+                0x8000_0000 | (1 << bit),
+            ];
+            stream.extend(release(0x1000, 1, 0xbeef_cafe));
+            let mut memory = Fake::default();
+
+            let done = execute(&bytes(&stream), &mut memory);
+
+            assert_eq!(
+                done.stopped,
+                Stopped::NeedsGpu {
+                    offset: 0,
+                    opcode: super::CONTEXT_CONTROL
+                },
+                "shadow bit {bit}"
+            );
+            assert_eq!(memory.word(0x1000), 0);
+        }
+    }
+
+    fn write_data(control: u32, dst: u64, data: &[u32]) -> Vec<u32> {
+        let body = u32::try_from(3 + data.len()).expect("small");
+        let mut out = vec![
+            command_header(super::WRITE_DATA, body),
+            control,
+            dst as u32,
+            (dst >> 32) as u32,
+        ];
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// `WRITE_DATA` to memory - through L2, direct, or synchronised across GRBM - writes its data
+    /// words at the address, in order, as radeonsi emits it (`ac_cmdbuf_cp.c:62-66`: `DST_SEL`,
+    /// `WR_CONFIRM` and `ENGINE_SEL` in the control word).
+    #[test]
+    fn write_data_to_memory_writes_its_words() {
+        for dst_sel in [1_u32, 2, 5] {
+            let control = (dst_sel << 8) | (1 << 20) | (1 << 30);
+            let mut stream = write_data(control, 0x2004, &[0x1111_1111, 0x2222_2222, 0x3333_3333]);
+            stream.extend(release(0x1000, 1, 0xbeef_cafe));
+            let mut memory = Fake::default();
+
+            let done = execute(&bytes(&stream), &mut memory);
+
+            assert_eq!(
+                done.stopped,
+                Stopped::Completed,
+                "dst_sel {dst_sel}: {done:?}"
+            );
+            assert_eq!(
+                [
+                    memory.word(0x2004),
+                    memory.word(0x2008),
+                    memory.word(0x200c)
+                ],
+                [0x1111_1111, 0x2222_2222, 0x3333_3333]
+            );
+            assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+            assert_eq!(done.bytes_written, 12 + 4);
+        }
+    }
+
+    /// With `ADDR_INCR` set to "do not increment" every word goes to the same address, so the last
+    /// one is what memory holds.
+    #[test]
+    fn write_data_without_increment_leaves_the_last_word() {
+        let control = (5 << 8) | (1 << 16);
+        let stream = write_data(control, 0x2000, &[1, 2, 3]);
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!((memory.word(0x2000), memory.word(0x2004)), (3, 0));
+    }
+
+    /// A register destination is register state, passed over like `SET_UCONFIG_REG`: memory is
+    /// untouched and the fence after it retires. The flip builder's packet is one - `DST_SEL` 0 to
+    /// register `0xc343` (obSCEne, `sceAgcDcbSetFlip`).
+    #[test]
+    fn write_data_to_a_register_is_register_state() {
+        let mut stream = write_data(0, 0xc343, &[0x1234_5678]);
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(done.bytes_written, 4, "only the fence");
+        assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+    }
+
+    /// A reserved destination stops, by name; an unmapped memory destination is refused.
+    #[test]
+    fn write_data_to_a_reserved_destination_or_unmapped_memory_stops() {
+        let stream = write_data(3 << 8, 0x2000, &[1]);
+        let done = execute(&bytes(&stream), &mut Fake::default());
+        assert_eq!(
+            done.stopped,
+            Stopped::NeedsGpu {
+                offset: 0,
+                opcode: super::WRITE_DATA
+            }
+        );
+        let stream = write_data(5 << 8, 0xdead_0000, &[1]);
+        let done = execute(&bytes(&stream), &mut Fake::default());
+        assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
+    }
+
+    /// Memory whose dispatches the executor carries out by writing where they were asked for, or
+    /// refuses.
+    struct Dispatching {
+        inner: Fake,
+        runs: bool,
+        seen: Vec<(u32, [u32; 3], u32)>,
+    }
+
+    impl CpMemory for Dispatching {
+        fn read(&self, address: u64, length: usize) -> Option<Vec<u8>> {
+            self.inner.read(address, length)
+        }
+        fn write(&mut self, address: u64, bytes: &[u8]) -> bool {
+            self.inner.write(address, bytes)
+        }
+        fn timestamp(&mut self) -> u64 {
+            self.inner.timestamp()
+        }
+        fn run_dispatch(&mut self, dispatch: &super::Dispatch<'_>) -> bool {
+            self.seen
+                .push((dispatch.offset, dispatch.groups, dispatch.initiator));
+            self.runs && self.inner.write(0x3000, &0xc0de_c0de_u32.to_le_bytes())
+        }
+    }
+
+    /// A dispatch is handed to the executor with its place in the stream, its grid and its
+    /// initiator; carried out, the fence after it retires and what it wrote is in memory before.
+    /// Refused, it stops the stream and nothing after it retires.
+    #[test]
+    fn a_dispatch_the_executor_carries_out_lets_the_fence_after_it_retire() {
+        let mut stream = fill(0x2000, 0x1111_1111, 16);
+        let at = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(crate::packet::build::dispatch_direct(0xc0, 1, 1));
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        for runs in [true, false] {
+            let mut memory = Dispatching {
+                inner: Fake::default(),
+                runs,
+                seen: Vec::new(),
+            };
+
+            let done = execute(&bytes(&stream), &mut memory);
+
+            assert_eq!(memory.seen, vec![(at, [0xc0, 1, 1], 1)]);
+            if runs {
+                assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+                assert_eq!(done.dispatches, 1);
+                assert_eq!(memory.inner.word(0x3000), 0xc0de_c0de);
+                assert_eq!(memory.inner.word(0x1000), 0xbeef_cafe);
+            } else {
+                assert_eq!(
+                    done.stopped,
+                    Stopped::NeedsGpu {
+                        offset: at,
+                        opcode: crate::packet::build::DISPATCH_DIRECT
+                    }
+                );
+                assert_eq!(
+                    memory.inner.word(0x1000),
+                    0,
+                    "no fence for a refused dispatch"
+                );
+            }
+        }
     }
 
     /// A wait that cannot hold stops the stream; memory out of bounds is refused, not written.

@@ -112,6 +112,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
+    "v_lshl_add_u32",
+    "v_lshrrev_b64",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
     "v_mbcnt_lo_u32_b32",
@@ -715,6 +717,25 @@ pub trait Model {
     /// How many words of guest memory this module addresses. A property of the module, so a test
     /// can widen the window.
     fn memory_words(&self) -> u32;
+
+    /// The high thirty-two bits of the window's guest address, which an exact access's address
+    /// must share.
+    fn memory_high(&self) -> u32 {
+        0
+    }
+
+    /// Whether every guest-memory access must be placed exactly: a module whose writes land in
+    /// guest memory for real, where an access dropped or folded into the window would be a wrong
+    /// answer. Such a module records each access it cannot place ([`Self::note_escape`]), and an
+    /// access that cannot even be checked is refused at translation.
+    fn exact_memory(&self) -> bool {
+        false
+    }
+
+    /// Records that an access left the memory this module can reach exactly, when `escaped` holds:
+    /// for `lane` when it is active, or for the scalar unit (`None`). A model that is not exact
+    /// records nothing.
+    fn note_escape(&mut self, _escaped: Id, _lane: Option<u32>) {}
 
     /// Reinterprets a register's bits as a float.
     fn as_float(&mut self, value: Id) -> Id {
@@ -1741,6 +1762,10 @@ fn vector_instruction<M: Model + ?Sized>(
         // The division pre-scale, and the carry-producing arithmetic that writes a per-lane carry
         // mask as a second destination; 64-bit address arithmetic is built from these.
         "v_div_scale_f32" => division_scale(model, instruction),
+
+        // Integer shifts in the long form: a shift-then-add, and a 64-bit shift of a register pair.
+        "v_lshl_add_u32" => shift_add(model, instruction),
+        "v_lshrrev_b64" => shift_right_64(model, instruction),
         "v_add_co_u32" | "v_sub_co_u32" | "v_add_co_ci_u32_e64" | "v_add_co_ci_u32_e32" => {
             carry_arithmetic(model, instruction, name)
         }
@@ -1812,6 +1837,21 @@ fn memory_instruction<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
+    // Only the untyped buffer accesses and the local data share are checked against an exact
+    // module's window so far; any other access to guest memory is refused there rather than left
+    // to fold into it.
+    if model.exact_memory()
+        && !name.starts_with("buffer_")
+        && !matches!(name, "ds_write_b32" | "ds_read_b32")
+    {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a guest dispatch writes guest memory for real, and this access is not yet ",
+                "checked against its window, so where it lands could not be made exact"
+            ),
+        });
+    }
     match name {
         // Anything that reaches guest memory.
         "s_load_dword"
@@ -3486,6 +3526,8 @@ struct BufferResource {
     records: Id,
     /// Set when the descriptor asks for addressing this translator does not do.
     unsupported: Id,
+    /// Bits 47:32 of the base, which an exact module checks against its window's high half.
+    high: Id,
 }
 
 /// Reads a buffer resource constant from the register file.
@@ -3513,12 +3555,15 @@ fn read_buffer_resource<M: Model + ?Sized>(model: &mut M, first: u32) -> BufferR
     let add_tid_bit = model.constant(1 << 23);
     let add_tid = model.binary(op::BITWISE_AND, flags, add_tid_bit);
     let unsupported = model.binary(op::BITWISE_OR, swizzled, add_tid);
+    let high_mask = model.constant(0xFFFF);
+    let high = model.binary(op::BITWISE_AND, second, high_mask);
 
     BufferResource {
         base,
         stride,
         records,
         unsupported,
+        high,
     }
 }
 
@@ -3560,7 +3605,9 @@ fn buffer_address<M: Model + ?Sized>(
 /// four are evaluated: mode 0 checks index >= records or offset >= stride (structured buffers);
 /// mode 1 checks index >= records (raw buffers); mode 2 checks records == 0; mode 3 checks offset +
 /// payload > records (raw, unswizzled). Mode 3's payload is read as bytes: the reference calls it
-/// dwords, but every other term is a byte count, and bytes give the ordinary range check.
+/// dwords, but every other term is a byte count, and bytes give the ordinary range check. The two
+/// bits are `OOB_SELECT`, bits 29:28 of the descriptor's fourth word on this generation (Mesa
+/// `src/amd/registers/gfx10-rsrc.json`, `SQ_BUF_RSRC_WORD3`).
 fn buffer_out_of_bounds<M: Model + ?Sized>(
     model: &mut M,
     resource: &BufferResource,
@@ -3573,10 +3620,10 @@ fn buffer_out_of_bounds<M: Model + ?Sized>(
     let two = model.constant(2);
     // The selector is two bits wide.
     let three = model.constant(3);
-    let twenty_four = model.constant(24);
+    let twenty_eight = model.constant(28);
     let payload = model.constant(payload_bytes);
 
-    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, flags, twenty_four);
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, flags, twenty_eight);
     let mode = model.binary(op::BITWISE_AND, shifted, three);
 
     let index_past = model.compare(op::UGREATER_THAN_EQUAL, index, resource.records);
@@ -4161,6 +4208,10 @@ fn buffer_access<M: Model + ?Sized>(
             // can satisfy one and not the other.
             let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, 4);
             let register = register + component;
+            if model.exact_memory() {
+                let escaped = buffer_escape(model, &resource, address, outside);
+                model.note_escape(escaped, Some(lane));
+            }
 
             if loading {
                 // Out of range reads zero, as the reference states.
@@ -4176,6 +4227,170 @@ fn buffer_access<M: Model + ?Sized>(
                 write_guarded(model, address, kept, lane);
             }
         }
+    }
+    model.count();
+    Ok(())
+}
+
+/// Whether an exact module's buffer access leaves the memory it can place: a descriptor whose
+/// addressing is not modelled (forced out of bounds, which the hardware would not do), or an
+/// access the buffer's bounds admit at an address outside the window - below or past it, or in
+/// another four-gigabyte span than the window's.
+fn buffer_escape<M: Model + ?Sized>(
+    model: &mut M,
+    resource: &BufferResource,
+    address: Id,
+    outside: Id,
+) -> Id {
+    let refused = model.is_not_zero(resource.unsupported);
+    let inside = model.address_within_window(address);
+    let window_high = model.constant(model.memory_high());
+    let same_span = model.compare(op::IEQUAL, resource.high, window_high);
+    let placed = both(model, inside, same_span);
+    let bool_type = model.bool_type();
+    let b = model.builder();
+    let admitted = b.id();
+    b.function(op::LOGICAL_NOT, &[bool_type.0, admitted.0, outside.0]);
+    let unplaced = b.id();
+    b.function(op::LOGICAL_NOT, &[bool_type.0, unplaced.0, placed.0]);
+    let lost = both(model, admitted, unplaced);
+    model.either(refused, lost)
+}
+
+/// Refuses any source modifier on a long-form integer instruction: negate and absolute value
+/// have no integer meaning here, and a clamp would saturate.
+fn no_integer_modifiers(instruction: &Instruction, sources: usize) -> Result<(), TranslateError> {
+    let modifiers = Modifiers::read(instruction, false)?;
+    if (0..sources).any(|source| modifiers.touches(source)) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a source modifier on long-form integer arithmetic, which is not translated",
+        });
+    }
+    Ok(())
+}
+
+/// `v_lshl_add_u32 d, a, b, c`: `(a << b[4:0]) + c` per lane, wrapping (AMD's published RDNA
+/// instruction set, `V_LSHL_ADD_U32`).
+fn shift_add<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 3)?;
+    let [destination, value, amount, addend] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_lshl_add_u32 does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_lshl_add_u32 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let low_five = model.constant(31);
+    for lane in running_lanes(model) {
+        let value = model.read_source(instruction, value, lane)?;
+        let amount = model.read_source(instruction, amount, lane)?;
+        let addend = model.read_source(instruction, addend, lane)?;
+        let amount = model.binary(op::BITWISE_AND, amount, low_five);
+        let shifted = model.binary(op::SHIFT_LEFT_LOGICAL, value, amount);
+        let sum = model.add(shifted, addend);
+        model.write_vector_lane(register, lane, sum);
+    }
+    model.count();
+    Ok(())
+}
+
+/// The two halves of a 64-bit source operand for one lane: a vector or scalar register pair, or an
+/// inline integer sign-extended as the hardware does.
+fn pair_source<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    operand: &Operand,
+    lane: u32,
+) -> Result<(Id, Id), TranslateError> {
+    let next = match operand {
+        Operand::Vector(n) => {
+            Operand::Vector(n.checked_add(1).ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a 64-bit vector source runs past the register file",
+            })?)
+        }
+        Operand::Scalar(n) => {
+            Operand::Scalar(n.checked_add(1).ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a 64-bit scalar source runs past the register file",
+            })?)
+        }
+        Operand::Integer(value) => {
+            let low = model.read_source(instruction, operand, lane)?;
+            let high = model.constant(if *value < 0 { u32::MAX } else { 0 });
+            return Ok((low, high));
+        }
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a 64-bit source that is neither a register pair nor an inline integer",
+            });
+        }
+    };
+    let low = model.read_source(instruction, operand, lane)?;
+    let high = model.read_source(instruction, &next, lane)?;
+    Ok((low, high))
+}
+
+/// `v_lshrrev_b64 d, amount, value`: the 64-bit `value` shifted right by `amount[5:0]`, into the
+/// destination pair (`V_LSHRREV_B64`). SPIR-V leaves a shift by the operand's width or more
+/// undefined, so the three ranges - zero, below 32, 32 and above - are computed apart and selected.
+fn shift_right_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 2)?;
+    let (destination, amount, value) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_lshrrev_b64 destination is not a vector register pair",
+        });
+    };
+    let register = u32::from(*register);
+    if register + 2 > VECTOR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_lshrrev_b64 destination runs past the vector register file",
+        });
+    }
+    let (six_bits, thirty_one, thirty_two, zero) = (
+        model.constant(63),
+        model.constant(31),
+        model.constant(32),
+        model.constant(0),
+    );
+    for lane in running_lanes(model) {
+        let amount = model.read_source(instruction, amount, lane)?;
+        let (low, high) = pair_source(model, instruction, value, lane)?;
+        let k = model.binary(op::BITWISE_AND, amount, six_bits);
+        // Below 32: each half shifts, and the high half's low bits move into the low half.
+        let small = model.binary(op::BITWISE_AND, k, thirty_one);
+        let reverse = model.binary(op::ISUB, thirty_two, small);
+        let reverse = model.binary(op::BITWISE_AND, reverse, thirty_one);
+        let low_shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, low, small);
+        let carried = model.binary(op::SHIFT_LEFT_LOGICAL, high, reverse);
+        let no_carry = model.compare(op::IEQUAL, small, zero);
+        let carried = pick(model, no_carry, zero, carried);
+        let low_small = model.binary(op::BITWISE_OR, low_shifted, carried);
+        let high_small = model.binary(op::SHIFT_RIGHT_LOGICAL, high, small);
+        // 32 and above: the high half, shifted by the rest, becomes the low half.
+        let low_large = model.binary(op::SHIFT_RIGHT_LOGICAL, high, small);
+        let large = model.compare(op::UGREATER_THAN_EQUAL, k, thirty_two);
+        let new_low = pick(model, large, low_large, low_small);
+        let new_high = pick(model, large, zero, high_small);
+        model.write_vector_lane(register, lane, new_low);
+        model.write_vector_lane(register + 1, lane, new_high);
     }
     model.count();
     Ok(())

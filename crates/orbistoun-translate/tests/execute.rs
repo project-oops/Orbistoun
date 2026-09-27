@@ -3120,13 +3120,14 @@ const IDXEN: u32 = 1 << 13;
 /// Builds a raw buffer descriptor in `s[base..base+4]`.
 ///
 /// Base address zero, no stride, `records` bytes, and out-of-bounds mode three - the raw
-/// unswizzled mode, whose check is `offset + payload > records`.
+/// unswizzled mode, whose check is `offset + payload > records` - in `OOB_SELECT`, bits 29:28 of
+/// the fourth word (Mesa `gfx10-rsrc.json`, `SQ_BUF_RSRC_WORD3`).
 fn describe_buffer(base: u32, records: u32) -> Vec<u32> {
     [
         s_mov_b32_literal(base, 0),
         s_mov_b32_literal(base + 1, 0),
         s_mov_b32_literal(base + 2, records),
-        s_mov_b32_literal(base + 3, 3 << 24),
+        s_mov_b32_literal(base + 3, 3 << 28),
     ]
     .concat()
 }
@@ -4116,7 +4117,7 @@ fn an_indexed_buffer_access_multiplies_the_index_by_the_stride() {
         s_mov_b32_literal(4, 0),
         s_mov_b32_literal(5, 16 << 16),
         s_mov_b32_literal(6, 4),
-        s_mov_b32_literal(7, 1 << 24),
+        s_mov_b32_literal(7, 1 << 28),
     ]
     .concat();
     program.extend([v_mov_inline(0, 2), v_mov_code(1, F_2)]);
@@ -4810,4 +4811,55 @@ fn every_supported_name_exists_on_this_target() {
         missing.len(),
         missing
     );
+}
+
+/// `v_lshl_add_u32`: the first source shifted left by the low five bits of the second, plus the
+/// third, wrapping. A shift of 36 is a shift of 4.
+#[test]
+fn a_shift_then_add_uses_the_low_five_bits_and_wraps() {
+    if !device_or_skip("v_lshl_add_u32") {
+        return;
+    }
+    // Vector register sources are 256 + n in the shared numbering.
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 0x8000_0003));
+    program.extend(v_mov_literal(2, 36));
+    program.extend(v_mov_literal(3, 0x10));
+    program.extend(vop3("v_lshl_add_u32", 0, [257, 258, 259], 0, 0));
+    program.extend(vop3("v_lshl_add_u32", 4, [257, 128 + 1, 257], 0, 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 0),
+        (0x8000_0003_u32 << 4).wrapping_add(0x10)
+    );
+    assert_eq!(
+        vector(&registers, 4),
+        (0x8000_0003_u32 << 1).wrapping_add(0x8000_0003)
+    );
+}
+
+/// `v_lshrrev_b64`: a register pair shifted right by the low six bits of the first source,
+/// through all three ranges - zero, below thirty-two, and thirty-two and above.
+#[test]
+fn a_sixty_four_bit_right_shift_crosses_the_halves() {
+    if !device_or_skip("v_lshrrev_b64") {
+        return;
+    }
+    let value: u64 = 0x8765_4321_0fed_cba9;
+    for shift in [0_u32, 4, 31, 32, 40, 63, 64 + 8] {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(2, value as u32));
+        program.extend(v_mov_literal(3, (value >> 32) as u32));
+        program.extend(v_mov_literal(4, shift));
+        program.extend(vop3("v_lshrrev_b64", 0, [260, 258, 0], 0, 0));
+        program.push(s_endpgm());
+        let registers = run(&program);
+        let expected = value >> (shift & 63);
+        assert_eq!(
+            (vector(&registers, 0), vector(&registers, 1)),
+            (expected as u32, (expected >> 32) as u32),
+            "shift {shift}"
+        );
+    }
 }

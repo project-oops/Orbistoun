@@ -7,10 +7,12 @@ purpose = "Registers a flip completion against an event queue, so a submitted fl
 edge_cases = [
     "Arity three, corroborated at both ends: arg0 is an event-queue handle orbistoun issued, arg1 is 0x1 - the port handle its own sceVideoOutOpen answered - and arg2 the caller's opaque word, 0x0 here (D560).",
     "This was the missing half of the flip loop. sceVideoOutSubmitFlip completed a flip and told nobody, so PPSA02664 waited on a completion orbistoun had already performed - 839 calls to sceKernelWaitEqueue against a queue nothing delivered to.",
+    "Measured on hardware (obSCEne -4e20, 080-video/visual-flip, sweep 20260927-013000 lines 4471-4592): the completion is a 32-byte kevent with ident 0x0006010000000000, filter -13 (EVFILT_VIDEO_OUT), flags 0x20, fflags 0, udata the registration's word, and data = flipArg << 16 - flipArg 0x123456789a, -1 and 0x7fffffffffff all come back through an arithmetic >> 16. orbistoun posts exactly that.",
 ]
 known_by = "guest-observed"
 assumptions = [
-    "What identifier a flip event carries, and what a waiter reads back out of it, is not established. Without it a flip that completes on submit (D516) cannot be reported to a queue, which is why PPSA02664 waits 1,177 times for one.",
+    "The low sixteen bits of data read 0x136f, 0x173f and 0x19b5 on three successive flips - a count or a time, not established - and orbistoun leaves them zero; a guest shifting them out, as PPSA05684 does, sees no difference.",
+    "One port was observed, so whether the ident varies with the port is not established.",
     "Registration is keyed by the port handle, because that is what the guest passes and what a flip knows about itself. Nothing measured says the console keys it the same way.",
 ]
 found_in = [

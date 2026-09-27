@@ -731,7 +731,11 @@ found_on = "2026-09-12"
 [[function]]
 name = "sceAgcDcbSetFlip"
 purpose = "Appends a flip request to a draw command buffer - the guest's ask to present the frame it built."
-edge_cases = ["MEASURED (obSCEne 166-agc/dcb-set-flip, sweep 20260917-124503): appends an empty encoding (0 bytes changed) and returns rc 0x0 under both a bare writer and one prepared through sceAgcDcbResetQueue, and its GetSize symbol (sceAgcDcbSetFlipGetSize) is absent from libSceAgc. So on this firmware the call writes no packet a walk would see and answers success - the same library-level no-op shape as sceAgcDcbWaitUntilSafeForRendering. Recorded so the measured empty-encoding/0x0 is what a guest that reaches it is answered."]
+edge_cases = [
+    "Measured with a port open and two buffers registered (obSCEne -1d54, 166-agc/dcb-set-flip, sweep 20260927-013000 lines 12923-12975): (dcb, video handle, buffer index, flip mode 1, flip arg) writes 76 bytes and advances the cursor 256 - SET_UCONFIG_REG 0x342-0x343 = 0xc7010101 + 8*index, 0; WRITE_DATA to register 0xc343 of the 64-bit flip arg; RELEASE_MEM of the 64-bit value 1 to the buffer's flip label 0xC_8000_40A0 + 8*index with interrupt context id 0x08000101 rising by one per call; then the header of a NOP whose 45-dword body is skipped unwritten. It answers the packet's address (the probe buffer's first byte).",
+    "Buffer index 4 with two registered, and a port that is not open (the earlier sweep's bare writers), write nothing and answer 0. That, not a no-op, is what sweep 20260917-124503's empty encoding was.",
+    "orbistoun writes exactly that packet, having queued the flip under its context id; the command processor carries the flip out when it reaches the release (D728). PPSA03416 calls it as (dcb, 1, 0, 1, 1).",
+]
 known_by = "measured"
-cites = "obSCEne 166-agc/dcb-set-flip, sweep 20260917-124503: empty encoding, rc 0x0 under bare and prepared writers, GetSize symbol absent."
+cites = "obSCEne -1d54 (166-agc/dcb-set-flip, sweep 20260927-013000 lines 12923-12975): the packet bytes for buffers 0 and 1, twice each, the 0x100 cursor advance, rc the packet address, and nothing written for an unregistered buffer or an unopened port."
 found_on = "2026-09-19"
