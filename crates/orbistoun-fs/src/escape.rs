@@ -412,6 +412,9 @@ mod tests {
     /// Reads through the kernel pipe answer the `allproc` and `struct proc` layout.
     #[test]
     fn kernel_read_pipe_answers_allproc_and_proc() {
+        // A set read address routes descriptor 3's reads to this pipe, so the test holds the
+        // descriptor tests off and clears the address again before it lets them run.
+        let _guard = crate::exclusively();
         set_kernel_read_address(KERNEL_DATA_BASE + 0x20000);
         let mut buf = [0u8; 8];
         assert_eq!(read_kernel_pipe(&mut buf), 8);
@@ -434,6 +437,7 @@ mod tests {
         let mut handle_buf = [0u8; 4];
         assert_eq!(read_kernel_pipe(&mut handle_buf), 4);
         let handle = i32::from_le_bytes(handle_buf);
+        set_kernel_read_address(0);
         assert_eq!(handle, 0x2001);
     }
 }
