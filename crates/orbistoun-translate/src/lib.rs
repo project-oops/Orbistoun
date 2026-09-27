@@ -400,6 +400,45 @@ pub fn translate_windowed_primitive(
     )
 }
 
+/// Why a module was built at the slowest fidelity, when that was not what was asked for: a
+/// graphics stage, a guest dispatch, or a shader that touches a lane mask.
+fn fidelity_warnings(
+    (staged, dispatch): (bool, bool),
+    asked_for: Fidelity,
+    fidelity: Fidelity,
+    width: Width,
+) -> Vec<Warning> {
+    // Said as a warning rather than left in a field: the wavefront model costs a factor of
+    // sixty-four.
+    if staged && asked_for != Fidelity::Wavefront {
+        vec![Warning::SlowestFidelity {
+            because: concat!(
+                "the module is for a graphics stage, and the wavefront model is the only one ",
+                "with fragment inputs and a colour output"
+            ),
+            subgroup_would_need: width.lanes(),
+        }]
+    } else if dispatch && asked_for != Fidelity::Wavefront {
+        vec![Warning::SlowestFidelity {
+            because: concat!(
+                "the module is a guest dispatch, and the wavefront model is the only one with ",
+                "its entry state and exact memory"
+            ),
+            subgroup_would_need: width.lanes(),
+        }]
+    } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
+        vec![Warning::SlowestFidelity {
+            because: concat!(
+                "the shader reads or writes a lane mask, which the per-lane model cannot ",
+                "represent"
+            ),
+            subgroup_would_need: width.lanes(),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
 /// As [`translate_windowed_primitive`], for a module that reads its stage's user data at entry
 /// from the push-constant block a draw supplies. A graphics stage is always the wavefront
 /// model, which is the one that reads it.
@@ -422,31 +461,13 @@ pub fn translate_with_user_data(
     let asked_for = fidelity;
     let mut fidelity = resolve(fidelity, decode, encodings);
     let staged = stage != wavefront::Stage::Compute;
-    if staged {
+    // A guest dispatch's entry state and exact memory exist only in the wavefront model.
+    let dispatch = !staged && user_data.compute.is_some();
+    if staged || dispatch {
         fidelity = Fidelity::Wavefront;
     }
 
-    // Said as a warning rather than left in a field: the wavefront model costs a factor of
-    // sixty-four.
-    let warnings = if staged && asked_for != Fidelity::Wavefront {
-        vec![Warning::SlowestFidelity {
-            because: concat!(
-                "the module is for a graphics stage, and the wavefront model is the only one ",
-                "with fragment inputs and a colour output"
-            ),
-            subgroup_would_need: width.lanes(),
-        }]
-    } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
-        vec![Warning::SlowestFidelity {
-            because: concat!(
-                "the shader reads or writes a lane mask, which the per-lane model cannot ",
-                "represent"
-            ),
-            subgroup_would_need: width.lanes(),
-        }]
-    } else {
-        Vec::new()
-    };
+    let warnings = fidelity_warnings((staged, dispatch), asked_for, fidelity, width);
 
     if decode.desynchronised {
         return Err(TranslateError::UntrustworthyDecode {

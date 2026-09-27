@@ -466,6 +466,22 @@ pub fn execute_draws(submission: &Submission, before: Before<'_>) -> bool {
     .is_some()
 }
 
+/// Runs a guest compute dispatch on the device, on the device thread, for the command processor
+/// (installed as its dispatch executor).
+pub fn execute_dispatch(
+    module: &[u32],
+    memory: &[u32],
+    push: &[u32],
+    groups: [u32; 3],
+) -> Result<(Vec<u32>, bool), String> {
+    on_device(|| {
+        orbistoun_gpu_vulkan::dispatch_guest(module, memory, push, groups)
+            .map(|done| (done.memory, done.escaped))
+            .map_err(|e| format!("the device refused it: {e:?}"))
+    })
+    .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
+}
+
 /// The backend a running guest's submissions are drawn on, kept for the run.
 fn live_backend() -> &'static Mutex<Option<VulkanBackend>> {
     static LIVE: Mutex<Option<VulkanBackend>> = Mutex::new(None);
@@ -983,6 +999,9 @@ fn log_execution() {
             record.held_back
         )
     };
+    if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
+        tracing::info!("a compute dispatch was not carried out - {why}");
+    }
     tracing::info!(
         "the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}{held}",
         record.completed,

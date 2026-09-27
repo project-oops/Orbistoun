@@ -887,6 +887,10 @@ pub struct Wavefront<'a> {
     dispatch: Option<compute_inputs::DispatchState>,
     /// The high thirty-two bits of the window's guest address.
     memory_high: u32,
+    /// A guest dispatch's user-data words the stream never wrote, one bit each.
+    unwritten_user_data: u32,
+    /// Whether the program reads one of them, whose value nothing here knows.
+    reads_unwritten: bool,
 }
 
 impl Wavefront<'_> {
@@ -1252,6 +1256,8 @@ impl<'a> Wavefront<'a> {
             translated: 0,
             dispatch,
             memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
+            unwritten_user_data: user_data.compute.map_or(0, |c| c.unwritten_user_data),
+            reads_unwritten: false,
         };
 
         this.seed_entry(user_data_source, user_data, &system);
@@ -1372,6 +1378,9 @@ impl<'a> Wavefront<'a> {
     }
 
     fn load_scalar(&mut self, register: u32) -> Id {
+        if register < 32 && (self.unwritten_user_data >> register) & 1 != 0 {
+            self.reads_unwritten = true;
+        }
         if let Some(known) = self.known_exec_half(register) {
             return self.constant(known);
         }
@@ -1515,6 +1524,15 @@ impl<'a> Wavefront<'a> {
     /// Lane zero of each vector register, then the scalar registers: the lane model's layout, so
     /// the two can be diffed.
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
+        if self.reads_unwritten {
+            return Err(TranslateError::Unsupported {
+                offset: 0,
+                detail: concat!(
+                    "the program reads a user-data word the stream never wrote, so what it ",
+                    "starts with is unknown"
+                ),
+            });
+        }
         // Only a compute module publishes its registers: the epilogue is the compute harness's
         // oracle, and a graphics module's oracle is its attachment (D553).
         if let Some(state) = self.dispatch {

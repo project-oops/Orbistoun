@@ -436,6 +436,22 @@ pub struct Pipeline {
     store: Option<crate::translations::TranslationStore>,
     /// Fills not yet matched against a depth target, which may clear one a later submission binds.
     depth_fills: crate::depth::PendingFills,
+    /// Guest dispatch modules, by the program's bytes, its entry state and its window.
+    dispatch_modules: BTreeMap<u64, Vec<u32>>,
+}
+
+/// A guest compute dispatch made ready to run: its module, the window it was built against, and the
+/// push-constant block carrying its user data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedDispatch {
+    /// The translated module.
+    pub module: Vec<u32>,
+    /// The guest memory it reads and writes.
+    pub window: Window,
+    /// Its user data, from word zero of the block.
+    pub push: Vec<u32>,
+    /// How many groups run.
+    pub groups: [u32; 3],
 }
 
 impl Pipeline {
@@ -463,6 +479,104 @@ impl Pipeline {
             next_resource: 1,
             store: None,
             depth_fills: crate::depth::PendingFills::default(),
+            dispatch_modules: BTreeMap::new(),
+        })
+    }
+
+    /// Makes a guest compute dispatch ready to run: reads and decodes its program, refuses one that
+    /// may read user data the stream never wrote, places its window over the buffers it addresses,
+    /// and translates it with its entry state and exact memory.
+    ///
+    /// # Errors
+    ///
+    /// Each refusal, by name: an unreadable or undecodable program, unknown user data, a window
+    /// that cannot be placed, or a translation refused.
+    pub fn prepare_dispatch(
+        &mut self,
+        state: &crate::dispatch::DispatchState,
+        memory: &impl GuestMemory,
+    ) -> Result<PreparedDispatch, String> {
+        let address = guest_address_of(state.program);
+        let window = read_window(memory, address)
+            .ok_or_else(|| format!("no mapped memory at the compute program {address:#x}"))?;
+        let decoded = decode_program(window, &self.encodings, &self.operands);
+        if !decoded.terminated || !decoded.is_trustworthy() {
+            return Err(format!(
+                "the compute program at {address:#x} did not decode cleanly to its end"
+            ));
+        }
+        let program = &window[..decoded.consumed];
+        let placed = crate::dispatch::place_window(state, &decoded, &self.encodings, |at, len| {
+            usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some())
+        })
+        .map_err(str::to_owned)?;
+        let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
+        let user_data = UserData {
+            first_register: 0,
+            count,
+            block_offset: 0,
+            dx10_clamp: state.dx10_clamp,
+            pixel_inputs: None,
+            compute: Some(state.inputs),
+        };
+        let inputs = state.inputs;
+        let key = content_hash(program)
+            ^ window_salt(placed)
+            ^ (u64::from(count) << 56)
+            ^ u64::from(inputs.threads[0]) << 40
+            ^ u64::from(inputs.threads[1]) << 32
+            ^ u64::from(inputs.threads[2]) << 24
+            ^ u64::from(inputs.thread_id_components) << 20
+            ^ inputs
+                .workgroup_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &on)| u64::from(on) << (16 + i))
+                .sum::<u64>()
+            ^ match state.dx10_clamp {
+                None => 0,
+                Some(false) => 1 << 12,
+                Some(true) => 2 << 12,
+            }
+            ^ match state.width {
+                Width::Wave32 => 1 << 10,
+                Width::Wave64 => 0,
+            };
+        let module = if let Some(module) = self.dispatch_modules.get(&key) {
+            module.clone()
+        } else {
+            let strategy = Strategy::Predicated {
+                fidelity: orbistoun_translate::Fidelity::Wavefront,
+                width: state.width,
+            };
+            let translated = translate_with_user_data(
+                &decoded,
+                &self.encodings,
+                strategy,
+                (Stage::Compute, MeshPrimitive::default()),
+                placed,
+                user_data,
+            )
+            .map_err(|e| {
+                format!("the compute program at {address:#x} could not be translated: {e}")
+            })?;
+            self.dispatch_modules.insert(key, translated.module.clone());
+            translated.module
+        };
+        Ok(PreparedDispatch {
+            module,
+            window: placed,
+            // The whole block the module declares; a word the stream never wrote, which the
+            // translation refused a program for reading, and the rest of the block are zero.
+            push: {
+                let mut block: Vec<u32> = state.user_data.iter().map(|w| w.unwrap_or(0)).collect();
+                block.resize(
+                    orbistoun_translate::wavefront::USER_DATA_BLOCK_WORDS as usize,
+                    0,
+                );
+                block
+            },
+            groups: state.groups,
         })
     }
 

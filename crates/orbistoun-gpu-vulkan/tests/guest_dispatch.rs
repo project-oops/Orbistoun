@@ -60,6 +60,11 @@ const VALUE: [u32; 4] = [0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444];
 const WORD3: u32 = 0x3101_6fac;
 
 fn module() -> Vec<u32> {
+    translated(0).expect("the clear translates")
+}
+
+/// The clear, translated with the user-data words in `unwritten` marked as never written.
+fn translated(unwritten: u32) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let bytes: Vec<u8> = CLEAR.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -78,12 +83,24 @@ fn module() -> Vec<u32> {
                 workgroup_ids: [true, false, false],
                 thread_id_components: 1,
                 threads: [64, 1, 1],
+                unwritten_user_data: unwritten,
             }),
             ..UserData::default()
         },
     )
-    .expect("the clear translates")
-    .0
+    .map(|(module, _, _)| module)
+}
+
+/// A user-data word the stream never wrote is refused only when the program reads it: the clear
+/// reads words 4 to 12 and never word one.
+#[test]
+fn an_unwritten_user_data_word_is_refused_only_when_read() {
+    assert!(translated(1 << 1).is_ok(), "word one is never read");
+    assert!(translated(1 << 5).is_err(), "word five is the clear value");
+    assert!(
+        translated(1 << 10).is_err(),
+        "word ten is the descriptor's record count"
+    );
 }
 
 /// The user-data block: words 4-7 the value, 8-11 a raw descriptor at `base` of `records` bytes.

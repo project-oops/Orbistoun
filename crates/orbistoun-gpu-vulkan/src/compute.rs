@@ -898,6 +898,8 @@ pub fn dispatch_guest(
     push: &[u32],
     groups: [u32; 3],
 ) -> Result<GuestDispatch, DispatchError> {
+    // Draws already queued finish first: the window was read from guest memory they write.
+    crate::framebuffer::settle_session()?;
     let session = session()?;
     let session = session
         .lock()

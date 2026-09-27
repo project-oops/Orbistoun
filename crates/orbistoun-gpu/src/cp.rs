@@ -126,6 +126,51 @@ pub trait CpMemory {
     fn run_draws(&mut self) -> bool {
         false
     }
+    /// Carries out one compute dispatch, its writes landing in guest memory, answering whether
+    /// that happened exactly. The default carries out nothing, which leaves the dispatch as a
+    /// stop.
+    fn run_dispatch(&mut self, _dispatch: &Dispatch<'_>) -> bool {
+        false
+    }
+}
+
+/// A compute dispatch as the stream asks for it: where it is, so the registers set before it can
+/// be read from the stream, its grid, and its dispatch initiator.
+#[derive(Debug, Clone, Copy)]
+pub struct Dispatch<'a> {
+    /// The whole stream, whose register writes before [`Self::offset`] are the dispatch's state.
+    pub stream: &'a [u8],
+    /// Byte offset of the `DISPATCH_DIRECT` packet.
+    pub offset: u32,
+    /// Groups in x, y and z.
+    pub groups: [u32; 3],
+    /// `COMPUTE_DISPATCH_INITIATOR`.
+    pub initiator: u32,
+}
+
+/// `DISPATCH_DIRECT`'s body: the grid then the initiator (`sid.h:43`; the measured builder in
+/// `packet::build::dispatch_direct`).
+fn dispatch_direct(
+    stream: &[u8],
+    offset: u32,
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [x, y, z, initiator, ..] = *body else {
+        return Err(Stop::Malformed);
+    };
+    let dispatch = Dispatch {
+        stream,
+        offset,
+        groups: [x, y, z],
+        initiator,
+    };
+    if !memory.run_dispatch(&dispatch) {
+        return Err(Stop::NeedsGpu);
+    }
+    result.dispatches += 1;
+    Ok(())
 }
 
 /// The draw packets a submission's draws are carried out for together: `DRAW_INDEX_2` and
@@ -187,6 +232,8 @@ pub struct CpExecution {
     pub waits: usize,
     /// Draw packets carried out, through [`CpMemory::run_draws`].
     pub draws: usize,
+    /// Compute dispatches carried out, through [`CpMemory::run_dispatch`].
+    pub dispatches: usize,
     /// Bytes written to guest memory.
     pub bytes_written: u64,
     /// Where it stopped.
@@ -275,6 +322,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
                 wait_reg_mem(&body, memory, &mut result)
             }),
             CONTEXT_CONTROL => context_control(&body),
+            packet::build::DISPATCH_DIRECT => {
+                dispatch_direct(stream, offset, &body, memory, &mut result)
+            }
             WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 write_data(&body, memory, &mut result)
             }),
@@ -1006,6 +1056,72 @@ mod tests {
         let stream = write_data(5 << 8, 0xdead_0000, &[1]);
         let done = execute(&bytes(&stream), &mut Fake::default());
         assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
+    }
+
+    /// Memory whose dispatches the executor carries out by writing where they were asked for, or
+    /// refuses.
+    struct Dispatching {
+        inner: Fake,
+        runs: bool,
+        seen: Vec<(u32, [u32; 3], u32)>,
+    }
+
+    impl CpMemory for Dispatching {
+        fn read(&self, address: u64, length: usize) -> Option<Vec<u8>> {
+            self.inner.read(address, length)
+        }
+        fn write(&mut self, address: u64, bytes: &[u8]) -> bool {
+            self.inner.write(address, bytes)
+        }
+        fn timestamp(&mut self) -> u64 {
+            self.inner.timestamp()
+        }
+        fn run_dispatch(&mut self, dispatch: &super::Dispatch<'_>) -> bool {
+            self.seen
+                .push((dispatch.offset, dispatch.groups, dispatch.initiator));
+            self.runs && self.inner.write(0x3000, &0xc0de_c0de_u32.to_le_bytes())
+        }
+    }
+
+    /// A dispatch is handed to the executor with its place in the stream, its grid and its
+    /// initiator; carried out, the fence after it retires and what it wrote is in memory before.
+    /// Refused, it stops the stream and nothing after it retires.
+    #[test]
+    fn a_dispatch_the_executor_carries_out_lets_the_fence_after_it_retire() {
+        let mut stream = fill(0x2000, 0x1111_1111, 16);
+        let at = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(crate::packet::build::dispatch_direct(0xc0, 1, 1));
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        for runs in [true, false] {
+            let mut memory = Dispatching {
+                inner: Fake::default(),
+                runs,
+                seen: Vec::new(),
+            };
+
+            let done = execute(&bytes(&stream), &mut memory);
+
+            assert_eq!(memory.seen, vec![(at, [0xc0, 1, 1], 1)]);
+            if runs {
+                assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+                assert_eq!(done.dispatches, 1);
+                assert_eq!(memory.inner.word(0x3000), 0xc0de_c0de);
+                assert_eq!(memory.inner.word(0x1000), 0xbeef_cafe);
+            } else {
+                assert_eq!(
+                    done.stopped,
+                    Stopped::NeedsGpu {
+                        offset: at,
+                        opcode: crate::packet::build::DISPATCH_DIRECT
+                    }
+                );
+                assert_eq!(
+                    memory.inner.word(0x1000),
+                    0,
+                    "no fence for a refused dispatch"
+                );
+            }
+        }
     }
 
     /// A wait that cannot hold stops the stream; memory out of bounds is refused, not written.

@@ -30,6 +30,10 @@ pub struct ComputeInputs {
     pub thread_id_components: u32,
     /// The thread group's shape, `COMPUTE_NUM_THREAD_X`, `_Y` and `_Z`.
     pub threads: [u32; 3],
+    /// The user-data words the stream never wrote, one bit each: a program that reads one is
+    /// refused, since the register holds a value nothing here knows.
+    #[serde(default)]
+    pub unwritten_user_data: u32,
 }
 
 impl ComputeInputs {
@@ -232,6 +236,7 @@ mod tests {
             workgroup_ids: [true, false, false],
             thread_id_components: components,
             threads,
+            unwritten_user_data: 0,
         }
     }
 
