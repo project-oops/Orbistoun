@@ -341,6 +341,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceSysmoduleLoadModule", sysmodule_load_module),
         ("sceSysmoduleUnloadModule", sysmodule_unload_module),
         ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
+        ("sceSaveDataInitialize3", save_data::initialize3),
     ]
 }
 
@@ -462,6 +463,7 @@ mod tests {
             .chain(super::user::MODULE.imports.iter())
             .chain(super::sysmodule::MODULE.imports.iter())
             .chain(super::error_dialog::MODULE.imports.iter())
+            .chain(super::save_data::MODULE.imports.iter())
             .map(|i| i.name)
             .collect();
         for (name, _) in implementations() {
