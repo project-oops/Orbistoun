@@ -325,7 +325,7 @@ fn resolve_top(guest_path: &str) -> Option<PathBuf> {
 ///
 /// FreeBSD's lookup answers `ENOTDIR` for it: a trailing slash, or `.`, names the directory it
 /// follows, so what precedes it must be one. Dropping the `.` and the empty components, as
-/// [`without_current_dir`] does for the walk, would otherwise open the file, and a guest that
+/// `without_current_dir` does for the walk, would otherwise open the file, and a guest that
 /// asks "is this a directory?" by opening `path/.` would be told yes for every file.
 #[must_use]
 pub fn names_file_as_directory(guest_path: &str) -> bool {
