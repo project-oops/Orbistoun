@@ -90,20 +90,23 @@ const fn primitive_salt(primitive: MeshPrimitive) -> u64 {
         MeshPrimitive::Points => 0x504f_494e_0000_0001,
         MeshPrimitive::Lines => 0x4c49_4e45_0000_0001,
         MeshPrimitive::Triangles => 0,
+        MeshPrimitive::Rectangles => 0x5245_4354_0000_0001,
     }
 }
 
 /// The mesh primitive a decoded topology asks the translator to assemble, or a refusal naming a
 /// topology that has no mesh-primitive shape.
 ///
-/// Point, line and triangle map onto the three the mesh extension emits. A rectangle list or an
-/// unknown value is refused by name rather than drawn as a triangle.
+/// Point, line and triangle map onto the three the mesh extension emits, and a rectangle list onto
+/// triangles over each rectangle's fourth corner. An unknown value is refused by name rather than
+/// drawn as a triangle.
 fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, PipelineError> {
     match topology {
         PrimitiveTopology::PointList => Ok(MeshPrimitive::Points),
         PrimitiveTopology::LineStrip => Ok(MeshPrimitive::Lines),
         PrimitiveTopology::TriangleStrip => Ok(MeshPrimitive::Triangles),
-        other => Err(PipelineError::NoMeshPrimitive(other)),
+        PrimitiveTopology::RectangleList => Ok(MeshPrimitive::Rectangles),
+        other @ PrimitiveTopology::Other(_) => Err(PipelineError::NoMeshPrimitive(other)),
     }
 }
 
@@ -2400,7 +2403,7 @@ mod tests {
     }
 
     /// A topology maps to the mesh primitive of its shape (D688), or is refused by name when it has
-    /// none, such as a rectangle list or an unknown value.
+    /// none, such as an unknown value.
     #[test]
     fn a_topology_maps_to_its_primitive_or_is_refused_by_name() {
         use super::{MeshPrimitive, PrimitiveTopology, mesh_primitive_of};
@@ -2418,12 +2421,9 @@ mod tests {
             Ok(MeshPrimitive::Triangles)
         );
 
-        let rect = mesh_primitive_of(PrimitiveTopology::RectangleList)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            rect.contains("rectangle list") && rect.contains("refused"),
-            "a rectangle list is refused by name, not drawn as a triangle: {rect}"
+        assert_eq!(
+            mesh_primitive_of(PrimitiveTopology::RectangleList),
+            Ok(MeshPrimitive::Rectangles)
         );
         let other = mesh_primitive_of(PrimitiveTopology::Other(9))
             .unwrap_err()
@@ -2449,9 +2449,13 @@ mod tests {
             primitive_salt(MeshPrimitive::Points),
             primitive_salt(MeshPrimitive::Lines),
             primitive_salt(MeshPrimitive::Triangles),
+            primitive_salt(MeshPrimitive::Rectangles),
         ];
+        let mut distinct = salts.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
         assert!(
-            salts[0] != salts[1] && salts[1] != salts[2] && salts[0] != salts[2],
+            distinct.len() == salts.len(),
             "each primitive salts the cache key differently: {salts:?}"
         );
     }

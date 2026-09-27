@@ -204,6 +204,12 @@ pub enum MeshPrimitive {
     /// Three vertices per primitive. The default.
     #[default]
     Triangles,
+    /// Three corners per primitive, of a rectangle whose fourth corner is `v1 + v2 - v0`: the
+    /// `RECTLIST` radeonsi's blits draw (`si_pipe.h:2110`), whose three vertices are `(x1, y1)`,
+    /// `(x1, y2)` and `(x2, y1)` (`si_nir_lower_vs_inputs.c:97-122`). Emitted as two triangles over
+    /// a fourth vertex whose position and parameters are carried the same way, so each parameter
+    /// stays the one plane the three corners define.
+    Rectangles,
 }
 
 impl MeshPrimitive {
@@ -214,7 +220,16 @@ impl MeshPrimitive {
         match self {
             Self::Points => 1,
             Self::Lines => 2,
-            Self::Triangles => 3,
+            Self::Triangles | Self::Rectangles => 3,
+        }
+    }
+
+    /// How many vertices and primitives the module declares room for: one of each per lane, and
+    /// for a rectangle a fourth vertex and a second triangle per primitive as well.
+    const fn slots(self) -> u32 {
+        match self {
+            Self::Rectangles => 2 * MESH_SLOTS,
+            _ => MESH_SLOTS,
         }
     }
 
@@ -223,7 +238,7 @@ impl MeshPrimitive {
         match self {
             Self::Points => mode::OUTPUT_POINTS,
             Self::Lines => mode::OUTPUT_LINES_EXT,
-            Self::Triangles => mode::OUTPUT_TRIANGLES_EXT,
+            Self::Triangles | Self::Rectangles => mode::OUTPUT_TRIANGLES_EXT,
         }
     }
 
@@ -232,7 +247,7 @@ impl MeshPrimitive {
         match self {
             Self::Points => built_in::PRIMITIVE_POINT_INDICES_EXT,
             Self::Lines => built_in::PRIMITIVE_LINE_INDICES_EXT,
-            Self::Triangles => built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+            Self::Triangles | Self::Rectangles => built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
         }
     }
 }
@@ -453,11 +468,11 @@ fn emit_header(
             b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
             b.header(
                 op::EXECUTION_MODE,
-                &[main.0, mode::OUTPUT_VERTICES, MESH_SLOTS],
+                &[main.0, mode::OUTPUT_VERTICES, primitive.slots()],
             );
             b.header(
                 op::EXECUTION_MODE,
-                &[main.0, mode::OUTPUT_PRIMITIVES_EXT, MESH_SLOTS],
+                &[main.0, mode::OUTPUT_PRIMITIVES_EXT, primitive.slots()],
             );
             // The shape the stream asked for: Vulkan reads the mesh output topology from here,
             // never from the pipeline's input assembly (D688).
@@ -614,7 +629,7 @@ fn declare_mesh_outputs(
         return None;
     }
     let slots = b.id();
-    b.declare(op::CONSTANT, &[u32_type.0, slots.0, MESH_SLOTS]);
+    b.declare(op::CONSTANT, &[u32_type.0, slots.0, primitive.slots()]);
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
     // The index element carries one vertex index per component: `uint` for a point, `uvec2` for a
     // line, `uvec3` for a triangle, matching the `PrimitivePointIndices`/`Line`/`Triangle`
@@ -709,16 +724,19 @@ struct MeshReserved {
     vertices: Id,
     indices: Id,
     parameters: BTreeMap<u32, Id>,
+    /// A rectangle list's copies of what it emits, declared once the mesh outputs are.
+    rectangles: Option<RectangleCopies>,
 }
 
 impl MeshReserved {
     /// Reserves ids for a mesh module's outputs, or nothing at another stage.
-    fn new(b: &mut Builder, stage: Stage, locations: &[u32]) -> Self {
+    fn new(b: &mut Builder, stage: Stage, primitive: MeshPrimitive, locations: &[u32]) -> Self {
         if stage != Stage::Mesh {
             return Self {
                 vertices: Id(0),
                 indices: Id(0),
                 parameters: BTreeMap::new(),
+                rectangles: None,
             };
         }
         Self {
@@ -728,6 +746,7 @@ impl MeshReserved {
                 .iter()
                 .map(|location| (*location, b.id()))
                 .collect(),
+            rectangles: RectangleCopies::reserve(b, stage, primitive, locations),
         }
     }
 
@@ -738,7 +757,135 @@ impl MeshReserved {
         }
         let mut ids = vec![self.vertices.0, self.indices.0];
         ids.extend(self.parameters.values().map(|id| id.0));
+        ids.extend(self.rectangles.iter().flat_map(RectangleCopies::interface));
         ids
+    }
+
+    /// Declares a rectangle list's copies, once the mesh outputs they mirror are declared.
+    fn declare_rectangles(
+        &self,
+        b: &mut Builder,
+        mesh: Option<&MeshOutputs>,
+        vec4: Id,
+        ids: &Reserved,
+    ) -> Option<RectangleCopies> {
+        let (copies, outputs) = self.rectangles.clone().zip(mesh)?;
+        Some(copies.declare(b, (ids.u32_type, vec4, outputs.index_type), ids.counter_ptr))
+    }
+}
+
+/// The SPIR-V version a module for `stage` declares: 1.4 for a mesh module, which its extension
+/// requires, and 1.3 for everything else, where an entry point lists only its inputs and outputs.
+const fn module_version(stage: Stage) -> u32 {
+    if matches!(stage, Stage::Mesh) {
+        orbistoun_spirv::VERSION_1_4
+    } else {
+        orbistoun_spirv::VERSION_1_3
+    }
+}
+
+/// Declares the types every module has: `void` and the entry point's function type, the 32-bit
+/// integer and float, and the boolean.
+fn declare_base_types(b: &mut Builder, ids: &Reserved) {
+    b.declare(op::TYPE_VOID, &[ids.void.0]);
+    b.declare(op::TYPE_FUNCTION, &[ids.fn_type.0, ids.void.0]);
+    b.declare(op::TYPE_INT, &[ids.u32_type.0, 32, 0]);
+    b.declare(op::TYPE_FLOAT, &[ids.f32_type.0, 32]);
+    b.declare(op::TYPE_BOOL, &[ids.bool_type.0]);
+}
+
+/// A rectangle-list mesh module's own copy of what it emitted, which its outputs cannot be read
+/// back for: each lane's position, parameters and primitive indices, and the declared counts. The
+/// fourth corner of each rectangle is formed from them once the program has run.
+#[derive(Debug, Clone)]
+struct RectangleCopies {
+    /// `vec4` per lane: the positions.
+    positions: Id,
+    /// `vec4` per lane, per exported parameter location.
+    parameters: BTreeMap<u32, Id>,
+    /// `uvec3` per lane: the primitive's three corners.
+    indices: Id,
+    /// The vertex count the allocation request declared.
+    vertices: Id,
+    /// The primitive count it declared.
+    primitives: Id,
+    /// Pointer to one `vec4` of a copy.
+    vec4_ptr: Id,
+    /// Pointer to one `uvec3` of the index copy.
+    index_ptr: Id,
+    /// Pointer to one private word.
+    word_ptr: Id,
+}
+
+impl RectangleCopies {
+    /// Reserves the copies' variables, or nothing for any other module: the entry point lists them.
+    fn reserve(
+        b: &mut Builder,
+        stage: Stage,
+        primitive: MeshPrimitive,
+        locations: &[u32],
+    ) -> Option<Self> {
+        (stage == Stage::Mesh && primitive == MeshPrimitive::Rectangles).then(|| Self {
+            positions: b.id(),
+            parameters: locations
+                .iter()
+                .map(|location| (*location, b.id()))
+                .collect(),
+            indices: b.id(),
+            vertices: b.id(),
+            primitives: b.id(),
+            vec4_ptr: Id(0),
+            index_ptr: Id(0),
+            word_ptr: Id(0),
+        })
+    }
+
+    /// Every variable the entry point must list.
+    fn interface(&self) -> Vec<u32> {
+        let mut ids = vec![
+            self.positions.0,
+            self.indices.0,
+            self.vertices.0,
+            self.primitives.0,
+        ];
+        ids.extend(self.parameters.values().map(|id| id.0));
+        ids
+    }
+
+    /// Declares the reserved variables as private storage, one element per lane.
+    fn declare(
+        mut self,
+        b: &mut Builder,
+        (u32_type, vec4, uvec3): (Id, Id, Id),
+        word_ptr: Id,
+    ) -> Self {
+        let lanes = b.id();
+        b.declare(op::CONSTANT, &[u32_type.0, lanes.0, MESH_SLOTS]);
+        let vec4_array = b.id();
+        let vec4_array_ptr = b.id();
+        let index_array = b.id();
+        let index_array_ptr = b.id();
+        self.vec4_ptr = b.id();
+        self.index_ptr = b.id();
+        b.declare(op::TYPE_ARRAY, &[vec4_array.0, vec4.0, lanes.0]);
+        b.declare(op::TYPE_POINTER, &[vec4_array_ptr.0, PRIVATE, vec4_array.0]);
+        b.declare(op::TYPE_ARRAY, &[index_array.0, uvec3.0, lanes.0]);
+        b.declare(
+            op::TYPE_POINTER,
+            &[index_array_ptr.0, PRIVATE, index_array.0],
+        );
+        b.declare(op::TYPE_POINTER, &[self.vec4_ptr.0, PRIVATE, vec4.0]);
+        b.declare(op::TYPE_POINTER, &[self.index_ptr.0, PRIVATE, uvec3.0]);
+        b.declare(op::VARIABLE, &[vec4_array_ptr.0, self.positions.0, PRIVATE]);
+        for variable in self.parameters.values() {
+            b.declare(op::VARIABLE, &[vec4_array_ptr.0, variable.0, PRIVATE]);
+        }
+        b.declare(op::VARIABLE, &[index_array_ptr.0, self.indices.0, PRIVATE]);
+        for word in [self.vertices, self.primitives] {
+            b.declare(op::VARIABLE, &[word_ptr.0, word.0, PRIVATE]);
+        }
+        self.word_ptr = word_ptr;
+        self
     }
 }
 
@@ -816,6 +963,8 @@ pub struct Wavefront<'a> {
     inputs: BTreeMap<u32, Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
     mesh: Option<MeshOutputs>,
+    /// A rectangle-list mesh module's copies of what it emitted, or [`None`] for any other.
+    rectangles: Option<RectangleCopies>,
     /// The primitive a mesh module assembles. Read only at [`Stage::Mesh`].
     primitive: MeshPrimitive,
     /// The four-component float vector, which the stages that have one share.
@@ -1146,14 +1295,7 @@ impl<'a> Wavefront<'a> {
         parameters: &[u32],
         (window, user_data): (Window, UserData),
     ) -> Self {
-        // A mesh module declares 1.4, which its extension requires; everything else is 1.3, where
-        // an entry point lists only its inputs and outputs.
-        let version = if stage == Stage::Mesh {
-            orbistoun_spirv::VERSION_1_4
-        } else {
-            orbistoun_spirv::VERSION_1_3
-        };
-        let mut b = Builder::new().with_version(version);
+        let mut b = Builder::new().with_version(module_version(stage));
 
         let ids = Reserved::new(&mut b);
         let (void, fn_type, main) = (ids.void, ids.fn_type, ids.main);
@@ -1171,15 +1313,9 @@ impl<'a> Wavefront<'a> {
         // be named in its interface, and a driver does not reliably reject a module that omits one.
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
-        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
+        let mesh_reserved = MeshReserved::new(&mut b, stage, primitive, parameters);
         emit_header(&mut b, stage, primitive, main, output);
-
-        b.declare(op::TYPE_VOID, &[void.0]);
-        b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
-        b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
-        b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
-
-        b.declare(op::TYPE_BOOL, &[bool_type.0]);
+        declare_base_types(&mut b, &ids);
         let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
         system.declare(&mut b, vec4, bool_type);
@@ -1193,6 +1329,7 @@ impl<'a> Wavefront<'a> {
             &mesh_reserved,
         );
         let (files, observation, guest_memory) = declare_state(&mut b, &ids, stage, width, window);
+        let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
         let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
 
@@ -1221,6 +1358,7 @@ impl<'a> Wavefront<'a> {
             output,
             inputs,
             mesh,
+            rectangles,
             primitive,
             vec4,
             memory_base: window.base,
@@ -1480,6 +1618,12 @@ impl<'a> Wavefront<'a> {
     /// declared count and never read. A sparse vertex mask would write a vertex it did not mean to
     /// emit; the mask is a runtime value, so this is an assumption rather than a check (D688).
     fn store_vec4(&mut self, pointer: Id, components: [Id; 4]) {
+        let value = self.composite_vec4(components);
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
+    }
+
+    /// Four components as one `vec4` value.
+    fn composite_vec4(&mut self, components: [Id; 4]) -> Id {
         let vec4 = self.vec4;
         let value = self.builder.id();
         self.builder.function(
@@ -1493,7 +1637,7 @@ impl<'a> Wavefront<'a> {
                 components[3].0,
             ],
         );
-        self.builder.function(op::STORE, &[pointer.0, value.0]);
+        value
     }
 
     fn store_lane_masked(&mut self, register: u32, lane: u32, value: Id) {
@@ -1549,10 +1693,144 @@ impl<'a> Wavefront<'a> {
                 self.write_observation(member, OBSERVED_REGISTERS + register, value);
             }
         }
+        self.complete_rectangles();
         self.builder.function(op::RETURN, &[]);
         self.builder.function(op::FUNCTION_END, &[]);
         self.builder.check()?;
         Ok((self.builder.finish(), self.translated))
+    }
+
+    /// A rectangle-list module's epilogue: for each declared primitive, the fourth corner as the
+    /// vertex after every emitted one - `v1 + v2 - v0` in position and in each parameter - and the
+    /// second triangle, `(v2, v1, v3)`, which winds the same way as `(v0, v1, v2)`.
+    ///
+    /// The corners are read from the module's copies, indexed by the guest's own indices masked to
+    /// the copies' length: an index past the vertices a lane holds is the guest's fault, and reading
+    /// past a private array would be the host's.
+    fn complete_rectangles(&mut self) {
+        let (Some(copies), Some(mesh)) = (self.rectangles.clone(), self.mesh.clone()) else {
+            return;
+        };
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let vertices = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, vertices.0, copies.vertices.0]);
+        let primitives = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, primitives.0, copies.primitives.0]);
+        let last = Self::constant(self, MESH_SLOTS - 1);
+        let member = Self::constant(self, 0);
+        for primitive in 0..self.lanes.min(MESH_SLOTS) {
+            let this = Self::constant(self, primitive);
+            let declared = self.builder.id();
+            self.builder.function(
+                op::ULESS_THAN,
+                &[bool_type.0, declared.0, this.0, primitives.0],
+            );
+            let (body, merge) = (self.builder.id(), self.builder.id());
+            self.builder.function(op::SELECTION_MERGE, &[merge.0, 0]);
+            self.builder
+                .function(op::BRANCH_CONDITIONAL, &[declared.0, body.0, merge.0]);
+            self.builder.function(op::LABEL, &[body.0]);
+
+            let pointer = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[copies.index_ptr.0, pointer.0, copies.indices.0, this.0],
+            );
+            let corners = self.builder.id();
+            self.builder
+                .function(op::LOAD, &[mesh.index_type.0, corners.0, pointer.0]);
+            let mut raw = [Id(0); 3];
+            let mut masked = [Id(0); 3];
+            for (k, (raw, masked)) in raw.iter_mut().zip(masked.iter_mut()).enumerate() {
+                *raw = self.builder.id();
+                self.builder.function(
+                    op::COMPOSITE_EXTRACT,
+                    &[u32_type.0, raw.0, corners.0, k as u32],
+                );
+                *masked = self.builder.id();
+                self.builder
+                    .function(op::BITWISE_AND, &[u32_type.0, masked.0, raw.0, last.0]);
+            }
+            let fourth = self.builder.id();
+            self.builder
+                .function(op::IADD, &[u32_type.0, fourth.0, vertices.0, this.0]);
+
+            // The position, then each parameter: `v1 + v2 - v0`.
+            let mut arrays = vec![(copies.positions, None)];
+            arrays.extend(
+                copies
+                    .parameters
+                    .iter()
+                    .map(|(location, copy)| (*copy, mesh.parameters.get(location).copied())),
+            );
+            for (copy, output) in arrays {
+                let corner = self.fourth_corner(copies.vec4_ptr, copy, masked);
+                let target = self.builder.id();
+                match output {
+                    None => self.builder.function(
+                        op::ACCESS_CHAIN,
+                        &[
+                            mesh.vec4_ptr.0,
+                            target.0,
+                            mesh.vertices.0,
+                            fourth.0,
+                            member.0,
+                        ],
+                    ),
+                    Some(parameter) => self.builder.function(
+                        op::ACCESS_CHAIN,
+                        &[mesh.vec4_ptr.0, target.0, parameter.0, fourth.0],
+                    ),
+                }
+                self.builder.function(op::STORE, &[target.0, corner.0]);
+            }
+
+            let second = self.builder.id();
+            self.builder.function(
+                op::COMPOSITE_CONSTRUCT,
+                &[mesh.index_type.0, second.0, raw[2].0, raw[1].0, fourth.0],
+            );
+            let slot = Self::constant(self, 2 * primitive + 1);
+            let at = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[mesh.index_ptr.0, at.0, mesh.indices.0, slot.0],
+            );
+            self.builder.function(op::STORE, &[at.0, second.0]);
+            self.builder.function(op::BRANCH, &[merge.0]);
+            self.builder.function(op::LABEL, &[merge.0]);
+        }
+    }
+
+    /// `v1 + v2 - v0` over three elements of a rectangle copy, by index.
+    fn fourth_corner(&mut self, pointer: Id, copy: Id, corners: [Id; 3]) -> Id {
+        let vec4 = self.vec4;
+        let mut values = [Id(0); 3];
+        for (value, index) in values.iter_mut().zip(corners) {
+            let at = self.builder.id();
+            self.builder
+                .function(op::ACCESS_CHAIN, &[pointer.0, at.0, copy.0, index.0]);
+            *value = self.builder.id();
+            self.builder.function(op::LOAD, &[vec4.0, value.0, at.0]);
+        }
+        let sum = self.builder.id();
+        self.builder
+            .function(op::FADD, &[vec4.0, sum.0, values[1].0, values[2].0]);
+        let corner = self.builder.id();
+        self.builder
+            .function(op::FSUB, &[vec4.0, corner.0, sum.0, values[0].0]);
+        corner
+    }
+
+    /// Stores `value` into element `index` of a rectangle copy, when this module keeps them.
+    fn copy_element(&mut self, array: Id, pointer: Id, index: u32, value: Id) {
+        let at = Self::constant(self, index);
+        let element = self.builder.id();
+        self.builder
+            .function(op::ACCESS_CHAIN, &[pointer.0, element.0, array.0, at.0]);
+        self.builder.function(op::STORE, &[element.0, value.0]);
     }
 
     fn write_observation(&mut self, member: Id, slot: u32, value: Id) {
@@ -1587,6 +1865,27 @@ impl Model for Wavefront<'_> {
 
     fn set_mesh_outputs(&mut self, vertices: Id, primitives: Id) -> Option<()> {
         self.mesh.as_ref()?;
+        let (vertices, primitives) = match self.rectangles.clone() {
+            None => (vertices, primitives),
+            // Each rectangle adds its fourth corner after the emitted vertices, and a second
+            // triangle.
+            Some(copies) => {
+                self.builder
+                    .function(op::STORE, &[copies.vertices.0, vertices.0]);
+                self.builder
+                    .function(op::STORE, &[copies.primitives.0, primitives.0]);
+                let u32_type = self.u32_type;
+                let total = self.builder.id();
+                self.builder
+                    .function(op::IADD, &[u32_type.0, total.0, vertices.0, primitives.0]);
+                let doubled = self.builder.id();
+                self.builder.function(
+                    op::IADD,
+                    &[u32_type.0, doubled.0, primitives.0, primitives.0],
+                );
+                (total, doubled)
+            }
+        };
         self.builder
             .function(op::SET_MESH_OUTPUTS_EXT, &[vertices.0, primitives.0]);
         Some(())
@@ -1608,6 +1907,10 @@ impl Model for Wavefront<'_> {
             ],
         );
         self.store_vec4(pointer, components);
+        if let Some(copies) = self.rectangles.clone() {
+            let value = self.composite_vec4(components);
+            self.copy_element(copies.positions, copies.vec4_ptr, lane, value);
+        }
         Some(())
     }
 
@@ -1626,12 +1929,23 @@ impl Model for Wavefront<'_> {
             &[mesh.vec4_ptr.0, pointer.0, variable.0, slot.0],
         );
         self.store_vec4(pointer, components);
+        if let Some(copies) = self.rectangles.clone()
+            && let Some(copy) = copies.parameters.get(&location).copied()
+        {
+            let value = self.composite_vec4(components);
+            self.copy_element(copy, copies.vec4_ptr, lane, value);
+        }
         Some(())
     }
 
     fn write_mesh_indices(&mut self, lane: u32, indices: &[Id]) -> Option<()> {
         let mesh = self.mesh.clone()?;
-        let slot = Self::constant(self, lane);
+        // A rectangle's first triangle is its three corners; its second follows it.
+        let slot = if self.rectangles.is_some() {
+            Self::constant(self, 2 * lane)
+        } else {
+            Self::constant(self, lane)
+        };
         let pointer = self.builder.id();
         self.builder.function(
             op::ACCESS_CHAIN,
@@ -1651,6 +1965,9 @@ impl Model for Wavefront<'_> {
         };
         // Unmasked, as `store_vec4` explains: a mesh module's outputs cannot be read.
         self.builder.function(op::STORE, &[pointer.0, value.0]);
+        if let Some(copies) = self.rectangles.clone() {
+            self.copy_element(copies.indices, copies.index_ptr, lane, value);
+        }
         Some(())
     }
 
