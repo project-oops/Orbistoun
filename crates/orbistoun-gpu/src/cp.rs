@@ -40,6 +40,9 @@ pub const WRITE_DATA: u8 = 0x37;
 /// three, and only these, as memory addresses (`parse_cp_pm4_table_data_json.py:77-79`). `0` is a
 /// memory-mapped register.
 const WRITE_DATA_DST_SEL_MEMORY: [u32; 3] = [1, 2, 5];
+/// `WRITE_DATA` `DST_SEL` 0, `mem_mapped_register` (`cp_pm4_table_data_gfx11.json:6680`): the
+/// destination is a register, not memory.
+const WRITE_DATA_DST_SEL_REGISTER: u32 = 0;
 /// `WRITE_DATA` `ADDR_INCR` (control bit 16): set, every word goes to the same address.
 const WRITE_DATA_NO_INCREMENT: u32 = 1 << 16;
 
@@ -486,7 +489,8 @@ fn context_control(body: &[u32]) -> Result<(), Stop> {
 /// `WRITE_DATA`: control, destination low (bits 31:2) and high, then the data words
 /// (`cp_pm4_table_data_gfx11.json:6677-6834`). `WR_CONFIRM` and the cache policy change nothing
 /// here: the write has landed when this returns, and there is no cache before guest memory. A
-/// register destination needs the GPU's registers.
+/// register destination is register state, passed over as every `SET_*_REG` is; a reserved one
+/// stops.
 fn write_data(
     body: &[u32],
     memory: &mut dyn CpMemory,
@@ -495,7 +499,11 @@ fn write_data(
     let [control, addr_low, addr_high, ref data @ ..] = *body else {
         return Err(Stop::Malformed);
     };
-    if !WRITE_DATA_DST_SEL_MEMORY.contains(&((control >> 8) & 0xf)) {
+    let dst_sel = (control >> 8) & 0xf;
+    if dst_sel == WRITE_DATA_DST_SEL_REGISTER {
+        return Ok(());
+    }
+    if !WRITE_DATA_DST_SEL_MEMORY.contains(&dst_sel) {
         return Err(Stop::NeedsGpu);
     }
     let destination = address(addr_low & !0x3, addr_high);
@@ -967,10 +975,26 @@ mod tests {
         assert_eq!((memory.word(0x2000), memory.word(0x2004)), (3, 0));
     }
 
-    /// A register destination needs the GPU's registers; an unmapped destination is refused.
+    /// A register destination is register state, passed over like `SET_UCONFIG_REG`: memory is
+    /// untouched and the fence after it retires. The flip builder's packet is one - `DST_SEL` 0 to
+    /// register `0xc343` (obSCEne, `sceAgcDcbSetFlip`).
     #[test]
-    fn write_data_to_a_register_or_unmapped_memory_stops() {
-        let stream = write_data(0, 0x2000, &[1]);
+    fn write_data_to_a_register_is_register_state() {
+        let mut stream = write_data(0, 0xc343, &[0x1234_5678]);
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(done.bytes_written, 4, "only the fence");
+        assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+    }
+
+    /// A reserved destination stops, by name; an unmapped memory destination is refused.
+    #[test]
+    fn write_data_to_a_reserved_destination_or_unmapped_memory_stops() {
+        let stream = write_data(3 << 8, 0x2000, &[1]);
         let done = execute(&bytes(&stream), &mut Fake::default());
         assert_eq!(
             done.stopped,
