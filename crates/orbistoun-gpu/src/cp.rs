@@ -15,6 +15,12 @@ use crate::packet::{self, PacketKind, build::measured};
 /// writes it by hand to the public layout.
 pub const WAIT_REG_MEM: u8 = 0x3c;
 
+/// `PKT3_WAIT_REG_MEM64` (`amd_cp_packets_gfx11.h:1764`): `WAIT_REG_MEM` over a 64-bit value -
+/// function and space, the address (8-byte aligned), a 64-bit reference and a 64-bit mask, then
+/// the poll interval (`:1765-1826`). `sceAgcDcbWaitUntilSafeForRendering` writes it on a flip
+/// label (`-5a17`).
+pub const WAIT_REG_MEM64: u8 = 0x93;
+
 /// `PKT3_CLEAR_STATE` (`sid.h:41`): resets register state to its defaults. radeonsi's preamble
 /// emits it with one zero body word (`si_state.c:4880-4881`); it touches no memory.
 pub const CLEAR_STATE: u8 = 0x12;
@@ -331,6 +337,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             WAIT_REG_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 wait_reg_mem(&body, memory, &mut result)
             }),
+            WAIT_REG_MEM64 => crate::perf::span(crate::perf::Span::OtherMemory, || {
+                wait_reg_mem64(&body, memory, &mut result)
+            }),
             CONTEXT_CONTROL => context_control(&body),
             packet::build::DISPATCH_DIRECT => {
                 dispatch_direct(stream, offset, &body, memory, &mut result)
@@ -627,6 +636,52 @@ fn wait_reg_mem(
     Ok(())
 }
 
+/// `WAIT_REG_MEM64`: function and space, address low and high, reference low and high, mask low
+/// and high, poll interval (`amd_cp_packets_gfx11.h:1765-1826`). As with [`wait_reg_mem`], only a
+/// memory wait with a function the 32-bit form checks is carried out.
+fn wait_reg_mem64(
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [
+        function,
+        addr_low,
+        addr_high,
+        reference_low,
+        reference_high,
+        mask_low,
+        mask_high,
+        ..,
+    ] = *body
+    else {
+        return Err(Stop::Malformed);
+    };
+    if function & WAIT_MEM_SPACE == 0 {
+        return Err(Stop::NeedsGpu);
+    }
+    // `MEM_POLL_ADDR_LO` is bits 31:3: the low three bits are not address (`:1806`).
+    let bytes = memory
+        .read(address(addr_low & !0x7, addr_high), 8)
+        .ok_or(Stop::OutOfBounds)?;
+    let mut word = [0_u8; 8];
+    word.copy_from_slice(&bytes);
+    let mask = u64::from(mask_high) << 32 | u64::from(mask_low);
+    let value = u64::from_le_bytes(word) & mask;
+    let reference = u64::from(reference_high) << 32 | u64::from(reference_low);
+    let holds = match function & 0x7 {
+        WAIT_EQUAL => value == reference,
+        WAIT_NOT_EQUAL => value != reference,
+        WAIT_GREATER_OR_EQUAL => value >= reference,
+        _ => return Err(Stop::NeedsGpu),
+    };
+    if !holds {
+        return Err(Stop::Wait);
+    }
+    result.waits += 1;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CpMemory, Stopped, WAIT_REG_MEM, execute};
@@ -760,6 +815,30 @@ mod tests {
 
     fn bytes(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    /// The wait `sceAgcDcbWaitUntilSafeForRendering` writes (`-5a17`) holds while the buffer's
+    /// 64-bit label reads `0` and never holds once either half is set: a label released to `1`
+    /// in its high half stops the stream there, as the command processor would wait on it forever.
+    #[test]
+    fn a_wait_until_safe_polls_the_whole_64_bit_label() {
+        let label = 0x1000_u64;
+        // The written words, then the `NOP` body the builder skips over.
+        let mut wait = crate::display::wait_until_safe_words(0, label).to_vec();
+        wait.resize(crate::display::WAIT_UNTIL_SAFE_DWORDS, 0);
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&wait), &mut memory);
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(done.waits, 1);
+
+        let mut stream = release(label + 4, 1, 1);
+        stream.extend(wait);
+        let done = execute(&bytes(&stream), &mut memory);
+        assert!(
+            matches!(done.stopped, Stopped::WaitNeverSatisfied { .. }),
+            "{done:?}"
+        );
     }
 
     /// The GL context's clear self-test runs to completion, and the pixels are really there.

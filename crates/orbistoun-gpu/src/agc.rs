@@ -531,13 +531,24 @@ fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceAgcDcbWaitUntilSafeForRendering(dcb, ...)` - a measured library-level no-op.
-///
-/// obSCEne measures 0 bytes written and `0x0` returned under every condition, with no `GetSize`
-/// symbol in `libSceAgc`. It writes nothing and dereferences no argument, so a null handle needs
-/// no guard.
-fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
+/// `sceAgcDcbWaitUntilSafeForRendering(dcb, video_handle, buffer_index)`: writes the wait for the
+/// buffer's flip label to read `0` - the display has taken it off the screen - before drawing into
+/// it. Measured (`-5a17`, sweep 20260927-153242): with a port open, 64 bytes written and the cursor
+/// advanced 128, the packet's address answered, for indices 0, 1 and 4 alike; with no port open,
+/// nothing written and `0` answered.
+fn dcb_wait_until_safe_for_rendering(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (dcb, handle, index) = (args[0], args[1], args[2]);
+    let Ok(index32) = u32::try_from(index) else {
+        return 0;
+    };
+    let Some(label) = crate::display::wait_label(handle, index) else {
+        return 0;
+    };
+    dcb_append_spanning(
+        dcb,
+        &crate::display::wait_until_safe_words(index32, label),
+        crate::display::WAIT_UNTIL_SAFE_DWORDS,
+    )
 }
 
 /// Bytes from a register write's start to its values: the measured `SET_SH_REG` packet is a
@@ -817,8 +828,8 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceAgcCreateShader` and the shader-linkage calls (interpolant mapping, primitive state, shader
 /// linker) implement measured behaviour. The command builders are wired through the writer handle
 /// in `arg0` (the private `dcb` module) as pure encoders or reservation skeletons from
-/// [`crate::packet::build`]. `sceAgcDcbWaitUntilSafeForRendering` and the patch family answer
-/// their measured `0x0` and write nothing. This array is the authoritative list; its size is
+/// [`crate::packet::build`]; the flip builders' words come from [`crate::display`]. The patch
+/// family answers its measured `0x0` and writes nothing. This array is the authoritative list; its size is
 /// pinned by `tests/dcb_wiring.rs`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
@@ -846,7 +857,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDcbDmaData", dcb_dma_data),
         ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
         ("sceAgcDcbResetQueue", dcb_reset_queue),
-        ("sceAgcDcbWaitUntilSafeForRendering", agc_no_op_returns_ok),
+        (
+            "sceAgcDcbWaitUntilSafeForRendering",
+            dcb_wait_until_safe_for_rendering,
+        ),
         ("sceAgcDcbSetFlip", dcb_set_flip),
         // Reservation skeletons from measured headers.
         ("sceAgcCbDispatch", cb_dispatch),

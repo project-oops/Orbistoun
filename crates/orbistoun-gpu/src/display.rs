@@ -15,6 +15,9 @@ pub struct Display {
     /// Reports a release of `label` with interrupt context id `context`; answers whether it was a
     /// flip and was performed.
     pub released: fn(u64, u32) -> bool,
+    /// The label a wait for buffer `index` of port `handle` to leave the screen polls, readable by
+    /// the command processor, or `None` when the port is not open.
+    pub wait_label: fn(u64, u64) -> Option<u64>,
 }
 
 static DISPLAY: OnceLock<Display> = OnceLock::new();
@@ -30,6 +33,14 @@ pub fn queue_flip(handle: u64, buffer_index: u64, flip_arg: u64) -> Option<(u32,
     DISPLAY
         .get()
         .and_then(|display| (display.queue_flip)(handle, buffer_index, flip_arg))
+}
+
+/// The installed display's [`Display::wait_label`], or `None` with none installed.
+#[must_use]
+pub fn wait_label(handle: u64, buffer_index: u64) -> Option<u64> {
+    DISPLAY
+        .get()
+        .and_then(|display| (display.wait_label)(handle, buffer_index))
 }
 
 /// Hands a release to the installed display, if there is one.
@@ -75,6 +86,43 @@ pub fn set_flip_words(buffer_index: u32, flip_arg: u64, context: u32, label: u64
 /// How far `sceAgcDcbSetFlip` advances the cursor: 256 bytes, the written dwords and the skipped
 /// `NOP` body together (`-1d54`: `bytes 0x100` on every written call).
 pub const SET_FLIP_DWORDS: usize = 64;
+
+/// The dwords `sceAgcDcbWaitUntilSafeForRendering` writes for `buffer_index`, polling `label` -
+/// measured whole (obSCEne `-5a17`, `166-agc/dcb-wait-until-safe-for-rendering`, sweep
+/// 20260927-153242, indices 0, 1 and 4, each twice):
+///
+/// - `SET_UCONFIG_REG` `0x342` (`SQ_THREAD_TRACE_USERDATA_2`, Mesa `sid.h` `R_030D08`, the marker
+///   register `sceAgcDcbSetFlip` writes too): `0xcb000000 + buffer_index`;
+/// - `WAIT_REG_MEM64` until the 64-bit label equals `0`, polled from memory by the prefetch parser
+///   with interval `0x40`;
+/// - the marker again, `0xcb000020 + buffer_index`;
+/// - the header of a `NOP` whose 16-dword body the builder skips over unwritten (the written extent
+///   is 64 bytes of the 128 the cursor advances), making 32 dwords.
+#[must_use]
+pub fn wait_until_safe_words(buffer_index: u32, label: u64) -> [u32; 16] {
+    [
+        0xc001_7904,
+        0x0000_0342,
+        0xcb00_0000_u32.wrapping_add(buffer_index),
+        0xc007_9300,
+        0x0600_0113,
+        label as u32,
+        (label >> 32) as u32,
+        0x0000_0000,
+        0x0000_0000,
+        0xffff_ffff,
+        0xffff_ffff,
+        0x0000_0040,
+        0xc001_7904,
+        0x0000_0342,
+        0xcb00_0020_u32.wrapping_add(buffer_index),
+        0xc00f_1000,
+    ]
+}
+
+/// How far `sceAgcDcbWaitUntilSafeForRendering` advances the cursor: 128 bytes (`-5a17`: `bytes
+/// 0x80` on every written call).
+pub const WAIT_UNTIL_SAFE_DWORDS: usize = 32;
 
 #[cfg(test)]
 mod tests {

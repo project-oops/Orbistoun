@@ -877,6 +877,13 @@ mod tests {
         );
         assert_eq!(queued::queue(handle, 4, 1), None, "an unregistered buffer");
         assert_eq!(queued::queue(0xdead, 0, 1), None, "a port that is not open");
+        // A wait polls any index's label on an open port (`-5a17` waited on index 4), none on a
+        // port that is not open.
+        assert_eq!(
+            queued::wait_label(handle, 4),
+            Some(queued::FLIP_LABEL_BASE + 32)
+        );
+        assert_eq!(queued::wait_label(0xdead, 0), None);
 
         let (first, label0) = queued::queue(handle, 0, 5).expect("buffer 0 queues");
         assert_eq!(label0, queued::FLIP_LABEL_BASE);

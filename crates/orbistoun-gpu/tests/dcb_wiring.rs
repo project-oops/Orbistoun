@@ -339,17 +339,18 @@ fn every_patch_answers_the_measured_success_not_a_placeholder() {
     }
 }
 
-/// `sceAgcDcbWaitUntilSafeForRendering` is a measured library no-op: it answers `0x0` and writes
-/// nothing, on a real writer or none.
+/// `sceAgcDcbWaitUntilSafeForRendering` for a port that is not open answers `0x0` and writes
+/// nothing, on a real writer or none (`-5a17`'s no-port arms). No display is installed in this test
+/// binary, so no port is open; `dcb_set_flip.rs` covers the written packet.
 #[test]
-fn wait_until_safe_for_rendering_is_a_no_op_that_answers_zero() {
+fn wait_until_safe_for_rendering_with_no_port_answers_zero() {
     let w = Writer::new(0x400);
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[0] = w.handle();
     let rc = call("sceAgcDcbWaitUntilSafeForRendering", args);
     assert_eq!(rc, 0, "the measured 0x0");
     assert_ne!(rc, UNIMPLEMENTED, "not the placeholder");
-    assert_eq!(w.written(), 0, "a no-op writes no packet");
+    assert_eq!(w.written(), 0, "no port, no packet");
 
     // A null handle is still 0x0: nothing is dereferenced.
     assert_eq!(

@@ -608,10 +608,15 @@ found_on = "2026-09-15"
 
 [[function]]
 name = "sceAgcDcbWaitUntilSafeForRendering"
-purpose = "A wait/sync builder that, on retail, emits nothing into the command buffer."
-edge_cases = ["MEASURED LIBRARY NO-OP (obSCEne 166-agc/dcb-wait-until-safe, sweeps 20260917-090300/101310). Its GetSize symbol (sceAgcDcbWaitUntilSafeForRenderingGetSize) is absent from libSceAgc, and the builder writes 0 bytes and returns rc 0x0 on a bare writer (arg1 0 and 1) and on one prepared through sceAgcDcbResetQueue - empty-encoding true under every condition. So it is a genuine library-level no-op, distinct from a failed capture: contrast CbSetShRegistersDirect (partial 0 B with GetSize 0, a library-confirmed empty measurement) where this one has no GetSize at all. agc_no_op_returns_ok answers the measured 0x0 and writes nothing."]
+purpose = "Writes a wait for a display buffer's flip label to read 0 - the buffer is off the screen - before the stream draws into it: (writer, video_handle, buffer_index)."
+edge_cases = [
+    "MEASURED WITH A PORT OPEN (obSCEne -5a17, check 166-agc/dcb-wait-until-safe-for-rendering, sweep 20260927-153242): for indices 0, 1 and 4, twice each, 64 bytes written and the cursor advanced 128, the answer the packet's address (0x200a50078, the form sceAgcDcbSetFlip answers). The words: SET_UCONFIG_REG 0x342 = 0xcb000000 + index; WAIT_REG_MEM64 (0x93) until the 64-bit label at 0xC_8000_40A0 + 8 * index equals 0, memory space, prefetch parser, poll interval 0x40; SET_UCONFIG_REG 0x342 = 0xcb000020 + index; then the header of a NOP whose 16-dword body is skipped unwritten (the written extent is 64).",
+    "Register 0x342 is SQ_THREAD_TRACE_USERDATA_2 (Mesa sid.h R_030D08), a thread-trace marker with no effect on memory; sceAgcDcbSetFlip writes it too. The wait is what matters: the command processor carries it out on the label D728 models, which the display clears when the buffer leaves the screen.",
+    "Index 4 wrote the same wait as 0 and 1 on a port the probe had not registered buffers on, so the builder checks the port, not the buffer. The argument order is (writer, video_handle, buffer_index): swapped, (writer, 0, video_handle) wrote nothing and answered 0.",
+    "NO PORT, NO PACKET. With no port open (the -5a17 no-port arms, and the earlier sweeps 20260917-090300/101310 that ran with none) it writes nothing and answers 0x0, which is why it was first recorded as a library no-op. Its GetSize symbol does not resolve.",
+]
 known_by = "measured"
-cites = "obSCEne sweeps 20260917-090300/101310 (166-agc/dcb-wait-until-safe: GetSize resolved 0x0, bytes 0x0, rc 0x0, empty-encoding 0x1)."
+cites = "obSCEne REQ-20260927T0200Z-5a17 (sweep 20260927-153242, check 166-agc/dcb-wait-until-safe-for-rendering: video-handle 0x4e100100, wait-open-idx{0,1,4}-c{1,2} rc 0x200a50078 and bytes 0x80, extent 64, wait-swapped-idx0 0x0); obSCEne sweeps 20260917-090300/101310 (no port: bytes 0x0, rc 0x0); Mesa amd_cp_packets_gfx11.h:1764-1826 (WAIT_REG_MEM64 layout)."
 found_on = "2026-09-17"
 
 [[function]]

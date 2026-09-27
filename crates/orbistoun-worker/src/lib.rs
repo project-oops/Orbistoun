@@ -538,6 +538,7 @@ fn install_presentation() {
     // (D728).
     orbistoun_gpu::display::install(orbistoun_gpu::display::Display {
         queue_flip: orbistoun_video::queued::queue,
+        wait_label: orbistoun_video::queued::wait_label,
         released: orbistoun_video::queued::released,
     });
     // A launcher's request to start another title, which the front end carries out.
