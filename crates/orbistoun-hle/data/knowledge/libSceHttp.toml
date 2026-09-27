@@ -24,14 +24,13 @@ arity = 1
 purpose = "Ends an HTTP context."
 returns = "status"
 edge_cases = [
+    "Measured (obSCEne 102-net/http-lifecycle, sweep 20260927-093727): an id never issued answers 0x80431100.",
     "A dead or non-context id is refused.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
-assumptions = [
-    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
-]
+assumptions = []
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
 
@@ -130,14 +129,13 @@ arity = 1
 purpose = "Deletes a request, releasing its response and header block."
 returns = "status"
 edge_cases = [
+    "Measured (obSCEne 102-net/http-lifecycle, sweep 20260927-093727): an id never issued answers 0x80431100.",
     "The header block sceHttpGetAllResponseHeaders handed out is invalid afterwards.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
-assumptions = [
-    "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
-]
+assumptions = []
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
 
@@ -147,6 +145,7 @@ arity = 4
 purpose = "Adds a header to a template, connection or request."
 returns = "status"
 edge_cases = [
+    "Measured (obSCEne 102-net/http-lifecycle, sweep 20260927-093727): mode 2 answers 0x804311fe.",
     "Mode 0 replaces a header of the same name, mode 1 adds another beside it; any other mode is refused.",
     "A header set on a parent is inherited by children created afterwards.",
 ]
@@ -238,8 +237,7 @@ edge_cases = [
 found_by = "static"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
-assumptions = [
-]
+assumptions = []
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
 
@@ -267,6 +265,7 @@ arity = 3
 purpose = "Sends a request with optional body data, up to the response headers."
 returns = "status"
 edge_cases = [
+    "Measured (obSCEne 102-net/http-lifecycle, sweep 20260927-093727): a refused connection answers 0x8041013d, libSceNet's ECONNREFUSED (0x80410100 | 61).",
     "The transfer is the host's, over rustls; the body stays unread until sceHttpReadData.",
     "An unreachable host or a failed TLS handshake answers a negative code rather than hanging or succeeding.",
 ]
@@ -274,6 +273,7 @@ found_by = "generated"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
 assumptions = [
+    "Only a refused connection has a measured code; every other failure answers the host-failed placeholder.",
     "A failure answers orbistoun's placeholder (invalid handle, invalid argument, or host failed), not the platform's 0x8043xxxx code for the condition, which is unmeasured; the guest relies only on the answer being negative.",
 ]
 found_in = ["OPSY00001"]
@@ -290,8 +290,7 @@ edge_cases = [
 found_by = "static"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
-assumptions = [
-]
+assumptions = []
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
 

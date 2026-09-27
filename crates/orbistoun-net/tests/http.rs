@@ -297,16 +297,33 @@ fn an_unreachable_host_fails_the_send() {
         "sceHttpCreateRequestWithURL2",
         &[connection, text(&method), text(&url), 0],
     );
-    assert!(int(call("sceHttpSendRequest", &[request, 0, 0])) < 0);
+    // libSceNet's ECONNREFUSED, as hardware answered a refused port (`102-net/http-lifecycle`).
+    assert_eq!(call("sceHttpSendRequest", &[request, 0, 0]), 0x8041_013d);
     delete(connection, request);
+    session.close();
+}
+
+/// A header mode other than replace (0) or add (1) is refused with the code hardware gives mode 2.
+#[test]
+fn an_unknown_header_mode_is_refused_with_the_measured_code() {
+    let session = Session::open(true);
+    let (name, value) = (CString::new("X").unwrap(), CString::new("y").unwrap());
+    assert_eq!(
+        call(
+            "sceHttpAddRequestHeader",
+            &[session.template, text(&name), text(&value), 2]
+        ),
+        0x8043_11fe
+    );
     session.close();
 }
 
 /// An id that names nothing is refused.
 #[test]
 fn a_dead_id_is_refused() {
-    assert!(int(call("sceHttpDeleteRequest", &[0x7fff_0000])) < 0);
-    assert!(int(call("sceHttpTerm", &[0x7fff_0001])) < 0);
+    // The code obSCEne read for both on hardware (`102-net/http-lifecycle`, sweep 20260927-093727).
+    assert_eq!(call("sceHttpDeleteRequest", &[0x7fff_0000]), 0x8043_1100);
+    assert_eq!(call("sceHttpTerm", &[0x7fff_0001]), 0x8043_1100);
     assert!(int(call("sceSslTerm", &[0x7fff_0002])) < 0);
     assert!(int(call("sceNetPoolDestroy", &[0x7fff_0003])) < 0);
 }

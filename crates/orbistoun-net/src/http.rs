@@ -74,7 +74,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceHttpCreateConnectionWithURL", create_connection),
         ("sceHttpDeleteConnection", delete_object),
         ("sceHttpCreateRequestWithURL2", create_request),
-        ("sceHttpDeleteRequest", delete_object),
+        ("sceHttpDeleteRequest", delete_request),
         ("sceHttpAddRequestHeader", add_request_header),
         ("sceHttpSetAutoRedirect", set_auto_redirect),
         ("sceHttpSetResolveTimeOut", set_resolve_timeout),
@@ -110,6 +110,15 @@ const CONTENT_LENGTH_EXISTS: u32 = 0;
 const CONTENT_LENGTH_NOT_FOUND: u32 = 1;
 /// ...or the body is chunked.
 const CONTENT_LENGTH_CHUNKED: u32 = 2;
+
+/// What `sceHttpDeleteRequest` and `sceHttpTerm` answer for an id never issued, on hardware
+/// (obSCEne `102-net/http-lifecycle`, sweep 20260927-093727).
+const ERROR_UNISSUED_ID: u32 = 0x8043_1100;
+/// What `sceHttpAddRequestHeader` answers for mode 2 on hardware (the same sweep).
+const ERROR_HEADER_MODE: u32 = 0x8043_11fe;
+/// `ECONNREFUSED`, FreeBSD `sys/sys/errno.h`: `sceHttpSendRequest` to a refused port answered
+/// libSceNet's `0x8041_013d` on hardware (the same sweep).
+const ECONNREFUSED: u32 = 61;
 
 /// The longest string read from the guest: a signed CDN URL runs to a few kilobytes.
 const LONGEST_STRING: usize = 16 * 1024;
@@ -238,10 +247,23 @@ fn init(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceHttpTerm(context)`.
 fn term(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    delete_kind(id_of(args[0]), Kind::Context)
+    delete_kind(
+        id_of(args[0]),
+        Kind::Context,
+        GuestError::Raw(ERROR_UNISSUED_ID),
+    )
 }
 
-/// `sceHttpDelete{Template,Connection,Request}(id)`.
+/// `sceHttpDeleteRequest(request)`.
+fn delete_request(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    delete_kind(
+        id_of(args[0]),
+        Kind::Request,
+        GuestError::Raw(ERROR_UNISSUED_ID),
+    )
+}
+
+/// `sceHttpDelete{Template,Connection}(id)`. What either answers for a dead id is unmeasured.
 fn delete_object(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if table().remove(&id_of(args[0])).is_some() {
         ok()
@@ -250,13 +272,14 @@ fn delete_object(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-fn delete_kind(id: u32, kind: Kind) -> u64 {
+/// Deletes `id` if it names a live object of `kind`, answering `refusal` otherwise.
+fn delete_kind(id: u32, kind: Kind, refusal: GuestError) -> u64 {
     let mut objects = table();
     if objects.get(&id).is_some_and(|o| o.kind == kind) {
         objects.remove(&id);
         ok()
     } else {
-        fail(GuestError::InvalidHandle)
+        fail(refusal)
     }
 }
 
@@ -340,7 +363,7 @@ fn add_request_header(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     let mode = args[3] & 0xFFFF_FFFF;
     if mode != HEADER_OVERWRITE && mode != HEADER_ADD {
-        return fail(GuestError::InvalidArgument);
+        return fail(GuestError::Raw(ERROR_HEADER_MODE));
     }
     with_settings(id_of(args[0]), |settings| {
         if mode == HEADER_OVERWRITE {
@@ -465,7 +488,7 @@ fn send_request(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!("sceHttpSendRequest: {url}: {error}");
-            return fail(GuestError::HostFailed);
+            return fail(send_failure(&error));
         }
     };
     let received = received(response);
@@ -477,6 +500,21 @@ fn send_request(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Deleted while the transfer ran.
         None => fail(GuestError::InvalidHandle),
     }
+}
+
+/// What a failed send answers: libSceNet's own code where the host's failure is one hardware was
+/// seen to answer, the host-failure placeholder otherwise.
+fn send_failure(error: &reqwest::Error) -> GuestError {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            return GuestError::vendor_in(crate::NET_ERROR_BASE, ECONNREFUSED);
+        }
+        source = cause.source();
+    }
+    GuestError::HostFailed
 }
 
 /// The parts of a host response the guest can ask for.
