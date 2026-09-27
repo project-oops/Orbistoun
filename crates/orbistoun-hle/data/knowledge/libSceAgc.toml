@@ -17,14 +17,15 @@ found_on = "2026-09-20"
 [[function]]
 name = "0x53bbd82b51d172db"
 arity = 2
-purpose = "Alias NID for sceAgcInit(state, version), imported directly by retail titles (including PPSA02664 and PPSA28061)."
+purpose = "An initialisation gate of its own beside sceAgcInit: (state, version), imported directly by retail titles (including PPSA02664 and PPSA28061)."
 edge_cases = [
-    "ALIAS NID FOR sceAgcInit. The standard name sceAgcInit hashes to 0x916dc62dbed07cf8, but published identifier tables list 0x53bbd82b51d172db as an alias for this library's initialization gate. Real titles import this raw identifier.",
-    "RETURN AND VERSION GATE MEASURED (obSCEne b7e4, sweep 20260915-125124). Validates version: returns 0x0 for version 13 and 0x8a6c0004 for all other versions.",
-    "ARG0 IS UNTOUCHED BY HARDWARE (obSCEne a3f0, sweep 20260920, check 166-agc/init). Extent = 0, changed = 0, touches 0 bytes at arg0.",
+    "NOT AN ALIAS OF sceAgcInit (obSCEne -7e41, check 166-agc/init-alias-7e41, sweep 20260927-153242). Imported statically beside the named export, it resolves to 0x800595990 and sceAgcInit to 0x800595930: two entry points 0x60 apart (identical-entry-point 0x0). The published identifier tables that list it against sceAgcInit's name are wrong about the function.",
+    "THE C NAME obSCEne CALLS IN 166-agc/init BINDS TO THIS NID (include/obscene/platform.h declares sceAgcInit as $23LRUSvYu1M, this identifier), so every 166-agc/init row measures this function. In a fresh process (sweeps 20260915-125124 and 20260920): version 13 answers 0x0 with a null state, a 0xAA sentinel state and PPSA02664's {0, 1} state pattern; versions 0, 1, 4, 8, 12, 16, 24, 32 and 64 answer 0x8a6c0004; nothing is written through arg0 (extent 0).",
+    "PPSA02664 CALLS IT WITH VERSION 8 from its graphics init routine (image+0x3dd2d: rdi = its state global at image+0x19c9620, esi = 8) and, answered non-zero, skips the two register-defaults steps that follow (image+0x3dd3d, image+0x3dd4d) and returns the code. Version 8 answers 0x8a6c0004 in the sweeps, so orbistoun answering it matches the measurement, not a guess.",
+    "In sweep 20260927-153242, after the named sceAgcInit had run, this function answered 0x8a6c0004 for 12, 13 and 14 and 166-agc/init's later arms answered it for 13 too. Whether a prior sceAgcInit is what closes the gate is unmeasured, and no title seen calls both; orbistoun answers the fresh-process gate.",
 ]
-known_by = "published"
-cites = "SELFish REQ-20260909T1250Z-1f74; obSCEne b7e4 (sweep 20260915-125124); obSCEne REQ-20260920T1425Z-a3f0 (sweep 20260920 live console, check 166-agc/init)"
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2230Z-7e41 (sweep 20260927-153242, check 166-agc/init-alias-7e41: raw-nid-addr 0x800595990, sceAgcInit-addr 0x800595930, identical-entry-point 0x0, rc-alias 0x8a6c0004 for 12-14); obSCEne sweeps 20260915-125124 and 20260920 (check 166-agc/init through the C name bound to this NID: sweep-rc 0x0 for 13, 0x8a6c0004 for every other swept version, extent 0); PPSA02664 call site image+0x3dd2d, arguments captured with ORBISTOUN_DUMP."
 found_in = ["PPSA02664-app0", "PPSA28061-app0"]
 found_on = "2026-09-20"
 
@@ -554,17 +555,14 @@ assumptions = [
 [[function]]
 name = "sceAgcInit"
 arity = 2
-purpose = "Initialises the current-generation graphics library. sceAgcInit(state, version): validates version and gates every later AGC call. Attributed to the identifier three titles import first and stall inside."
+purpose = "Initialises the current-generation graphics library: sceAgcInit(state, version) validates the version and writes nothing."
 edge_cases = [
-    "**The identifier a real title imports is 0x53bbd82b51d172db (orbistoun spelling), and this name does not hash to it.** The hash of this name is 0x916dc62dbed07cf8. The published tables list BOTH identifiers against this one name, so the second is an alias no derivation can reach - which is why 30,184 names and 3.9 billion generated candidates never explained it.",
-    "**known_by is published, and that is the ceiling on it.** The attribution is external; this project cannot confirm it the way it confirms every other name, because confirmation here means the hash reproducing and this one demonstrably does not. It is recorded so a reader meeting the bare hash knows what it is believed to be and exactly how much that is worth.",
-    "**The systematic shape matters more than the single name.** Of 116 published libSceAgc identifiers, 108 reproduce and 8 do not; five of the 8 are a second identifier on a name whose first one reproduces. So this library carries a class of alias identifiers, and a future unnameable hash here should be checked against that pattern before a word list is extended.",
-    "PPSA28061 stops inside this library's initialisation; PPSA02664 and PPSA03416 call it, pass it, reach flipped, and fault later in command-buffer construction (the 0xa8 null object, commit b4f7e73/684). All three import and exercise the library, which corroborates the attribution semantically without confirming it.",
-    "RETURN AND VERSION GATE MEASURED (obSCEne b7e4, sweep 20260915-125124). sceAgcInit(state, v) returns 0x0 for v = 13 and 0x8a6c0004 (SCE_AGC_ERROR_INVALID_VERSION) for every other version; 13 is the only version retail FW 12.40 accepts. And it gates the library: sceAgcCreateShader called before sceAgcInit faults (SIGSEGV). So the arity is 2, not 0 - a state buffer at arg0 and a version at arg1 - and the identity attribution being published does not make the behaviour unmeasured, because obSCEne calls the canonical export through the SDK.",
-    "ARG0 IS UNTOUCHED BY HARDWARE (obSCEne a3f0, sweep 20260920, check 166-agc/init). Probe of sceAgcInit(state, 13) across 1024-byte 0xAA sentinels, PPSA02664 descriptor pattern, and pointer-to-pointer confirmed extent = 0, changed = 0, and out-ptr-valid = 0, with rc-null = 0x0. sceAgcInit does not populate a context buffer at arg0; it is a pure library version initialization gate.",
+    "MEASURED BY ITS OWN NAME (obSCEne -7e41, check 166-agc/init-alias-7e41, sweep 20260927-153242): imported statically as the name (orbistoun's hash 0xf87cd0be2dc66d91, obSCEne's $kW3GLb7QfPg) it resolves to 0x800595930 and answers 0x0 for versions 12, 13 and 14 with a 0xCC state, writing nothing (bytes-written-init 0x0).",
+    "No other version was called through this name, so orbistoun refuses one by name rather than lending it 0x8a6c0004: that code was measured on 0x53bbd82b51d172db, which obSCEne's older 166-agc/init check called under this name's C spelling.",
+    "It is not the function retail titles import as 0x53bbd82b51d172db; see that entry.",
 ]
-known_by = "published"
-cites = "SELFish REQ-20260909T1250Z-1f74; obSCEne b7e4 (sweep 20260915-125124); obSCEne REQ-20260920T1425Z-a3f0 (sweep 20260920 live console, check 166-agc/init: extent 0, changed 0, rc-sentinel 0x0, rc-desc 0x0, rc-null 0x0, v=13 -> 0x0)"
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2230Z-7e41 (sweep 20260927-153242, check 166-agc/init-alias-7e41: sceAgcInit-addr 0x800595930, rc-init 0x0 for versions 12, 13, 14, bytes-written-init 0x0)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-09"
 

@@ -578,15 +578,36 @@ fn the_indirect_register_patches_replay_the_measured_sequence() {
     assert_eq!(w.written(), 20, "the patches amend in place");
 }
 
-/// `sceAgcInit` (and alias `0x53bbd82b51d172db`) validates version 13 and returns 0.
+/// `sceAgcInit` accepts versions 12, 13 and 14 (`-7e41`); a version nobody measured is refused
+/// by name rather than given the other function's code.
 #[test]
-fn sce_agc_init_wired_and_validates_version() {
+fn sce_agc_init_accepts_the_measured_versions() {
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    for version in [12, 13, 14] {
+        args[1] = version;
+        assert_eq!(call("sceAgcInit", args), 0, "version {version}");
+    }
+    args[1] = 1;
+    assert_eq!(
+        call("sceAgcInit", args),
+        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    );
+}
+
+/// `0x53bbd82b51d172db` is its own function, not `sceAgcInit` under another name (`-7e41`: a
+/// separate entry point). In a fresh process it accepts version 13 only; PPSA02664 calls it with
+/// version 8 and is answered `0x8a6c0004`, as the sweeps measured for 8.
+#[test]
+fn the_raw_init_nid_keeps_its_own_version_gate() {
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[1] = 13;
-    assert_eq!(call("sceAgcInit", args), 0);
     assert_eq!(call("0x53bbd82b51d172db", args), 0);
-
-    args[1] = 1;
-    assert_eq!(call("sceAgcInit", args), 0x8a6c_0004);
-    assert_eq!(call("0x53bbd82b51d172db", args), 0x8a6c_0004);
+    for version in [0, 1, 4, 8, 12, 14, 16, 24, 32, 64] {
+        args[1] = version;
+        assert_eq!(
+            call("0x53bbd82b51d172db", args),
+            0x8a6c_0004,
+            "version {version}"
+        );
+    }
 }

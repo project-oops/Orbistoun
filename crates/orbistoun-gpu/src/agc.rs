@@ -564,14 +564,34 @@ fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceAgcInit(state, version)` (and alias NID `0x53bbd82b51d172db`).
-///
-/// Measured on Prospero-generation hardware (`166-agc/init`): version 13 (`0xd`) returns `0x0`,
-/// every other version `0x8a6c0004` (`SCE_AGC_ERROR_INVALID_VERSION`), and nothing is written to
-/// `arg0`.
+/// The versions `sceAgcInit` was measured to accept (`-7e41`, `166-agc/init-alias-7e41`).
+const AGC_INIT_VERSIONS: std::ops::RangeInclusive<u32> = 12..=14;
+
+/// `sceAgcInit(state, version)`: answers `0x0` for versions 12, 13 and 14 and writes nothing
+/// (`-7e41`, `166-agc/init-alias-7e41`, sweep 20260927-153242). No other version was measured, so
+/// one is refused by name.
 fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let version = args[1] as u32;
-    if version == 13 { OK } else { 0x8a6c_0004 }
+    if AGC_INIT_VERSIONS.contains(&(args[1] as u32)) {
+        OK
+    } else {
+        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// The only version `0x53bbd82b51d172db` accepts in a fresh process.
+const RAW_INIT_VERSION: u32 = 13;
+
+/// `0x53bbd82b51d172db(state, version)`: a function of its own, 0x60 bytes past `sceAgcInit` in
+/// the library (`-7e41`). The C name obSCEne's `166-agc/init` calls binds to this NID, so its
+/// sweeps are this function's: in a fresh process version 13 answers `0x0` and every other swept
+/// version `0x8a6c0004` (sweeps 20260915-125124 and 20260920), writing nothing. PPSA02664 calls it
+/// with version 8.
+fn agc_init_raw(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[1] as u32 == RAW_INIT_VERSION {
+        OK
+    } else {
+        0x8a6c_0004
+    }
 }
 
 /// `sceAgcGetIsTrinityMode()` - whether the GPU is the faster revision of this generation.
@@ -894,7 +914,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceAgcDcbDrawIndex", dcb_draw_index),
         ("sceAgcDcbSetIndexSize", dcb_set_index_size),
-        ("0x53bbd82b51d172db", agc_init),
+        ("0x53bbd82b51d172db", agc_init_raw),
         ("sceAgcInit", agc_init),
         ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
     ]
@@ -1217,20 +1237,18 @@ mod tests {
         }
     }
 
-    /// `sceAgcInit` returns 0 for version 13, and 0x8a6c0004 for other versions.
+    /// Neither init gate writes through its state argument, whatever it answers.
     #[test]
-    fn agc_init_validates_version_and_touches_no_state() {
+    fn the_init_gates_touch_no_state() {
         let mut buf = [0x55u8; 64];
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = buf.as_mut_ptr() as u64;
-        args[1] = 13;
-
-        assert_eq!(agc_init(&args), OK);
-        assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
-
-        args[1] = 12;
-        assert_eq!(agc_init(&args), 0x8a6c_0004);
-        assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
+        for version in [8, 12, 13] {
+            args[1] = version;
+            agc_init(&args);
+            agc_init_raw(&args);
+            assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
+        }
     }
 
     /// `sceAgcGetIsTrinityMode` answers `0` for a base machine, keeping a base guest off the faster
