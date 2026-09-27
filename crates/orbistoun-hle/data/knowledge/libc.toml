@@ -1769,6 +1769,22 @@ found_on = "2026-09-03"
 note = "Called 2 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
+name = "reallocalign"
+found_by = "static"
+arity = 3
+purpose = "Resizes an allocation, as realloc does, to a block whose address is a multiple of the given alignment."
+edge_cases = [
+    "Unserved, the loader bound it to the title's own libc.prx, whose heap owns none of the blocks this library's malloc family hands out. PPSA02664's Unity runtime grew an empty array with reallocalign(NULL, 0x400, 16), got null from that heap, stored it and wrote through it: the fault at image+0xafafdb that stopped PPSA02664 and PPSA03416.",
+    "A null pointer allocates; the contents survive up to the smaller of the two sizes; the old block is freed.",
+    "An alignment that is not a power of two, or a failed allocation, answers null and leaves the original block alive.",
+]
+known_by = "guest-observed"
+cites = "PPSA02664 image+0xafaf8c: reallocalign(old, size, 0x10) with the result stored at the array's base; realloc's contract (ISO C 7.22.3.5) with memalign's alignment"
+assumptions = ["Whether the platform frees and answers a minimum block for a zero size, as FreeBSD's realloc does, is unmeasured; this allocates the minimum block and frees the original."]
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-09-27"
+
+[[function]]
 name = "posix_memalign"
 found_by = "published-standard"
 purpose = "Allocates memory whose address is a multiple of a requested alignment, storing it through an out-pointer and answering an error number."

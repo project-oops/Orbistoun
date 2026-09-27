@@ -222,6 +222,7 @@ guest_module! {
         // call, and under-declaring would truncate the arguments before the renderer saw them.
         "memalign" => 2,
         "posix_memalign" => 3,
+        "reallocalign" => 3,
         "printf" => 6,
         // Declared because it must not return: the default stub returns into the trap a compiler
         // places after a `noreturn` call (D177).
@@ -929,6 +930,39 @@ fn realloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if keep > 0 {
         // SAFETY: both allocations are at least `keep` bytes and do not overlap.
         unsafe { std::ptr::copy_nonoverlapping(ptr(pointer), ptr(fresh), keep) };
+    }
+    let mut release = [0_u64; GUEST_ARG_REGISTERS];
+    release[0] = pointer;
+    free(&release);
+    fresh
+}
+
+/// `reallocalign(pointer, size, alignment)`: `realloc` whose result is a multiple of `alignment`.
+///
+/// Served here with the rest of the allocator: unserved, the loader bound it to the title's own
+/// `libc.prx`, whose heap holds none of the blocks this library hands out, and PPSA02664's Unity
+/// runtime stored the null it answered for `(NULL, 0x400, 16)` and wrote through it. Null grows
+/// from nothing, as `realloc` does; the contents survive up to the smaller size; a failure,
+/// including an alignment that is not a power of two, answers null and leaves the original.
+fn reallocalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (pointer, Ok(size), Ok(align)) =
+        (args[0], usize::try_from(args[1]), usize::try_from(args[2]))
+    else {
+        return 0;
+    };
+    if !align.is_power_of_two() {
+        return 0;
+    }
+    let fresh = allocate(size, align);
+    if fresh == 0 || pointer == 0 {
+        return fresh;
+    }
+    if let Some((old_total, old_offset)) = header_of(pointer) {
+        let keep = old_total.saturating_sub(old_offset).min(size);
+        if keep > 0 {
+            // SAFETY: both allocations are at least `keep` bytes and do not overlap.
+            unsafe { std::ptr::copy_nonoverlapping(ptr(pointer), ptr(fresh), keep) };
+        }
     }
     let mut release = [0_u64; GUEST_ARG_REGISTERS];
     release[0] = pointer;
@@ -3076,6 +3110,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("memchr", memchr),
         ("memalign", memalign),
         ("posix_memalign", posix_memalign),
+        ("reallocalign", reallocalign),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
         ("vsprintf_s", vsprintf_s),
@@ -3787,6 +3822,50 @@ mod tests {
             assert_eq!(p % align, 0, "alignment {align} was not honoured");
             call("free", [p, 0, 0, 0, 0, 0]);
         }
+    }
+
+    /// `reallocalign(NULL, n, a)` is an aligned allocation - the call PPSA02664's Unity runtime
+    /// makes to grow an empty array, which the title's own libc answered with null when this was
+    /// not served here.
+    #[test]
+    fn reallocalign_from_null_allocates_aligned() {
+        for align in [16_u64, 64, 4096] {
+            let p = call("reallocalign", [0, 0x400, align, 0, 0, 0]);
+            assert_ne!(p, 0, "alignment {align}");
+            assert_eq!(p % align, 0, "alignment {align} was not honoured");
+            call("free", [p, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    /// Growing keeps the contents and the alignment, and frees the old block's storage.
+    #[test]
+    fn reallocalign_keeps_the_contents_and_the_alignment() {
+        let first = call("reallocalign", [0, 16, 64, 0, 0, 0]);
+        assert_ne!(first, 0);
+        // SAFETY: a 16-byte block this library just returned.
+        unsafe { std::ptr::write_bytes(crate::ptr(first), 0x5a, 16) };
+        let grown = call("reallocalign", [first, 0x1000, 64, 0, 0, 0]);
+        assert_ne!(grown, 0);
+        assert_eq!(grown % 64, 0);
+        // SAFETY: the grown block is at least 16 bytes.
+        let kept = unsafe { std::slice::from_raw_parts(crate::ptr(grown), 16) };
+        assert!(
+            kept.iter().all(|&b| b == 0x5a),
+            "the first 16 bytes survive"
+        );
+        call("free", [grown, 0, 0, 0, 0, 0]);
+    }
+
+    /// An alignment that is not a power of two is refused with null, and the original survives.
+    #[test]
+    fn reallocalign_refuses_a_bad_alignment_and_keeps_the_original() {
+        let block = call("malloc", [32, 0, 0, 0, 0, 0]);
+        assert_eq!(call("reallocalign", [block, 64, 24, 0, 0, 0]), 0);
+        assert_eq!(
+            call("realloc", [block, 64, 0, 0, 0, 0]) % 16,
+            0,
+            "still a live block"
+        );
     }
 
     #[test]
