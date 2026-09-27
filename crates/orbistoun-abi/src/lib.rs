@@ -9,6 +9,7 @@
 
 use std::io;
 
+pub mod context;
 pub mod enter;
 pub mod exec;
 pub mod thread_pointer;
