@@ -1346,23 +1346,18 @@ mod tests {
         );
     }
 
-    /// `0x7d86501b8094ef57` answers a register write's values, two dwords in, and refuses the
-    /// unmeasured kinds without writing.
+    /// The payload decision on each measured header (`-r1b0`): a register write's values two dwords
+    /// in, a `NOP`'s body one dword in or null when it has none, kind 2 two dwords into a `NOP`, and
+    /// nothing for a pairing no arm covered. `tests/dcb_wiring.rs` runs the handler on real packets.
     #[test]
-    fn the_payload_of_a_reserved_register_write_starts_two_dwords_in() {
-        let mut slot: u64 = 0;
-        let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = std::ptr::addr_of_mut!(slot) as u64;
-        args[1] = 0x7400_0218_7e30;
-        args[2] = 1;
-        assert_eq!(agc_packet_payload(&args), OK);
-        assert_eq!(slot, 0x7400_0218_7e38);
-        for kind in [0, 2] {
-            slot = 0;
-            args[2] = kind;
-            assert_eq!(agc_packet_payload(&args), BAD_ARGUMENT);
-            assert_eq!(slot, 0);
-        }
+    fn the_payload_offsets_are_the_measured_ones() {
+        assert_eq!(payload_offset(0xc003_7600, 1), Some(Payload::At(8)));
+        assert_eq!(payload_offset(0xc002_1000, 0), Some(Payload::At(4)));
+        assert_eq!(payload_offset(0xffff_1000, 0), Some(Payload::Null));
+        assert_eq!(payload_offset(0xc002_1000, 2), Some(Payload::At(8)));
+        assert_eq!(payload_offset(0xffff_1000, 2), None);
+        assert_eq!(payload_offset(0xc003_7600, 0), None);
+        assert_eq!(payload_offset(0x0000_1000, 0), None, "not a type-3 header");
     }
 
     /// The raw gate keeps its first accepted version (`-7e52`, 20260915-125124), and refuses an
