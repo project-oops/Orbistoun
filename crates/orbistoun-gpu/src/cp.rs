@@ -151,7 +151,9 @@ pub struct DrawSegment<'a> {
     pub first: u32,
     /// Byte offset just past its last draw packet.
     pub end: u32,
-    /// Whether it holds every draw in the stream - no memory work sits between any two of them.
+    /// Whether it is all the stream's GPU work: every draw, no memory work between any two of
+    /// them, and no dispatch anywhere - so the submission as prepared is its draws and nothing
+    /// the command processor carries out itself.
     pub whole: bool,
 }
 
@@ -376,8 +378,11 @@ fn draw_segments<'a>(stream: &'a [u8], packets: &[packet::Packet]) -> Vec<DrawSe
             open = false;
         }
     }
+    let dispatches = packets.iter().any(|p| {
+        matches!(p.kind, PacketKind::Command { opcode } if opcode == packet::build::DISPATCH_DIRECT)
+    });
     if let [only] = segments.as_mut_slice() {
-        only.whole = true;
+        only.whole = !dispatches;
     }
     segments
 }
@@ -927,6 +932,10 @@ mod tests {
             ));
             self.refuse != Some(segment.first)
         }
+        /// Every dispatch carried out, writing nothing.
+        fn run_dispatch(&mut self, _dispatch: &super::Dispatch<'_>) -> bool {
+            true
+        }
     }
 
     /// Memory work between draws splits them into segments carried out in order (D729): each
@@ -1023,6 +1032,27 @@ mod tests {
 
         assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
         assert_eq!(memory.seen, vec![(0, end, true, 0)]);
+    }
+
+    /// A stream with a dispatch in it is not drawn as prepared, even when its draws are one
+    /// segment: the prepared submission carries the dispatch too, which the command processor
+    /// carries out itself, so the segment is prepared from its own stream instead.
+    #[test]
+    fn a_lone_segment_in_a_stream_with_a_dispatch_is_not_whole() {
+        let mut stream = crate::packet::build::dispatch_direct(0xc0, 1, 1).to_vec();
+        let first = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(draw());
+        let end = u32::try_from(stream.len() * 4).expect("small");
+        let mut memory = Segmenting {
+            inner: Fake::default(),
+            refuse: None,
+            seen: Vec::new(),
+        };
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.seen, vec![(first, end, false, 0)]);
     }
 
     /// A `CONTEXT_CONTROL` that only updates its load and shadow enables, as radeonsi's preamble
