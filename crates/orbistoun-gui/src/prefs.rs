@@ -25,15 +25,11 @@ pub(crate) enum Pane {
     Pads,
     /// Background daemon payloads and autoload.
     Payloads,
-    /// Not built.
-    Video,
-    /// Not built.
-    Input,
 }
 
 impl Pane {
     /// Every pane, in the order they are listed.
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::General,
         Self::Payloads,
         Self::Entry,
@@ -41,8 +37,6 @@ impl Pane {
         Self::Memory,
         Self::Shell,
         Self::Pads,
-        Self::Video,
-        Self::Input,
     ];
 
     /// The label in the pane list.
@@ -55,8 +49,6 @@ impl Pane {
             Self::Memory => "memory",
             Self::Shell => "shell",
             Self::Pads => "controllers",
-            Self::Video => "video",
-            Self::Input => "input",
         }
     }
 }
@@ -165,23 +157,6 @@ pub(crate) fn pane_contents(
         Pane::Memory => memory(ui, &mut prefs.file),
         Pane::Shell => shell(ui, &mut prefs.shell),
         Pane::Pads => pads(ui, &mut prefs.file.pads, live),
-        Pane::Video => not_built(
-            ui,
-            "video",
-            concat!(
-                "No output subsystem exists. The guest runs in a child process and nothing ",
-                "presents a frame yet, so resolution, window mode and vertical sync would all ",
-                "be controls over nothing.",
-            ),
-        ),
-        Pane::Input => not_built(
-            ui,
-            "input",
-            concat!(
-                "No input subsystem exists. The controller shim declares its interface and ",
-                "implements none of it, so a binding here could not reach a guest.",
-            ),
-        ),
     }
 }
 
@@ -575,20 +550,5 @@ fn memory(ui: &mut egui::Ui, file: &mut FileConfig) {
         "Off, this answers unimplemented and the guest gets no virtual address for memory ",
         "it reserved. It was off for one afternoon while a fault inside it went ",
         "unexplained - the cause turned out to be the entry convention, not the mapping.",
-    ));
-}
-
-/// A pane for a subsystem that does not exist.
-fn not_built(ui: &mut egui::Ui, name: &str, why: &str) {
-    ui.heading(name);
-    ui.add_space(8.0);
-    ui.colored_label(egui::Color32::from_gray(160), "nothing to configure yet");
-    ui.add_space(4.0);
-    ui.label(why);
-    ui.add_space(8.0);
-    ui.small(concat!(
-        "This pane is deliberately empty rather than filled with controls that do ",
-        "nothing. A setting that silently has no effect is indistinguishable from one ",
-        "that is broken.",
     ));
 }
