@@ -237,6 +237,9 @@ fn a_redirect_not_followed_hands_its_location_to_the_guest() {
             size as usize,
         )
     };
+    // The size counts the terminator, and the text before it ends with the blank line (`-5f0c`,
+    // sweep 20260927-185507: every block ends `\r\n\r\n\0` at `block[size - 1]`).
+    assert!(headers.ends_with(b"\r\n\r\n\0"), "{headers:?}");
     let headers = String::from_utf8_lossy(headers).to_ascii_lowercase();
     assert!(
         headers.contains("\r\nlocation: https://cdn.example/asset?sig=1\r\n"),
@@ -274,8 +277,25 @@ fn a_chunked_body_has_no_length_and_arrives_decoded() {
     let session = Session::open(true);
     let (connection, request) = session.get(&format!("http://127.0.0.1:{port}/"), None);
     let (result, _) = content_length(request);
-    assert_ne!(result, 0, "no length is present");
+    assert_eq!(result, 2, "chunked, as measured (`-9e41`)");
     assert_eq!(body(request), b"hello world");
+    delete(connection, request);
+    session.close();
+}
+
+/// A response with neither a length nor chunking, ended by the server closing, answers result
+/// word 1 with length 0 (`-5f0c`, sweep 20260927-185507, `test-no-length`), and its body is the
+/// bytes up to the close.
+#[test]
+fn a_body_ended_by_the_close_has_no_length() {
+    let (port, _heads) = serve(1, |_| {
+        b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nuntil close"
+            .to_vec()
+    });
+    let session = Session::open(true);
+    let (connection, request) = session.get(&format!("http://127.0.0.1:{port}/"), None);
+    assert_eq!(content_length(request), (1, 0));
+    assert_eq!(body(request), b"until close");
     delete(connection, request);
     session.close();
 }
