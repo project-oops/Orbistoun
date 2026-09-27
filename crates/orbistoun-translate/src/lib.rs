@@ -12,6 +12,7 @@
 pub mod blocks;
 mod buffer;
 pub mod control;
+pub mod draw_buffers;
 pub mod model;
 pub mod modifiers;
 pub mod predicated;
@@ -607,6 +608,7 @@ mod tests {
                     compute: None,
                     geometry: None,
                     window_space: false,
+                    draw_buffers: false,
                 },
             )
         };

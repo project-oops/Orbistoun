@@ -286,6 +286,57 @@ fn shader_failures(submission: &Submission) -> String {
     clause
 }
 
+/// Why a submission's draws cannot be drawn as the guest asked, from what preparing them found:
+/// positions that are not clip space, memory reads with nowhere to read from, textures or buffers
+/// that could not be bound, or a stage with no shader. `None` when nothing stands in the way.
+fn unmodelled_draws(submission: &Submission) -> Option<String> {
+    let report = &submission.report;
+    if report.unmodelled_viewports > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) turn the viewport transform off, and positions that are not ",
+                "clip space are not modelled"
+            ),
+            report.unmodelled_viewports
+        ));
+    }
+    if report.unwindowed_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) run a shader that reads guest memory, and no window is mapped ",
+                "for it to read through"
+            ),
+            report.unwindowed_draws
+        ));
+    }
+    if report.unbound_textures > 0 {
+        return Some(format!(
+            concat!(
+                "{} sampled texture slot(s) had no texture bound, and the placeholder is ",
+                "not the guest's picture"
+            ),
+            report.unbound_textures
+        ));
+    }
+    if report.unshaded_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) have a stage whose shader was not prepared, and would run the ",
+                "shader bound before them{}"
+            ),
+            report.unshaded_draws,
+            shader_failures(submission)
+        ));
+    }
+    if let (refused @ 1.., why) = report.unbound_buffers {
+        return Some(format!(
+            "{refused} draw(s) read through a buffer that could not be bound: {}",
+            why.unwrap_or("no reason was kept")
+        ));
+    }
+    None
+}
+
 /// Why the most recent draw segment was not carried out, for the run report.
 fn draw_refusal() -> &'static Mutex<Option<String>> {
     static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
@@ -392,32 +443,8 @@ impl GuestCp<'_> {
                 submission.targets.len()
             )
         })?;
-        if submission.report.unmodelled_viewports > 0 {
-            return Err(format!(
-                concat!(
-                    "{} draw(s) turn the viewport transform off, and positions that are not ",
-                    "clip space are not modelled"
-                ),
-                submission.report.unmodelled_viewports
-            ));
-        }
-        if submission.report.unwindowed_draws > 0 {
-            return Err(format!(
-                concat!(
-                    "{} draw(s) run a shader that reads guest memory, and no window is mapped ",
-                    "for it to read through"
-                ),
-                submission.report.unwindowed_draws
-            ));
-        }
-        if submission.report.unbound_textures > 0 {
-            return Err(format!(
-                concat!(
-                    "{} sampled texture slot(s) had no texture bound, and the placeholder is ",
-                    "not the guest's picture"
-                ),
-                submission.report.unbound_textures
-            ));
+        if let Some(why) = unmodelled_draws(submission) {
+            return Err(why);
         }
         if let Some(dcc) = submission.colour_target_dcc
             && let Some(why) = crate::dcc::unsupported(

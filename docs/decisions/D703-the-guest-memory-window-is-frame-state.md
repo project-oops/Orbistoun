@@ -5,7 +5,8 @@
 
 The frontend reads the pipeline window's exact span from guest memory, and the driver sets it on
 the backend once per frame through `set_guest_memory`, before the commands. A span that is not
-wholly mapped reads as empty.
+wholly mapped reads as empty. Amended by D733: a draw's traced buffers reach the backend as
+buffers of their own, per draw.
 
 **Why:** every module in a submission shares one window compiled into it, and the guest never
 numbered it, so a guest-numbered buffer bind would misrepresent it. The span must equal the mask

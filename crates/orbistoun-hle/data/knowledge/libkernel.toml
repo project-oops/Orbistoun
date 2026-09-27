@@ -2065,6 +2065,22 @@ assumptions = [
 found_on = "2026-08-25"
 
 [[function]]
+name = "scePthreadEqual"
+arity = 2
+purpose = "Whether two thread handles name the same thread: non-zero if they do, zero if not."
+edge_cases = [
+    "Unimplemented, it answered the placeholder, which is non-zero, so every pair of threads compared equal. Mesa's glthread then took the application thread for its own worker (`u_thread_is_self`, `glthread.c` `_mesa_glthread_finish`) and skipped the synchronisation, and both threads executed one context's command batches at once: Craft spun in `tc_batch_execute` on a call id no batch holds.",
+    "Handles are compared by value, as scePthreadSelf hands out one per thread for the thread's life.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on FreeBSD pthread_equal(3), whose vendor spelling this is: oops-sdk's thread layer calls it where POSIX calls pthread_equal (`src/thread/thread.c`), in builds that run on the hardware.",
+]
+found_in = ["CRFT00001"]
+found_on = "2026-09-27"
+
+[[function]]
 name = "scePthreadSelf"
 arity = 0
 purpose = """

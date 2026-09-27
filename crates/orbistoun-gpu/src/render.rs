@@ -25,6 +25,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetCull(_) => "SetCull",
         RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
         RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",
         RenderCommand::DrawIndexed { .. } => "DrawIndexed",
@@ -125,7 +126,9 @@ pub fn drive(
             }
             Err(BackendError::Device(message)) => {
                 let shown = match command {
-                    RenderCommand::BindTexture { .. } => command_name(command).to_owned(),
+                    RenderCommand::BindTexture { .. } | RenderCommand::BindDrawBuffers { .. } => {
+                        command_name(command).to_owned()
+                    }
                     other => format!("{other:?}"),
                 };
                 return Err(BackendError::Device(format!(

@@ -168,6 +168,10 @@ fn stage_strategy(strategy: Strategy, stage: Stage, widths: WaveWidths) -> (Stra
     (strategy, salt)
 }
 
+/// Distinguishes a module that reads its draw's bound buffers from one that reaches guest memory
+/// only through the window (D733), in the cache key.
+const DRAW_BUFFERS_SALT: u64 = 0x4452_4157_4255_4653;
+
 /// Distinguishes the same shader translated against different memory windows, in the cache key.
 ///
 /// A window's base and length are compiled into the module (the base is subtracted and the length
@@ -285,6 +289,12 @@ pub struct SubmissionReport {
     /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
     /// module would read zeros where the guest's data is.
     pub unwindowed_draws: usize,
+    /// Draws whose shaders read through a buffer the draw could not bind exactly (D733), and why the
+    /// first was refused.
+    pub unbound_buffers: (usize, Option<&'static str>),
+    /// Draws a stage's shader was not prepared for, which would run whatever shader was bound
+    /// before them.
+    pub unshaded_draws: usize,
 }
 
 impl SubmissionReport {
@@ -417,6 +427,31 @@ fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], d
 
 /// The shaders one draw runs, by stage.
 type DrawShaders = Vec<(ShaderStage, ResourceId)>;
+
+/// How many draws a stage's shader was not prepared for: a draw on the draw queue missing its
+/// geometry or its pixel shader, a stage the guest registered aside, since that one is bound once
+/// for the whole stream. Such a draw would run whatever shader the backend bound before it.
+fn unshaded_draws(
+    per_draw: &[DrawShaders],
+    queue: Queue,
+    registered: &[RegisteredShader],
+) -> usize {
+    if queue != Queue::Draw {
+        return 0;
+    }
+    let needed: Vec<ShaderStage> = [ShaderStage::Vertex, ShaderStage::Fragment]
+        .into_iter()
+        .filter(|stage| !registered.iter().any(|r| r.stage == *stage))
+        .collect();
+    per_draw
+        .iter()
+        .filter(|shaders| {
+            !needed
+                .iter()
+                .all(|stage| shaders.iter().any(|(bound, _)| bound == stage))
+        })
+        .count()
+}
 
 /// A candidate that was not prepared: its failure recorded, or a primitive shader that needs a
 /// draw's geometry (D730), with the reason it gave.
@@ -571,6 +606,10 @@ pub struct Pipeline {
     memory_readers: std::collections::BTreeSet<ResourceId>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
+    /// Each translated module's draw buffers, in slot order (D733).
+    buffer_sources: BTreeMap<ResourceId, Vec<orbistoun_translate::draw_buffers::BufferSource>>,
+    /// Bytes read for draw buffers, shared across submissions while unwritten.
+    buffers: crate::draw_buffers::BufferCache,
     next_resource: u64,
     /// Translations kept across runs, consulted before translating and added to after (D113).
     store: Option<crate::translations::TranslationStore>,
@@ -617,6 +656,8 @@ impl Pipeline {
             texture_sources: BTreeMap::new(),
             memory_readers: std::collections::BTreeSet::new(),
             texels: TexelCache::new(),
+            buffer_sources: BTreeMap::new(),
+            buffers: crate::draw_buffers::BufferCache::default(),
             next_resource: 1,
             store: None,
             depth_fills: crate::depth::PendingFills::default(),
@@ -661,6 +702,7 @@ impl Pipeline {
             compute: Some(state.inputs),
             geometry: None,
             window_space: false,
+            draw_buffers: false,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -887,6 +929,7 @@ impl Pipeline {
         });
         submission.report.unwindowed_draws =
             self.unwindowed_draws(&per_draw, &submission.guest_memory);
+        submission.report.unshaded_draws = unshaded_draws(&per_draw, queue, registered);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
         if let Some(clear) =
@@ -907,15 +950,7 @@ impl Pipeline {
             );
         });
         span(Span::PrepareTextures, || {
-            submission.report.textures = texture_census(&submission.commands, memory);
-            if self.feeds_user_data {
-                bind_textures(
-                    &mut submission.commands,
-                    (&self.texture_sources, &mut self.texels),
-                    memory,
-                    &mut submission.report.unbound_textures,
-                );
-            }
+            self.bind_resources(&mut submission, memory);
         });
         submission.report.draws = submission
             .commands
@@ -1064,6 +1099,59 @@ impl Pipeline {
             previous_shaders = shaders;
         }
         per_draw
+    }
+
+    /// Binds what each draw's shaders read beside their user data, for a backend that supplies it:
+    /// the textures they sample and the buffers they read through (D733).
+    fn bind_resources(&mut self, submission: &mut Submission, memory: &impl GuestMemory) {
+        submission.report.textures = texture_census(&submission.commands, memory);
+        if !self.feeds_user_data {
+            return;
+        }
+        bind_textures(
+            &mut submission.commands,
+            (&self.texture_sources, &mut self.texels),
+            memory,
+            &mut submission.report.unbound_textures,
+        );
+        crate::draw_buffers::bind_draw_buffers(
+            &mut submission.commands,
+            (&self.buffer_sources, &mut self.buffers),
+            memory,
+            &mut submission.report.unbound_buffers,
+        );
+    }
+
+    /// Records how a translated module reaches guest memory: the buffers a draw binds for it
+    /// (D733), and whether anything else it reads goes through the window.
+    fn note_memory(
+        &mut self,
+        resource: ResourceId,
+        (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
+        (stage, user_data): (Stage, UserData),
+    ) {
+        let again;
+        let decoded = if let Some(decoded) = decoded {
+            decoded
+        } else {
+            again = decode_program(shader, &self.encodings, &self.operands);
+            &again
+        };
+        // The translation refused more buffers than a stage binds, so what is kept here is what
+        // the module declares.
+        let buffers = orbistoun_translate::wavefront::draw_buffers_for(
+            decoded,
+            &self.encodings,
+            stage,
+            user_data,
+        )
+        .unwrap_or_default();
+        if reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
+            self.memory_readers.insert(resource);
+        }
+        if !buffers.sources.is_empty() {
+            self.buffer_sources.insert(resource, buffers.sources);
+        }
     }
 
     /// How many draws run a module that reaches guest memory while `window` is empty. A module
@@ -1415,6 +1503,11 @@ impl Pipeline {
             ShaderStage::Fragment => self.user_data[1],
             ShaderStage::Compute => UserData::default(),
         };
+        // A live draw binds the buffers its stages read through (D733).
+        let user_data = UserData {
+            draw_buffers: self.feeds_user_data && host_stage != Stage::Compute,
+            ..user_data
+        };
         let (strategy, width_salt) = stage_strategy(self.strategy, host_stage, widths);
         // The user-data layout and the wave width are in the module too.
         let key = content_hash(shader)
@@ -1424,7 +1517,12 @@ impl Pipeline {
             ^ width_salt
             ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
             ^ crate::pixel_inputs::salt(user_data)
-            ^ for_draw_salt(for_draw);
+            ^ for_draw_salt(for_draw)
+            ^ if user_data.draw_buffers {
+                DRAW_BUFFERS_SALT
+            } else {
+                0
+            };
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -1468,17 +1566,7 @@ impl Pipeline {
         self.cache.insert(key, Cached::of(resource, shader));
         // Where each texture the module samples comes from, for binding them per draw.
         self.texture_sources.insert(resource, kept.textures);
-        // Whether it reaches guest memory, which it can only through the window.
-        let again;
-        let decoded = if let Some(decoded) = decoded {
-            decoded
-        } else {
-            again = decode_program(shader, &self.encodings, &self.operands);
-            &again
-        };
-        if reaches_guest_memory(decoded, &self.encodings) {
-            self.memory_readers.insert(resource);
-        }
+        self.note_memory(resource, (shader, decoded), (host_stage, user_data));
         Ok(Prepared::Fresh {
             resource,
             module: kept.module,
@@ -1996,6 +2084,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             compute: None,
             geometry: None,
             window_space: false,
+            draw_buffers: false,
         },
         UserData {
             first_register: 0,
@@ -2007,6 +2096,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             compute: None,
             geometry: None,
             window_space: false,
+            draw_buffers: false,
         },
     ]
 }
@@ -2099,8 +2189,13 @@ impl Pipeline {
 /// is never used. Which registers are read is found syntactically over the whole program, each
 /// scalar source counted with the register after it, which can only count more reads than there
 /// are - so a load is excused only when nothing else could read what it wrote. Its local data share
-/// and its images are not guest memory the window holds.
-fn reaches_guest_memory(decoded: &orbistoun_shader::Decode, encodings: &EncodingTable) -> bool {
+/// and its images are not guest memory the window holds, and neither are the accesses `served`
+/// names, which read the draw's bound buffers (D733).
+fn reaches_guest_memory(
+    decoded: &orbistoun_shader::Decode,
+    encodings: &EncodingTable,
+    served: &BTreeMap<u32, u32>,
+) -> bool {
     const ACCESSES: [&str; 6] = [
         "s_buffer_load",
         "global_",
@@ -2137,6 +2232,9 @@ fn reaches_guest_memory(decoded: &orbistoun_shader::Decode, encodings: &Encoding
         }
     }
     named.iter().any(|&(instruction, name)| {
+        if served.contains_key(&instruction.offset) {
+            return false;
+        }
         if ACCESSES.iter().any(|prefix| name.starts_with(prefix)) {
             return true;
         }
@@ -2667,6 +2765,9 @@ mod tests {
             }
         }
         assert_eq!(offsets.len(), 12, "twelve draws: {offsets:?}");
+        // Nothing is mapped, so neither stage's shader was prepared for any draw: each would run
+        // whatever shaders were bound before it.
+        assert_eq!(submission.report.unshaded_draws, 12);
         let mut distinct = offsets.clone();
         distinct.sort_unstable();
         distinct.dedup();
@@ -2820,7 +2921,11 @@ mod tests {
         let only_image = words(&[load[0], load[1], image[0], image[1], end]);
         let also_read = words(&[load[0], load[1], image[0], image[1], read_s9, end]);
         let reaches = |bytes: &[u8]| {
-            super::reaches_guest_memory(&decode_program(bytes, &encodings, &operands), &encodings)
+            super::reaches_guest_memory(
+                &decode_program(bytes, &encodings, &operands),
+                &encodings,
+                &std::collections::BTreeMap::new(),
+            )
         };
         assert!(!reaches(&only_image));
         assert!(reaches(&also_read));

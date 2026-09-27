@@ -7,7 +7,8 @@ The live submit path places each submission's memory window at the constant 64-b
 vertex-stage shader forms: a scalar register pair, each written once by a constant move, feeding
 a carry-chained vector add. The window is the largest wholly readable power-of-two span from
 that base, at most 2^16 words and never crossing a 4 GiB boundary; with no such base it stays
-where it was.
+where it was. Amended by D733: a draw's traced buffers are bound apart, and only what nothing
+traces reads through the window.
 
 **Why:** the open-toolchain GL context patches its vertex buffer address into the shader as two
 literal moves, so the guest's own program says where it reads. This reads a constant the guest
