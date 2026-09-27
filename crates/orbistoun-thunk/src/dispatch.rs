@@ -102,7 +102,9 @@ mod overflow {
     /// Publishes the area for a call, answering what was there before.
     ///
     /// Saved and restored rather than cleared, so an implementation that calls back into another
-    /// import does not leave the outer call reading nothing.
+    /// import does not leave the outer call reading nothing. Neither end is inlined, for the reason
+    /// `enter_import` gives: a call can end on another thread than it began (D732).
+    #[inline(never)]
     pub(super) fn begin(entry_rsp: u64) -> u64 {
         // `[entry_rsp]` is the return address the guest's `call` pushed, so the first argument that
         // did not fit is the word above it.
@@ -114,7 +116,8 @@ mod overflow {
         AREA.with(|held| held.replace(area))
     }
 
-    /// Puts back what `begin` answered.
+    /// Puts back what `begin` answered, on the thread running now.
+    #[inline(never)]
     pub(super) fn end(previous: u64) {
         AREA.with(|held| held.set(previous));
     }
@@ -1363,15 +1366,32 @@ unsafe extern "sysv64" fn on_guest_call(
     // The dispatch is split out so every answer leaves through one point, where the return below is
     // recorded; `handler` is handed over rather than looked up again. `INSIDE` brackets exactly the
     // handler, so an implementation asking what it is inside gets its own thread's answer (D621).
-    let outer = INSIDE.with(|inside| inside.replace((index as u32).wrapping_add(1)));
+    let outer = enter_import(index);
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
-    INSIDE.with(|inside| inside.set(outer));
+    leave_import(outer);
 
     record_return(sequence, answer);
 
     answer
+}
+
+/// Marks this thread as inside import `index`, answering what it was inside before.
+///
+/// Never inlined, nor is `leave_import`: a fiber switch suspends a call inside its handler and
+/// may resume it on another host thread (D732), and a thread-local's address computed once for
+/// both ends of the call would then name the first thread's slot. A call of its own computes it
+/// afresh on whichever thread is running.
+#[inline(never)]
+fn enter_import(index: u64) -> u32 {
+    INSIDE.with(|inside| inside.replace((index as u32).wrapping_add(1)))
+}
+
+/// Puts back what `enter_import` answered, on the thread running now.
+#[inline(never)]
+fn leave_import(outer: u32) {
+    INSIDE.with(|inside| inside.set(outer));
 }
 
 /// Counts one call of `index` and, for its first calls, folds its argument shapes in.
