@@ -65,3 +65,27 @@ fn a_null_stack_is_refused() {
     assert_eq!(call("scePthreadAttrInit", &[attr_at]), 0);
     assert_ne!(call("scePthreadAttrSetstack", &[attr_at, 0, 0x8000]), 0);
 }
+
+/// The vendor spellings of the read-write lock attribute calls serve the same objects the POSIX
+/// ones do: an attribute initialised through them initialises a lock that locks and unlocks.
+#[test]
+fn a_rwlock_built_from_vendor_attributes_locks() {
+    let mut attr = 0_u64;
+    let attr_at = std::ptr::from_mut(&mut attr).expose_provenance() as u64;
+    assert_eq!(call("scePthreadRwlockattrInit", &[attr_at]), 0);
+    assert_ne!(attr, 0, "an attribute handle");
+    let mut lock = 0_u64;
+    let lock_at = std::ptr::from_mut(&mut lock).expose_provenance() as u64;
+    let name = b"rw\0";
+    assert_eq!(
+        call(
+            "scePthreadRwlockInit",
+            &[lock_at, attr_at, name.as_ptr() as u64]
+        ),
+        0
+    );
+    assert_eq!(call("scePthreadRwlockWrlock", &[lock_at]), 0);
+    assert_eq!(call("scePthreadRwlockUnlock", &[lock_at]), 0);
+    assert_eq!(call("scePthreadRwlockDestroy", &[lock_at]), 0);
+    assert_eq!(call("scePthreadRwlockattrDestroy", &[attr_at]), 0);
+}

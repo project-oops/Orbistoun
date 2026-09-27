@@ -150,6 +150,7 @@ guest_module! {
         "scePthreadRwlockTryrdlock" => 1, "scePthreadRwlockWrlock" => 1,
         "scePthreadRwlockTrywrlock" => 1, "scePthreadRwlockUnlock" => 1,
         "scePthreadRwlockDestroy" => 1,
+        "scePthreadRwlockattrInit" => 1, "scePthreadRwlockattrDestroy" => 1,
         "posix_pthread_rwlock_init" => 2, "posix_pthread_rwlock_rdlock" => 1,
         "posix_pthread_rwlock_tryrdlock" => 1, "posix_pthread_rwlock_wrlock" => 1,
         "posix_pthread_rwlock_trywrlock" => 1, "posix_pthread_rwlock_unlock" => 1,
@@ -5722,6 +5723,9 @@ const TABLE: &[(&str, GuestFn)] = &[
         pthread_barrierattr_setpshared,
     ),
     ("pthread_rwlockattr_init", pthread_rwlockattr_init),
+    // The vendor spellings of the same two calls, which retail titles import (PPSA21564).
+    ("scePthreadRwlockattrInit", pthread_rwlockattr_init),
+    ("scePthreadRwlockattrDestroy", pthread_rwlockattr_destroy),
     ("pthread_rwlockattr_destroy", pthread_rwlockattr_destroy),
     (
         "pthread_rwlockattr_getpshared",

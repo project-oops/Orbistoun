@@ -1572,6 +1572,28 @@ found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
 
 [[function]]
+name = "scePthreadRwlockattrInit"
+found_by = "generated"
+arity = 1
+purpose = "Allocates a read-write lock attribute object and hands back its handle through the pointer given."
+edge_cases = ["The vendor spelling of pthread_rwlockattr_init, served by the same implementation. Unserved, PPSA21564's engine asserted (RwLock.cpp:168) on the placeholder."]
+known_by = "published"
+cites = "POSIX.1-2008 pthread_rwlockattr_init"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "scePthreadRwlockattrDestroy"
+found_by = "generated"
+arity = 1
+purpose = "Destroys a read-write lock attribute object."
+edge_cases = ["The vendor spelling of pthread_rwlockattr_destroy, served by the same implementation."]
+known_by = "published"
+cites = "POSIX.1-2008 pthread_rwlockattr_destroy"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
 name = "scePthreadCondattrInit"
 arity = 1
 purpose = "allocates a condition-variable attribute object."
