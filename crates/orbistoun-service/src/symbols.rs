@@ -27,11 +27,12 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 42] {
+pub(crate) fn modules() -> [ModuleDesc; 43] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
         orbistoun_kernel::sync_on_address::MODULE,
+        orbistoun_kernel::fiber::MODULE,
         orbistoun_libc::MODULE,
         orbistoun_posix::MODULE,
         orbistoun_gpu::MODULE,
@@ -104,6 +105,8 @@ pub fn float_implementation_named(name: &str) -> Option<orbistoun_core::GuestFlo
 /// declaration and implementation cannot drift apart silently.
 pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> {
     let mut all = orbistoun_kernel::implementations().to_vec();
+    // User-mode fibers: their own library, switched beside the thread registry (D732).
+    all.extend_from_slice(orbistoun_kernel::fiber::implementations());
     all.extend(orbistoun_libc::implementations());
     all.extend(orbistoun_posix::implementations());
     all.extend_from_slice(orbistoun_video::implementations());

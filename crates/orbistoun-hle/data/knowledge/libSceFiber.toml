@@ -1,0 +1,117 @@
+library = "libSceFiber"
+
+[[function]]
+name = "_sceFiberInitializeImpl"
+arity = 6
+purpose = "Makes a block of guest memory the context (stack) of a fiber that starts at an entry function, without running it."
+returns = "status"
+arguments = [
+    { name = "fiber", kind = "ptr", note = "The guest's fiber object; its address is the fiber's identity. Nothing in it is read or written." },
+    { name = "name", kind = "ptr", note = "A NUL-terminated name; PPSA21564 names its fiber GameMain." },
+    { name = "entry", kind = "ptr", note = "Called as entry(argOnInitialize, argOnRun) on the first run." },
+    { name = "argOnInitialize", kind = "u64" },
+    { name = "addrContext", kind = "ptr", note = "The fiber's stack memory; PPSA21564 passes a 0x100000-byte sceLibcMspaceMalloc block." },
+    { name = "sizeContext", kind = "u64" },
+]
+edge_cases = [
+    "MEASURED (obSCEne 033-fiber/invalid-args, 9 runs agree): a null fiber object answers 0x80590001; a null context address with size 4096 answers 0x80590004; a zero context size with a valid address answers 0x80590004.",
+    "MEASURED (obSCEne 033-fiber/lifecycle): initialising with a 0x10000-byte context answers 0, and the fiber's entry later receives argOnInitialize (0x1122 in the check) as its first argument.",
+    "Two more arguments travel on the stack: PPSA21564 passes a null option block and 0x9000000 after it. Neither is read.",
+    "PPSA21564 asserts (Fiber.cpp:120, rc == 0) when this answers anything but 0, and went on past it once this answered 0.",
+]
+partial = "The option block is not read. A null entry and a context too small to hold the first frame are refused with placeholders, since the platform's codes for them are unmeasured. The guest's fiber object is left untouched, because what the platform writes into it is unmeasured."
+found_by = "static"
+known_by = "guest-observed"
+assumptions = [
+    "A fiber starts with the float control state (MXCSR, x87 control word) of the thread that initialised it.",
+    "The platform keeps no state a title reads inside the SceFiber object; nothing here writes it.",
+    "Re-initialising a fiber that is not running replaces it; one that is running is refused.",
+]
+cites = "obSCEne 033-fiber/invalid-args and 033-fiber/lifecycle rows, reports/hardware/*.obs.log in the sibling conformance-probe repository"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+note = "Implemented as a real context switch (D732). Measured and guest-observed parts are in edge_cases; known_by is the weaker of the two."
+
+[[function]]
+name = "sceFiberRun"
+arity = 3
+purpose = "Runs a fiber on the calling thread until a fiber on this thread returns the thread, then hands back the value it returned with."
+returns = "status"
+arguments = [
+    { name = "fiber", kind = "ptr" },
+    { name = "argOnRunTo", kind = "u64", note = "The entry's second argument on a first run; otherwise delivered through the out-parameter of the call that suspended the fiber." },
+    { name = "argOnReturn", kind = "ptr", note = "Receives the value sceFiberReturnToThread passed; may be null." },
+]
+edge_cases = [
+    "MEASURED (obSCEne 033-fiber/lifecycle, 9 runs agree): answers 0; the entry ran (fiber-ran 1) and received argOnInitialize 0x1122 and argOnRunTo 0x3344; the entry called sceFiberReturnToThread(0x7788, NULL) and this call returned.",
+]
+partial = "A fiber nobody initialised, a fiber that is already running, and a call from a thread that is running a fiber are refused with placeholders: the platform's codes are unmeasured."
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "*argOnReturn receives the argOnReturn of the sceFiberReturnToThread that ended the run; the check passed its out-parameter but never reported it.",
+    "A fiber suspended on one thread may be run by another.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceFiberSwitch"
+arity = 3
+purpose = "Suspends the running fiber and runs another on the same thread; the thread's own context stays suspended where it was."
+returns = "status"
+arguments = [
+    { name = "fiber", kind = "ptr", note = "The fiber to run." },
+    { name = "argOnRunTo", kind = "u64", note = "Delivered to the target as sceFiberRun would deliver it." },
+    { name = "argOnRun", kind = "ptr", note = "Receives the value passed by whatever later resumes the calling fiber; may be null." },
+]
+partial = "Off a fiber, for a fiber nobody initialised, and for a running fiber (the caller included) the call is refused with placeholders: none of it is measured."
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "Answers 0 on success, as sceFiberRun does; the switch itself is unmeasured.",
+    "Values travel as for sceFiberRun and sceFiberReturnToThread.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceFiberReturnToThread"
+arity = 2
+purpose = "Suspends the running fiber and resumes the thread inside the sceFiberRun that started the run, which returns argOnReturn through its out-parameter."
+returns = "status"
+arguments = [
+    { name = "argOnReturn", kind = "u64" },
+    { name = "argOnRun", kind = "ptr", note = "Receives the argOnRunTo of whatever later resumes this fiber; may be null." },
+]
+edge_cases = [
+    "MEASURED (obSCEne 033-fiber/lifecycle): called from a fiber's entry as (0x7788, NULL), it made the thread's sceFiberRun return 0. Its own return value is never observed, because that fiber is finalised without being resumed.",
+]
+partial = "A call from a thread that is not running a fiber is refused with a placeholder; the platform's code is unmeasured."
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "Answers 0 when the fiber is resumed.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceFiberFinalize"
+arity = 1
+purpose = "Forgets a fiber that is not running; its context memory stays the guest's."
+returns = "status"
+arguments = [
+    { name = "fiber", kind = "ptr" },
+]
+edge_cases = [
+    "MEASURED (obSCEne 033-fiber/lifecycle, 9 runs agree): answers 0 for a fiber suspended inside its entry by sceFiberReturnToThread.",
+]
+partial = "A fiber nobody initialised and a running fiber are refused with placeholders; the platform's codes are unmeasured."
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "Finalising a fiber that has never run answers 0, as for a suspended one.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"

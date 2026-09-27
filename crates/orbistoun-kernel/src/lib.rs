@@ -11,6 +11,7 @@
 
 pub mod apr;
 pub mod direct;
+pub mod fiber;
 pub mod interrupt;
 pub mod mapped;
 pub mod sync;
