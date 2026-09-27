@@ -852,6 +852,41 @@ mod tests {
         ));
     }
 
+    /// A primitive shader that reads the geometry engine's inputs - its system SGPRs s0-s7 or its
+    /// input VGPRs v0-v8 (`si_shader_args.c:304-371`) - before writing them is refused by name:
+    /// nothing seeds them, so it would read zero where the hardware hands it its vertex and
+    /// primitive counts. The same register written first reads what was written.
+    #[test]
+    fn a_primitive_shader_reading_unseeded_geometry_inputs_is_refused() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        const END: u32 = 0xBF81_0000;
+        let (table, operands) = tables();
+        let mesh = |words: &[u32]| {
+            let decoded = decode(&stream(words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Mesh, MeshPrimitive::default()),
+                Window::default(),
+                UserData::default(),
+            )
+        };
+        // s_and_b32 s0, s3, s3: radeonsi's first look at merged_wave_info.
+        let scalar_input = mesh(&[0x8700_0303, END]).expect_err("refused").to_string();
+        assert!(scalar_input.contains("geometry engine"), "{scalar_input}");
+        // v_mov_b32 v1, v5: the vertex id.
+        let vertex_id = mesh(&[0x7E02_0305, END]).expect_err("refused").to_string();
+        assert!(vertex_id.contains("geometry engine"), "{vertex_id}");
+        // s_mov_b32 s3, 1 then s_and_b32 s0, s3, s3: written first.
+        assert!(mesh(&[0xBE83_0381, 0x8700_0303, END]).is_ok());
+        // v_mov_b32 v12, v20: not a geometry input.
+        assert!(mesh(&[0x7E18_0314, END]).is_ok());
+    }
+
     /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an
     /// instruction whose SDWA form is translated: a DPP16 `v_mov_b32` and an SDWA `v_mul_f32` are
     /// refused, radeonsi's `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1` is not.

@@ -1040,7 +1040,19 @@ pub struct Wavefront<'a> {
     unwritten_user_data: u32,
     /// Whether the program reads one of them, whose value nothing here knows.
     reads_unwritten: bool,
+    /// Scalar and vector registers written so far, in program order: seeded at entry, or by an
+    /// instruction before the one now translated.
+    written: (u128, [u64; 4]),
+    /// Whether a mesh module read a geometry-engine input it was not given.
+    reads_geometry_input: bool,
 }
+
+/// A primitive shader's system SGPRs, `s0`-`s7`, ahead of its user SGPRs: gs_tg_info in `s2` and
+/// merged_wave_info in `s3` among them (`si_shader_args.c:304-322`).
+const GEOMETRY_SYSTEM_SGPRS: u32 = 8;
+/// Its input VGPRs, `v0`-`v8`: the vertex offsets, primitive and invocation ids, then the vertex
+/// shader's vertex id and instance id (`si_shader_args.c:363-371`, `:93-118`).
+const GEOMETRY_INPUT_VGPRS: u32 = 9;
 
 impl Wavefront<'_> {
     /// The texture sources this module samples, in slot order.
@@ -1396,6 +1408,8 @@ impl<'a> Wavefront<'a> {
             memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
             unwritten_user_data: user_data.compute.map_or(0, |c| c.unwritten_user_data),
             reads_unwritten: false,
+            written: (0, [0; 4]),
+            reads_geometry_input: false,
         };
 
         this.seed_entry(user_data_source, user_data, &system);
@@ -1530,6 +1544,9 @@ impl<'a> Wavefront<'a> {
     }
 
     fn store_scalar(&mut self, register: u32, value: Id) {
+        if register < 128 {
+            self.written.0 |= 1 << register;
+        }
         if let Some(half) = exec_half(register) {
             self.known_exec[half] = self.constant_value(value);
         }
@@ -1640,7 +1657,33 @@ impl<'a> Wavefront<'a> {
         value
     }
 
+    /// Notes a guest-visible read of a register, and, in a mesh module, a geometry-engine input
+    /// read before anything wrote it.
+    fn note_read(&mut self, scalar: bool, register: u32) {
+        if self.stage != Stage::Mesh || self.reads_geometry_input {
+            return;
+        }
+        let (limit, written) = if scalar {
+            (
+                GEOMETRY_SYSTEM_SGPRS,
+                register < 128 && self.written.0 >> register & 1 != 0,
+            )
+        } else {
+            let (word, bit) = ((register / 64) as usize, register % 64);
+            (
+                GEOMETRY_INPUT_VGPRS,
+                self.written.1.get(word).is_some_and(|w| w >> bit & 1 != 0),
+            )
+        };
+        if register < limit && !written {
+            self.reads_geometry_input = true;
+        }
+    }
+
     fn store_lane_masked(&mut self, register: u32, lane: u32, value: Id) {
+        if let Some(word) = self.written.1.get_mut((register / 64) as usize) {
+            *word |= 1 << (register % 64);
+        }
         match self.lane_known(lane) {
             // Known inactive: the write does not happen.
             Some(false) => return,
@@ -1668,6 +1711,16 @@ impl<'a> Wavefront<'a> {
     /// Lane zero of each vector register, then the scalar registers: the lane model's layout, so
     /// the two can be diffed.
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
+        if self.reads_geometry_input {
+            return Err(TranslateError::Unsupported {
+                offset: 0,
+                detail: concat!(
+                    "the primitive shader reads the geometry engine's inputs - its system SGPRs ",
+                    "(gs_tg_info, merged_wave_info) or its input VGPRs (vertex offsets, vertex ",
+                    "id) - before writing them, and no draw's geometry is given to seed them"
+                ),
+            });
+        }
         if self.reads_unwritten {
             return Err(TranslateError::Unsupported {
                 offset: 0,
@@ -2038,8 +2091,14 @@ impl Model for Wavefront<'_> {
                 Ok(Self::constant(self, value))
             }
             // Uniform across the wavefront, so the same value for every lane.
-            Operand::Scalar(register) => Ok(self.load_scalar(u32::from(*register))),
-            Operand::Vector(register) => Ok(self.load_lane(u32::from(*register), lane)),
+            Operand::Scalar(register) => {
+                self.note_read(true, u32::from(*register));
+                Ok(self.load_scalar(u32::from(*register)))
+            }
+            Operand::Vector(register) => {
+                self.note_read(false, u32::from(*register));
+                Ok(self.load_lane(u32::from(*register), lane))
+            }
             // A lane mask read as an ordinary 32-bit source: its low half, as in `s_and_b32
             // exec_lo, exec_lo, sN` narrowing a 32-lane shader's mask.
             Operand::Named(named) if model::lane_mask_name(named).is_some() => {
@@ -2408,6 +2467,7 @@ impl Model for Wavefront<'_> {
     }
 
     fn read_scalar(&mut self, register: u32) -> Id {
+        self.note_read(true, register);
         Self::load_scalar(self, register)
     }
 
