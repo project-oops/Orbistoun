@@ -456,6 +456,28 @@ fn wcslen_counts_characters_rather_than_bytes() {
     assert_eq!(call("wcslen", &[empty.at()]), 0);
 }
 
+/// `wmemchr` finds the first wide character equal to `c` among the first `n`, comparing all 32
+/// bits and passing over zeros, and answers null past `n`, for `n` zero, and for no match.
+#[test]
+fn wmemchr_finds_the_first_match_within_n_characters() {
+    let text = Wide::new(&[0x41, 0, 0x1F600, 0x41, 0x1_0041]);
+    let at = |index: u64| text.at() + index * 4;
+    assert_eq!(call("wmemchr", &[text.at(), 0x41, 5]), at(0));
+    assert_eq!(
+        call("wmemchr", &[text.at(), 0x1F600, 5]),
+        at(2),
+        "past a zero"
+    );
+    assert_eq!(
+        call("wmemchr", &[text.at(), 0x1_0041, 5]),
+        at(4),
+        "all 32 bits compared"
+    );
+    assert_eq!(call("wmemchr", &[text.at(), 0x1F600, 2]), 0, "not within n");
+    assert_eq!(call("wmemchr", &[text.at(), 0x41, 0]), 0, "n zero");
+    assert_eq!(call("wmemchr", &[text.at(), 0x42, 5]), 0, "no match");
+}
+
 /// A null wide string is length zero, not a fault.
 #[test]
 fn a_null_wide_string_is_length_zero() {
