@@ -20,12 +20,12 @@ arity = 2
 purpose = "An initialisation gate of its own beside sceAgcInit: (state, version), imported directly by retail titles (including PPSA02664 and PPSA28061)."
 edge_cases = [
     "NOT AN ALIAS OF sceAgcInit (obSCEne -7e41, check 166-agc/init-alias-7e41, sweep 20260927-153242). Imported statically beside the named export, it resolves to 0x800595990 and sceAgcInit to 0x800595930: two entry points 0x60 apart (identical-entry-point 0x0). The published identifier tables that list it against sceAgcInit's name are wrong about the function.",
-    "THE C NAME obSCEne CALLS IN 166-agc/init BINDS TO THIS NID (include/obscene/platform.h declares sceAgcInit as $23LRUSvYu1M, this identifier), so every 166-agc/init row measures this function. In a fresh process (sweeps 20260915-125124 and 20260920): version 13 answers 0x0 with a null state, a 0xAA sentinel state and PPSA02664's {0, 1} state pattern; versions 0, 1, 4, 8, 12, 16, 24, 32 and 64 answer 0x8a6c0004; nothing is written through arg0 (extent 0).",
-    "PPSA02664 CALLS IT WITH VERSION 8 from its graphics init routine (image+0x3dd2d: rdi = its state global at image+0x19c9620, esi = 8) and, answered non-zero, skips the two register-defaults steps that follow (image+0x3dd3d, image+0x3dd4d) and returns the code. Version 8 answers 0x8a6c0004 in the sweeps, so orbistoun answering it matches the measurement, not a guess.",
-    "In sweep 20260927-153242, after the named sceAgcInit had run, this function answered 0x8a6c0004 for 12, 13 and 14 and 166-agc/init's later arms answered it for 13 too. Whether a prior sceAgcInit is what closes the gate is unmeasured, and no title seen calls both; orbistoun answers the fresh-process gate.",
+    "THE C NAME obSCEne CALLS IN 166-agc/init BINDS TO THIS NID (include/obscene/platform.h declares sceAgcInit as $23LRUSvYu1M, this identifier), so every 166-agc/init row measures this function. Nothing is written through arg0 (extent 0, changed-bytes 0) in any sweep.",
+    "THE FIRST ACCEPTED VERSION IS KEPT. In a fresh process (obSCEne -7e52, check 166-agc/init-raw-gate-7e52, sweep 20260927-185507) PPSA02664's exact call - state 00000000 01000000 then zeros, version 8 - answers 0x0; after it 13, 12 and 14 answer 0x8a6c0004 and 8 still answers 0x0. Sweep 20260915-125124 is the same rule from the other side: its first call was (NULL, 13), answered 0x0, and afterwards only 13 passed. orbistoun keeps the first of 8 or 13 it is given; a first call with any other version is unmeasured and refused by name without fixing one.",
+    "PPSA02664 CALLS IT WITH VERSION 8 from its graphics init routine (image+0x3dd2d: rdi = its state global at image+0x19c9620, esi = 8); answered 0x0 it goes on to its two register-defaults steps (image+0x3dd3d, image+0x3dd4d), which call sceAgcGetRegisterDefaults2 and ...Internal with version 8.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20260926T2230Z-7e41 (sweep 20260927-153242, check 166-agc/init-alias-7e41: raw-nid-addr 0x800595990, sceAgcInit-addr 0x800595930, identical-entry-point 0x0, rc-alias 0x8a6c0004 for 12-14); obSCEne sweeps 20260915-125124 and 20260920 (check 166-agc/init through the C name bound to this NID: sweep-rc 0x0 for 13, 0x8a6c0004 for every other swept version, extent 0); PPSA02664 call site image+0x3dd2d, arguments captured with ORBISTOUN_DUMP."
+cites = "obSCEne REQ-20260927T1730Z-7e52 (sweep 20260927-185507, check 166-agc/init-raw-gate-7e52, log lines 6314-6349: step1 rc 0x0 for version 8, steps 2-4); obSCEne REQ-20260926T2230Z-7e41 (sweep 20260927-153242, check 166-agc/init-alias-7e41: raw-nid-addr 0x800595990, sceAgcInit-addr 0x800595930, identical-entry-point 0x0, rc-alias 0x8a6c0004 for 12-14); obSCEne sweeps 20260915-125124 and 20260920 (check 166-agc/init through the C name bound to this NID: sweep-rc 0x0 for 13, 0x8a6c0004 for every other swept version, extent 0); PPSA02664 call site image+0x3dd2d, arguments captured with ORBISTOUN_DUMP."
 found_in = ["PPSA02664-app0", "PPSA28061-app0"]
 found_on = "2026-09-20"
 
@@ -559,7 +559,7 @@ arity = 2
 purpose = "Initialises the current-generation graphics library: sceAgcInit(state, version) validates the version and writes nothing."
 edge_cases = [
     "MEASURED BY ITS OWN NAME (obSCEne -7e41, check 166-agc/init-alias-7e41, sweep 20260927-153242): imported statically as the name (orbistoun's hash 0xf87cd0be2dc66d91, obSCEne's $kW3GLb7QfPg) it resolves to 0x800595930 and answers 0x0 for versions 12, 13 and 14 with a 0xCC state, writing nothing (bytes-written-init 0x0).",
-    "No other version was called through this name, so orbistoun refuses one by name rather than lending it 0x8a6c0004: that code was measured on 0x53bbd82b51d172db, which obSCEne's older 166-agc/init check called under this name's C spelling.",
+    "AFTER THE RAW GATE HAS KEPT A VERSION it answers 0x8a6c0004 for another (obSCEne -7e52, sweep 20260927-185507: 13 after 0x53bbd82b51d172db accepted 8). Any other version, or a call after the raw gate kept the same one, is unmeasured and refused by name.",
     "It is not the function retail titles import as 0x53bbd82b51d172db; see that entry.",
 ]
 known_by = "measured"

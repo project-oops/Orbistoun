@@ -575,34 +575,72 @@ fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// The version the raw init gate accepted first, or `0` before any: the gate is the library's, one
+/// per process.
+static RAW_INIT_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `SCE_AGC_ERROR_INVALID_VERSION`, what either gate answers a version the library will not take.
+const INVALID_VERSION: u64 = 0x8a6c_0004;
+
+/// The versions `0x53bbd82b51d172db` was measured to accept as a process's first call: 8 (`-7e52`,
+/// sweep 20260927-185507, PPSA02664's call) and 13 (sweep 20260915-125124, `(NULL, 13)` first).
+const RAW_FIRST_VERSIONS: [u32; 2] = [8, 13];
+
+/// The raw gate's decision: its answer to `version` with `fixed` accepted before (`0` for none), and
+/// the version fixed after. Measured across three sweeps: the first accepted version is kept, and
+/// from then on that version passes and every other answers `0x8a6c0004` (`-7e52`: 8 then 13, 12,
+/// 14 refused and 8 again passing; 20260915-125124: 13 then 0-12 and 16-64 refused, 13 passing). A
+/// first call with a version outside the two seen to succeed is unmeasured, and refused by name.
+fn raw_init_gate(fixed: u32, version: u32) -> (u64, u32) {
+    match fixed {
+        0 if RAW_FIRST_VERSIONS.contains(&version) => (OK, version),
+        0 => (
+            u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+            0,
+        ),
+        _ if version == fixed => (OK, fixed),
+        _ => (INVALID_VERSION, fixed),
+    }
+}
+
 /// The versions `sceAgcInit` was measured to accept (`-7e41`, `166-agc/init-alias-7e41`).
 const AGC_INIT_VERSIONS: std::ops::RangeInclusive<u32> = 12..=14;
 
-/// `sceAgcInit(state, version)`: answers `0x0` for versions 12, 13 and 14 and writes nothing
-/// (`-7e41`, `166-agc/init-alias-7e41`, sweep 20260927-153242). No other version was measured, so
-/// one is refused by name.
-fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if AGC_INIT_VERSIONS.contains(&(args[1] as u32)) {
+/// The named gate's decision: `version` against the raw gate's fixed version (`0` for none). With
+/// none, 12, 13 and 14 pass (`-7e41`, sweep 20260927-153242); with the raw gate fixed at another
+/// version it answers `0x8a6c0004` (`-7e52`: 13 after raw 8). Anything else is unmeasured.
+fn named_init_gate(fixed: u32, version: u32) -> u64 {
+    if fixed != 0 && version != fixed {
+        INVALID_VERSION
+    } else if fixed == 0 && AGC_INIT_VERSIONS.contains(&version) {
         OK
     } else {
         u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
     }
 }
 
-/// The only version `0x53bbd82b51d172db` accepts in a fresh process.
-const RAW_INIT_VERSION: u32 = 13;
+/// `sceAgcInit(state, version)`: [`named_init_gate`]; writes nothing.
+fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    named_init_gate(
+        RAW_INIT_VERSION.load(std::sync::atomic::Ordering::Acquire),
+        args[1] as u32,
+    )
+}
 
 /// `0x53bbd82b51d172db(state, version)`: a function of its own, 0x60 bytes past `sceAgcInit` in
-/// the library (`-7e41`). The C name obSCEne's `166-agc/init` calls binds to this NID, so its
-/// sweeps are this function's: in a fresh process version 13 answers `0x0` and every other swept
-/// version `0x8a6c0004` (sweeps 20260915-125124 and 20260920), writing nothing. PPSA02664 calls it
-/// with version 8.
+/// the library (`-7e41`), answered by [`raw_init_gate`]; writes nothing. The C name obSCEne's
+/// `166-agc/init` calls binds to this NID, so its sweeps are this function's.
 fn agc_init_raw(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[1] as u32 == RAW_INIT_VERSION {
-        OK
-    } else {
-        0x8a6c_0004
-    }
+    use std::sync::atomic::Ordering;
+    let version = args[1] as u32;
+    let mut answer = OK;
+    // The decision and the fix are one step, so two threads' first calls cannot both fix a version.
+    let _ = RAW_INIT_VERSION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |fixed| {
+        let (rc, next) = raw_init_gate(fixed, version);
+        answer = rc;
+        Some(next)
+    });
+    answer
 }
 
 /// `sceAgcGetIsTrinityMode()` - whether the GPU is the faster revision of this generation.
@@ -1251,18 +1289,25 @@ mod tests {
         }
     }
 
-    /// Neither init gate writes through its state argument, whatever it answers.
+    /// The raw gate keeps its first accepted version (`-7e52`, 20260915-125124), and refuses an
+    /// unmeasured first version by name without fixing it.
     #[test]
-    fn the_init_gates_touch_no_state() {
-        let mut buf = [0x55u8; 64];
-        let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = buf.as_mut_ptr() as u64;
-        for version in [8, 12, 13] {
-            args[1] = version;
-            agc_init(&args);
-            agc_init_raw(&args);
-            assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
-        }
+    fn the_raw_gate_keeps_its_first_version() {
+        let unimplemented = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+        assert_eq!(raw_init_gate(0, 12), (unimplemented, 0));
+        assert_eq!(raw_init_gate(0, 8), (OK, 8));
+        assert_eq!(raw_init_gate(8, 13), (INVALID_VERSION, 8));
+        assert_eq!(raw_init_gate(8, 8), (OK, 8));
+        assert_eq!(raw_init_gate(0, 13), (OK, 13));
+        assert_eq!(raw_init_gate(13, 0), (INVALID_VERSION, 13));
+    }
+
+    /// The named gate passes 12-14 until the raw gate fixes another version.
+    #[test]
+    fn the_named_gate_follows_the_raw_one() {
+        assert_eq!(named_init_gate(0, 13), OK);
+        assert_eq!(named_init_gate(8, 13), INVALID_VERSION);
+        assert_ne!(named_init_gate(0, 1), OK);
     }
 
     /// `sceAgcGetIsTrinityMode` answers `0` for a base machine, keeping a base guest off the faster

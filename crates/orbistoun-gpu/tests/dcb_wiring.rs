@@ -579,36 +579,29 @@ fn the_indirect_register_patches_replay_the_measured_sequence() {
     assert_eq!(w.written(), 20, "the patches amend in place");
 }
 
-/// `sceAgcInit` accepts versions 12, 13 and 14 (`-7e41`); a version nobody measured is refused
-/// by name rather than given the other function's code.
+/// The two init gates, in the one order this process runs them (the gate is process state, so a
+/// second test calling either would race this one). Before any raw call the named `sceAgcInit`
+/// accepts 12, 13 and 14 (`-7e41`). PPSA02664's `0x53bbd82b51d172db(state, 8)` succeeds in a fresh
+/// process and fixes the version: 13 is then refused by both gates and 8 still passes (`-7e52`,
+/// sweep 20260927-185507).
 #[test]
-fn sce_agc_init_accepts_the_measured_versions() {
-    let mut args = [0u64; GUEST_ARG_REGISTERS];
+fn the_raw_init_gate_keeps_the_first_version_it_accepts() {
+    let at = |version: u64| {
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[1] = version;
+        args
+    };
     for version in [12, 13, 14] {
-        args[1] = version;
-        assert_eq!(call("sceAgcInit", args), 0, "version {version}");
+        assert_eq!(call("sceAgcInit", at(version)), 0, "named {version}");
     }
-    args[1] = 1;
-    assert_eq!(
-        call("sceAgcInit", args),
-        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
-    );
-}
-
-/// `0x53bbd82b51d172db` is its own function, not `sceAgcInit` under another name (`-7e41`: a
-/// separate entry point). In a fresh process it accepts version 13 only; PPSA02664 calls it with
-/// version 8 and is answered `0x8a6c0004`, as the sweeps measured for 8.
-#[test]
-fn the_raw_init_nid_keeps_its_own_version_gate() {
-    let mut args = [0u64; GUEST_ARG_REGISTERS];
-    args[1] = 13;
-    assert_eq!(call("0x53bbd82b51d172db", args), 0);
-    for version in [0, 1, 4, 8, 12, 14, 16, 24, 32, 64] {
-        args[1] = version;
+    assert_eq!(call("0x53bbd82b51d172db", at(8)), 0, "the title's call");
+    for version in [13, 12, 14] {
         assert_eq!(
-            call("0x53bbd82b51d172db", args),
+            call("0x53bbd82b51d172db", at(version)),
             0x8a6c_0004,
-            "version {version}"
+            "raw {version}"
         );
     }
+    assert_eq!(call("sceAgcInit", at(13)), 0x8a6c_0004, "named after raw 8");
+    assert_eq!(call("0x53bbd82b51d172db", at(8)), 0, "8 again");
 }
