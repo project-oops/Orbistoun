@@ -184,6 +184,7 @@ guest_module! {
         "sceKernelReleaseFlexibleMemory" => 2,
         "scePthreadAttrInit" => 1, "scePthreadAttrDestroy" => 1,
         "scePthreadAttrSetstacksize" => 2, "scePthreadAttrGetstacksize" => 2,
+        "scePthreadAttrSetstack" => 3,
         // (thread, attr) and (attr, out): the shapes of FreeBSD `pthread_attr_get_np` and
         // `pthread_attr_getstackaddr`, used by garbage collectors to find the stack they scan.
         "scePthreadAttrGet" => 2, "scePthreadAttrGetstackaddr" => 2,
@@ -2052,13 +2053,13 @@ fn pthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let start = thread::Start { entry, argument };
     // The attribute block the guest built through `scePthreadAttrSet*`: on the hardware a live
     // thread reads back the stack size and affinity its block asked for (obSCEne `031-stackattr`).
-    let (affinity, stack) = thread_attributes(attr);
+    let (affinity, stack, region) = thread_attributes(attr);
 
     // SAFETY: `entry` is a guest address the guest itself is asking to have called, in a
     // fully relocated image - the same contract the real call has. The thread body runs
     // guest instructions, which is the entire purpose of this emulator, and it runs on a
     // stack of its own so an overrun hits a guard page rather than host frames.
-    let spawned = unsafe { thread::spawn(start, &name, affinity, 0, stack) };
+    let spawned = unsafe { thread::spawn(start, &name, affinity, 0, stack, region) };
 
     match spawned {
         Ok(handle) => {
@@ -2105,24 +2106,31 @@ fn spawn_parameters(stack_field: u64, affinity_field: u64) -> (thread::Affinity,
 ///   detach promise is kept by construction (see [`pthread_detach`]).
 /// - Priority: `scePthreadAttrSetschedparam` refuses on a retail attribute on the hardware
 ///   (`0x8002002d`), so priority arrives through `scePthreadSetprio` instead.
-fn thread_attributes(attr: u64) -> (thread::Affinity, u64) {
+fn thread_attributes(attr: u64) -> (thread::Affinity, u64, Option<(u64, u64)>) {
     if attr == 0 {
         return (
             thread::Affinity::default(),
             orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+            None,
         );
     }
     let Some(object) = attr_at(attr) else {
         return (
             thread::Affinity::default(),
             orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+            None,
         );
     };
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let stack_field = unsafe { guest::read_u64(object + ATTR_STACK_SIZE) }.unwrap_or(0);
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let affinity_field = unsafe { guest::read_u64(object + ATTR_AFFINITY) }.unwrap_or(0);
-    spawn_parameters(stack_field, affinity_field)
+    // A stack the guest supplied through `scePthreadAttrSetstack`: its lowest address and size.
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let stack_address = unsafe { guest::read_u64(object + ATTR_STACK_ADDR) }.unwrap_or(0);
+    let region = (stack_address != 0 && stack_field != 0).then_some((stack_address, stack_field));
+    let (affinity, stack) = spawn_parameters(stack_field, affinity_field);
+    (affinity, stack, region)
 }
 
 /// `scePthreadJoin(thread, value)`.
@@ -4786,6 +4794,29 @@ fn pthread_attr_getstackaddr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `scePthreadAttrSetstack(attr, addr, size)`: POSIX `pthread_attr_setstack` - the thread runs on
+/// the caller's memory, `size` bytes from `addr` up, rather than on a stack this kernel reserves.
+///
+/// A null address is `EINVAL`, as FreeBSD's `pthread_attr_setstack` answers. The address and size
+/// are stored in the attribute's own fields, so `scePthreadAttrGetstackaddr` and
+/// `scePthreadAttrGetstacksize` read them back, and [`thread_attributes`] hands them to the spawn.
+fn pthread_attr_setstack(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (attr, address, size) = (args[0], args[1], args[2]);
+    if address == 0 || size == 0 {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    let Some(object) = attr_at(attr) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    // SAFETY: the attribute object this kernel allocated, whose fields these are.
+    let stored = unsafe { guest::write_u64(object + ATTR_STACK_ADDR, address) };
+    // SAFETY: as above.
+    if !stored || !unsafe { guest::write_u64(object + ATTR_STACK_SIZE, size) } {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// `scePthreadAttrSetdetachstate(attr, state)`.
 fn pthread_attr_setdetachstate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     attr_set(args, ATTR_DETACH)
@@ -5830,6 +5861,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadAttrInit", pthread_attr_init),
     ("scePthreadAttrDestroy", pthread_attr_destroy),
     ("scePthreadAttrSetstacksize", pthread_attr_setstacksize),
+    ("scePthreadAttrSetstack", pthread_attr_setstack),
     ("scePthreadAttrGetstacksize", pthread_attr_getstacksize),
     ("scePthreadAttrGet", pthread_attr_get),
     ("scePthreadAttrGetstackaddr", pthread_attr_getstackaddr),
