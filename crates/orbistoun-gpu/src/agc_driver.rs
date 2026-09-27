@@ -399,6 +399,15 @@ impl GuestCp<'_> {
                 submission.report.unmodelled_viewports
             ));
         }
+        if submission.report.unwindowed_draws > 0 {
+            return Err(format!(
+                concat!(
+                    "{} draw(s) run a shader that reads guest memory, and no window is mapped ",
+                    "for it to read through"
+                ),
+                submission.report.unwindowed_draws
+            ));
+        }
         if submission.report.unbound_textures > 0 {
             return Err(format!(
                 concat!(

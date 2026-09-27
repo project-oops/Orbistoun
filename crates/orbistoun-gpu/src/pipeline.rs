@@ -282,6 +282,9 @@ pub struct SubmissionReport {
     /// Draws whose viewport transform the stream turned off (`PA_CL_VTE_CNTL`), so their positions
     /// are not the clip space the backend draws.
     pub unmodelled_viewports: usize,
+    /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
+    /// module would read zeros where the guest's data is.
+    pub unwindowed_draws: usize,
 }
 
 impl SubmissionReport {
@@ -563,6 +566,9 @@ pub struct Pipeline {
     bases: BTreeMap<u64, (Vec<u8>, Option<u64>)>,
     /// Each translated module's texture sources, by its resource.
     texture_sources: BTreeMap<ResourceId, Vec<TextureSource>>,
+    /// The translated modules whose shaders read or write guest memory, which reach it only
+    /// through the window.
+    memory_readers: std::collections::BTreeSet<ResourceId>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
     next_resource: u64,
@@ -609,6 +615,7 @@ impl Pipeline {
             decoded: BTreeMap::new(),
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
+            memory_readers: std::collections::BTreeSet::new(),
             texels: TexelCache::new(),
             next_resource: 1,
             store: None,
@@ -878,6 +885,8 @@ impl Pipeline {
                 &mut submission,
             )
         });
+        submission.report.unwindowed_draws =
+            self.unwindowed_draws(&per_draw, &submission.guest_memory);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
         if let Some(clear) =
@@ -1055,6 +1064,23 @@ impl Pipeline {
             previous_shaders = shaders;
         }
         per_draw
+    }
+
+    /// How many draws run a module that reaches guest memory while `window` is empty. A module
+    /// reaches guest memory only through the window; with none mapped it reads zeros, so such a
+    /// draw is counted and refused rather than drawn from them.
+    fn unwindowed_draws(&self, per_draw: &[DrawShaders], window: &[u32]) -> usize {
+        if !window.is_empty() {
+            return 0;
+        }
+        per_draw
+            .iter()
+            .filter(|shaders| {
+                shaders
+                    .iter()
+                    .any(|(_, resource)| self.memory_readers.contains(resource))
+            })
+            .count()
     }
 
     /// The module one draw binds for a candidate: the one prepared without geometry, or - for a
@@ -1442,6 +1468,17 @@ impl Pipeline {
         self.cache.insert(key, Cached::of(resource, shader));
         // Where each texture the module samples comes from, for binding them per draw.
         self.texture_sources.insert(resource, kept.textures);
+        // Whether it reaches guest memory, which it can only through the window.
+        let again;
+        let decoded = if let Some(decoded) = decoded {
+            decoded
+        } else {
+            again = decode_program(shader, &self.encodings, &self.operands);
+            &again
+        };
+        if reaches_guest_memory(decoded, &self.encodings) {
+            self.memory_readers.insert(resource);
+        }
         Ok(Prepared::Fresh {
             resource,
             module: kept.module,
@@ -2052,6 +2089,68 @@ impl Pipeline {
     }
 }
 
+/// Whether a shader's results depend on guest memory it reaches through the window: any flat,
+/// global, scratch, buffer or scalar buffer access, and any scalar load whose registers something
+/// other than an image instruction reads.
+///
+/// A scalar load that only fills an image's descriptor registers is the exception: the translated
+/// module names its image by the register group, and the texture itself is bound per draw from
+/// where that load reads (the table provenance of `TextureSource`), so the value the module loads
+/// is never used. Which registers are read is found syntactically over the whole program, each
+/// scalar source counted with the register after it, which can only count more reads than there
+/// are - so a load is excused only when nothing else could read what it wrote. Its local data share
+/// and its images are not guest memory the window holds.
+fn reaches_guest_memory(decoded: &orbistoun_shader::Decode, encodings: &EncodingTable) -> bool {
+    const ACCESSES: [&str; 6] = [
+        "s_buffer_load",
+        "global_",
+        "flat_",
+        "scratch_",
+        "buffer_",
+        "tbuffer_",
+    ];
+    let named: Vec<(&orbistoun_shader::Instruction, &str)> = decoded
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            let family = encodings
+                .encodings()
+                .get(usize::from(instruction.encoding?))?;
+            Some((
+                instruction,
+                encodings.mnemonic_for(&family.name, instruction.opcode)?,
+            ))
+        })
+        .collect();
+    // Every scalar register something other than an image instruction reads: its sources, and the
+    // first operand of a compare, which writes nothing.
+    let mut read = std::collections::BTreeSet::new();
+    for &(instruction, name) in &named {
+        if name.starts_with("image_") {
+            continue;
+        }
+        let first = usize::from(!(name.starts_with("s_cmp") || name.starts_with("s_bitcmp")));
+        for operand in instruction.operands.iter().skip(first) {
+            if let Operand::Scalar(register) = operand {
+                read.extend([*register, register.saturating_add(1)]);
+            }
+        }
+    }
+    named.iter().any(|&(instruction, name)| {
+        if ACCESSES.iter().any(|prefix| name.starts_with(prefix)) {
+            return true;
+        }
+        if !name.starts_with("s_load") {
+            return false;
+        }
+        let Some(Operand::Scalar(first)) = instruction.operands.first() else {
+            return true;
+        };
+        let span = scalar_destination_span(name);
+        (*first..first.saturating_add(span)).any(|register| read.contains(&register))
+    })
+}
+
 /// The 64-bit address a shader forms from two constant scalar registers as the base of its memory
 /// accesses, or `None` (D711).
 ///
@@ -2660,6 +2759,71 @@ mod tests {
             Some(&rewritten[..decoded + 8]),
             "and its decode, one move longer, replaces the earlier one"
         );
+    }
+
+    /// A shader that reads guest memory is known as one by the resource it became, so a draw that
+    /// runs it with no window mapped can be refused rather than drawn from zeros; a shader that
+    /// reads none is not.
+    #[test]
+    fn a_shader_that_reads_guest_memory_is_known_by_its_resource() {
+        use super::{Pipeline, Prepared, ShaderStage, WaveWidths};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+
+        const AT: u64 = 0x1_0000;
+        struct At(Vec<u8>);
+        impl super::GuestMemory for At {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(AT)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Lane,
+            width: Width::default(),
+        })
+        .expect("a pipeline");
+        let mut prepare = |program: &[u8]| {
+            let mut bytes = program.to_vec();
+            bytes.resize(super::MAX_SHADER_BYTES, 0);
+            match pipeline.prepare(
+                AT,
+                ShaderStage::Vertex,
+                (None, WaveWidths::default(), super::ForDraw::default()),
+                &At(bytes),
+            ) {
+                Ok(Prepared::Fresh { resource, .. }) => resource,
+                other => panic!("the program prepares fresh: {:?}", other.err()),
+            }
+        };
+        let reading = prepare(&console_vertex_program());
+        let silent = prepare(&0xbf81_0000_u32.to_le_bytes());
+        assert!(pipeline.memory_readers.contains(&reading));
+        assert!(!pipeline.memory_readers.contains(&silent));
+    }
+
+    /// A scalar load that only fills an image's descriptor registers - radeonsi's blit pixel
+    /// shader's `s_load_dwordx8 s[8:15], s[0:1], 0x400` before `image_load_mip` - does not make
+    /// the shader depend on the window, since the texture is bound from where it reads; the same
+    /// load with one of its registers read by anything else does.
+    #[test]
+    fn a_load_that_only_names_an_image_does_not_reach_the_window() {
+        use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = |program: &[u32]| -> Vec<u8> {
+            program.iter().flat_map(|word| word.to_le_bytes()).collect()
+        };
+        let load = [0xf40c_0200, 0xfa00_0400];
+        let image = [0xf004_1f08, 0x0002_0002];
+        let read_s9 = 0xbe94_0309;
+        let end = 0xbf81_0000;
+        let only_image = words(&[load[0], load[1], image[0], image[1], end]);
+        let also_read = words(&[load[0], load[1], image[0], image[1], read_s9, end]);
+        let reaches = |bytes: &[u8]| {
+            super::reaches_guest_memory(&decode_program(bytes, &encodings, &operands), &encodings)
+        };
+        assert!(!reaches(&only_image));
+        assert!(reaches(&also_read));
     }
 
     /// The window a vertex program places follows its bytes, not its address.
