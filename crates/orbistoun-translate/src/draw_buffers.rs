@@ -32,8 +32,14 @@ pub enum DescriptorWord {
 /// Where one of a module's buffers comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BufferSource {
-    /// A buffer resource constant: its four words. The range is the one the descriptor bounds.
-    Descriptor([DescriptorWord; 4]),
+    /// A buffer resource constant: its four words, and how the program reads through it. The range
+    /// is the one the descriptor's bounds rules admit for those reads.
+    Descriptor {
+        /// The descriptor's words, in register order.
+        words: [DescriptorWord; 4],
+        /// What the accesses through it reach.
+        reads: DescriptorReads,
+    },
     /// A scalar load's base, and how many bytes past it the program's loads through it reach.
     Pointer {
         /// The base address.
@@ -41,6 +47,50 @@ pub enum BufferSource {
         /// One past the last byte any load through the base reads.
         extent: u32,
     },
+}
+
+/// How a program's accesses through one descriptor reach into its buffer: what bounds the bytes a
+/// draw must bind for them, beside the descriptor's own fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DescriptorReads {
+    /// One past the last byte any scalar buffer load through it reads, from the buffer's start;
+    /// zero when none does.
+    pub scalar_reach: u32,
+    /// Whether a vector access reads through it, so its out-of-bounds mode applies.
+    pub vector: bool,
+    /// One past the last byte any vector access reads from its record's start - its immediate
+    /// offset and its width - or [`None`] when one adds a register offset, which nothing bounds
+    /// here.
+    pub vector_reach: Option<u32>,
+    /// Whether a vector access indexes records.
+    pub indexed: bool,
+}
+
+impl DescriptorReads {
+    /// These reads together with `other`'s.
+    #[must_use]
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            scalar_reach: self.scalar_reach.max(other.scalar_reach),
+            vector: self.vector || other.vector,
+            vector_reach: self
+                .vector_reach
+                .zip(other.vector_reach)
+                .map(|(a, b)| a.max(b)),
+            indexed: self.indexed || other.indexed,
+        }
+    }
+}
+
+impl Default for DescriptorReads {
+    fn default() -> Self {
+        Self {
+            scalar_reach: 0,
+            vector: false,
+            vector_reach: Some(0),
+            indexed: false,
+        }
+    }
 }
 
 /// A module's buffers and the accesses that read through each.
@@ -111,35 +161,63 @@ pub fn trace(
         }
     }
     accesses.sort_by_key(|(offset, _)| *offset);
-    let mut reach: BTreeMap<TableBase, u32> = BTreeMap::new();
-    for (_, access) in &accesses {
-        if let Access::Pointer { base, end } = *access {
-            let extent = reach.entry(base).or_default();
-            *extent = (*extent).max(end);
-        }
-    }
+    slots(accesses)
+}
+
+/// Gives each distinct descriptor or base a slot, in the order the program first reaches it, with
+/// every access's reach through it combined.
+fn slots(accesses: Vec<(u32, Access)>) -> DrawBuffers {
+    let mut keys: Vec<Key> = Vec::new();
+    let mut sources: Vec<BufferSource> = Vec::new();
     let mut buffers = DrawBuffers::default();
     for (offset, access) in accesses {
-        let source = match access {
-            Access::Descriptor(words) => BufferSource::Descriptor(words),
-            Access::Pointer { base, .. } => BufferSource::Pointer {
-                base,
-                extent: reach.get(&base).copied().unwrap_or(0),
-            },
+        let (key, source) = match access {
+            Access::Descriptor(words, reads) => (
+                Key::Descriptor(words),
+                BufferSource::Descriptor { words, reads },
+            ),
+            Access::Pointer { base, end } => (
+                Key::Pointer(base),
+                BufferSource::Pointer { base, extent: end },
+            ),
         };
-        let slot = buffers
-            .sources
-            .iter()
-            .position(|s| *s == source)
-            .unwrap_or_else(|| {
-                buffers.sources.push(source);
-                buffers.sources.len() - 1
-            });
+        let slot = if let Some(slot) = keys.iter().position(|k| *k == key) {
+            sources[slot] = match (sources[slot], source) {
+                (
+                    BufferSource::Descriptor { words, reads },
+                    BufferSource::Descriptor { reads: more, .. },
+                ) => BufferSource::Descriptor {
+                    words,
+                    reads: reads.and(more),
+                },
+                (
+                    BufferSource::Pointer { base, extent },
+                    BufferSource::Pointer { extent: more, .. },
+                ) => BufferSource::Pointer {
+                    base,
+                    extent: extent.max(more),
+                },
+                (kept, _) => kept,
+            };
+            slot
+        } else {
+            keys.push(key);
+            sources.push(source);
+            sources.len() - 1
+        };
         buffers
             .served
             .insert(offset, u32::try_from(slot).unwrap_or(u32::MAX));
     }
+    buffers.sources = sources;
     buffers
+}
+
+/// What makes two accesses read one buffer: the same descriptor words, or the same base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Descriptor([DescriptorWord; 4]),
+    Pointer(TableBase),
 }
 
 /// What each scalar register holds, where the program's own writes fix it: [`None`] where it could
@@ -149,8 +227,8 @@ type Held = Vec<Option<DescriptorWord>>;
 /// One traced access, before its base's reach is known.
 #[derive(Debug, Clone, Copy)]
 enum Access {
-    /// Through a buffer descriptor.
-    Descriptor([DescriptorWord; 4]),
+    /// Through a buffer descriptor, reaching as far as the reads say.
+    Descriptor([DescriptorWord; 4], DescriptorReads),
     /// A scalar load at a base, reaching `end` bytes past it.
     Pointer { base: TableBase, end: u32 },
 }
@@ -284,22 +362,68 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
         if !plain_scalar_offset(instruction) {
             return None;
         }
-        let offset = u32::try_from(*offset).ok()?;
+        let end = u32::try_from(*offset)
+            .ok()?
+            .checked_add(scalar_words(name) * 4)?;
         if name.starts_with("s_buffer_load") {
-            return descriptor(held, *base).map(Access::Descriptor);
+            let reads = DescriptorReads {
+                scalar_reach: end,
+                ..DescriptorReads::default()
+            };
+            return Some(Access::Descriptor(descriptor(held, *base)?, reads));
         }
         return Some(Access::Pointer {
             base: table_base(held, *base)?,
-            end: offset.checked_add(scalar_words(name) * 4)?,
+            end,
         });
     }
     if name.starts_with("buffer_") || name.starts_with("tbuffer_") {
-        let [_, _, Operand::Scalar(first), _] = operands else {
+        // The scalar offset is added to the address and not to the range check, so only an access
+        // that adds none is bounded by what the descriptor says.
+        let [_, _, Operand::Scalar(first), soffset] = operands else {
             return None;
         };
-        return descriptor(held, *first).map(Access::Descriptor);
+        if !matches!(soffset, Operand::Integer(0)) && *soffset != Operand::Named("null".into()) {
+            return None;
+        }
+        // The addressing modifiers: the immediate offset in bits 11:0, `offen` at 12, `idxen` at 13.
+        let word = instruction.word;
+        let reach =
+            (word & (1 << 12) == 0).then(|| (word & 0xfff) + vector_payload(instruction, name));
+        let reads = DescriptorReads {
+            scalar_reach: 0,
+            vector: true,
+            vector_reach: reach,
+            indexed: word & (1 << 13) != 0,
+        };
+        return Some(Access::Descriptor(descriptor(held, *first)?, reads));
     }
     None
+}
+
+/// How many bytes a vector buffer access reads or writes at its address: its dwords for an
+/// untyped one, its element for a typed one, and sixteen - the widest - where neither is known.
+fn vector_payload(instruction: &Instruction, name: &str) -> u32 {
+    const WIDEST: u32 = 16;
+    if name.starts_with("tbuffer_") {
+        static FORMATS: std::sync::OnceLock<orbistoun_shader::FormatTable> =
+            std::sync::OnceLock::new();
+        let formats =
+            FORMATS.get_or_init(|| orbistoun_shader::FormatTable::builtin().unwrap_or_default());
+        return formats
+            .get(orbistoun_shader::FormatTable::field(instruction.word))
+            .map_or(WIDEST, |format| {
+                format.widths.iter().sum::<u32>().div_ceil(8)
+            });
+    }
+    match name.rsplit_once("dword") {
+        Some((_, "")) => 4,
+        Some((_, count)) => count
+            .strip_prefix('x')
+            .and_then(|n| n.parse::<u32>().ok())
+            .map_or(WIDEST, |n| n * 4),
+        None => WIDEST,
+    }
 }
 
 /// Forgets `count` registers from `first`.
@@ -409,7 +533,7 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferSource, DescriptorWord, trace};
+    use super::{BufferSource, DescriptorReads, DescriptorWord, trace};
     use crate::wavefront::{TableBase, TableWord};
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
 
@@ -449,12 +573,18 @@ mod tests {
         let buffers = traced(&CLEAR, 4);
         assert_eq!(
             buffers.sources,
-            [BufferSource::Descriptor([
-                DescriptorWord::UserData(2),
-                DescriptorWord::Constant(4),
-                DescriptorWord::Constant(16),
-                DescriptorWord::Constant(0x3101_6fac),
-            ])]
+            [BufferSource::Descriptor {
+                words: [
+                    DescriptorWord::UserData(2),
+                    DescriptorWord::Constant(4),
+                    DescriptorWord::Constant(16),
+                    DescriptorWord::Constant(0x3101_6fac),
+                ],
+                reads: DescriptorReads {
+                    scalar_reach: 16,
+                    ..DescriptorReads::default()
+                },
+            }]
         );
         assert_eq!(buffers.served.get(&0x14), Some(&0));
         assert_eq!(buffers.served.len(), 1);
@@ -485,7 +615,13 @@ mod tests {
                     base: table,
                     extent: 0x20
                 },
-                BufferSource::Descriptor([loaded(0x10), loaded(0x14), loaded(0x18), loaded(0x1c)]),
+                BufferSource::Descriptor {
+                    words: [loaded(0x10), loaded(0x14), loaded(0x18), loaded(0x1c)],
+                    reads: DescriptorReads {
+                        scalar_reach: 4,
+                        ..DescriptorReads::default()
+                    },
+                },
             ]
         );
         assert_eq!(buffers.served.get(&0x0), Some(&0));
@@ -654,5 +790,39 @@ mod tests {
         let buffers = traced(&program, 4);
         assert_eq!(buffers.sources.len(), 1);
         assert_eq!(buffers.served.values().copied().collect::<Vec<_>>(), [0, 0]);
+        let BufferSource::Descriptor { reads, .. } = buffers.sources[0] else {
+            panic!("a descriptor: {:?}", buffers.sources[0]);
+        };
+        assert_eq!(reads.scalar_reach, 8, "the second load reaches furthest");
+    }
+
+    /// The descriptor a vertex fetch indexes, in user data: an indexed access at an immediate
+    /// offset reaches that offset and its width into each record.
+    #[test]
+    fn an_indexed_fetch_reaches_its_offset_and_width_into_a_record() {
+        // buffer_load_dword v1, v0, s[0:3], 0 idxen offset:8
+        let program = [0xe030_2008, 0x8000_0100, END];
+        let buffers = traced(&program, 4);
+        assert_eq!(
+            buffers.sources,
+            [BufferSource::Descriptor {
+                words: [0, 1, 2, 3].map(DescriptorWord::UserData),
+                reads: DescriptorReads {
+                    scalar_reach: 0,
+                    vector: true,
+                    vector_reach: Some(12),
+                    indexed: true,
+                },
+            }]
+        );
+    }
+
+    /// A fetch that adds a scalar offset register is left to the window: the range check does not
+    /// see that offset, so the descriptor does not bound where it reads.
+    #[test]
+    fn a_fetch_adding_a_scalar_offset_is_not_traced() {
+        // buffer_load_dword v1, v0, s[0:3], s5 idxen offset:8
+        let program = [0xe030_2008, 0x0500_0100, END];
+        assert!(traced(&program, 6).sources.is_empty());
     }
 }
