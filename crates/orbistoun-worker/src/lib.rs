@@ -532,6 +532,8 @@ fn install_presentation() {
     });
     // Every flip, shown as it is presented.
     orbistoun_video::install_flip_observer(render::present_flip);
+    // Heap memory the guest re-protects, such as a stack guard page carved from its heap.
+    orbistoun_kernel::install_heap_protect(orbistoun_libc::protect_heap_range);
     // Flips a command buffer carries, queued by their builder and carried out at their release
     // (D728).
     orbistoun_gpu::display::install(orbistoun_gpu::display::Display {

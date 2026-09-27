@@ -732,7 +732,88 @@ pub(crate) fn allocate(size: usize, align: usize) -> u64 {
         FILLED_ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         FILLED_HEAP_BYTES.fetch_add(size as u64, std::sync::atomic::Ordering::Relaxed);
     }
-    body as usize as u64
+    let body = body as usize as u64;
+    if align as u64 >= orbistoun_core::GUEST_PAGE_SIZE {
+        if let Ok(mut blocks) = page_blocks().lock() {
+            blocks.insert(
+                body,
+                PageBlock {
+                    size: size as u64,
+                    protected: Vec::new(),
+                },
+            );
+        }
+    }
+    body
+}
+
+/// A live block aligned to the guest page size: the only kind whose pages it owns outright, so the
+/// only kind a guest may re-protect (a guard page below a thread stack it carved from the heap).
+#[derive(Debug)]
+struct PageBlock {
+    /// The bytes the guest asked for.
+    size: u64,
+    /// The ranges re-protected, restored before the block is released.
+    protected: Vec<(u64, u64)>,
+}
+
+/// Every live page-aligned block, by body address.
+fn page_blocks() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, PageBlock>> {
+    static BLOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<u64, PageBlock>>,
+    > = std::sync::OnceLock::new();
+    BLOCKS.get_or_init(Default::default)
+}
+
+/// Re-protects `[address, address + length)` when it lies wholly inside the body of a live
+/// page-aligned heap block, page-aligned at both ends, answering whether the host applied it;
+/// `None` when no such block holds the range, so the caller's other authorities decide.
+///
+/// On hardware, heap memory is the process's own mapped memory and `sceKernelMprotect` changes it;
+/// PPSA21564 carves a thread stack with `sceLibcMspaceMemalign(0x4000, 0xc000)` and makes its first
+/// page a guard, asserting when that is refused. The protection is recorded so `free` restores the
+/// pages before they return to the host heap, where anything else may reuse them.
+#[must_use]
+pub fn protect_heap_range(
+    address: u64,
+    length: u64,
+    protection: orbistoun_mem::Protection,
+) -> Option<bool> {
+    let page = orbistoun_core::GUEST_PAGE_SIZE;
+    if length == 0 || address % page != 0 || length % page != 0 {
+        return None;
+    }
+    let mut blocks = page_blocks().lock().ok()?;
+    let (_, block) = blocks
+        .range_mut(..=address)
+        .next_back()
+        .filter(|(body, block)| {
+            address
+                .checked_add(length)
+                .is_some_and(|end| end <= **body + block.size)
+        })?;
+    let applied = orbistoun_mem::platform::protect(address, length, protection).is_ok();
+    if applied {
+        block.protected.push((address, length));
+    }
+    Some(applied)
+}
+
+/// Restores the pages a guest re-protected inside the block at `body`, and forgets the block.
+fn release_page_block(body: u64) {
+    let Ok(mut blocks) = page_blocks().lock() else {
+        return;
+    };
+    if let Some(block) = blocks.remove(&body) {
+        for (address, length) in block.protected {
+            // Back to what the host heap expects, before the memory is released to it.
+            let _ = orbistoun_mem::platform::protect(
+                address,
+                length,
+                orbistoun_mem::Protection::READ_WRITE,
+            );
+        }
+    }
 }
 
 /// How many allocations this run filled, and how many bytes, so the report shows the fill ran
@@ -864,6 +945,7 @@ pub(crate) fn free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Freeing null is defined and does nothing.
         return 0;
     }
+    release_page_block(pointer);
     if arena::holds(pointer) {
         // Asked before the header is read: a fixed-region block carries the same header as a
         // host-heap one, and `dealloc` on reserved memory is undefined behaviour. The region never
@@ -3929,6 +4011,47 @@ mod tests {
         assert_eq!(p % 64, 0);
         call("free", [p, 0, 0, 0, 0, 0]);
         assert_eq!(call("aligned_alloc", [24, 48, 0, 0, 0, 0]), 0);
+    }
+
+    /// A page inside a page-aligned block can be made read-only, as a thread stack's guard page is;
+    /// a range outside any such block is not this allocator's to change; and the block is writable
+    /// again for whoever gets its memory after it is freed.
+    #[test]
+    fn a_page_aligned_block_can_carry_a_guard_page() {
+        let page = orbistoun_core::GUEST_PAGE_SIZE;
+        let block = call("sceLibcMspaceMemalign", [0, 0x4000, 0xc000, 0, 0, 0]);
+        assert_eq!(block % 0x4000, 0);
+        let read_only = orbistoun_mem::Protection {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        assert_eq!(
+            super::protect_heap_range(block, 0x4000, read_only),
+            Some(true)
+        );
+        assert_eq!(
+            super::protect_heap_range(block + 0xc000, page, read_only),
+            None,
+            "past the block"
+        );
+        assert_eq!(
+            super::protect_heap_range(block + 1, page, read_only),
+            None,
+            "unaligned"
+        );
+        let small = call("malloc", [64, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            super::protect_heap_range(small & !(page - 1), page, read_only),
+            None,
+            "not page-aligned storage"
+        );
+        call("free", [block, 0, 0, 0, 0, 0]);
+        // The pages went back writable: the next page-aligned block that reuses them can be written.
+        let again = call("sceLibcMspaceMemalign", [0, 0x4000, 0xc000, 0, 0, 0]);
+        // SAFETY: a block this library just returned, at least 0xc000 bytes.
+        unsafe { std::ptr::write_bytes(crate::ptr(again), 0x5a, 0xc000) };
+        call("free", [again, 0, 0, 0, 0, 0]);
     }
 
     /// `reallocalign(NULL, n, a)` is an aligned allocation - the call PPSA02664's Unity runtime

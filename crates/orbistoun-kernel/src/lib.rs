@@ -4033,6 +4033,19 @@ fn set_virtual_range_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Re-protects a range of the guest's heap, answering whether the host applied it, or `None` when
+/// the range is not heap memory the allocator owns outright. Installed by the layer above that owns
+/// both this crate and the C library's allocator.
+pub type HeapProtect = fn(u64, u64, orbistoun_mem::Protection) -> Option<bool>;
+
+static HEAP_PROTECT: OnceLock<HeapProtect> = OnceLock::new();
+
+/// Installs the heap's re-protection, so `sceKernelMprotect` can reach memory the guest carved
+/// from its heap. First install wins.
+pub fn install_heap_protect(protect: HeapProtect) {
+    let _ = HEAP_PROTECT.set(protect);
+}
+
 /// `sceKernelMprotect(addr, len, prot)`: changes the protection of a range already reserved.
 ///
 /// A guest reserves a span, then calls this before handing it to its own allocator, and acts on
@@ -4080,10 +4093,21 @@ fn mprotect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 
     // Not a mapping this crate handed out: for a guest re-protecting its own module that is the
-    // ordinary case (D577). A range inside a region placed for the guest is allowed; a range covered
-    // by nothing is refused.
+    // ordinary case (D577). A range inside a region placed for the guest is allowed. So is a range
+    // of heap memory the allocator owns outright - a guard page below a thread stack carved from
+    // the heap, which the hardware allows since heap memory is the process's own. A range covered by
+    // nothing is refused.
     if region_covering(addr, len).is_none() {
-        return vendor(orbistoun_core::errno::INVALID);
+        let heap = HEAP_PROTECT
+            .get()
+            .and_then(|protect| protect(addr, len, protection));
+        return match heap {
+            Some(true) => {
+                note_requested_protection(addr, len, prot);
+                OK
+            }
+            _ => vendor(orbistoun_core::errno::INVALID),
+        };
     }
     match orbistoun_mem::platform::protect(addr, len, protection) {
         Ok(()) => OK,
