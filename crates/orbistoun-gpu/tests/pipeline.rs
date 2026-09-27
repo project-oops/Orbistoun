@@ -310,6 +310,7 @@ fn a_stream_sets_the_pipeline_state_the_submission_carries() {
             base: 0x2_000e_0000,
             width: 64,
             height: 64,
+            pipe_bank_xor: 0,
         }),
         "colour target zero's base and extent reach the submission"
     );

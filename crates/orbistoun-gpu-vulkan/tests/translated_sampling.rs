@@ -313,6 +313,56 @@ fn a_translated_fetch_reads_the_texel_its_index_names() {
     }
 }
 
+/// `image_load_mip v[4:7], v[0:2], s[4:11] dmask:0xf`: `image_load` with the level in the
+/// register after the coordinate (MIMG opcode 1, as radeonsi's blit pixel shader fetches its
+/// source texel). The level register is `v2`, zero here: the bound image holds one level.
+fn fetching_mip_shader(x: u32, y: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (register, value) in [(0u32, x), (1, y), (2, 0)] {
+        let word = 0x7E00_0000u32 | (1 << 9) | (register << 17) | (128 + value);
+        bytes.extend(word.to_le_bytes());
+    }
+    // As `fetching_shader`, with opcode 1 at bit 18 and `unorm` (bit 12) as radeonsi sets it.
+    bytes.extend(
+        (0xF000_0000u32 | (1 << 18) | (1 << 12) | (0xF << 8) | TWO_DIMENSIONAL).to_le_bytes(),
+    );
+    bytes.extend(((4 << 8) | ((IMAGE_DESCRIPTOR / 4) << 16)).to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
+    bytes.extend(0x0706_0504u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    bytes
+}
+
+/// A translated fetch at a level reads the texel its index names at that level.
+#[test]
+fn a_translated_fetch_at_a_level_reads_the_texel_its_index_names() {
+    if !device_or_skip("a_translated_fetch_at_a_level_reads_the_texel_its_index_names") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let vertex = interpolated_vertex_module([[0.0, 0.0, 0.0, 1.0]; 3]);
+    for y in 0..2u32 {
+        for x in 0..2u32 {
+            let decoded = decode(&fetching_mip_shader(x, y), &encodings, &operands);
+            let module = translate_for(
+                &decoded,
+                &encodings,
+                Width::Wave64,
+                Stage::Fragment,
+                Window::default(),
+            )
+            .map(|(module, _)| module)
+            .expect("the texel fetch at a level translated");
+            let pixels =
+                draw_with_texture(&vertex, &module, [1.0, 0.0, 1.0, 1.0], (8, 8), (&TEXELS, 2))
+                    .expect("the translated draw ran");
+            let expected = EXPECTED[(y * 2 + x) as usize];
+            assert_eq!(pixels.at(3, 5), Some(expected), "texel ({x}, {y})");
+        }
+    }
+}
+
 /// An image with a different number of dimensions is refused, not read as two.
 ///
 /// Every image translation here reads two coordinate registers, which is wrong for any other
@@ -486,7 +536,7 @@ fn a_second_texture_is_refused_rather_than_guessed() {
 /// unit is sampled first, as that prolog does, so slot 0 is the `+0x40` texture.
 #[test]
 fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
-    use orbistoun_translate::wavefront::{MeshPrimitive, TextureSource, UserData};
+    use orbistoun_translate::wavefront::{MeshPrimitive, TableBase, TextureSource, UserData};
     use orbistoun_translate::{Fidelity, Strategy};
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
@@ -542,11 +592,13 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
         [
             TextureSource {
                 slot: 0,
-                table_offset: Some(0x40)
+                table_offset: Some(0x40),
+                table: TableBase::default(),
             },
             TextureSource {
                 slot: 1,
-                table_offset: Some(0x00)
+                table_offset: Some(0x00),
+                table: TableBase::default(),
             },
         ]
     );

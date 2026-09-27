@@ -239,6 +239,23 @@ fn a_move_through_m0_round_trips_and_leaves_the_scalar_file_alone() {
     }
 }
 
+/// Scalar arithmetic writing `m0` lands there, as radeonsi's primitive shader forms its allocation
+/// request with `s_or_b32 m0, s0, s2`.
+#[test]
+fn scalar_logic_into_m0_lands_in_m0() {
+    if !device_or_skip("scalar_logic_into_m0_lands_in_m0") {
+        return;
+    }
+    let registers = run(&[
+        s_mov_inline(0, 16),
+        s_mov_inline(2, 3),
+        head("s_or_b32") | (M0_CODE << 16) | (2 << 8),
+        s_mov_code(5, M0_CODE),
+        s_endpgm(),
+    ]);
+    assert_eq!(scalar(&registers, 5), 19, "got {registers:?}");
+}
+
 /// `s_waitcnt` translates and changes no register.
 #[test]
 fn a_wait_instruction_translates_and_changes_nothing() {
@@ -821,6 +838,110 @@ fn the_models_agree_about_a_wide_scalar_load() {
         lane_memory, wave_memory,
         "the models disagree about guest memory"
     );
+}
+
+/// `s_buffer_load_dwordxN sDst, s[base:base+3], offset` with no scalar offset register: the
+/// layout `s_load` has, and `null` (code 125) in the second word's `SOFFSET` field, bits 31:25,
+/// as radeonsi's clear shader encodes it.
+fn s_buffer_load(name: &str, dst: u32, base: u32, offset: u32) -> [u32; 2] {
+    [head(name) | (dst << 6) | (base / 2), offset | (125 << 25)]
+}
+
+/// Seeds `values` at byte 16 onwards and a raw buffer descriptor over them in s[4:7]: base 16,
+/// stride zero, `records` bytes, no flags. The destinations sit below it, since the observed
+/// scalars stop at s7.
+fn seeded_buffer(values: [u32; 4], records: u32) -> Vec<u32> {
+    let mut program = Vec::new();
+    for (address, value) in (16u32..).step_by(4).zip(values) {
+        program.push(v_mov_inline(0, address));
+        program.push(v_mov_inline(1, value));
+        program.extend(global_store(0, 1));
+    }
+    program.extend([
+        s_mov_inline(4, 16),
+        s_mov_inline(5, 0),
+        s_mov_inline(6, records),
+        s_mov_inline(7, 0),
+    ]);
+    program
+}
+
+/// radeonsi's clear colour: `s_buffer_load_dwordx4` reads four consecutive words from its
+/// descriptor's base plus the offset, and a dword load at an offset reads the word there.
+#[test]
+fn a_scalar_buffer_load_reads_from_its_descriptor_s_base() {
+    if !device_or_skip("a_scalar_buffer_load_reads_from_its_descriptor_s_base") {
+        return;
+    }
+    let mut program = seeded_buffer([11, 22, 33, 44], 16);
+    program.extend(s_buffer_load("s_buffer_load_dwordx4", 0, 4, 0));
+    // The last load may overwrite the descriptor it reads.
+    program.extend(s_buffer_load("s_buffer_load_dword", 4, 4, 8));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [0, 1, 2, 3, 4].map(|n| scalar(&registers, n)),
+        [11, 22, 33, 44, 33]
+    );
+}
+
+/// A scalar buffer load reads zero for each word that does not fit within the descriptor's record
+/// count, in bytes for a raw buffer - the range check the vector raw-buffer access makes, applied a
+/// word at a time: from GFX8 a scalar access out of bounds does not reach memory
+/// (`ac_gpu_info.h:187`, `ac_nir_lower_mem_access_bit_sizes.c:212-217`).
+#[test]
+fn a_scalar_buffer_load_past_its_records_reads_zero() {
+    if !device_or_skip("a_scalar_buffer_load_past_its_records_reads_zero") {
+        return;
+    }
+    let mut program = seeded_buffer([11, 22, 33, 44], 12);
+    program.extend(s_buffer_load("s_buffer_load_dwordx4", 0, 4, 0));
+    program.extend(s_buffer_load("s_buffer_load_dwordx2", 6, 4, 8));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [0, 1, 2, 3, 6, 7].map(|n| scalar(&registers, n)),
+        [11, 22, 33, 0, 33, 0]
+    );
+}
+
+/// A scalar buffer load adding a scalar offset register is refused by name: the solved layout
+/// has no field for it, so its value would be dropped.
+#[test]
+fn a_scalar_buffer_load_with_an_offset_register_is_refused() {
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let [first, second] = s_buffer_load("s_buffer_load_dwordx4", 4, 0, 0);
+    // SOFFSET s5 rather than null.
+    let program = [first, (second & !(0x7f << 25)) | (5 << 25), s_endpgm()];
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let error = translate(&decoded, &table, Strategy::default())
+        .expect_err("an offset register must be refused");
+    assert!(
+        error.to_string().contains("offset register"),
+        "the error should name the offset register, got: {error}"
+    );
+}
+
+/// radeonsi's clear primitive shader also picks corners with a signed not-equal compare into
+/// `vcc`.
+#[test]
+fn a_not_equal_compare_into_vcc_selects_per_lane() {
+    if !device_or_skip("a_not_equal_compare_into_vcc_selects_per_lane") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(5, 1)];
+    program.extend(v_mov_literal(6, 0xaaaa));
+    // v_cmp_ne_i32_e32 vcc, 1, v5: 1 != 1 is false, so v_cndmask picks 3.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 1));
+    program.push(head("v_cndmask_b32_e32") | (1 << 17) | (6 << 9) | (128 + 3));
+    // v_cmp_ne_i32_e32 vcc, 2, v5: 2 != 1, so v6.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 2));
+    program.push(head("v_cndmask_b32_e32") | (2 << 17) | (6 << 9) | (128 + 3));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!([1, 2].map(|n| vector(&registers, n)), [3, 0xaaaa]);
 }
 
 /// A store reaches guest memory at its address and nowhere else.
@@ -4862,4 +4983,268 @@ fn a_sixty_four_bit_right_shift_crosses_the_halves() {
             "shift {shift}"
         );
     }
+}
+
+/// A SOP2 instruction with a literal second source: `name sD, sA, <literal>`.
+fn sop2_literal(name: &str, dst: u32, src0: u32, literal: u32) -> [u32; 2] {
+    [
+        head(name) | (dst << 16) | (LITERAL_CODE << 8) | src0,
+        literal,
+    ]
+}
+
+/// `s_mov_b32 sN, <literal>`.
+fn s_mov_literal(dst: u32, value: u32) -> [u32; 2] {
+    [head("s_mov_b32") | (dst << 16) | LITERAL_CODE, value]
+}
+
+/// radeonsi's primitive shader reads the geometry engine's counts out of its system SGPRs:
+/// `s_bfe_u32` takes `S1[22:16]` bits from bit `S1[4:0]` (the published instruction set's
+/// `D = (S0 >> S1[4:0]) & ((1 << S1[22:16]) - 1)`), `s_lshl_b32` shifts by `S1[4:0]`, and
+/// `s_bfm_b64` makes `((1 << S0[5:0]) - 1) << S1[5:0]` across a pair. The 16-bit packs take the
+/// low (`ll`) or high (`hh`) halves of both sources, the first into the low half.
+#[test]
+fn the_scalar_bit_field_operations_take_and_place_their_fields() {
+    if !device_or_skip("the_scalar_bit_field_operations_take_and_place_their_fields") {
+        return;
+    }
+    let mut program = Vec::new();
+    // s2 holds five primitives at bit 22 and three vertices at bit 12, as gs_tg_info does.
+    program.extend(s_mov_literal(2, (5 << 22) | (3 << 12) | 0x7));
+    program.extend(sop2_literal("s_bfe_u32", 0, 2, 0x0009_0016));
+    program.extend(sop2_literal("s_bfe_u32", 1, 2, 0x0009_000c));
+    program.push(sop2("s_lshl_b32", 3, 0, 128 + 12));
+    program.push(sop2("s_bfm_b64", 4, 128 + 3, 128 + 36));
+    program.extend(s_mov_literal(6, 0x1234_5678));
+    program.extend(s_mov_literal(7, 0x9abc_def0));
+    program.push(sop2("s_pack_ll_b32_b16", 1, 6, 7));
+    program.push(sop2("s_pack_hh_b32_b16", 6, 6, 7));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 0), 5, "the primitive count");
+    assert_eq!(scalar(&registers, 3), 5 << 12, "shifted into m0's field");
+    assert_eq!(
+        (scalar(&registers, 4), scalar(&registers, 5)),
+        (0, 0x70),
+        "three ones at bit 36, in the pair's high half"
+    );
+    assert_eq!(scalar(&registers, 1), 0xdef0_5678, "the low halves");
+    assert_eq!(scalar(&registers, 6), 0x9abc_1234, "the high halves");
+}
+
+/// A priority hint, a barrier in a one-wave group and a store-counter wait change nothing.
+#[test]
+fn the_scheduling_instructions_change_nothing() {
+    if !device_or_skip("the_scheduling_instructions_change_nothing") {
+        return;
+    }
+    let registers = run(&[
+        v_mov_inline(1, 7),
+        head("s_setprio") | 3,
+        head("s_barrier"),
+        // s_waitcnt_vscnt null, 0: the SOPK destination field at bit 16.
+        head("s_waitcnt_vscnt") | (125 << 16),
+        s_endpgm(),
+    ]);
+    assert_eq!(vector(&registers, 1), 7, "got {registers:?}");
+}
+
+/// `v_cvt_f32_u32` converts unsigned; `v_cvt_i32_f32` truncates and saturates, a NaN reading as
+/// zero (the published instruction set's conversion table).
+#[test]
+fn the_integer_conversions_round_and_saturate_as_published() {
+    if !device_or_skip("the_integer_conversions_round_and_saturate_as_published") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0xffff_ffff));
+    program.push(vop1_vv("v_cvt_f32_u32_e32", 1, 0));
+    let inputs = [
+        (-3.7_f32).to_bits(),
+        1.0e10_f32.to_bits(),
+        (-1.0e10_f32).to_bits(),
+        f32::NAN.to_bits(),
+        2.9_f32.to_bits(),
+    ];
+    for (i, bits) in (2..).zip(inputs) {
+        program.extend(v_mov_literal(i, bits));
+        program.push(vop1_vv("v_cvt_i32_f32_e32", i, i));
+    }
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 4_294_967_296.0_f32.to_bits());
+    assert_eq!(
+        [2, 3, 4, 5, 6].map(|n| vector(&registers, n)),
+        [0xffff_fffd, 0x7fff_ffff, 0x8000_0000, 0, 2]
+    );
+}
+
+/// The corner selection: a compare into `vcc` picks with the short-form select, and a compare
+/// into an ordinary pair with the long one.
+#[test]
+fn a_compare_selects_per_lane_through_vcc_and_a_register_pair() {
+    if !device_or_skip("a_compare_selects_per_lane_through_vcc_and_a_register_pair") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(5, 1)];
+    // v_cmp_ge_u32_e32 vcc, 1, v5: 1 >= 1.
+    program.push(head("v_cmp_ge_u32_e32") | (5 << 9) | (128 + 1));
+    program.extend(v_mov_literal(6, 0xaaaa));
+    // v_cndmask_b32_e32 v1, 3, v6, vcc: set, so v6.
+    program.push(head("v_cndmask_b32_e32") | (1 << 17) | (6 << 9) | (128 + 3));
+    // v_cmp_ne_i32_e64 s[2:3], 1, v5: 1 != 1 is false.
+    program.extend([head("v_cmp_ne_i32_e64") | 2, ((256 + 5) << 9) | (128 + 1)]);
+    // v_cndmask_b32_e64 v2, 3, v6, s[2:3]: clear, so 3.
+    program.extend(vop3("v_cndmask_b32_e64", 2, [128 + 3, 256 + 6, 2], 0, 0));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(vector(&registers, 1), 0xaaaa, "vcc set in lane zero");
+    assert_eq!(scalar(&registers, 2) & 1, 0, "the pair's lane-zero bit");
+    assert_eq!(vector(&registers, 2), 3);
+}
+
+/// A VOP2 instruction in its SDWA form: the instruction with source 249, then the modifier word
+/// (`aco_assembler.cpp:1183-1225`): the real first source in bits 7:0 (bit 23 set when it is a
+/// scalar register or constant), `dst_sel` 10:8, `dst_unused` 12:11, each source's `sel` (18:16,
+/// 26:24) and sign extension (19, 27).
+fn vop2_sdwa(name: &str, dst: u32, vsrc1: u32, sdwa: Sdwa) -> [u32; 2] {
+    [
+        head(name) | (dst << 17) | (vsrc1 << 9) | SDWA_MARKER,
+        sdwa.src0
+            | (sdwa.dst_sel << 8)
+            | (sdwa.dst_unused << 11)
+            | (sdwa.src0_sel << 16)
+            | (u32::from(sdwa.src0_sext) << 19)
+            | (u32::from(sdwa.src0_scalar) << 23)
+            | (sdwa.src1_sel << 24)
+            | (u32::from(sdwa.src1_sext) << 27),
+    ]
+}
+
+/// The first-source code that marks the SDWA form.
+const SDWA_MARKER: u32 = 0xf9;
+
+/// The fields of an SDWA modifier word a test sets.
+#[derive(Clone, Copy)]
+struct Sdwa {
+    src0: u32,
+    src0_scalar: bool,
+    src0_sel: u32,
+    src0_sext: bool,
+    src1_sel: u32,
+    src1_sext: bool,
+    dst_sel: u32,
+    dst_unused: u32,
+}
+
+/// SDWA selects: bytes 0-3, words 4-5, the whole dword 6 (`aco_ir.h:1679-1688`); `dst_unused` pads
+/// (0), sign-extends (1) or preserves (2).
+const SEL_BYTE_0: u32 = 0;
+const SEL_BYTE_1: u32 = 1;
+const SEL_BYTE_3: u32 = 3;
+const SEL_WORD_0: u32 = 4;
+const SEL_WORD_1: u32 = 5;
+const SEL_DWORD: u32 = 6;
+
+/// radeonsi's index packing, as its blit primitive shader writes it: `v_lshlrev_b32_sdwa v2, 10,
+/// v0 src1_sel:WORD_1` then `v_or_b32_sdwa v0, v0, v2 src0_sel:WORD_0`, turning two 16-bit
+/// indices into ten-bit fields. Then a byte into a preserved destination, and a sign-extended
+/// byte into a sign-extended word.
+#[test]
+fn sdwa_selects_its_sources_and_places_its_result() {
+    if !device_or_skip("sdwa_selects_its_sources_and_places_its_result") {
+        return;
+    }
+    let dword = Sdwa {
+        src0: 0,
+        src0_scalar: false,
+        src0_sel: SEL_DWORD,
+        src0_sext: false,
+        src1_sel: SEL_DWORD,
+        src1_sext: false,
+        dst_sel: SEL_DWORD,
+        dst_unused: 0,
+    };
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0002_0001));
+    program.extend(vop2_sdwa(
+        "v_lshlrev_b32_e32",
+        2,
+        0,
+        Sdwa {
+            src0: 128 + 10,
+            src0_scalar: true,
+            src1_sel: SEL_WORD_1,
+            ..dword
+        },
+    ));
+    program.extend(vop2_sdwa(
+        "v_or_b32_e32",
+        0,
+        2,
+        Sdwa {
+            src0: 0,
+            src0_sel: SEL_WORD_0,
+            ..dword
+        },
+    ));
+    program.extend(v_mov_literal(3, 0x1122_3344));
+    program.extend(v_mov_literal(4, 0x0000_00f0));
+    program.extend(v_mov_literal(5, 0x8000_0001));
+    program.extend(vop2_sdwa(
+        "v_or_b32_e32",
+        3,
+        5,
+        Sdwa {
+            src0: 4,
+            src0_sel: SEL_BYTE_0,
+            src1_sel: SEL_BYTE_3,
+            dst_sel: SEL_BYTE_1,
+            dst_unused: 2,
+            ..dword
+        },
+    ));
+    program.extend(vop2_sdwa(
+        "v_or_b32_e32",
+        6,
+        5,
+        Sdwa {
+            src0: 4,
+            src0_sel: SEL_BYTE_0,
+            src1_sel: SEL_BYTE_3,
+            src1_sext: true,
+            dst_sel: SEL_WORD_0,
+            dst_unused: 1,
+            ..dword
+        },
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 0x800, "index one, ten bits up");
+    assert_eq!(vector(&registers, 0), 0x801, "and index zero below it");
+    assert_eq!(
+        vector(&registers, 3),
+        0x1122_f044,
+        "byte one replaced, the rest kept"
+    );
+    assert_eq!(vector(&registers, 6), 0xffff_fff0, "a word sign-extended");
+}
+
+/// The primitive export word: vertex indices packed ten bits apart, by `v_lshl_or_b32` and
+/// `v_or_b32`.
+#[test]
+fn the_index_packing_shifts_and_ors() {
+    if !device_or_skip("the_index_packing_shifts_and_ors") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x801));
+    program.push(v_mov_inline(1, 3));
+    program.extend(vop3("v_lshl_or_b32", 2, [256 + 1, 128 + 20, 256], 0, 0));
+    program.extend(v_mov_literal(3, 0xf000_0000));
+    program.push(vop2_vv("v_or_b32_e32", 4, 3, 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), (3 << 20) | 0x801);
+    assert_eq!(vector(&registers, 4), 0xf000_0801);
 }

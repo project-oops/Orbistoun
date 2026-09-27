@@ -246,44 +246,226 @@ struct GuestCp<'a> {
     submission: Option<&'a Submission>,
 }
 
+/// The stream as one segment's draws see it (D729): every packet up to the segment's last draw,
+/// with each draw and each dispatch before its first replaced by a `NOP` of the same length. Every
+/// register write before the segment still runs, so its draws see the register state the stream
+/// gives them; no earlier segment's draw is drawn again, no dispatch the command processor already
+/// carried out is dispatched again, and nothing after the segment is read.
+fn segment_stream(segment: &cp::DrawSegment<'_>) -> Vec<u8> {
+    let end = (segment.end as usize).min(segment.stream.len());
+    let mut bytes = segment.stream[..end].to_vec();
+    for packet in &crate::packet::walk(&bytes).packets {
+        let crate::packet::PacketKind::Command { opcode } = packet.kind else {
+            continue;
+        };
+        let dispatch = opcode == crate::packet::build::DISPATCH_DIRECT;
+        if packet.offset >= segment.first || !(cp::is_draw(opcode) || dispatch) {
+            continue;
+        }
+        let header = crate::packet::build::command_header(
+            crate::packet::build::measured::NOP,
+            packet.body_length() / 4,
+        );
+        let at = packet.offset as usize;
+        bytes[at..at + 4].copy_from_slice(&header.to_le_bytes());
+    }
+    bytes
+}
+
+/// The shaders a submission could not prepare, as a clause for a refusal - empty when none failed.
+fn shader_failures(submission: &Submission) -> String {
+    use std::fmt::Write as _;
+    let mut clause = String::new();
+    for failure in &submission.report.failures {
+        let _ = write!(
+            clause,
+            "; its {} shader at {:#x} was not prepared: {}",
+            failure.stage, failure.address, failure.reason
+        );
+    }
+    clause
+}
+
+/// Why the most recent draw segment was not carried out, for the run report.
+fn draw_refusal() -> &'static Mutex<Option<String>> {
+    static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
+    &REFUSAL
+}
+
+fn note_draw_refusal(why: String) {
+    *draw_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+}
+
+/// Why the most recent draw segment was refused, if one was.
+#[must_use]
+pub fn last_draw_refusal() -> Option<String> {
+    draw_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 impl GuestCp<'_> {
+    /// Carries out one segment of the stream's draws (D729): a segment holding every draw is the
+    /// submission as prepared; any other is prepared from [`segment_stream`] through the live
+    /// pipeline, carrying the modules the whole submission brought for the backend.
+    fn draw_segment(&mut self, segment: &cp::DrawSegment<'_>) -> Result<(), String> {
+        let whole = self
+            .submission
+            .ok_or("no submission is being carried out")?;
+        if segment.whole {
+            return self.draw_into_target(whole);
+        }
+        let bytes = segment_stream(segment);
+        let mut prepared = {
+            let mut live = live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+            let prepared = pipeline.submit(&bytes, Queue::Draw, &[], &self.memory);
+            keep_new_translations(pipeline);
+            prepared
+        };
+        for (id, module) in &whole.modules {
+            prepared
+                .modules
+                .entry(*id)
+                .or_insert_with(|| module.clone());
+        }
+        self.draw_into_target(&prepared)
+    }
+
+    /// Leaves every block of a DCC target stored uncompressed, with its key saying so, before its
+    /// draws run. The frame is then written back as uncompressed blocks under uncompressed keys - a
+    /// state the hardware's own writes leave - and nothing here compresses. Keys all uncompressed
+    /// already need nothing; keys all cleared to `0000` mean every bit of every block is zero, so
+    /// the surface is filled with zeros and its keys marked uncompressed, which is exactly what
+    /// expanding them leaves. Any other key state needs per-block key addressing and is refused,
+    /// with nothing written.
+    fn expand_dcc(&mut self, target: ColourTarget, dcc: crate::dcc::Dcc) -> Result<(), String> {
+        let start = crate::dcc::meta_start(dcc);
+        let length = crate::dcc::meta_bytes(target.width, target.height, dcc.pipe_aligned);
+        let keys = usize::try_from(length)
+            .ok()
+            .and_then(|length| cp::CpMemory::read(self, start, length))
+            .ok_or("its DCC keys are not readable guest memory")?;
+        match crate::dcc::classify(&keys) {
+            crate::dcc::Keys::Uncompressed => Ok(()),
+            crate::dcc::Keys::Clear0000 => {
+                let span = tiling::surface_words_64kb_rx_bpp4(target.width, target.height) * 4;
+                let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
+                if cp::CpMemory::fill(self, target.base, 0, span)
+                    && cp::CpMemory::fill(self, start, keys_uncompressed, keys.len())
+                {
+                    Ok(())
+                } else {
+                    Err("its cleared DCC blocks could not be expanded in guest memory".to_owned())
+                }
+            }
+            crate::dcc::Keys::Other => Err(concat!(
+                "its DCC keys are neither all uncompressed nor all cleared to 0000, and decoding ",
+                "them needs per-block key addressing, which is not modelled"
+            )
+            .to_owned()),
+        }
+    }
+
     /// Reads the target, has the executor draw over it, and - after every submission, or at the
-    /// flip - writes the result back where the guest reads it (D714). `false`, with nothing
+    /// flip - writes the result back where the guest reads it (D714). Why not, with nothing
     /// written, at the first thing that is not exact.
-    fn draw_into_target(&mut self) -> bool {
+    fn draw_into_target(&mut self, submission: &Submission) -> Result<(), String> {
         let (Some(execute), Some(read)) = (draw_executor().get(), frame_reader().get()) else {
-            return false;
+            return Err("no device is installed to draw with".to_owned());
         };
-        let Some(submission) = self.submission else {
-            return false;
-        };
-        let Some((target, swap)) = writable_target(submission) else {
-            return false;
-        };
+        let (target, swap) = writable_target(submission).ok_or_else(|| {
+            format!(
+                "its colour target is not one a frame can be written back to exactly: {:?}, \
+                 {:?}, {:?}, {} base(s), {} extent(s)",
+                submission.colour_target,
+                submission.colour_target_tiling,
+                submission.colour_target_format,
+                submission.colour_target_bases,
+                submission.targets.len()
+            )
+        })?;
+        if submission.report.unmodelled_viewports > 0 {
+            return Err(format!(
+                concat!(
+                    "{} draw(s) turn the viewport transform off, and positions that are not ",
+                    "clip space are not modelled"
+                ),
+                submission.report.unmodelled_viewports
+            ));
+        }
+        if submission.report.unwindowed_draws > 0 {
+            return Err(format!(
+                concat!(
+                    "{} draw(s) run a shader that reads guest memory, and no window is mapped ",
+                    "for it to read through"
+                ),
+                submission.report.unwindowed_draws
+            ));
+        }
+        if submission.report.unbound_textures > 0 {
+            return Err(format!(
+                concat!(
+                    "{} sampled texture slot(s) had no texture bound, and the placeholder is ",
+                    "not the guest's picture"
+                ),
+                submission.report.unbound_textures
+            ));
+        }
+        if let Some(dcc) = submission.colour_target_dcc
+            && let Some(why) = crate::dcc::unsupported(
+                submission.colour_target_tiling,
+                dcc.single_level,
+                dcc.single_sample,
+            )
+        {
+            return Err(format!(
+                "its colour target uses {why}, which is not modelled"
+            ));
+        }
         // The executor holds one frame per extent, so a frame still pending for another target is
         // written back before this one is drawn over it (D714).
         if pending_target().is_some_and(|(pending, _)| pending.base != target.base)
             && !write_back_pending(self)
         {
-            return false;
+            return Err(
+                "the frame pending for another target could not be written back".to_owned(),
+            );
+        }
+        if let Some(dcc) = submission.colour_target_dcc {
+            self.expand_dcc(target, dcc.dcc)?;
         }
         if !write_back_at_flip() {
             return draw_over(self, target, swap, |before| {
                 execute(submission, before).then(read).flatten()
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "the device did not draw it, or it could not be written back{}",
+                    shader_failures(submission)
+                )
             });
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
         // each of the many submissions a GL frame takes (D714).
-        let Some(before) = read_target(self, target, swap) else {
-            return false;
-        };
+        let before = read_target(self, target, swap)
+            .ok_or("its colour target is not readable guest memory")?;
         if !execute(submission, before.before()) {
             forget_written();
             set_pending(None);
-            return false;
+            return Err(format!(
+                "the device did not draw it{}",
+                shader_failures(submission)
+            ));
         }
         set_pending(Some((target, swap)));
-        true
+        Ok(())
     }
 }
 
@@ -747,6 +929,7 @@ fn read_target(
             &words_of(&bytes),
             width,
             height,
+            target.pipe_bank_xor,
             |w| swapped(w, swap),
         )),
     };
@@ -812,9 +995,14 @@ fn write_target(
         let mut tiled_ok = false;
         let mut written = Vec::new();
         let edited = memory.edit_words(target.base, words, &mut |tiled| {
-            tiled_ok = tiling::tile_surface_64kb_rx_bpp4_mapped(after, width, height, tiled, |w| {
-                swapped(w, swap)
-            })
+            tiled_ok = tiling::tile_surface_64kb_rx_bpp4_mapped(
+                after,
+                width,
+                height,
+                target.pipe_bank_xor,
+                tiled,
+                |w| swapped(w, swap),
+            )
             .is_ok();
             // What memory holds now, for the next submission's unchanged check.
             written = zerocopy::IntoBytes::as_bytes(&*tiled).to_vec();
@@ -1120,9 +1308,14 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     };
     let (width, height) = (copy.target.width, copy.target.height);
     let mut tiled = words_of(&copy.memory_then);
-    if tiling::tile_surface_64kb_rx_bpp4_mapped(&frame, width, height, &mut tiled, |w| {
-        swapped(w, copy.swap)
-    })
+    if tiling::tile_surface_64kb_rx_bpp4_mapped(
+        &frame,
+        width,
+        height,
+        copy.target.pipe_bank_xor,
+        &mut tiled,
+        |w| swapped(w, copy.swap),
+    )
     .is_err()
     {
         return false;
@@ -1325,8 +1518,19 @@ impl cp::CpMemory for GuestCp<'_> {
         RELEASED.with(|released| released.borrow_mut().push((address, context)));
     }
 
-    fn run_draws(&mut self) -> bool {
-        crate::perf::span(crate::perf::Span::RunDraws, || self.draw_into_target())
+    fn run_draws(&mut self, segment: &cp::DrawSegment<'_>) -> bool {
+        crate::perf::span(crate::perf::Span::RunDraws, || {
+            match self.draw_segment(segment) {
+                Ok(()) => true,
+                Err(why) => {
+                    note_draw_refusal(format!(
+                        "the draws at bytes {:#x}..{:#x}: {why}",
+                        segment.first, segment.end
+                    ));
+                    false
+                }
+            }
+        })
     }
 
     fn run_dispatch(&mut self, dispatch: &cp::Dispatch<'_>) -> bool {
@@ -1873,6 +2077,76 @@ mod tests {
     };
     use std::sync::{Mutex, PoisonError};
 
+    /// A segment's stream keeps every packet up to its last draw, register writes included, turns
+    /// each earlier draw into a `NOP` of the same length, and leaves out everything after (D729).
+    #[test]
+    fn a_segment_stream_keeps_register_state_and_silences_earlier_draws() {
+        use crate::packet::build::{command_header, measured};
+        let set = [command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7];
+        let draw = [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2];
+        let fill = [
+            command_header(measured::DMA_DATA, 6),
+            0x8000_0000 | (2 << 29) | (3 << 20),
+            1,
+            0,
+            0x2000,
+            0,
+            16,
+        ];
+        let mut words = set.to_vec();
+        words.extend(draw);
+        words.extend(fill);
+        let first = u32::try_from(words.len() * 4).expect("small");
+        words.extend(set);
+        words.extend(draw);
+        let end = u32::try_from(words.len() * 4).expect("small");
+        words.extend(fill);
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let segment = super::segment_stream(&crate::cp::DrawSegment {
+            stream: &stream,
+            first,
+            end,
+            whole: false,
+        });
+
+        let mut expected = stream[..end as usize].to_vec();
+        expected[12..16].copy_from_slice(&command_header(measured::NOP, 2).to_le_bytes());
+        assert_eq!(segment, expected);
+        let walked = crate::packet::walk(&segment);
+        assert!(walked.is_trustworthy());
+        assert_eq!(walked.packets.len(), 5, "every packet kept, none split");
+    }
+
+    /// A dispatch before a segment is memory work the command processor already carried out
+    /// (D729), so the segment's stream silences it as it does an earlier draw: drawn again it
+    /// would be a second dispatch, and on a device with no compute shader bound, a refusal.
+    #[test]
+    fn a_segment_stream_silences_the_dispatches_before_it() {
+        use crate::packet::build::{command_header, dispatch_direct, measured};
+        let set = [command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7];
+        let draw = [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2];
+        let mut words = set.to_vec();
+        let dispatch_at = words.len() * 4;
+        words.extend(dispatch_direct(0xc0, 1, 1));
+        let first = u32::try_from(words.len() * 4).expect("small");
+        words.extend(draw);
+        let end = u32::try_from(words.len() * 4).expect("small");
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let segment = super::segment_stream(&crate::cp::DrawSegment {
+            stream: &stream,
+            first,
+            end,
+            whole: false,
+        });
+
+        let mut expected = stream.clone();
+        expected[dispatch_at..dispatch_at + 4]
+            .copy_from_slice(&command_header(measured::NOP, 4).to_le_bytes());
+        assert_eq!(segment, expected);
+    }
+
     /// A dispatch writes back exactly the words it changed, as runs.
     #[test]
     fn a_dispatch_writes_back_the_runs_it_changed() {
@@ -1894,6 +2168,7 @@ mod tests {
             base: 0x10_0000,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         assert!(
             !overlaps_target(target, 0x0f_ff00, 0x100),
@@ -1983,6 +2258,7 @@ mod tests {
             base: BASE,
             width,
             height,
+            pipe_bank_xor: 0,
         };
         let mut seen = None;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Alternate, |before| {
@@ -2041,11 +2317,13 @@ mod tests {
             base: BASE,
             width,
             height,
+            pipe_bank_xor: 0,
         };
         let expected = crate::tiling::detile_surface_64kb_rx_bpp4_mapped(
             &words_of(&memory.0),
             width,
             height,
+            0,
             |w| swapped(w, ComponentSwap::Alternate),
         );
         let mut handed = None;
@@ -2069,6 +2347,7 @@ mod tests {
             base: BASE + 0x1_0000,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         let mut ran = false;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Standard, |before| {
@@ -2093,6 +2372,7 @@ mod tests {
                 base: 0x7400_0000_0000,
                 width: 1920,
                 height: 1080,
+                pipe_bank_xor: 0,
             }),
             colour_target_tiling: Some(SwizzleMode::Tiled64KbRX),
             colour_target_format: Some(decode_colour_target_format(0x0001_80a8 | (1 << 11))),
@@ -2473,6 +2753,7 @@ mod tests {
             base,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
@@ -2534,6 +2815,7 @@ mod tests {
             base: 0,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
@@ -2557,7 +2839,7 @@ mod tests {
         assert_eq!(memory, before.as_slice(), "nothing written at the flip");
         assert!(super::carry_out_before_reading(base, 4));
         let mut expected = super::words_of(&before);
-        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, &mut expected, |w| w)
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
             .expect("tiles");
         assert_eq!(
             memory,
@@ -2594,6 +2876,62 @@ mod tests {
         super::forget_written();
     }
 
+    /// Before a DCC target's draws, its blocks are left uncompressed under uncompressed keys: keys
+    /// cleared to `0000` expand to a zero surface with every key `0xFF`, keys already uncompressed
+    /// change nothing, and any other key state is refused with nothing written.
+    #[test]
+    fn a_dcc_target_is_expanded_before_its_draws_or_refused() {
+        use super::{ColourTarget, GuestCp, MappedRegions};
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let keys = 0x1000;
+        let buffer: &'static mut [u8] =
+            Box::leak(vec![0u8; span + keys + 0x2000].into_boxed_slice());
+        let buffer_at = buffer.as_ptr() as usize as u64;
+        allow_writes_to(buffer_at, buffer.len() as u64);
+        set_guest_regions(vec![region_of(buffer)]);
+        // The keys start on a 4 KiB metadata block, as addrlib aligns them.
+        let meta = (buffer_at + span as u64 + 0xFFF) & !0xFFF;
+        let base = buffer_at;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        let dcc = crate::dcc::Dcc {
+            base: meta | 0x300,
+            pipe_aligned: true,
+        };
+        let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+
+        buffer[..span].fill(0xAB);
+        buffer[at(meta)..at(meta) + keys].fill(0x00);
+        assert_eq!(cp.expand_dcc(target, dcc), Ok(()));
+        assert!(
+            buffer[..span].iter().all(|&b| b == 0),
+            "the cleared blocks' zeros"
+        );
+        assert!(
+            buffer[at(meta)..at(meta) + keys].iter().all(|&b| b == 0xFF),
+            "every key uncompressed"
+        );
+
+        buffer[..span].fill(0x5A);
+        assert_eq!(cp.expand_dcc(target, dcc), Ok(()));
+        assert!(buffer[..span].iter().all(|&b| b == 0x5A), "left as it is");
+
+        buffer[at(meta) + 7] = 0x20;
+        assert!(cp.expand_dcc(target, dcc).is_err());
+        assert!(buffer[..span].iter().all(|&b| b == 0x5A), "nothing written");
+        assert_eq!(buffer[at(meta) + 7], 0x20);
+        super::forget_written();
+    }
+
     /// A fill over the whole pending target drops the frame rather than writing it back (D719), and
     /// forgets what memory held, so the next read is a full one. No frame reader is installed, so a
     /// write-back would fail the fill.
@@ -2610,6 +2948,7 @@ mod tests {
             base,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             base,

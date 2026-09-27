@@ -11,6 +11,7 @@
 
 mod backend;
 pub mod cp;
+pub mod dcc;
 pub mod depth;
 pub mod dispatch;
 pub mod display;

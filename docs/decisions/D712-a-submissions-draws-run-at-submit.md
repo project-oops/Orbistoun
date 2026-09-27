@@ -8,6 +8,7 @@ colour target before the command processor passes them as done. They run only wh
 from the first draw to the last is a draw or memory-inert, into one target of one base and
 extent in a tiling and format that write back exactly, starting from what guest memory holds;
 anything else leaves them unexecuted. The executor runs on a host thread of its own.
+Amended by D729: memory work between draws splits them into segments run in order.
 
 **Why:** a fence may stand only for work that ran (D705), and a GL frame loop waits on the fence
 after its draws. The guest reads and composes over its target, so a frame kept only on the host

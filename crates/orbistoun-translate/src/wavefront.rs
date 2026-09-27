@@ -204,6 +204,12 @@ pub enum MeshPrimitive {
     /// Three vertices per primitive. The default.
     #[default]
     Triangles,
+    /// Three corners per primitive, of a rectangle whose fourth corner is `v1 + v2 - v0`: the
+    /// `RECTLIST` radeonsi's blits draw (`si_pipe.h:2110`), whose three vertices are `(x1, y1)`,
+    /// `(x1, y2)` and `(x2, y1)` (`si_nir_lower_vs_inputs.c:97-122`). Emitted as two triangles over
+    /// a fourth vertex whose position and parameters are carried the same way, so each parameter
+    /// stays the one plane the three corners define.
+    Rectangles,
 }
 
 impl MeshPrimitive {
@@ -214,7 +220,16 @@ impl MeshPrimitive {
         match self {
             Self::Points => 1,
             Self::Lines => 2,
-            Self::Triangles => 3,
+            Self::Triangles | Self::Rectangles => 3,
+        }
+    }
+
+    /// How many vertices and primitives the module declares room for: one of each per lane, and
+    /// for a rectangle a fourth vertex and a second triangle per primitive as well.
+    const fn slots(self) -> u32 {
+        match self {
+            Self::Rectangles => 2 * MESH_SLOTS,
+            _ => MESH_SLOTS,
         }
     }
 
@@ -223,7 +238,7 @@ impl MeshPrimitive {
         match self {
             Self::Points => mode::OUTPUT_POINTS,
             Self::Lines => mode::OUTPUT_LINES_EXT,
-            Self::Triangles => mode::OUTPUT_TRIANGLES_EXT,
+            Self::Triangles | Self::Rectangles => mode::OUTPUT_TRIANGLES_EXT,
         }
     }
 
@@ -232,7 +247,7 @@ impl MeshPrimitive {
         match self {
             Self::Points => built_in::PRIMITIVE_POINT_INDICES_EXT,
             Self::Lines => built_in::PRIMITIVE_LINE_INDICES_EXT,
-            Self::Triangles => built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+            Self::Triangles | Self::Rectangles => built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
         }
     }
 }
@@ -377,8 +392,64 @@ pub struct UserData {
     /// compute module is the register-observing harness it always was.
     #[serde(default)]
     pub compute: Option<ComputeInputs>,
+    /// A primitive shader's geometry-engine inputs for the draw it runs (D730). Without them a
+    /// mesh module that reads those inputs is refused.
+    #[serde(default)]
+    pub geometry: Option<GeometryInputs>,
+    /// Whether a primitive shader's position export is in window space (D731): `PA_CL_VTE_CNTL` in
+    /// the form radeonsi gives a window-space shader, x, y and z already divided and the fourth
+    /// component `1/W`, with no viewport scale or offset (`si_state_shaders.cpp:1321-1322`). The
+    /// module then writes the clip-space position that, under the viewport [`WINDOW_SPACE_SCALE`]
+    /// names, lands on the same pixel.
+    #[serde(default)]
+    pub window_space: bool,
 }
 
+/// The viewport scale a window-space draw runs under (D731), in pixels, on both axes, with no
+/// offset: a window-space position `(x, y, z, 1/W)` is written `(x W / S, y W / S, z W, W)`, which
+/// Vulkan's divide and this viewport take back to `(x, y, z)`. A power of two, so the scaling is
+/// exact; and large enough that every position on a target of up to `S` pixels lies inside the
+/// clip volume.
+pub const WINDOW_SPACE_SCALE: f32 = 8192.0;
+
+/// What the geometry engine hands a primitive shader for a draw one subgroup holds whole (D730):
+/// the draw's vertices, one per vertex thread from `first_vertex`, and its primitives of three
+/// vertices each, primitive `p` over vertices `3p`, `3p + 1` and `3p + 2` - a triangle list or a
+/// rectangle list, not indexed.
+///
+/// Seeded where GFX10's non-passthrough primitive shader receives them (`si_shader_args.c:304-371`):
+/// `s2` gs_tg_info, input vertices at bit 12 and primitives at bit 22
+/// (`ac_nir_lower_intrinsics_to_args.c:273-276`); `s3` merged_wave_info, this wave's vertex and
+/// primitive threads at bits 0 and 8 and the one wave of the group counted at bit 28
+/// (`:36`, `:99`, `:127`, `:418`); `v0` the first two vertex indices, sixteen bits each, and `v1`
+/// the third (`ac_nir_lower_ngg.c:130-131`); `v2` the primitive id; and `v5` the vertex id
+/// (`si_shader_args.c:95`). The invocation id, the fifth vertex register, the user VGPRs and the
+/// instance id read zero: one invocation, no adjacency, one instance.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct GeometryInputs {
+    /// The vertex id of the first vertex thread.
+    pub first_vertex: u32,
+    /// Vertex threads: the draw's vertex count.
+    pub vertices: u32,
+    /// Primitive threads.
+    pub primitives: u32,
+}
+
+impl GeometryInputs {
+    /// Why a subgroup of `lanes` threads cannot hold these whole, if it cannot.
+    #[must_use]
+    pub const fn refusal(self, lanes: u32) -> Option<&'static str> {
+        if self.vertices > lanes || self.primitives > lanes {
+            Some("the draw has more vertices or primitives than one wave's threads")
+        } else if self.primitives * 3 > self.vertices {
+            Some("the draw's primitives name vertices it does not have")
+        } else {
+            None
+        }
+    }
+}
 /// Words in the push-constant block: sixteen per stage, two stages. 128 bytes is the smallest
 /// `maxPushConstantsSize` a Vulkan device may report, so every device takes it.
 pub const USER_DATA_BLOCK_WORDS: u32 = 32;
@@ -453,11 +524,11 @@ fn emit_header(
             b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
             b.header(
                 op::EXECUTION_MODE,
-                &[main.0, mode::OUTPUT_VERTICES, MESH_SLOTS],
+                &[main.0, mode::OUTPUT_VERTICES, primitive.slots()],
             );
             b.header(
                 op::EXECUTION_MODE,
-                &[main.0, mode::OUTPUT_PRIMITIVES_EXT, MESH_SLOTS],
+                &[main.0, mode::OUTPUT_PRIMITIVES_EXT, primitive.slots()],
             );
             // The shape the stream asked for: Vulkan reads the mesh output topology from here,
             // never from the pipeline's input assembly (D688).
@@ -614,7 +685,7 @@ fn declare_mesh_outputs(
         return None;
     }
     let slots = b.id();
-    b.declare(op::CONSTANT, &[u32_type.0, slots.0, MESH_SLOTS]);
+    b.declare(op::CONSTANT, &[u32_type.0, slots.0, primitive.slots()]);
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
     // The index element carries one vertex index per component: `uint` for a point, `uvec2` for a
     // line, `uvec3` for a triangle, matching the `PrimitivePointIndices`/`Line`/`Triangle`
@@ -709,16 +780,19 @@ struct MeshReserved {
     vertices: Id,
     indices: Id,
     parameters: BTreeMap<u32, Id>,
+    /// A rectangle list's copies of what it emits, declared once the mesh outputs are.
+    rectangles: Option<RectangleCopies>,
 }
 
 impl MeshReserved {
     /// Reserves ids for a mesh module's outputs, or nothing at another stage.
-    fn new(b: &mut Builder, stage: Stage, locations: &[u32]) -> Self {
+    fn new(b: &mut Builder, stage: Stage, primitive: MeshPrimitive, locations: &[u32]) -> Self {
         if stage != Stage::Mesh {
             return Self {
                 vertices: Id(0),
                 indices: Id(0),
                 parameters: BTreeMap::new(),
+                rectangles: None,
             };
         }
         Self {
@@ -728,6 +802,7 @@ impl MeshReserved {
                 .iter()
                 .map(|location| (*location, b.id()))
                 .collect(),
+            rectangles: RectangleCopies::reserve(b, stage, primitive, locations),
         }
     }
 
@@ -738,7 +813,135 @@ impl MeshReserved {
         }
         let mut ids = vec![self.vertices.0, self.indices.0];
         ids.extend(self.parameters.values().map(|id| id.0));
+        ids.extend(self.rectangles.iter().flat_map(RectangleCopies::interface));
         ids
+    }
+
+    /// Declares a rectangle list's copies, once the mesh outputs they mirror are declared.
+    fn declare_rectangles(
+        &self,
+        b: &mut Builder,
+        mesh: Option<&MeshOutputs>,
+        vec4: Id,
+        ids: &Reserved,
+    ) -> Option<RectangleCopies> {
+        let (copies, outputs) = self.rectangles.clone().zip(mesh)?;
+        Some(copies.declare(b, (ids.u32_type, vec4, outputs.index_type), ids.counter_ptr))
+    }
+}
+
+/// The SPIR-V version a module for `stage` declares: 1.4 for a mesh module, which its extension
+/// requires, and 1.3 for everything else, where an entry point lists only its inputs and outputs.
+const fn module_version(stage: Stage) -> u32 {
+    if matches!(stage, Stage::Mesh) {
+        orbistoun_spirv::VERSION_1_4
+    } else {
+        orbistoun_spirv::VERSION_1_3
+    }
+}
+
+/// Declares the types every module has: `void` and the entry point's function type, the 32-bit
+/// integer and float, and the boolean.
+fn declare_base_types(b: &mut Builder, ids: &Reserved) {
+    b.declare(op::TYPE_VOID, &[ids.void.0]);
+    b.declare(op::TYPE_FUNCTION, &[ids.fn_type.0, ids.void.0]);
+    b.declare(op::TYPE_INT, &[ids.u32_type.0, 32, 0]);
+    b.declare(op::TYPE_FLOAT, &[ids.f32_type.0, 32]);
+    b.declare(op::TYPE_BOOL, &[ids.bool_type.0]);
+}
+
+/// A rectangle-list mesh module's own copy of what it emitted, which its outputs cannot be read
+/// back for: each lane's position, parameters and primitive indices, and the declared counts. The
+/// fourth corner of each rectangle is formed from them once the program has run.
+#[derive(Debug, Clone)]
+struct RectangleCopies {
+    /// `vec4` per lane: the positions.
+    positions: Id,
+    /// `vec4` per lane, per exported parameter location.
+    parameters: BTreeMap<u32, Id>,
+    /// `uvec3` per lane: the primitive's three corners.
+    indices: Id,
+    /// The vertex count the allocation request declared.
+    vertices: Id,
+    /// The primitive count it declared.
+    primitives: Id,
+    /// Pointer to one `vec4` of a copy.
+    vec4_ptr: Id,
+    /// Pointer to one `uvec3` of the index copy.
+    index_ptr: Id,
+    /// Pointer to one private word.
+    word_ptr: Id,
+}
+
+impl RectangleCopies {
+    /// Reserves the copies' variables, or nothing for any other module: the entry point lists them.
+    fn reserve(
+        b: &mut Builder,
+        stage: Stage,
+        primitive: MeshPrimitive,
+        locations: &[u32],
+    ) -> Option<Self> {
+        (stage == Stage::Mesh && primitive == MeshPrimitive::Rectangles).then(|| Self {
+            positions: b.id(),
+            parameters: locations
+                .iter()
+                .map(|location| (*location, b.id()))
+                .collect(),
+            indices: b.id(),
+            vertices: b.id(),
+            primitives: b.id(),
+            vec4_ptr: Id(0),
+            index_ptr: Id(0),
+            word_ptr: Id(0),
+        })
+    }
+
+    /// Every variable the entry point must list.
+    fn interface(&self) -> Vec<u32> {
+        let mut ids = vec![
+            self.positions.0,
+            self.indices.0,
+            self.vertices.0,
+            self.primitives.0,
+        ];
+        ids.extend(self.parameters.values().map(|id| id.0));
+        ids
+    }
+
+    /// Declares the reserved variables as private storage, one element per lane.
+    fn declare(
+        mut self,
+        b: &mut Builder,
+        (u32_type, vec4, uvec3): (Id, Id, Id),
+        word_ptr: Id,
+    ) -> Self {
+        let lanes = b.id();
+        b.declare(op::CONSTANT, &[u32_type.0, lanes.0, MESH_SLOTS]);
+        let vec4_array = b.id();
+        let vec4_array_ptr = b.id();
+        let index_array = b.id();
+        let index_array_ptr = b.id();
+        self.vec4_ptr = b.id();
+        self.index_ptr = b.id();
+        b.declare(op::TYPE_ARRAY, &[vec4_array.0, vec4.0, lanes.0]);
+        b.declare(op::TYPE_POINTER, &[vec4_array_ptr.0, PRIVATE, vec4_array.0]);
+        b.declare(op::TYPE_ARRAY, &[index_array.0, uvec3.0, lanes.0]);
+        b.declare(
+            op::TYPE_POINTER,
+            &[index_array_ptr.0, PRIVATE, index_array.0],
+        );
+        b.declare(op::TYPE_POINTER, &[self.vec4_ptr.0, PRIVATE, vec4.0]);
+        b.declare(op::TYPE_POINTER, &[self.index_ptr.0, PRIVATE, uvec3.0]);
+        b.declare(op::VARIABLE, &[vec4_array_ptr.0, self.positions.0, PRIVATE]);
+        for variable in self.parameters.values() {
+            b.declare(op::VARIABLE, &[vec4_array_ptr.0, variable.0, PRIVATE]);
+        }
+        b.declare(op::VARIABLE, &[index_array_ptr.0, self.indices.0, PRIVATE]);
+        for word in [self.vertices, self.primitives] {
+            b.declare(op::VARIABLE, &[word_ptr.0, word.0, PRIVATE]);
+        }
+        self.word_ptr = word_ptr;
+        self
     }
 }
 
@@ -816,6 +1019,11 @@ pub struct Wavefront<'a> {
     inputs: BTreeMap<u32, Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
     mesh: Option<MeshOutputs>,
+    /// A rectangle-list mesh module's copies of what it emitted, or [`None`] for any other.
+    rectangles: Option<RectangleCopies>,
+    /// Whether a mesh module's position export is in window space (D731); see
+    /// [`UserData::window_space`].
+    window_space: bool,
     /// The primitive a mesh module assembles. Read only at [`Stage::Mesh`].
     primitive: MeshPrimitive,
     /// The four-component float vector, which the stages that have one share.
@@ -836,6 +1044,8 @@ pub struct Wavefront<'a> {
     /// `7`). A lane known inactive emits nothing, and one known active writes without a select.
     known_exec: [Option<u32>; 2],
     constants: BTreeMap<u32, Id>,
+    /// The 32-bit float constants declared so far, by bit pattern.
+    float_constants: BTreeMap<u32, Id>,
     /// The imported `GLSL.std.450` set id, cached after the first extended instruction imports it.
     glsl_set: Option<Id>,
     u32_type: Id,
@@ -852,7 +1062,7 @@ pub struct Wavefront<'a> {
     /// Empty for a module that does not sample, so its pipeline layout carries no image binding.
     textures: Vec<BoundTexture>,
     /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`].
-    descriptor_loads: BTreeMap<u32, std::collections::BTreeSet<u32>>,
+    descriptor_loads: BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>>,
     /// The storage image, declared the first time an instruction stores to one.
     ///
     /// Declaring it declares a capability that a device without the matching feature refuses, so a
@@ -891,7 +1101,19 @@ pub struct Wavefront<'a> {
     unwritten_user_data: u32,
     /// Whether the program reads one of them, whose value nothing here knows.
     reads_unwritten: bool,
+    /// Scalar and vector registers written so far, in program order: seeded at entry, or by an
+    /// instruction before the one now translated.
+    written: (u128, [u64; 4]),
+    /// Whether a mesh module read a geometry-engine input it was not given.
+    reads_geometry_input: bool,
 }
+
+/// A primitive shader's system SGPRs, `s0`-`s7`, ahead of its user SGPRs: gs_tg_info in `s2` and
+/// merged_wave_info in `s3` among them (`si_shader_args.c:304-322`).
+const GEOMETRY_SYSTEM_SGPRS: u32 = 8;
+/// Its input VGPRs, `v0`-`v8`: the vertex offsets, primitive and invocation ids, then the vertex
+/// shader's vertex id and instance id (`si_shader_args.c:363-371`, `:93-118`).
+const GEOMETRY_INPUT_VGPRS: u32 = 9;
 
 impl Wavefront<'_> {
     /// The texture sources this module samples, in slot order.
@@ -912,9 +1134,17 @@ impl Wavefront<'_> {
         if slot > 1 {
             return Err("this shader reads more than two textures, and two bindings exist (D690)");
         }
-        let table_offset = match self.descriptor_loads.get(&descriptor) {
-            None => None,
-            Some(offsets) if offsets.len() == 1 => offsets.first().copied(),
+        let (table, table_offset) = match self.descriptor_loads.get(&descriptor) {
+            None => (TableBase::default(), None),
+            Some(loads) if loads.len() == 1 => match loads.first().copied() {
+                Some((Some(table), offset)) => (table, Some(offset)),
+                _ => {
+                    return Err(concat!(
+                        "this shader loads an image descriptor through an address it formed from ",
+                        "something other than its user data and constants, which is not traced"
+                    ));
+                }
+            },
             Some(_) => {
                 return Err(concat!(
                     "this shader loads one image descriptor from more than one place in its ",
@@ -932,7 +1162,11 @@ impl Wavefront<'_> {
                 "its descriptor table, so which is which cannot be told (D690)"
             ));
         }
-        Ok(TextureSource { slot, table_offset })
+        Ok(TextureSource {
+            slot,
+            table_offset,
+            table,
+        })
     }
 }
 
@@ -1146,14 +1380,7 @@ impl<'a> Wavefront<'a> {
         parameters: &[u32],
         (window, user_data): (Window, UserData),
     ) -> Self {
-        // A mesh module declares 1.4, which its extension requires; everything else is 1.3, where
-        // an entry point lists only its inputs and outputs.
-        let version = if stage == Stage::Mesh {
-            orbistoun_spirv::VERSION_1_4
-        } else {
-            orbistoun_spirv::VERSION_1_3
-        };
-        let mut b = Builder::new().with_version(version);
+        let mut b = Builder::new().with_version(module_version(stage));
 
         let ids = Reserved::new(&mut b);
         let (void, fn_type, main) = (ids.void, ids.fn_type, ids.main);
@@ -1171,15 +1398,9 @@ impl<'a> Wavefront<'a> {
         // be named in its interface, and a driver does not reliably reject a module that omits one.
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
-        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
+        let mesh_reserved = MeshReserved::new(&mut b, stage, primitive, parameters);
         emit_header(&mut b, stage, primitive, main, output);
-
-        b.declare(op::TYPE_VOID, &[void.0]);
-        b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
-        b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
-        b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
-
-        b.declare(op::TYPE_BOOL, &[bool_type.0]);
+        declare_base_types(&mut b, &ids);
         let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
         system.declare(&mut b, vec4, bool_type);
@@ -1193,6 +1414,7 @@ impl<'a> Wavefront<'a> {
             &mesh_reserved,
         );
         let (files, observation, guest_memory) = declare_state(&mut b, &ids, stage, width, window);
+        let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
         let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
 
@@ -1221,6 +1443,8 @@ impl<'a> Wavefront<'a> {
             output,
             inputs,
             mesh,
+            rectangles,
+            window_space: user_data.window_space,
             primitive,
             vec4,
             memory_base: window.base,
@@ -1231,6 +1455,7 @@ impl<'a> Wavefront<'a> {
             lanes: simulated_lanes(stage, width),
             known_exec: [None; 2],
             constants: BTreeMap::new(),
+            float_constants: BTreeMap::new(),
             glsl_set: None,
             u32_type,
             f32_type,
@@ -1258,6 +1483,8 @@ impl<'a> Wavefront<'a> {
             memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
             unwritten_user_data: user_data.compute.map_or(0, |c| c.unwritten_user_data),
             reads_unwritten: false,
+            written: (0, [0; 4]),
+            reads_geometry_input: false,
         };
 
         this.seed_entry(user_data_source, user_data, &system);
@@ -1287,6 +1514,54 @@ impl<'a> Wavefront<'a> {
         // A dispatch's ids after the user data and in the first vector registers.
         if let (Some(state), Some(inputs)) = (self.dispatch, user_data.compute) {
             state.seed(self, inputs, user_data.count);
+        }
+        // A primitive shader's geometry-engine inputs (D730).
+        if let (Stage::Mesh, Some(geometry)) = (self.stage, user_data.geometry) {
+            self.seed_geometry(geometry);
+        }
+    }
+
+    /// Seeds the geometry-engine inputs [`GeometryInputs`] describes, every input register in
+    /// every lane: a lane that is no vertex or primitive thread reads zero.
+    fn seed_geometry(&mut self, geometry: GeometryInputs) {
+        let GeometryInputs {
+            first_vertex,
+            vertices,
+            primitives,
+        } = geometry;
+        let tg_info = self.constant((vertices << 12) | (primitives << 22));
+        self.store_scalar(2, tg_info);
+        let wave_info = self.constant(vertices | (primitives << 8) | (1 << 28));
+        self.store_scalar(3, wave_info);
+        for lane in 0..self.lanes {
+            let is_primitive = lane < primitives;
+            let first = 3 * lane;
+            let words = [
+                // v0: the first two vertex indices; v1: the third.
+                if is_primitive {
+                    first | ((first + 1) << 16)
+                } else {
+                    0
+                },
+                if is_primitive { first + 2 } else { 0 },
+                // v2: the primitive id; v3: the invocation id; v4: the fifth and sixth indices.
+                if is_primitive { lane } else { 0 },
+                0,
+                0,
+                // v5: the vertex id; v6, v7: user VGPRs; v8: the instance id.
+                if lane < vertices {
+                    first_vertex + lane
+                } else {
+                    0
+                },
+                0,
+                0,
+                0,
+            ];
+            for (register, word) in (0..).zip(words) {
+                let value = self.constant(word);
+                self.store_lane_masked(register, lane, value);
+            }
         }
     }
 
@@ -1392,6 +1667,9 @@ impl<'a> Wavefront<'a> {
     }
 
     fn store_scalar(&mut self, register: u32, value: Id) {
+        if register < 128 {
+            self.written.0 |= 1 << register;
+        }
         if let Some(half) = exec_half(register) {
             self.known_exec[half] = self.constant_value(value);
         }
@@ -1480,6 +1758,12 @@ impl<'a> Wavefront<'a> {
     /// declared count and never read. A sparse vertex mask would write a vertex it did not mean to
     /// emit; the mask is a runtime value, so this is an assumption rather than a check (D688).
     fn store_vec4(&mut self, pointer: Id, components: [Id; 4]) {
+        let value = self.composite_vec4(components);
+        self.builder.function(op::STORE, &[pointer.0, value.0]);
+    }
+
+    /// Four components as one `vec4` value.
+    fn composite_vec4(&mut self, components: [Id; 4]) -> Id {
         let vec4 = self.vec4;
         let value = self.builder.id();
         self.builder.function(
@@ -1493,10 +1777,36 @@ impl<'a> Wavefront<'a> {
                 components[3].0,
             ],
         );
-        self.builder.function(op::STORE, &[pointer.0, value.0]);
+        value
+    }
+
+    /// Notes a guest-visible read of a register, and, in a mesh module, a geometry-engine input
+    /// read before anything wrote it.
+    fn note_read(&mut self, scalar: bool, register: u32) {
+        if self.stage != Stage::Mesh || self.reads_geometry_input {
+            return;
+        }
+        let (limit, written) = if scalar {
+            (
+                GEOMETRY_SYSTEM_SGPRS,
+                register < 128 && self.written.0 >> register & 1 != 0,
+            )
+        } else {
+            let (word, bit) = ((register / 64) as usize, register % 64);
+            (
+                GEOMETRY_INPUT_VGPRS,
+                self.written.1.get(word).is_some_and(|w| w >> bit & 1 != 0),
+            )
+        };
+        if register < limit && !written {
+            self.reads_geometry_input = true;
+        }
     }
 
     fn store_lane_masked(&mut self, register: u32, lane: u32, value: Id) {
+        if let Some(word) = self.written.1.get_mut((register / 64) as usize) {
+            *word |= 1 << (register % 64);
+        }
         match self.lane_known(lane) {
             // Known inactive: the write does not happen.
             Some(false) => return,
@@ -1524,6 +1834,9 @@ impl<'a> Wavefront<'a> {
     /// Lane zero of each vector register, then the scalar registers: the lane model's layout, so
     /// the two can be diffed.
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
+        if self.reads_geometry_input {
+            return Err(TranslateError::ReadsGeometryInputs);
+        }
         if self.reads_unwritten {
             return Err(TranslateError::Unsupported {
                 offset: 0,
@@ -1549,10 +1862,182 @@ impl<'a> Wavefront<'a> {
                 self.write_observation(member, OBSERVED_REGISTERS + register, value);
             }
         }
+        self.complete_rectangles();
         self.builder.function(op::RETURN, &[]);
         self.builder.function(op::FUNCTION_END, &[]);
         self.builder.check()?;
         Ok((self.builder.finish(), self.translated))
+    }
+
+    /// A rectangle-list module's epilogue: for each declared primitive, the fourth corner as the
+    /// vertex after every emitted one - `v1 + v2 - v0` in position and in each parameter - and the
+    /// second triangle, `(v2, v1, v3)`, which winds the same way as `(v0, v1, v2)`.
+    ///
+    /// The corners are read from the module's copies, indexed by the guest's own indices masked to
+    /// the copies' length: an index past the vertices a lane holds is the guest's fault, and reading
+    /// past a private array would be the host's.
+    fn complete_rectangles(&mut self) {
+        let (Some(copies), Some(mesh)) = (self.rectangles.clone(), self.mesh.clone()) else {
+            return;
+        };
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let vertices = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, vertices.0, copies.vertices.0]);
+        let primitives = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, primitives.0, copies.primitives.0]);
+        let last = Self::constant(self, MESH_SLOTS - 1);
+        let member = Self::constant(self, 0);
+        for primitive in 0..self.lanes.min(MESH_SLOTS) {
+            let this = Self::constant(self, primitive);
+            let declared = self.builder.id();
+            self.builder.function(
+                op::ULESS_THAN,
+                &[bool_type.0, declared.0, this.0, primitives.0],
+            );
+            let (body, merge) = (self.builder.id(), self.builder.id());
+            self.builder.function(op::SELECTION_MERGE, &[merge.0, 0]);
+            self.builder
+                .function(op::BRANCH_CONDITIONAL, &[declared.0, body.0, merge.0]);
+            self.builder.function(op::LABEL, &[body.0]);
+
+            let pointer = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[copies.index_ptr.0, pointer.0, copies.indices.0, this.0],
+            );
+            let corners = self.builder.id();
+            self.builder
+                .function(op::LOAD, &[mesh.index_type.0, corners.0, pointer.0]);
+            let mut raw = [Id(0); 3];
+            let mut masked = [Id(0); 3];
+            for (k, (raw, masked)) in raw.iter_mut().zip(masked.iter_mut()).enumerate() {
+                *raw = self.builder.id();
+                self.builder.function(
+                    op::COMPOSITE_EXTRACT,
+                    &[u32_type.0, raw.0, corners.0, k as u32],
+                );
+                *masked = self.builder.id();
+                self.builder
+                    .function(op::BITWISE_AND, &[u32_type.0, masked.0, raw.0, last.0]);
+            }
+            let fourth = self.builder.id();
+            self.builder
+                .function(op::IADD, &[u32_type.0, fourth.0, vertices.0, this.0]);
+
+            // The position, then each parameter: `v1 + v2 - v0`.
+            let mut arrays = vec![(copies.positions, None)];
+            arrays.extend(
+                copies
+                    .parameters
+                    .iter()
+                    .map(|(location, copy)| (*copy, mesh.parameters.get(location).copied())),
+            );
+            for (copy, output) in arrays {
+                let corner = self.fourth_corner(copies.vec4_ptr, copy, masked);
+                let target = self.builder.id();
+                match output {
+                    None => self.builder.function(
+                        op::ACCESS_CHAIN,
+                        &[
+                            mesh.vec4_ptr.0,
+                            target.0,
+                            mesh.vertices.0,
+                            fourth.0,
+                            member.0,
+                        ],
+                    ),
+                    Some(parameter) => self.builder.function(
+                        op::ACCESS_CHAIN,
+                        &[mesh.vec4_ptr.0, target.0, parameter.0, fourth.0],
+                    ),
+                }
+                self.builder.function(op::STORE, &[target.0, corner.0]);
+            }
+
+            let second = self.builder.id();
+            self.builder.function(
+                op::COMPOSITE_CONSTRUCT,
+                &[mesh.index_type.0, second.0, raw[2].0, raw[1].0, fourth.0],
+            );
+            let slot = Self::constant(self, 2 * primitive + 1);
+            let at = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[mesh.index_ptr.0, at.0, mesh.indices.0, slot.0],
+            );
+            self.builder.function(op::STORE, &[at.0, second.0]);
+            self.builder.function(op::BRANCH, &[merge.0]);
+            self.builder.function(op::LABEL, &[merge.0]);
+        }
+    }
+
+    /// `v1 + v2 - v0` over three elements of a rectangle copy, by index.
+    fn fourth_corner(&mut self, pointer: Id, copy: Id, corners: [Id; 3]) -> Id {
+        let vec4 = self.vec4;
+        let mut values = [Id(0); 3];
+        for (value, index) in values.iter_mut().zip(corners) {
+            let at = self.builder.id();
+            self.builder
+                .function(op::ACCESS_CHAIN, &[pointer.0, at.0, copy.0, index.0]);
+            *value = self.builder.id();
+            self.builder.function(op::LOAD, &[vec4.0, value.0, at.0]);
+        }
+        let sum = self.builder.id();
+        self.builder
+            .function(op::FADD, &[vec4.0, sum.0, values[1].0, values[2].0]);
+        let corner = self.builder.id();
+        self.builder
+            .function(op::FSUB, &[vec4.0, corner.0, sum.0, values[0].0]);
+        corner
+    }
+
+    /// The clip-space position that lands a window-space one on its pixel (D731): `(x, y, z, q)`,
+    /// where `q` is `1/W`, becomes `(x W / S, y W / S, z W, W)` for `W = 1 / q` and `S` the
+    /// [`WINDOW_SPACE_SCALE`] the draw's viewport scales by. Vulkan divides by `W` and scales by
+    /// `S`, giving back `(x, y, z)`; and `W` is what it interpolates perspective by, as the
+    /// hardware does with `1/W` from the fourth component.
+    fn window_to_clip(&mut self, [x, y, depth, reciprocal]: [Id; 4]) -> [Id; 4] {
+        let one = self.float_constant(1.0);
+        let inverse_scale = self.float_constant(WINDOW_SPACE_SCALE.recip());
+        let clip_w = self.float_binary(op::FDIV, one, reciprocal);
+        let per_pixel = self.float_binary(op::FDIV, inverse_scale, reciprocal);
+        [
+            self.float_binary(op::FMUL, x, per_pixel),
+            self.float_binary(op::FMUL, y, per_pixel),
+            self.float_binary(op::FMUL, depth, clip_w),
+            clip_w,
+        ]
+    }
+
+    /// One 32-bit float operation on two float values.
+    fn float_binary(&mut self, operation: u16, lhs: Id, rhs: Id) -> Id {
+        let result = self.builder.id();
+        self.builder
+            .function(operation, &[self.f32_type.0, result.0, lhs.0, rhs.0]);
+        result
+    }
+
+    /// A 32-bit float constant, declared once per value.
+    fn float_constant(&mut self, value: f32) -> Id {
+        if let Some(id) = self.float_constants.get(&value.to_bits()) {
+            return *id;
+        }
+        let id = self.builder.id();
+        self.builder
+            .declare(op::CONSTANT, &[self.f32_type.0, id.0, value.to_bits()]);
+        self.float_constants.insert(value.to_bits(), id);
+        id
+    }
+
+    /// Stores `value` into element `index` of a rectangle copy, when this module keeps them.
+    fn copy_element(&mut self, array: Id, pointer: Id, index: u32, value: Id) {
+        let at = Self::constant(self, index);
+        let element = self.builder.id();
+        self.builder
+            .function(op::ACCESS_CHAIN, &[pointer.0, element.0, array.0, at.0]);
+        self.builder.function(op::STORE, &[element.0, value.0]);
     }
 
     fn write_observation(&mut self, member: Id, slot: u32, value: Id) {
@@ -1587,6 +2072,27 @@ impl Model for Wavefront<'_> {
 
     fn set_mesh_outputs(&mut self, vertices: Id, primitives: Id) -> Option<()> {
         self.mesh.as_ref()?;
+        let (vertices, primitives) = match self.rectangles.clone() {
+            None => (vertices, primitives),
+            // Each rectangle adds its fourth corner after the emitted vertices, and a second
+            // triangle.
+            Some(copies) => {
+                self.builder
+                    .function(op::STORE, &[copies.vertices.0, vertices.0]);
+                self.builder
+                    .function(op::STORE, &[copies.primitives.0, primitives.0]);
+                let u32_type = self.u32_type;
+                let total = self.builder.id();
+                self.builder
+                    .function(op::IADD, &[u32_type.0, total.0, vertices.0, primitives.0]);
+                let doubled = self.builder.id();
+                self.builder.function(
+                    op::IADD,
+                    &[u32_type.0, doubled.0, primitives.0, primitives.0],
+                );
+                (total, doubled)
+            }
+        };
         self.builder
             .function(op::SET_MESH_OUTPUTS_EXT, &[vertices.0, primitives.0]);
         Some(())
@@ -1594,6 +2100,11 @@ impl Model for Wavefront<'_> {
 
     fn write_mesh_position(&mut self, lane: u32, components: [Id; 4]) -> Option<()> {
         let mesh = self.mesh.clone()?;
+        let components = if self.window_space {
+            self.window_to_clip(components)
+        } else {
+            components
+        };
         let slot = Self::constant(self, lane);
         let member = Self::constant(self, 0);
         let pointer = self.builder.id();
@@ -1608,6 +2119,10 @@ impl Model for Wavefront<'_> {
             ],
         );
         self.store_vec4(pointer, components);
+        if let Some(copies) = self.rectangles.clone() {
+            let value = self.composite_vec4(components);
+            self.copy_element(copies.positions, copies.vec4_ptr, lane, value);
+        }
         Some(())
     }
 
@@ -1626,12 +2141,23 @@ impl Model for Wavefront<'_> {
             &[mesh.vec4_ptr.0, pointer.0, variable.0, slot.0],
         );
         self.store_vec4(pointer, components);
+        if let Some(copies) = self.rectangles.clone()
+            && let Some(copy) = copies.parameters.get(&location).copied()
+        {
+            let value = self.composite_vec4(components);
+            self.copy_element(copy, copies.vec4_ptr, lane, value);
+        }
         Some(())
     }
 
     fn write_mesh_indices(&mut self, lane: u32, indices: &[Id]) -> Option<()> {
         let mesh = self.mesh.clone()?;
-        let slot = Self::constant(self, lane);
+        // A rectangle's first triangle is its three corners; its second follows it.
+        let slot = if self.rectangles.is_some() {
+            Self::constant(self, 2 * lane)
+        } else {
+            Self::constant(self, lane)
+        };
         let pointer = self.builder.id();
         self.builder.function(
             op::ACCESS_CHAIN,
@@ -1651,6 +2177,9 @@ impl Model for Wavefront<'_> {
         };
         // Unmasked, as `store_vec4` explains: a mesh module's outputs cannot be read.
         self.builder.function(op::STORE, &[pointer.0, value.0]);
+        if let Some(copies) = self.rectangles.clone() {
+            self.copy_element(copies.indices, copies.index_ptr, lane, value);
+        }
         Some(())
     }
 
@@ -1721,8 +2250,14 @@ impl Model for Wavefront<'_> {
                 Ok(Self::constant(self, value))
             }
             // Uniform across the wavefront, so the same value for every lane.
-            Operand::Scalar(register) => Ok(self.load_scalar(u32::from(*register))),
-            Operand::Vector(register) => Ok(self.load_lane(u32::from(*register), lane)),
+            Operand::Scalar(register) => {
+                self.note_read(true, u32::from(*register));
+                Ok(self.load_scalar(u32::from(*register)))
+            }
+            Operand::Vector(register) => {
+                self.note_read(false, u32::from(*register));
+                Ok(self.load_lane(u32::from(*register), lane))
+            }
             // A lane mask read as an ordinary 32-bit source: its low half, as in `s_and_b32
             // exec_lo, exec_lo, sN` narrowing a 32-lane shader's mask.
             Operand::Named(named) if model::lane_mask_name(named).is_some() => {
@@ -2091,6 +2626,7 @@ impl Model for Wavefront<'_> {
     }
 
     fn read_scalar(&mut self, register: u32) -> Id {
+        self.note_read(true, register);
         Self::load_scalar(self, register)
     }
 
@@ -2127,15 +2663,51 @@ impl Model for Wavefront<'_> {
 }
 
 /// Which texture a translated module samples at which binding, and where its descriptor comes from:
-/// the byte offset in the pixel shader's descriptor table (addressed by its first two user-data
-/// registers) that the image descriptor was loaded from. `None` when the module did not load it
-/// from there; a pipeline then reads offset zero.
+/// the descriptor table the image descriptor was loaded from, and the byte offset in it. `None` when
+/// the module did not load it from a table; a pipeline then reads offset zero of the table at the
+/// stage's first two user-data words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextureSource {
     /// 0 for the first texture the module samples, 1 for a second.
     pub slot: u32,
     /// The descriptor's byte offset in the table, when a load from the table put it there.
     pub table_offset: Option<u32>,
+    /// Where the table's address came from.
+    #[serde(default)]
+    pub table: TableBase,
+}
+
+/// One half of a descriptor table's 64-bit address, as the program formed it before loading from
+/// it: a user-data word of the stage, or a constant.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum TableWord {
+    /// The stage's user-data word at this index.
+    UserData(u32),
+    /// This value.
+    Constant(u32),
+}
+
+/// A descriptor table's address: its low and high words. The default is the stage's first two
+/// user-data words, where the open-toolchain GL context puts its table.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct TableBase {
+    /// Address bits 31:0.
+    pub low: TableWord,
+    /// Address bits 63:32.
+    pub high: TableWord,
+}
+
+impl Default for TableBase {
+    fn default() -> Self {
+        Self {
+            low: TableWord::UserData(0),
+            high: TableWord::UserData(1),
+        }
+    }
 }
 
 /// The descriptor-table offsets each eight-register group is loaded from: every `s_load_dwordx8
@@ -2148,8 +2720,23 @@ pub struct TextureSource {
 fn descriptor_table_loads(
     decode: &Decode,
     encodings: &EncodingTable,
-) -> BTreeMap<u32, std::collections::BTreeSet<u32>> {
-    let mut loads: BTreeMap<u32, std::collections::BTreeSet<u32>> = BTreeMap::new();
+    first_register: u32,
+) -> BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>> {
+    let mut loads: BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>> =
+        BTreeMap::new();
+    // What each scalar register holds, in program order: a user-data word from where the hardware
+    // loads the stage's, or a constant a move put there. Anything else written is untraced.
+    let mut held: Vec<Option<TableWord>> = vec![None; model::SCALAR_REGISTERS as usize];
+    for (index, word) in
+        (0..USER_DATA_STAGE_WORDS).zip(held.iter_mut().skip(first_register as usize))
+    {
+        *word = Some(TableWord::UserData(index));
+    }
+    let forget = |held: &mut Vec<Option<TableWord>>, register: u16, count: usize| {
+        for word in held.iter_mut().skip(usize::from(register)).take(count) {
+            *word = None;
+        }
+    };
     for instruction in &decode.instructions {
         let Some(family) = instruction
             .encoding
@@ -2158,20 +2745,65 @@ fn descriptor_table_loads(
         else {
             continue;
         };
-        if encodings.mnemonic_for(family, instruction.opcode) != Some("s_load_dwordx8") {
-            continue;
-        }
-        if let [
-            Operand::Scalar(destination),
-            Operand::Scalar(0),
-            Operand::Immediate(offset),
-        ] = instruction.operands.as_slice()
-            && let Ok(offset) = u32::try_from(*offset)
-        {
-            loads
-                .entry(u32::from(*destination))
-                .or_default()
-                .insert(offset);
+        let name = encodings
+            .mnemonic_for(family, instruction.opcode)
+            .unwrap_or("");
+        match (name, instruction.operands.as_slice()) {
+            ("s_mov_b32", [Operand::Scalar(destination), source]) => {
+                let value = match source {
+                    Operand::Scalar(from) => held.get(usize::from(*from)).copied().flatten(),
+                    Operand::Integer(value) => i32::try_from(*value)
+                        .ok()
+                        .map(|v| TableWord::Constant(u32::from_ne_bytes(v.to_ne_bytes()))),
+                    Operand::Literal(value) => Some(TableWord::Constant(*value)),
+                    _ => None,
+                };
+                if let Some(slot) = held.get_mut(usize::from(*destination)) {
+                    *slot = value;
+                }
+            }
+            (
+                "s_load_dword" | "s_load_dwordx2" | "s_load_dwordx4" | "s_load_dwordx8",
+                [
+                    Operand::Scalar(destination),
+                    Operand::Scalar(base),
+                    Operand::Immediate(offset),
+                ],
+            ) => {
+                if name == "s_load_dwordx8"
+                    && let Ok(offset) = u32::try_from(*offset)
+                {
+                    let at = |register: u16| held.get(usize::from(register)).copied().flatten();
+                    let table = at(*base)
+                        .zip(at(base + 1))
+                        .map(|(low, high)| TableBase { low, high });
+                    loads
+                        .entry(u32::from(*destination))
+                        .or_default()
+                        .insert((table, offset));
+                }
+                let width = match name {
+                    "s_load_dword" => 1,
+                    "s_load_dwordx2" => 2,
+                    "s_load_dwordx4" => 4,
+                    _ => 8,
+                };
+                forget(&mut held, *destination, width);
+            }
+            // Any other write: the destination first, and a carry-out's second, a pair wide at
+            // most - untraced from here on.
+            (_, [Operand::Scalar(destination), rest @ ..]) => {
+                forget(&mut held, *destination, 2);
+                if name.contains("_co_")
+                    && let Some(Operand::Scalar(carry)) = rest.first()
+                {
+                    forget(&mut held, *carry, 2);
+                }
+            }
+            (_, [_, Operand::Scalar(carry), ..]) if name.contains("_co_") => {
+                forget(&mut held, *carry, 2);
+            }
+            _ => {}
         }
     }
     loads
@@ -2335,6 +2967,11 @@ pub fn translate_with_user_data(
     if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
         inputs.check(width.lanes())?;
     }
+    if let (Stage::Mesh, Some(geometry)) = (stage, user_data.geometry)
+        && let Some(detail) = geometry.refusal(width.lanes())
+    {
+        return Err(TranslateError::Unsupported { offset: 0, detail });
+    }
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);
     let mut module = Wavefront::for_stage(
@@ -2346,7 +2983,7 @@ pub fn translate_with_user_data(
         &parameters,
         (window, user_data),
     );
-    module.descriptor_loads = descriptor_table_loads(decode, encodings);
+    module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     crate::control::emit(&mut module, decode, encodings)?;
     let sources = module.texture_sources();
     let (words, translated) = module.finish()?;

@@ -829,19 +829,25 @@ const CB_COLOR0_BASE: u32 = 0xA318;
 /// [`crate::tiling`] slices before detiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColourTarget {
-    /// Base byte address of the surface in guest memory.
+    /// Base byte address of the surface in guest memory - for a `64KB_R_X` surface, its first
+    /// block.
     pub base: u64,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+    /// The surface's pipe-bank XOR, which moves 256-byte runs within each block
+    /// ([`crate::tiling`]); zero for a surface without one.
+    pub pipe_bank_xor: u8,
 }
 
 /// The colour target a submission set up, from the live values of `CB_COLOR0_BASE` and
 /// `CB_COLOR0_ATTRIB2` among the writes.
 ///
 /// [`None`] unless both were set: a missing half is not invented (D010). The most recent write to
-/// each wins.
+/// each wins. A `64KB_R_X` surface starts on a 64 KiB block, so the low byte of its 256-byte base
+/// is not address: radeonsi ORs the surface's pipe-bank XOR in there (`ac_descriptors.c:1477-1481`,
+/// `cb_color_base |= tile_swizzle`), and it is split out.
 #[must_use]
 pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     let base = writes
@@ -850,10 +856,85 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         .find(|write| write.register == CB_COLOR0_BASE)?
         .value;
     let extent = colour_target_extent_at(writes)?;
+    let (base, pipe_bank_xor) = match colour_swizzle_mode_at(writes) {
+        Some(SwizzleMode::Tiled64KbRX) => (base & !0xFF, (base & 0xFF) as u8),
+        _ => (base, 0),
+    };
     Some(ColourTarget {
         base: u64::from(base) << 8,
         width: extent.width,
         height: extent.height,
+        pipe_bank_xor,
+    })
+}
+
+/// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
+/// `SLICE_MAX` 25:13, `MIP_LEVEL` 29:26.
+const CB_COLOR0_VIEW: u32 = 0xA31B;
+/// `CB_COLOR0_ATTRIB` (`gfx103.json`, byte `167028`, dword `0xA31D`): `NUM_SAMPLES` 14:12,
+/// `NUM_FRAGMENTS` 16:15.
+const CB_COLOR0_ATTRIB: u32 = 0xA31D;
+/// `CB_COLOR0_DCC_BASE` (`gfx103.json`, byte `167060`, dword `0xA325`), in 256-byte units.
+const CB_COLOR0_DCC_BASE: u32 = 0xA325;
+/// `CB_COLOR0_DCC_BASE_EXT` (`gfx103.json`, byte `167584`, dword `0xA3A8`): address bits 47:40 in
+/// `BASE_256B` 7:0.
+const CB_COLOR0_DCC_BASE_EXT: u32 = 0xA3A8;
+/// `CB_COLOR0_INFO.DCC_ENABLE`, bit 28 (`gfx103.json`).
+const INFO_DCC_ENABLE: u32 = 1 << 28;
+/// `CB_COLOR0_ATTRIB3.DCC_PIPE_ALIGNED`, bit 30 (`gfx103.json`).
+const ATTRIB3_DCC_PIPE_ALIGNED: u32 = 1 << 30;
+/// `CB_COLOR0_ATTRIB3.RESOURCE_TYPE`'s value for a 2D surface, `ADDR_RSRC_TEX_2D`
+/// (`addrtypes.h:310`), which radeonsi writes there (`ac_descriptors.c:1328-1329`).
+const RESOURCE_TYPE_2D: u32 = 1;
+
+/// Colour target zero's delta colour compression, when `CB_COLOR0_INFO.DCC_ENABLE` is set: where
+/// its keys are, and whether the target is the single-level, single-slice, single-sample 2D
+/// surface whose keys are one run of whole metadata blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColourTargetDcc {
+    /// The keys' base and layout.
+    pub dcc: crate::dcc::Dcc,
+    /// One 2D slice and one mip level: `ATTRIB2.MAX_MIP`, `CB_COLOR0_VIEW` and
+    /// `ATTRIB3.MIP0_DEPTH` all zero, `ATTRIB3.RESOURCE_TYPE` 2D.
+    pub single_level: bool,
+    /// `CB_COLOR0_ATTRIB`'s sample and fragment counts both one.
+    pub single_sample: bool,
+}
+
+/// Colour target zero's DCC from the live registers, or `None` when `CB_COLOR0_INFO` is unset or
+/// does not enable it. An unwritten `VIEW`, `ATTRIB` or `DCC_BASE_EXT` reads as its reset value,
+/// zero, which `CLEAR_STATE` leaves them at.
+#[must_use]
+pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc> {
+    let last = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    if last(CB_COLOR0_INFO)? & INFO_DCC_ENABLE == 0 {
+        return None;
+    }
+    let base = (u64::from(last(CB_COLOR0_DCC_BASE_EXT).unwrap_or(0) & 0xFF) << 40)
+        | (u64::from(last(CB_COLOR0_DCC_BASE)?) << 8);
+    let attrib3 = last(CB_COLOR0_ATTRIB3)?;
+    let max_mip = last(CB_COLOR0_ATTRIB2)? >> 28;
+    // `ATTRIB3.MIP0_DEPTH` 12:0, `RESOURCE_TYPE` 25:24.
+    let mip0_depth = attrib3 & 0x1FFF;
+    let single_level = max_mip == 0
+        && last(CB_COLOR0_VIEW).unwrap_or(0) == 0
+        && mip0_depth == 0
+        && (attrib3 >> 24) & 0x3 == RESOURCE_TYPE_2D;
+    // `NUM_SAMPLES` and `NUM_FRAGMENTS`, as `log2`, together in 16:12.
+    let samples_and_fragments = (last(CB_COLOR0_ATTRIB).unwrap_or(0) >> 12) & 0x1F;
+    Some(ColourTargetDcc {
+        dcc: crate::dcc::Dcc {
+            base,
+            pipe_aligned: attrib3 & ATTRIB3_DCC_PIPE_ALIGNED != 0,
+        },
+        single_level,
+        single_sample: samples_and_fragments == 0,
     })
 }
 
@@ -1428,6 +1509,41 @@ pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<Vi
     })
 }
 
+/// Every `PA_CL_VTE_CNTL` field this reads: the six scale and offset enables (bits 0-5) and
+/// `VTX_XY_FMT`, `VTX_Z_FMT` and `VTX_W0_FMT` (bits 8-10, `gfx103.json:13365-13367`).
+const VTE_FIELDS: u32 = 0x73F;
+/// The value radeonsi gives a window-space shader (`si_state_shaders.cpp:1321-1322`): x, y and z
+/// pre-divided, no scale or offset, and `VTX_W0_FMT` clear - Gallium's `VS_WINDOW_SPACE_POSITION`,
+/// whose fourth component is `1/W` taken as is (`docs/gallium/tgsi.rst:3705-3711`).
+const VTE_WINDOW_SPACE: u32 = 0x300;
+
+/// The space a draw's positions are in, from `PA_CL_VTE_CNTL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionSpace {
+    /// Clip space, mapped through the viewport transform: the x/y terms are on, or the stream
+    /// never wrote the register.
+    Clip,
+    /// Window space, in radeonsi's form (D731).
+    Window,
+    /// The x/y terms off in some other form, with the value that asked for it.
+    Unmodelled(u32),
+}
+
+/// The space the positions of a draw are in, reading each register's value through `last` - a
+/// [`RegisterSweep::latest`] for a caller walking draws in order.
+pub fn position_space(mut last: impl FnMut(u32) -> Option<u32>) -> PositionSpace {
+    match last(PA_CL_VTE_CNTL) {
+        Some(value) if value & VTE_XY_ENABLES != VTE_XY_ENABLES => {
+            if value & VTE_FIELDS == VTE_WINDOW_SPACE {
+                PositionSpace::Window
+            } else {
+                PositionSpace::Unmodelled(value)
+            }
+        }
+        _ => PositionSpace::Clip,
+    }
+}
+
 /// [`viewport_transform_at`], reading each register's value through `last` - a
 /// [`RegisterSweep::latest`] for a caller walking draws in order.
 pub fn viewport_transform_from(
@@ -1522,15 +1638,27 @@ pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetF
     Some(decode_colour_target_format(value))
 }
 
-/// How many distinct colour target zero base addresses a stream wrote. A submission whose draws are
-/// carried out together and written back as one frame must have drawn into one target, so more
-/// than one is a refusal.
+/// How many distinct colour target zero base addresses a stream's draws drew into, counting the
+/// base left in force after them - the one a frame is written back to. `draws` are the draw
+/// packets' byte offsets. A submission whose draws are carried out together and written back as one
+/// frame must have drawn into one target, so more than one is a refusal; a base overwritten before
+/// any draw used it is not a target.
 #[must_use]
-pub fn colour_target_bases_in(writes: &[RegisterWrite]) -> usize {
-    let mut bases: Vec<u32> = writes
+pub fn colour_target_bases_in(writes: &[RegisterWrite], draws: &[u32]) -> usize {
+    let bases_written = writes
         .iter()
-        .filter(|write| write.register == CB_COLOR0_BASE)
-        .map(|write| write.value)
+        .filter(|write| write.register == CB_COLOR0_BASE);
+    let in_force = |before: u32| {
+        bases_written
+            .clone()
+            .rev()
+            .find(|write| write.packet_offset < before)
+            .map(|write| write.value)
+    };
+    let mut bases: Vec<u32> = draws
+        .iter()
+        .filter_map(|&draw| in_force(draw))
+        .chain(bases_written.clone().next_back().map(|write| write.value))
         .collect();
     bases.sort_unstable();
     bases.dedup();
@@ -2068,6 +2196,38 @@ mod tests {
         assert!(viewport_transform_at(&writes, 100).is_none());
     }
 
+    /// A draw's positions are clip space unless `PA_CL_VTE_CNTL` turns the x/y terms off; with
+    /// every scale and offset off and x, y and z pre-divided - the value radeonsi gives a
+    /// window-space shader (`si_state_shaders.cpp:1321-1322`) - they are window space (D731); any
+    /// other value with the x/y terms off is named as unmodelled.
+    #[test]
+    fn a_draw_s_position_space_is_read_from_vte_cntl() {
+        use super::{PositionSpace, position_space};
+        let with = |value: Option<u32>| position_space(|_| value);
+        assert_eq!(with(None), PositionSpace::Clip, "nothing written");
+        assert_eq!(
+            with(Some(0x43F)),
+            PositionSpace::Clip,
+            "radeonsi's clip-space value"
+        );
+        assert_eq!(with(Some(0x300)), PositionSpace::Window);
+        assert_eq!(
+            with(Some(0x700)),
+            PositionSpace::Unmodelled(0x700),
+            "W0 not 1/W"
+        );
+        assert_eq!(
+            with(Some(0x310)),
+            PositionSpace::Unmodelled(0x310),
+            "a z scale"
+        );
+        assert_eq!(
+            with(Some(0x430)),
+            PositionSpace::Unmodelled(0x430),
+            "not pre-divided"
+        );
+    }
+
     /// The vertex program is read from `PGM_LO/HI_ES`, not `PGM_LO/HI_VS`: on this generation the
     /// NGG wave takes its program counter from ES (Mesa `radv_shader.c:2078-2084`). A stream that
     /// points ES at one program and VS at another names the ES one.
@@ -2482,6 +2642,7 @@ mod tests {
                 base: 0x2_000e_0000,
                 width: 64,
                 height: 64,
+                pipe_bank_xor: 0,
             })
         );
         // A base with no extent cannot be sized; an extent with no base cannot be placed. Both
@@ -2494,6 +2655,85 @@ mod tests {
             colour_target_at(&[write(0xA3B0, 0x000f_c03f)]).is_none(),
             "no base"
         );
+    }
+
+    /// A `64KB_R_X` target's base register carries its pipe-bank XOR in the low byte
+    /// (`ac_descriptors.c:1477-1481`): Craft's third texture writes `0x040286c0`, whose surface
+    /// starts at the 64 KiB block `0x4_0286_0000` with XOR `0xc0`. A linear target's low byte is
+    /// address.
+    #[test]
+    fn a_tiled_target_s_base_splits_into_its_block_and_its_pipe_bank_xor() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let tiled = [
+            write(0xA318, 0x0402_86c0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_at(&tiled),
+            Some(ColourTarget {
+                base: 0x4_0286_0000,
+                width: 256,
+                height: 256,
+                pipe_bank_xor: 0xc0,
+            })
+        );
+        let linear = [
+            write(0xA318, 0x0402_86c0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0),
+        ];
+        assert_eq!(
+            colour_target_at(&linear).map(|t| (t.base, t.pipe_bank_xor)),
+            Some((0x4_0286_c000, 0))
+        );
+    }
+
+    /// Craft's fourth texture target, as its stream writes it: DCC enabled, pipe-aligned keys at
+    /// `0x4_028a_0000`, one level of one 2D slice. Without `DCC_ENABLE` there is none; a mip chain
+    /// or a view of one level is not single-level.
+    #[test]
+    fn a_dcc_target_decodes_its_keys_and_its_shape() {
+        use super::{ColourTargetDcc, colour_target_dcc_at};
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let craft = vec![
+            write(0xA318, 0x0402_86c0),
+            write(0xA31B, 0),
+            write(0xA31C, 0x1002_8028),
+            write(0xA31D, 0),
+            write(0xA325, 0x0402_8a00),
+            write(0xA3A8, 0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_dcc_at(&craft),
+            Some(ColourTargetDcc {
+                dcc: crate::dcc::Dcc {
+                    base: 0x4_028a_0000,
+                    pipe_aligned: true,
+                },
+                single_level: true,
+                single_sample: true,
+            })
+        );
+        let mut plain = craft.clone();
+        plain.push(write(0xA31C, 0x0002_8028));
+        assert_eq!(colour_target_dcc_at(&plain), None);
+        let mut chain = craft.clone();
+        chain.push(write(0xA3B0, 0x303f_c0ff));
+        assert!(!colour_target_dcc_at(&chain).expect("dcc").single_level);
+        let mut view = craft;
+        view.push(write(0xA31B, 1 << 26));
+        assert!(!colour_target_dcc_at(&view).expect("dcc").single_level);
     }
 
     #[test]
@@ -2526,6 +2766,35 @@ mod tests {
         assert!(mask.writes_target(1));
         assert!(!mask.writes_target(2), "MRT2 is disabled");
         assert_eq!(mask.active_targets(), 2);
+    }
+
+    /// The bases counted are the ones draws drew into, and the one left in force: a base
+    /// overwritten before any draw drew into it is not a target, and a stream whose draws share
+    /// one base and leave it in force has one. A different base in force after the last draw is a
+    /// second, since what is read back is the base left in force.
+    #[test]
+    fn colour_target_bases_are_the_ones_draws_drew_into_and_the_one_left() {
+        use super::{CB_COLOR0_BASE, RegisterWrite, colour_target_bases_in};
+        let base = |packet_offset, value| RegisterWrite {
+            packet_offset,
+            register: CB_COLOR0_BASE,
+            value,
+        };
+        let writes = [base(0, 0x100), base(8, 0x200), base(40, 0x200)];
+        assert_eq!(colour_target_bases_in(&writes, &[16, 32]), 1);
+        assert_eq!(
+            colour_target_bases_in(&writes, &[4, 32]),
+            2,
+            "the first draw drew into 0x100"
+        );
+        let after = [base(8, 0x200), base(40, 0x300)];
+        assert_eq!(colour_target_bases_in(&after, &[16]), 2);
+        assert_eq!(
+            colour_target_bases_in(&after, &[]),
+            1,
+            "no draw: the one left"
+        );
+        assert_eq!(colour_target_bases_in(&[], &[16]), 0);
     }
 
     #[test]

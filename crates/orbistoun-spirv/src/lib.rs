@@ -179,6 +179,8 @@ pub mod op {
     pub const FMUL: u16 = 133;
     /// Floating-point division.
     pub const FDIV: u16 = 136;
+    /// Converts a float to a signed integer, rounding toward zero; undefined out of range.
+    pub const CONVERT_F_TO_S: u16 = 110;
     /// Converts a signed integer to the float of the same value.
     pub const CONVERT_S_TO_F: u16 = 111;
     /// Converts an unsigned integer to the float of the same value.
@@ -1836,6 +1838,13 @@ static SHAPES: &[ShapeEntry] = &[
     (op::ACCESS_CHAIN, Some(1), &[0], Some(2), RestStride::Every),
     (op::LOAD, Some(1), &[0, 2], None, RestStride::Every),
     (op::BITCAST, Some(1), &[0, 2], None, RestStride::Every),
+    (
+        op::CONVERT_F_TO_S,
+        Some(1),
+        &[0, 2],
+        None,
+        RestStride::Every,
+    ),
     (
         op::CONVERT_S_TO_F,
         Some(1),

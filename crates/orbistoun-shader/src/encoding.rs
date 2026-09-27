@@ -59,6 +59,12 @@ impl OperandField {
 /// Uniform across encodings, so it is a constant rather than a table column.
 pub const LITERAL_MARKER: u32 = 255;
 
+/// The source codes meaning "a modifier dword follows this instruction": `DPP8` (233) and
+/// `DPP8` with fetch-inactive (234) (`aco_assembler.cpp:1060`, `233u + dpp.fetch_inactive`),
+/// `SDWA` (249, `:1185`) and `DPP16` (250, `:1032`). The dword carries the real first source and
+/// the modifier's fields, so the instruction is a word longer than its family's fixed width.
+pub const MODIFIER_MARKERS: [u32; 4] = [233, 234, 249, 250];
+
 /// One instruction encoding family.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Encoding {
@@ -96,6 +102,12 @@ pub struct Encoding {
     /// shader, which [`crate::decode()`] reports as a decode running off the end.
     #[serde(default)]
     pub literal_operands: Vec<OperandField>,
+    /// Operand fields that can select a trailing modifier dword ([`MODIFIER_MARKERS`]).
+    ///
+    /// The first source of the short vector forms. A miss steps into the modifier word and
+    /// decodes it as an instruction, which nothing downstream can tell from a real one.
+    #[serde(default)]
+    pub modifier_operands: Vec<OperandField>,
     /// Where this family's operands sit, in the order the specification prints them.
     ///
     /// `None` means no layout is established. `Some([])` means the family has no register
@@ -144,7 +156,17 @@ impl Encoding {
                 .get(field.word)
                 .map_or(0, |word| field.extract(*word) * 4)
         });
-        self.width_bytes + extra + if literal { 4 } else { 0 }
+        let modifier = self.modifier_selected(words).is_some();
+        self.width_bytes + extra + if literal || modifier { 4 } else { 0 }
+    }
+
+    /// The modifier marker an instruction's source selects, when one does: the dword after the
+    /// fixed width is then its modifier word.
+    pub fn modifier_selected(&self, words: &[u32]) -> Option<u32> {
+        self.modifier_operands.iter().find_map(|field| {
+            let code = field.extract(*words.get(field.word)?);
+            MODIFIER_MARKERS.contains(&code).then_some(code)
+        })
     }
 }
 
@@ -552,6 +574,7 @@ mod tests {
                 width: 9,
                 word: 0,
             }],
+            modifier_operands: Vec::new(),
             operands: None,
         };
         assert_eq!(encoding.length_bytes(&[0x0000_0000]), 4, "no literal");
@@ -559,6 +582,43 @@ mod tests {
             encoding.length_bytes(&[0x0000_00FF]),
             8,
             "operand 255 pulls in a trailing dword"
+        );
+    }
+
+    /// A source selecting SDWA (249), DPP16 (250) or DPP8 (233, 234) carries the modifier dword
+    /// after the instruction (`aco_assembler.cpp:1032`, `:1060`, `:1185`).
+    #[test]
+    fn a_modifier_operand_extends_the_instruction_by_one_dword() {
+        let source = OperandField {
+            shift: 0,
+            width: 9,
+            word: 0,
+        };
+        let encoding = Encoding {
+            name: "WITH_MODIFIER".into(),
+            mask: 0x8000_0000,
+            value: 0x0000_0000,
+            opcode: OperandField {
+                shift: 25,
+                width: 6,
+                word: 0,
+            },
+            opcode_extension: None,
+            width_bytes: 4,
+            extra_dwords: None,
+            literal_operands: vec![source],
+            modifier_operands: vec![source],
+            operands: None,
+        };
+        for code in [233, 234, 249, 250] {
+            assert_eq!(encoding.length_bytes(&[code]), 8, "code {code}");
+            assert_eq!(encoding.modifier_selected(&[code]), Some(code));
+        }
+        assert_eq!(encoding.length_bytes(&[248]), 4);
+        assert_eq!(
+            encoding.modifier_selected(&[0x100]),
+            None,
+            "a vector register"
         );
     }
 
