@@ -279,6 +279,11 @@ guest_module! {
         "sceLibcMspaceCalloc" => 3,
         "sceLibcMspaceRealloc" => 3,
         "sceLibcMspaceFree" => 2,
+        "sceLibcMspaceCreate" => 4,
+        "sceLibcMspaceDestroy" => 1,
+        "sceLibcMspaceMemalign" => 3,
+        "sceLibcMspaceMallocUsableSize" => 1,
+        "aligned_alloc" => 2,
         "exit" => 1,
         "_Exit" => 1,
         // The raw syscall's spelling: FreeBSD entry 1 is `_exit`, and the name derived from
@@ -1011,6 +1016,67 @@ fn mspace_free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mut request = [0_u64; GUEST_ARG_REGISTERS];
     request[0] = args[1];
     free(&request)
+}
+
+/// `sceLibcMspaceCreate(name, base, capacity, flag)`: an arena handle.
+///
+/// Every mspace is served from the one host heap and the handle is not consulted (D451), so the
+/// handle only has to be distinct and non-null; it is a small block of this allocator's own, which
+/// `sceLibcMspaceDestroy` frees. Unserved, the call bound to the title's bundled libc.prx, whose
+/// arena the rest of this family never reads - PPSA21564's `sceLibcMspaceMemalign` then faulted on
+/// the null that arena answered.
+fn mspace_create(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    allocate(MSPACE_HANDLE_BYTES, HEAP_HEADER)
+}
+
+/// The size of the block an mspace handle is: dlmalloc's `malloc_state` is larger, but nothing
+/// reads through the handle here, so it holds nothing.
+const MSPACE_HANDLE_BYTES: usize = 64;
+
+/// `sceLibcMspaceDestroy(msp)`: releases the handle. dlmalloc's `destroy_mspace` answers the bytes
+/// it released; with every allocation on the shared heap there are none to report beyond the
+/// handle's, so it answers zero.
+fn mspace_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mut release = [0_u64; GUEST_ARG_REGISTERS];
+    release[0] = args[0];
+    free(&release);
+    0
+}
+
+/// `sceLibcMspaceMemalign(msp, alignment, bytes)`: dlmalloc's `mspace_memalign`, which rounds an
+/// alignment that is not a power of two up to the next one (`internal_memalign`), then allocates
+/// from the shared heap.
+fn mspace_memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (Ok(align), Ok(size)) = (usize::try_from(args[1]), usize::try_from(args[2])) else {
+        return 0;
+    };
+    let Some(align) = align.max(1).checked_next_power_of_two() else {
+        return 0;
+    };
+    allocate(size, align)
+}
+
+/// `sceLibcMspaceMallocUsableSize(ptr)`: dlmalloc's `mspace_usable_size` - the bytes the block can
+/// hold, zero for null. Unserved, it bound to the bundled libc.prx and read this allocator's
+/// blocks with that heap's chunk layout.
+fn mspace_malloc_usable_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return 0;
+    }
+    header_of(args[0]).map_or(0, |(total, offset)| (total - offset) as u64)
+}
+
+/// `aligned_alloc(alignment, size)` (ISO C 7.22.3.1): a block whose address is a multiple of a
+/// power-of-two `alignment`; any other alignment is refused with null, as FreeBSD's
+/// `aligned_alloc(3)` does.
+fn aligned_alloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (Ok(align), Ok(size)) = (usize::try_from(args[0]), usize::try_from(args[1])) else {
+        return 0;
+    };
+    if !align.is_power_of_two() {
+        return 0;
+    }
+    allocate(size, align)
 }
 
 /// `__cxa_atexit(destructor, argument, dso_handle)`.
@@ -3111,6 +3177,11 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("memalign", memalign),
         ("posix_memalign", posix_memalign),
         ("reallocalign", reallocalign),
+        ("aligned_alloc", aligned_alloc),
+        ("sceLibcMspaceCreate", mspace_create),
+        ("sceLibcMspaceDestroy", mspace_destroy),
+        ("sceLibcMspaceMemalign", mspace_memalign),
+        ("sceLibcMspaceMallocUsableSize", mspace_malloc_usable_size),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
         ("vsprintf_s", vsprintf_s),
@@ -3822,6 +3893,42 @@ mod tests {
             assert_eq!(p % align, 0, "alignment {align} was not honoured");
             call("free", [p, 0, 0, 0, 0, 0]);
         }
+    }
+
+    /// An mspace is created, allocated from with an alignment, sized and destroyed through the one
+    /// allocator; the handle is usable and not null.
+    #[test]
+    fn an_mspace_lives_its_whole_life_on_the_one_allocator() {
+        let arena = vec![0_u8; 0x1_0000];
+        let base = arena.as_ptr() as u64;
+        let name = b"test\0";
+        let msp = call(
+            "sceLibcMspaceCreate",
+            [name.as_ptr() as u64, base, 0x1_0000, 0, 0, 0],
+        );
+        assert_ne!(msp, 0, "a handle");
+        let p = call("sceLibcMspaceMemalign", [msp, 256, 100, 0, 0, 0]);
+        assert_ne!(p, 0);
+        assert_eq!(p % 256, 0, "the alignment is honoured");
+        assert!(call("sceLibcMspaceMallocUsableSize", [p, 0, 0, 0, 0, 0]) >= 100);
+        assert_eq!(call("sceLibcMspaceMallocUsableSize", [0, 0, 0, 0, 0, 0]), 0);
+        // dlmalloc rounds an alignment that is not a power of two up to the next one.
+        let q = call("sceLibcMspaceMemalign", [msp, 24, 8, 0, 0, 0]);
+        assert_ne!(q, 0);
+        assert_eq!(q % 32, 0, "24 rounded up to 32");
+        call("sceLibcMspaceFree", [msp, p, 0, 0, 0, 0]);
+        call("sceLibcMspaceFree", [msp, q, 0, 0, 0, 0]);
+        assert_eq!(call("sceLibcMspaceDestroy", [msp, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// `aligned_alloc` honours a power-of-two alignment and refuses any other with null.
+    #[test]
+    fn aligned_alloc_honours_a_power_of_two_and_refuses_the_rest() {
+        let p = call("aligned_alloc", [64, 128, 0, 0, 0, 0]);
+        assert_ne!(p, 0);
+        assert_eq!(p % 64, 0);
+        call("free", [p, 0, 0, 0, 0, 0]);
+        assert_eq!(call("aligned_alloc", [24, 48, 0, 0, 0, 0]), 0);
     }
 
     /// `reallocalign(NULL, n, a)` is an aligned allocation - the call PPSA02664's Unity runtime

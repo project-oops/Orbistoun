@@ -1769,6 +1769,77 @@ found_on = "2026-09-03"
 note = "Called 2 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
+name = "sceLibcMspaceCreate"
+found_by = "generated"
+arity = 4
+purpose = "Creates an mspace arena and answers its handle."
+edge_cases = [
+    "Every mspace is served from the one host heap and the handle is not consulted (D451), so the handle is a small block of this allocator's own - distinct and non-null.",
+    "Unserved, it bound to the title's bundled libc.prx, whose arena the rest of the family never reads; PPSA21564's sceLibcMspaceMemalign then faulted on the null that arena answered.",
+]
+known_by = "assumed"
+assumptions = [
+    "The argument order (name, base, capacity, flag) is taken from the call shape; the base and capacity are not used, since the arena is the shared heap.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceLibcMspaceDestroy"
+found_by = "generated"
+arity = 1
+purpose = "Destroys an mspace arena."
+edge_cases = [
+    "Frees the handle block; answers zero, since every allocation lives on the shared heap and none is released with the arena.",
+]
+known_by = "assumed"
+assumptions = [
+    "dlmalloc destroy_mspace answers the bytes released; what the platform answers is unmeasured.",
+]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceLibcMspaceMemalign"
+found_by = "static"
+arity = 3
+purpose = "Allocates from an mspace at a given alignment."
+edge_cases = [
+    "An alignment that is not a power of two is rounded up to the next one, as dlmalloc internal_memalign does.",
+    "PPSA21564 faulted inside its bundled libc.prx here (cmp [rdi+0x38]) when the call bound there with a null arena.",
+]
+known_by = "published"
+cites = "Doug Lea dlmalloc 2.8.6 (public domain) mspace interface, which the platform's sceLibcMspace* family wraps; D451 (one host heap, arena handle not consulted); internal_memalign"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceLibcMspaceMallocUsableSize"
+found_by = "static"
+arity = 1
+purpose = "Answers how many bytes an allocated block can hold."
+edge_cases = [
+    "Zero for null; otherwise the block's usable bytes from this allocator's header. Bound to the bundled libc.prx it read this allocator's blocks with that heap's chunk layout.",
+]
+known_by = "published"
+cites = "Doug Lea dlmalloc 2.8.6 (public domain) mspace interface, which the platform's sceLibcMspace* family wraps; D451 (one host heap, arena handle not consulted); mspace_usable_size"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "aligned_alloc"
+found_by = "published-standard"
+arity = 2
+purpose = "Allocates memory whose address is a multiple of a power-of-two alignment."
+edge_cases = [
+    "An alignment that is not a power of two answers null, as FreeBSD aligned_alloc(3) does.",
+]
+known_by = "published"
+cites = "ISO C 7.22.3.1 aligned_alloc; FreeBSD aligned_alloc(3)"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
 name = "reallocalign"
 found_by = "static"
 arity = 3
