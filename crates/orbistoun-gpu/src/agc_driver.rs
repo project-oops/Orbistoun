@@ -417,6 +417,12 @@ impl GuestCp<'_> {
                 submission.report.unbound_textures
             ));
         }
+        if let (refused @ 1.., why) = submission.report.unbound_buffers {
+            return Err(format!(
+                "{refused} draw(s) read through a buffer that could not be bound: {}",
+                why.unwrap_or("no reason was kept")
+            ));
+        }
         if let Some(dcc) = submission.colour_target_dcc
             && let Some(why) = crate::dcc::unsupported(
                 submission.colour_target_tiling,

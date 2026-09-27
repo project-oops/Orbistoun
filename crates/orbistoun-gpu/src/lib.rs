@@ -15,6 +15,7 @@ pub mod dcc;
 pub mod depth;
 pub mod dispatch;
 pub mod display;
+pub mod draw_buffers;
 pub mod packet;
 pub mod perf;
 pub mod pipeline;
