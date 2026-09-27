@@ -1179,7 +1179,26 @@ impl GuestCp<'_> {
     }
 }
 
+thread_local! {
+    /// The releases the command processor reported during the walk in progress on this thread,
+    /// handed to the display once the walk returns (D728).
+    static RELEASED: std::cell::RefCell<Vec<(u64, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Hands the display every release the walk just reported. After the walk rather than during it:
+/// a flip presents, and presenting reads back through this module, which the walk is inside.
+fn hand_releases_to_display() {
+    let releases = RELEASED.with(|released| std::mem::take(&mut *released.borrow_mut()));
+    for (address, context) in releases {
+        crate::display::released(address, context);
+    }
+}
+
 impl cp::CpMemory for GuestCp<'_> {
+    fn released(&mut self, address: u64, context: u32) {
+        RELEASED.with(|released| released.borrow_mut().push((address, context)));
+    }
+
     fn run_draws(&mut self) -> bool {
         crate::perf::span(crate::perf::Span::RunDraws, || self.draw_into_target())
     }
@@ -1634,6 +1653,7 @@ fn submit_described_timed(descriptor: u64) -> u64 {
             },
         )
     });
+    hand_releases_to_display();
     if executed.draws == 0
         && let Ok(mut pending) = undelivered_modules().lock()
     {

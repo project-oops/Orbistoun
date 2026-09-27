@@ -1045,6 +1045,26 @@ fn noted_regions() -> &'static Mutex<Vec<(u64, u64)>> {
     NOTED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// Maps `[base, base + len)` read-write at exactly `base` on the platform's behalf - memory a
+/// system library places in the process at an address of its own, such as the display's flip
+/// labels (D728). Answers whether the range is mapped, so a second call for the same range is a
+/// success rather than a conflict.
+pub fn map_system_region(base: u64, len: u64) -> bool {
+    let protection = orbistoun_mem::Protection::READ_WRITE;
+    let Ok(mut space) = mappings().lock() else {
+        return false;
+    };
+    if space.owns(base, len) {
+        return true;
+    }
+    if space.reserve(base, len, protection).is_err() {
+        return false;
+    }
+    drop(space);
+    mapping_placed(base, len, protection, true);
+    true
+}
+
 /// Records a `[base, base + len)` region the guest can read but this crate did not map, so
 /// `virtual_query` answers for it. Stored as `(start, end)`; a region already noted is not
 /// duplicated, so the worker may call this on every run.

@@ -7,6 +7,7 @@
 use orbistoun_hle::guest_module;
 
 pub mod av_player;
+pub mod queued;
 pub mod recording;
 
 guest_module! {
@@ -407,7 +408,13 @@ fn video_out_set_buffer_attribute2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `buffer_index` is recorded as the port's last-flipped index. `flip_mode` is not modelled:
 /// when a flip is shown is a property of a scanout that does not exist.
 fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (handle, buffer_index, flip_arg) = (args[0], args[1], args[3]);
+    flip(args[0], args[1], args[3])
+}
+
+/// Presents `buffer_index` on port `handle` and posts its completion - the body a flip submitted
+/// on the CPU and one carried out from a command buffer (D728) share. The port's answer: `0`, or
+/// the bad-handle code.
+pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
     if port::with(handle, |p| {
         p.flips += 1;
         p.last_flip = Some(buffer_index);
@@ -848,6 +855,63 @@ mod tests {
                 "the argument comes back through sar 16"
             );
         }
+    }
+
+    /// A flip queued in a command buffer is performed at its release (D728): the completion is
+    /// posted with its argument, the port records the buffer, and the label of the buffer it
+    /// replaced on screen reads `0` again. A release under another context id, or for a port or
+    /// buffer that is not there, performs nothing.
+    #[test]
+    fn a_queued_flip_is_performed_at_its_release() {
+        use super::queued;
+        let _guard = serial();
+        let handle = open_on(11);
+        let queue = orbistoun_kernel::sync::create_equeue("queued-flip-test");
+        let mut add = [0_u64; GUEST_ARG_REGISTERS];
+        add[..3].copy_from_slice(&[queue, handle, 0x77]);
+        assert_eq!(super::video_out_add_flip_event(&add), 0);
+        let addresses: [u64; 2] = [0x2_0500_0000, 0x2_0501_0000];
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, addresses.as_ptr() as u64, 2])),
+            0
+        );
+        assert_eq!(queued::queue(handle, 4, 1), None, "an unregistered buffer");
+        assert_eq!(queued::queue(0xdead, 0, 1), None, "a port that is not open");
+
+        let (first, label0) = queued::queue(handle, 0, 5).expect("buffer 0 queues");
+        assert_eq!(label0, queued::FLIP_LABEL_BASE);
+        assert!(
+            !queued::released(label0, first.wrapping_add(1000)),
+            "another context id"
+        );
+        // The command processor stores the released value before it reports the release.
+        // SAFETY: the label region `queue` mapped.
+        assert!(unsafe { orbistoun_mem::guest::write_u64(label0, 1) });
+        assert!(queued::released(label0, first));
+        assert!(!queued::released(label0, first), "a flip is performed once");
+        let events = orbistoun_kernel::sync::take_events(queue, 4);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data >> 16, 5);
+        assert_eq!(
+            port::with(handle, |p| p.last_flip).expect("the port"),
+            Some(0)
+        );
+
+        let (second, label1) = queued::queue(handle, 1, 6).expect("buffer 1 queues");
+        assert_eq!(label1, queued::FLIP_LABEL_BASE + 8);
+        assert!(second > first, "context ids rise");
+        assert!(queued::released(label1, second));
+        // SAFETY: the label region `queue` mapped.
+        let cleared = unsafe { orbistoun_mem::guest::read_u64(label0) };
+        assert_eq!(
+            cleared,
+            Some(0),
+            "buffer 0 left the screen, so its label is clear"
+        );
+        assert_eq!(
+            port::with(handle, |p| p.last_flip).expect("the port"),
+            Some(1)
+        );
     }
 
     /// Opens a distinct output so the shared port table cannot make two tests collide on

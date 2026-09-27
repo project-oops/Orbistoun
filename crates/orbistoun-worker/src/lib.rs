@@ -527,6 +527,12 @@ fn install_presentation() {
     });
     // Every flip, shown as it is presented.
     orbistoun_video::install_flip_observer(render::present_flip);
+    // Flips a command buffer carries, queued by their builder and carried out at their release
+    // (D728).
+    orbistoun_gpu::display::install(orbistoun_gpu::display::Display {
+        queue_flip: orbistoun_video::queued::queue,
+        released: orbistoun_video::queued::released,
+    });
     // A launcher's request to start another title, which the front end carries out.
     orbistoun_systemservice::launch::install_launch_observer(render::request_launch);
 }

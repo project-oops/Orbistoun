@@ -48,6 +48,10 @@ pub trait CpMemory {
     fn write(&mut self, address: u64, bytes: &[u8]) -> bool;
     /// The 64-bit GPU clock counter a `RELEASE_MEM` with `DATA_SEL` 3 writes.
     fn timestamp(&mut self) -> u64;
+    /// A `RELEASE_MEM` stored its value at `address` and raised the interrupt with context id
+    /// `context` - what the display acts on for a flip queued in the stream (D728). The default
+    /// has no display to tell.
+    fn released(&mut self, _address: u64, _context: u32) {}
     /// Whether the memory at `address` holds exactly `expected`, asked of a whole colour target to
     /// see whether anything wrote it. The default reads a copy; guest memory compares in place.
     fn holds(&self, address: u64, expected: &[u8]) -> bool {
@@ -402,6 +406,8 @@ fn release_mem(
     if !written.is_empty() && !memory.write(destination, &written) {
         return Err(Stop::OutOfBounds);
     }
+    // The last body dword is the interrupt's context id (`INT_CTXID`).
+    memory.released(destination, body.get(6).copied().unwrap_or(0));
     result.releases += 1;
     result.bytes_written += written.len() as u64;
     Ok(())
@@ -448,6 +454,8 @@ mod tests {
     struct Fake {
         bytes: BTreeMap<u64, u8>,
         clock: u64,
+        /// Every release reported, `(address, context)`.
+        released: Vec<(u64, u32)>,
     }
 
     impl Fake {
@@ -481,6 +489,40 @@ mod tests {
             self.clock += 1;
             0x1_0000_0000 + self.clock
         }
+        fn released(&mut self, address: u64, context: u32) {
+            self.released.push((address, context));
+        }
+    }
+
+    /// A release that lands reports its address and interrupt context id, which is how a flip
+    /// queued in the stream reaches the display (D728); one that cannot land reports nothing.
+    #[test]
+    fn a_release_reports_its_address_and_context_id() {
+        let packet = |dst: u64| -> Vec<u32> {
+            vec![
+                command_header(measured::RELEASE_MEM, 7),
+                0x0620_0504,
+                0x4201_0000,
+                dst as u32,
+                (dst >> 32) as u32,
+                1,
+                0,
+                0x0800_0101,
+            ]
+        };
+        let mut memory = Fake::default();
+        let ran = execute(&bytes(&packet(0x2000)), &mut memory);
+        assert_eq!(ran.stopped, Stopped::Completed);
+        assert_eq!(memory.released, vec![(0x2000, 0x0800_0101)]);
+        assert_eq!(memory.word(0x2000), 1, "the label holds the released value");
+
+        let mut memory = Fake::default();
+        let ran = execute(&bytes(&packet(0xC_8000_40A0)), &mut memory);
+        assert!(matches!(ran.stopped, Stopped::OutOfBounds { .. }));
+        assert!(
+            memory.released.is_empty(),
+            "a release that did not land is not reported"
+        );
     }
 
     fn fill(dst: u64, value: u32, bytes: u32) -> Vec<u32> {
