@@ -17,7 +17,9 @@ use orbistoun_shader::{
 use orbistoun_translate::wavefront::MeshPrimitive;
 use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
-use orbistoun_translate::wavefront::{TextureSource, USER_DATA_STAGE_WORDS, UserData};
+use orbistoun_translate::wavefront::{
+    GeometryInputs, TableBase, TableWord, TextureSource, USER_DATA_STAGE_WORDS, UserData,
+};
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
 
 use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS};
@@ -79,6 +81,17 @@ const fn stage_salt(stage: Stage) -> u64 {
         Stage::Fragment => 0x5352_4746_0000_0001,
         Stage::Mesh => 0x4d45_5348_0000_0001,
     }
+}
+
+/// Distinguishes the same primitive shader translated for different draws' geometry (D730), in
+/// the cache key.
+fn geometry_salt(geometry: Option<GeometryInputs>) -> u64 {
+    geometry.map_or(0, |g| {
+        0x4745_4f4d_0000_0000
+            ^ (u64::from(g.vertices) << 32)
+            ^ (u64::from(g.primitives) << 16)
+            ^ u64::from(g.first_vertex)
+    })
 }
 
 /// Distinguishes the same shader translated for different mesh primitives, in the cache key.
@@ -248,6 +261,12 @@ pub struct SubmissionReport {
     /// descriptor table, whose first eight words are the image descriptor (the GL context's
     /// textured shader loads them with `s_load_dwordx8 s[4:11], s[0:1], 0x00`).
     pub textures: Vec<ImageDescriptor>,
+    /// Draws' sampled texture slots nothing could be bound to - an unreadable descriptor, or one
+    /// this does not read - so the backend would sample its placeholder.
+    pub unbound_textures: usize,
+    /// Draws whose viewport transform the stream turned off (`PA_CL_VTE_CNTL`), so their positions
+    /// are not the clip space the backend draws.
+    pub unmodelled_viewports: usize,
 }
 
 impl SubmissionReport {
@@ -350,14 +369,106 @@ enum PrepareFailure {
     Unresolved(String),
     /// The address resolved and something after it did not.
     Resolved(String),
+    /// A primitive shader reads the geometry engine's inputs, and it was prepared without a
+    /// draw's geometry to seed them (D730).
+    NeedsGeometry(String),
 }
 
 impl PrepareFailure {
     /// The reason, for a report.
     fn reason(self) -> String {
         match self {
-            Self::Unresolved(reason) | Self::Resolved(reason) => reason,
+            Self::Unresolved(reason) | Self::Resolved(reason) | Self::NeedsGeometry(reason) => {
+                reason
+            }
         }
+    }
+}
+
+/// Colour target zero's base, tiling, element layout and compression, and how many bases the draws
+/// drew into, for a backend to build its pipeline from and a write-back to place its frame by. Each
+/// is `None` when the stream set its register nowhere: state is read, never assumed.
+fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], draws: &[DrawCall]) {
+    submission.colour_target = colour_target_at(writes);
+    submission.colour_target_tiling = colour_swizzle_mode_at(writes);
+    submission.colour_target_format = colour_target_format_at(writes);
+    submission.colour_target_dcc = colour_target_dcc_at(writes);
+    let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();
+    submission.colour_target_bases = colour_target_bases_in(writes, &draw_offsets);
+}
+
+/// The shaders one draw runs, by stage.
+type DrawShaders = Vec<(ShaderStage, ResourceId)>;
+
+/// A candidate that was not prepared: its failure recorded, or a primitive shader that needs a
+/// draw's geometry (D730), with the reason it gave.
+enum Unprepared {
+    Failed,
+    NeedsGeometry(String),
+}
+
+/// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
+/// the reason they gave; what each geometry made; and the refusals already recorded.
+#[derive(Default)]
+struct ByGeometry {
+    /// Candidates prepared without geometry, and what they became; `None` for a failure.
+    plain: BTreeMap<(u32, u64), Option<ResourceId>>,
+    needs: BTreeMap<(u32, u64), String>,
+    prepared: BTreeMap<(u32, u64, GeometryInputs), Option<ResourceId>>,
+    refused: std::collections::BTreeSet<(u64, String)>,
+}
+
+/// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
+/// primitive, `PRIM_TYPE` in bits 5:0.
+const VGT_PRIMITIVE_TYPE: u32 = 0xC242;
+/// `DI_PT_TRILIST` and `DI_PT_RECTLIST` (`gfx103.json:691`, `:704`, enum `VGT_DI_PRIM_TYPE`): the
+/// input primitives of three vertices each, the second radeonsi's blits.
+const DI_PT_TRILIST: u32 = 4;
+const DI_PT_RECTLIST: u32 = 17;
+/// `VGT_SHADER_STAGES_EN` (`gfx103.json`, dword `0xA2D5`); its `PRIMGEN_PASSTHRU_EN`, bit 25, hands
+/// the primitive shader its primitive already packed in `v0`, a layout not seeded.
+const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
+const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
+/// `GE_INDX_OFFSET` (`gfx103.json`, byte `198952`, uconfig dword `0xC24A`): added to every vertex
+/// index, so the vertex ids of a draw that sets it are not its indices.
+const GE_INDX_OFFSET: u32 = 0xC24A;
+
+/// The geometry-engine inputs a draw hands its primitive shader, when one subgroup of `lanes`
+/// threads holds it whole (D730), or why not: a non-indexed draw of one instance over a list of
+/// three-vertex primitives, with no index offset and no passthrough.
+fn draw_geometry(
+    draw: &DrawCall,
+    mut latest: impl FnMut(u32) -> Option<u32>,
+    lanes: u32,
+) -> Result<GeometryInputs, String> {
+    let DrawKind::Auto { vertices } = draw.kind else {
+        return Err("an indexed draw's geometry-engine inputs are not seeded".to_owned());
+    };
+    if draw.instances != 1 {
+        return Err(
+            "a draw of more than one instance's geometry-engine inputs are not seeded".to_owned(),
+        );
+    }
+    let topology = latest(VGT_PRIMITIVE_TYPE).map(|value| value & 0x3F);
+    if !matches!(topology, Some(DI_PT_TRILIST | DI_PT_RECTLIST)) {
+        return Err(format!(
+            "the draw's input primitive {topology:?} is not a list of three-vertex primitives, whose geometry-engine inputs are the ones seeded"
+        ));
+    }
+    if latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0) {
+        return Err("a passthrough primitive shader's inputs are not seeded".to_owned());
+    }
+    if latest(GE_INDX_OFFSET).is_some_and(|value| value != 0) {
+        return Err("a draw with an index offset's vertex ids are not seeded".to_owned());
+    }
+    let geometry = GeometryInputs {
+        first_vertex: 0,
+        vertices,
+        primitives: vertices / 3,
+    };
+    match geometry.refusal(lanes) {
+        Some(why) => Err(why.to_owned()),
+        None => Ok(geometry),
     }
 }
 
@@ -525,6 +636,7 @@ impl Pipeline {
             dx10_clamp: state.dx10_clamp,
             pixel_inputs: None,
             compute: Some(state.inputs),
+            geometry: None,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -704,17 +816,9 @@ impl Pipeline {
             });
         }
 
-        // Colour target zero's base and tiling, and the depth, stencil and blend state, for a
-        // backend to build its pipeline from. Each is `None` when the stream set its register
-        // nowhere: state is read, never assumed.
-        submission.colour_target = colour_target_at(&writes);
-        submission.colour_target_tiling = colour_swizzle_mode_at(&writes);
-        submission.colour_target_format = colour_target_format_at(&writes);
-        submission.colour_target_dcc = colour_target_dcc_at(&writes);
         // The draws, found once for every pass that walks them.
         let draws = draw_calls(&walked, stream);
-        let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();
-        submission.colour_target_bases = colour_target_bases_in(&writes, &draw_offsets);
+        record_colour_target(&mut submission, &writes, &draws);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&writes);
@@ -772,8 +876,8 @@ impl Pipeline {
                 &mut submission.commands,
                 (&walked, stream, &draws),
                 &writes,
-                &per_draw,
-                depth_target.map(|(id, _, _)| id),
+                (&per_draw, depth_target.map(|(id, _, _)| id)),
+                &mut submission.report.unmodelled_viewports,
             );
         });
         span(Span::PrepareTextures, || {
@@ -783,6 +887,7 @@ impl Pipeline {
                     &mut submission.commands,
                     (&self.texture_sources, &mut self.texels),
                     memory,
+                    &mut submission.report.unbound_textures,
                 );
             }
         });
@@ -828,8 +933,9 @@ impl Pipeline {
         submission: &mut Submission,
     ) -> Vec<Vec<(ShaderStage, ResourceId)>> {
         // Every (stage, address) prepared so far and what it became; `None` for a failure, so it is
-        // tried and reported once however many draws name it.
-        let mut prepared: BTreeMap<(u32, u64), Option<ResourceId>> = BTreeMap::new();
+        // tried and reported once however many draws name it. A primitive shader that needs a
+        // draw's geometry is prepared per geometry instead (D730).
+        let mut by_geometry = ByGeometry::default();
         let registered_stages: Vec<ShaderStage> = candidates
             .iter()
             .filter(|c| {
@@ -840,13 +946,22 @@ impl Pipeline {
             .map(|c| c.stage)
             .collect();
         for &candidate in candidates {
-            let resource = self.prepare_candidate(candidate, memory, submission);
-            prepared.insert((candidate.stage as u32, candidate.address), resource);
-            if let Some(resource) = resource {
-                submission.commands.push(RenderCommand::BindShader {
-                    stage: candidate.stage,
-                    shader: resource,
-                });
+            let key = (candidate.stage as u32, candidate.address);
+            match self.prepare_candidate(candidate, (memory, None), submission) {
+                Ok(resource) => {
+                    by_geometry.plain.insert(key, Some(resource));
+                    submission.commands.push(RenderCommand::BindShader {
+                        stage: candidate.stage,
+                        shader: resource,
+                    });
+                }
+                Err(Unprepared::Failed) => {
+                    by_geometry.plain.insert(key, None);
+                }
+                // Bound per draw, with each draw's geometry.
+                Err(Unprepared::NeedsGeometry(reason)) => {
+                    by_geometry.needs.insert(key, reason);
+                }
             }
         }
 
@@ -858,11 +973,32 @@ impl Pipeline {
         // frame rewrites the same addresses before each of many draws.
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
+        let lanes = if submission.report.wave_widths.primitive_w32 {
+            32
+        } else {
+            64
+        };
         for draw in draws {
-            let written: Vec<Option<u32>> = shader_registers
+            let mut written: Vec<Option<u32>> = shader_registers
                 .iter()
                 .map(|&register| sweep.latest(draw.packet_offset, register))
                 .collect();
+            // A primitive shader prepared per geometry runs another module for other geometry, so
+            // the geometry is part of what must repeat.
+            let geometry = draw_geometry(
+                draw,
+                |register| sweep.latest(draw.packet_offset, register),
+                lanes,
+            );
+            if !by_geometry.needs.is_empty()
+                && let Ok(geometry) = geometry
+            {
+                written.extend([
+                    Some(geometry.vertices),
+                    Some(geometry.primitives),
+                    Some(geometry.first_vertex),
+                ]);
+            }
             if previous_writes.as_ref() == Some(&written) {
                 per_draw.push(Vec::clone(&previous_shaders));
                 continue;
@@ -877,18 +1013,16 @@ impl Pipeline {
                 if !queue.permits(stage) || registered_stages.contains(&stage) {
                     continue;
                 }
-                let key = (stage as u32, inferred.address);
-                let resource = if let Some(known) = prepared.get(&key) {
-                    *known
-                } else {
-                    let candidate = Candidate {
-                        address: inferred.address,
-                        stage,
-                    };
-                    let made = self.prepare_candidate(candidate, memory, submission);
-                    prepared.insert(key, made);
-                    made
+                let candidate = Candidate {
+                    address: inferred.address,
+                    stage,
                 };
+                let resource = self.bind_for_draw(
+                    candidate,
+                    (memory, &geometry),
+                    &mut by_geometry,
+                    submission,
+                );
                 if let Some(resource) = resource {
                     shaders.push((stage, resource));
                 }
@@ -900,21 +1034,103 @@ impl Pipeline {
         per_draw
     }
 
+    /// The module one draw binds for a candidate: the one prepared without geometry, or - for a
+    /// primitive shader that reads the geometry engine's inputs - the one for this draw's geometry
+    /// (D730). Each is prepared once however many draws name it.
+    fn bind_for_draw(
+        &mut self,
+        candidate: Candidate,
+        (memory, geometry): (&impl GuestMemory, &Result<GeometryInputs, String>),
+        by_geometry: &mut ByGeometry,
+        submission: &mut Submission,
+    ) -> Option<ResourceId> {
+        let key = (candidate.stage as u32, candidate.address);
+        if !by_geometry.needs.contains_key(&key) {
+            if let Some(known) = by_geometry.plain.get(&key) {
+                return *known;
+            }
+            match self.prepare_candidate(candidate, (memory, None), submission) {
+                Ok(resource) => {
+                    by_geometry.plain.insert(key, Some(resource));
+                    return Some(resource);
+                }
+                Err(Unprepared::Failed) => {
+                    by_geometry.plain.insert(key, None);
+                    return None;
+                }
+                Err(Unprepared::NeedsGeometry(reason)) => {
+                    by_geometry.needs.insert(key, reason);
+                }
+            }
+        }
+        let needs = by_geometry.needs.get(&key).cloned().unwrap_or_default();
+        self.prepare_with_geometry(
+            candidate,
+            (memory, Some(geometry.clone()), needs),
+            by_geometry,
+            submission,
+        )
+    }
+
+    /// Prepares a primitive shader that reads the geometry engine's inputs for one draw's geometry
+    /// (D730), once per geometry however many draws share it; a draw whose geometry is not one
+    /// that is seeded records why, once.
+    fn prepare_with_geometry(
+        &mut self,
+        candidate: Candidate,
+        (memory, geometry, needs): (
+            &impl GuestMemory,
+            Option<Result<GeometryInputs, String>>,
+            String,
+        ),
+        by_geometry: &mut ByGeometry,
+        submission: &mut Submission,
+    ) -> Option<ResourceId> {
+        let geometry = match geometry {
+            Some(Ok(geometry)) => geometry,
+            Some(Err(why)) => {
+                let reason = format!("{needs}; and this draw's cannot be: {why}");
+                if by_geometry
+                    .refused
+                    .insert((candidate.address, reason.clone()))
+                {
+                    submission.report.failures.push(ShaderFailure {
+                        address: candidate.address,
+                        stage: format!("{:?}", candidate.stage).to_lowercase(),
+                        reason,
+                    });
+                }
+                return None;
+            }
+            None => return None,
+        };
+        let key = (candidate.stage as u32, candidate.address, geometry);
+        if let Some(known) = by_geometry.prepared.get(&key) {
+            return *known;
+        }
+        let made = self
+            .prepare_candidate(candidate, (memory, Some(geometry)), submission)
+            .ok();
+        by_geometry.prepared.insert(key, made);
+        made
+    }
+
     /// Prepares one shader candidate and records the outcome in the submission's report: the module
     /// travels with the submission when the backend has not seen it, and a failure is counted and
     /// named. The resource it became, or `None` when it could not be prepared.
     fn prepare_candidate(
         &mut self,
         candidate: Candidate,
-        memory: &impl GuestMemory,
+        (memory, geometry): (&impl GuestMemory, Option<GeometryInputs>),
         submission: &mut Submission,
-    ) -> Option<ResourceId> {
+    ) -> Result<ResourceId, Unprepared> {
         match self.prepare(
             candidate.address,
             candidate.stage,
             (
                 submission.report.primitive_topology,
                 submission.report.wave_widths,
+                geometry,
             ),
             memory,
         ) {
@@ -922,7 +1138,7 @@ impl Pipeline {
                 // The address resolved, whatever happened to the shader after that.
                 submission.report.addresses_resolved += 1;
                 submission.report.shaders_translated += 1;
-                Some(match prepared {
+                Ok(match prepared {
                     // Only a module the backend has not seen travels with the submission.
                     Prepared::Fresh {
                         resource,
@@ -939,6 +1155,8 @@ impl Pipeline {
                     }
                 })
             }
+            // Not a failure yet: it is prepared again with each draw's geometry.
+            Err(PrepareFailure::NeedsGeometry(reason)) => Err(Unprepared::NeedsGeometry(reason)),
             Err(failure) => {
                 // Counted before the reason is consumed, and apart from the shader outcome: address
                 // resolution is evidence about the address space.
@@ -946,14 +1164,16 @@ impl Pipeline {
                     PrepareFailure::Unresolved(_) => {
                         submission.report.addresses_unresolved += 1;
                     }
-                    PrepareFailure::Resolved(_) => submission.report.addresses_resolved += 1,
+                    PrepareFailure::Resolved(_) | PrepareFailure::NeedsGeometry(_) => {
+                        submission.report.addresses_resolved += 1;
+                    }
                 }
                 submission.report.failures.push(ShaderFailure {
                     address: candidate.address,
                     stage: format!("{:?}", candidate.stage).to_lowercase(),
                     reason: failure.reason(),
                 });
-                None
+                Err(Unprepared::Failed)
             }
         }
     }
@@ -1032,7 +1252,11 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
-        (topology, widths): (Option<PrimitiveTopology>, WaveWidths),
+        (topology, widths, geometry): (
+            Option<PrimitiveTopology>,
+            WaveWidths,
+            Option<GeometryInputs>,
+        ),
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
         // A shader already decoded at this address with the same bytes is not decoded again: a
@@ -1041,7 +1265,12 @@ impl Pipeline {
             && let Some(bytes) = memory.read(guest_address_of(address), known.len())
             && bytes == known.as_slice()
         {
-            return self.prepare_decoded(address, stage, (topology, widths), (bytes, None));
+            return self.prepare_decoded(
+                address,
+                stage,
+                (topology, widths, geometry),
+                (bytes, None),
+            );
         }
         // The register named a GPU address; guest memory is indexed by a guest one. See
         // `guest_address_of`.
@@ -1080,7 +1309,12 @@ impl Pipeline {
 
         let shader = &window[..decoded.consumed];
         self.decoded.insert(address, shader.to_vec());
-        self.prepare_decoded(address, stage, (topology, widths), (shader, Some(&decoded)))
+        self.prepare_decoded(
+            address,
+            stage,
+            (topology, widths, geometry),
+            (shader, Some(&decoded)),
+        )
     }
 
     /// Translates and caches a shader whose bytes, end-of-program included, are known, or finds its
@@ -1092,7 +1326,11 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
-        (topology, widths): (Option<PrimitiveTopology>, WaveWidths),
+        (topology, widths, geometry): (
+            Option<PrimitiveTopology>,
+            WaveWidths,
+            Option<GeometryInputs>,
+        ),
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
     ) -> Result<Prepared, PrepareFailure> {
         let host_stage = host_stage(stage);
@@ -1111,7 +1349,10 @@ impl Pipeline {
         // Keyed by content, stage and primitive: one instruction stream translated for different
         // stages or output shapes gives different modules.
         let user_data = match stage {
-            ShaderStage::Vertex => self.user_data[0],
+            ShaderStage::Vertex => UserData {
+                geometry,
+                ..self.user_data[0]
+            },
             ShaderStage::Fragment => self.user_data[1],
             ShaderStage::Compute => UserData::default(),
         };
@@ -1123,7 +1364,8 @@ impl Pipeline {
             ^ window_salt(self.window)
             ^ width_salt
             ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
-            ^ crate::pixel_inputs::salt(user_data);
+            ^ crate::pixel_inputs::salt(user_data)
+            ^ geometry_salt(geometry);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -1213,9 +1455,12 @@ impl Pipeline {
             context.user_data,
         )
         .map_err(|e| {
-            PrepareFailure::Resolved(format!(
-                "the shader at {address:#x} could not be translated: {e}"
-            ))
+            let reason = format!("the shader at {address:#x} could not be translated: {e}");
+            if matches!(e, orbistoun_translate::TranslateError::ReadsGeometryInputs) {
+                PrepareFailure::NeedsGeometry(reason)
+            } else {
+                PrepareFailure::Resolved(reason)
+            }
         })?;
         Ok(crate::translations::Kept {
             bytes: shader.to_vec(),
@@ -1241,8 +1486,8 @@ fn push_geometry_commands(
     commands: &mut Vec<RenderCommand>,
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
     writes: &[RegisterWrite],
-    shaders: &[Vec<(ShaderStage, ResourceId)>],
-    depth_target: Option<ResourceId>,
+    (shaders, depth_target): (&[DrawShaders], Option<ResourceId>),
+    unmodelled_viewports: &mut usize,
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
     let mut blend_sent = None;
@@ -1278,6 +1523,11 @@ fn push_geometry_commands(
         }
         // The depth, stencil and cull state in force at this draw, and a clear it asks for.
         depth_sent.push(&mut sweep, at, depth_target, commands);
+        // A draw whose positions are not clip space is counted, so it is refused rather than drawn
+        // as if they were.
+        if crate::registers::viewport_transform_disabled(|register| sweep.latest(at, register)) {
+            *unmodelled_viewports += 1;
+        }
         // The clip-to-pixel transform in force at this draw, when the stream set one and it
         // changed.
         if let Some(transform) = viewport_transform_from(|register| sweep.latest(at, register))
@@ -1377,21 +1627,22 @@ fn bind_textures(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
+    unbound: &mut usize,
 ) {
     // Each draw's textures, where its pixel shader says they are: for every slot the bound fragment
     // module samples, the descriptor at that slot's table offset (zero for a module whose texture
     // did not come from the table). Re-emitted before a draw whenever the table or the module
     // changed.
     let mut out = Vec::with_capacity(commands.len());
-    let (mut table, mut fragment, mut stale) = (None, None, false);
+    let (mut words, mut fragment, mut stale) = (None, None, false);
     let mut read: BTreeMap<(u64, u32), Option<RenderCommand>> = BTreeMap::new();
     for command in commands.drain(..) {
         match &command {
             RenderCommand::SetUserData {
                 stage: ShaderStage::Fragment,
-                words,
+                words: set,
             } => {
-                table = Some(u64::from(words[0]) | u64::from(words[1]) << 32);
+                words = Some(*set);
                 stale = true;
             }
             RenderCommand::BindShader {
@@ -1410,6 +1661,7 @@ fn bind_textures(
                 let default = [TextureSource {
                     slot: 0,
                     table_offset: None,
+                    table: TableBase::default(),
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
@@ -1417,14 +1669,30 @@ fn bind_textures(
                     slots
                 };
                 for source in slots {
-                    let at = table.map(|t| t + u64::from(source.table_offset.unwrap_or(0)));
+                    // The table where the program formed its address: user-data words or
+                    // constants.
+                    let half = |word: TableWord| match word {
+                        TableWord::UserData(index) => words
+                            .and_then(|w| w.get(usize::try_from(index).ok()?).copied())
+                            .unwrap_or(0),
+                        TableWord::Constant(value) => value,
+                    };
+                    let table = u64::from(half(source.table.low))
+                        | u64::from(half(source.table.high)) << 32;
+                    let at = table + u64::from(source.table_offset.unwrap_or(0));
                     // Read once per descriptor per submission: guest memory does not change while a
                     // submission is prepared, and a frame binds the same few textures many times.
-                    out.extend(at.and_then(|at| {
-                        read.entry((at, source.slot))
-                            .or_insert_with(|| read_texture(at, source.slot, memory, texels))
-                            .clone()
-                    }));
+                    let bound = read
+                        .entry((at, source.slot))
+                        .or_insert_with(|| read_texture(at, source.slot, memory, texels))
+                        .clone();
+                    // A texture the module samples and nothing binds draws the backend's
+                    // placeholder, which is not the guest's picture: counted, so the draw is
+                    // refused rather than drawn wrong.
+                    if bound.is_none() {
+                        *unbound += 1;
+                    }
+                    out.extend(bound);
                 }
             }
             _ => {}
@@ -1643,6 +1911,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             dx10_clamp: dx10_clamp(RSRC1_REGISTERS[0]),
             pixel_inputs: None,
             compute: None,
+            geometry: None,
         },
         UserData {
             first_register: 0,
@@ -1652,6 +1921,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             // Set by `set_environment` for every backend.
             pixel_inputs: None,
             compute: None,
+            geometry: None,
         },
     ]
 }
@@ -2314,7 +2584,7 @@ mod tests {
         let prepare = |pipeline: &mut Pipeline, memory: &At| match pipeline.prepare(
             AT,
             ShaderStage::Vertex,
-            (None, WaveWidths::default()),
+            (None, WaveWidths::default(), None),
             memory,
         ) {
             Ok(Prepared::Fresh { resource, .. }) => (resource, true),
@@ -2500,5 +2770,64 @@ mod tests {
         let entry = Cached::of(ResourceId(1), &[1, 2]);
         assert!(entry.matches(&[1, 2]));
         assert!(!entry.matches(&[3, 4]));
+    }
+
+    /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list of
+    /// three-vertex primitives that one wave holds, without passthrough or an index offset (D730);
+    /// anything else says why not.
+    #[test]
+    fn a_draw_s_geometry_is_seeded_only_where_one_subgroup_holds_it() {
+        use super::{
+            DI_PT_RECTLIST, DI_PT_TRILIST, GE_INDX_OFFSET, GeometryInputs, PRIMGEN_PASSTHRU_EN,
+            VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN, draw_geometry,
+        };
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = |vertices, instances| DrawCall {
+            packet_offset: 0,
+            instances,
+            kind: DrawKind::Auto { vertices },
+        };
+        let registers = |topology: u32, stages: u32, offset: u32| {
+            move |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(topology),
+                VGT_SHADER_STAGES_EN => Some(stages),
+                GE_INDX_OFFSET => Some(offset),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0x0041_2010, 0), 32),
+            Ok(GeometryInputs {
+                first_vertex: 0,
+                vertices: 3,
+                primitives: 1,
+            })
+        );
+        assert_eq!(
+            draw_geometry(&draw(30, 1), registers(DI_PT_TRILIST, 0, 0), 64).map(|g| g.primitives),
+            Ok(10)
+        );
+        for refused in [
+            draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0), 64),
+            draw_geometry(&draw(3, 1), registers(6, 0, 0), 64),
+            draw_geometry(
+                &draw(3, 1),
+                registers(DI_PT_RECTLIST, PRIMGEN_PASSTHRU_EN, 0),
+                64,
+            ),
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 4), 64),
+            draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0), 64),
+        ] {
+            assert!(refused.is_err(), "{refused:?}");
+        }
+        let indexed = DrawCall {
+            packet_offset: 0,
+            instances: 1,
+            kind: DrawKind::Indexed {
+                indices: 3,
+                address: 0,
+            },
+        };
+        assert!(draw_geometry(&indexed, registers(DI_PT_TRILIST, 0, 0), 64).is_err());
     }
 }

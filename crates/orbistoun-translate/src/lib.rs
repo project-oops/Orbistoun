@@ -183,6 +183,13 @@ pub enum TranslateError {
         detail: &'static str,
     },
 
+    /// A primitive shader reads the geometry engine's inputs before writing them, and the
+    /// translation was not given the draw's geometry to seed them with (D730).
+    #[error(
+        "the primitive shader reads the geometry engine's inputs - its system SGPRs (gs_tg_info, merged_wave_info) or its input VGPRs (vertex offsets, vertex id) - before writing them, and no draw's geometry is given to seed them"
+    )]
+    ReadsGeometryInputs,
+
     /// An instruction with no known operand layout was reached.
     #[error(
         "instruction at {offset:#x} has no operand layout; cannot translate what it operates on"
@@ -598,6 +605,7 @@ mod tests {
                     dx10_clamp: None,
                     pixel_inputs: None,
                     compute: None,
+                    geometry: None,
                 },
             )
         };
@@ -885,6 +893,67 @@ mod tests {
         assert!(mesh(&[0xBE83_0381, 0x8700_0303, END]).is_ok());
         // v_mov_b32 v12, v20: not a geometry input.
         assert!(mesh(&[0x7E18_0314, END]).is_ok());
+    }
+
+    /// A descriptor loaded through an address the program formed is found where it was formed:
+    /// radeonsi's blit pixel shader moves user-data word 3 into `s0` and the constant 4 into `s1`,
+    /// then loads its image descriptor from `s[0:1] + 0x400`. A pair holding anything else - here
+    /// a sum - is refused where it is sampled, not read as the table at words 0 and 1.
+    #[test]
+    fn a_descriptor_table_is_found_where_the_program_formed_its_address() {
+        use crate::wavefront::{MeshPrimitive, Stage, TableBase, TableWord, UserData};
+        let (table, operands) = tables();
+        let fragment = |words: &[u32]| {
+            let decoded = decode(&stream(words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    count: 4,
+                    ..UserData::default()
+                },
+            )
+        };
+        let load_and_fetch = [
+            // s_load_dwordx8 s[8:15], s[0:1], 0x400
+            0xf40c_0200,
+            0xfa00_0400,
+            0xbf8c_c07f,
+            // image_load_mip v[0:3], v[2:4], s[8:15] dmask:0xf dim:2D unorm
+            0xf004_1f08,
+            0x0002_0002,
+            // exp mrt0 v0, v1, v2, v3 done vm
+            0xf800_180f,
+            0x0302_0100,
+            0xbf81_0000,
+        ];
+        let mut words = vec![0xbe80_0303, 0xbe81_0384];
+        words.extend(load_and_fetch);
+        let translated = fragment(&words).expect("translates");
+        assert_eq!(
+            translated
+                .textures
+                .first()
+                .map(|t| (t.table_offset, t.table)),
+            Some((
+                Some(0x400),
+                TableBase {
+                    low: TableWord::UserData(3),
+                    high: TableWord::Constant(4),
+                }
+            ))
+        );
+        // s_add_i32 s0, s3, s2 in place of the move.
+        let mut words = vec![0x8100_0203, 0xbe81_0384];
+        words.extend(load_and_fetch);
+        let refused = fragment(&words).expect_err("refused").to_string();
+        assert!(refused.contains("not traced"), "{refused}");
     }
 
     /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an

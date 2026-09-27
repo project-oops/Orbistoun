@@ -100,6 +100,113 @@ fn memory() -> Vec<u32> {
     memory
 }
 
+/// A primitive shader that stores its geometry-engine inputs to guest memory: each lane's `v0`,
+/// `v1`, `v5` and `v2` at `lane * 16`, then `s2` and `s3` at `0x800`.
+fn storing_inputs_shader() -> Vec<u8> {
+    let words = [
+        // m0 = three vertices, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+        0xbefc_03ff,
+        0x0000_1003,
+        0xbf90_0009,
+        // v14 = lane * 16, v15 = 0
+        0xd765_000e,
+        0x0001_00c1,
+        0x341c_1c84,
+        0x7e1e_0280,
+        // global_store_dword v[14:15], v0 / v1 / v5 / v2, off offset:0 / 4 / 8 / 12
+        0xdc70_8000,
+        0x007d_000e,
+        0xdc70_8004,
+        0x007d_010e,
+        0xdc70_8008,
+        0x007d_050e,
+        0xdc70_800c,
+        0x007d_020e,
+        // v16 = 0x800, v17 = 0
+        0x7e20_02ff,
+        0x0000_0800,
+        0x7e22_0280,
+        // v20 = s2; store; v20 = s3; store offset:4
+        0x7e28_0202,
+        0xdc70_8000,
+        0x007d_1410,
+        0x7e28_0203,
+        0xdc70_8004,
+        0x007d_1410,
+        0xbf8c_3f70,
+        // exp prim v21 = 0 | 1 << 10 | 2 << 20; exp pos0 v23, v23, v23, v22 = (0, 0, 0, 1)
+        0x7e2a_02ff,
+        0x0020_0400_u32,
+        0xf800_0941,
+        0x0000_0015,
+        0x7e2c_02f2,
+        0x7e2e_0280,
+        0xf800_08cf,
+        0x1617_1717,
+        0xbf81_0000,
+    ];
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// A primitive shader given a draw's geometry finds the geometry engine's inputs where GFX10
+/// puts them (D730): three vertices and one primitive leave gs_tg_info `3 << 12 | 1 << 22` in
+/// `s2` and merged_wave_info `3 | 1 << 8 | 1 << 28` in `s3`; primitive thread zero has vertices
+/// 0 and 1 in `v0` and 2 in `v1` and its id in `v2`; each vertex thread its id in `v5`; any other
+/// thread zeros. Without the geometry the same shader is refused, since it reads what nothing
+/// seeded.
+#[test]
+fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
+    use orbistoun_translate::wavefront::{GeometryInputs, UserData};
+    if !device_or_skip("a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let decoded = decode_program(&storing_inputs_shader(), &encodings, &operands);
+    let strategy = Strategy::Predicated {
+        fidelity: Fidelity::Auto,
+        width: Width::Wave64,
+    };
+    let with = |geometry| {
+        orbistoun_translate::translate_with_user_data(
+            &decoded,
+            &encodings,
+            strategy,
+            (Stage::Mesh, MeshPrimitive::Rectangles),
+            // Wide enough for every lane's four words and the two scalars at 0x800.
+            Window::spanning(0, 1024).expect("a power of two"),
+            UserData {
+                geometry,
+                ..UserData::default()
+            },
+        )
+    };
+    assert!(matches!(
+        with(None),
+        Err(orbistoun_translate::TranslateError::ReadsGeometryInputs)
+    ));
+    let module = with(Some(GeometryInputs {
+        first_vertex: 0,
+        vertices: 3,
+        primitives: 1,
+    }))
+    .expect("translates with its geometry")
+    .module;
+    let fragment = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+    let (_, memory) = draw_mesh_over(&module, &fragment, [0.0; 4], 4, 4, &vec![0u32; 1024])
+        .expect("the draw ran");
+    let lane = |n: usize| &memory[n * 4..n * 4 + 4];
+    assert_eq!(lane(0), [1 << 16, 2, 0, 0], "v0, v1, v5, v2 of thread zero");
+    assert_eq!(lane(1), [0, 0, 1, 0], "a vertex thread only");
+    assert_eq!(lane(2), [0, 0, 2, 0]);
+    assert_eq!(lane(3), [0, 0, 0, 0], "neither");
+    assert_eq!(
+        memory[0x200..0x202],
+        [(3 << 12) | (1 << 22), 3 | (1 << 8) | (1 << 28)],
+        "gs_tg_info and merged_wave_info"
+    );
+}
+
 /// The rectangle covers every pixel, and parameter zero - the position - is one plane across it:
 /// at each pixel centre it is that pixel's own clip-space position, clamped to the target's unorm
 /// range. As a triangle list the same three vertices leave the far corner at the clear colour.

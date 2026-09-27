@@ -4971,7 +4971,7 @@ fn the_integer_conversions_round_and_saturate_as_published() {
     assert_eq!(vector(&registers, 1), 4_294_967_296.0_f32.to_bits());
     assert_eq!(
         [2, 3, 4, 5, 6].map(|n| vector(&registers, n)),
-        [(-3_i32).cast_unsigned(), 0x7fff_ffff, 0x8000_0000, 0, 2]
+        [0xffff_fffd, 0x7fff_ffff, 0x8000_0000, 0, 2]
     );
 }
 

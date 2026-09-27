@@ -388,6 +388,24 @@ impl GuestCp<'_> {
                 submission.targets.len()
             )
         })?;
+        if submission.report.unmodelled_viewports > 0 {
+            return Err(format!(
+                concat!(
+                    "{} draw(s) turn the viewport transform off, and positions that are not ",
+                    "clip space are not modelled"
+                ),
+                submission.report.unmodelled_viewports
+            ));
+        }
+        if submission.report.unbound_textures > 0 {
+            return Err(format!(
+                concat!(
+                    "{} sampled texture slot(s) had no texture bound, and the placeholder is ",
+                    "not the guest's picture"
+                ),
+                submission.report.unbound_textures
+            ));
+        }
         if let Some(dcc) = submission.colour_target_dcc
             && let Some(why) = crate::dcc::unsupported(
                 submission.colour_target_tiling,

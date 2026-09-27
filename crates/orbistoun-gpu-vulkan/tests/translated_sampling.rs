@@ -536,7 +536,7 @@ fn a_second_texture_is_refused_rather_than_guessed() {
 /// unit is sampled first, as that prolog does, so slot 0 is the `+0x40` texture.
 #[test]
 fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
-    use orbistoun_translate::wavefront::{MeshPrimitive, TextureSource, UserData};
+    use orbistoun_translate::wavefront::{MeshPrimitive, TableBase, TextureSource, UserData};
     use orbistoun_translate::{Fidelity, Strategy};
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
@@ -592,11 +592,13 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
         [
             TextureSource {
                 slot: 0,
-                table_offset: Some(0x40)
+                table_offset: Some(0x40),
+                table: TableBase::default(),
             },
             TextureSource {
                 slot: 1,
-                table_offset: Some(0x00)
+                table_offset: Some(0x00),
+                table: TableBase::default(),
             },
         ]
     );

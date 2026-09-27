@@ -1509,6 +1509,13 @@ pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<Vi
     })
 }
 
+/// Whether the stream turned the viewport transform's x/y scale or offset off in
+/// `PA_CL_VTE_CNTL`: its positions are then not clip space, and drawing them as clip space draws
+/// somewhere else.
+pub fn viewport_transform_disabled(mut last: impl FnMut(u32) -> Option<u32>) -> bool {
+    last(PA_CL_VTE_CNTL).is_some_and(|value| value & VTE_XY_ENABLES != VTE_XY_ENABLES)
+}
+
 /// [`viewport_transform_at`], reading each register's value through `last` - a
 /// [`RegisterSweep::latest`] for a caller walking draws in order.
 pub fn viewport_transform_from(

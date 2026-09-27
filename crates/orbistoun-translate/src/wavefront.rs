@@ -392,8 +392,50 @@ pub struct UserData {
     /// compute module is the register-observing harness it always was.
     #[serde(default)]
     pub compute: Option<ComputeInputs>,
+    /// A primitive shader's geometry-engine inputs for the draw it runs (D730). Without them a
+    /// mesh module that reads those inputs is refused.
+    #[serde(default)]
+    pub geometry: Option<GeometryInputs>,
 }
 
+/// What the geometry engine hands a primitive shader for a draw one subgroup holds whole (D730):
+/// the draw's vertices, one per vertex thread from `first_vertex`, and its primitives of three
+/// vertices each, primitive `p` over vertices `3p`, `3p + 1` and `3p + 2` - a triangle list or a
+/// rectangle list, not indexed.
+///
+/// Seeded where GFX10's non-passthrough primitive shader receives them (`si_shader_args.c:304-371`):
+/// `s2` gs_tg_info, input vertices at bit 12 and primitives at bit 22
+/// (`ac_nir_lower_intrinsics_to_args.c:273-276`); `s3` merged_wave_info, this wave's vertex and
+/// primitive threads at bits 0 and 8 and the one wave of the group counted at bit 28
+/// (`:36`, `:99`, `:127`, `:418`); `v0` the first two vertex indices, sixteen bits each, and `v1`
+/// the third (`ac_nir_lower_ngg.c:130-131`); `v2` the primitive id; and `v5` the vertex id
+/// (`si_shader_args.c:95`). The invocation id, the fifth vertex register, the user VGPRs and the
+/// instance id read zero: one invocation, no adjacency, one instance.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct GeometryInputs {
+    /// The vertex id of the first vertex thread.
+    pub first_vertex: u32,
+    /// Vertex threads: the draw's vertex count.
+    pub vertices: u32,
+    /// Primitive threads.
+    pub primitives: u32,
+}
+
+impl GeometryInputs {
+    /// Why a subgroup of `lanes` threads cannot hold these whole, if it cannot.
+    #[must_use]
+    pub const fn refusal(self, lanes: u32) -> Option<&'static str> {
+        if self.vertices > lanes || self.primitives > lanes {
+            Some("the draw has more vertices or primitives than one wave's threads")
+        } else if self.primitives * 3 > self.vertices {
+            Some("the draw's primitives name vertices it does not have")
+        } else {
+            None
+        }
+    }
+}
 /// Words in the push-constant block: sixteen per stage, two stages. 128 bytes is the smallest
 /// `maxPushConstantsSize` a Vulkan device may report, so every device takes it.
 pub const USER_DATA_BLOCK_WORDS: u32 = 32;
@@ -1001,7 +1043,7 @@ pub struct Wavefront<'a> {
     /// Empty for a module that does not sample, so its pipeline layout carries no image binding.
     textures: Vec<BoundTexture>,
     /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`].
-    descriptor_loads: BTreeMap<u32, std::collections::BTreeSet<u32>>,
+    descriptor_loads: BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>>,
     /// The storage image, declared the first time an instruction stores to one.
     ///
     /// Declaring it declares a capability that a device without the matching feature refuses, so a
@@ -1073,9 +1115,17 @@ impl Wavefront<'_> {
         if slot > 1 {
             return Err("this shader reads more than two textures, and two bindings exist (D690)");
         }
-        let table_offset = match self.descriptor_loads.get(&descriptor) {
-            None => None,
-            Some(offsets) if offsets.len() == 1 => offsets.first().copied(),
+        let (table, table_offset) = match self.descriptor_loads.get(&descriptor) {
+            None => (TableBase::default(), None),
+            Some(loads) if loads.len() == 1 => match loads.first().copied() {
+                Some((Some(table), offset)) => (table, Some(offset)),
+                _ => {
+                    return Err(concat!(
+                        "this shader loads an image descriptor through an address it formed from ",
+                        "something other than its user data and constants, which is not traced"
+                    ));
+                }
+            },
             Some(_) => {
                 return Err(concat!(
                     "this shader loads one image descriptor from more than one place in its ",
@@ -1093,7 +1143,11 @@ impl Wavefront<'_> {
                 "its descriptor table, so which is which cannot be told (D690)"
             ));
         }
-        Ok(TextureSource { slot, table_offset })
+        Ok(TextureSource {
+            slot,
+            table_offset,
+            table,
+        })
     }
 }
 
@@ -1440,6 +1494,54 @@ impl<'a> Wavefront<'a> {
         if let (Some(state), Some(inputs)) = (self.dispatch, user_data.compute) {
             state.seed(self, inputs, user_data.count);
         }
+        // A primitive shader's geometry-engine inputs (D730).
+        if let (Stage::Mesh, Some(geometry)) = (self.stage, user_data.geometry) {
+            self.seed_geometry(geometry);
+        }
+    }
+
+    /// Seeds the geometry-engine inputs [`GeometryInputs`] describes, every input register in
+    /// every lane: a lane that is no vertex or primitive thread reads zero.
+    fn seed_geometry(&mut self, geometry: GeometryInputs) {
+        let GeometryInputs {
+            first_vertex,
+            vertices,
+            primitives,
+        } = geometry;
+        let tg_info = self.constant((vertices << 12) | (primitives << 22));
+        self.store_scalar(2, tg_info);
+        let wave_info = self.constant(vertices | (primitives << 8) | (1 << 28));
+        self.store_scalar(3, wave_info);
+        for lane in 0..self.lanes {
+            let is_primitive = lane < primitives;
+            let first = 3 * lane;
+            let words = [
+                // v0: the first two vertex indices; v1: the third.
+                if is_primitive {
+                    first | ((first + 1) << 16)
+                } else {
+                    0
+                },
+                if is_primitive { first + 2 } else { 0 },
+                // v2: the primitive id; v3: the invocation id; v4: the fifth and sixth indices.
+                if is_primitive { lane } else { 0 },
+                0,
+                0,
+                // v5: the vertex id; v6, v7: user VGPRs; v8: the instance id.
+                if lane < vertices {
+                    first_vertex + lane
+                } else {
+                    0
+                },
+                0,
+                0,
+                0,
+            ];
+            for (register, word) in (0..).zip(words) {
+                let value = self.constant(word);
+                self.store_lane_masked(register, lane, value);
+            }
+        }
     }
 
     /// Loads each user-data word from `source` into its scalar register, at entry.
@@ -1712,14 +1814,7 @@ impl<'a> Wavefront<'a> {
     /// the two can be diffed.
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
         if self.reads_geometry_input {
-            return Err(TranslateError::Unsupported {
-                offset: 0,
-                detail: concat!(
-                    "the primitive shader reads the geometry engine's inputs - its system SGPRs ",
-                    "(gs_tg_info, merged_wave_info) or its input VGPRs (vertex offsets, vertex ",
-                    "id) - before writing them, and no draw's geometry is given to seed them"
-                ),
-            });
+            return Err(TranslateError::ReadsGeometryInputs);
         }
         if self.reads_unwritten {
             return Err(TranslateError::Unsupported {
@@ -2504,15 +2599,51 @@ impl Model for Wavefront<'_> {
 }
 
 /// Which texture a translated module samples at which binding, and where its descriptor comes from:
-/// the byte offset in the pixel shader's descriptor table (addressed by its first two user-data
-/// registers) that the image descriptor was loaded from. `None` when the module did not load it
-/// from there; a pipeline then reads offset zero.
+/// the descriptor table the image descriptor was loaded from, and the byte offset in it. `None` when
+/// the module did not load it from a table; a pipeline then reads offset zero of the table at the
+/// stage's first two user-data words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextureSource {
     /// 0 for the first texture the module samples, 1 for a second.
     pub slot: u32,
     /// The descriptor's byte offset in the table, when a load from the table put it there.
     pub table_offset: Option<u32>,
+    /// Where the table's address came from.
+    #[serde(default)]
+    pub table: TableBase,
+}
+
+/// One half of a descriptor table's 64-bit address, as the program formed it before loading from
+/// it: a user-data word of the stage, or a constant.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum TableWord {
+    /// The stage's user-data word at this index.
+    UserData(u32),
+    /// This value.
+    Constant(u32),
+}
+
+/// A descriptor table's address: its low and high words. The default is the stage's first two
+/// user-data words, where the open-toolchain GL context puts its table.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct TableBase {
+    /// Address bits 31:0.
+    pub low: TableWord,
+    /// Address bits 63:32.
+    pub high: TableWord,
+}
+
+impl Default for TableBase {
+    fn default() -> Self {
+        Self {
+            low: TableWord::UserData(0),
+            high: TableWord::UserData(1),
+        }
+    }
 }
 
 /// The descriptor-table offsets each eight-register group is loaded from: every `s_load_dwordx8
@@ -2525,8 +2656,23 @@ pub struct TextureSource {
 fn descriptor_table_loads(
     decode: &Decode,
     encodings: &EncodingTable,
-) -> BTreeMap<u32, std::collections::BTreeSet<u32>> {
-    let mut loads: BTreeMap<u32, std::collections::BTreeSet<u32>> = BTreeMap::new();
+    first_register: u32,
+) -> BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>> {
+    let mut loads: BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>> =
+        BTreeMap::new();
+    // What each scalar register holds, in program order: a user-data word from where the hardware
+    // loads the stage's, or a constant a move put there. Anything else written is untraced.
+    let mut held: Vec<Option<TableWord>> = vec![None; model::SCALAR_REGISTERS as usize];
+    for (index, word) in
+        (0..USER_DATA_STAGE_WORDS).zip(held.iter_mut().skip(first_register as usize))
+    {
+        *word = Some(TableWord::UserData(index));
+    }
+    let forget = |held: &mut Vec<Option<TableWord>>, register: u16, count: usize| {
+        for word in held.iter_mut().skip(usize::from(register)).take(count) {
+            *word = None;
+        }
+    };
     for instruction in &decode.instructions {
         let Some(family) = instruction
             .encoding
@@ -2535,20 +2681,65 @@ fn descriptor_table_loads(
         else {
             continue;
         };
-        if encodings.mnemonic_for(family, instruction.opcode) != Some("s_load_dwordx8") {
-            continue;
-        }
-        if let [
-            Operand::Scalar(destination),
-            Operand::Scalar(0),
-            Operand::Immediate(offset),
-        ] = instruction.operands.as_slice()
-            && let Ok(offset) = u32::try_from(*offset)
-        {
-            loads
-                .entry(u32::from(*destination))
-                .or_default()
-                .insert(offset);
+        let name = encodings
+            .mnemonic_for(family, instruction.opcode)
+            .unwrap_or("");
+        match (name, instruction.operands.as_slice()) {
+            ("s_mov_b32", [Operand::Scalar(destination), source]) => {
+                let value = match source {
+                    Operand::Scalar(from) => held.get(usize::from(*from)).copied().flatten(),
+                    Operand::Integer(value) => i32::try_from(*value)
+                        .ok()
+                        .map(|v| TableWord::Constant(u32::from_ne_bytes(v.to_ne_bytes()))),
+                    Operand::Literal(value) => Some(TableWord::Constant(*value)),
+                    _ => None,
+                };
+                if let Some(slot) = held.get_mut(usize::from(*destination)) {
+                    *slot = value;
+                }
+            }
+            (
+                "s_load_dword" | "s_load_dwordx2" | "s_load_dwordx4" | "s_load_dwordx8",
+                [
+                    Operand::Scalar(destination),
+                    Operand::Scalar(base),
+                    Operand::Immediate(offset),
+                ],
+            ) => {
+                if name == "s_load_dwordx8"
+                    && let Ok(offset) = u32::try_from(*offset)
+                {
+                    let at = |register: u16| held.get(usize::from(register)).copied().flatten();
+                    let table = at(*base)
+                        .zip(at(base + 1))
+                        .map(|(low, high)| TableBase { low, high });
+                    loads
+                        .entry(u32::from(*destination))
+                        .or_default()
+                        .insert((table, offset));
+                }
+                let width = match name {
+                    "s_load_dword" => 1,
+                    "s_load_dwordx2" => 2,
+                    "s_load_dwordx4" => 4,
+                    _ => 8,
+                };
+                forget(&mut held, *destination, width);
+            }
+            // Any other write: the destination first, and a carry-out's second, a pair wide at
+            // most - untraced from here on.
+            (_, [Operand::Scalar(destination), rest @ ..]) => {
+                forget(&mut held, *destination, 2);
+                if name.contains("_co_")
+                    && let Some(Operand::Scalar(carry)) = rest.first()
+                {
+                    forget(&mut held, *carry, 2);
+                }
+            }
+            (_, [_, Operand::Scalar(carry), ..]) if name.contains("_co_") => {
+                forget(&mut held, *carry, 2);
+            }
+            _ => {}
         }
     }
     loads
@@ -2712,6 +2903,11 @@ pub fn translate_with_user_data(
     if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
         inputs.check(width.lanes())?;
     }
+    if let (Stage::Mesh, Some(geometry)) = (stage, user_data.geometry)
+        && let Some(detail) = geometry.refusal(width.lanes())
+    {
+        return Err(TranslateError::Unsupported { offset: 0, detail });
+    }
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);
     let mut module = Wavefront::for_stage(
@@ -2723,7 +2919,7 @@ pub fn translate_with_user_data(
         &parameters,
         (window, user_data),
     );
-    module.descriptor_loads = descriptor_table_loads(decode, encodings);
+    module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     crate::control::emit(&mut module, decode, encodings)?;
     let sources = module.texture_sources();
     let (words, translated) = module.finish()?;
