@@ -497,12 +497,15 @@ pub fn translate_with_user_data(
                 offset: instruction.offset,
             });
         }
-        if modifier_of(instruction, encodings).is_some() {
+        if let Some(marker) = modifier_of(instruction, encodings)
+            && !model::sdwa_translated(marker, instruction, encodings)
+        {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: concat!(
                     "the instruction carries an SDWA or DPP modifier word, which selects parts ",
-                    "of its operands or other lanes' values, and no modifier is translated"
+                    "of its operands or other lanes' values; only SDWA on the integer ",
+                    "instructions `model::SDWA_INTEGER` names is translated"
                 ),
             });
         }
@@ -849,17 +852,22 @@ mod tests {
         ));
     }
 
-    /// An instruction carrying an SDWA modifier word is refused by name, before anything is
-    /// translated: radeonsi's `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1`.
+    /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an
+    /// instruction whose SDWA form is translated: a DPP16 `v_mov_b32` and an SDWA `v_mul_f32` are
+    /// refused, radeonsi's `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1` is not.
     #[test]
-    fn an_sdwa_instruction_is_refused_by_name() {
+    fn a_modifier_word_is_refused_by_name_unless_its_sdwa_form_is_translated() {
         let (table, operands) = tables();
+        for words in [[0x7e00_02fa, 0x0000_00ff], [0x1000_00f9, 0x0006_0600]] {
+            let decoded = decode(&stream(&words), &table, &operands);
+            assert!(decoded.is_trustworthy());
+            let refused = translate(&decoded, &table, Strategy::default())
+                .expect_err("refused")
+                .to_string();
+            assert!(refused.contains("SDWA or DPP"), "{refused}");
+        }
         let decoded = decode(&stream(&[0x3404_00f9, 0x0586_068a]), &table, &operands);
-        assert!(decoded.is_trustworthy());
-        let refused = translate(&decoded, &table, Strategy::default())
-            .expect_err("refused")
-            .to_string();
-        assert!(refused.contains("SDWA"), "{refused}");
+        assert!(translate(&decoded, &table, Strategy::default()).is_ok());
     }
 
     /// An instruction with no operand layout is refused.

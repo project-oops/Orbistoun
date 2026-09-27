@@ -49,6 +49,11 @@ name = "image_load"
 
 [[mnemonic]]
 family = "MIMG"
+opcode = 1
+name = "image_load_mip"
+
+[[mnemonic]]
+family = "MIMG"
 opcode = 8
 name = "image_store"
 
@@ -208,6 +213,31 @@ opcode = 21
 name = "s_andn2_b64"
 
 [[mnemonic]]
+family = "SOP2"
+opcode = 30
+name = "s_lshl_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 37
+name = "s_bfm_b64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 39
+name = "s_bfe_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 50
+name = "s_pack_ll_b32_b16"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 52
+name = "s_pack_hh_b32_b16"
+
+[[mnemonic]]
 family = "SOPC"
 opcode = 4
 name = "s_cmp_lt_i32"
@@ -236,6 +266,11 @@ name = "s_addk_i32"
 family = "SOPK"
 opcode = 16
 name = "s_mulk_i32"
+
+[[mnemonic]]
+family = "SOPK"
+opcode = 23
+name = "s_waitcnt_vscnt"
 
 [[mnemonic]]
 family = "SOPP"
@@ -269,8 +304,18 @@ name = "s_cbranch_execnz"
 
 [[mnemonic]]
 family = "SOPP"
+opcode = 10
+name = "s_barrier"
+
+[[mnemonic]]
+family = "SOPP"
 opcode = 12
 name = "s_waitcnt"
+
+[[mnemonic]]
+family = "SOPP"
+opcode = 15
+name = "s_setprio"
 
 [[mnemonic]]
 family = "SOPP"
@@ -314,8 +359,18 @@ name = "v_mov_b32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 6
+name = "v_cvt_f32_u32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 7
 name = "v_cvt_u32_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 8
+name = "v_cvt_i32_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
@@ -351,6 +406,11 @@ name = "v_sin_f32_e32"
 family = "VOP1"
 opcode = 54
 name = "v_cos_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 1
+name = "v_cndmask_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
@@ -399,6 +459,11 @@ name = "v_and_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 28
+name = "v_or_b32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 40
 name = "v_add_co_ci_u32_e32"
 
@@ -411,6 +476,11 @@ name = "v_fmac_f32_e32"
 family = "VOP2"
 opcode = 47
 name = "v_cvt_pkrtz_f16_f32_e32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 133
+name = "v_cmp_ne_i32_e64"
 
 [[mnemonic]]
 family = "VOP3"
@@ -441,6 +511,11 @@ name = "v_div_scale_f32"
 family = "VOP3"
 opcode = 367
 name = "v_div_fmas_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 879
+name = "v_lshl_or_b32"
 
 [[mnemonic]]
 family = "VOPC"
@@ -476,3 +551,8 @@ name = "v_cmp_neq_f32_e32"
 family = "VOPC"
 opcode = 197
 name = "v_cmp_ne_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 198
+name = "v_cmp_ge_u32_e32"

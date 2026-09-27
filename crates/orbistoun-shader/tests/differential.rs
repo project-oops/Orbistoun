@@ -138,6 +138,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "texture",
         "the textured pixel shader's whole-quad mode, branches, compares and conversions",
     ),
+    (
+        "blit",
+        "radeonsi's blit shaders: geometry-engine counts, corner selection, texel loads",
+    ),
 ];
 
 /// Every fixture on disk is read by this suite.
