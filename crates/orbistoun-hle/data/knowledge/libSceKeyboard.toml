@@ -4,16 +4,16 @@ library = "libSceKeyboard"
 name = "sceKeyboardInit"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 3 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Called 3 time(s) across the recorded corpus. Measured: returns 0x0 (obSCEne REQ-20260926T2140Z-5c1e (sweep 20260927-153242, check 101-input-ext/keyboard-lifecycle), init rc). Unimplemented here until the keyboard a title reads is decided: the host's, as NetCtl reports the host's network."
 
 [[function]]
 name = "sceKeyboardOpen"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 3 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Called 3 time(s) across the recorded corpus. Measured (obSCEne REQ-20260926T2140Z-5c1e (sweep 20260927-153242, check 101-input-ext/keyboard-lifecycle)): (user, 0, 0, NULL) answers a positive handle (0x1eb0700 in one pass, 0x1e60700 in another, so the value is not fixed); a second open for the same user 0x80da0004; user id -1 0x809b0001. sceKeyboardClose answers 0x0 on the handle and 0x80da0003 on -1."
 
 [[function]]
 name = "sceKeyboardReadState"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 519 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+note = "Called 519 time(s) across the recorded corpus. Measured (obSCEne REQ-20260926T2140Z-5c1e (sweep 20260927-153242, check 101-input-ext/keyboard-lifecycle)): 0x80da0003 on handle -1; 0x0 on an open handle, with a 96-byte record whose first 64 bytes held 1 at +0x10 (connected, per oops-sdk keyboard.c) and 1 at +0x14 and zeros elsewhere. The arm was meant to have no keyboard attached, but the probe console has a remote-control device attached that presents itself as a USB keyboard, so it does not show what an absent keyboard reads."
