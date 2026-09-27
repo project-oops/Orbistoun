@@ -3329,6 +3329,14 @@ mod tests {
 
     /// Drives `serve` over in-memory pipes, so the protocol loop is tested with no process
     /// involved.
+    /// Held by every test that drives the process's input capture: a `Run` request stops capture
+    /// when it ends, so one finishing in parallel would cut another test's recording short.
+    fn capture_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn exchange(requests: &[Request]) -> Vec<Event> {
         exchange_noting_hangup(requests).0
     }
@@ -3447,6 +3455,7 @@ mod tests {
     /// told (D721).
     #[test]
     fn input_is_captured_only_when_asked_and_reads_back_as_a_script() {
+        let _capture = capture_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("input").join("capture.toml");
         let mut pressed = orbistoun_input::PadState::default();
@@ -3474,6 +3483,7 @@ mod tests {
     /// A missing guest is a request failure, not a halted run.
     #[test]
     fn a_missing_guest_is_a_request_failure_not_a_halted_run() {
+        let _capture = capture_lock();
         // `Failed` means the request was wrong; `Terminated` means a guest was loaded and then
         // stopped. The two must stay distinguishable.
         let events = exchange(&[Request::Run {
@@ -3543,6 +3553,7 @@ mod tests {
     /// A real container reaches placement and halts with a stated reason.
     #[test]
     fn a_real_container_reaches_placement_and_halts_honestly() {
+        let _capture = capture_lock();
         // A run that stops says so, rather than looking like a guest that ran and did nothing
         // (D010).
         let dir = tempfile::tempdir().expect("tempdir");
