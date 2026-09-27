@@ -1730,6 +1730,45 @@ pub(crate) fn guest_viewport(transform: orbistoun_gpu::ViewportTransform) -> vk:
     }
 }
 
+/// Refuses a viewport the device cannot take: wider or taller than `maxViewportDimensions`, or
+/// reaching outside `viewportBoundsRange` - both invalid usage in Vulkan rather than a clamp. A
+/// window-space draw's viewport (D731) spans `2 * WINDOW_SPACE_SCALE` pixels from `-S`.
+///
+/// # Errors
+///
+/// [`DispatchError::Unsupported`] naming the limit exceeded.
+fn viewport_within_limits(
+    devices: Devices<'_>,
+    viewport: vk::Viewport,
+) -> Result<(), DispatchError> {
+    // SAFETY: the physical device was enumerated from this instance, which outlives the call.
+    let limits = unsafe {
+        devices
+            .instance
+            .get_physical_device_properties(devices.physical)
+    }
+    .limits;
+    let [max_width, max_height] = limits.max_viewport_dimensions;
+    let [low, high] = limits.viewport_bounds_range;
+    let (width, height) = (viewport.width.abs(), viewport.height.abs());
+    if width > f32_from(max_width) || height > f32_from(max_height) {
+        return Err(DispatchError::Unsupported(format!(
+            "a viewport of {width}x{height} exceeds the device's maxViewportDimensions of \
+             {max_width}x{max_height}"
+        )));
+    }
+    let x = [viewport.x, viewport.x + viewport.width];
+    let y = [viewport.y, viewport.y + viewport.height];
+    if x.into_iter().chain(y).any(|edge| edge < low || edge > high) {
+        return Err(DispatchError::Unsupported(format!(
+            "a viewport from ({}, {}) of {}x{} reaches outside the device's viewportBoundsRange \
+             [{low}, {high}]",
+            viewport.x, viewport.y, viewport.width, viewport.height
+        )));
+    }
+    Ok(())
+}
+
 /// The colour-blend attachment state a guest's `CB_BLEND0_CONTROL` asks for, or the name of what it
 /// asks for that this cannot honour exactly.
 ///
@@ -3307,6 +3346,9 @@ fn build_pipeline(
     bound: Bound<'_>,
 ) -> Result<Pipeline, DispatchError> {
     let device = devices.device;
+    if let Some(transform) = bound.viewport {
+        viewport_within_limits(devices, guest_viewport(transform))?;
+    }
     let (vertex, fragment) = create_shader_modules(device, shaders)?;
     let resources = create_bound_resources(devices, bound)?;
     let set_layout = create_set_layout(device)?;
@@ -3793,6 +3835,37 @@ pub fn draw_mesh_over(
         memory,
         None,
     )
+}
+
+/// Draws with a mesh stage over seeded guest memory under the guest viewport transform `viewport`
+/// rather than clip space over the whole attachment.
+///
+/// # Errors
+///
+/// When no device is available, when it has no mesh stage, when the viewport exceeds the device's
+/// limits, or when any Vulkan call fails.
+pub fn draw_mesh_over_viewport(
+    mesh_words: &[u32],
+    fragment_words: &[u32],
+    clear: [f32; 4],
+    (width, height): (u32, u32),
+    memory: &[u32],
+    viewport: orbistoun_gpu::ViewportTransform,
+) -> Result<(Pixels, Vec<u32>), DispatchError> {
+    render_over(
+        clear,
+        width,
+        height,
+        Some((mesh_words, fragment_words)),
+        Geometry::Mesh,
+        Bound {
+            windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
+            memory,
+            viewport: Some(viewport),
+            ..Bound::default()
+        },
+    )
+    .map(|drawn| (drawn.pixels, drawn.memory))
 }
 
 /// Draws with a mesh stage over seeded guest memory, restricted to a scissor rectangle.

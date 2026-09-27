@@ -19,6 +19,7 @@ use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
 use orbistoun_translate::wavefront::{
     GeometryInputs, TableBase, TableWord, TextureSource, USER_DATA_STAGE_WORDS, UserData,
+    WINDOW_SPACE_SCALE,
 };
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
 
@@ -27,11 +28,11 @@ use crate::packet::{PacketWalk, walk};
 use crate::registers::{
     BlendControl, ColourTarget, ColourTargetExtent, ColourTargetFormat, DepthControl, DrawCall,
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
-    Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at, colour_target_at,
-    colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at, colour_target_format_at,
-    decode_blend_control, decode_image_descriptor, depth_control_at, dispatch_calls, draw_calls,
-    primitive_topology_at, register_writes, scissor_at, shader_candidates, stencil_control_at,
-    viewport_transform_from,
+    ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
+    colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
+    colour_target_format_at, decode_blend_control, decode_image_descriptor, depth_control_at,
+    dispatch_calls, draw_calls, primitive_topology_at, register_writes, scissor_at,
+    shader_candidates, stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -83,15 +84,29 @@ const fn stage_salt(stage: Stage) -> u64 {
     }
 }
 
-/// Distinguishes the same primitive shader translated for different draws' geometry (D730), in
-/// the cache key.
-fn geometry_salt(geometry: Option<GeometryInputs>) -> u64 {
-    geometry.map_or(0, |g| {
+/// What one draw adds to its primitive shader's translation: the geometry-engine inputs it seeds
+/// (D730), and whether its position export is in window space (D731).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct ForDraw {
+    geometry: Option<GeometryInputs>,
+    window_space: bool,
+}
+
+/// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
+/// position space (D731), in the cache key.
+fn for_draw_salt(for_draw: ForDraw) -> u64 {
+    let geometry = for_draw.geometry.map_or(0, |g| {
         0x4745_4f4d_0000_0000
             ^ (u64::from(g.vertices) << 32)
             ^ (u64::from(g.primitives) << 16)
             ^ u64::from(g.first_vertex)
-    })
+    });
+    geometry
+        ^ if for_draw.window_space {
+            0x5749_4e44_5350_4345
+        } else {
+            0
+        }
 }
 
 /// Distinguishes the same shader translated for different mesh primitives, in the cache key.
@@ -411,10 +426,11 @@ enum Unprepared {
 /// the reason they gave; what each geometry made; and the refusals already recorded.
 #[derive(Default)]
 struct ByGeometry {
-    /// Candidates prepared without geometry, and what they became; `None` for a failure.
-    plain: BTreeMap<(u32, u64), Option<ResourceId>>,
+    /// Candidates prepared without geometry, by whether their positions are in window space (D731),
+    /// and what they became; `None` for a failure.
+    plain: BTreeMap<(u32, u64, bool), Option<ResourceId>>,
     needs: BTreeMap<(u32, u64), String>,
-    prepared: BTreeMap<(u32, u64, GeometryInputs), Option<ResourceId>>,
+    prepared: BTreeMap<(u32, u64, ForDraw), Option<ResourceId>>,
     refused: std::collections::BTreeSet<(u64, String)>,
 }
 
@@ -637,6 +653,7 @@ impl Pipeline {
             pixel_inputs: None,
             compute: Some(state.inputs),
             geometry: None,
+            window_space: false,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -947,16 +964,17 @@ impl Pipeline {
             .collect();
         for &candidate in candidates {
             let key = (candidate.stage as u32, candidate.address);
-            match self.prepare_candidate(candidate, (memory, None), submission) {
+            let plain = (key.0, key.1, false);
+            match self.prepare_candidate(candidate, (memory, ForDraw::default()), submission) {
                 Ok(resource) => {
-                    by_geometry.plain.insert(key, Some(resource));
+                    by_geometry.plain.insert(plain, Some(resource));
                     submission.commands.push(RenderCommand::BindShader {
                         stage: candidate.stage,
                         shader: resource,
                     });
                 }
                 Err(Unprepared::Failed) => {
-                    by_geometry.plain.insert(key, None);
+                    by_geometry.plain.insert(plain, None);
                 }
                 // Bound per draw, with each draw's geometry.
                 Err(Unprepared::NeedsGeometry(reason)) => {
@@ -999,6 +1017,11 @@ impl Pipeline {
                     Some(geometry.first_vertex),
                 ]);
             }
+            // A window-space draw's primitive shader writes its position differently (D731).
+            let window_space = crate::registers::position_space(|register| {
+                sweep.latest(draw.packet_offset, register)
+            }) == crate::registers::PositionSpace::Window;
+            written.push(Some(u32::from(window_space)));
             if previous_writes.as_ref() == Some(&written) {
                 per_draw.push(Vec::clone(&previous_shaders));
                 continue;
@@ -1019,7 +1042,7 @@ impl Pipeline {
                 };
                 let resource = self.bind_for_draw(
                     candidate,
-                    (memory, &geometry),
+                    (memory, &geometry, window_space),
                     &mut by_geometry,
                     submission,
                 );
@@ -1036,26 +1059,38 @@ impl Pipeline {
 
     /// The module one draw binds for a candidate: the one prepared without geometry, or - for a
     /// primitive shader that reads the geometry engine's inputs - the one for this draw's geometry
-    /// (D730). Each is prepared once however many draws name it.
+    /// (D730). A primitive shader of a window-space draw is its own module (D731). Each is prepared
+    /// once however many draws name it.
     fn bind_for_draw(
         &mut self,
         candidate: Candidate,
-        (memory, geometry): (&impl GuestMemory, &Result<GeometryInputs, String>),
+        (memory, geometry, window_space): (
+            &impl GuestMemory,
+            &Result<GeometryInputs, String>,
+            bool,
+        ),
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
     ) -> Option<ResourceId> {
+        // Only the primitive shader writes a position.
+        let window_space = window_space && candidate.stage == ShaderStage::Vertex;
         let key = (candidate.stage as u32, candidate.address);
         if !by_geometry.needs.contains_key(&key) {
-            if let Some(known) = by_geometry.plain.get(&key) {
+            let plain = (key.0, key.1, window_space);
+            if let Some(known) = by_geometry.plain.get(&plain) {
                 return *known;
             }
-            match self.prepare_candidate(candidate, (memory, None), submission) {
+            let for_draw = ForDraw {
+                geometry: None,
+                window_space,
+            };
+            match self.prepare_candidate(candidate, (memory, for_draw), submission) {
                 Ok(resource) => {
-                    by_geometry.plain.insert(key, Some(resource));
+                    by_geometry.plain.insert(plain, Some(resource));
                     return Some(resource);
                 }
                 Err(Unprepared::Failed) => {
-                    by_geometry.plain.insert(key, None);
+                    by_geometry.plain.insert(plain, None);
                     return None;
                 }
                 Err(Unprepared::NeedsGeometry(reason)) => {
@@ -1066,7 +1101,7 @@ impl Pipeline {
         let needs = by_geometry.needs.get(&key).cloned().unwrap_or_default();
         self.prepare_with_geometry(
             candidate,
-            (memory, Some(geometry.clone()), needs),
+            (memory, Some(geometry.clone()), needs, window_space),
             by_geometry,
             submission,
         )
@@ -1078,10 +1113,11 @@ impl Pipeline {
     fn prepare_with_geometry(
         &mut self,
         candidate: Candidate,
-        (memory, geometry, needs): (
+        (memory, geometry, needs, window_space): (
             &impl GuestMemory,
             Option<Result<GeometryInputs, String>>,
             String,
+            bool,
         ),
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
@@ -1104,12 +1140,16 @@ impl Pipeline {
             }
             None => return None,
         };
-        let key = (candidate.stage as u32, candidate.address, geometry);
+        let for_draw = ForDraw {
+            geometry: Some(geometry),
+            window_space,
+        };
+        let key = (candidate.stage as u32, candidate.address, for_draw);
         if let Some(known) = by_geometry.prepared.get(&key) {
             return *known;
         }
         let made = self
-            .prepare_candidate(candidate, (memory, Some(geometry)), submission)
+            .prepare_candidate(candidate, (memory, for_draw), submission)
             .ok();
         by_geometry.prepared.insert(key, made);
         made
@@ -1121,7 +1161,7 @@ impl Pipeline {
     fn prepare_candidate(
         &mut self,
         candidate: Candidate,
-        (memory, geometry): (&impl GuestMemory, Option<GeometryInputs>),
+        (memory, for_draw): (&impl GuestMemory, ForDraw),
         submission: &mut Submission,
     ) -> Result<ResourceId, Unprepared> {
         match self.prepare(
@@ -1130,7 +1170,7 @@ impl Pipeline {
             (
                 submission.report.primitive_topology,
                 submission.report.wave_widths,
-                geometry,
+                for_draw,
             ),
             memory,
         ) {
@@ -1252,11 +1292,7 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
-        (topology, widths, geometry): (
-            Option<PrimitiveTopology>,
-            WaveWidths,
-            Option<GeometryInputs>,
-        ),
+        (topology, widths, for_draw): (Option<PrimitiveTopology>, WaveWidths, ForDraw),
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
         // A shader already decoded at this address with the same bytes is not decoded again: a
@@ -1268,7 +1304,7 @@ impl Pipeline {
             return self.prepare_decoded(
                 address,
                 stage,
-                (topology, widths, geometry),
+                (topology, widths, for_draw),
                 (bytes, None),
             );
         }
@@ -1312,7 +1348,7 @@ impl Pipeline {
         self.prepare_decoded(
             address,
             stage,
-            (topology, widths, geometry),
+            (topology, widths, for_draw),
             (shader, Some(&decoded)),
         )
     }
@@ -1326,11 +1362,7 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
-        (topology, widths, geometry): (
-            Option<PrimitiveTopology>,
-            WaveWidths,
-            Option<GeometryInputs>,
-        ),
+        (topology, widths, for_draw): (Option<PrimitiveTopology>, WaveWidths, ForDraw),
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
     ) -> Result<Prepared, PrepareFailure> {
         let host_stage = host_stage(stage);
@@ -1350,7 +1382,8 @@ impl Pipeline {
         // stages or output shapes gives different modules.
         let user_data = match stage {
             ShaderStage::Vertex => UserData {
-                geometry,
+                geometry: for_draw.geometry,
+                window_space: for_draw.window_space,
                 ..self.user_data[0]
             },
             ShaderStage::Fragment => self.user_data[1],
@@ -1365,7 +1398,7 @@ impl Pipeline {
             ^ width_salt
             ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
             ^ crate::pixel_inputs::salt(user_data)
-            ^ geometry_salt(geometry);
+            ^ for_draw_salt(for_draw);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -1523,14 +1556,27 @@ fn push_geometry_commands(
         }
         // The depth, stencil and cull state in force at this draw, and a clear it asks for.
         depth_sent.push(&mut sweep, at, depth_target, commands);
-        // A draw whose positions are not clip space is counted, so it is refused rather than drawn
-        // as if they were.
-        if crate::registers::viewport_transform_disabled(|register| sweep.latest(at, register)) {
-            *unmodelled_viewports += 1;
-        }
         // The clip-to-pixel transform in force at this draw, when the stream set one and it
-        // changed.
-        if let Some(transform) = viewport_transform_from(|register| sweep.latest(at, register))
+        // changed. A window-space draw's primitive shader wrote positions this fixed transform
+        // takes back to pixels (D731); a draw whose positions are in any other space is counted,
+        // so it is refused rather than drawn as if they were clip space.
+        let transform =
+            match crate::registers::position_space(|register| sweep.latest(at, register)) {
+                crate::registers::PositionSpace::Clip => {
+                    viewport_transform_from(|register| sweep.latest(at, register))
+                }
+                crate::registers::PositionSpace::Window => Some(ViewportTransform {
+                    x_scale: WINDOW_SPACE_SCALE,
+                    x_offset: 0.0,
+                    y_scale: WINDOW_SPACE_SCALE,
+                    y_offset: 0.0,
+                }),
+                crate::registers::PositionSpace::Unmodelled(_) => {
+                    *unmodelled_viewports += 1;
+                    None
+                }
+            };
+        if let Some(transform) = transform
             && transform_sent != Some(transform)
         {
             commands.push(RenderCommand::SetViewportTransform(transform));
@@ -1912,6 +1958,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             pixel_inputs: None,
             compute: None,
             geometry: None,
+            window_space: false,
         },
         UserData {
             first_register: 0,
@@ -1922,6 +1969,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             pixel_inputs: None,
             compute: None,
             geometry: None,
+            window_space: false,
         },
     ]
 }
@@ -2584,7 +2632,7 @@ mod tests {
         let prepare = |pipeline: &mut Pipeline, memory: &At| match pipeline.prepare(
             AT,
             ShaderStage::Vertex,
-            (None, WaveWidths::default(), None),
+            (None, WaveWidths::default(), super::ForDraw::default()),
             memory,
         ) {
             Ok(Prepared::Fresh { resource, .. }) => (resource, true),

@@ -606,6 +606,7 @@ mod tests {
                     pixel_inputs: None,
                     compute: None,
                     geometry: None,
+                    window_space: false,
                 },
             )
         };

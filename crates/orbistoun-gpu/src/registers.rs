@@ -1509,11 +1509,39 @@ pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<Vi
     })
 }
 
-/// Whether the stream turned the viewport transform's x/y scale or offset off in
-/// `PA_CL_VTE_CNTL`: its positions are then not clip space, and drawing them as clip space draws
-/// somewhere else.
-pub fn viewport_transform_disabled(mut last: impl FnMut(u32) -> Option<u32>) -> bool {
-    last(PA_CL_VTE_CNTL).is_some_and(|value| value & VTE_XY_ENABLES != VTE_XY_ENABLES)
+/// Every `PA_CL_VTE_CNTL` field this reads: the six scale and offset enables (bits 0-5) and
+/// `VTX_XY_FMT`, `VTX_Z_FMT` and `VTX_W0_FMT` (bits 8-10, `gfx103.json:13365-13367`).
+const VTE_FIELDS: u32 = 0x73F;
+/// The value radeonsi gives a window-space shader (`si_state_shaders.cpp:1321-1322`): x, y and z
+/// pre-divided, no scale or offset, and `VTX_W0_FMT` clear - Gallium's `VS_WINDOW_SPACE_POSITION`,
+/// whose fourth component is `1/W` taken as is (`docs/gallium/tgsi.rst:3705-3711`).
+const VTE_WINDOW_SPACE: u32 = 0x300;
+
+/// The space a draw's positions are in, from `PA_CL_VTE_CNTL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionSpace {
+    /// Clip space, mapped through the viewport transform: the x/y terms are on, or the stream
+    /// never wrote the register.
+    Clip,
+    /// Window space, in radeonsi's form (D731).
+    Window,
+    /// The x/y terms off in some other form, with the value that asked for it.
+    Unmodelled(u32),
+}
+
+/// The space the positions of a draw are in, reading each register's value through `last` - a
+/// [`RegisterSweep::latest`] for a caller walking draws in order.
+pub fn position_space(mut last: impl FnMut(u32) -> Option<u32>) -> PositionSpace {
+    match last(PA_CL_VTE_CNTL) {
+        Some(value) if value & VTE_XY_ENABLES != VTE_XY_ENABLES => {
+            if value & VTE_FIELDS == VTE_WINDOW_SPACE {
+                PositionSpace::Window
+            } else {
+                PositionSpace::Unmodelled(value)
+            }
+        }
+        _ => PositionSpace::Clip,
+    }
 }
 
 /// [`viewport_transform_at`], reading each register's value through `last` - a
@@ -2166,6 +2194,38 @@ mod tests {
             value: 0x430, // VTE_CNTL with the x/y enables clear
         });
         assert!(viewport_transform_at(&writes, 100).is_none());
+    }
+
+    /// A draw's positions are clip space unless `PA_CL_VTE_CNTL` turns the x/y terms off; with
+    /// every scale and offset off and x, y and z pre-divided - the value radeonsi gives a
+    /// window-space shader (`si_state_shaders.cpp:1321-1322`) - they are window space (D731); any
+    /// other value with the x/y terms off is named as unmodelled.
+    #[test]
+    fn a_draw_s_position_space_is_read_from_vte_cntl() {
+        use super::{PositionSpace, position_space};
+        let with = |value: Option<u32>| position_space(|_| value);
+        assert_eq!(with(None), PositionSpace::Clip, "nothing written");
+        assert_eq!(
+            with(Some(0x43F)),
+            PositionSpace::Clip,
+            "radeonsi's clip-space value"
+        );
+        assert_eq!(with(Some(0x300)), PositionSpace::Window);
+        assert_eq!(
+            with(Some(0x700)),
+            PositionSpace::Unmodelled(0x700),
+            "W0 not 1/W"
+        );
+        assert_eq!(
+            with(Some(0x310)),
+            PositionSpace::Unmodelled(0x310),
+            "a z scale"
+        );
+        assert_eq!(
+            with(Some(0x430)),
+            PositionSpace::Unmodelled(0x430),
+            "not pre-divided"
+        );
     }
 
     /// The vertex program is read from `PGM_LO/HI_ES`, not `PGM_LO/HI_VS`: on this generation the

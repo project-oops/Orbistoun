@@ -396,7 +396,21 @@ pub struct UserData {
     /// mesh module that reads those inputs is refused.
     #[serde(default)]
     pub geometry: Option<GeometryInputs>,
+    /// Whether a primitive shader's position export is in window space (D731): `PA_CL_VTE_CNTL` in
+    /// the form radeonsi gives a window-space shader, x, y and z already divided and the fourth
+    /// component `1/W`, with no viewport scale or offset (`si_state_shaders.cpp:1321-1322`). The
+    /// module then writes the clip-space position that, under the viewport [`WINDOW_SPACE_SCALE`]
+    /// names, lands on the same pixel.
+    #[serde(default)]
+    pub window_space: bool,
 }
+
+/// The viewport scale a window-space draw runs under (D731), in pixels, on both axes, with no
+/// offset: a window-space position `(x, y, z, 1/W)` is written `(x W / S, y W / S, z W, W)`, which
+/// Vulkan's divide and this viewport take back to `(x, y, z)`. A power of two, so the scaling is
+/// exact; and large enough that every position on a target of up to `S` pixels lies inside the
+/// clip volume.
+pub const WINDOW_SPACE_SCALE: f32 = 8192.0;
 
 /// What the geometry engine hands a primitive shader for a draw one subgroup holds whole (D730):
 /// the draw's vertices, one per vertex thread from `first_vertex`, and its primitives of three
@@ -1007,6 +1021,9 @@ pub struct Wavefront<'a> {
     mesh: Option<MeshOutputs>,
     /// A rectangle-list mesh module's copies of what it emitted, or [`None`] for any other.
     rectangles: Option<RectangleCopies>,
+    /// Whether a mesh module's position export is in window space (D731); see
+    /// [`UserData::window_space`].
+    window_space: bool,
     /// The primitive a mesh module assembles. Read only at [`Stage::Mesh`].
     primitive: MeshPrimitive,
     /// The four-component float vector, which the stages that have one share.
@@ -1027,6 +1044,8 @@ pub struct Wavefront<'a> {
     /// `7`). A lane known inactive emits nothing, and one known active writes without a select.
     known_exec: [Option<u32>; 2],
     constants: BTreeMap<u32, Id>,
+    /// The 32-bit float constants declared so far, by bit pattern.
+    float_constants: BTreeMap<u32, Id>,
     /// The imported `GLSL.std.450` set id, cached after the first extended instruction imports it.
     glsl_set: Option<Id>,
     u32_type: Id,
@@ -1425,6 +1444,7 @@ impl<'a> Wavefront<'a> {
             inputs,
             mesh,
             rectangles,
+            window_space: user_data.window_space,
             primitive,
             vec4,
             memory_base: window.base,
@@ -1435,6 +1455,7 @@ impl<'a> Wavefront<'a> {
             lanes: simulated_lanes(stage, width),
             known_exec: [None; 2],
             constants: BTreeMap::new(),
+            float_constants: BTreeMap::new(),
             glsl_set: None,
             u32_type,
             f32_type,
@@ -1972,6 +1993,44 @@ impl<'a> Wavefront<'a> {
         corner
     }
 
+    /// The clip-space position that lands a window-space one on its pixel (D731): `(x, y, z, q)`,
+    /// where `q` is `1/W`, becomes `(x W / S, y W / S, z W, W)` for `W = 1 / q` and `S` the
+    /// [`WINDOW_SPACE_SCALE`] the draw's viewport scales by. Vulkan divides by `W` and scales by
+    /// `S`, giving back `(x, y, z)`; and `W` is what it interpolates perspective by, as the
+    /// hardware does with `1/W` from the fourth component.
+    fn window_to_clip(&mut self, [x, y, depth, reciprocal]: [Id; 4]) -> [Id; 4] {
+        let one = self.float_constant(1.0);
+        let inverse_scale = self.float_constant(WINDOW_SPACE_SCALE.recip());
+        let clip_w = self.float_binary(op::FDIV, one, reciprocal);
+        let per_pixel = self.float_binary(op::FDIV, inverse_scale, reciprocal);
+        [
+            self.float_binary(op::FMUL, x, per_pixel),
+            self.float_binary(op::FMUL, y, per_pixel),
+            self.float_binary(op::FMUL, depth, clip_w),
+            clip_w,
+        ]
+    }
+
+    /// One 32-bit float operation on two float values.
+    fn float_binary(&mut self, operation: u16, lhs: Id, rhs: Id) -> Id {
+        let result = self.builder.id();
+        self.builder
+            .function(operation, &[self.f32_type.0, result.0, lhs.0, rhs.0]);
+        result
+    }
+
+    /// A 32-bit float constant, declared once per value.
+    fn float_constant(&mut self, value: f32) -> Id {
+        if let Some(id) = self.float_constants.get(&value.to_bits()) {
+            return *id;
+        }
+        let id = self.builder.id();
+        self.builder
+            .declare(op::CONSTANT, &[self.f32_type.0, id.0, value.to_bits()]);
+        self.float_constants.insert(value.to_bits(), id);
+        id
+    }
+
     /// Stores `value` into element `index` of a rectangle copy, when this module keeps them.
     fn copy_element(&mut self, array: Id, pointer: Id, index: u32, value: Id) {
         let at = Self::constant(self, index);
@@ -2041,6 +2100,11 @@ impl Model for Wavefront<'_> {
 
     fn write_mesh_position(&mut self, lane: u32, components: [Id; 4]) -> Option<()> {
         let mesh = self.mesh.clone()?;
+        let components = if self.window_space {
+            self.window_to_clip(components)
+        } else {
+            components
+        };
         let slot = Self::constant(self, lane);
         let member = Self::constant(self, 0);
         let pointer = self.builder.id();
