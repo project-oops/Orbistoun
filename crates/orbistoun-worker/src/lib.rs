@@ -506,6 +506,8 @@ fn install_presentation() {
     // The draws, carried out at submit and written back where the guest reads them, so the fence
     // after them retires from work that ran.
     orbistoun_gpu::agc_driver::install_draw_executor(render::execute_draws);
+    // Compute dispatches, carried out at submit over guest memory the same way.
+    orbistoun_gpu::agc_driver::install_dispatch_executor(render::execute_dispatch);
     // Read back when the drawn frame is written into guest memory: at the flip by default, or after
     // every submission under `ORBISTOUN_TARGET_WRITEBACK=submit` (D714).
     orbistoun_gpu::agc_driver::install_frame_reader(render::read_frame);

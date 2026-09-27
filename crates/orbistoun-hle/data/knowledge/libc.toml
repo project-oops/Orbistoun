@@ -3216,6 +3216,17 @@ found_on = "2026-09-02"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
+name = "wmemchr"
+arity = 3
+purpose = "the address of the first of the n wide characters at s equal to c, or null."
+edge_cases = ["Reference: ISO/IEC 9899:2011 7.29.4.5.8. n counts wide characters, and a zero among them is an ordinary character, not a terminator."]
+known_by = "published"
+cites = "ISO/IEC 9899:2011 7.29.4.5.8."
+assumptions = ["The published specification is the source; wchar_t is taken as 32-bit, as on every FreeBSD-derived system. Nothing on the target has confirmed it."]
+found_on = "2026-09-27"
+note = "Derived from the implementation's doc comment."
+
+[[function]]
 name = "wcsrchr"
 arity = 2
 purpose = "the address of the last wide character in s equal to c, or null."

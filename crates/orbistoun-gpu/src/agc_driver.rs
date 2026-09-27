@@ -287,6 +287,132 @@ impl GuestCp<'_> {
     }
 }
 
+/// Runs a guest compute dispatch's module over its window: the module, the window's words before,
+/// the push-constant block and the grid. Answers the window's words after and whether any access
+/// escaped the window, or why the device could not run it. Installed by the worker, which owns the
+/// graphics device.
+pub type DispatchExecutor =
+    fn(&[u32], &[u32], &[u32], [u32; 3]) -> Result<(Vec<u32>, bool), String>;
+
+fn dispatch_executor() -> &'static OnceLock<DispatchExecutor> {
+    static EXECUTOR: OnceLock<DispatchExecutor> = OnceLock::new();
+    &EXECUTOR
+}
+
+/// Installs the executor a submit carries out its compute dispatches with. Without one, a dispatch
+/// stops the command processor. First install wins.
+pub fn install_dispatch_executor(executor: DispatchExecutor) {
+    let _ = dispatch_executor().set(executor);
+}
+
+/// Why the most recent dispatch was not carried out, for the run report.
+fn dispatch_refusal() -> &'static Mutex<Option<String>> {
+    static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
+    &REFUSAL
+}
+
+fn note_dispatch_refusal(why: String) {
+    *dispatch_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+}
+
+/// Why the most recent compute dispatch was refused, if one was.
+#[must_use]
+pub fn last_dispatch_refusal() -> Option<String> {
+    dispatch_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// The runs of words that differ between `before` and `after`, as `(first word, words)`.
+fn changed_runs(before: &[u32], after: &[u32]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut start = None;
+    for (index, (old, new)) in before.iter().zip(after).enumerate() {
+        match (old != new, start) {
+            (true, None) => start = Some(index),
+            (false, Some(first)) => {
+                runs.push((first, index - first));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(first) = start {
+        runs.push((first, before.len().min(after.len()) - first));
+    }
+    runs
+}
+
+impl GuestCp<'_> {
+    /// Carries out a compute dispatch: reads its state from the stream, prepares its program, runs
+    /// it over its window as guest memory holds it now, and writes back exactly the words it
+    /// changed. Nothing is written unless the whole dispatch ran exactly.
+    fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
+        static VOCABULARY: OnceLock<Option<crate::registers::Vocabulary>> = OnceLock::new();
+        let execute = dispatch_executor()
+            .get()
+            .ok_or("no device is installed to run it")?;
+        let vocabulary = VOCABULARY
+            .get_or_init(|| crate::registers::Vocabulary::builtin().ok())
+            .as_ref()
+            .ok_or("the register vocabulary did not load")?;
+        let walked = crate::packet::walk(dispatch.stream);
+        let writes = crate::registers::register_writes(&walked, dispatch.stream, vocabulary);
+        let state = crate::dispatch::state_at(
+            &writes,
+            dispatch.offset,
+            dispatch.groups,
+            dispatch.initiator,
+        )?;
+        let prepared = {
+            let mut live = live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+            pipeline.prepare_dispatch(&state, &self.memory)?
+        };
+        let span = prepared.window.words() as usize * 4;
+        let bytes = cp::CpMemory::read(self, prepared.window.address(), span)
+            .ok_or("its window is not readable guest memory")?;
+        let before: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect();
+        let (after, escaped) = execute(&prepared.module, &before, &prepared.push, prepared.groups)?;
+        if escaped {
+            return Err(concat!(
+                "an access left its window or went through a buffer descriptor whose addressing ",
+                "is not modelled, so what it wrote is not the guest's"
+            )
+            .to_owned());
+        }
+        if after.len() != before.len() {
+            return Err("the device answered a window of another size".to_owned());
+        }
+        let runs = changed_runs(&before, &after);
+        let base = prepared.window.address();
+        let writable = write_lookup().get();
+        if !runs.iter().all(|&(first, words)| {
+            writable.is_some_and(|allows| allows(base + first as u64 * 4, words as u64 * 4))
+        }) {
+            return Err("it wrote guest memory that is not writable".to_owned());
+        }
+        for (first, words) in runs {
+            let bytes: Vec<u8> = after[first..first + words]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect();
+            if !cp::CpMemory::write(self, base + first as u64 * 4, &bytes) {
+                return Err("a write back into guest memory was refused".to_owned());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Answers the frame the executor's last draws left on the target, as linear `Rgba8` words - read
 /// off the device when the frame is written back (D714). Installed by the worker with the executor.
 pub type FrameReader = fn() -> Option<Vec<u32>>;
@@ -1203,6 +1329,19 @@ impl cp::CpMemory for GuestCp<'_> {
         crate::perf::span(crate::perf::Span::RunDraws, || self.draw_into_target())
     }
 
+    fn run_dispatch(&mut self, dispatch: &cp::Dispatch<'_>) -> bool {
+        match self.dispatch_into_memory(dispatch) {
+            Ok(()) => true,
+            Err(why) => {
+                note_dispatch_refusal(format!(
+                    "the compute dispatch at byte {:#x}: {why}",
+                    dispatch.offset
+                ));
+                false
+            }
+        }
+    }
+
     fn holds(&self, address: u64, expected: &[u8]) -> bool {
         carry_out_overlapping(address, expected.len() as u64)
             && self
@@ -1372,8 +1511,22 @@ pub struct ExecutionRecord {
     pub drawn: u64,
     /// Bytes written to guest memory across them all.
     pub bytes_written: u64,
-    /// The most recent submission's execution.
+    /// Submissions not carried out because one before them on the queue stopped (D710).
+    pub held_back: u64,
+    /// The most recent submission's execution - once the queue has stopped, the one that stopped
+    /// it, since that is where its work ends.
     pub last: Option<cp::CpExecution>,
+}
+
+/// The execution of the first submission on the queue that did not run to completion, once one
+/// has not.
+///
+/// The command processor retires its queue in order, and nothing here ever runs the packet a
+/// submission stopped at, so everything submitted after it waits forever: none of it is carried
+/// out, and no fence after it is written (D705, D710).
+fn queue_stall() -> &'static Mutex<Option<cp::CpExecution>> {
+    static STALL: Mutex<Option<cp::CpExecution>> = Mutex::new(None);
+    &STALL
 }
 
 fn execution_record() -> &'static Mutex<ExecutionRecord> {
@@ -1640,6 +1793,19 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
     }
     let submission = submission;
+    // A queue an earlier submission stopped retires nothing more (D710).
+    let stalled = *queue_stall()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stalled.is_some() {
+        if let Ok(mut record) = execution_record().lock() {
+            record.held_back += 1;
+        }
+        if let Ok(mut slot) = last_submission().lock() {
+            *slot = Some(submission);
+        }
+        return SUBMIT_OK;
+    }
     // The command processor's own memory work, carried out synchronously as the submit returns. It
     // stops at the first packet needing the GPU, so a fence is written only when everything before
     // it ran (D705); draws are such work once an executor is installed and they can run as one into
@@ -1665,6 +1831,11 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         record.drawn += u64::from(executed.draws > 0);
         record.bytes_written += executed.bytes_written;
         record.last = Some(executed);
+    }
+    if executed.stopped != cp::Stopped::Completed {
+        *queue_stall()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(executed);
     }
     if let Ok(mut slot) = last_submission().lock() {
         *slot = Some(submission);
@@ -1701,6 +1872,17 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
     use std::sync::{Mutex, PoisonError};
+
+    /// A dispatch writes back exactly the words it changed, as runs.
+    #[test]
+    fn a_dispatch_writes_back_the_runs_it_changed() {
+        let before = [0, 1, 2, 3, 4, 5, 6];
+        assert_eq!(super::changed_runs(&before, &before), vec![]);
+        assert_eq!(
+            super::changed_runs(&before, &[9, 1, 9, 9, 4, 5, 9]),
+            vec![(0, 1), (2, 2), (6, 1)]
+        );
+    }
 
     /// A range touches a target exactly when it shares a byte with its tiled surface: a 16x8 target
     /// is one 64 KiB block, so the byte before it and the byte after its block are outside, and a
@@ -1970,7 +2152,57 @@ mod tests {
     /// time. A poisoned lock is recovered rather than cascading a panic across the others.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+        let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        // Each test starts on a queue nothing has stopped.
+        *super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        guard
+    }
+
+    /// A submission that stops holds up every later one on the queue: the fence stream submitted
+    /// after it is not carried out, so its fence stays unwritten (D705, D710). A command processor
+    /// retires its stream in order, and nothing runs the stopped packet.
+    #[test]
+    fn a_stopped_submission_holds_back_every_later_one() {
+        let _guard = serial();
+        let fence: &'static mut [u8] = Box::leak(vec![0u8; 64].into_boxed_slice());
+        let fence_at = fence.as_ptr() as usize as u64;
+        allow_writes_to(fence_at, 64);
+        let words = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        // An indirect draw: its arguments are in memory at execution time, never carried out here.
+        let stopping = words(&[crate::packet::build::command_header(0x24, 4), 0, 0, 0, 0]);
+        let release = words(&[
+            crate::packet::build::command_header(crate::packet::build::measured::RELEASE_MEM, 7),
+            0x0660_3514,
+            1 << 29,
+            fence_at as u32,
+            (fence_at >> 32) as u32,
+            0xbeef_cafe,
+            0,
+            0,
+        ]);
+        set_guest_regions(vec![
+            region_of(&stopping),
+            region_of(&release),
+            region_of(fence),
+        ]);
+
+        let desc = descriptor(&stopping);
+        assert_eq!(submit_dcb(&args(desc.as_ptr() as usize as u64)), SUBMIT_OK);
+        let desc = descriptor(&release);
+        assert_eq!(submit_dcb(&args(desc.as_ptr() as usize as u64)), SUBMIT_OK);
+
+        assert_eq!(&fence[..4], &[0; 4], "no fence for a queue that stopped");
+        let record = super::execution();
+        assert!(
+            matches!(
+                record.last.map(|l| l.stopped),
+                Some(crate::cp::Stopped::NeedsGpu { opcode: 0x24, .. })
+            ),
+            "the wall is the stopped submission, not the one behind it: {record:?}"
+        );
+        assert!(record.held_back >= 1, "{record:?}");
     }
 
     /// The `(start, end)` region a heap buffer occupies, its address exposed for the handler's

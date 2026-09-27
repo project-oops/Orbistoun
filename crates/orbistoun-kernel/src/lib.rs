@@ -1222,6 +1222,30 @@ fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, (u64, u
     MAPPED.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
 }
 
+/// The address `[physical, physical + len)` is already mapped at as one run, or `None`.
+///
+/// The run may be several recorded mappings - a buffer batch-mapped in pieces - as long as each
+/// piece starts at the virtual and physical address the one before ends at, so the whole range is
+/// one span of addresses holding exactly that memory in order.
+fn contiguous_alias(
+    mapped: &std::collections::BTreeMap<u64, (u64, u64)>,
+    physical: u64,
+    len: u64,
+) -> Option<u64> {
+    let &(start, _) = mapped.get(&physical)?;
+    let (mut covered, mut next_physical, mut next_virtual) = (0_u64, physical, start);
+    while covered < len {
+        let &(base, piece) = mapped.get(&next_physical)?;
+        if base != next_virtual || piece == 0 {
+            return None;
+        }
+        covered = covered.checked_add(piece)?;
+        next_physical = next_physical.checked_add(piece)?;
+        next_virtual = next_virtual.checked_add(piece)?;
+    }
+    Some(start)
+}
+
 /// Forgets every alias whose physical offset lies in `[start, start + len)`: the memory was
 /// released, so a later allocation of it is new memory.
 fn forget_physical(start: u64, len: u64) {
@@ -1288,9 +1312,7 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // Already mapped and covering what is asked for: the guest gets the address it had, with its
     // data. A longer map is a different mapping.
     if let Ok(mapped) = physical_mappings().lock() {
-        if let Some(&(existing, existing_len)) = mapped.get(&physical)
-            && existing_len >= len
-        {
+        if let Some(existing) = contiguous_alias(&mapped, physical, len) {
             drop(mapped);
             // SAFETY: an address the guest passed for this call, valid by its contract.
             return if unsafe { guest::write_u64(out, existing) } {
@@ -1403,6 +1425,19 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
     let mut done: u64 = 0;
     let mut outcome = OK;
+    // Entries that continue one another - each at the virtual and physical address the one before
+    // ends at, with the same protection - are placed as one mapping. A driver maps a buffer page by
+    // page, and a guest page is smaller than the host's placement unit, so pages placed one at a
+    // time would each land on the next host boundary instead of where they were asked to go.
+    let mut run: Option<(u64, u64, u64, u64, u64)> = None; // (vaddr, paddr, len, prot, entries)
+    let place = |run: (u64, u64, u64, u64, u64), done: &mut u64| {
+        let (vaddr, paddr, len, prot, entries) = run;
+        let placed = map_direct_at(vaddr, paddr, len, prot);
+        if placed == OK {
+            *done += entries;
+        }
+        placed
+    };
     for index in 0..count {
         let Some(entry) = index
             .checked_mul(ENTRY_SIZE)
@@ -1425,12 +1460,36 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             break;
         };
         // `prot` is the low byte of the word at offset 24; the padding and `flags` bytes are not read.
-        let placed = map_direct_at(vaddr, paddr, len, prot_word & 0xff);
-        if placed != OK {
-            outcome = placed;
+        let prot = prot_word & 0xff;
+        run = match run {
+            Some((v, p, l, pr, n))
+                if pr == prot
+                    && v.checked_add(l) == Some(vaddr)
+                    && p.checked_add(l) == Some(paddr) =>
+            {
+                l.checked_add(len).map(|l| (v, p, l, pr, n + 1))
+            }
+            Some(finished) => {
+                let placed = place(finished, &mut done);
+                if placed != OK {
+                    outcome = placed;
+                    run = None;
+                    break;
+                }
+                Some((vaddr, paddr, len, prot, 1))
+            }
+            None => Some((vaddr, paddr, len, prot, 1)),
+        };
+        if run.is_none() {
+            outcome = u64::from(GuestError::InvalidArgument.as_raw());
             break;
         }
-        done += 1;
+    }
+    if let Some(last) = run {
+        let placed = place(last, &mut done);
+        if placed != OK && outcome == OK {
+            outcome = placed;
+        }
     }
     // Written whatever the outcome, so a stopped batch still says how far it got.
     // SAFETY: an address the guest passed for this call, valid by its contract.
@@ -6738,6 +6797,65 @@ mod tests {
         // SAFETY: as above - the same live mapping.
         let read_back = unsafe { std::ptr::read_volatile(again as usize as *const u64) };
         assert_eq!(read_back, 0xFEED_FACE, "and the data survived");
+    }
+
+    /// A buffer batch-mapped page by page at the address a driver chose, then mapped again for the
+    /// CPU, is one memory seen at one address: the second map answers the first's address, and
+    /// what is written through one is read through the other. Two batches of sixty-four 16 KiB
+    /// pages, as a GPU-address map arrives, cover the whole 2 MiB buffer the CPU map asks for.
+    #[test]
+    fn a_page_by_page_batch_map_is_the_alias_a_whole_map_finds() {
+        const PAGE: u64 = 0x4000;
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let size = 128 * PAGE;
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = size;
+        args[1] = size;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+
+        let va = 0x6e40_0000_0000_u64;
+        for batch in 0..2_u64 {
+            // `obs_batch_map_entry`: vaddr, paddr, len, prot (low byte), flags.
+            let entries: Vec<u64> = (0..64_u64)
+                .flat_map(|i| {
+                    let page = batch * 64 + i;
+                    [va + page * PAGE, physical + page * PAGE, PAGE, 0x33]
+                })
+                .collect();
+            let mut completed = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = entries.as_ptr() as usize as u64;
+            args[1] = 64;
+            args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+            assert_eq!(super::batch_map(&args), 0, "batch {batch} maps");
+            assert_eq!(completed, 64, "every entry of batch {batch}");
+        }
+        // SAFETY: the last word of the batch-mapped buffer, mapped read-write just above.
+        unsafe { std::ptr::write_volatile((va + size - 8) as usize as *mut u64, 0x5eed) };
+
+        let mut cpu = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = std::ptr::addr_of_mut!(cpu) as usize as u64;
+        args[1] = size;
+        args[2] = 3;
+        args[4] = physical;
+        args[5] = PAGE;
+        assert_eq!(super::map_named_direct_memory(&args), 0, "the CPU map");
+        assert_eq!(
+            cpu, va,
+            "the same memory answers the address it is already at"
+        );
+        // SAFETY: as above - the same live mapping.
+        let seen = unsafe { std::ptr::read_volatile((cpu + size - 8) as usize as *const u64) };
+        assert_eq!(
+            seen, 0x5eed,
+            "and holds what was written through the batch map"
+        );
     }
 
     /// An alias does not outlive its memory or its mapping, and never answers a longer map.
