@@ -247,9 +247,10 @@ struct GuestCp<'a> {
 }
 
 /// The stream as one segment's draws see it (D729): every packet up to the segment's last draw,
-/// with each draw before its first replaced by a `NOP` of the same length. Every register write
-/// before the segment still runs, so its draws see the register state the stream gives them; no
-/// earlier segment's draw is drawn again, and nothing after the segment is read.
+/// with each draw and each dispatch before its first replaced by a `NOP` of the same length. Every
+/// register write before the segment still runs, so its draws see the register state the stream
+/// gives them; no earlier segment's draw is drawn again, no dispatch the command processor already
+/// carried out is dispatched again, and nothing after the segment is read.
 fn segment_stream(segment: &cp::DrawSegment<'_>) -> Vec<u8> {
     let end = (segment.end as usize).min(segment.stream.len());
     let mut bytes = segment.stream[..end].to_vec();
@@ -257,7 +258,8 @@ fn segment_stream(segment: &cp::DrawSegment<'_>) -> Vec<u8> {
         let crate::packet::PacketKind::Command { opcode } = packet.kind else {
             continue;
         };
-        if packet.offset >= segment.first || !cp::is_draw(opcode) {
+        let dispatch = opcode == crate::packet::build::DISPATCH_DIRECT;
+        if packet.offset >= segment.first || !(cp::is_draw(opcode) || dispatch) {
             continue;
         }
         let header = crate::packet::build::command_header(
@@ -2105,6 +2107,35 @@ mod tests {
         let walked = crate::packet::walk(&segment);
         assert!(walked.is_trustworthy());
         assert_eq!(walked.packets.len(), 5, "every packet kept, none split");
+    }
+
+    /// A dispatch before a segment is memory work the command processor already carried out
+    /// (D729), so the segment's stream silences it as it does an earlier draw: drawn again it
+    /// would be a second dispatch, and on a device with no compute shader bound, a refusal.
+    #[test]
+    fn a_segment_stream_silences_the_dispatches_before_it() {
+        use crate::packet::build::{command_header, dispatch_direct, measured};
+        let set = [command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7];
+        let draw = [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2];
+        let mut words = set.to_vec();
+        let dispatch_at = words.len() * 4;
+        words.extend(dispatch_direct(0xc0, 1, 1));
+        let first = u32::try_from(words.len() * 4).expect("small");
+        words.extend(draw);
+        let end = u32::try_from(words.len() * 4).expect("small");
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let segment = super::segment_stream(&crate::cp::DrawSegment {
+            stream: &stream,
+            first,
+            end,
+            whole: false,
+        });
+
+        let mut expected = stream.clone();
+        expected[dispatch_at..dispatch_at + 4]
+            .copy_from_slice(&command_header(measured::NOP, 4).to_le_bytes());
+        assert_eq!(segment, expected);
     }
 
     /// A dispatch writes back exactly the words it changed, as runs.
