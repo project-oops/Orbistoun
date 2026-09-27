@@ -22,7 +22,7 @@ guest_module! {
         "sceAgcAcbWaitRegMem" => 6,
         "sceAgcAcbWriteData" => 6,
         "sceAgcCbDispatch" => 6,
-        "sceAgcCbNop" => 6,
+        "sceAgcCbNop" => 2,
         "sceAgcCbReleaseMem" => 6,
         "sceAgcCbSetShRegisterRangeDirect" => 6,
         "sceAgcCbSetShRegistersDirect" => 6,
@@ -551,27 +551,60 @@ fn dcb_wait_until_safe_for_rendering(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// Bytes from a register write's start to its values: the measured `SET_SH_REG` packet is a
-/// header, the register offset, then the values (`166-agc/dcb-set-sh-reg-direct`).
-const REGISTER_PAYLOAD_OFFSET: u64 = 8;
+/// The count field of a header-only `NOP`: `0x3fff`, as in `0xffff1000`, a `NOP` with no body.
+const HEADER_ONLY_COUNT: u32 = 0x3fff;
 
-/// The kind [`agc_packet_payload`] is asked with for a register write.
-const REGISTER_WRITE_KIND: u64 = 1;
+/// What [`agc_packet_payload`] answers for a packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Payload {
+    /// The payload begins this many bytes into the packet.
+    At(u64),
+    /// Null: the packet has no body.
+    Null,
+}
 
-/// `0x7d86501b8094ef57(out, packet, kind)`: where the payload of a packet the guest reserved
-/// begins.
-///
-/// Guest-observed: PPSA02664 calls it with kind 1 on the register write it just reserved with no
-/// values, then fills the values through the answer, so kind 1 answers the measured payload
-/// offset. It also calls it with kind 0 on a data `NOP`, whose layout is unmeasured; that kind is
-/// refused until obSCEne measures it.
+/// What [`agc_packet_payload`] answers for a `kind` on a packet with `header`, or `None` for a
+/// pairing nobody measured.
+/// Measured (`-r1b0`, sweep 20260927-204316, `166-agc/cb-unnamed-ef57`, all answering `0`): kind 1
+/// on `SET_SH_REG` 8; kind 0 on an ordinary `NOP` 4 and on the header-only `NOP` null; kind 2 on an
+/// ordinary `NOP` 8.
+fn payload_offset(header: u32, kind: u64) -> Option<Payload> {
+    if header >> 30 != 3 {
+        return None;
+    }
+    let opcode = ((header >> 8) & 0xff) as u8;
+    let count = (header >> 16) & 0x3fff;
+    match (kind, opcode) {
+        (1, measured::SET_SH_REG) => Some(Payload::At(8)),
+        (0, measured::NOP) if count == HEADER_ONLY_COUNT => Some(Payload::Null),
+        (0, measured::NOP) => Some(Payload::At(4)),
+        (2, measured::NOP) if count != HEADER_ONLY_COUNT => Some(Payload::At(8)),
+        _ => None,
+    }
+}
+
+/// `0x7d86501b8094ef57(out, packet, kind)`: writes where the payload of a packet the guest
+/// reserved begins, or null for a `NOP` with no body, and answers `0` - see [`payload_offset`].
+/// PPSA02664 fills a register write's values through the kind-1 answer and passes the kind-0
+/// answer for its header-only `NOP` to `sceAgcQueueEndOfPipeActionPatchAddress`.
 fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, packet, kind) = (args[0], args[1], args[2]);
-    if out == 0 || packet == 0 || kind != REGISTER_WRITE_KIND {
+    if out == 0 || packet == 0 {
         return BAD_ARGUMENT;
     }
+    // SAFETY: `packet` is the guest's packet, whose header this reads.
+    let Some(header) = (unsafe { guest::read_u32(packet) }) else {
+        return BAD_ARGUMENT;
+    };
+    let Some(offset) = payload_offset(header, kind) else {
+        return BAD_ARGUMENT;
+    };
+    let answer = match offset {
+        Payload::At(offset) => packet.wrapping_add(offset),
+        Payload::Null => 0,
+    };
     // SAFETY: `out` is the guest-supplied pointer-sized out-parameter.
-    unsafe { guest::write_u64(out, packet.wrapping_add(REGISTER_PAYLOAD_OFFSET)) };
+    unsafe { guest::write_u64(out, answer) };
     OK
 }
 
@@ -675,10 +708,32 @@ fn get_is_trinity_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcCbNop(cb)` - a header-only no-op, measured whole (`166-agc/cb-nop`). It takes no
-/// arguments, so this is the complete encoding.
+/// The longest `NOP` a PM4 header describes: a count field of 14 bits, plus the header and one.
+const NOP_MAX_DWORDS: u64 = 0x3fff + 1;
+
+/// `sceAgcCbNop(cb, dwords)` - a `NOP` `dwords` long, its body reserved and left unwritten.
+///
+/// Measured (`166-agc/cb-nop`): length 1 writes the header-only word `0xffff1000` and answers the
+/// packet's address; length 0 writes nothing, and its answer was not reported, so it is refused.
+/// A longer one follows the public PM4 header, whose count is the length less two - the rule
+/// length 1 is the wrapped case of (`0x3fff`) - with its body skipped, as the measured `NOP` bodies
+/// of `sceAgcDcbSetFlip` and `sceAgcDcbWaitUntilSafeForRendering` are. PPSA02664 asks for 3 and
+/// writes the two body dwords itself.
 fn cb_nop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &packet::build::nop())
+    let dwords = args[1];
+    match dwords {
+        1 => dcb_append(args[0], &packet::build::nop()),
+        2..=NOP_MAX_DWORDS => dcb_append_spanning(
+            args[0],
+            // Its body is every dword after the header.
+            &[packet::build::command_header(
+                measured::NOP,
+                (dwords - 1) as u32,
+            )],
+            dwords as usize,
+        ),
+        _ => BAD_ARGUMENT,
+    }
 }
 
 /// `sceAgcDcbAcquireMem(dcb, ...)` - reserves the 32-byte ACQUIRE_MEM packet, cursor real, body

@@ -105,23 +105,35 @@ fn every_wired_builder_is_reachable_by_its_import_name() {
     }
 }
 
-/// `sceAgcCbNop` writes the measured header-only no-op and advances the cursor by four.
+/// `sceAgcCbNop(cb, dwords)` writes a `NOP` `dwords` long. Measured (`166-agc/cb-nop`): 1 writes
+/// the header-only word `0xffff1000`, four bytes, and answers the packet's address; 0 writes
+/// nothing, and is refused here since its answer was not reported. Longer ones follow the PM4
+/// header (count = length - 2, the rule 1 is the wrapped case of): PPSA02664 asks for 3 and fills
+/// the two body dwords through `0x7d86501b8094ef57`, so the body is reserved and left unwritten.
 #[test]
-fn cb_nop_writes_the_measured_header_only_packet() {
-    // Fully measured: `166-agc/cb-nop` says the whole packet is `0xffff1000`, four bytes, no
-    // arguments.
+fn cb_nop_writes_a_nop_of_the_length_asked() {
     let w = Writer::new(0x400);
     let mut args = [0u64; GUEST_ARG_REGISTERS];
     args[0] = w.handle();
-
+    args[1] = 1;
     let at = w.cursor();
     assert_eq!(call("sceAgcCbNop", args), at, "returns the packet address");
     assert_eq!(w.written(), 4, "a header-only packet is four bytes");
-    assert_eq!(
-        w.bytes(),
-        &[0x00, 0x10, 0xff, 0xff],
-        "the measured no-op word 0xffff1000, little-endian"
-    );
+    assert_eq!(w.bytes(), &[0x00, 0x10, 0xff, 0xff], "0xffff1000");
+
+    let w = Writer::new(0x400);
+    args[0] = w.handle();
+    args[1] = 3;
+    let at = w.cursor();
+    assert_eq!(call("sceAgcCbNop", args), at);
+    assert_eq!(w.written(), 12, "header and two body dwords");
+    assert_eq!(&w.bytes()[..4], &0xc001_1000_u32.to_le_bytes());
+
+    let w = Writer::new(0x400);
+    args[0] = w.handle();
+    args[1] = 0;
+    assert_ne!(call("sceAgcCbNop", args), w.cursor(), "length 0 is refused");
+    assert_eq!(w.written(), 0);
 }
 
 /// `sceAgcDcbAcquireMem` reserves the measured 32-byte extent with the measured header and a zero
@@ -604,4 +616,33 @@ fn the_raw_init_gate_keeps_the_first_version_it_accepts() {
     }
     assert_eq!(call("sceAgcInit", at(13)), 0x8a6c_0004, "named after raw 8");
     assert_eq!(call("0x53bbd82b51d172db", at(8)), 0, "8 again");
+}
+
+/// `0x7d86501b8094ef57(out, packet, kind)` on the probe's own packets (`-r1b0`, sweep
+/// 20260927-204316, check `166-agc/cb-unnamed-ef57`): kind 1 on a `SET_SH_REG` answers packet + 8;
+/// kind 0 on an ordinary `NOP` packet + 4 and on the header-only `0xffff1000` `NOP` null; kind 2 on
+/// an ordinary `NOP` packet + 8; `0` returned every time. A kind on a packet nobody measured it on
+/// is refused.
+#[test]
+fn packet_payload_answers_the_measured_kinds() {
+    let payload = |packet: &[u32], kind: u64| -> (u64, u64) {
+        let mut out = 0xcccc_cccc_cccc_cccc_u64;
+        let mut query = [0u64; GUEST_ARG_REGISTERS];
+        query[0] = std::ptr::addr_of_mut!(out) as u64;
+        query[1] = packet.as_ptr() as u64;
+        query[2] = kind;
+        (call("0x7d86501b8094ef57", query), out)
+    };
+    let sh_reg = [0xc003_7600_u32, 0x240, 0, 0, 0, 0, 0, 0];
+    let nop_ordinary = [0xc002_1000_u32, 0, 0, 0];
+    let nop_header_only = [0xffff_1000_u32, 0, 0, 0];
+    let at = |packet: &[u32], bytes: u64| packet.as_ptr() as u64 + bytes;
+
+    assert_eq!(payload(&sh_reg, 1), (0, at(&sh_reg, 8)));
+    assert_eq!(payload(&nop_ordinary, 0), (0, at(&nop_ordinary, 4)));
+    assert_eq!(payload(&nop_header_only, 0), (0, 0));
+    assert_eq!(payload(&nop_ordinary, 2), (0, at(&nop_ordinary, 8)));
+    let (rc, out) = payload(&sh_reg, 2);
+    assert_ne!(rc, 0, "kind 2 was measured on a NOP only");
+    assert_eq!(out, 0xcccc_cccc_cccc_cccc, "and nothing written");
 }

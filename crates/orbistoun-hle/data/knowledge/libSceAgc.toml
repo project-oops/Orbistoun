@@ -3,15 +3,15 @@ library = "libSceAgc"
 [[function]]
 name = "0x7d86501b8094ef57"
 arity = 3
-purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing the payload address through out."
+purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing the payload address - or null for a packet with no body - through out and returning 0."
 edge_cases = [
-    "GUEST-OBSERVED: PPSA02664 calls it with kind 1 on the SET_SH_REG packet sceAgcCbSetShRegisterRangeDirect returned for a null values array, then writes the register values through the answer. The measured SET_SH_REG layout (header, register offset, values; check 166-agc/dcb-set-sh-reg-direct) puts them at packet + 8, which is what kind 1 answers.",
-    "Kind 0 is called on a data NOP (header 0xffff1000: count field 0x3fff) and the answer is later passed as an address to sceAgcQueueEndOfPipeActionPatchAddress. Its layout is unmeasured, so kind 0 and every other kind are refused until obSCEne measures them.",
-    "NON-EXPORT NID. Imported directly as raw hex NID 0x7d86501b8094ef57 with no declared C export. obSCEne 166-agc/cb-unnamed-ef57 (sweep 20260920-110931) measures a bare synthetic import of it binding null on retail; the probe null-checks before calling, so it reports call-executed 0x0, reason slot-is-null - the probe's caution, not the platform refusing the call.",
-    "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fault earlier, fetching an instruction from 0x0: it calls the slot with no null-check of its own (commit 3212e2a).",
+    "MEASURED (obSCEne -r1b0, reopening -f2ee; sweep 20260927-204316, check 166-agc/cb-unnamed-ef57): a static import binds (0x800599040) and every arm returns 0. Kind 1 on SET_SH_REG (0xc0037600) answers packet + 8; kind 0 on an ordinary NOP (0xc0021000) packet + 4; kind 0 on the header-only NOP 0xffff1000 (count 0x3fff, no body) null; kind 2 on the ordinary NOP packet + 8.",
+    "A kind on an opcode or header form not in those arms is refused and out left alone: the arms do not say whether kind names an opcode, a payload position or both.",
+    "PPSA02664 fills a register write's values through the kind-1 answer, and passes the kind-0 answer for its header-only NOP to sceAgcQueueEndOfPipeActionPatchAddress.",
+    "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fetch an instruction from 0x0: it calls the slot with no null-check of its own (commit 3212e2a).",
 ]
-known_by = "guest-observed"
-cites = "PPSA02664 call arguments captured with ORBISTOUN_DUMP (kind 1 on the reserved SET_SH_REG packet, kind 0 on a data NOP); obSCEne sweep 20260914-100833, check 166-agc/dcb-set-sh-reg-direct (the SET_SH_REG layout); commit 3212e2a (null-slot test); obSCEne sweep 20260920-110931, check 166-agc/cb-unnamed-ef57."
+known_by = "measured"
+cites = "obSCEne REQ-20260927T1100Z-r1b0 (sweep 20260927-204316, check 166-agc/cb-unnamed-ef57: call-executed 0x1, rc 0x0 in all four arms, out at packet + 8, null, packet + 4 and packet + 8); PPSA02664 call arguments captured with ORBISTOUN_DUMP."
 found_on = "2026-09-20"
 
 [[function]]
@@ -112,6 +112,7 @@ edge_cases = [
     "The field split used to read it is **derived, not cited**: it is the only reading under which the measured lengths of the other three builders close exactly, which is evidence and is not a document. No further hardware run settles it - it is a question about how these bytes are read, not about what the console did (D565).",
     'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-nop-getsize): sceAgcCbNopGetSize answered a reservation of 4 bytes (1 dwords); the builder then advanced the writer by exactly 4 bytes and wrote exactly 4 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
     'MEASURED: the size is argument-driven and linear. Sweeping the first argument through 0, 1, 2, 4 and 8 returned reservations of 0, 4, 8, 16 and 32 bytes - exactly four bytes per unit, so this builder emits n dwords where n is that argument. This retires the D565 puzzle that the single captured dword had a count field of 0x3fff which "does not describe a 4-byte packet": the 4-byte capture was simply the n=1 case, and the count field is not a body length for a filler no-op.',
+    "IMPLEMENTED BY LENGTH: sceAgcCbNop(cb, n) reserves n dwords. n = 1 writes the measured 0xffff1000; a longer one writes the public PM4 header whose count is n - 2 (the rule of which 0x3fff is the n = 1 wrap) and leaves its body unwritten, as the measured NOP bodies of sceAgcDcbSetFlip and sceAgcDcbWaitUntilSafeForRendering are; n = 0 reserves nothing and, its answer unreported, is refused. PPSA02664 and PPSA03416 ask for n = 3 and write the two body dwords through the kind-0 answer of 0x7d86501b8094ef57, packet + 4; handed a header-only NOP instead, that answer was null and both titles faulted at image+0x4371d.",
 ]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-nop-getsize."
