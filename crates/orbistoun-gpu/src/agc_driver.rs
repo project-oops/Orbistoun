@@ -2371,6 +2371,8 @@ mod tests {
     #[test]
     fn a_target_outside_guest_memory_is_refused_unwritten() {
         use super::{ColourTarget, ComponentSwap, draw_over};
+        // Refused or not, reading the target asks and re-protects the shared slots (D720).
+        let _guard = serial();
         let mut memory = Block(vec![0x5a; 65536]);
         let target = ColourTarget {
             base: BASE + 0x1_0000,
@@ -2457,8 +2459,9 @@ mod tests {
         );
     }
 
-    /// These tests share the process-global region and last-submission stores, so they run one at a
-    /// time. A poisoned lock is recovered rather than cascading a panic across the others.
+    /// These tests share the process-global region and last-submission stores, the last-written
+    /// target and its write protection, so they run one at a time - any test reaching `draw_over`,
+    /// `read_target` or a submission included. A poisoned lock is recovered rather than cascading a panic across the others.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
