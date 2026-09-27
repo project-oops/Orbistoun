@@ -64,6 +64,7 @@ pub(crate) struct App {
     ///
     /// Kept on the application so a session survives the window being closed and reopened.
     probe: crate::probe::Panel,
+    payloads: crate::payloads::PayloadManager,
     selected: Option<usize>,
     detail: Option<Detail>,
     prefs: Preferences,
@@ -159,12 +160,15 @@ impl App {
             memory_settings: prefs.file.memory,
             ..ServiceConfig::default()
         });
+        let mut payloads = crate::payloads::PayloadManager::new();
+        payloads.autoload_configured(&paths.payloads_dir(), &prefs.file.payloads.autoload);
         let mut app = Self {
             service,
             paths,
             titles: Ok(Vec::new()),
             rows: Vec::new(),
             probe: crate::probe::Panel::default(),
+            payloads,
             selected: None,
             detail: None,
             prefs,
@@ -911,6 +915,23 @@ impl App {
                         ui.close_menu();
                     }
                 });
+                ui.menu_button("payloads", |ui| {
+                    if ui.button("manage payloads...").clicked() {
+                        self.payloads.open = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("rescan payloads").clicked() {
+                        self.payloads.rescan(&self.paths.payloads_dir());
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let count = self.payloads.running_count();
+                    ui.label(format!("{count} payload(s) running"));
+                    if count > 0 && ui.button("stop all payloads").clicked() {
+                        self.payloads.stop_all();
+                        ui.close_menu();
+                    }
+                });
                 ui.menu_button("settings", |ui| {
                     if ui.button("preferences...").clicked() {
                         self.prefs.open = true;
@@ -954,6 +975,7 @@ impl App {
     ///
     /// Every control is disabled rather than hidden when it does not apply, and says why
     /// on hover.
+    #[allow(clippy::too_many_lines)]
     fn toolbar(&mut self, ctx: &egui::Context) {
         // Acted on after the strip is drawn, because rescanning replaces the list being
         // drawn.
@@ -1048,6 +1070,21 @@ impl App {
 
                 ui.separator();
                 self.input_controls(ui);
+
+                ui.separator();
+                let payload_count = self.payloads.running_count();
+                let payload_text = if payload_count > 0 {
+                    format!("📦 payloads ({payload_count})")
+                } else {
+                    "📦 payloads".to_string()
+                };
+                if ui
+                    .button(payload_text)
+                    .on_hover_text("manage background daemon payloads (sandbox-daemon, etc.)")
+                    .clicked()
+                {
+                    self.payloads.open = true;
+                }
 
                 ui.separator();
                 ui.label("limit");
@@ -1638,6 +1675,10 @@ impl eframe::App for App {
         self.docs.show(ctx, DOCS);
         // No repaint timer: the probe worker requests a repaint when it has something.
         self.probe.show(ctx);
+        let config_path = self.paths.config_file();
+        let payloads_dir = self.paths.payloads_dir();
+        self.payloads
+            .show(ctx, &mut self.prefs.file, &config_path, &payloads_dir);
 
         // Deferred actions run after drawing, once each, when no borrow of the frame is held.
         if std::mem::take(&mut self.deferred.close) {
@@ -1650,6 +1691,12 @@ impl eframe::App for App {
         if std::mem::take(&mut self.deferred.screenshot) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
         }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.payloads.stop_all();
     }
 }
 

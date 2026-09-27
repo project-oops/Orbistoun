@@ -23,6 +23,8 @@ pub(crate) enum Pane {
     Shell,
     /// Controllers, and what maps to what.
     Pads,
+    /// Background daemon payloads and autoload.
+    Payloads,
     /// Not built.
     Video,
     /// Not built.
@@ -31,8 +33,9 @@ pub(crate) enum Pane {
 
 impl Pane {
     /// Every pane, in the order they are listed.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::General,
+        Self::Payloads,
         Self::Entry,
         Self::Threads,
         Self::Memory,
@@ -46,6 +49,7 @@ impl Pane {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Payloads => "payloads",
             Self::Entry => "entry",
             Self::Threads => "threads",
             Self::Memory => "memory",
@@ -155,6 +159,7 @@ pub(crate) fn pane_contents(
 ) {
     match prefs.pane {
         Pane::General => general(ui, prefs),
+        Pane::Payloads => payloads(ui, prefs),
         Pane::Entry => entry(ui, &mut prefs.file),
         Pane::Threads => threads(ui, &mut prefs.file),
         Pane::Memory => memory(ui, &mut prefs.file),
@@ -224,6 +229,29 @@ fn general(ui: &mut egui::Ui, prefs: &mut Preferences) {
         "`--list` and `--shell` override it for one launch, and `--title <name>` skips ",
         "the choice by launching straight into a title - returning here when it ends.",
     ));
+}
+
+/// Background daemon payloads and autoloading configuration.
+fn payloads(ui: &mut egui::Ui, prefs: &mut Preferences) {
+    ui.heading("payloads");
+    ui.label("Background daemons and services autoloaded at startup.");
+    ui.small(concat!(
+        "Open-toolchain daemons (such as `sandbox-daemon.elf`) run in the background ",
+        "to serve filesystem namespace escape requests and other kernel-adjacent IPC. ",
+        "Payloads are discovered in the shared payloads folder.",
+    ));
+    ui.separator();
+    ui.label("Autoload daemons (one per line):");
+    let mut text = prefs.file.payloads.autoload.join("\n");
+    if ui.text_edit_multiline(&mut text).changed() {
+        prefs.file.payloads.autoload = text
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+    }
+    ui.small("Examples: `sandbox-daemon.elf`, `pltauth-patch.elf`");
 }
 
 /// Controllers: how many, what drives each, and which key is which button.

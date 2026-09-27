@@ -270,6 +270,8 @@ pub struct FileConfig {
     /// Here rather than in the shell settings file because it describes this installation's
     /// hardware, which does not travel to another machine (D326).
     pub pads: orbistoun_input::Pads,
+    /// Background daemon payloads and autoloading configuration.
+    pub payloads: PayloadSettings,
     /// What unimplemented functions answer.
     ///
     /// The main lever of the method: the oracle is often one bit per call site (answer `ok`, does
@@ -399,6 +401,14 @@ impl Default for LibrarySettings {
             start_in: orbistoun_shell::View::List,
         }
     }
+}
+
+/// Background daemon payloads and autoloading configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct PayloadSettings {
+    /// Payloads to automatically spawn at startup.
+    pub autoload: Vec<String>,
 }
 
 impl FileConfig {

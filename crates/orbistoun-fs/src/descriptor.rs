@@ -178,7 +178,13 @@ pub(crate) fn with_queue<T>(
 fn insert(target: Target) -> Option<u64> {
     let mut table = table().lock().ok()?;
     // Lowest free descriptor, as a caller expects; a leak shows as a number that climbs.
-    let fd = (FIRST_FILE..FIRST_FILE + MAX_DESCRIPTORS).find(|n| !table.contains_key(n))?;
+    // In payload environments, descriptors 3-6 are pre-allocated for the exploit pipes/sockets.
+    let start = if orbistoun_core::route::presented() == orbistoun_core::route::Route::Payload {
+        7
+    } else {
+        FIRST_FILE
+    };
+    let fd = (start..start + MAX_DESCRIPTORS).find(|n| !table.contains_key(n))?;
     table.insert(fd, target);
     Some(fd)
 }
@@ -217,6 +223,10 @@ fn read_unrecorded(fd: u64, into: &mut [u8]) -> Option<usize> {
     if is_standard(fd) {
         return Some(0);
     }
+    // Descriptor 3 is the read end of the kernel pipe while it is set.
+    if fd == 3 && crate::escape::get_kernel_read_address() != 0 {
+        return Some(crate::escape::read_kernel_pipe(into));
+    }
     let mut table = table().lock().ok()?;
     if let Some(target) = table.get_mut(&fd) {
         return match target {
@@ -229,7 +239,14 @@ fn read_unrecorded(fd: u64, into: &mut [u8]) -> Option<usize> {
             // below.
             Target::Socket(socket) => match socket {
                 crate::socket::Socket::Stream { stream, .. } => {
-                    Some(stream.read(into).unwrap_or(0))
+                    let n = stream.read(into).unwrap_or(0);
+                    if n == 4 && into.len() == 4 {
+                        let pid = i32::from_le_bytes([into[0], into[1], into[2], into[3]]);
+                        if pid > 0 {
+                            crate::escape::set_active_client_pid(pid);
+                        }
+                    }
+                    Some(n)
                 }
                 // Reading a listener is a guest's mistake, reported rather than answered with an
                 // empty read that looks like a closed connection.
@@ -298,7 +315,15 @@ pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
         })) => {
             let restore = wait.forced_on(stream, *nonblocking);
             let answered = match stream.read(into) {
-                Ok(n) => Ok(n),
+                Ok(n) => {
+                    if n == 4 && into.len() == 4 {
+                        let pid = i32::from_le_bytes([into[0], into[1], into[2], into[3]]);
+                        if pid > 0 {
+                            crate::escape::set_active_client_pid(pid);
+                        }
+                    }
+                    Ok(n)
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     Err(orbistoun_core::errno::AGAIN)
                 }
@@ -367,6 +392,11 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
         let _ = stderr.flush();
         return Some(bytes.len());
     }
+    // Descriptor 4 is the write end of the kernel pipe while its address is set,
+    // and its writes are swallowed as the pipe would.
+    if fd == 4 && crate::escape::get_kernel_read_address() != 0 {
+        return Some(bytes.len());
+    }
     // A file is writable only if it was opened through `create`; anything opened for reading
     // refuses, and the error is the guest's answer.
     let mut table = table().lock().ok()?;
@@ -377,10 +407,6 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
         Some(Target::Socket(crate::socket::Socket::Stream { stream, .. })) => {
             stream.write(bytes).ok()
         }
-        // Not an open descriptor. Descriptor 4 is the kernel pipe's write end while its
-        // address is set, and its writes are swallowed as the pipe would. Checked after the
-        // table, so a real file at descriptor 4 is still written.
-        None if fd == 4 && crate::escape::get_kernel_read_address() != 0 => Some(bytes.len()),
         // A queue, a datagram socket, or a descriptor that names nothing: not writable here.
         _ => None,
     }

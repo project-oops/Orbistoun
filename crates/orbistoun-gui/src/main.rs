@@ -11,6 +11,7 @@ mod controls;
 mod frame;
 mod icons;
 mod input;
+mod payloads;
 mod perf_overlay;
 mod prefs;
 mod probe;

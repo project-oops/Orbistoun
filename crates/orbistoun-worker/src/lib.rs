@@ -270,6 +270,9 @@ fn run_guest<W: Write>(
     // the execution guard, because the route is a property of the run whether or not it executes
     // anything.
     orbistoun_core::route::present(orbistoun_core::route::route_for(path, Path::exists));
+    if orbistoun_core::route::presented() == orbistoun_core::route::Route::Payload {
+        let _ = orbistoun_firmware::present();
+    }
 
     // Refused here rather than at the transfer, where it would reach the user as a child-process
     // panic that reads as a bug in the tool.
@@ -1276,7 +1279,9 @@ fn stand_up_firmware(settings: &orbistoun_shell::Settings) {
     // interface into the memory image beneath it (D404). Reserving the region makes that address
     // arithmetic land in mapped, observable memory; a run presenting no firmware pays nothing. A
     // failed reservation is reported and not fatal: those accesses then fault as unmapped.
-    if settings.machine.firmware != 0 {
+    if settings.machine.firmware != 0
+        || orbistoun_core::route::presented() == orbistoun_core::route::Route::Payload
+    {
         if let Err(e) = orbistoun_firmware::present() {
             tracing::warn!(
                 "could not stand up the firmware skeleton: {e} - firmware accesses will fault as unmapped"
@@ -1570,7 +1575,17 @@ fn entry_arguments(
     entry_stack: u64,
     named_fields: &[[u64; 2]],
 ) -> (u64, u64) {
-    let argument = overridden_entry_argument().unwrap_or(argument);
+    let argument = overridden_entry_argument()
+        .or_else(|| {
+            if argument == process::EntryArgument::ImageAddress
+                && orbistoun_core::route::presented() == orbistoun_core::route::Route::Payload
+            {
+                Some(process::EntryArgument::Handoff)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(argument);
     match argument {
         process::EntryArgument::MainArguments => main_arguments(entry_stack),
         process::EntryArgument::ImageAddress => (entry_stack, 0),
@@ -2047,7 +2062,7 @@ fn measured_handoff_fields() -> Vec<[u64; 2]> {
         [2, base + rwpair_offset],
         // Fields three and four carry the measured high-half kernel pointers: a payload validates
         // `kpipe_addr >> 48 != 0` before attempting kernel access.
-        [3, 0xffff_8661_5c60_7840],
+        [3, 0xffff_cd61_5c60_7840],
         [4, 0xffff_ffff_8c29_0000],
         [5, base + payloadout_offset],
     ]
@@ -2099,12 +2114,15 @@ fn handoff_block(named_fields: &[[u64; 2]]) -> u64 {
     // The measured pointers for fields one to five, unless a run named its own fields or set
     // `HANDOFF_FIELDS`, which are deliberate experiments and win. One poisoned field is applied
     // last, so it wins over everything else: it asks whether the runtime touches that field at all.
-    let mut named_fields =
-        if firmware_present && explicit_fields.is_none() && named_fields.is_empty() {
-            measured_handoff_fields()
-        } else {
-            named_fields.to_vec()
-        };
+    let payload_route = orbistoun_core::route::presented() == orbistoun_core::route::Route::Payload;
+    let mut named_fields = if (firmware_present || payload_route)
+        && explicit_fields.is_none()
+        && named_fields.is_empty()
+    {
+        measured_handoff_fields()
+    } else {
+        named_fields.to_vec()
+    };
     if let Some((field, value)) = poisoned_field() {
         named_fields.retain(|[at, _]| *at != field);
         named_fields.push([field, value]);

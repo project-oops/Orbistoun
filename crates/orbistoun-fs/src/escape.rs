@@ -19,28 +19,48 @@ pub fn get_kernel_read_address() -> u64 {
     KERNEL_READ_ADDR.load(Ordering::SeqCst)
 }
 
+static ACTIVE_CLIENT_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(100);
+
+/// Sets the PID of the active client connecting for sandbox elevation.
+pub fn set_active_client_pid(pid: i32) {
+    ACTIVE_CLIENT_PID.store(pid, Ordering::SeqCst);
+}
+
+/// The PID of the active client.
+pub fn get_active_client_pid() -> i32 {
+    ACTIVE_CLIENT_PID.load(Ordering::SeqCst)
+}
+
 /// Canonical kernel data base address.
 pub const KERNEL_DATA_BASE: u64 = 0xffff_ffff_8c29_0000;
-/// Canonical kernel proc struct address.
-pub const KPROC_ADDR: u64 = 0xffff_8661_5000_0000;
+/// Canonical kernel proc struct address for PID 1 (mini-syscore).
+pub const KPROC_PID1_ADDR: u64 = 0xffff_cd61_5000_0000;
+/// Canonical kernel proc struct address for self (daemon).
+pub const KPROC_ADDR: u64 = 0xffff_cd61_5000_0800;
+/// Canonical kernel proc struct address for client (target app).
+pub const KPROC_CLIENT_ADDR: u64 = 0xffff_cd61_5000_1000;
 /// Canonical kernel ucred struct address.
-pub const KUCRED_ADDR: u64 = 0xffff_8661_5000_1000;
+pub const KUCRED_ADDR: u64 = 0xffff_cd61_5000_2000;
+/// Canonical kernel filedesc struct address.
+pub const KFILEDESC_ADDR: u64 = 0xffff_cd61_5000_2800;
+/// Canonical root vnode address.
+pub const ROOTVNODE_ADDR: u64 = 0xffff_cd61_6000_0000;
 /// Canonical kernel dynlib linked list head address.
-pub const DYNLIB_HEAD_ADDR: u64 = 0xffff_8661_5000_1f00;
+pub const DYNLIB_HEAD_ADDR: u64 = 0xffff_cd61_5000_3000;
 /// Canonical kernel dynlib object for libkernel.
-pub const DYNLIB_LIBKERNEL_ADDR: u64 = 0xffff_8661_5000_2000;
+pub const DYNLIB_LIBKERNEL_ADDR: u64 = 0xffff_cd61_5000_3200;
 /// Canonical kernel dynlib object for libc.
-pub const DYNLIB_LIBC_ADDR: u64 = 0xffff_8661_5000_2200;
+pub const DYNLIB_LIBC_ADDR: u64 = 0xffff_cd61_5000_3400;
 /// Canonical kernel dynlib object for main executable.
-pub const DYNLIB_MAIN_ADDR: u64 = 0xffff_8661_5000_2400;
+pub const DYNLIB_MAIN_ADDR: u64 = 0xffff_cd61_5000_3600;
 /// Canonical kernel dynlib path string address.
-pub const DYNLIB_PATH_ADDR: u64 = 0xffff_8661_5000_2800;
+pub const DYNLIB_PATH_ADDR: u64 = 0xffff_cd61_5000_3800;
 /// Canonical kernel RTLD meta address.
-pub const RTLD_META_ADDR: u64 = 0xffff_8661_5000_3000;
+pub const RTLD_META_ADDR: u64 = 0xffff_cd61_5000_4000;
 /// Canonical kernel symtab address.
-pub const SYMTAB_ADDR: u64 = 0xffff_8661_5000_4000;
+pub const SYMTAB_ADDR: u64 = 0xffff_cd61_5000_5000;
 /// Canonical kernel strtab address.
-pub const STRTAB_ADDR: u64 = 0xffff_8661_5000_8000;
+pub const STRTAB_ADDR: u64 = 0xffff_cd61_5000_9000;
 
 struct KernelTables {
     symtab: Vec<u8>,
@@ -163,29 +183,58 @@ fn dynlib_obj(next: u64, handle: i32) -> [u8; 0x200] {
 }
 
 /// Reads `out.len()` bytes of simulated kernel memory starting at the targeted address.
+#[allow(clippy::too_many_lines)]
 pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
     let addr = get_kernel_read_address();
     let len = out.len();
     out.fill(0);
 
     // KERNEL_DATA_BASE region (`allproc` lookup).
+    // Answering KPROC_PID1_ADDR sets the proc chain head at PID 1.
     if (KERNEL_DATA_BASE..KERNEL_DATA_BASE + 0x1000_0000).contains(&addr) {
-        let ptr = KPROC_ADDR;
+        let ptr = KPROC_PID1_ADDR;
         let bytes = ptr.to_le_bytes();
         let copy_len = len.min(bytes.len());
         out[..copy_len].copy_from_slice(&bytes[..copy_len]);
         return len;
     }
 
-    // KPROC_ADDR region (`struct proc`).
-    if (KPROC_ADDR..KPROC_ADDR + 0x1000).contains(&addr) {
-        let offset = (addr - KPROC_ADDR) as usize;
+    // KPROC_PID1_ADDR region (`struct proc` for PID 1, mini-syscore).
+    if (KPROC_PID1_ADDR..KPROC_PID1_ADDR + 0x500).contains(&addr) {
+        let offset = (addr - KPROC_PID1_ADDR) as usize;
         let mut proc_buf = vec![0u8; 0x500];
-
+        // proc + 0x00: p_list.le_next -> points to daemon proc
+        proc_buf[0x00..0x08].copy_from_slice(&KPROC_ADDR.to_le_bytes());
         // proc + 0x08: p_ucred
         proc_buf[0x08..0x10].copy_from_slice(&KUCRED_ADDR.to_le_bytes());
         // proc + 0x40: ucred offset
         proc_buf[0x40..0x48].copy_from_slice(&KUCRED_ADDR.to_le_bytes());
+        // proc + 0x48: p_fd
+        proc_buf[0x48..0x50].copy_from_slice(&KFILEDESC_ADDR.to_le_bytes());
+        // proc + 0xbc: pid = 1
+        proc_buf[0xbc..0xc0].copy_from_slice(&1_i32.to_le_bytes());
+
+        if offset < proc_buf.len() {
+            let available = proc_buf.len() - offset;
+            let copy_len = len.min(available);
+            out[..copy_len].copy_from_slice(&proc_buf[offset..offset + copy_len]);
+        }
+        return len;
+    }
+
+    // KPROC_ADDR region (`struct proc` for daemon).
+    if (KPROC_ADDR..KPROC_ADDR + 0x500).contains(&addr) {
+        let offset = (addr - KPROC_ADDR) as usize;
+        let mut proc_buf = vec![0u8; 0x500];
+
+        // proc + 0x00: p_list.le_next -> points to client proc
+        proc_buf[0x00..0x08].copy_from_slice(&KPROC_CLIENT_ADDR.to_le_bytes());
+        // proc + 0x08: p_ucred
+        proc_buf[0x08..0x10].copy_from_slice(&KUCRED_ADDR.to_le_bytes());
+        // proc + 0x40: ucred offset
+        proc_buf[0x40..0x48].copy_from_slice(&KUCRED_ADDR.to_le_bytes());
+        // proc + 0x48: p_fd
+        proc_buf[0x48..0x50].copy_from_slice(&KFILEDESC_ADDR.to_le_bytes());
         // proc + 0xbc: pid
         let pid = std::process::id() as i32;
         proc_buf[0xbc..0xc0].copy_from_slice(&pid.to_le_bytes());
@@ -197,6 +246,68 @@ pub fn read_kernel_pipe(out: &mut [u8]) -> usize {
             let copy_len = len.min(available);
             out[..copy_len].copy_from_slice(&proc_buf[offset..offset + copy_len]);
         }
+        return len;
+    }
+
+    // KPROC_CLIENT_ADDR region (`struct proc` for client app).
+    if (KPROC_CLIENT_ADDR..KPROC_CLIENT_ADDR + 0x500).contains(&addr) {
+        let offset = (addr - KPROC_CLIENT_ADDR) as usize;
+        let mut proc_buf = vec![0u8; 0x500];
+
+        // proc + 0x00: p_list.le_next = 0 (end of chain)
+        // proc + 0x08: p_ucred
+        proc_buf[0x08..0x10].copy_from_slice(&KUCRED_ADDR.to_le_bytes());
+        // proc + 0x40: ucred offset
+        proc_buf[0x40..0x48].copy_from_slice(&KUCRED_ADDR.to_le_bytes());
+        // proc + 0x48: p_fd
+        proc_buf[0x48..0x50].copy_from_slice(&KFILEDESC_ADDR.to_le_bytes());
+        // proc + 0xbc: pid
+        let pid = get_active_client_pid();
+        proc_buf[0xbc..0xc0].copy_from_slice(&pid.to_le_bytes());
+        // proc + 0x3e8: p_dynlib (LIST_HEAD pointer)
+        proc_buf[0x3e8..0x3f0].copy_from_slice(&DYNLIB_HEAD_ADDR.to_le_bytes());
+
+        if offset < proc_buf.len() {
+            let available = proc_buf.len() - offset;
+            let copy_len = len.min(available);
+            out[..copy_len].copy_from_slice(&proc_buf[offset..offset + copy_len]);
+        }
+        return len;
+    }
+
+    // KFILEDESC_ADDR region (`struct filedesc`).
+    if (KFILEDESC_ADDR..KFILEDESC_ADDR + 0x100).contains(&addr) {
+        let offset = (addr - KFILEDESC_ADDR) as usize;
+        let mut fd_buf = [0u8; 0x40];
+        // fd + 0x08: cdir
+        fd_buf[0x08..0x10].copy_from_slice(&ROOTVNODE_ADDR.to_le_bytes());
+        // fd + 0x10: rdir
+        fd_buf[0x10..0x18].copy_from_slice(&ROOTVNODE_ADDR.to_le_bytes());
+        // fd + 0x18: jdir
+        fd_buf[0x18..0x20].copy_from_slice(&ROOTVNODE_ADDR.to_le_bytes());
+
+        copy_from(out, &fd_buf, offset);
+        return len;
+    }
+
+    // KUCRED_ADDR region (`struct ucred`).
+    if (KUCRED_ADDR..KUCRED_ADDR + 0x100).contains(&addr) {
+        let offset = (addr - KUCRED_ADDR) as usize;
+        let mut ucred_buf = [0u8; 0x80];
+        // cr_uid = 0, cr_ruid = 0
+        // cr_prison at 0x30
+        ucred_buf[0x30..0x38].copy_from_slice(&(KUCRED_ADDR + 0x80).to_le_bytes());
+        // cr_sceauthid at 0x58
+        ucred_buf[0x58..0x60].copy_from_slice(&0x4801_0000_0000_0013_u64.to_le_bytes());
+        // cr_scecaps at 0x60
+        ucred_buf[0x60..0x70].copy_from_slice(&[0xff; 16]);
+
+        copy_from(out, &ucred_buf, offset);
+        return len;
+    }
+
+    // ROOTVNODE_ADDR region (`struct vnode`).
+    if (ROOTVNODE_ADDR..ROOTVNODE_ADDR + 0x100).contains(&addr) {
         return len;
     }
 
@@ -305,7 +416,7 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(read_kernel_pipe(&mut buf), 8);
         let proc_ptr = u64::from_le_bytes(buf);
-        assert_eq!(proc_ptr, KPROC_ADDR);
+        assert_eq!(proc_ptr, KPROC_PID1_ADDR);
 
         set_kernel_read_address(KPROC_ADDR + 0x3e8);
         let mut head_buf = [0u8; 8];
