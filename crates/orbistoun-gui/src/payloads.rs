@@ -131,25 +131,96 @@ impl PayloadManager {
         }
     }
 
-    pub(crate) fn autoload_configured(&mut self, payloads_dir: &Path, autoload: &[String]) {
-        self.rescan(payloads_dir);
-        let to_start: Vec<String> = self
+    /// Finds the closest matching payload entry for a configured or autoload.txt name.
+    pub(crate) fn find_matching_entry(&self, name: &str) -> Option<&PayloadEntry> {
+        let clean = name.trim().trim_end_matches(".elf");
+        // 1. Exact filename match (case-insensitive)
+        if let Some(entry) = self
             .entries
             .iter()
-            .filter_map(|item| {
-                let should_autoload = autoload.iter().any(|name| {
-                    name.eq_ignore_ascii_case(&item.filename)
-                        || name.eq_ignore_ascii_case(item.filename.trim_end_matches(".elf"))
-                });
-                if should_autoload && !self.is_running(&item.filename) {
-                    Some(item.filename.clone())
-                } else {
-                    None
+            .find(|e| e.filename.eq_ignore_ascii_case(name.trim()))
+        {
+            return Some(entry);
+        }
+        // 2. Exact basename match without extension
+        if let Some(entry) = self.entries.iter().find(|e| {
+            e.filename
+                .trim_end_matches(".elf")
+                .eq_ignore_ascii_case(clean)
+        }) {
+            return Some(entry);
+        }
+        // 3. Prefix/version match: e.g. "ftpsrv_v0.21" matches "ftpsrv_v0.21.1.elf", or "ftpsrv" matches "ftpsrv_v0.21.elf"
+        if let Some(entry) = self.entries.iter().find(|e| {
+            let entry_clean = e.filename.trim_end_matches(".elf");
+            entry_clean
+                .to_ascii_lowercase()
+                .starts_with(&clean.to_ascii_lowercase())
+                || clean
+                    .to_ascii_lowercase()
+                    .starts_with(&entry_clean.to_ascii_lowercase())
+        }) {
+            return Some(entry);
+        }
+        None
+    }
+
+    /// Autoloads payloads in the exact sequence requested, honoring delays (`!delay_ms`)
+    /// and pldmgr `autoload.txt` syntax.
+    pub(crate) fn autoload_configured(&mut self, payloads_dir: &Path, autoload: &[String]) {
+        self.rescan(payloads_dir);
+
+        // Sequence source: config.toml `autoload` list takes precedence if non-empty;
+        // otherwise check for autoload.txt in payloads_dir, payloads_dir/pldmgr, or C:/tmp/ps5-pldmgr.
+        let lines: Vec<String> = if !autoload.is_empty() {
+            autoload.to_vec()
+        } else if let Ok(text) = std::fs::read_to_string(payloads_dir.join("autoload.txt")) {
+            text.lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        } else if let Ok(text) =
+            std::fs::read_to_string(payloads_dir.join("pldmgr").join("autoload.txt"))
+        {
+            text.lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        } else if let Ok(text) = std::fs::read_to_string("C:/tmp/ps5-pldmgr/autoload.txt") {
+            text.lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        for item in lines {
+            let item = item.trim();
+            if item.is_empty() || item.starts_with('#') || item.starts_with("//") {
+                continue;
+            }
+
+            // pldmgr delay syntax: "!<millis>"
+            if let Some(delay_str) = item.strip_prefix('!') {
+                if let Ok(ms) = delay_str.parse::<u64>() {
+                    eprintln!("orbistoun: autoload delay {ms}ms (pldmgr syntax)");
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    continue;
                 }
-            })
-            .collect();
-        for name in to_start {
-            self.start_payload(&name);
+            }
+
+            if let Some(entry) = self.find_matching_entry(item).cloned() {
+                if !self.is_running(&entry.filename) {
+                    eprintln!("orbistoun: autoload starting daemon '{}'", entry.filename);
+                    self.start_payload(&entry.filename);
+                }
+            } else {
+                eprintln!("orbistoun: autoload payload '{item}' not found in payloads directory");
+            }
         }
     }
 
@@ -290,6 +361,10 @@ impl PayloadManager {
         config_path: &Path,
         payloads_dir: &Path,
     ) {
+        let mut to_start = None;
+        let mut to_stop = None;
+        let mut config_changed = false;
+
         // Toolbar
         ui.horizontal(|ui| {
             if ui.button("Rescan").clicked() {
@@ -297,6 +372,34 @@ impl PayloadManager {
             }
             if ui.button("Open Folder").clicked() {
                 open_in_file_manager(payloads_dir);
+            }
+            let autoload_path = payloads_dir.join("autoload.txt");
+            if autoload_path.exists()
+                && ui
+                    .button("Sync autoload.txt")
+                    .on_hover_text("Load payload order and delays from payloads/autoload.txt")
+                    .clicked()
+            {
+                if let Ok(text) = std::fs::read_to_string(&autoload_path) {
+                    config.payloads.autoload = text
+                        .lines()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty() && !s.starts_with('#') && !s.starts_with("//"))
+                        .map(String::from)
+                        .collect();
+                    config_changed = true;
+                    self.status = Some("Loaded autoload.txt into configuration".to_string());
+                }
+            }
+            if ui
+                .button("Export autoload.txt")
+                .on_hover_text("Write current autoload sequence to payloads/autoload.txt")
+                .clicked()
+            {
+                let text = config.payloads.autoload.join("\r\n");
+                if std::fs::write(&autoload_path, text).is_ok() {
+                    self.status = Some(format!("Exported sequence to {}", autoload_path.display()));
+                }
             }
             ui.separator();
             ui.label(format!(
@@ -309,10 +412,6 @@ impl PayloadManager {
         ui.separator();
 
         // Main table of payloads
-        let mut to_start = None;
-        let mut to_stop = None;
-        let mut config_changed = false;
-
         ui.label(egui::RichText::new("Discovered Payloads:").strong());
         egui::ScrollArea::vertical()
             .max_height(200.0)
@@ -354,33 +453,38 @@ impl PayloadManager {
                             let size_kb = entry.size_bytes.div_ceil(1024);
                             ui.label(format!("{size_kb} KB"));
 
-                            // Autoload checkbox
-                            let mut autoloaded = config.payloads.autoload.iter().any(|s| {
+                            // Autoload checkbox and sequence badge
+                            let pos = config.payloads.autoload.iter().position(|s| {
                                 s.eq_ignore_ascii_case(&entry.filename)
                                     || s.eq_ignore_ascii_case(
                                         entry.filename.trim_end_matches(".elf"),
                                     )
                             });
-                            if ui.checkbox(&mut autoloaded, "").changed() {
-                                config_changed = true;
-                                if autoloaded {
-                                    if !config
-                                        .payloads
-                                        .autoload
-                                        .iter()
-                                        .any(|s| s.eq_ignore_ascii_case(&entry.filename))
-                                    {
-                                        config.payloads.autoload.push(entry.filename.clone());
+                            let mut autoloaded = pos.is_some();
+                            let label = pos
+                                .map_or_else(String::new, |idx| format!("#{pos}", pos = idx + 1));
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut autoloaded, label).changed() {
+                                    config_changed = true;
+                                    if autoloaded {
+                                        if !config
+                                            .payloads
+                                            .autoload
+                                            .iter()
+                                            .any(|s| s.eq_ignore_ascii_case(&entry.filename))
+                                        {
+                                            config.payloads.autoload.push(entry.filename.clone());
+                                        }
+                                    } else {
+                                        config.payloads.autoload.retain(|s| {
+                                            !s.eq_ignore_ascii_case(&entry.filename)
+                                                && !s.eq_ignore_ascii_case(
+                                                    entry.filename.trim_end_matches(".elf"),
+                                                )
+                                        });
                                     }
-                                } else {
-                                    config.payloads.autoload.retain(|s| {
-                                        !s.eq_ignore_ascii_case(&entry.filename)
-                                            && !s.eq_ignore_ascii_case(
-                                                entry.filename.trim_end_matches(".elf"),
-                                            )
-                                    });
                                 }
-                            }
+                            });
 
                             // Action column
                             if is_running {
