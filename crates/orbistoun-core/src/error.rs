@@ -59,6 +59,10 @@ pub mod errno {
     /// Held by somebody else, and the call does not wait. Observed from taking a lock the
     /// caller already holds.
     pub const BUSY: u32 = 16;
+    /// Not a directory: a path asks for a directory - it ends in `/` or `/.` - through something
+    /// that is a file. Published: 20 in FreeBSD `sys/sys/errno.h`, under the measured vendor
+    /// encoding; an `040-file` open of `file/.` would promote it.
+    pub const NOT_A_DIRECTORY: u32 = 20;
     /// The argument is outside what the call accepts. Observed from querying memory with an
     /// undefined flag, and from asking for a module description the wrong way.
     pub const INVALID: u32 = 22;
