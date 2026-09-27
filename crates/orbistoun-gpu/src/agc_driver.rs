@@ -246,44 +246,148 @@ struct GuestCp<'a> {
     submission: Option<&'a Submission>,
 }
 
+/// The stream as one segment's draws see it (D729): every packet up to the segment's last draw,
+/// with each draw before its first replaced by a `NOP` of the same length. Every register write
+/// before the segment still runs, so its draws see the register state the stream gives them; no
+/// earlier segment's draw is drawn again, and nothing after the segment is read.
+fn segment_stream(segment: &cp::DrawSegment<'_>) -> Vec<u8> {
+    let end = (segment.end as usize).min(segment.stream.len());
+    let mut bytes = segment.stream[..end].to_vec();
+    for packet in &crate::packet::walk(&bytes).packets {
+        let crate::packet::PacketKind::Command { opcode } = packet.kind else {
+            continue;
+        };
+        if packet.offset >= segment.first || !cp::is_draw(opcode) {
+            continue;
+        }
+        let header = crate::packet::build::command_header(
+            crate::packet::build::measured::NOP,
+            packet.body_length() / 4,
+        );
+        let at = packet.offset as usize;
+        bytes[at..at + 4].copy_from_slice(&header.to_le_bytes());
+    }
+    bytes
+}
+
+/// The shaders a submission could not prepare, as a clause for a refusal - empty when none failed.
+fn shader_failures(submission: &Submission) -> String {
+    use std::fmt::Write as _;
+    let mut clause = String::new();
+    for failure in &submission.report.failures {
+        let _ = write!(
+            clause,
+            "; its {} shader at {:#x} was not prepared: {}",
+            failure.stage, failure.address, failure.reason
+        );
+    }
+    clause
+}
+
+/// Why the most recent draw segment was not carried out, for the run report.
+fn draw_refusal() -> &'static Mutex<Option<String>> {
+    static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
+    &REFUSAL
+}
+
+fn note_draw_refusal(why: String) {
+    *draw_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+}
+
+/// Why the most recent draw segment was refused, if one was.
+#[must_use]
+pub fn last_draw_refusal() -> Option<String> {
+    draw_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 impl GuestCp<'_> {
+    /// Carries out one segment of the stream's draws (D729): a segment holding every draw is the
+    /// submission as prepared; any other is prepared from [`segment_stream`] through the live
+    /// pipeline, carrying the modules the whole submission brought for the backend.
+    fn draw_segment(&mut self, segment: &cp::DrawSegment<'_>) -> Result<(), String> {
+        let whole = self
+            .submission
+            .ok_or("no submission is being carried out")?;
+        if segment.whole {
+            return self.draw_into_target(whole);
+        }
+        let bytes = segment_stream(segment);
+        let mut prepared = {
+            let mut live = live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+            let prepared = pipeline.submit(&bytes, Queue::Draw, &[], &self.memory);
+            keep_new_translations(pipeline);
+            prepared
+        };
+        for (id, module) in &whole.modules {
+            prepared
+                .modules
+                .entry(*id)
+                .or_insert_with(|| module.clone());
+        }
+        self.draw_into_target(&prepared)
+    }
+
     /// Reads the target, has the executor draw over it, and - after every submission, or at the
-    /// flip - writes the result back where the guest reads it (D714). `false`, with nothing
+    /// flip - writes the result back where the guest reads it (D714). Why not, with nothing
     /// written, at the first thing that is not exact.
-    fn draw_into_target(&mut self) -> bool {
+    fn draw_into_target(&mut self, submission: &Submission) -> Result<(), String> {
         let (Some(execute), Some(read)) = (draw_executor().get(), frame_reader().get()) else {
-            return false;
+            return Err("no device is installed to draw with".to_owned());
         };
-        let Some(submission) = self.submission else {
-            return false;
-        };
-        let Some((target, swap)) = writable_target(submission) else {
-            return false;
-        };
+        let (target, swap) = writable_target(submission).ok_or_else(|| {
+            format!(
+                "its colour target is not one a frame can be written back to exactly: {:?}, \
+                 {:?}, {:?}, {} base(s), {} extent(s)",
+                submission.colour_target,
+                submission.colour_target_tiling,
+                submission.colour_target_format,
+                submission.colour_target_bases,
+                submission.targets.len()
+            )
+        })?;
         // The executor holds one frame per extent, so a frame still pending for another target is
         // written back before this one is drawn over it (D714).
         if pending_target().is_some_and(|(pending, _)| pending.base != target.base)
             && !write_back_pending(self)
         {
-            return false;
+            return Err(
+                "the frame pending for another target could not be written back".to_owned(),
+            );
         }
         if !write_back_at_flip() {
             return draw_over(self, target, swap, |before| {
                 execute(submission, before).then(read).flatten()
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "the device did not draw it, or it could not be written back{}",
+                    shader_failures(submission)
+                )
             });
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
         // each of the many submissions a GL frame takes (D714).
-        let Some(before) = read_target(self, target, swap) else {
-            return false;
-        };
+        let before = read_target(self, target, swap)
+            .ok_or("its colour target is not readable guest memory")?;
         if !execute(submission, before.before()) {
             forget_written();
             set_pending(None);
-            return false;
+            return Err(format!(
+                "the device did not draw it{}",
+                shader_failures(submission)
+            ));
         }
         set_pending(Some((target, swap)));
-        true
+        Ok(())
     }
 }
 
@@ -1325,8 +1429,19 @@ impl cp::CpMemory for GuestCp<'_> {
         RELEASED.with(|released| released.borrow_mut().push((address, context)));
     }
 
-    fn run_draws(&mut self) -> bool {
-        crate::perf::span(crate::perf::Span::RunDraws, || self.draw_into_target())
+    fn run_draws(&mut self, segment: &cp::DrawSegment<'_>) -> bool {
+        crate::perf::span(crate::perf::Span::RunDraws, || {
+            match self.draw_segment(segment) {
+                Ok(()) => true,
+                Err(why) => {
+                    note_draw_refusal(format!(
+                        "the draws at bytes {:#x}..{:#x}: {why}",
+                        segment.first, segment.end
+                    ));
+                    false
+                }
+            }
+        })
     }
 
     fn run_dispatch(&mut self, dispatch: &cp::Dispatch<'_>) -> bool {
@@ -1872,6 +1987,47 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
     use std::sync::{Mutex, PoisonError};
+
+    /// A segment's stream keeps every packet up to its last draw, register writes included, turns
+    /// each earlier draw into a `NOP` of the same length, and leaves out everything after (D729).
+    #[test]
+    fn a_segment_stream_keeps_register_state_and_silences_earlier_draws() {
+        use crate::packet::build::{command_header, measured};
+        let set = [command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7];
+        let draw = [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2];
+        let fill = [
+            command_header(measured::DMA_DATA, 6),
+            0x8000_0000 | (2 << 29) | (3 << 20),
+            1,
+            0,
+            0x2000,
+            0,
+            16,
+        ];
+        let mut words = set.to_vec();
+        words.extend(draw);
+        words.extend(fill);
+        let first = u32::try_from(words.len() * 4).expect("small");
+        words.extend(set);
+        words.extend(draw);
+        let end = u32::try_from(words.len() * 4).expect("small");
+        words.extend(fill);
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let segment = super::segment_stream(&crate::cp::DrawSegment {
+            stream: &stream,
+            first,
+            end,
+            whole: false,
+        });
+
+        let mut expected = stream[..end as usize].to_vec();
+        expected[12..16].copy_from_slice(&command_header(measured::NOP, 2).to_le_bytes());
+        assert_eq!(segment, expected);
+        let walked = crate::packet::walk(&segment);
+        assert!(walked.is_trustworthy());
+        assert_eq!(walked.packets.len(), 5, "every packet kept, none split");
+    }
 
     /// A dispatch writes back exactly the words it changed, as runs.
     #[test]

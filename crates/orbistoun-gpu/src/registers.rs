@@ -1522,15 +1522,27 @@ pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetF
     Some(decode_colour_target_format(value))
 }
 
-/// How many distinct colour target zero base addresses a stream wrote. A submission whose draws are
-/// carried out together and written back as one frame must have drawn into one target, so more
-/// than one is a refusal.
+/// How many distinct colour target zero base addresses a stream's draws drew into, counting the
+/// base left in force after them - the one a frame is written back to. `draws` are the draw
+/// packets' byte offsets. A submission whose draws are carried out together and written back as one
+/// frame must have drawn into one target, so more than one is a refusal; a base overwritten before
+/// any draw used it is not a target.
 #[must_use]
-pub fn colour_target_bases_in(writes: &[RegisterWrite]) -> usize {
-    let mut bases: Vec<u32> = writes
+pub fn colour_target_bases_in(writes: &[RegisterWrite], draws: &[u32]) -> usize {
+    let bases_written = writes
         .iter()
-        .filter(|write| write.register == CB_COLOR0_BASE)
-        .map(|write| write.value)
+        .filter(|write| write.register == CB_COLOR0_BASE);
+    let in_force = |before: u32| {
+        bases_written
+            .clone()
+            .rev()
+            .find(|write| write.packet_offset < before)
+            .map(|write| write.value)
+    };
+    let mut bases: Vec<u32> = draws
+        .iter()
+        .filter_map(|&draw| in_force(draw))
+        .chain(bases_written.clone().next_back().map(|write| write.value))
         .collect();
     bases.sort_unstable();
     bases.dedup();
@@ -2526,6 +2538,35 @@ mod tests {
         assert!(mask.writes_target(1));
         assert!(!mask.writes_target(2), "MRT2 is disabled");
         assert_eq!(mask.active_targets(), 2);
+    }
+
+    /// The bases counted are the ones draws drew into, and the one left in force: a base
+    /// overwritten before any draw drew into it is not a target, and a stream whose draws share
+    /// one base and leave it in force has one. A different base in force after the last draw is a
+    /// second, since what is read back is the base left in force.
+    #[test]
+    fn colour_target_bases_are_the_ones_draws_drew_into_and_the_one_left() {
+        use super::{CB_COLOR0_BASE, RegisterWrite, colour_target_bases_in};
+        let base = |packet_offset, value| RegisterWrite {
+            packet_offset,
+            register: CB_COLOR0_BASE,
+            value,
+        };
+        let writes = [base(0, 0x100), base(8, 0x200), base(40, 0x200)];
+        assert_eq!(colour_target_bases_in(&writes, &[16, 32]), 1);
+        assert_eq!(
+            colour_target_bases_in(&writes, &[4, 32]),
+            2,
+            "the first draw drew into 0x100"
+        );
+        let after = [base(8, 0x200), base(40, 0x300)];
+        assert_eq!(colour_target_bases_in(&after, &[16]), 2);
+        assert_eq!(
+            colour_target_bases_in(&after, &[]),
+            1,
+            "no draw: the one left"
+        );
+        assert_eq!(colour_target_bases_in(&[], &[16]), 0);
     }
 
     #[test]

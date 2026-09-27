@@ -703,7 +703,10 @@ impl Pipeline {
         submission.colour_target = colour_target_at(&writes);
         submission.colour_target_tiling = colour_swizzle_mode_at(&writes);
         submission.colour_target_format = colour_target_format_at(&writes);
-        submission.colour_target_bases = colour_target_bases_in(&writes);
+        // The draws, found once for every pass that walks them.
+        let draws = draw_calls(&walked, stream);
+        let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();
+        submission.colour_target_bases = colour_target_bases_in(&writes, &draw_offsets);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&writes);
@@ -737,8 +740,6 @@ impl Pipeline {
         submission.guest_memory_base = self.window.address();
         submission.report.shaders_found = candidates.len();
 
-        // The draws, found once for both passes that walk them.
-        let draws = draw_calls(&walked, stream);
         let per_draw = span(Span::PrepareShaders, || {
             self.bind_shaders(
                 &candidates,

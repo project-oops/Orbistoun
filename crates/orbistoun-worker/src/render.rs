@@ -986,9 +986,6 @@ fn log_execution() {
         Some(orbistoun_gpu::cp::Stopped::NeedsGpu { offset, opcode }) => format!(
             "stopped at byte {offset:#x}: opcode {opcode:#04x} needs the GPU, so nothing after it retired"
         ),
-        Some(orbistoun_gpu::cp::Stopped::DrawsInterleaved { offset, opcode }) => format!(
-            "stopped at its first draw: opcode {opcode:#04x} at byte {offset:#x} sits between its draws, so they could not run as one"
-        ),
         Some(other) => format!("stopped: {other:?}"),
     };
     let held = if record.held_back == 0 {
@@ -1001,6 +998,9 @@ fn log_execution() {
     };
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
+    }
+    if let Some(why) = orbistoun_gpu::agc_driver::last_draw_refusal() {
+        tracing::info!("a draw segment was not carried out - {why}");
     }
     tracing::info!(
         "the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}{held}",
