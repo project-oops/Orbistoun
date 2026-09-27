@@ -38,7 +38,9 @@ fn text(value: &CString) -> u64 {
 }
 
 /// A server that answers each connection with the response `answer` builds from the request
-/// line, and hands back every request's head.
+/// line, and hands back every request's head. It closes each connection after one answer, so
+/// every response says `Connection: close`: otherwise the client may send its next request down
+/// the socket this server has already closed.
 fn serve(
     connections: usize,
     answer: fn(&str) -> Vec<u8>,
@@ -213,7 +215,7 @@ fn a_get_answers_its_status_length_and_body() {
 #[test]
 fn a_redirect_not_followed_hands_its_location_to_the_guest() {
     let (port, _heads) = serve(1, |_| {
-        b"HTTP/1.1 302 Found\r\nLocation: https://cdn.example/asset?sig=1\r\nContent-Length: 0\r\n\r\n"
+        b"HTTP/1.1 302 Found\r\nLocation: https://cdn.example/asset?sig=1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             .to_vec()
     });
     let session = Session::open(true);
@@ -249,9 +251,9 @@ fn a_redirect_not_followed_hands_its_location_to_the_guest() {
 fn a_redirect_followed_answers_the_destination() {
     let (port, _heads) = serve(2, |line| {
         if line.contains("/moved") {
-            b"HTTP/1.1 301 Moved\r\nLocation: /here\r\nContent-Length: 0\r\n\r\n".to_vec()
+            b"HTTP/1.1 301 Moved\r\nLocation: /here\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
         } else {
-            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhere".to_vec()
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nhere".to_vec()
         }
     });
     let session = Session::open(true);
@@ -266,7 +268,7 @@ fn a_redirect_followed_answers_the_destination() {
 #[test]
 fn a_chunked_body_has_no_length_and_arrives_decoded() {
     let (port, _heads) = serve(1, |_| {
-        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
             .to_vec()
     });
     let session = Session::open(true);
