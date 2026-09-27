@@ -121,6 +121,8 @@ guest_module! {
         "scePthreadCreate" => 5,
         "scePthreadJoin" => 2,
         "scePthreadSelf" => 0,
+        // Two thread handles, the vendor spelling of FreeBSD's `pthread_equal`.
+        "scePthreadEqual" => 2,
         // The calling thread's unique integer id (FreeBSD `pthread_getthreadid_np`) (D452).
         "scePthreadGetthreadid" => 0,
         // Named by guests themselves and confirmed by hash. Titles print diagnostics naming these,
@@ -5606,6 +5608,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadCreate", pthread_create),
     ("scePthreadJoin", pthread_join),
     ("scePthreadSelf", pthread_self),
+    ("scePthreadEqual", pthread_equal),
     ("scePthreadGetthreadid", pthread_getthreadid),
     ("sceKernelCreateSema", create_semaphore),
     ("scePthreadMutexattrInit", pthread_mutexattr_init),
@@ -6086,6 +6089,22 @@ mod tests {
         SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `scePthreadEqual` answers non-zero for two copies of one thread's handle and zero for two
+    /// threads' handles: the placeholder it answered unimplemented was non-zero for every pair.
+    #[test]
+    fn sce_pthread_equal_tells_one_thread_from_another() {
+        let (_, equal) = implementations()
+            .iter()
+            .find(|(name, _)| *name == "scePthreadEqual")
+            .expect("scePthreadEqual is implemented");
+        let this = super::pthread_self(&args([0, 0, 0, 0]));
+        let other = std::thread::spawn(|| super::pthread_self(&args([0, 0, 0, 0])))
+            .join()
+            .expect("the other thread answered its handle");
+        assert_ne!(equal(&args([this, this, 0, 0])), 0);
+        assert_eq!(equal(&args([this, other, 0, 0])), 0);
     }
 
     /// `scePthreadGetaffinity` reads back the mask a thread was recorded with; an unknown handle is
