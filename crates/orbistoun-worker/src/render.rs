@@ -729,6 +729,26 @@ fn write_failed_submission(submission: &Submission) {
 
 /// Writes `submission` under `name`: `failed` for a drive the device refused, `last` for the
 /// run's last submission, which is where a wrong picture is read from.
+/// A stage's draw buffers in a listing: each slot's length and first words, not its bytes.
+fn draw_buffers_line(
+    stage: orbistoun_gpu::ShaderStage,
+    buffers: &[orbistoun_gpu::DrawBuffer],
+) -> String {
+    let slots: Vec<String> = buffers
+        .iter()
+        .map(|buffer| {
+            let first: Vec<String> = buffer
+                .bytes
+                .chunks_exact(4)
+                .take(4)
+                .map(|w| format!("{:#010x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]])))
+                .collect();
+            format!("{} bytes [{}]", buffer.bytes.len(), first.join(" "))
+        })
+        .collect();
+    format!("BindDrawBuffers {{ {stage:?}: {} }}", slots.join(", "))
+}
+
 fn write_submission(submission: &Submission, name: &str) {
     let Some(dir) = frames_dir() else {
         return;
@@ -742,6 +762,9 @@ fn write_submission(submission: &Submission, name: &str) {
                 height,
                 ..
             } => format!("BindTexture {{ slot {slot}, {width}x{height} }}"),
+            orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
+                draw_buffers_line(*stage, buffers)
+            }
             other => format!("{other:x?}"),
         };
         let _ = writeln!(text, "{index:5}  {shown}");
@@ -951,6 +974,9 @@ fn command_summary(commands: &[orbistoun_gpu::RenderCommand]) -> Vec<String> {
                     texels.first().copied().unwrap_or_default(),
                     texels.last().copied().unwrap_or_default()
                 )
+            }
+            orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
+                draw_buffers_line(*stage, buffers)
             }
             other => format!("{other:?}"),
         };

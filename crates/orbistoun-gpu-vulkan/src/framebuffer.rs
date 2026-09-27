@@ -1678,6 +1678,10 @@ pub(crate) fn draw_vertices(
             viewport: start.viewport,
             second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
             cull: start.cull,
+            draw_buffers: &DrawBuffersBound {
+                buffers: start.buffers,
+                ..NO_DRAW_BUFFERS
+            },
             ..Bound::default()
         },
     )
@@ -1711,6 +1715,8 @@ pub(crate) struct Start<'a> {
     pub(crate) cull: Option<orbistoun_gpu::depth::CullState>,
     /// The clear the depth attachment takes before the draw.
     pub(crate) depth_clear: Option<crate::depth::DepthClear>,
+    /// The primitive shader's and the pixel shader's buffers (D732).
+    pub(crate) buffers: [&'a [orbistoun_gpu::DrawBuffer]; 2],
 }
 
 /// The Vulkan viewport a guest's transform describes.
@@ -1877,6 +1883,19 @@ fn render_over(
     let device = &session.device;
     let queue = session.queue;
     let family = session.family;
+    // The draw's buffers (D732), bound as set one whatever the modules read.
+    let draw_buffers = DrawBuffersBound {
+        set: Some(match bound.draw_buffers.set {
+            Some(set) => set,
+            None => crate::draw_buffers::descriptor_set(&session, bound.draw_buffers.buffers)?,
+        }),
+        layout: Some(crate::draw_buffers::set_layout(&session)?),
+        ..*bound.draw_buffers
+    };
+    let bound = Bound {
+        draw_buffers: &draw_buffers,
+        ..bound
+    };
 
     // A resident attachment is drawn on in place: no attachment, render pass, framebuffer or buffer
     // of this draw's own, and no pixels in or out.
@@ -2246,6 +2265,8 @@ struct BindState {
     geometry: Geometry,
     user_data: [u32; USER_DATA_BLOCK_WORDS],
     window_offset: u32,
+    /// The draw's buffers' set (D732), bound as set one.
+    buffers: vk::DescriptorSet,
 }
 
 impl Pipeline {
@@ -2257,6 +2278,7 @@ impl Pipeline {
             geometry: self.geometry,
             user_data: self.user_data,
             window_offset: self.window_offset,
+            buffers: self.draw_buffers,
         }
     }
 }
@@ -2286,6 +2308,20 @@ fn bind_for_draw(device: &ash::Device, command: vk::CommandBuffer, state: &BindS
             &offsets,
         );
     }
+    // The draw's buffers (D732): set one, whose layout every pipeline layout shares.
+    let buffers = [state.buffers];
+    // SAFETY: the set was allocated against the draw-buffer layout this pipeline's layout holds at
+    // set one, and is live until every recorded draw has run.
+    unsafe {
+        device.cmd_bind_descriptor_sets(
+            command,
+            vk::PipelineBindPoint::GRAPHICS,
+            state.layout,
+            orbistoun_spirv::DRAW_BUFFERS_SET,
+            &buffers,
+            &[],
+        );
+    }
     // The draw's user data, where its shaders read it at entry.
     let block = zerocopy::IntoBytes::as_bytes(&state.user_data);
     // SAFETY: recording is open; the layout declares a push-constant range of exactly this many
@@ -2312,13 +2348,15 @@ struct MeshBatch {
 }
 
 /// What must be the same for a draw to join a batch: the pipeline (which carries its shaders,
-/// textures, blend, viewport and scissor), the attachment, the window slot and buffer, and the
-/// fragment stage's user data - everything but the geometry stage's words.
+/// textures, blend, viewport and scissor), the attachment, the window slot and buffer, the draw's
+/// buffers, and the fragment stage's user data - everything but the geometry stage's words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BatchKey {
     pipeline: u64,
     framebuffer: vk::Framebuffer,
     window: (vk::Buffer, u32),
+    /// The draw's buffers' set (D732).
+    buffers: vk::DescriptorSet,
     fragment: DrawWords,
 }
 
@@ -2401,6 +2439,8 @@ fn render_resident(
         built.window_offset = u32::try_from(guest.offset).unwrap_or(0);
         built.geometry = geometry;
         built.user_data = *bound.user_data;
+        // This draw's buffers: a set bound at record time, not a change to the pipeline (D732).
+        built.draw_buffers = bound.draw_buffers.set?;
         Some(built)
     });
     let pipeline =
@@ -3049,6 +3089,7 @@ fn render_resident_with(
                     pipeline: key,
                     framebuffer: pass.framebuffer,
                     window: (built.buffers[1].0, built.window_offset),
+                    buffers: built.draw_buffers,
                     fragment,
                 },
                 built.bind_state(),
@@ -3313,6 +3354,8 @@ struct Pipeline {
     /// The dynamic offset of binding 1: which window-ring slot the draw reads. Zero for a pipeline
     /// that made its own guest-memory buffer.
     window_offset: u32,
+    /// The set of the buffers its latest draw binds (D732), which the draw-buffer cache owns.
+    draw_buffers: vk::DescriptorSet,
 }
 
 /// An attachment dimension as a float, exactly.
@@ -3349,12 +3392,18 @@ fn build_pipeline(
     if let Some(transform) = bound.viewport {
         viewport_within_limits(devices, guest_viewport(transform))?;
     }
+    let (Some(buffers_layout), Some(draw_buffers)) =
+        (bound.draw_buffers.layout, bound.draw_buffers.set)
+    else {
+        return Err(DispatchError::Unsupported(
+            "a pipeline built with no draw-buffer set to bind (D732)".to_owned(),
+        ));
+    };
     let (vertex, fragment) = create_shader_modules(device, shaders)?;
     let resources = create_bound_resources(devices, bound)?;
     let set_layout = create_set_layout(device)?;
-    let set_layouts = [set_layout];
-    let layout = create_pipeline_layout(device, &set_layouts, geometry)?;
-    let (descriptor_pool, set) = allocate_set(device, &set_layouts)?;
+    let layout = create_pipeline_layout(device, &[set_layout, buffers_layout], geometry)?;
+    let (descriptor_pool, set) = allocate_set(device, &[set_layout])?;
     write_descriptor_set(device, set, bound.windows, &resources);
     let handle = create_graphics_pipeline(
         device,
@@ -3385,6 +3434,7 @@ fn build_pipeline(
         window_offset: bound
             .guest_buffer
             .map_or(0, |guest| u32::try_from(guest.offset).unwrap_or(0)),
+        draw_buffers,
     })
 }
 
@@ -3922,9 +3972,17 @@ pub(crate) fn draw_resident(
     let pass = resident.pass(start.depth.is_some()).ok_or_else(|| {
         DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
     })?;
+    // The draw's buffers (D732), in their own set.
+    let buffers_set = {
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::draw_buffers::descriptor_set(&session, start.buffers)?
+    };
     // A draw the open batch already describes joins it and does nothing else (D718): same pipeline
-    // (shaders, textures, blend, depth, cull, viewport and scissor), pass, window and fragment
-    // words. Only mesh draws batch, and a draw after a clear starts a batch of its own.
+    // (shaders, textures, blend, depth, cull, viewport and scissor), pass, window, buffers and
+    // fragment words. Only mesh draws batch, and a draw after a clear starts a batch of its own.
     let key = start
         .pipeline_key
         .filter(|_| vertices.is_none())
@@ -3937,6 +3995,7 @@ pub(crate) fn draw_resident(
                     guest_buffer.buffer,
                     u32::try_from(guest_buffer.offset).unwrap_or(0),
                 ),
+                buffers: buffers_set,
                 fragment,
             }
         });
@@ -3967,6 +4026,11 @@ pub(crate) fn draw_resident(
             depth: start.depth.as_ref(),
             cull: start.cull,
             depth_clear: start.depth_clear,
+            draw_buffers: &DrawBuffersBound {
+                buffers: start.buffers,
+                set: Some(buffers_set),
+                layout: None,
+            },
             ..Bound::default()
         },
     )
@@ -4076,7 +4140,29 @@ struct Bound<'a> {
     cull: Option<orbistoun_gpu::depth::CullState>,
     /// The clear the depth attachment takes before a resident draw.
     depth_clear: Option<crate::depth::DepthClear>,
+    /// The draw's buffers (D732); none by default. By reference, so `Bound` stays cheap to pass by
+    /// value.
+    draw_buffers: &'a DrawBuffersBound<'a>,
 }
+
+/// A draw's buffers (D732) as a draw binds them: each stage's, and once found where the session is
+/// held, their set and its layout, which every pipeline layout holds at set one.
+#[derive(Clone, Copy)]
+struct DrawBuffersBound<'a> {
+    /// The primitive shader's and the pixel shader's buffers.
+    buffers: [&'a [orbistoun_gpu::DrawBuffer]; 2],
+    /// Their set.
+    set: Option<vk::DescriptorSet>,
+    /// The set's layout.
+    layout: Option<vk::DescriptorSetLayout>,
+}
+
+/// A draw that binds no buffers.
+static NO_DRAW_BUFFERS: DrawBuffersBound<'static> = DrawBuffersBound {
+    buffers: [&[], &[]],
+    set: None,
+    layout: None,
+};
 
 /// The block a draw that sets no user data pushes.
 static NO_USER_DATA: [u32; USER_DATA_BLOCK_WORDS] = [0; USER_DATA_BLOCK_WORDS];
@@ -4100,6 +4186,7 @@ impl Default for Bound<'_> {
             depth: None,
             cull: None,
             depth_clear: None,
+            draw_buffers: &NO_DRAW_BUFFERS,
         }
     }
 }
