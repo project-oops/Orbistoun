@@ -21,7 +21,9 @@ use crate::model::{self, Model};
 use crate::predicated::{MEMORY_WORDS, OBSERVED_REGISTERS, OBSERVED_WORDS, REGISTER_COUNT};
 use crate::{TranslateError, Width};
 
+mod compute_inputs;
 mod pixel_inputs;
+pub use compute_inputs::ComputeInputs;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
 
 /// Lanes in a wavefront.
@@ -370,6 +372,11 @@ pub struct UserData {
     /// `None` when the stream set none, and then no vector register is seeded.
     #[serde(default)]
     pub pixel_inputs: Option<PixelInputs>,
+    /// A guest compute dispatch's entry state. With it a compute module seeds the workgroup and
+    /// thread ids and keeps its memory exact, refusing by flag what it cannot place; without it a
+    /// compute module is the register-observing harness it always was.
+    #[serde(default)]
+    pub compute: Option<ComputeInputs>,
 }
 
 /// Words in the push-constant block: sixteen per stage, two stages. 128 bytes is the smallest
@@ -876,6 +883,10 @@ pub struct Wavefront<'a> {
     translated: usize,
     /// The stage's `DX10_CLAMP` mode, from its `RSRC1`; `None` when unknown.
     dx10_clamp: Option<bool>,
+    /// A guest dispatch's workgroup id and escape flag, or `None` for any other module.
+    dispatch: Option<compute_inputs::DispatchState>,
+    /// The high thirty-two bits of the window's guest address.
+    memory_high: u32,
 }
 
 impl Wavefront<'_> {
@@ -1179,6 +1190,7 @@ impl<'a> Wavefront<'a> {
         );
         let (files, observation, guest_memory) = declare_state(&mut b, &ids, stage, width, window);
         let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
+        let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
@@ -1186,6 +1198,7 @@ impl<'a> Wavefront<'a> {
         interface.extend(system.interface());
         interface.extend(output.map(|(_, colour)| colour.0));
         interface.extend(mesh_reserved.interface(stage));
+        interface.extend(dispatch.map(compute_inputs::DispatchState::interface));
         if stage == Stage::Mesh {
             interface.extend(mesh_interface(
                 &ids,
@@ -1237,22 +1250,38 @@ impl<'a> Wavefront<'a> {
             condition_code: ids.scc,
             m0: ids.m0,
             translated: 0,
+            dispatch,
+            memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
         };
 
+        this.seed_entry(user_data_source, user_data, &system);
+        this
+    }
+
+    /// Places what the hardware loads before a wave's first instruction.
+    fn seed_entry(
+        &mut self,
+        user_data_source: Option<UserDataSource>,
+        user_data: UserData,
+        system: &pixel_inputs::SystemInputs,
+    ) {
         // Every lane runs at entry; a zero mask would discard every write and produce a buffer of
         // zeros.
-        let all = this.constant(u32::MAX);
-        this.store_scalar(EXEC_LO, all);
-        this.store_scalar(EXEC_HI, all);
+        let all = self.constant(u32::MAX);
+        self.store_scalar(EXEC_LO, all);
+        self.store_scalar(EXEC_HI, all);
 
         // The user data where the hardware puts it: word `i` of this stage's range in the block
         // into `s[first + i]`, before the first instruction runs.
         if let Some(source) = user_data_source {
-            this.load_user_data(source, user_data);
+            self.load_user_data(source, user_data);
         }
         // The system values where the hardware puts them: after the interpolants, in field order.
-        system.seed(&mut this);
-        this
+        system.seed(self);
+        // A dispatch's ids after the user data and in the first vector registers.
+        if let (Some(state), Some(inputs)) = (self.dispatch, user_data.compute) {
+            state.seed(self, inputs, user_data.count);
+        }
     }
 
     /// Loads each user-data word from `source` into its scalar register, at entry.
@@ -1488,7 +1517,10 @@ impl<'a> Wavefront<'a> {
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
         // Only a compute module publishes its registers: the epilogue is the compute harness's
         // oracle, and a graphics module's oracle is its attachment (D553).
-        if self.stage == Stage::Compute {
+        if let Some(state) = self.dispatch {
+            // A guest dispatch's observation is whether it stayed exact, not its registers.
+            state.publish(&mut self);
+        } else if self.stage == Stage::Compute {
             let member = self.constant(0);
             for register in 0..OBSERVED_REGISTERS {
                 let value = self.load_lane(register, 0);
@@ -1620,6 +1652,20 @@ impl Model for Wavefront<'_> {
 
     fn memory_base(&self) -> u32 {
         self.memory_base
+    }
+
+    fn memory_high(&self) -> u32 {
+        self.memory_high
+    }
+
+    fn exact_memory(&self) -> bool {
+        self.dispatch.is_some()
+    }
+
+    fn note_escape(&mut self, escaped: Id, lane: Option<u32>) {
+        if let Some(state) = self.dispatch {
+            state.note(self, escaped, lane);
+        }
     }
 
     fn lanes(&self) -> u32 {
@@ -2267,6 +2313,9 @@ pub fn translate_with_user_data(
     }
     if let (Stage::Fragment, Some(inputs)) = (stage, user_data.pixel_inputs) {
         inputs.seeded()?;
+    }
+    if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
+        inputs.check(width.lanes())?;
     }
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);

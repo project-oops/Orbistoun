@@ -253,3 +253,21 @@ v_mul_f32_e32 v12, 0, v88
 v_rcp_f32_e32 v0, v1
 v_rcp_f32_e32 v255, s101
 v_rcp_f32_e32 v130, -1
+
+// ---- v_lshl_add_u32 and v_lshrrev_b64 --------------------------------------------
+//
+// radeonsi's compute clear forms each thread's offset with v_lshl_add_u32 - the
+// workgroup id shifted and added to the thread id - and ACO moves a 64-bit pair of user
+// SGPRs into vector registers with a zero-distance v_lshrrev_b64 (Mesa
+// aco_opcodes.py:1402, gfx10 opcode 0x300). Varied sources for both: vector, scalar and
+// inline, and register pairs spread across the file for the 64-bit forms.
+v_lshl_add_u32 v0, s12, 6, v0
+v_lshl_add_u32 v100, v200, v255, v190
+v_lshl_add_u32 v255, v12, s30, v44
+v_lshl_add_u32 v9, -1, v77, s101
+v_lshl_add_u32 v130, v88, 4, v240
+v_lshrrev_b64 v[4:5], 0, s[4:5]
+v_lshrrev_b64 v[100:101], v200, v[130:131]
+v_lshrrev_b64 v[254:255], s30, v[12:13]
+v_lshrrev_b64 v[8:9], 4, v[44:45]
+v_lshrrev_b64 v[40:41], v77, s[70:71]

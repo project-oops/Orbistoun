@@ -11,7 +11,9 @@
 pub mod compute;
 mod depth;
 pub mod framebuffer;
-pub use compute::{Availability, DispatchError, Output, dispatch, probe};
+pub use compute::{
+    Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest, probe,
+};
 
 use std::collections::BTreeMap;
 

@@ -1519,6 +1519,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             block_offset: 0,
             dx10_clamp: dx10_clamp(RSRC1_REGISTERS[0]),
             pixel_inputs: None,
+            compute: None,
         },
         UserData {
             first_register: 0,
@@ -1527,6 +1528,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             dx10_clamp: dx10_clamp(RSRC1_REGISTERS[1]),
             // Set by `set_environment` for every backend.
             pixel_inputs: None,
+            compute: None,
         },
     ]
 }

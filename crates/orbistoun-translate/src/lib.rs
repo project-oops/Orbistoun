@@ -553,6 +553,7 @@ mod tests {
                     block_offset: 16,
                     dx10_clamp: None,
                     pixel_inputs: None,
+                    compute: None,
                 },
             )
         };
