@@ -431,15 +431,14 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // unfed queue does when its wait completes. It is off by default and recorded as an
     // intervention, so a verdict under it is not a measurement (D227).
     let completion = orbistoun_kernel::sync::PendingEvent {
-        ident: handle,
-        // The filter identifying a video-out completion is unestablished and left at zero rather
-        // than invented (D010).
-        filter: 0,
-        flags: 0,
+        ident: FLIP_EVENT_IDENT,
+        filter: EVFILT_VIDEO_OUT,
+        flags: FLIP_EVENT_FLAGS,
         fflags: 0,
-        // The caller's flip argument, the only per-flip value the guest supplies. Carrying it in
-        // `data` is an assumption.
-        data: i64::from_ne_bytes(flip_arg.to_ne_bytes()),
+        // The flip argument in bits 16..63, so a guest's arithmetic `>> 16` gives it back, -1
+        // included. The low sixteen bits vary from flip to flip on hardware in a way not yet
+        // established, and are left zero.
+        data: i64::from_ne_bytes(flip_arg.to_ne_bytes()) << 16,
         // Replaced by the registration's own word on delivery.
         udata: 0,
     };
@@ -451,6 +450,15 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     orbistoun_kernel::sync::post_event(handle, completion);
     OK
 }
+
+/// The filter a flip completion carries: `EVFILT_VIDEO_OUT`, read on hardware as -13 (obSCEne
+/// `-4e20`, `080-video/visual-flip`).
+const EVFILT_VIDEO_OUT: i16 = -13;
+/// A flip completion's flags word, `0x20` on hardware for every flip argument tried (`-4e20`).
+const FLIP_EVENT_FLAGS: u16 = 0x20;
+/// A flip completion's ident, `0x0006_0100_0000_0000` on hardware (`-4e20`). One port was
+/// observed, so whether it varies with the port is not established.
+const FLIP_EVENT_IDENT: u64 = 0x0006_0100_0000_0000;
 
 /// `sceVideoOutAddFlipEvent(equeue, handle, udata)`.
 ///
@@ -802,6 +810,44 @@ mod tests {
             vec![0x2_0300_0000, 0x2_0301_0000],
             "the two data addresses read back in order"
         );
+    }
+
+    /// A flip completion is the event obSCEne read on hardware (`-4e20`, `080-video/visual-flip`):
+    /// filter -13, flags 0x20, the flip ident, the registration's udata, and the flip argument in
+    /// bits 16..63 of `data`, whose arithmetic shift back gives it again - -1 and a full 48 bits
+    /// included.
+    #[test]
+    fn a_flip_completion_carries_the_measured_event() {
+        let _guard = serial();
+        let handle = open_on(10);
+        let queue = orbistoun_kernel::sync::create_equeue("flip-test");
+        let mut add = [0_u64; GUEST_ARG_REGISTERS];
+        add[..3].copy_from_slice(&[queue, handle, 0xabcd]);
+        assert_eq!(super::video_out_add_flip_event(&add), 0);
+        let addresses: [u64; 2] = [0x2_0400_0000, 0x2_0401_0000];
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, addresses.as_ptr() as u64, 2])),
+            0
+        );
+        for flip_arg in [0x12_3456_789a_i64, -1, 0x7fff_ffff_ffff] {
+            assert_eq!(
+                video_out_submit_flip(&args([handle, 0, 1, flip_arg as u64])),
+                0
+            );
+            let events = orbistoun_kernel::sync::take_events(queue, 4);
+            assert_eq!(events.len(), 1, "one completion per flip");
+            let event = events[0];
+            assert_eq!(event.filter, -13, "EVFILT_VIDEO_OUT");
+            assert_eq!(event.flags, 0x20);
+            assert_eq!(event.fflags, 0);
+            assert_eq!(event.ident, 0x0006_0100_0000_0000);
+            assert_eq!(event.udata, 0xabcd, "the registration's word");
+            assert_eq!(
+                event.data >> 16,
+                flip_arg,
+                "the argument comes back through sar 16"
+            );
+        }
     }
 
     /// Opens a distinct output so the shared port table cannot make two tests collide on
