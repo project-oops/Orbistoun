@@ -560,6 +560,82 @@ mod tests {
         assert!(traced(&program, 4).sources.is_empty());
     }
 
+    /// The clear shader's pixel module, translated for a draw that binds its buffers, declares
+    /// them at the pixel stage's binding of the draw-buffer set and reads them there; translated
+    /// for one that does not, it declares nothing there and reads the window as before.
+    #[test]
+    fn a_draw_that_binds_buffers_reads_the_clear_colour_through_its_binding() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData, Window};
+        use crate::{Fidelity, Strategy, Width, translate_with_user_data};
+        use orbistoun_spirv::{DRAW_BUFFERS_SET, PIXEL_BUFFERS_BINDING, decoration, op};
+
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = CLEAR.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let module = |draw_buffers: bool| {
+            translate_with_user_data(
+                &decoded,
+                &encodings,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::Wave64,
+                },
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    count: 4,
+                    block_offset: 16,
+                    draw_buffers,
+                    ..UserData::default()
+                },
+            )
+            .expect("the clear shader translates")
+            .module
+        };
+        // Every instruction of a module, as its opcode and operand words.
+        let instructions = |words: &[u32]| -> Vec<(u16, Vec<u32>)> {
+            let mut at = 5;
+            let mut found = Vec::new();
+            while let Some(&word) = words.get(at) {
+                let count = (word >> 16) as usize;
+                found.push(((word & 0xffff) as u16, words[at + 1..at + count].to_vec()));
+                at += count;
+            }
+            found
+        };
+        let decorated = |words: &[u32], what: u32, value: u32| {
+            instructions(words).iter().any(|(opcode, operands)| {
+                *opcode == op::DECORATE && operands.get(1..) == Some(&[what, value][..])
+            })
+        };
+        let lengths = |words: &[u32]| {
+            instructions(words)
+                .iter()
+                .filter(|(opcode, _)| *opcode == op::ARRAY_LENGTH)
+                .count()
+        };
+        let bound = module(true);
+        assert!(decorated(
+            &bound,
+            decoration::DESCRIPTOR_SET,
+            DRAW_BUFFERS_SET
+        ));
+        assert!(decorated(
+            &bound,
+            decoration::BINDING,
+            PIXEL_BUFFERS_BINDING
+        ));
+        assert_eq!(lengths(&bound), 4, "one read per word of the colour");
+        let windowed = module(false);
+        assert!(!decorated(
+            &windowed,
+            decoration::DESCRIPTOR_SET,
+            DRAW_BUFFERS_SET
+        ));
+        assert_eq!(lengths(&windowed), 0);
+    }
+
     /// Two loads through one descriptor read one buffer.
     #[test]
     fn two_loads_through_one_descriptor_share_a_slot() {

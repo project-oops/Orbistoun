@@ -608,6 +608,7 @@ mod tests {
                     compute: None,
                     geometry: None,
                     window_space: false,
+                    draw_buffers: false,
                 },
             )
         };

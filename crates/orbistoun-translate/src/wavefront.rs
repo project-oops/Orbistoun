@@ -403,6 +403,11 @@ pub struct UserData {
     /// names, lands on the same pixel.
     #[serde(default)]
     pub window_space: bool,
+    /// Whether a draw binds the buffers this stage's shader reads through (D732). With it every
+    /// access [`crate::draw_buffers::trace`] traces reads the buffer bound at its slot, and one
+    /// that stores through such a buffer is refused; without it every access reaches the window.
+    #[serde(default)]
+    pub draw_buffers: bool,
 }
 
 /// The viewport scale a window-space draw runs under (D731), in pixels, on both axes, with no
@@ -1106,6 +1111,9 @@ pub struct Wavefront<'a> {
     written: (u128, [u64; 4]),
     /// Whether a mesh module read a geometry-engine input it was not given.
     reads_geometry_input: bool,
+    /// The draw's bound buffers, and the slot each traced access reads, by the access's offset
+    /// (D732). `None` for a module that reads through none.
+    draw_buffers: Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)>,
 }
 
 /// A primitive shader's system SGPRs, `s0`-`s7`, ahead of its user SGPRs: gs_tg_info in `s2` and
@@ -1320,6 +1328,26 @@ fn mesh_interface(
     interface
 }
 
+/// Declares a draw's buffers at the stage's binding, only where a traced access reads one (D732),
+/// with the slot each access reads.
+fn declare_draw_buffers(
+    b: &mut Builder,
+    u32_type: Id,
+    stage: Stage,
+    buffers: &crate::draw_buffers::DrawBuffers,
+) -> Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)> {
+    let binding = match stage {
+        _ if buffers.served.is_empty() => return None,
+        Stage::Mesh => orbistoun_spirv::GEOMETRY_BUFFERS_BINDING,
+        Stage::Fragment => orbistoun_spirv::PIXEL_BUFFERS_BINDING,
+        Stage::Compute => return None,
+    };
+    Some((
+        buffer::declare_draw_buffers(b, u32_type, binding),
+        buffers.served.clone(),
+    ))
+}
+
 /// Declares the block a draw's user data arrives in, when the stage reads any.
 fn declare_user_data_source(
     b: &mut Builder,
@@ -1366,7 +1394,11 @@ impl<'a> Wavefront<'a> {
             MeshPrimitive::default(),
             &[],
             &[],
-            (Window::default(), UserData::default()),
+            (
+                Window::default(),
+                UserData::default(),
+                &crate::draw_buffers::DrawBuffers::default(),
+            ),
         )
     }
 
@@ -1378,7 +1410,7 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data): (Window, UserData),
+        (window, user_data, buffers): (Window, UserData, &crate::draw_buffers::DrawBuffers),
     ) -> Self {
         let mut b = Builder::new().with_version(module_version(stage));
 
@@ -1417,6 +1449,7 @@ impl<'a> Wavefront<'a> {
         let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
         let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
+        let draw_buffers = declare_draw_buffers(&mut b, u32_type, stage, buffers);
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
@@ -1432,6 +1465,7 @@ impl<'a> Wavefront<'a> {
                 (&observation, &guest_memory),
                 user_data_source,
             ));
+            interface.extend(draw_buffers.as_ref().map(|(array, _)| array.variable.0));
         }
         emit_entry_point(&mut b, stage, main, &interface);
 
@@ -1485,6 +1519,7 @@ impl<'a> Wavefront<'a> {
             reads_unwritten: false,
             written: (0, [0; 4]),
             reads_geometry_input: false,
+            draw_buffers,
         };
 
         this.seed_entry(user_data_source, user_data, &system);
@@ -2617,6 +2652,60 @@ impl Model for Wavefront<'_> {
         Ok(())
     }
 
+    fn draw_buffer_slot(&self, instruction: &Instruction) -> Option<u32> {
+        let (_, served) = self.draw_buffers.as_ref()?;
+        served.get(&instruction.offset).copied()
+    }
+
+    fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {
+        let Some((array, _)) = self.draw_buffers else {
+            return Err(TranslateError::Unsupported {
+                offset: 0,
+                detail: "a draw buffer read in a module that declares none (D732)",
+            });
+        };
+        let u32_type = self.u32_type;
+        let buffer = Self::constant(self, slot);
+        let member = Self::constant(self, 0);
+        let zero = member;
+        let bool_type = self.bool_type;
+        let b = &mut self.builder;
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[array.block_ptr.0, block.0, array.variable.0, buffer.0],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        // Past the bound words the read takes word zero instead: defined, and never the answer,
+        // since the host binds every word the descriptor admits.
+        let inside = b.id();
+        b.function(
+            op::ULESS_THAN,
+            &[bool_type.0, inside.0, word_index.0, length.0],
+        );
+        let index = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, index.0, inside.0, word_index.0, zero.0],
+        );
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                array.element_ptr.0,
+                pointer.0,
+                array.variable.0,
+                buffer.0,
+                member.0,
+                index.0,
+            ],
+        );
+        let value = b.id();
+        b.function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        Ok(value)
+    }
+
     fn memory_buffer(&self) -> Id {
         self.memory
     }
@@ -2887,6 +2976,32 @@ fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
     locations
 }
 
+/// The buffers a draw binds for this module (D732): traced for a draw's stage when the caller binds
+/// them, and none otherwise.
+///
+/// # Errors
+///
+/// More buffers than a stage's binding holds, refused rather than left to the window.
+pub fn draw_buffers_for(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    stage: Stage,
+    user_data: UserData,
+) -> Result<crate::draw_buffers::DrawBuffers, TranslateError> {
+    if !user_data.draw_buffers || stage == Stage::Compute {
+        return Ok(crate::draw_buffers::DrawBuffers::default());
+    }
+    let buffers =
+        crate::draw_buffers::trace(decode, encodings, user_data.first_register, user_data.count);
+    if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
+        return Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "the shader reads through more buffers than a stage of a draw binds (D732)",
+        });
+    }
+    Ok(buffers)
+}
+
 /// Translates a whole decoded shader at wavefront fidelity, for a named stage.
 ///
 /// # Errors
@@ -2974,6 +3089,7 @@ pub fn translate_with_user_data(
     }
     let attributes = interpolated_attributes(decode, encodings)?;
     let parameters = exported_parameters(decode, encodings);
+    let buffers = draw_buffers_for(decode, encodings, stage, user_data)?;
     let mut module = Wavefront::for_stage(
         encodings,
         width,
@@ -2981,7 +3097,7 @@ pub fn translate_with_user_data(
         primitive,
         &attributes,
         &parameters,
-        (window, user_data),
+        (window, user_data, &buffers),
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     crate::control::emit(&mut module, decode, encodings)?;

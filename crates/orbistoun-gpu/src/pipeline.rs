@@ -661,6 +661,7 @@ impl Pipeline {
             compute: Some(state.inputs),
             geometry: None,
             window_space: false,
+            draw_buffers: false,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -1996,6 +1997,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             compute: None,
             geometry: None,
             window_space: false,
+            draw_buffers: false,
         },
         UserData {
             first_register: 0,
@@ -2007,6 +2009,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             compute: None,
             geometry: None,
             window_space: false,
+            draw_buffers: false,
         },
     ]
 }

@@ -625,6 +625,28 @@ pub trait Model {
     /// Writes one word of the local data share, honouring the execution mask.
     fn write_local(&mut self, word_index: Id, value: Id, lane: u32) -> Result<(), TranslateError>;
 
+    /// The draw buffer the access at `instruction` reads through (D732), or `None` for one that
+    /// reaches guest memory through the window. `None` in a model that binds no draw buffers.
+    fn draw_buffer_slot(&self, instruction: &Instruction) -> Option<u32> {
+        let _ = instruction;
+        None
+    }
+
+    /// Reads word `word_index` of the draw buffer at `slot`, which the bound buffer's first word
+    /// is word zero of. An index past the bound buffer's end reads word zero instead, so the read
+    /// is always defined; the caller's bounds check decides what the access answers.
+    ///
+    /// # Errors
+    ///
+    /// In a model that binds no draw buffers, where [`Self::draw_buffer_slot`] never names one.
+    fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {
+        let _ = (slot, word_index);
+        Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "this model binds no draw buffers (D732)",
+        })
+    }
+
     /// The guest-memory buffer.
     fn memory_buffer(&self) -> Id;
 
@@ -3651,14 +3673,21 @@ fn scalar_buffer_load<M: Model + ?Sized>(
     let strided = model.is_not_zero(resource.stride);
     let unsupported = model.is_not_zero(resource.unsupported);
     let refused = model.either(strided, unsupported);
+    let slot = model.draw_buffer_slot(instruction);
     for word in 0..words {
         let at = model.constant(bytes + word * 4);
         let end = model.constant(bytes + word * 4 + 4);
         let past = model.compare(op::UGREATER_THAN, end, resource.records);
         let outside = model.either(past, refused);
-        let address = model.add(resource.base, at);
-        let index = model.word_index(address);
-        let loaded = model.read_memory(index);
+        // Through a bound draw buffer the word is the offset's, from the buffer's start (D732).
+        let loaded = if let Some(slot) = slot {
+            let index = model.constant((bytes + word * 4) / 4);
+            model.read_draw_buffer(slot, index)?
+        } else {
+            let address = model.add(resource.base, at);
+            let index = model.word_index(address);
+            model.read_memory(index)
+        };
         let value = model.select(outside, zero, loaded);
         model.write_scalar(register + word, value);
     }
@@ -3683,6 +3712,7 @@ fn access_words(name: &str) -> u32 {
 ///
 /// Holds the fields addressing needs; channel selects and data format describe a conversion the
 /// untyped accesses do not do.
+#[derive(Clone, Copy)]
 struct BufferResource {
     /// Byte address of the buffer. The reference gives 48 bits; see [`buffer_address`].
     base: Id,
@@ -3763,6 +3793,95 @@ fn buffer_address<M: Model + ?Sized>(
         address = model.add(address, scaled);
     }
     address
+}
+
+/// Where a buffer access reads: through the window, or through the draw buffer at a slot (D732).
+///
+/// A draw buffer starts at the descriptor's base, so an access through one is addressed from zero:
+/// the descriptor's base is where the bound buffer begins, and the rest of the equation is the
+/// offset into it. A store through one is refused, since nothing writes it back.
+fn buffer_reach<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    loading: bool,
+    resource: BufferResource,
+) -> Result<(Option<u32>, BufferResource), TranslateError> {
+    let Some(slot) = model.draw_buffer_slot(instruction) else {
+        return Ok((None, resource));
+    };
+    if !loading {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a store through a draw's bound buffer, which nothing writes back (D732)",
+        });
+    }
+    let base = model.constant(0);
+    Ok((Some(slot), BufferResource { base, ..resource }))
+}
+
+/// Reads the word at `address`: through the window, or at `address / 4` of the draw buffer at
+/// `slot`, the low two bits dropped as the window's word index drops them.
+fn read_reached<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<u32>,
+    address: Id,
+) -> Result<Id, TranslateError> {
+    let Some(slot) = slot else {
+        return Ok(read_guarded(model, address));
+    };
+    let two = model.constant(2);
+    let index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+    model.read_draw_buffer(slot, index)
+}
+
+/// A packed element's words from `base`: through the window, or from a draw buffer at the
+/// element's own byte, which need not be a word's first.
+fn read_element<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<u32>,
+    base: Id,
+    words: u32,
+) -> Result<Vec<Id>, TranslateError> {
+    let mut packed = Vec::with_capacity(words as usize);
+    for word in 0..words {
+        let step = model.constant(word * 4);
+        let address = model.add(base, step);
+        packed.push(match slot {
+            Some(slot) => read_draw_buffer_bytes(model, slot, address)?,
+            None => read_guarded(model, address),
+        });
+    }
+    Ok(packed)
+}
+
+/// The four bytes of the draw buffer at `slot` from byte `address`, as a little-endian word: the
+/// word holding the first byte shifted down, with the next word's low bytes above it.
+fn read_draw_buffer_bytes<M: Model + ?Sized>(
+    model: &mut M,
+    slot: u32,
+    address: Id,
+) -> Result<Id, TranslateError> {
+    let (two, three, one, eight, thirty_two) = (
+        model.constant(2),
+        model.constant(3),
+        model.constant(1),
+        model.constant(8),
+        model.constant(32),
+    );
+    let index = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+    let low = model.read_draw_buffer(slot, index)?;
+    let next = model.add(index, one);
+    let high = model.read_draw_buffer(slot, next)?;
+    let byte = model.binary(op::BITWISE_AND, address, three);
+    let shift = model.binary(op::IMUL, byte, eight);
+    let down = model.binary(op::SHIFT_RIGHT_LOGICAL, low, shift);
+    // A shift by thirty-two is undefined, so the aligned case takes the low word whole.
+    let up_by = model.binary(op::ISUB, thirty_two, shift);
+    let up = model.binary(op::SHIFT_LEFT_LOGICAL, high, up_by);
+    let joined = model.binary(op::BITWISE_OR, down, up);
+    let zero = model.constant(0);
+    let aligned = model.compare(op::IEQUAL, byte, zero);
+    Ok(pick(model, aligned, low, joined))
 }
 
 /// Whether a buffer access falls outside the buffer.
@@ -4119,6 +4238,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
     let idxen = word & (1 << 13) != 0;
 
     let resource = read_buffer_resource(model, resource_base);
+    let (slot, addressed) = buffer_reach(model, instruction, loading, resource)?;
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
@@ -4157,7 +4277,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
 
         let base = buffer_address(
             model,
-            &resource,
+            &addressed,
             scalar_offset,
             instruction_offset,
             voffset,
@@ -4171,13 +4291,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
         // `MEASURED_10_11_11` in `tests/execute.rs` pins this: in `10_11_11`, `x` is an eleven-bit
         // channel at bit 0.
         if loading {
-            let mut packed = Vec::with_capacity(element_words as usize);
-            for word in 0..element_words {
-                let step = model.constant(word * 4);
-                let address = model.add(base, step);
-                packed.push(read_guarded(model, address));
-            }
-
+            let packed = read_element(model, slot, base, element_words)?;
             let mut bit = 0u32;
             for (component, &width) in format.widths.iter().rev().enumerate() {
                 let register_component = register
@@ -4320,6 +4434,7 @@ fn buffer_access<M: Model + ?Sized>(
     let idxen = word & (1 << 13) != 0;
 
     let resource = read_buffer_resource(model, resource_base);
+    let (slot, addressed) = buffer_reach(model, instruction, loading, resource)?;
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
@@ -4356,7 +4471,7 @@ fn buffer_access<M: Model + ?Sized>(
 
         let base = buffer_address(
             model,
-            &resource,
+            &addressed,
             scalar_offset,
             instruction_offset,
             voffset,
@@ -4381,7 +4496,7 @@ fn buffer_access<M: Model + ?Sized>(
 
             if loading {
                 // Out of range reads zero, as the reference states.
-                let value = read_guarded(model, address);
+                let value = read_reached(model, slot, address)?;
                 let kept = pick(model, outside, zero, value);
                 model.write_vector_lane(register, lane, kept);
             } else {
@@ -5660,6 +5775,16 @@ fn memory<M: Model + ?Sized>(
                 });
             }
 
+            // A traced base is a draw buffer that starts at it (D732): the words are the offset's.
+            if let Some(slot) = model.draw_buffer_slot(instruction) {
+                for word in 0..words {
+                    let index = model.constant(bytes / 4 + word);
+                    let loaded = model.read_draw_buffer(slot, index)?;
+                    model.write_scalar(register + word, loaded);
+                }
+                model.count();
+                return Ok(());
+            }
             let base_value = model.read_scalar(u32::from(*base_register));
             let offset_value = model.constant(bytes);
             let address = model.add(base_value, offset_value);
