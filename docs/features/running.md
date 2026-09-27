@@ -128,13 +128,14 @@ that did not stop the work, `info` is an action with a side effect, `debug` is d
 
 ## Preferences
 
-settings - preferences... opens the preferences window. A list of panes is on the left; save
-writes `config.toml` and `shell.toml` together, and rescan library reads the folder again.
-Settings apply to the next run.
+settings - preferences... opens the preferences window. A list of panes is on the left, in
+the order below; save writes `config.toml` and `shell.toml` together, and rescan library reads
+the folder again. Settings apply to the next run.
 
 | Pane | Sets |
 |---|---|
 | general | library folder (and the folder it resolves to), run limit, and the view the window opens in |
+| payloads | the background daemon payloads started with each run, one per line, found in the shared payloads folder |
 | entry | how control reaches the guest's first instruction: the convention (function or process) and what the first argument register holds. The reporting and handoff choices are diagnostics, and a run under one is not compared with an ordinary run. |
 | threads | how many cores the guest is told it has and how many are usable, and how guest affinity requests are handled: observe, map or strict |
 | memory | whether direct memory is mapped for real; see [memory](memory.md) |

@@ -143,6 +143,10 @@ impl Preferences {
     }
 }
 
+/// The user-facing page that lists every pane, relative to this crate.
+#[cfg(test)]
+const PANES_DOCUMENTED_IN: &str = "../../docs/features/running.md";
+
 /// Draws one pane's controls.
 pub(crate) fn pane_contents(
     ui: &mut egui::Ui,
@@ -551,4 +555,47 @@ fn memory(ui: &mut egui::Ui, file: &mut FileConfig) {
         "it reserved. It was off for one afternoon while a fault inside it went ",
         "unexplained - the cause turned out to be the entry convention, not the mapping.",
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PANES_DOCUMENTED_IN, Pane};
+
+    /// The preferences table in the user docs names exactly the panes the window lists, in the
+    /// same order, each with what it sets - so a pane cannot be added, removed or renamed without
+    /// the page that explains it changing too.
+    #[test]
+    fn the_user_docs_list_every_pane_in_order() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(PANES_DOCUMENTED_IN);
+        let page = std::fs::read_to_string(&path).expect("the page that documents the panes");
+        let section = page
+            .split("## Preferences")
+            .nth(1)
+            .expect("a Preferences section");
+        let rows: Vec<(String, String)> = section
+            .lines()
+            .skip_while(|line| !line.starts_with("| Pane |"))
+            .skip(2)
+            .take_while(|line| line.starts_with('|'))
+            .map(|line| {
+                let mut cells = line.trim_matches('|').split('|').map(str::trim);
+                (
+                    cells.next().unwrap_or_default().to_owned(),
+                    cells.next().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        let documented: Vec<&str> = rows.iter().map(|(pane, _)| pane.as_str()).collect();
+        let listed: Vec<&str> = Pane::ALL.iter().map(|pane| pane.label()).collect();
+        assert_eq!(
+            documented, listed,
+            "docs/features/running.md's pane table must match Pane::ALL, in order"
+        );
+        for (pane, sets) in &rows {
+            assert!(
+                !sets.is_empty(),
+                "the {pane} row says nothing about what it sets"
+            );
+        }
+    }
 }
