@@ -292,6 +292,9 @@ pub struct SubmissionReport {
     /// Draws whose shaders read through a buffer the draw could not bind exactly (D732), and why the
     /// first was refused.
     pub unbound_buffers: (usize, Option<&'static str>),
+    /// Draws a stage's shader was not prepared for, which would run whatever shader was bound
+    /// before them.
+    pub unshaded_draws: usize,
 }
 
 impl SubmissionReport {
@@ -424,6 +427,31 @@ fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], d
 
 /// The shaders one draw runs, by stage.
 type DrawShaders = Vec<(ShaderStage, ResourceId)>;
+
+/// How many draws a stage's shader was not prepared for: a draw on the draw queue missing its
+/// geometry or its pixel shader, a stage the guest registered aside, since that one is bound once
+/// for the whole stream. Such a draw would run whatever shader the backend bound before it.
+fn unshaded_draws(
+    per_draw: &[DrawShaders],
+    queue: Queue,
+    registered: &[RegisteredShader],
+) -> usize {
+    if queue != Queue::Draw {
+        return 0;
+    }
+    let needed: Vec<ShaderStage> = [ShaderStage::Vertex, ShaderStage::Fragment]
+        .into_iter()
+        .filter(|stage| !registered.iter().any(|r| r.stage == *stage))
+        .collect();
+    per_draw
+        .iter()
+        .filter(|shaders| {
+            !needed
+                .iter()
+                .all(|stage| shaders.iter().any(|(bound, _)| bound == stage))
+        })
+        .count()
+}
 
 /// A candidate that was not prepared: its failure recorded, or a primitive shader that needs a
 /// draw's geometry (D730), with the reason it gave.
@@ -901,6 +929,7 @@ impl Pipeline {
         });
         submission.report.unwindowed_draws =
             self.unwindowed_draws(&per_draw, &submission.guest_memory);
+        submission.report.unshaded_draws = unshaded_draws(&per_draw, queue, registered);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
         if let Some(clear) =
@@ -2736,6 +2765,9 @@ mod tests {
             }
         }
         assert_eq!(offsets.len(), 12, "twelve draws: {offsets:?}");
+        // Nothing is mapped, so neither stage's shader was prepared for any draw: each would run
+        // whatever shaders were bound before it.
+        assert_eq!(submission.report.unshaded_draws, 12);
         let mut distinct = offsets.clone();
         distinct.sort_unstable();
         distinct.dedup();
