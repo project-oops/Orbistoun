@@ -289,6 +289,38 @@ file = "oopsy-daisy-title-prospero.zip"
 sha256 = "a1e87e58304d3acf441fe28610fd41327d87bea2d0253747bc013dbb6f2c28ba"
 
 [[source]]
+name = "BUGD00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/bugdom/dist/bugdom-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/bugdom-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "bugdom-title-prospero.zip"
+sha256 = "d74436e90171926effd7d2b134312c47065bd394a01e56ffa437cf0ad4e0ea34"
+
+[[source]]
+name = "BGII00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/bugdom2/dist/bugdom2-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/bugdom2-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "bugdom2-title-prospero.zip"
+sha256 = "9054f7a70ac4c7d52406c13e6df1984918b6c787bf911b6f81739cad67545ccd"
+
+[[source]]
 name = "RTRA00001"
 target = "titles"
 kind = "local"
