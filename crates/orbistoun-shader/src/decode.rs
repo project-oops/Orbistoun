@@ -270,9 +270,10 @@ fn recognise(
         let second = read_word(bytes, offset + 4);
         let words: Vec<u32> = core::iter::once(word).chain(second).collect();
         let length = found.length_bytes(&words);
+        let modified = found.modifier_selected(&words).is_some();
         // A literal lives in the dword after the instruction's fixed part, which only
-        // the encoding knows the end of.
-        let literal = if length > found.width_bytes {
+        // the encoding knows the end of. A modifier word sits there instead, and is not one.
+        let literal = if length > found.width_bytes && !modified {
             read_word(bytes, offset + found.width_bytes as usize)
         } else {
             None
@@ -326,7 +327,8 @@ fn recognise(
             opcode: found.opcode_of(&words),
             operands: decoded,
             has_layout: slots.is_some(),
-            second_word: (found.width_bytes >= 8)
+            // A modifier word is the second word of an instruction that has one.
+            second_word: (found.width_bytes >= 8 || modified)
                 .then(|| read_word(bytes, offset + 4))
                 .flatten(),
         }
@@ -422,6 +424,38 @@ mod tests {
         );
         assert_eq!(decoded.instructions[0].length, 8);
         assert_eq!(decoded.instructions[1].offset, 8);
+        assert!(decoded.is_trustworthy());
+    }
+
+    /// A vector instruction whose first source selects SDWA carries its modifier dword: radeonsi's
+    /// blit primitive shader packs its vertex indices with two of them (`v_lshlrev_b32_sdwa`,
+    /// `v_or_b32_sdwa`), and the decode steps over each whole, keeping the modifier word, so the
+    /// packed-index `v_lshl_or_b32` after them is where the walk resumes.
+    #[test]
+    fn an_sdwa_modifier_word_is_part_of_its_instruction() {
+        let table = EncodingTable::builtin().expect("the built-in table");
+        let bytes = stream(&[
+            0x3404_00f9,
+            0x0586_068a,
+            0x3800_04f9,
+            0x0604_0600,
+            0xd76f_0001,
+            0x0401_2901,
+        ]);
+        let decoded = decode(&bytes, &table, &operands());
+        let at: Vec<(u32, u32, Option<u32>)> = decoded
+            .instructions
+            .iter()
+            .map(|i| (i.offset, i.length, i.second_word))
+            .collect();
+        assert_eq!(
+            at,
+            vec![
+                (0, 8, Some(0x0586_068a)),
+                (8, 8, Some(0x0604_0600)),
+                (16, 8, Some(0x0401_2901)),
+            ]
+        );
         assert!(decoded.is_trustworthy());
     }
 

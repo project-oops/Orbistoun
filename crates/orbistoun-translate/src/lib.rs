@@ -400,6 +400,17 @@ pub fn translate_windowed_primitive(
     )
 }
 
+/// The modifier marker an instruction's first source selects - SDWA or DPP - when it has one.
+fn modifier_of(
+    instruction: &orbistoun_shader::Instruction,
+    encodings: &EncodingTable,
+) -> Option<u32> {
+    let family = encodings
+        .encodings()
+        .get(usize::from(instruction.encoding?))?;
+    family.modifier_selected(&[instruction.word])
+}
+
 /// Why a module was built at the slowest fidelity, when that was not what was asked for: a
 /// graphics stage, a guest dispatch, or a shader that touches a lane mask.
 fn fidelity_warnings(
@@ -484,6 +495,15 @@ pub fn translate_with_user_data(
         if !instruction.operands_decoded {
             return Err(TranslateError::OperandsUnknown {
                 offset: instruction.offset,
+            });
+        }
+        if modifier_of(instruction, encodings).is_some() {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "the instruction carries an SDWA or DPP modifier word, which selects parts ",
+                    "of its operands or other lanes' values, and no modifier is translated"
+                ),
             });
         }
     }
@@ -827,6 +847,19 @@ mod tests {
             translate(&decoded, &table, Strategy::default()),
             Err(TranslateError::UntrustworthyDecode { .. })
         ));
+    }
+
+    /// An instruction carrying an SDWA modifier word is refused by name, before anything is
+    /// translated: radeonsi's `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1`.
+    #[test]
+    fn an_sdwa_instruction_is_refused_by_name() {
+        let (table, operands) = tables();
+        let decoded = decode(&stream(&[0x3404_00f9, 0x0586_068a]), &table, &operands);
+        assert!(decoded.is_trustworthy());
+        let refused = translate(&decoded, &table, Strategy::default())
+            .expect_err("refused")
+            .to_string();
+        assert!(refused.contains("SDWA"), "{refused}");
     }
 
     /// An instruction with no operand layout is refused.
