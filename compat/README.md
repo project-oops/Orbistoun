@@ -1,7 +1,7 @@
 # compat/
 
-What each title needs, and what it last did. One TOML file per title, named by its title id and
-tracked by git.
+What each title needs, and what it last did. One directory per title, named by its title id and
+tracked by git, holding its record, `report.toml` (D736).
 
 Nothing here is guest material. A record holds a title identifier, settings, and numbers read off
 a run - never guest bytes, never a path into a title library. Guest material lives in the title

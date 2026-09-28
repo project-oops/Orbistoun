@@ -13,13 +13,15 @@ fn main() {
     println!("cargo::rerun-if-changed={}", compat.display());
     let mut entries: Vec<(String, String)> = Vec::new();
     if let Ok(dir) = std::fs::read_dir(&compat) {
+        // A title is a directory holding its `report.toml` (D736).
         for entry in dir.flatten() {
-            let path = entry.path();
+            let path = entry.path().join("report.toml");
             println!("cargo::rerun-if-changed={}", path.display());
-            if path.extension().is_none_or(|e| e != "toml") {
+            if !path.is_file() {
                 continue;
             }
-            let Some(title) = path.file_stem().and_then(|s| s.to_str()) else {
+            let name = entry.file_name();
+            let Some(title) = name.to_str() else {
                 continue;
             };
             let Ok(text) = std::fs::read_to_string(&path) else {

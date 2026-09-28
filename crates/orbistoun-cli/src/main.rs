@@ -14,6 +14,7 @@ mod names;
 mod probe;
 mod progress;
 mod questions;
+mod records;
 mod run;
 mod shaders;
 mod status;

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 
 /// Where one title's record lives.
 fn compat_path(dir: &std::path::Path, title: &str) -> std::path::PathBuf {
-    dir.join(format!("{title}.toml"))
+    crate::records::report_path(dir, title)
 }
 
 /// Reads a title record, or an empty one.
@@ -24,26 +24,11 @@ fn load_compat(dir: &std::path::Path, title: &str) -> Result<orbistoun_overrides
 /// `compat list` - every recorded title, furthest first.
 pub(crate) fn cmd_compat_list(dir: &std::path::Path) -> Result<()> {
     let mut rows: Vec<(String, orbistoun_overrides::Status)> = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("no records yet - {} does not exist", dir.display());
-            return Ok(());
-        }
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(records) = crate::records::read_all(dir)? else {
+        println!("no records yet - {} does not exist", dir.display());
+        return Ok(());
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "toml") {
-            continue;
-        }
-        let Some(title) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let file = orbistoun_overrides::OverrideFile::from_toml(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+    for (title, file) in records {
         if let Some(status) = file.status {
             rows.push((title, status));
         }
@@ -66,22 +51,11 @@ pub(crate) fn cmd_compat_list(dir: &std::path::Path) -> Result<()> {
 /// A `.toml` that only configures a title and has measured nothing is skipped. The `status`
 /// baseline is preferred over the `experiment` slot, which is marked when used.
 fn compat_rows(
-    entries: std::fs::ReadDir,
+    records: Vec<(String, orbistoun_overrides::OverrideFile)>,
     shots: &std::path::Path,
-) -> Result<Vec<(orbistoun_overrides::Row, orbistoun_overrides::Title, String)>> {
+) -> Vec<(orbistoun_overrides::Row, orbistoun_overrides::Title, String)> {
     let mut rows = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "toml") {
-            continue;
-        }
-        let Some(title) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let file = orbistoun_overrides::OverrideFile::from_toml(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+    for (title, file) in records {
         // Prefer the unassisted baseline (`status`); fall back to the `experiment` slot, marked so
         // a reader knows the number came from a run with stub answers.
         let (status, experiment) = match (file.status, file.experiment) {
@@ -113,7 +87,7 @@ fn compat_rows(
             notes,
         ));
     }
-    Ok(rows)
+    rows
 }
 
 /// The generated compat files that are not what the records render to, each named for the message.
@@ -144,15 +118,11 @@ pub(crate) fn cmd_compat_markdown(
     shots: &std::path::Path,
     check: bool,
 ) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("no records yet - {} does not exist", dir.display());
-            return Ok(());
-        }
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(records) = crate::records::read_all(dir)? else {
+        println!("no records yet - {} does not exist", dir.display());
+        return Ok(());
     };
-    let rows = compat_rows(entries, shots)?;
+    let rows = compat_rows(records, shots);
     if rows.is_empty() {
         println!("no titles recorded yet");
         return Ok(());
@@ -383,7 +353,9 @@ fn write_compat(
     file: &orbistoun_overrides::OverrideFile,
 ) -> Result<std::path::PathBuf> {
     let text = file.to_toml().context("rendering the record")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let title_dir = crate::records::title_dir(dir, title);
+    std::fs::create_dir_all(&title_dir)
+        .with_context(|| format!("creating {}", title_dir.display()))?;
     let path = compat_path(dir, title);
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
@@ -617,9 +589,9 @@ mod tests {
     fn compat_check_rejects_a_hand_edited_generated_file() {
         let root = tempfile::tempdir().expect("a temp dir");
         let dir = root.path().join("compat");
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(crate::records::title_dir(&dir, "dist")).unwrap();
         std::fs::write(
-            dir.join("dist.toml"),
+            crate::records::report_path(&dir, "dist"),
             r#"[compat]
 [settings]
 [status]
