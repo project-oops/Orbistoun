@@ -380,6 +380,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceSysmoduleUnloadModule", sysmodule_unload_module),
         ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
         ("sceSaveDataInitialize3", save_data::initialize3),
+        (
+            "sceSaveDataSetupSaveDataMemory2",
+            save_data::setup_save_data_memory2,
+        ),
     ]
 }
 

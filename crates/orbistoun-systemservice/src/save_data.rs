@@ -1,7 +1,9 @@
 //! `libSceSaveData_native` - save data.
 //!
 //! `sceSaveDataInitialize3` answers as obSCEne measured it through a static import (`-d7a1`, sweep
-//! 20260927-204316, check `130-layout/savedata-layout`). The other names are declared and unserved.
+//! 20260927-204316, check `130-layout/savedata-layout`), and `sceSaveDataSetupSaveDataMemory2` as
+//! `-5d20` measured it (sweep 20260928-100713, check `130-layout/savedata-memory-5d20`). The other
+//! names are declared and unserved.
 //!
 //! The other arities are `6`, the trampoline's full capture, not a claim about how many arguments
 //! a function takes: a wrong arity only degrades a trace, while a wrong name is unreachable.
@@ -53,5 +55,66 @@ pub(crate) fn initialize3(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         ZEROED_PARAMETER
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// What a second `sceSaveDataSetupSaveDataMemory2` answered, with a null result pointer and with a
+/// `0xcc`-filled one alike, writing nothing (measured).
+const MEMORY_ALREADY_SET_UP: u64 = 0x809f_0000;
+
+/// Whether save-data memory has been set up.
+static MEMORY_SET_UP: AtomicBool = AtomicBool::new(false);
+
+/// `sceSaveDataSetupSaveDataMemory2(param, result)`: sets up the title's save-data memory. Measured
+/// after a null-parameter `sceSaveDataInitialize3` (`-5d20`): PPSA21564's parameter block - u32 0,
+/// u32 the user, u64 `0x200000`, zeros to 64 bytes - with a null result answers `0` and leaves the
+/// block unwritten; every call after that answers `0x809f0000` and writes nothing. A call before
+/// initialisation, and a first call with a result pointer, whose writes were not measured, are
+/// refused by name.
+pub(crate) fn setup_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (param, result) = (args[0], args[1]);
+    if !INITIALISED.load(Ordering::Acquire) || param == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    if MEMORY_SET_UP.load(Ordering::Acquire) {
+        return MEMORY_ALREADY_SET_UP;
+    }
+    if result != 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    if MEMORY_SET_UP.swap(true, Ordering::AcqRel) {
+        MEMORY_ALREADY_SET_UP
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{initialize3, setup_save_data_memory2};
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// The first set-up after initialisation answers `0` and writes nothing; every later one answers
+    /// `0x809f0000` and writes nothing, result pointer or not (obSCEne `-5d20`).
+    #[test]
+    fn save_data_memory_is_set_up_once_as_measured() {
+        let mut param = [0u8; 64];
+        param[4..8].copy_from_slice(&0x1ea2_f4d9_u32.to_le_bytes());
+        param[8..16].copy_from_slice(&0x20_0000_u64.to_le_bytes());
+        let before = param;
+        let mut result = [0xccu8; 64];
+        let at = |bytes: &mut [u8; 64]| std::ptr::from_mut(bytes).expose_provenance() as u64;
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        assert_eq!(initialize3(&args), 0, "initialised with a null parameter");
+        args[0] = at(&mut param);
+        assert_eq!(setup_save_data_memory2(&args), 0);
+        assert_eq!(param, before, "the block is left unwritten");
+        assert_eq!(setup_save_data_memory2(&args), 0x809f_0000, "a second call");
+        args[1] = at(&mut result);
+        assert_eq!(setup_save_data_memory2(&args), 0x809f_0000);
+        assert!(
+            result.iter().all(|&b| b == 0xcc),
+            "nothing written through the result"
+        );
     }
 }

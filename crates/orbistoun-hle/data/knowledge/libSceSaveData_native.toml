@@ -15,3 +15,19 @@ known_by = "measured"
 cites = "obSCEne REQ-20260927T1530Z-d7a1 (sweep 20260927-204316, check 130-layout/savedata-layout: zero-param rc 0x809f0000 changed-bytes 0, second-call rc 0x809f0000, null-param rc 0x0, terminate rc 0x0, post-terminate rc 0x809f0000)."
 found_in = ["PPSA02664-app0", "PPSA21564-app0"]
 found_on = "2026-09-03"
+
+[[function]]
+name = "sceSaveDataSetupSaveDataMemory2"
+arity = 6
+purpose = "Sets up the title's save-data memory: sceSaveDataSetupSaveDataMemory2(param, result)."
+returns = "status"
+edge_cases = [
+    "After a null-parameter sceSaveDataInitialize3, PPSA21564's block (u32 0, u32 the user, u64 0x200000, zeros to 64 bytes) with a null result answers 0 and leaves the block unwritten.",
+    "Every later call answers 0x809f0000 and writes nothing, with a null result and with a 0xcc-filled one alike.",
+    "PPSA21564 asserts (SaveMemory.cpp:60) on anything but success. A call before initialisation, and a first call with a result pointer, whose writes were not measured, are refused by name.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20260928T0100Z-5d20 (sweep 20260928-100713, check 130-layout/savedata-memory-5d20, log lines 5949-5983: setup2-null-result rc 0x0 changed-bytes 0, setup2-second-call and setup2-poison-result rc 0x809f0000 with the result unwritten; resolved at 0x800dab9e0 by name, the probe's NID spelling oQySEUfgXRA being the byte-reversed EF3gRxGSDKE)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-28"
