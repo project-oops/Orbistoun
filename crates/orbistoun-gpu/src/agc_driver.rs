@@ -92,6 +92,14 @@ fn register_resource(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
 }
 
+/// `sceAgcDriverSetHsOffchipParam(...)`: sets the hull-shader off-chip parameter, the driver's
+/// `VGT_HS_OFFCHIP_PARAM` (Mesa `ac_cmdbuf_cp.c:374`). Answers `0` for PPSA02664's arguments
+/// `(0, 0x1ff, 0x7400, 0, 3, 0x1e44)` and for all zeros (obSCEne REQ-20260927T1130Z-b3c2). It
+/// writes no guest memory; the register only shapes tessellation, which draws here do not reach.
+fn set_hs_offchip_param(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `sceAgcDriverInitResourceRegistration(...)` - stub, returns `0x8a6c9018`.
 fn init_resource_registration(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
@@ -2304,6 +2312,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverCreateQueue", create_queue),
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),
+        ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
         (
             "sceAgcDriverInitResourceRegistration",
             init_resource_registration,
@@ -3125,6 +3134,19 @@ mod tests {
         );
         assert!(super::deferred().lock().expect("list").is_empty());
         super::forget_written();
+    }
+
+    /// `sceAgcDriverSetHsOffchipParam` is served and answers the measured `0` for PPSA02664's
+    /// arguments and for zeros (obSCEne REQ-20260927T1130Z-b3c2).
+    #[test]
+    fn set_hs_offchip_param_answers_zero_as_measured() {
+        let served = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "sceAgcDriverSetHsOffchipParam")
+            .map(|&(_, f)| f)
+            .expect("served");
+        assert_eq!(served(&[0, 0x1ff, 0x7400, 0, 3, 0x1e44]), 0);
+        assert_eq!(served(&[0; GUEST_ARG_REGISTERS]), 0);
     }
 
     /// A DMA copy over the whole of a deferred copy's destination drops it unread, as a covering

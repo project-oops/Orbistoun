@@ -123,8 +123,10 @@ found_on = "2026-09-20"
 name = "sceAgcDriverSetHsOffchipParam"
 purpose = "Configures the hull-shader off-chip LDS parameter for the graphics driver - GPU-driver setup on the same CreateWorkload path."
 edge_cases = [
-    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): same status and reason as sceAgcDriverSetTFRing and sceAgcDriverAddEqEvent - an out-of-line SDK inline with no export to measure, to be synthesised in HLE (commit 3212e2a).",
+    "Exported by NID (1MoYIWUIzjA) with its name stripped: the 2026-09-20 sweep looked it up by name only and reported it absent.",
+    "Answers 0 for PPSA02664's arguments (0, 0x1ff, 0x7400, 0, 3, 0x1e44) and for all zeros; writes no guest memory.",
+    "The register it sets shapes tessellation only, which no draw orbistoun carries out reaches.",
 ]
 known_by = "measured"
-cites = "obSCEne c9e2, sweep 20260920-082906, reports/hardware/20260920-082906-eboot.obs.log:3782-3789 and :10398-10405."
+cites = "obSCEne REQ-20260927T1130Z-b3c2 (sweep 20260928-135518, check 166-agc/driver-set-hs-offchip-param, log lines 9106-9114: resolved 0x1 by name or NID 1MoYIWUIzjA, rc 0x0 in arm-ppsa02664 and arm-zeros); Mesa ac_cmdbuf_cp.c:374 (VGT_HS_OFFCHIP_PARAM)"
 found_on = "2026-09-20"
