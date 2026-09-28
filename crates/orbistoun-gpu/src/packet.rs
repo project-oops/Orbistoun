@@ -451,35 +451,81 @@ pub mod build {
         ]
     }
 
-    /// A `RELEASE_MEM` skeleton - the packet reserved, its cursor real, its body zeroed. Eight
-    /// dwords, 32 bytes.
+    /// The `RELEASE_MEM` packet `sceAgcCbReleaseMem(cb, a[0], .., a[10])` writes: eight dwords, 32
+    /// bytes, each field placed by the argument that sets it.
     ///
-    /// Header and extent are measured (`166-agc/cb-release-mem`): with zero arguments the builder
-    /// writes `0xc0064900` then seven zeroed dwords, which this reproduces. The argument-to-body
-    /// map (event selector, write-back address and data) is left unencoded (D696).
+    /// Measured one argument at a time, all ones and every other argument zero (obSCEne
+    /// `-1044`, check `166-agc/cb-release-mem-args`), and checked against distinct markers and
+    /// sentinels (`-ff23`):
+    ///
+    /// - DW1: event type `a1 & 0x3f`; event index 5, or 6 when bit 6 of `a1` is set;
+    ///   `(a2 & 0xfff) << 12`; `(a4 & 3) << 25`.
+    /// - DW2: `(a3 & 3) << 16`; interrupt select `(a10 & 7) << 24`; data select `(a6 & 7) << 29`.
+    /// - DW3-DW4: the destination `a5`, its low two bits clear.
+    /// - DW5-DW6: the data `a7`.
+    /// - DW7: `a11 & 0x07ff_ffff`.
+    ///
+    /// `a8` and `a9` land nowhere. Every argument from `a6` on is a stack argument.
     #[must_use]
-    pub fn release_mem_skeleton() -> [u32; 8] {
+    pub fn release_mem(a: &[u64; 11]) -> [u32; 8] {
+        let [a1, a2, a3, a4, a5, a6, a7, _, _, a10, a11] = *a;
+        let index = 5 + ((a1 >> 6) & 1);
+        let destination = a5 & !3;
         [
             command_header(measured::RELEASE_MEM, 7),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
+            ((a1 & 0x3f) | (index << 8) | ((a2 & 0xfff) << 12) | ((a4 & 3) << 25)) as u32,
+            (((a3 & 3) << 16) | ((a10 & 7) << 24) | ((a6 & 7) << 29)) as u32,
+            destination as u32,
+            (destination >> 32) as u32,
+            a7 as u32,
+            (a7 >> 32) as u32,
+            (a11 & 0x07ff_ffff) as u32,
         ]
     }
 
-    /// A `DMA_DATA` skeleton - the packet reserved, its cursor real, its body zeroed. Seven dwords,
-    /// 28 bytes.
+    /// The `DMA_DATA` packet `sceAgcDcbDmaData(dcb, a[0], .., a[10])` writes: seven dwords, 28
+    /// bytes, each field placed by the argument that sets it.
     ///
-    /// Header and extent are measured (`166-agc/dcb-dma-data`): `0xc0055000` then six dwords. A
-    /// `DMA_DATA` body carries source, destination and size, an argument map one zero-argument pass
-    /// cannot pin, so the body is zero (D696).
+    /// Measured one argument at a time, all ones and every other argument zero (obSCEne
+    /// `-1044`, check `166-agc/dcb-dma-data-args`), and checked against distinct markers and
+    /// sentinels (`-ff23`):
+    ///
+    /// - DW1: `a1 & 1`; `(a6 & 3) << 13`; `(a2 & 3) << 20`; `(a3 & 3) << 25`; `(a5 & 3) << 29`;
+    ///   `(a11 & 1) << 31`.
+    /// - DW2-DW3: the source `a7`. DW4-DW5: the destination `a4`.
+    /// - DW6: the byte count `a8 & 0x03ff_ffff`; bit 26 is `a5 & 1` and bit 28 is set when
+    ///   `a5 & 3 == 3`; bit 27 is `a2 & 1` and bit 29 is set when `a2 & 3 == 3`; `(a9 & 1) << 30`;
+    ///   `(a10 & 1) << 31`. The select values decode into those bits rather than copy into them:
+    ///   `a5 = 2` sets neither, `0x55` only bit 26, all ones both. `a2 & 3 == 1` is unmeasured and
+    ///   follows `a5`'s pattern.
+    ///
+    /// Every argument from `a6` on is a stack argument.
     #[must_use]
-    pub fn dma_data_skeleton() -> [u32; 7] {
-        [command_header(measured::DMA_DATA, 6), 0, 0, 0, 0, 0, 0]
+    pub fn dma_data(a: &[u64; 11]) -> [u32; 7] {
+        let [a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11] = *a;
+        let control = (a1 & 1)
+            | ((a6 & 3) << 13)
+            | ((a2 & 3) << 20)
+            | ((a3 & 3) << 25)
+            | ((a5 & 3) << 29)
+            | ((a11 & 1) << 31);
+        let both = |select: u64| u64::from(select & 3 == 3);
+        let count = (a8 & 0x03ff_ffff)
+            | ((a5 & 1) << 26)
+            | ((a2 & 1) << 27)
+            | (both(a5) << 28)
+            | (both(a2) << 29)
+            | ((a9 & 1) << 30)
+            | ((a10 & 1) << 31);
+        [
+            command_header(measured::DMA_DATA, 6),
+            control as u32,
+            a7 as u32,
+            (a7 >> 32) as u32,
+            a4 as u32,
+            (a4 >> 32) as u32,
+            count as u32,
+        ]
     }
 
     /// A `SET_BASE` skeleton for the indirect-args base - the packet reserved, cursor real, body
@@ -789,5 +835,192 @@ mod tests {
         );
         assert_eq!(result.packets[0].length, 20, "header plus four body dwords");
         assert!(result.is_trustworthy(), "and it walks cleanly to the end");
+    }
+
+    /// Both builders' packets are the bytes obSCEne dumped (`-1044`, sweep 20260928-212840, lines
+    /// 10741-10930): each argument alone at all ones, then the markers, PPSA03416's arguments and
+    /// the two sentinel sets, which move every field at once.
+    #[test]
+    fn release_mem_is_the_measured_packet() {
+        use super::build::release_mem;
+        const ONES: u64 = u64::MAX;
+        let alone = |slot: usize| {
+            let mut a = [0_u64; 11];
+            a[slot] = ONES;
+            a
+        };
+        let markers: [u64; 11] = [
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            0x55,
+            0x1111_6666,
+            0x7777_7777_7777_0007,
+            0x8888_0008,
+            0x9999_0009,
+            0xaaaa_000a,
+            0xbbbb_000b,
+        ];
+        let mut ppsa_release = markers;
+        ppsa_release[..5].copy_from_slice(&[0x2b, 0, 1, 3, 0]);
+        let mut ppsa_dma = markers;
+        ppsa_dma[..5].copy_from_slice(&[0, 0, 0, 0, 2]);
+        let sentinel_a: [u64; 11] = std::array::from_fn(|i| 0x1111_1111_1111_1111 * (i as u64 + 1));
+        let mut sentinel_b: [u64; 11] =
+            std::array::from_fn(|i| 0xc1c1_c1c1_c1c1_c1c1 + 0x0101_0101_0101_0101 * i as u64);
+        sentinel_b[9] = 0xca0c_a0ca_0ca0_ca0c;
+
+        let release: [(&[u64; 11], [u32; 7]); 16] = [
+            (&[0; 11], [0x500, 0, 0, 0, 0, 0, 0]),
+            (&alone(0), [0x63f, 0, 0, 0, 0, 0, 0]),
+            (&alone(1), [0x00ff_f500, 0, 0, 0, 0, 0, 0]),
+            (&alone(2), [0x500, 0x0003_0000, 0, 0, 0, 0, 0]),
+            (&alone(3), [0x0600_0500, 0, 0, 0, 0, 0, 0]),
+            (&alone(4), [0x500, 0, 0xffff_fffc, 0xffff_ffff, 0, 0, 0]),
+            (&alone(5), [0x500, 0xe000_0000, 0, 0, 0, 0, 0]),
+            (&alone(6), [0x500, 0, 0, 0, 0xffff_ffff, 0xffff_ffff, 0]),
+            (&alone(7), [0x500, 0, 0, 0, 0, 0, 0]),
+            (&alone(8), [0x500, 0, 0, 0, 0, 0, 0]),
+            (&alone(9), [0x500, 0x0700_0000, 0, 0, 0, 0, 0]),
+            (&alone(10), [0x500, 0, 0, 0, 0, 0, 0x07ff_ffff]),
+            (
+                &markers,
+                [
+                    0x0002_2511,
+                    0xc203_0000,
+                    0x54,
+                    0,
+                    0x7777_0007,
+                    0x7777_7777,
+                    0x03bb_000b,
+                ],
+            ),
+            (
+                &ppsa_release,
+                [
+                    0x0600_052b,
+                    0xc201_0000,
+                    0,
+                    0,
+                    0x7777_0007,
+                    0x7777_7777,
+                    0x03bb_000b,
+                ],
+            ),
+            (
+                &sentinel_a,
+                [
+                    0x0022_2511,
+                    0xc203_0000,
+                    0x5555_5554,
+                    0x5555_5555,
+                    0x7777_7777,
+                    0x7777_7777,
+                    0x03bb_bbbb,
+                ],
+            ),
+            (
+                &sentinel_b,
+                [
+                    0x002c_2601,
+                    0xc403_0000,
+                    0xc5c5_c5c4,
+                    0xc5c5_c5c5,
+                    0xc7c7_c7c7,
+                    0xc7c7_c7c7,
+                    0x03cb_cbcb,
+                ],
+            ),
+        ];
+        for (arguments, body) in release {
+            let packet = release_mem(arguments);
+            assert_eq!(packet[0], 0xc006_4900);
+            assert_eq!(packet[1..], body, "{arguments:x?}");
+        }
+    }
+
+    /// `DMA_DATA`'s side of the same measurements.
+    #[test]
+    fn dma_data_is_the_measured_packet() {
+        use super::build::dma_data;
+        const ONES: u64 = u64::MAX;
+        let alone = |slot: usize| {
+            let mut a = [0_u64; 11];
+            a[slot] = ONES;
+            a
+        };
+        let markers: [u64; 11] = [
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            0x55,
+            0x1111_6666,
+            0x7777_7777_7777_0007,
+            0x8888_0008,
+            0x9999_0009,
+            0xaaaa_000a,
+            0xbbbb_000b,
+        ];
+        let mut ppsa_release = markers;
+        ppsa_release[..5].copy_from_slice(&[0x2b, 0, 1, 3, 0]);
+        let mut ppsa_dma = markers;
+        ppsa_dma[..5].copy_from_slice(&[0, 0, 0, 0, 2]);
+        let sentinel_a: [u64; 11] = std::array::from_fn(|i| 0x1111_1111_1111_1111 * (i as u64 + 1));
+        let mut sentinel_b: [u64; 11] =
+            std::array::from_fn(|i| 0xc1c1_c1c1_c1c1_c1c1 + 0x0101_0101_0101_0101 * i as u64);
+        sentinel_b[9] = 0xca0c_a0ca_0ca0_ca0c;
+
+        let dma: [(&[u64; 11], [u32; 6]); 15] = [
+            (&[0; 11], [0, 0, 0, 0, 0, 0]),
+            (&alone(0), [1, 0, 0, 0, 0, 0]),
+            (&alone(1), [0x0030_0000, 0, 0, 0, 0, 0x2800_0000]),
+            (&alone(2), [0x0600_0000, 0, 0, 0, 0, 0]),
+            (&alone(3), [0, 0, 0, 0xffff_ffff, 0xffff_ffff, 0]),
+            (&alone(4), [0x6000_0000, 0, 0, 0, 0, 0x1400_0000]),
+            (&alone(5), [0x6000, 0, 0, 0, 0, 0]),
+            (&alone(6), [0, 0xffff_ffff, 0xffff_ffff, 0, 0, 0]),
+            (&alone(7), [0, 0, 0, 0, 0, 0x03ff_ffff]),
+            (&alone(8), [0, 0, 0, 0, 0, 0x4000_0000]),
+            (&alone(9), [0, 0, 0, 0, 0, 0x8000_0000]),
+            (&alone(10), [0x8000_0000, 0, 0, 0, 0, 0]),
+            (
+                &markers,
+                [0xa620_4001, 0x7777_0007, 0x7777_7777, 0x44, 0, 0x4488_0008],
+            ),
+            (
+                &ppsa_dma,
+                [0xc000_4000, 0x7777_0007, 0x7777_7777, 0, 0, 0x4088_0008],
+            ),
+            (
+                &sentinel_b,
+                [
+                    0xa620_4001,
+                    0xc7c7_c7c7,
+                    0xc7c7_c7c7,
+                    0xc4c4_c4c4,
+                    0xc4c4_c4c4,
+                    0x44c8_c8c8,
+                ],
+            ),
+        ];
+        for (arguments, body) in dma {
+            let packet = dma_data(arguments);
+            assert_eq!(packet[0], 0xc005_5000);
+            assert_eq!(packet[1..], body, "{arguments:x?}");
+        }
+        let packet = dma_data(&sentinel_a);
+        assert_eq!(
+            packet[1..],
+            [
+                0xa620_4001,
+                0x7777_7777,
+                0x7777_7777,
+                0x4444_4444,
+                0x4444_4444,
+                0x4488_8888
+            ]
+        );
     }
 }

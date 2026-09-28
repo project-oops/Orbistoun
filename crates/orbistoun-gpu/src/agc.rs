@@ -758,20 +758,35 @@ fn dcb_acquire_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::acquire_mem_skeleton())
 }
 
-/// `sceAgcCbReleaseMem(cb, ...)` - reserves the 32-byte RELEASE_MEM packet, cursor real, body zero.
-///
-/// Header (`0xc0064900`) and extent are measured (`166-agc/cb-release-mem`); the argument-to-body
-/// permutation is not, so the body is zero (D696).
-fn cb_release_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &packet::build::release_mem_skeleton())
+/// The eleven arguments after a builder's command buffer: five in registers, the other six from
+/// the call's stack area, zero where the dispatch published none (a direct call, as in a test).
+fn builder_arguments(args: &[u64; GUEST_ARG_REGISTERS]) -> [u64; 11] {
+    let mut all = [0_u64; 11];
+    all[..5].copy_from_slice(&args[1..6]);
+    let spilled = orbistoun_thunk::stack_arguments();
+    if spilled != 0 {
+        for (index, slot) in all[5..].iter_mut().enumerate() {
+            // SAFETY: the dispatch published this as the words above the return address the
+            // guest's call pushed, on the calling thread's live stack; the read is checked.
+            *slot = unsafe { guest::read_u64(spilled + index as u64 * 8) }.unwrap_or_default();
+        }
+    }
+    all
 }
 
-/// `sceAgcDcbDmaData(dcb, ...)` - reserves the 28-byte DMA_DATA packet, cursor real, body zero.
-///
-/// Header (`0xc0055000`) and extent are measured (`166-agc/dcb-dma-data`); the source, destination
-/// and size body is an argument permutation one zero-argument pass cannot pin, so it is zero.
+/// `sceAgcCbReleaseMem(cb, a1, .., a11)`: the `RELEASE_MEM` packet, its fields placed as measured
+/// one argument at a time (obSCEne `-1044`, [`packet::build::release_mem`]).
+fn cb_release_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    dcb_append(
+        args[0],
+        &packet::build::release_mem(&builder_arguments(args)),
+    )
+}
+
+/// `sceAgcDcbDmaData(dcb, a1, .., a11)`: the `DMA_DATA` packet, its fields placed as measured one
+/// argument at a time (obSCEne `-1044`, [`packet::build::dma_data`]).
 fn dcb_dma_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &packet::build::dma_data_skeleton())
+    dcb_append(args[0], &packet::build::dma_data(&builder_arguments(args)))
 }
 
 /// `sceAgcDcbSetBaseIndirectArgs(dcb, ...)` - reserves the 16-byte SET_BASE packet, cursor real,

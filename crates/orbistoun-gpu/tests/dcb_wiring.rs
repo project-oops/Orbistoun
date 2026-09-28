@@ -163,34 +163,77 @@ fn dcb_acquire_mem_reserves_the_measured_extent_with_a_zero_body() {
     );
 }
 
-/// The three skeletons measured by header and extent each reserve their measured length with the
-/// measured header and a zero body (D696). The argument in `arg1` must not leak into the body.
+/// `sceAgcCbReleaseMem` and `sceAgcDcbDmaData` write their packets through the handler with the
+/// arguments where the measurements put them (obSCEne `-1044`). A direct call publishes no stack
+/// area, so the arguments from the seventh on read as zero.
+#[test]
+fn release_mem_and_dma_data_write_their_arguments() {
+    let w = Writer::new(0x400);
+    let at = w.cursor();
+    assert_eq!(
+        call(
+            "sceAgcCbReleaseMem",
+            [w.handle(), 0x2b, 0, 1, 3, 0x1234_5678]
+        ),
+        at
+    );
+    assert_eq!(w.written(), 32);
+    let words: Vec<u32> = w
+        .bytes()
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    assert_eq!(
+        words,
+        [
+            0xc006_4900,
+            0x0600_052b,
+            0x0001_0000,
+            0x1234_5678,
+            0,
+            0,
+            0,
+            0
+        ]
+    );
+
+    let w = Writer::new(0x400);
+    assert_eq!(
+        call("sceAgcDcbDmaData", [w.handle(), 1, 0, 0, 0xabcd_0000, 2]),
+        w.cursor() - 28
+    );
+    assert_eq!(w.written(), 28);
+    let words: Vec<u32> = w
+        .bytes()
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    assert_eq!(words, [0xc005_5000, 0x4000_0001, 0, 0, 0xabcd_0000, 0, 0]);
+}
+
+/// The skeleton measured by header and extent reserves its measured length with the measured
+/// header and a zero body (D696). The argument in `arg1` must not leak into the body.
 #[test]
 fn the_measured_skeletons_reserve_their_extent_with_a_zero_body() {
-    for (name, extent, header) in [
-        ("sceAgcCbReleaseMem", 32usize, [0x00, 0x49, 0x06, 0xc0]),
-        ("sceAgcDcbDmaData", 28, [0x00, 0x50, 0x05, 0xc0]),
-        ("sceAgcDcbSetBaseIndirectArgs", 16, [0x00, 0x11, 0x02, 0xc0]),
-    ] {
-        let w = Writer::new(0x400);
-        let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = w.handle();
-        args[1] = 0x1111_1111; // an argument that must not appear in the packet
-        args[2] = 0x2222_2222;
+    let name = "sceAgcDcbSetBaseIndirectArgs";
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = 0x1111_1111; // an argument that must not appear in the packet
+    args[2] = 0x2222_2222;
 
-        let at = w.cursor();
-        assert_eq!(call(name, args), at, "{name} returns the packet address");
-        assert_eq!(w.written(), extent, "{name} reserves its measured extent");
-        assert_eq!(
-            &w.bytes()[..4],
-            &header,
-            "{name} writes its measured header, little-endian"
-        );
-        assert!(
-            w.bytes()[4..].iter().all(|b| *b == 0),
-            "{name} leaves the body zero, not a guessed encoding of the argument"
-        );
-    }
+    let at = w.cursor();
+    assert_eq!(call(name, args), at, "{name} returns the packet address");
+    assert_eq!(w.written(), 16, "{name} reserves its measured extent");
+    assert_eq!(
+        &w.bytes()[..4],
+        &[0x00, 0x11, 0x02, 0xc0],
+        "{name} writes its measured header, little-endian"
+    );
+    assert!(
+        w.bytes()[4..].iter().all(|b| *b == 0),
+        "{name} leaves the body zero, not a guessed encoding of the argument"
+    );
 }
 
 /// A skeleton refuses a null handle with the measured code, like every other builder.

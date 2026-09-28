@@ -2853,6 +2853,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-mem",
  "orbistoun-shader",
+ "orbistoun-thunk",
  "orbistoun-translate",
  "serde",
  "serde_json",

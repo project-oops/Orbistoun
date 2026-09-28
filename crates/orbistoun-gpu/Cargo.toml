@@ -26,6 +26,8 @@ tracing = { workspace = true }
 zerocopy = { workspace = true }
 # Whether guest memory was written since a point, asked of the host (commit 8beebaa).
 orbistoun-mem = { workspace = true }
+# The stack area of the call in progress, for builders with more than six arguments.
+orbistoun-thunk = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
