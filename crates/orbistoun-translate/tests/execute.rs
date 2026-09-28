@@ -299,9 +299,11 @@ fn the_supported_list_and_the_translator_agree() {
         // condition mask is handled.
         let unsupported = matches!(
             &translated,
+            Err(orbistoun_translate::TranslateError::NotTranslated { .. })
+        ) || matches!(
+            &translated,
             Err(orbistoun_translate::TranslateError::Unsupported { detail, .. })
-                if *detail == orbistoun_translate::model::NO_TRANSLATION
-                    || orbistoun_translate::model::blocked(name) == Some(*detail)
+                if orbistoun_translate::model::blocked(name) == Some(*detail)
         );
         // A listed instruction must not be refused as unsupported. An absent one must be
         // refused somehow; a more specific reason (an export has no operand layout) counts.
@@ -328,6 +330,41 @@ fn the_supported_list_and_the_translator_agree() {
             );
         }
     }
+}
+
+/// An instruction refused for having no translation names itself in the refusal, so a report
+/// says which instruction a shader needs rather than only where it sits.
+#[test]
+fn a_refusal_for_no_translation_names_the_instruction() {
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let mut refused = 0;
+    for (family, opcode, name, words) in known_encodings() {
+        if orbistoun_translate::model::supports_named(&table, &family, opcode)
+            || orbistoun_translate::model::blocked(&name).is_some()
+        {
+            continue;
+        }
+        let bytes: Vec<u8> = words
+            .iter()
+            .copied()
+            .chain(std::iter::once(s_endpgm()))
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let decoded = decode(&bytes, &table, &operands);
+        let Err(error) = translate(&decoded, &table, Strategy::default()) else {
+            continue;
+        };
+        if let orbistoun_translate::TranslateError::NotTranslated { mnemonic, .. } = &error {
+            assert_eq!(mnemonic, &name, "{family}:{opcode:#x}");
+            assert!(error.to_string().contains(&name), "{error}");
+            refused += 1;
+        }
+    }
+    assert!(
+        refused > 0,
+        "some instruction the table names has no translation"
+    );
 }
 
 /// Every instruction this target has a name for, as bytes that decode back to it.

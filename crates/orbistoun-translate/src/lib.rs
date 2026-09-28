@@ -184,6 +184,20 @@ pub enum TranslateError {
         detail: &'static str,
     },
 
+    /// An instruction the decoder named and this translator has no translation for.
+    ///
+    /// The mnemonic is carried so a report names the instruction a shader needs, not only where
+    /// it sits.
+    #[error("instruction at {offset:#x} ({mnemonic}) cannot be translated: {detail}")]
+    NotTranslated {
+        /// Byte offset within the shader.
+        offset: u32,
+        /// The instruction's name, as the encoding table gives it.
+        mnemonic: String,
+        /// Why: [`model::NO_TRANSLATION`].
+        detail: &'static str,
+    },
+
     /// A primitive shader reads the geometry engine's inputs before writing them, and the
     /// translation was not given the draw's geometry to seed them with (D730).
     #[error(

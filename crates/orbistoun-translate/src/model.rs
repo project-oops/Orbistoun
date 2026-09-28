@@ -1703,9 +1703,16 @@ pub fn instruction<M: Model + ?Sized>(
     let name = resolve(model, instruction)?;
 
     if !supports(&name) {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: blocked(&name).unwrap_or(NO_TRANSLATION),
+        return Err(match blocked(&name) {
+            Some(detail) => TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail,
+            },
+            None => TranslateError::NotTranslated {
+                offset: instruction.offset,
+                mnemonic: name.clone(),
+                detail: NO_TRANSLATION,
+            },
         });
     }
     let name = name.as_str();
@@ -1971,9 +1978,10 @@ fn memory_instruction<M: Model + ?Sized>(
         // sampled image (D692).
         "image_store" => image_store(model, instruction, name),
 
-        _ => Err(TranslateError::Unsupported {
+        _ => Err(TranslateError::NotTranslated {
             offset: instruction.offset,
-            detail: "no translation for this instruction",
+            mnemonic: name.to_owned(),
+            detail: NO_TRANSLATION,
         }),
     }
 }
@@ -5818,9 +5826,10 @@ fn memory<M: Model + ?Sized>(
         | "global_store_dwordx2"
         | "global_store_dwordx4" => flat_memory(model, instruction, name),
 
-        _ => Err(TranslateError::Unsupported {
+        _ => Err(TranslateError::NotTranslated {
             offset: instruction.offset,
-            detail: "no translation for this instruction",
+            mnemonic: name.to_owned(),
+            detail: NO_TRANSLATION,
         }),
     }
 }
