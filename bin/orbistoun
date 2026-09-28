@@ -1284,15 +1284,24 @@ sweep() {
     names
 
     step "running every module (limit ${ORBISTOUN_LIMIT:-20}s each)"
-    for module in "$(titles_root)"/*/eboot.bin; do
+    # Every title `run` lists: the library's own and the staged homebrew (D722), which a run under
+    # that folder stages without asking.
+    local library
+    library="$(titles_root)"
+    for module in ${library:+"$library"/*/eboot.bin "$library"/data/homebrew/*/eboot.bin}; do
         [ -e "$module" ] || continue
         printf '
 --- %s
 ' "$module"
+        # A title whose record replays a capture is swept with it, so the sweep reaches as far
+        # as the record does rather than idling at a menu (D736).
+        local inputs replay=()
+        inputs="compat/$(basename "$(dirname "$module")")/inputs.toml"
+        [ -f "$inputs" ] && replay=(--input "$inputs")
         # Failure is the expected outcome for a long time yet: a guest that faults has
         # still produced a trace, and that trace is the point of the run.
         ./target/release/orbistoun-cli --symbols-db "$SYMBOLS_DB" \
-            run "$module" --limit "${ORBISTOUN_LIMIT:-20}" 2>&1 \
+            run "$module" --limit "${ORBISTOUN_LIMIT:-20}" "${replay[@]}" 2>&1 \
             | grep -E "^reached|^outcome|^halted|^failed|^orbistoun:|recorded \[|could not record" || true
     done
 

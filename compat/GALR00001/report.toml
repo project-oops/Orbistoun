@@ -1,0 +1,31 @@
+[title]
+id = "GALR00001"
+name = "OOPS Gallery"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "83010660831bcf424250f00875bd6c16da9a613f0523c90d9f32bf4e2076e101"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 27
+calls = 24999
+standing = 100
+default_return = "unimplemented"
+frames = 4991
+unanswered = 2
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "7042df65ffd61c94"
+link_plan_stored = "new"

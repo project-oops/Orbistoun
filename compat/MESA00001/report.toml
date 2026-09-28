@@ -1,0 +1,30 @@
+[title]
+id = "MESA00001"
+name = "Mesa Probe"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "3c3bd6088bf4567bb1913ac103211a7ac1eedc32f86e98f463723793dcf40639"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 32
+calls = 353
+standing = 99
+default_return = "unimplemented"
+unanswered = 2
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "a072d7cef4f013a8"
+link_plan_stored = "new"

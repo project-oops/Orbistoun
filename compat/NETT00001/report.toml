@@ -1,0 +1,31 @@
+[title]
+id = "NETT00001"
+name = "Net Tool"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "46e82d2750f620c723506f94982e5716d388bc87f5bac441e7777e27804fc2ce"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 31
+calls = 32473
+standing = 100
+default_return = "unimplemented"
+frames = 5223
+unanswered = 5
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "6da852efb21237fa"
+link_plan_stored = "new"

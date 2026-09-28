@@ -1,0 +1,31 @@
+[title]
+id = "OPSY00001"
+name = "OOPSy-DAISY"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "8f49711c76a636131eb94019bfdae7483e326eef2d70b222d636cba0009e262d"
+limit_seconds = 30
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 65
+calls = 23006
+standing = 100
+default_return = "unimplemented"
+frames = 3260
+unanswered = 8
+limit_seconds = 30
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "2d9a8ee1b435c309"
+link_plan_stored = "match"

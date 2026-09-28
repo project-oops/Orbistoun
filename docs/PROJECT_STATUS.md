@@ -7,16 +7,36 @@ out of date.
 
 | Title | Reach | Imports | Calls | Standing | Ends | Link plan |
 |---|---|---|---|---|---|---|
-| BUGD00001 | presented | 55 | 115,754,224 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` match |
-| PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` | - |
+| obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
+| PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
+| OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
+| BGII00001 | presented | 55 | 6,267,850 | 100% | `ran to the time limit` | `135e110d3e230943` new |
+| BUGD00001 | presented | 55 | 88,848,677 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` new |
+| NVRB00001 | presented | 55 | 76,909,371 | 100% | `ran to the time limit` | `a89b785aee25443a` new |
+| NVPT00001 | presented | 53 | 72,190,754 | 100% | `ran to the time limit` | `f199db87cde691e2` new |
+| ETXR00001 | presented | 50 | 10,538,918 | 100% | `ran to the time limit` | `4a82e3e7b64097e7` new |
+| SCSH00001 | presented | 40 | 9,205 | 100% | `ran to the time limit` | `57ff1ceb38d5822b` new |
+| GLCB00001 | presented | 32 | 4,146,360 | 100% | `ran to the time limit` | `1ba0eae876769e17` new |
+| NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
+| GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
+| PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
 | PPSA03416-app0 | flipped | 224 | 470,362 | 100% | `image+0x3f8f0` | - |
 | PPSA02664-app0 | flipped | 224 | 418,362 | 100% | `image+0x3f8f0` | - |
+| PPSA25872-app0 | flipped | 216 | 404,136 | 100% | `the title's own modules+0xe3b20` | `2b0cfc83944ce04d` new |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
-| PPSA25872-app0 | flipped | 192 | 339,539 | 100% | `image+0x3b383b` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
-| PPSA04263-app0 | entered | 75 | 30,460 | 100% | `image+0x19676d7` | - |
-| PPSA21564-app0 | entered | 57 | 500,260 | 100% | `the title's own modules+0x7af792` | - |
-| PPSA28061-app0 | entered | 47 | 933 | 94% | `image+0x43c4` | - |
+| PPSA21564-app0 | entered | 103 | 505,299 | 100% | `image+0x2990db` | `e14140f4ef1f171b` new |
+| CRFT00001 | entered | 93 | 155,161 | 100% | `ran to the time limit` | `a5979edf0f7ebb41` match |
+| MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
+| PPSA04263-app0 | entered | 78 | 38,813 | 99% | `image+0x19676d7` | `19f92dc4726302a2` new |
+| MCUB00001 | entered | 67 | 50,348 | 100% | `ran to the time limit` | `ecc399008f7c33ff` new |
+| GCTS00001 | entered | 65 | 28,019 | 100% | `image+0x1b67c9` | `91f982d1d31cf359` new |
+| DRIP00001 | entered | 62 | 63,336 | 100% | `ran to the time limit` | `5e02052f2e0b06cd` new |
+| PPSA28061-app0 | entered | 61 | 1,021 | 98% | `the guest called abort` | `552eb17004eaca86` new |
+| MESA00001 | entered | 32 | 353 | 99% | `ran to the time limit` | `a072d7cef4f013a8` new |
+| GLTC00001 | entered | 24 | 37,342 | 100% | `ran to the time limit` | `1785f6a8b01771d2` new |
+| GLPB00001 | entered | 18 | 30,048 | 100% | `ran to the time limit` | `297884c655c12e41` new |
+| GLTP00001 | entered | 16 | 36,793 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
 | dist | entered | 0 | 0 | 100% | `0x1` | - |
 
 Under a measured policy - stubs answering by name, so these reach further by
@@ -67,10 +87,10 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1022 / 839 |
+| Functions declared / implemented | 1064 / 877 |
 | Declared in a library that serves nothing | 129 across 17 libraries - names written down, no implementation |
-| Recorded behaviours | 876 - 374 published, 103 measured, 104 guest-observed, 268 assumed |
-| Open questions a hardware probe could settle | 836 |
+| Recorded behaviours | 914 - 391 published, 103 measured, 115 guest-observed, 278 assumed |
+| Open questions a hardware probe could settle | 846 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

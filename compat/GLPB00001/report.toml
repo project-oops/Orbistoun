@@ -4,9 +4,30 @@ name = "GL1 Probe"
 content_version = "01.00"
 master_version = "01.00"
 
+[reproduce]
+module_sha256 = "d3e7cd4649be6972cb7a256323c89efb01050cf96e908499e774044526120198"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 18
+calls = 30048
+standing = 100
+default_return = "unimplemented"
+unanswered = 0
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "297884c655c12e41"
+link_plan_stored = "new"
 
 [experiment]
 reach = "flipped"

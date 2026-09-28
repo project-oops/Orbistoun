@@ -4,9 +4,31 @@ name = "Neverball"
 content_version = "01.00"
 master_version = "01.00"
 
+[reproduce]
+module_sha256 = "cca25131161809a87dbcbc324dd27852cd8ebe9de4cd8ba3246fdc18e1bf7bc4"
+limit_seconds = 30
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 55
+calls = 76909371
+standing = 100
+default_return = "unimplemented"
+frames = 453
+unanswered = 8
+limit_seconds = 30
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "a89b785aee25443a"
+link_plan_stored = "new"
 
 [experiment]
 reach = "flipped"

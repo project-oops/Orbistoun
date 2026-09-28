@@ -4,21 +4,30 @@ name = "ASTRO BOT"
 content_version = "01.007.000"
 master_version = "01.00"
 
+[reproduce]
+module_sha256 = "70d673f7c43edb189461a60f076e15baa73f9a82a579603e44372ae5b7225d3d"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
 
 [status]
 reach = "entered"
-outcome = "the title's own modules+0x7af792"
-imports = 57
-calls = 500260
+outcome = "image+0x2990db"
+imports = 103
+calls = 505299
 standing = 100
 default_return = "unimplemented"
-unanswered = 1
-limit_seconds = 12
-build = "0.1.0"
-measured_on = "2026-09-04"
+unanswered = 7
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "e14140f4ef1f171b"
+link_plan_stored = "new"
 
 [experiment]
 reach = "entered"

@@ -1,0 +1,31 @@
+[title]
+id = "BGII00001"
+name = "Bugdom 2"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "c84824e3e8e9bc9a8942bde7258826508226383a545533fc4f0a8a552b419d87"
+limit_seconds = 30
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 55
+calls = 6267850
+standing = 100
+default_return = "unimplemented"
+frames = 3691
+unanswered = 8
+limit_seconds = 30
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "135e110d3e230943"
+link_plan_stored = "new"

@@ -389,6 +389,21 @@ fn note_reproduction(
     Ok(())
 }
 
+/// Whether a run replayed the input `title`'s record replays: none for a record with no
+/// `inputs.toml`, the same bytes for one with it.
+fn replays_the_same_input(
+    dir: &std::path::Path,
+    title: &str,
+    input: Option<&std::path::Path>,
+) -> bool {
+    let beside = crate::records::title_dir(dir, title).join(orbistoun_overrides::INPUTS_FILE);
+    match (std::fs::read(&beside).ok(), input) {
+        (None, None) => true,
+        (Some(recorded), Some(input)) => std::fs::read(input).is_ok_and(|run| run == recorded),
+        _ => false,
+    }
+}
+
 /// A title module's SHA-256, as the link plan keys it (D724).
 fn module_sha256(bytes: &[u8]) -> String {
     use core::fmt::Write as _;
@@ -635,8 +650,18 @@ pub(crate) fn record_compat(
             );
             println!("  {}", record.display());
             // The baseline is what a reproduction repeats; an experiment rests on answers nothing
-            // measured, so it is not what the record reproduces (D736).
+            // measured, so it is not what the record reproduces (D736). A run that replayed no
+            // input never takes a record's capture away, however its numbers compare: a plain run
+            // of a title idling on its menu makes more calls than the capture that played it.
+            let strips_a_capture = taken.input.is_none()
+                && crate::records::title_dir(dir, &title)
+                    .join(orbistoun_overrides::INPUTS_FILE)
+                    .is_file();
+            if strips_a_capture {
+                println!("  the record's capture and sheet are kept: this run replayed no input");
+            }
             if slot == "status"
+                && !strips_a_capture
                 && let Err(e) =
                     note_reproduction(dir, &title, path, taken, &orbistoun_paths::Paths::resolve())
             {
@@ -650,9 +675,11 @@ pub(crate) fn record_compat(
             // A run as good as the record repeats what it records, so its reproduction and sheet
             // stand for the record too: a record gets its first `[reproduce]` this way, and a
             // rendering fix that moves no number still gets a current picture. A run below the
-            // record's best leaves both alone (D736).
+            // record's best leaves both alone, and so does one that replayed different input: a
+            // sweep's plain run of a title whose record replays a capture matches none of it (D736).
             if slot == "status"
                 && !is_below_best(&status, &previous)
+                && replays_the_same_input(dir, &title, taken.input)
                 && let Err(e) =
                     note_reproduction(dir, &title, path, taken, &orbistoun_paths::Paths::resolve())
             {
@@ -824,6 +851,41 @@ mod tests {
 
     /// The compat `--check` fails on a hand-edited generated file, and passes on a fresh one.
     ///
+    /// A run that only matches its record refreshes the reproduction when it replayed the record's
+    /// own input: a sweep's plain run of a title whose record replays a capture does not (D736).
+    #[test]
+    fn a_matching_run_must_replay_the_record_s_input() {
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let dir = root.path().join("compat");
+        let beside = crate::records::title_dir(&dir, "T0001");
+        std::fs::create_dir_all(&beside).unwrap();
+        assert!(
+            super::replays_the_same_input(&dir, "T0001", None),
+            "neither has input"
+        );
+
+        let capture = root.path().join("capture.toml");
+        std::fs::write(&capture, "[[step]]\nat_flip = 1\n").unwrap();
+        std::fs::write(
+            beside.join(orbistoun_overrides::INPUTS_FILE),
+            "[[step]]\nat_flip = 1\n",
+        )
+        .unwrap();
+        assert!(
+            super::replays_the_same_input(&dir, "T0001", Some(&capture)),
+            "the same capture"
+        );
+        assert!(
+            !super::replays_the_same_input(&dir, "T0001", None),
+            "a plain run against a captured record"
+        );
+        std::fs::write(&capture, "[[step]]\nat_flip = 2\n").unwrap();
+        assert!(
+            !super::replays_the_same_input(&dir, "T0001", Some(&capture)),
+            "another capture"
+        );
+    }
+
     /// A run recorded into `[status]` leaves its record reproducible (D736): the build pinned, the
     /// limit, input and frame interval it ran with, its input beside the record, and a sheet - in
     /// the local title library until the record says its frames are committed. A later run with no

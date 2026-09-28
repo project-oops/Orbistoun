@@ -1,0 +1,30 @@
+[title]
+id = "MCUB00001"
+name = "Mesa Cube"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "87c6418924e43f85bd54936993414d76722b18590845ec251df9351a8cd56412"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 67
+calls = 50348
+standing = 100
+default_return = "unimplemented"
+unanswered = 6
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "ecc399008f7c33ff"
+link_plan_stored = "new"

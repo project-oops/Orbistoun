@@ -4,22 +4,31 @@ name = "Terminator 2D: NO FATE"
 content_version = "01.002.000"
 master_version = "01.00"
 
+[reproduce]
+module_sha256 = "3348f1bb85444befecd6fed54e68083654360a4276f1a7dfef1c0597e5db19a0"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
 
 [status]
 reach = "flipped"
-outcome = "image+0x3b383b"
-imports = 192
-calls = 339539
+outcome = "the title's own modules+0xe3b20"
+imports = 216
+calls = 404136
 standing = 100
 default_return = "unimplemented"
 frames = 1
-unanswered = 14
-limit_seconds = 2
-build = "0.1.0"
-measured_on = "2026-09-13"
+unanswered = 12
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "2b0cfc83944ce04d"
+link_plan_stored = "new"
 
 [experiment]
 reach = "flipped"

@@ -4,6 +4,13 @@ name = "Grand Theft Auto V"
 content_version = "01.010.002"
 master_version = "01.00"
 
+[reproduce]
+module_sha256 = "e9fb70c05d1f2ac4fd220f50fb0dfb26e79f2f1ddae2b7d65d7bfcb1f1c3108d"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
@@ -11,14 +18,16 @@ master_version = "01.00"
 [status]
 reach = "entered"
 outcome = "image+0x19676d7"
-imports = 75
-calls = 30460
-standing = 100
+imports = 78
+calls = 38813
+standing = 99
 default_return = "unimplemented"
-unanswered = 5
+unanswered = 3
 limit_seconds = 20
-build = "v0.1.0 - 712d8c6-dirty"
-measured_on = "2026-09-21"
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "19f92dc4726302a2"
+link_plan_stored = "new"
 
 [experiment]
 reach = "entered"

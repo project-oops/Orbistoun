@@ -1,0 +1,30 @@
+[title]
+id = "DRIP00001"
+name = "DRI Probe"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "a8f6af7a77203d3c12941dcfaf0836908155a7271d758bc23c675dc2a787d905"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 62
+calls = 63336
+standing = 100
+default_return = "unimplemented"
+unanswered = 6
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "5e02052f2e0b06cd"
+link_plan_stored = "new"

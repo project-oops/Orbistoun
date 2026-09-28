@@ -1,0 +1,30 @@
+[title]
+id = "GLTC00001"
+name = "GL2 Cube"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "11f774655e82331923b26031cc1c6933c0dadf1f5c1bcd7e9bb33d70fff3c721"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 24
+calls = 37342
+standing = 100
+default_return = "unimplemented"
+unanswered = 2
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "1785f6a8b01771d2"
+link_plan_stored = "new"

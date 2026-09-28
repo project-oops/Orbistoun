@@ -1,0 +1,30 @@
+[title]
+id = "GLTP00001"
+name = "GL2 Probe"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "93cdb7fc0e71f6254d3484c1c773c2d1170a7ad18239213b814ed29b4363edee"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 16
+calls = 36793
+standing = 100
+default_return = "unimplemented"
+unanswered = 0
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "a86c33e902240eaa"
+link_plan_stored = "new"

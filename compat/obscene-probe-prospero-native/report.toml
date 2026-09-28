@@ -1,0 +1,29 @@
+[title]
+id = "PPSA99980"
+name = "obSCEne"
+
+[reproduce]
+module_sha256 = "5608877b44140d0ba27d50f0d8c936b24d1ccf0f7876bb654f2a55c32e29209b"
+limit_seconds = 20
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 223
+calls = 39546
+standing = 100
+default_return = "unimplemented"
+frames = 83
+unanswered = 12
+limit_seconds = 20
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "1306f1fcfd52ace9"
+link_plan_stored = "new"

@@ -1,11 +1,31 @@
-BUGD00001              presented   55 imports (46 answered)  115754224 calls  100% standing   ran to the time limit
-PPSA99980              flipped    246 imports (212 answered)     444296 calls  100% standing   ran to the time limit
+obscene-probe-prospero-native presented  223 imports (211 answered)      39546 calls  100% standing   ran to the time limit
+PPSA99980              presented  215 imports (206 answered)     416694 calls  100% standing   ran to the time limit
+OPSY00001              presented   65 imports (57 answered)      23006 calls  100% standing   ran to the time limit
+BGII00001              presented   55 imports (47 answered)    6267850 calls  100% standing   ran to the time limit
+BUGD00001              presented   55 imports (47 answered)   88848677 calls  100% standing   ran to the time limit
+NVRB00001              presented   55 imports (47 answered)   76909371 calls  100% standing   ran to the time limit
+NVPT00001              presented   53 imports (45 answered)   72190754 calls  100% standing   ran to the time limit
+ETXR00001              presented   50 imports (42 answered)   10538918 calls  100% standing   ran to the time limit
+SCSH00001              presented   40 imports (27 answered)       9205 calls  100% standing   ran to the time limit
+GLCB00001              presented   32 imports (25 answered)    4146360 calls  100% standing   ran to the time limit
+NETT00001              presented   31 imports (26 answered)      32473 calls  100% standing   ran to the time limit
+GALR00001              presented   27 imports (25 answered)      24999 calls  100% standing   ran to the time limit
+PADV00001              presented   21 imports (19 answered)      33982 calls  100% standing   ran to the time limit
 PPSA03416-app0         flipped    224 imports (216 answered)     470362 calls  100% standing   image+0x3f8f0
 PPSA02664-app0         flipped    224 imports (213 answered)     418362 calls  100% standing   image+0x3f8f0
+PPSA25872-app0         flipped    216 imports (204 answered)     404136 calls  100% standing   the title's own modules+0xe3b20
 obscene                flipped    193 imports (180 answered)     280274 calls  100% standing   ran to the time limit
-PPSA25872-app0         flipped    192 imports (178 answered)     339539 calls  100% standing   image+0x3b383b
 obscene-payload        flipped    187 imports (177 answered)       4914 calls  100% standing   0x5e2d
-PPSA04263-app0         entered     75 imports (70 answered)      30460 calls  100% standing   image+0x19676d7
-PPSA21564-app0         entered     57 imports (56 answered)     500260 calls  100% standing   the title's own modules+0x7af792
-PPSA28061-app0         entered     47 imports (- answered)        933 calls   94% standing   image+0x43c4
+PPSA21564-app0         entered    103 imports (96 answered)     505299 calls  100% standing   image+0x2990db
+CRFT00001              entered     93 imports (80 answered)     155161 calls  100% standing   ran to the time limit
+MDEM00001              entered     89 imports (74 answered)      74759 calls  100% standing   ran to the time limit
+PPSA04263-app0         entered     78 imports (75 answered)      38813 calls   99% standing   image+0x19676d7
+MCUB00001              entered     67 imports (61 answered)      50348 calls  100% standing   ran to the time limit
+GCTS00001              entered     65 imports (58 answered)      28019 calls  100% standing   image+0x1b67c9
+DRIP00001              entered     62 imports (56 answered)      63336 calls  100% standing   ran to the time limit
+PPSA28061-app0         entered     61 imports (48 answered)       1021 calls   98% standing   the guest called abort
+MESA00001              entered     32 imports (30 answered)        353 calls   99% standing   ran to the time limit
+GLTC00001              entered     24 imports (22 answered)      37342 calls  100% standing   ran to the time limit
+GLPB00001              entered     18 imports (18 answered)      30048 calls  100% standing   ran to the time limit
+GLTP00001              entered     16 imports (16 answered)      36793 calls  100% standing   ran to the time limit
 dist                   entered      0 imports (0 answered)          0 calls  100% standing   0x1

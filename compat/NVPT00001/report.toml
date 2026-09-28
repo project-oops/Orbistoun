@@ -4,9 +4,31 @@ name = "Neverputt"
 content_version = "01.00"
 master_version = "01.00"
 
+[reproduce]
+module_sha256 = "2e7ccda1f0fb4ac63cfe1c3d0f2a8c1c4eb99e587b700b110b8d616b62b274ec"
+limit_seconds = 30
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 53
+calls = 72190754
+standing = 100
+default_return = "unimplemented"
+frames = 595
+unanswered = 8
+limit_seconds = 30
+build = "v0.1.0 - 80f56d2"
+measured_on = "2026-09-28"
+link_plan = "f199db87cde691e2"
+link_plan_stored = "new"
 
 [experiment]
 reach = "flipped"
