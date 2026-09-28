@@ -645,7 +645,20 @@ pub(crate) fn record_compat(
         }
         // A record as good as this run is the ordinary outcome; one holding something better means
         // a regression, which is reported.
-        Ok(Kept::NotBetter { previous, .. }) => note_if_below_best(&status, &previous),
+        Ok(Kept::NotBetter { slot, previous }) => {
+            note_if_below_best(&status, &previous);
+            // A run as good as the record repeats what it records, so its reproduction and sheet
+            // stand for the record too: a record gets its first `[reproduce]` this way, and a
+            // rendering fix that moves no number still gets a current picture. A run below the
+            // record's best leaves both alone (D736).
+            if slot == "status"
+                && !is_below_best(&status, &previous)
+                && let Err(e) =
+                    note_reproduction(dir, &title, path, taken, &orbistoun_paths::Paths::resolve())
+            {
+                println!("  could not note how to reproduce it: {e:#}");
+            }
+        }
         // Reported, not swallowed: otherwise the result exists only on this screen.
         Err(e) => {
             println!();
