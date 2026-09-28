@@ -1961,6 +1961,17 @@ pub fn decode_scissor(top_left: u32, bottom_right: u32) -> Scissor {
     }
 }
 
+/// The scissor from `latest`, the value each register holds at some point in a stream, or
+/// [`None`] when only one corner or neither is set: the missing corner is not guessed (D010). What
+/// a draw is restricted to is the scissor in force at it.
+#[must_use]
+pub fn scissor_from(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<Scissor> {
+    Some(decode_scissor(
+        latest(PA_SC_GENERIC_SCISSOR_TL)?,
+        latest(PA_SC_GENERIC_SCISSOR_BR)?,
+    ))
+}
+
 /// The scissor from the live `GENERIC_SCISSOR` writes, or [`None`] when the stream set only one
 /// corner or neither: the missing corner is not guessed (D010). The most recent write to each wins.
 #[must_use]

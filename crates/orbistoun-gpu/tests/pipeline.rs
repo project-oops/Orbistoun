@@ -260,8 +260,8 @@ fn same_sized_targets_at_different_addresses_are_different_targets() {
     );
 }
 
-/// A stream that sets the generic scissor reaches the backend as a `SetViewport`: the
-/// `GENERIC_SCISSOR` write pair is decoded into the rectangle a draw is restricted to.
+/// A stream that sets the generic scissor and then draws reaches the backend as a `SetViewport`:
+/// the `GENERIC_SCISSOR` write pair is decoded into the rectangle the draw is restricted to.
 #[test]
 fn a_scissor_write_reaches_the_backend_as_set_viewport() {
     use orbistoun_gpu::Rect;
@@ -272,10 +272,21 @@ fn a_scissor_write_reaches_the_backend_as_set_viewport() {
     // Top-left (x 16, y 8) is 0x0008_0010; bottom-right (x 48, y 56) is 0x0038_0030.
     let top_left = 0x0008_0010;
     let bottom_right = 0x0038_0030;
-    let stream: Vec<u8> = [header, 0x090, top_left, header, 0x091, bottom_right]
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
+    let draw = (3u32 << 30) | ((2 - 1) << 16) | (0x2D << 8); // DRAW_INDEX_AUTO, three vertices
+    let stream: Vec<u8> = [
+        header,
+        0x090,
+        top_left,
+        header,
+        0x091,
+        bottom_right,
+        draw,
+        3,
+        2,
+    ]
+    .iter()
+    .flat_map(|word| word.to_le_bytes())
+    .collect();
 
     let mut pipeline = pipeline();
     let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory());

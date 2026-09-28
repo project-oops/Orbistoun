@@ -31,8 +31,8 @@ use crate::registers::{
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
     colour_target_format_at, decode_blend_control, decode_image_descriptor, depth_control_at,
-    dispatch_calls, draw_calls, primitive_topology_at, register_writes, scissor_at,
-    shader_candidates, stencil_control_at, viewport_transform_from,
+    dispatch_calls, draw_calls, primitive_topology_at, register_writes, shader_candidates,
+    stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -896,17 +896,6 @@ impl Pipeline {
         // registers are the only source (D145).
         submission.report.wave_widths = crate::registers::wave_widths_at(&writes);
 
-        // The scissor as a viewport the backend restricts a draw to; a stream that set none emits
-        // none, so a draw covers the whole target.
-        if let Some(scissor) = scissor_at(&writes) {
-            submission.commands.push(RenderCommand::SetViewport(Rect {
-                x: i32::try_from(scissor.x).unwrap_or(0),
-                y: i32::try_from(scissor.y).unwrap_or(0),
-                width: scissor.width,
-                height: scissor.height,
-            }));
-        }
-
         // The guest-memory window this frame's shaders read, read once because every module shares
         // it (D703). The default window at address zero is unmapped and reads empty.
         let candidates = Self::reconcile(queue, registered, &inferred, &mut submission.report);
@@ -1652,6 +1641,7 @@ fn push_geometry_commands(
     let mut blend_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
+    let mut scissor_sent = None;
     // What each stage has bound so far: the up-front binds, then each draw's own.
     let mut bound: Vec<(ShaderStage, ResourceId)> = commands
         .iter()
@@ -1707,6 +1697,21 @@ fn push_geometry_commands(
         {
             commands.push(RenderCommand::SetViewportTransform(transform));
             transform_sent = Some(transform);
+        }
+        // The scissor in force at this draw, as the rectangle the backend restricts it to, when the
+        // stream set one and it changed. A draw before any is unrestricted.
+        if let Some(scissor) = crate::registers::scissor_from(|register| sweep.latest(at, register))
+        {
+            let rect = Rect {
+                x: i32::try_from(scissor.x).unwrap_or(0),
+                y: i32::try_from(scissor.y).unwrap_or(0),
+                width: scissor.width,
+                height: scissor.height,
+            };
+            if scissor_sent != Some(rect) {
+                commands.push(RenderCommand::SetViewport(rect));
+                scissor_sent = Some(rect);
+            }
         }
         // Each stage's user data as it stands at this draw, emitted when it changed. A word the
         // stream never wrote reads zero.
@@ -2815,6 +2820,86 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), 12, "each draw its own offset: {offsets:?}");
+    }
+
+    /// Each draw is restricted to the scissor in force at it, not the stream's last one. Bugdom
+    /// draws its 3D pane under one scissor and its HUD bars above and below under another; one
+    /// scissor for the whole submission clipped the bars away, leaving the clear colour.
+    #[test]
+    fn each_draw_is_restricted_to_the_scissor_in_force_at_it() {
+        use super::{Pipeline, Rect, RenderCommand};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/captures/agc-gl-cube-fw1240-b.hex");
+        let words: Vec<u32> = std::fs::read_to_string(&path)
+            .expect("the committed capture")
+            .lines()
+            .flat_map(|line| {
+                line.split('#')
+                    .next()
+                    .unwrap_or_default()
+                    .split_whitespace()
+            })
+            .map(|word| u32::from_str_radix(word, 16).expect("a hex word"))
+            .collect();
+        let bytes: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+        let draws = crate::registers::draw_calls(&crate::packet::walk(&bytes), &bytes);
+        assert_eq!(draws.len(), 12);
+        // SET_CONTEXT_REG of GENERIC_SCISSOR_TL and _BR: (x, y) packed as y << 16 | x.
+        let scissor = |(x0, y0): (u32, u32), (x1, y1): (u32, u32)| {
+            [0xC002_6900, 0x90, y0 << 16 | x0, y1 << 16 | x1]
+        };
+        let pane = scissor((0, 140), (1920, 945));
+        let whole = scissor((0, 0), (1920, 1080));
+        // The pane's scissor before the first draw, the whole target's before the seventh.
+        let first = draws[0].packet_offset as usize / 4;
+        let seventh = draws[6].packet_offset as usize / 4;
+        let mut spliced = words[..first].to_vec();
+        spliced.extend(pane);
+        spliced.extend(&words[first..seventh]);
+        spliced.extend(whole);
+        spliced.extend(&words[seventh..]);
+        let stream: Vec<u8> = spliced.into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Lane,
+            width: Width::default(),
+        })
+        .expect("a pipeline");
+        let submission = pipeline.submit(&stream, super::Queue::Draw, &[], &Nothing);
+        let mut in_force = None;
+        let mut per_draw = Vec::new();
+        for command in &submission.commands {
+            match command {
+                RenderCommand::SetViewport(rect) => in_force = Some(*rect),
+                RenderCommand::Draw { .. } => per_draw.push(in_force),
+                _ => {}
+            }
+        }
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert_eq!(per_draw.len(), 12);
+        assert!(
+            per_draw[..6].iter().all(|r| *r == rect(0, 140, 1920, 805)),
+            "{per_draw:?}"
+        );
+        assert!(
+            per_draw[6..].iter().all(|r| *r == rect(0, 0, 1920, 1080)),
+            "{per_draw:?}"
+        );
     }
 
     /// The base a live vertex program forms is read from its own words (D711), and a register
