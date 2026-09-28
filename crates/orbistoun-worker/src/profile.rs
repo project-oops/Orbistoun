@@ -53,6 +53,95 @@ const SHOWN: usize = 16;
 #[cfg(windows)]
 const MOST_THREADS: usize = 8;
 
+/// The name of the function holding `address` in this process, from its symbols: this executable's
+/// own (a release build keeps them) or a system library's exports. `None` where neither names it.
+///
+/// Asked only when a report is made, never while a thread is suspended. The symbol handler is not
+/// thread-safe, so calls are serialised.
+#[cfg(windows)]
+fn symbol_of(address: u64) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SYMBOL_INFO, SYMOPT_DEFERRED_LOADS, SYMOPT_UNDNAME, SymFromAddr, SymInitializeW,
+        SymSetOptions,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    /// The longest name kept, in bytes.
+    const NAME_BYTES: usize = 512;
+    static HANDLER: Mutex<Option<bool>> = Mutex::new(None);
+    let mut ready = HANDLER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // SAFETY: answers this process's pseudo-handle; takes nothing and cannot fail.
+    let process = unsafe { GetCurrentProcess() };
+    let initialised = *ready.get_or_insert_with(|| {
+        // SAFETY: sets the handler's options before it is initialised; takes a plain flag word.
+        unsafe { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS) };
+        // The executable's own directory is searched for its symbols: the handler's default search
+        // is the working directory and `_NT_SYMBOL_PATH`, which a run from elsewhere misses.
+        let search: Vec<u16> = own_module()
+            .and_then(|(_, path)| {
+                std::path::Path::new(&path)
+                    .parent()
+                    .map(|dir| dir.as_os_str().to_owned())
+            })
+            .unwrap_or_default()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: initialises the handler for this process once, listing every loaded module;
+        // `search` is a NUL-terminated path that outlives the call.
+        unsafe { SymInitializeW(process, search.as_ptr(), 1) != 0 }
+    });
+    if !initialised {
+        return None;
+    }
+    // A `SYMBOL_INFO` followed by room for its name, in eight-byte words for its alignment.
+    let words = (size_of::<SYMBOL_INFO>() + NAME_BYTES).div_ceil(8);
+    let mut buffer = vec![0u64; words];
+    let info = buffer.as_mut_ptr().cast::<SYMBOL_INFO>();
+    let header = SYMBOL_INFO {
+        SizeOfStruct: size_of::<SYMBOL_INFO>() as u32,
+        MaxNameLen: NAME_BYTES as u32,
+        ..SYMBOL_INFO::default()
+    };
+    // SAFETY: `info` points at an aligned buffer at least `SYMBOL_INFO` long; the header's two size
+    // fields are what the call reads to know how much it may write.
+    unsafe { info.write(header) };
+    let mut displacement = 0u64;
+    // SAFETY: the handler is initialised for this process, and `info` has `MaxNameLen` bytes of
+    // name room past its fixed fields.
+    if unsafe { SymFromAddr(process, address, &raw mut displacement, info) } == 0 {
+        return None;
+    }
+    // SAFETY: `info` is the header the call filled in.
+    let length = (unsafe { (*info).NameLen } as usize).min(NAME_BYTES);
+    let name = info
+        .cast::<u8>()
+        .wrapping_add(std::mem::offset_of!(SYMBOL_INFO, Name));
+    // SAFETY: `name` holds `length` initialised bytes, as above.
+    let bytes = unsafe { std::slice::from_raw_parts(name, length) };
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// This executable's base address and path.
+#[cfg(windows)]
+fn own_module() -> Option<(u64, std::ffi::OsString)> {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    // SAFETY: a null name asks for this executable's own module, which is always loaded.
+    let base = unsafe { GetModuleHandleW(std::ptr::null()) } as usize as u64;
+    let path = std::env::current_exe().ok()?;
+    (base != 0).then(|| (base, path.into_os_string()))
+}
+
+/// A host address as a report names it: the function holding it, or its module and offset where no
+/// symbol does.
+#[cfg(windows)]
+fn host_place(address: u64) -> Option<String> {
+    let (module, offset) = crate::report::host_module_of(address)?;
+    Some(symbol_of(address).unwrap_or_else(|| format!("{module}+{:#x}", offset & !0xff)))
+}
+
 /// Counts one thread's `samples` into buckets and prints the largest.
 #[cfg(windows)]
 fn report(thread: &str, samples: &[(u64, u64)]) {
@@ -67,13 +156,15 @@ fn report(thread: &str, samples: &[(u64, u64)]) {
         let name = if (GUEST_IMAGE..GUEST_IMAGE + GUEST_SPAN).contains(&rip) {
             guest += 1;
             format!("guest+{:#x}", (rip - GUEST_IMAGE) & !0x3f)
-        } else if let Some((module, offset)) = crate::report::host_module_of(rip) {
+        } else if let Some((module, _)) = crate::report::host_module_of(rip) {
+            // A system library - most often a wait or a memory call - is named with the function
+            // of this executable that led to it, which is the place to look.
             let called_from = (Some(&module) != own.as_ref())
-                .then(|| crate::report::host_module_of(caller))
+                .then(|| host_place(caller))
                 .flatten()
-                .map(|(by, at)| format!(" from {by}+{at:#x}"))
+                .map(|by| format!(" from {by}"))
                 .unwrap_or_default();
-            format!("{module}+{:#x}{called_from}", offset & !0xff)
+            format!("{}{called_from}", host_place(rip).unwrap_or(module))
         } else {
             format!("unmapped {:#x}", rip & !0xfff)
         };
@@ -257,5 +348,23 @@ mod imp {
     /// The sampler exists on Windows only.
     pub(super) fn watch(_name: &'static str) {
         tracing::warn!("the profiler samples on Windows only");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// A function whose address the test looks up.
+    #[inline(never)]
+    fn a_function_the_profiler_names() -> u64 {
+        std::hint::black_box(7)
+    }
+
+    /// A sample in this executable is named by its function, so a report says what is slow rather
+    /// than where in the binary.
+    #[test]
+    fn a_host_address_is_named_by_its_function() {
+        let address = a_function_the_profiler_names as fn() -> u64 as usize as u64;
+        let name = super::symbol_of(address).expect("the symbols name it");
+        assert!(name.contains("a_function_the_profiler_names"), "{name}");
     }
 }
