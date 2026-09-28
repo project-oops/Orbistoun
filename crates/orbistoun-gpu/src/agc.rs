@@ -391,20 +391,25 @@ fn dcb_append_spanning(dcb: u64, words: &[u32], dwords: usize) -> u64 {
     cur
 }
 
-/// The flip mode obSCEne's measurement used; the register word for any other is unmeasured.
-const MEASURED_FLIP_MODE: u64 = 1;
+/// The flip modes whose packets are measured: 1 (`-1d54`), 2 and 3 (`-c4e3`). Mode 0 writes
+/// nothing; any higher mode's register word is unmeasured.
+const MEASURED_FLIP_MODES: std::ops::RangeInclusive<u64> = 1..=3;
 
 /// `sceAgcDcbSetFlip(dcb, video_handle, buffer_index, flip_mode, flip_arg)`: queues the flip with
 /// the display and writes the packet whose release carries it out (D728). Measured
-/// (`166-agc/dcb-set-flip`, `-1d54`): 76 bytes written, the cursor advanced 256, the packet's
-/// address answered; a port that is not open or a buffer that is not registered writes nothing and
-/// answers `0`. Another flip mode is refused, its register word being unmeasured.
+/// (`166-agc/dcb-set-flip`, `-1d54` and `-c4e3`): 76 bytes written, the cursor advanced 256, the
+/// packet's address answered; a port that is not open or a buffer that is not registered writes
+/// nothing and answers `0`, and so does flip mode 0. A mode above 3 is refused, its register word
+/// being unmeasured.
 fn dcb_set_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (dcb, handle, index, mode, arg) = (args[0], args[1], args[2], args[3], args[4]);
-    if mode != MEASURED_FLIP_MODE {
+    if mode == 0 {
+        return 0;
+    }
+    if !MEASURED_FLIP_MODES.contains(&mode) {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
     }
-    let Ok(index32) = u32::try_from(index) else {
+    let (Ok(index32), Ok(mode32)) = (u32::try_from(index), u32::try_from(mode)) else {
         return 0;
     };
     let Some((context, label)) = crate::display::queue_flip(handle, index, arg) else {
@@ -412,7 +417,7 @@ fn dcb_set_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     dcb_append_spanning(
         dcb,
-        &crate::display::set_flip_words(index32, arg, context, label),
+        &crate::display::set_flip_words(index32, mode32, arg, context, label),
         crate::display::SET_FLIP_DWORDS,
     )
 }

@@ -96,19 +96,19 @@ fn a_flip_writes_the_measured_packet_and_advances_256_bytes() {
     );
 }
 
-/// An unregistered buffer and an unknown port write nothing and answer `0`, as on hardware; a flip
-/// mode other than the measured one is refused.
+/// An unregistered buffer, an unknown port and flip mode 0 write nothing and answer `0`, as on
+/// hardware (`-1d54`, `-c4e3`); a flip mode above the measured ones is refused.
 #[test]
 fn nothing_is_written_for_an_unregistered_buffer_or_port() {
     install();
-    for (handle, index) in [(PORT, 4), (7, 0)] {
+    for (handle, index, mode) in [(PORT, 4, 1), (7, 0, 1), (PORT, 0, 0)] {
         let writer = Writer::new();
-        assert_eq!(call([writer.handle(), handle, index, 1, 5, 0]), 0);
+        assert_eq!(call([writer.handle(), handle, index, mode, 5, 0]), 0);
         assert_eq!(writer.advanced(), 0);
         assert!(writer.buffer.iter().all(|&b| b == 0xcd));
     }
     let writer = Writer::new();
-    assert_eq!(call([writer.handle(), PORT, 0, 2, 5, 0]), 0xf7ff_0001);
+    assert_eq!(call([writer.handle(), PORT, 0, 4, 5, 0]), 0xf7ff_0001);
     assert_eq!(writer.advanced(), 0);
 }
 
