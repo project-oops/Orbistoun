@@ -123,3 +123,68 @@ fn an_export_without_an_attachment_is_refused() {
         )
     );
 }
+
+/// A shader that sets the execution mask to `exec` (`s_mov_b64 exec, <inline>`), moves `colour`
+/// into `v0..v3` and makes the pixel shader's final export - `done` and `vm` set, as the last
+/// colour export of every pixel shader is (Mesa `aco_assembler.cpp:1000`, `:1474-1475`).
+fn final_export_shader(exec_inline: u32, colour: [f32; 4]) -> Vec<u8> {
+    // `s_mov_b64 exec, <inline>`: SOP1 opcode 4, destination 126 (exec).
+    let mut bytes = (0xBE80_0000u32 | (126 << 16) | (4 << 8) | exec_inline)
+        .to_le_bytes()
+        .to_vec();
+    for (register, component) in colour.iter().enumerate() {
+        let word = 0x7E00_0000u32 | ((register as u32) << 17) | (1 << 9) | 0xFF;
+        bytes.extend(word.to_le_bytes());
+        bytes.extend(component.to_bits().to_le_bytes());
+    }
+    // `exp mrt0 v0, v1, v2, v3 done vm`: `DONE` bit 11, `VM` bit 12.
+    bytes.extend((0xF800_000Fu32 | (1 << 11) | (1 << 12)).to_le_bytes());
+    bytes.extend(0x0302_0100u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    bytes
+}
+
+/// A pixel whose lane is inactive at the valid-mask export is discarded: with the execution mask
+/// cleared the red clear survives; with it set, the export's blue is written. This is how a
+/// compiler discards - Mesa's ACO clears the lane's execution bit before the final export
+/// (`aco_select_nir_intrinsics.cpp:4676`) - and how Bugdom 2's alpha test drops a keyed texel
+/// (`v_cmp_neq_f32 vcc, alpha, 0; s_and_b32 exec_lo, exec_lo, vcc_lo; exp ... done vm`).
+#[test]
+fn an_inactive_pixel_at_the_final_export_is_discarded() {
+    if !device_or_skip("an_inactive_pixel_at_the_final_export_is_discarded") {
+        return;
+    }
+    let (width, height) = (8, 5);
+    let (blue, red) = ([0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+    let vertex = fullscreen_triangle_vertex_module();
+    let draw = |exec_inline: u32| {
+        let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+        let operands = OperandTable::builtin().expect("the shipped operand table");
+        let decoded = decode(
+            &final_export_shader(exec_inline, blue),
+            &encodings,
+            &operands,
+        );
+        let (module, _) = translate_for(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            Stage::Fragment,
+            orbistoun_translate::wavefront::Window::default(),
+        )
+        .expect("the final export translated");
+        draw_with(&vertex, &module, red, width, height).expect("the draw ran")
+    };
+    // Inline constants: 128 is 0, 193 is -1.
+    let (cleared, set) = (draw(128), draw(193));
+    for y in 0..height {
+        for x in 0..width {
+            assert_eq!(
+                cleared.at(x, y),
+                Some([255, 0, 0, 255]),
+                "({x}, {y}) discarded"
+            );
+            assert_eq!(set.at(x, y), Some([0, 0, 255, 255]), "({x}, {y}) written");
+        }
+    }
+}

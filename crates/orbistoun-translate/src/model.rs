@@ -1574,6 +1574,12 @@ const EXPORT_COMPRESSED: u32 = 1 << 10;
 /// (`aco_assembler.cpp:1005`).
 const EXPORT_ENABLE_MASK: u32 = 0xf;
 
+/// An export's `VM` bit, 12 (`aco_assembler.cpp:1000`): the execution mask is the valid mask, so a
+/// pixel whose lane is inactive is discarded. The final colour export of every pixel shader
+/// carries it (`aco_assembler.cpp:1474-1475`), and a compiler discards by clearing the lane's bit
+/// before it (`aco_select_nir_intrinsics.cpp:4676`).
+const EXPORT_VALID_MASK: u32 = 1 << 12;
+
 /// `exp`: hands four registers to a render target.
 ///
 /// The sources are read for lane zero, reinterpreted as floats (not converted), assembled into a
@@ -1584,7 +1590,8 @@ const EXPORT_ENABLE_MASK: u32 = 0xf;
 /// - Any target but `mrt0`; see [`MRT0`].
 /// - A write mask other than all or none of the four channels. The mask and the compressed bit are
 ///   read from the instruction's first word. A compressed export is unpacked from its two
-///   half-packed sources; `done` and `vm` change nothing a single-export translation does.
+///   half-packed sources. With `vm` set a pixel whose lane is inactive is discarded
+///   ([`EXPORT_VALID_MASK`]); `done` changes nothing a single-export translation does.
 fn export<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -1649,6 +1656,21 @@ fn export<M: Model + ?Sized>(
             offset: instruction.offset,
             detail: "a colour export that enables fewer than all four channels is not translated",
         });
+    }
+
+    // A valid-mask export discards the pixel when its lane is inactive. A model with no execution
+    // mask has no inactive lane to discard.
+    if instruction.word & EXPORT_VALID_MASK != 0
+        && let Ok((low, high)) = model.read_lane_mask(EXEC_LOW_HALF)
+    {
+        let active = model.lane_bit(low, high, 0);
+        let b = model.builder();
+        let (discard, kept) = (b.id(), b.id());
+        b.function(op::SELECTION_MERGE, &[kept.0, 0]);
+        b.function(op::BRANCH_CONDITIONAL, &[active.0, kept.0, discard.0]);
+        b.function(op::LABEL, &[discard.0]);
+        b.function(op::KILL, &[]);
+        b.function(op::LABEL, &[kept.0]);
     }
 
     let mut components = Vec::with_capacity(4);

@@ -89,6 +89,8 @@ pub mod op {
     pub const LABEL: u16 = 248;
     /// Returns from a function with no value.
     pub const RETURN: u16 = 253;
+    /// Ends a fragment invocation without writing its outputs: the pixel is discarded.
+    pub const KILL: u16 = 252;
     /// Unconditional branch.
     pub const BRANCH: u16 = 249;
     /// Branch on a boolean.
@@ -2060,6 +2062,7 @@ static SHAPES: &[ShapeEntry] = &[
     (op::MEMORY_MODEL, None, &[], None, RestStride::Every),
     (op::FUNCTION_END, None, &[], None, RestStride::Every),
     (op::RETURN, None, &[], None, RestStride::Every),
+    (op::KILL, None, &[], None, RestStride::Every),
     // Control flow. Every operand of these is a label except the control masks and the
     // switch's case values.
     (op::BRANCH, None, &[0], None, RestStride::Every),
