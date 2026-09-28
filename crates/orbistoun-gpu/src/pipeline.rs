@@ -1785,6 +1785,17 @@ fn texture_census(commands: &[RenderCommand], memory: &impl GuestMemory) -> Vec<
     textures
 }
 
+/// The sampler descriptor at `at`, decoded, or `None` when it is not readable or asks for sampling
+/// no host sampler reproduces exactly ([`crate::registers::decode_sampler_descriptor`]).
+fn read_sampler(at: u64, memory: &impl GuestMemory) -> Option<crate::registers::TextureSampling> {
+    let bytes = memory.read(at, 16)?;
+    let mut words = [0u32; 4];
+    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    crate::registers::decode_sampler_descriptor(words).ok()
+}
+
 /// `SQ_IMG_RSRC_WORD3.TYPE` for a 2D image: 9 (Mesa `ac_descriptors.c:372`, as the SDK's
 /// `gl_pack_descriptors` cites it).
 const IMAGE_TYPE_2D: u32 = 9;
@@ -1806,7 +1817,7 @@ fn bind_textures(
     // changed.
     let mut out = Vec::with_capacity(commands.len());
     let (mut words, mut fragment, mut stale) = (None, None, false);
-    let mut read: BTreeMap<(u64, u32), Option<RenderCommand>> = BTreeMap::new();
+    let mut read: BTreeMap<(u64, u32, Option<u64>), Option<RenderCommand>> = BTreeMap::new();
     for command in commands.drain(..) {
         match &command {
             RenderCommand::SetUserData {
@@ -1833,6 +1844,7 @@ fn bind_textures(
                     slot: 0,
                     table_offset: None,
                     table: TableBase::default(),
+                    sampler_offset: None,
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
@@ -1853,9 +1865,24 @@ fn bind_textures(
                     let at = table + u64::from(source.table_offset.unwrap_or(0));
                     // Read once per descriptor per submission: guest memory does not change while a
                     // submission is prepared, and a frame binds the same few textures many times.
+                    let sampler_at = source
+                        .sampler_offset
+                        .map(|offset| table + u64::from(offset));
                     let bound = read
-                        .entry((at, source.slot))
-                        .or_insert_with(|| read_texture(at, source.slot, memory, texels))
+                        .entry((at, source.slot, sampler_at))
+                        .or_insert_with(|| {
+                            let mut bound = read_texture(at, source.slot, memory, texels)?;
+                            // A sampler the module named is read and honoured; one that cannot be
+                            // honoured exactly leaves the texture unbound, so the draw is refused
+                            // rather than sampled some other way.
+                            if let Some(sampler_at) = sampler_at {
+                                let decoded = read_sampler(sampler_at, memory)?;
+                                if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
+                                    *sampling = decoded;
+                                }
+                            }
+                            Some(bound)
+                        })
                         .clone();
                     // A texture the module samples and nothing binds draws the backend's
                     // placeholder, which is not the guest's picture: counted, so the draw is
@@ -1925,6 +1952,7 @@ fn read_texture(
             texels: cached.texels.clone(),
             width: descriptor.width,
             height: descriptor.height,
+            sampling: crate::registers::TextureSampling::default(),
         });
     }
     // Marked before the bytes are hashed, so a write racing the hash is seen next time.
@@ -1966,6 +1994,7 @@ fn read_texture(
         texels: shared,
         width: descriptor.width,
         height: descriptor.height,
+        sampling: crate::registers::TextureSampling::default(),
     })
 }
 
@@ -2003,6 +2032,7 @@ fn read_tiled_texture(
             texels: cached.texels.clone(),
             width: descriptor.width,
             height: descriptor.height,
+            sampling: crate::registers::TextureSampling::default(),
         });
     }
     let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
@@ -2039,6 +2069,7 @@ fn read_tiled_texture(
         texels: shared,
         width: descriptor.width,
         height: descriptor.height,
+        sampling: crate::registers::TextureSampling::default(),
     })
 }
 

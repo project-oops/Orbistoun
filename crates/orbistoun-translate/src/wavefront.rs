@@ -1066,8 +1066,9 @@ pub struct Wavefront<'a> {
     ///
     /// Empty for a module that does not sample, so its pipeline layout carries no image binding.
     textures: Vec<BoundTexture>,
-    /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`].
-    descriptor_loads: BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>>,
+    /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`]:
+    /// the image descriptors', then the sampler descriptors'.
+    descriptor_loads: (DescriptorLoads, DescriptorLoads),
     /// The storage image, declared the first time an instruction stores to one.
     ///
     /// Declaring it declares a capability that a device without the matching feature refuses, so a
@@ -1127,7 +1128,25 @@ impl Wavefront<'_> {
     /// The texture sources this module samples, in slot order.
     #[must_use]
     pub fn texture_sources(&self) -> Vec<TextureSource> {
-        self.textures.iter().map(|bound| bound.source).collect()
+        self.textures
+            .iter()
+            .map(|bound| TextureSource {
+                sampler_offset: bound
+                    .sampler
+                    .and_then(|sampler| self.sampler_offset(sampler, bound.source.table)),
+                ..bound.source
+            })
+            .collect()
+    }
+
+    /// Where a sampler descriptor starting at scalar register `sampler` was loaded from in `table`:
+    /// one load, from that same table, or nothing.
+    fn sampler_offset(&self, sampler: u32, table: TableBase) -> Option<u32> {
+        let loads = self.descriptor_loads.1.get(&sampler)?;
+        match loads.iter().collect::<Vec<_>>().as_slice() {
+            [(Some(from), offset)] if *from == table => Some(*offset),
+            _ => None,
+        }
     }
 
     /// The source of a texture first sampled through `descriptor`: the next slot, and the table
@@ -1142,7 +1161,7 @@ impl Wavefront<'_> {
         if slot > 1 {
             return Err("this shader reads more than two textures, and two bindings exist (D690)");
         }
-        let (table, table_offset) = match self.descriptor_loads.get(&descriptor) {
+        let (table, table_offset) = match self.descriptor_loads.0.get(&descriptor) {
             None => (TableBase::default(), None),
             Some(loads) if loads.len() == 1 => match loads.first().copied() {
                 Some((Some(table), offset)) => (table, Some(offset)),
@@ -1174,6 +1193,7 @@ impl Wavefront<'_> {
             slot,
             table_offset,
             table,
+            sampler_offset: None,
         })
     }
 }
@@ -1496,7 +1516,7 @@ impl<'a> Wavefront<'a> {
             f16_type: None,
             u16_type: None,
             textures: Vec::new(),
-            descriptor_loads: BTreeMap::new(),
+            descriptor_loads: Default::default(),
             stored: None,
             bool_type,
             lane_ptr: files.lane_ptr,
@@ -2764,6 +2784,11 @@ pub struct TextureSource {
     /// Where the table's address came from.
     #[serde(default)]
     pub table: TableBase,
+    /// The sampler descriptor's byte offset in the same table, when the module samples through one
+    /// it loaded from there. `None` for a fetch, which names no sampler, and for a sampler that
+    /// came from anywhere else: the texture is then read with default sampling.
+    #[serde(default)]
+    pub sampler_offset: Option<u32>,
 }
 
 /// One half of a descriptor table's 64-bit address, as the program formed it before loading from
@@ -2810,9 +2835,9 @@ fn descriptor_table_loads(
     decode: &Decode,
     encodings: &EncodingTable,
     first_register: u32,
-) -> BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>> {
-    let mut loads: BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>> =
-        BTreeMap::new();
+) -> (DescriptorLoads, DescriptorLoads) {
+    let mut loads: DescriptorLoads = BTreeMap::new();
+    let mut sampler_loads: DescriptorLoads = BTreeMap::new();
     // What each scalar register holds, in program order: a user-data word from where the hardware
     // loads the stage's, or a constant a move put there. Anything else written is untraced.
     let mut held: Vec<Option<TableWord>> = vec![None; model::SCALAR_REGISTERS as usize];
@@ -2859,15 +2884,21 @@ fn descriptor_table_loads(
                     Operand::Immediate(offset),
                 ],
             ) => {
-                if name == "s_load_dwordx8"
+                // Eight words is an image descriptor, four a sampler descriptor, kept apart so a
+                // sampler's load is never taken for an image's.
+                let into = match name {
+                    "s_load_dwordx8" => Some(&mut loads),
+                    "s_load_dwordx4" => Some(&mut sampler_loads),
+                    _ => None,
+                };
+                if let Some(into) = into
                     && let Ok(offset) = u32::try_from(*offset)
                 {
                     let at = |register: u16| held.get(usize::from(register)).copied().flatten();
                     let table = at(*base)
                         .zip(at(base + 1))
                         .map(|(low, high)| TableBase { low, high });
-                    loads
-                        .entry(u32::from(*destination))
+                    into.entry(u32::from(*destination))
                         .or_default()
                         .insert((table, offset));
                 }
@@ -2895,8 +2926,12 @@ fn descriptor_table_loads(
             _ => {}
         }
     }
-    loads
+    (loads, sampler_loads)
 }
+
+/// Descriptor loads by the first register they fill: the table each was loaded from (when the
+/// program formed its address from user data or constants) and the byte offset.
+type DescriptorLoads = BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>>;
 
 /// Every attribute the shader interpolates, in order and without repeats, with how it is read.
 ///

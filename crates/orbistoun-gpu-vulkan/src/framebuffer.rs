@@ -1310,6 +1310,40 @@ fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged {
     }
 }
 
+/// The sampler for a texture of `levels` mip levels, sampled as its sampler descriptor asks; the
+/// default - point sampling clamped to the edge - for a texture no sampler names, so a test that
+/// names a texel gets exactly that texel.
+fn sampler_info(
+    sampling: orbistoun_gpu::TextureSampling,
+    levels: u32,
+) -> vk::SamplerCreateInfo<'static> {
+    let address = |wrap: orbistoun_gpu::TextureWrap| match wrap {
+        orbistoun_gpu::TextureWrap::Repeat => vk::SamplerAddressMode::REPEAT,
+        orbistoun_gpu::TextureWrap::Mirror => vk::SamplerAddressMode::MIRRORED_REPEAT,
+        orbistoun_gpu::TextureWrap::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+    };
+    let filter = |filter: orbistoun_gpu::TextureFilter| match filter {
+        orbistoun_gpu::TextureFilter::Nearest => vk::Filter::NEAREST,
+        orbistoun_gpu::TextureFilter::Linear => vk::Filter::LINEAR,
+    };
+    // Mip filter none reads the base level only, which a maximum level of zero gives. Otherwise the
+    // levels' span: without it the sampler clamps every level request to zero and a levelled sample
+    // reads the fine level, indistinguishable from a translation that ignored the level operand.
+    let (mipmap_mode, max_lod) = match sampling.mip {
+        orbistoun_gpu::MipFilter::None => (vk::SamplerMipmapMode::NEAREST, 0.0),
+        orbistoun_gpu::MipFilter::Nearest => (vk::SamplerMipmapMode::NEAREST, f32_from(levels - 1)),
+        orbistoun_gpu::MipFilter::Linear => (vk::SamplerMipmapMode::LINEAR, f32_from(levels - 1)),
+    };
+    vk::SamplerCreateInfo::default()
+        .mag_filter(filter(sampling.magnify))
+        .min_filter(filter(sampling.minify))
+        .mipmap_mode(mipmap_mode)
+        .address_mode_u(address(sampling.wrap[0]))
+        .address_mode_v(address(sampling.wrap[1]))
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .max_lod(max_lod)
+}
+
 /// Creates a sampled image holding `texels`, `row` of them to a row.
 ///
 /// Optimally tiled and filled by a staging copy: `R8G8B8A8_UNORM` must support sampling with
@@ -1321,6 +1355,7 @@ fn create_texture(
     texels: &[u32],
     row: u32,
     coarse_level: bool,
+    sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
     let device = devices.device;
     let Staged {
@@ -1410,17 +1445,7 @@ fn create_texture(
     let view = unsafe { device.create_image_view(&view_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_image_view(texture)", e))?;
 
-    // Nearest filtering and clamping, so a test that names a texel gets exactly that texel.
-    let sampler_info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::NEAREST)
-        .min_filter(vk::Filter::NEAREST)
-        .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        // Without this the sampler clamps every level request to zero and a levelled sample reads
-        // the fine level, indistinguishable from a translation that ignored the level operand.
-        .max_lod(f32_from(levels - 1));
+    let sampler_info = sampler_info(sampling, levels);
     // SAFETY: the create info outlives the call and the device is live.
     let sampler = unsafe { device.create_sampler(&sampler_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_sampler", e))?;
@@ -1673,10 +1698,13 @@ pub(crate) fn draw_vertices(
             scissor,
             initial: start.initial,
             user_data: start.user_data,
-            texture: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+            textures: &TexturesBound {
+                first: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+                second: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+                sampling: start.sampling,
+            },
             blend: start.blend,
             viewport: start.viewport,
-            second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
             cull: start.cull,
             draw_buffers: &DrawBuffersBound {
                 buffers: start.buffers,
@@ -1706,6 +1734,8 @@ pub(crate) struct Start<'a> {
     pub(crate) viewport: Option<orbistoun_gpu::ViewportTransform>,
     /// The second texture and its row length.
     pub(crate) second_texture: Option<(&'a [u32], u32)>,
+    /// How each of the two textures is sampled, as its sampler descriptor says.
+    pub(crate) sampling: [orbistoun_gpu::TextureSampling; 2],
     /// The draw's pipeline, as the backend hashed it: a resident draw with a key reuses the
     /// pipeline built for the last draw with the same key. `None` builds afresh.
     pub(crate) pipeline_key: Option<std::num::NonZeroU64>,
@@ -3514,17 +3544,19 @@ fn create_bound_resources(
     let buffers = [observation, guest_memory];
     let texture = create_texture(
         devices,
-        bound.texture.0,
-        bound.texture.1,
+        bound.textures.first.0,
+        bound.textures.first.1,
         bound.coarse_level,
+        bound.textures.sampling[0],
     )?;
     // The second texture unit: a pixel shader that samples two textures reads the second here. The
     // default white texel when nothing asked for one.
     let second_texture = create_texture(
         devices,
-        bound.second_texture.0,
-        bound.second_texture.1,
+        bound.textures.second.0,
+        bound.textures.second.1,
         false,
+        bound.textures.sampling[1],
     )?;
     let storage_image = create_storage_image(devices, STORAGE_IMAGE_SIZE)?;
     // One dispatch's span of the draw-data buffer; the batch's offset is given at bind (D718).
@@ -4030,10 +4062,13 @@ pub(crate) fn draw_resident(
             guest_buffer: Some(guest_buffer),
             scissor,
             user_data: start.user_data,
-            texture: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+            textures: &TexturesBound {
+                first: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+                second: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+                sampling: start.sampling,
+            },
             blend: start.blend,
             viewport: start.viewport,
-            second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
             resident: Some(resident),
             pipeline_key: start.pipeline_key,
             depth: start.depth.as_ref(),
@@ -4077,7 +4112,10 @@ pub fn draw_mesh_over_texture(
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
-            texture,
+            textures: &TexturesBound {
+                first: texture,
+                ..NO_TEXTURES
+            },
             ..Bound::default()
         },
     )
@@ -4117,8 +4155,9 @@ struct Bound<'a> {
     windows: [usize; 2],
     /// What the guest-memory window holds before the draw.
     memory: &'a [u32],
-    /// The texels of the sampled image, and how many of them make one row.
-    texture: (&'a [u32], u32),
+    /// The sampled images and how they are sampled. By reference, so `Bound` stays cheap to pass
+    /// by value.
+    textures: &'a TexturesBound<'a>,
     /// The rectangle rasterisation is restricted to, or [`None`] for the whole attachment.
     scissor: Option<vk::Rect2D>,
     /// A caller-owned buffer bound as the guest-memory window (binding 1): a resident buffer
@@ -4141,8 +4180,6 @@ struct Bound<'a> {
     viewport: Option<orbistoun_gpu::ViewportTransform>,
     /// Draw into this attachment in place; `None` draws into a fresh one.
     resident: Option<&'a ResidentAttachment>,
-    /// The second sampled image's texels and row length; the default texel otherwise.
-    second_texture: (&'a [u32], u32),
     /// The key a resident draw's pipeline is cached under; `None` builds and releases one per draw.
     /// Non-zero so the option costs no space.
     pipeline_key: Option<std::num::NonZeroU64>,
@@ -4170,6 +4207,24 @@ struct DrawBuffersBound<'a> {
     layout: Option<vk::DescriptorSetLayout>,
 }
 
+/// The textures a draw samples, each as its texels and row length, and how each is sampled.
+#[derive(Clone, Copy)]
+struct TexturesBound<'a> {
+    /// The first sampled image; the default texel when nothing bound one.
+    first: (&'a [u32], u32),
+    /// The second, likewise.
+    second: (&'a [u32], u32),
+    /// How each is sampled, as its sampler descriptor says.
+    sampling: [orbistoun_gpu::TextureSampling; 2],
+}
+
+/// A draw that samples no texture: the default texel in both slots, point-sampled.
+static NO_TEXTURES: TexturesBound<'static> = TexturesBound {
+    first: (&NO_TEXTURE, 1),
+    second: (&NO_TEXTURE, 1),
+    sampling: [orbistoun_gpu::TextureSampling::CLAMPED_POINT; 2],
+};
+
 /// A draw that binds no buffers.
 static NO_DRAW_BUFFERS: DrawBuffersBound<'static> = DrawBuffersBound {
     buffers: [&[], &[]],
@@ -4185,7 +4240,7 @@ impl Default for Bound<'_> {
         Self {
             windows: DEFAULT_WINDOWS,
             memory: &[],
-            texture: (&NO_TEXTURE, 1),
+            textures: &NO_TEXTURES,
             scissor: None,
             guest_buffer: None,
             initial: None,
@@ -4194,7 +4249,6 @@ impl Default for Bound<'_> {
             coarse_level: false,
             viewport: None,
             resident: None,
-            second_texture: (&NO_TEXTURE, 1),
             pipeline_key: None,
             depth: None,
             cull: None,
@@ -4453,7 +4507,10 @@ pub fn draw_with_texture(
         Some((vertex_words, fragment_words)),
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
-            texture,
+            textures: &TexturesBound {
+                first: texture,
+                ..NO_TEXTURES
+            },
             coarse_level: true,
             ..Bound::default()
         },

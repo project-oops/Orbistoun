@@ -594,11 +594,13 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 slot: 0,
                 table_offset: Some(0x40),
                 table: TableBase::default(),
+                sampler_offset: None,
             },
             TextureSource {
                 slot: 1,
                 table_offset: Some(0x00),
                 table: TableBase::default(),
+                sampler_offset: None,
             },
         ]
     );
@@ -647,5 +649,71 @@ fn a_descriptor_rewritten_between_samples_is_refused() {
     assert!(
         detail.contains("written"),
         "refused, but not for the descriptor being rewritten: {detail}"
+    );
+}
+
+/// A sampler loaded from the descriptor table is reported with its offset, beside the image's, so a
+/// pipeline reads the guest's own wrap and filter modes: here the image at 0x00 and the sampler at
+/// 0x20 of the table at the stage's first two user-data words, the layout the SDK's GL layer packs
+/// and Bugdom's pixel shaders load (`s_load_dwordx8 s[4:11], s[0:1], 0` and
+/// `s_load_dwordx4 s[12:15], s[0:1], 0x20`).
+#[test]
+fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
+    use orbistoun_translate::wavefront::{
+        MeshPrimitive, TableBase, TextureSource, UserData, Window,
+    };
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load = |name: &str, dst: u32, offset: u32| {
+        let (family, opcode) = encodings.find_by_name(name).expect("the target has it");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    for word in s_load("s_load_dwordx8", IMAGE_DESCRIPTOR, 0x00)
+        .into_iter()
+        .chain(s_load("s_load_dwordx4", SAMPLER_DESCRIPTOR, 0x20))
+    {
+        bytes.extend(word.to_le_bytes());
+    }
+    let words = image_sample_words(39);
+    for word in [words[0], words[1], 0xBF81_0000] {
+        bytes.extend(word.to_le_bytes());
+    }
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("the sample translates");
+    assert_eq!(
+        translated.textures,
+        [TextureSource {
+            slot: 0,
+            table_offset: Some(0x00),
+            table: TableBase::default(),
+            sampler_offset: Some(0x20),
+        }]
     );
 }

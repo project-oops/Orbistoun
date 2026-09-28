@@ -145,6 +145,8 @@ pub enum RenderCommand {
         width: u32,
         /// Height in texels.
         height: u32,
+        /// How the draws sample it, from the sampler descriptor the pixel shader names.
+        sampling: crate::registers::TextureSampling,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).

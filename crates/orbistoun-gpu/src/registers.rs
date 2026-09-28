@@ -1808,6 +1808,105 @@ pub struct ImageDescriptor {
     pub tiling: SwizzleMode,
 }
 
+/// How a texture coordinate outside `[0, 1]` is brought back: `SQ_IMG_SAMP_WORD0.CLAMP_X/Y`
+/// (`gfx10-rsrc.json:462-463`), values as radeonsi's `si_tex_wrap` writes them and the SDK's GL
+/// layer uses on hardware (oops-sdk `gl_state.c:gl_hw_wrap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureWrap {
+    /// `SQ_TEX_WRAP` (0): repeat.
+    Repeat,
+    /// `SQ_TEX_MIRROR` (1): mirrored repeat.
+    Mirror,
+    /// `SQ_TEX_CLAMP_LAST_TEXEL` (2): clamp to the edge texel.
+    ClampToEdge,
+}
+
+/// A texture filter: `SQ_IMG_SAMP_WORD2.XY_MAG_FILTER` / `XY_MIN_FILTER` (`gfx10-rsrc.json:490-491`),
+/// 0 point and 1 bilinear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureFilter {
+    /// Point sampling.
+    Nearest,
+    /// Bilinear.
+    Linear,
+}
+
+/// Between mip levels: `SQ_IMG_SAMP_WORD2.MIP_FILTER` (`gfx10-rsrc.json:493`), 0 none, 1 point, 2
+/// linear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MipFilter {
+    /// The base level only.
+    None,
+    /// The nearest level.
+    Nearest,
+    /// Between the two nearest levels.
+    Linear,
+}
+
+/// How a texture is sampled, from its sampler descriptor (an S#).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureSampling {
+    /// The wrap across and down.
+    pub wrap: [TextureWrap; 2],
+    /// Magnifying.
+    pub magnify: TextureFilter,
+    /// Minifying.
+    pub minify: TextureFilter,
+    /// Between levels.
+    pub mip: MipFilter,
+}
+
+impl TextureSampling {
+    /// Point sampling clamped to the edge: what a texture no sampler names is read with, such as
+    /// one only fetched by index.
+    pub const CLAMPED_POINT: Self = Self {
+        wrap: [TextureWrap::ClampToEdge; 2],
+        magnify: TextureFilter::Nearest,
+        minify: TextureFilter::Nearest,
+        mip: MipFilter::Nearest,
+    };
+}
+
+impl Default for TextureSampling {
+    /// [`Self::CLAMPED_POINT`].
+    fn default() -> Self {
+        Self::CLAMPED_POINT
+    }
+}
+
+/// Decodes a sampler descriptor's four words into how it samples, or names the field it cannot
+/// honour exactly: a border or half-border clamp (which needs the border colour), a mirror-once
+/// mode, an anisotropic filter, or a reserved value. Only the wrap across and down and the three
+/// filters are read; a 2D texture has no third coordinate.
+pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
+    let wrap = |value: u32| match value {
+        0 => Ok(TextureWrap::Repeat),
+        1 => Ok(TextureWrap::Mirror),
+        2 => Ok(TextureWrap::ClampToEdge),
+        _ => Err(concat!(
+            "the sampler clamps to a border or mirrors once, which needs its border colour ",
+            "or a mode with no exact host form"
+        )),
+    };
+    let filter = |value: u32| match value {
+        0 => Ok(TextureFilter::Nearest),
+        1 => Ok(TextureFilter::Linear),
+        _ => Err("the sampler filters anisotropically, which is not reproduced"),
+    };
+    let mip = match (words[2] >> 26) & 0x3 {
+        0 => MipFilter::None,
+        1 => MipFilter::Nearest,
+        2 => MipFilter::Linear,
+        _ => return Err("the sampler's mip filter is a reserved value"),
+    };
+    Ok(TextureSampling {
+        wrap: [wrap(words[0] & 0x7)?, wrap((words[0] >> 3) & 0x7)?],
+        magnify: filter((words[2] >> 20) & 0x3)?,
+        minify: filter((words[2] >> 22) & 0x3)?,
+        mip,
+    })
+}
+
 /// A scissor rectangle - the region a guest restricts rasterisation to - decoded from the
 /// `GENERIC_SCISSOR` top-left and bottom-right register pair.
 ///
@@ -1896,6 +1995,54 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 
 #[cfg(test)]
 mod tests {
+
+    /// Sampler words as the SDK's GL layer writes them (`gl_state.c`: `cx | cy << 3` in word 0,
+    /// `mag << 20 | min << 22 | mip << 26` in word 2) decode to the wrap and filters asked for; a
+    /// border clamp and an anisotropic filter are refused rather than approximated.
+    #[test]
+    fn a_sampler_descriptor_decodes_to_its_wrap_and_filters() {
+        use super::{MipFilter, TextureFilter, TextureWrap, decode_sampler_descriptor};
+        let words = |cx: u32, cy: u32, mag: u32, min: u32, mip: u32| {
+            [
+                cx | (cy << 3),
+                0,
+                (mag << 20) | (min << 22) | (mip << 26),
+                0,
+            ]
+        };
+        let repeat_linear = decode_sampler_descriptor(words(0, 1, 1, 1, 2)).expect("decodes");
+        assert_eq!(
+            repeat_linear.wrap,
+            [TextureWrap::Repeat, TextureWrap::Mirror]
+        );
+        assert_eq!(
+            (
+                repeat_linear.magnify,
+                repeat_linear.minify,
+                repeat_linear.mip
+            ),
+            (
+                TextureFilter::Linear,
+                TextureFilter::Linear,
+                MipFilter::Linear
+            )
+        );
+        let clamped = decode_sampler_descriptor(words(2, 2, 0, 0, 0)).expect("decodes");
+        assert_eq!(clamped.wrap, [TextureWrap::ClampToEdge; 2]);
+        assert_eq!(clamped.mip, MipFilter::None);
+        assert!(
+            decode_sampler_descriptor(words(6, 0, 0, 0, 0)).is_err(),
+            "border"
+        );
+        assert!(
+            decode_sampler_descriptor(words(0, 4, 0, 0, 0)).is_err(),
+            "half border"
+        );
+        assert!(
+            decode_sampler_descriptor(words(0, 0, 2, 0, 0)).is_err(),
+            "aniso"
+        );
+    }
 
     /// The sweep answers what the whole stream would, forwards, backwards and past the table.
     #[test]

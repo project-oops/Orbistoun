@@ -163,6 +163,7 @@ struct BoundTexture {
     texels: std::sync::Arc<[u32]>,
     width: u32,
     hash: u64,
+    sampling: orbistoun_gpu::TextureSampling,
 }
 
 /// A bound module's words and their content hash.
@@ -429,6 +430,7 @@ impl VulkanBackend {
         slot: u32,
         (texels, hash): (&std::sync::Arc<[u32]>, u64),
         (width, height): (u32, u32),
+        sampling: orbistoun_gpu::TextureSampling,
     ) -> Result<(), BackendError> {
         if texels.len() != (width as usize) * (height as usize) {
             return Err(BackendError::Device(format!(
@@ -441,6 +443,7 @@ impl VulkanBackend {
             texels: std::sync::Arc::clone(texels),
             width,
             hash,
+            sampling,
         });
         match slot {
             0 => self.texture = bound,
@@ -829,10 +832,14 @@ impl VulkanBackend {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (shaders, extent).hash(&mut hasher);
-        self.texture.as_ref().map(|t| t.hash).hash(&mut hasher);
+        // The samplers too: each is built with its pipeline's descriptor set.
+        self.texture
+            .as_ref()
+            .map(|t| (t.hash, t.sampling))
+            .hash(&mut hasher);
         self.second_texture
             .as_ref()
-            .map(|t| t.hash)
+            .map(|t| (t.hash, t.sampling))
             .hash(&mut hasher);
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
@@ -1039,6 +1046,13 @@ impl VulkanBackend {
             blend: self.blend,
             viewport: self.viewport_transform,
             second_texture: second_texture.as_ref().map(|t| (&t.texels[..], t.width)),
+            sampling: [
+                texture.as_ref().map(|t| t.sampling).unwrap_or_default(),
+                second_texture
+                    .as_ref()
+                    .map(|t| t.sampling)
+                    .unwrap_or_default(),
+            ],
             pipeline_key: Some(pipeline_key),
             depth,
             cull: self.cull,
@@ -1270,7 +1284,8 @@ impl RenderBackend for VulkanBackend {
                 hash,
                 width,
                 height,
-            } => self.bind_texture(*slot, (texels, *hash), (*width, *height)),
+                sampling,
+            } => self.bind_texture(*slot, (texels, *hash), (*width, *height), *sampling),
             RenderCommand::BindDrawBuffers { stage, buffers } => {
                 self.bind_draw_buffers(*stage, buffers)
             }
