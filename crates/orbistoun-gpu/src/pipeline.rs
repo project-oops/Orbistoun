@@ -874,7 +874,8 @@ impl Pipeline {
             Some((crate::depth::depth_target_id(&target), target, extent))
         });
         if let Some(extent) = colour_target_extent_at(&writes) {
-            let target = colour_target_id(extent);
+            let base = colour_target_at(&writes).map(|target| target.base);
+            let target = colour_target_id(extent, base);
             submission.targets.insert(target, extent);
             submission.commands.push(RenderCommand::SetRenderTargets {
                 colour: vec![target],
@@ -2421,15 +2422,26 @@ pub const fn guest_address_of(gpu_address: u64) -> u64 {
     gpu_address
 }
 
-/// A content-addressed id for a colour target of a given extent.
+/// An id for a colour target of a given extent at a given base address.
 ///
-/// Keyed by extent rather than base address, because sources agree on the size register and not on
-/// the base register's offset (D702). The backend stores nothing per target, so two same-sized
-/// targets sharing an id is harmless. The top bit keeps target ids disjoint from shader ids, which
-/// count up from one; width and height are at most fourteen bits each, so the extent fits below it.
-fn colour_target_id(extent: ColourTargetExtent) -> ResourceId {
+/// Keyed on the address as well as the extent, as D702 set out for when the backend kept anything
+/// per target: it keeps each target's frame on the device until the flip (D714), so a
+/// double-buffered title's two same-sized targets sharing an id handed one buffer's frame to the
+/// other. A stream that sets no base keeps the extent alone. The top bit keeps target ids disjoint
+/// from shader ids, which count up from one.
+fn colour_target_id(extent: ColourTargetExtent, base: Option<u64>) -> ResourceId {
+    use std::hash::{Hash, Hasher};
     const TARGET_NAMESPACE: u64 = 1 << 63;
-    ResourceId(TARGET_NAMESPACE | (u64::from(extent.width) << 16) | u64::from(extent.height))
+    let key = match base {
+        // Width and height are at most fourteen bits each, so the extent fits below the top bit.
+        None => (u64::from(extent.width) << 16) | u64::from(extent.height),
+        Some(base) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (base, extent.width, extent.height).hash(&mut hasher);
+            hasher.finish() & !TARGET_NAMESPACE
+        }
+    };
+    ResourceId(TARGET_NAMESPACE | key)
 }
 
 /// The smallest window worth trying: one instruction that ends a program.
