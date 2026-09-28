@@ -241,6 +241,8 @@ pub mod op {
     /// Ordered means false when either operand is a NaN, as the guest's comparison is. The
     /// unordered forms answer true.
     pub const FORD_EQUAL: u16 = 180;
+    /// Unordered float inequality: true when the operands differ or either is a NaN.
+    pub const FUNORD_NOT_EQUAL: u16 = 183;
     /// Ordered float less-than.
     pub const FORD_LESS_THAN: u16 = 184;
     /// Ordered float greater-than.
@@ -2022,6 +2024,13 @@ static SHAPES: &[ShapeEntry] = &[
     (op::BIT_COUNT, Some(1), &[0, 2], None, RestStride::Every),
     (op::INOT_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::FORD_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
+    (
+        op::FUNORD_NOT_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
     (
         op::FORD_LESS_THAN,
         Some(1),

@@ -112,6 +112,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_eq_f32_e32",
     "v_cmp_gt_f32_e32",
     "v_cmp_lt_f32_e32",
+    "v_cmp_neq_f32_e32",
     "v_cmp_lt_u32_e32",
     "v_cmp_ge_u32_e32",
     "v_cmp_ne_i32_e32",
@@ -1812,8 +1813,10 @@ fn vector_instruction<M: Model + ?Sized>(
     match name {
         // Comparisons, which produce masks: every lane compares, and the answers become one value
         // the shader can and into `exec`.
-        "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_lt_u32_e32"
-        | "v_cmp_ge_u32_e32" | "v_cmp_ne_i32_e32" => compare(model, instruction, name),
+        "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_neq_f32_e32"
+        | "v_cmp_lt_u32_e32" | "v_cmp_ge_u32_e32" | "v_cmp_ne_i32_e32" => {
+            compare(model, instruction, name)
+        }
 
         // The long-form integer compare, into a register pair or a named mask.
         "v_cmp_ne_i32_e64" => compare_long(model, instruction, name),
@@ -3375,6 +3378,8 @@ fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), 
         "v_cmp_lt_f32_e32" => Ok((op::FORD_LESS_THAN, true)),
         "v_cmp_eq_f32_e32" => Ok((op::FORD_EQUAL, true)),
         "v_cmp_gt_f32_e32" => Ok((op::FORD_GREATER_THAN, true)),
+        // Not equal or unordered: true for a NaN, where `v_cmp_lg_f32` is the ordered form.
+        "v_cmp_neq_f32_e32" => Ok((op::FUNORD_NOT_EQUAL, true)),
         "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
         "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
         "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),

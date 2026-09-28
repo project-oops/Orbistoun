@@ -778,6 +778,13 @@ operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, impl
 
 [[opcode_operands]]
 family = "VOPC"
+opcode = 13
+mnemonic = "v_cmp_neq_f32_e32"
+samples = 4
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
 opcode = 133
 mnemonic = "v_cmp_ne_i32_e32"
 samples = 5

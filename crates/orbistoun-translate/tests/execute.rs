@@ -5285,3 +5285,35 @@ fn the_index_packing_shifts_and_ors() {
     assert_eq!(vector(&registers, 2), (3 << 20) | 0x801);
     assert_eq!(vector(&registers, 4), 0xf000_0801);
 }
+
+/// `v_cmp_neq_f32` is not-equal-or-unordered: true for two different values and whenever either
+/// is a NaN, false for equal ones (the form LLVM selects for `fcmp une`; `v_cmp_lg_f32` is the
+/// ordered one). Bugdom 2's fragment shaders test with it.
+#[test]
+fn not_equal_is_true_for_a_nan() {
+    if !device_or_skip("not_equal_is_true_for_a_nan") {
+        return;
+    }
+    let lanes_written = |left: u32, right: u32| -> u32 {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, left));
+        program.extend(v_mov_literal(1, right));
+        program.extend([
+            v_cmp_f32("v_cmp_neq_f32_e32", vgpr_code(0), 1),
+            s_logic_b64("s_and_b64", 126, 126, 106),
+            v_mov_inline(2, 63),
+            s_endpgm(),
+        ]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    let (one, two) = (1.0_f32.to_bits(), 2.0_f32.to_bits());
+    assert_eq!(lanes_written(one, two), 63, "1.0 != 2.0");
+    assert_eq!(lanes_written(one, one), 0, "1.0 == 1.0");
+    assert_eq!(lanes_written(BITS_QUIET_NAN, one), 63, "NaN is unordered");
+    assert_eq!(
+        lanes_written(BITS_QUIET_NAN, BITS_QUIET_NAN),
+        63,
+        "NaN != NaN"
+    );
+}
