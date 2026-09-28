@@ -1755,14 +1755,29 @@ pub(crate) struct Start<'a> {
 /// x_ndc + x_offset`. So `width = 2 * x_scale` and `x = x_offset - x_scale`, and likewise for y,
 /// where a negative `y_scale` becomes a negative height (core since Vulkan 1.1): the flip the guest
 /// asked for.
+///
+/// Depth likewise: Vulkan maps `depth = min + (max - min) * t`, where `t` is `ndc_z` clipped to
+/// `0..1`, or `(ndc_z + 1) / 2` under a negative-one-to-one pipeline; the guest maps `depth =
+/// z_scale * ndc_z + z_offset`. So `min = z_offset - z_scale`, `max = z_offset + z_scale` for a
+/// guest clipping to `-w..w`, and `min = z_offset`, `max = z_offset + z_scale` for one clipping to
+/// `0..w`.
 pub(crate) fn guest_viewport(transform: orbistoun_gpu::ViewportTransform) -> vk::Viewport {
+    let depth = transform.depth;
+    let (min_depth, max_depth) = if depth.negative_one_to_one {
+        (
+            depth.z_offset - depth.z_scale,
+            depth.z_offset + depth.z_scale,
+        )
+    } else {
+        (depth.z_offset, depth.z_offset + depth.z_scale)
+    };
     vk::Viewport {
         x: transform.x_offset - transform.x_scale,
         y: transform.y_offset - transform.y_scale,
         width: 2.0 * transform.x_scale,
         height: 2.0 * transform.y_scale,
-        min_depth: 0.0,
-        max_depth: 1.0,
+        min_depth,
+        max_depth,
     }
 }
 
@@ -1813,6 +1828,16 @@ fn viewport_within_limits(
             viewport.height,
             low = low,
             high = high,
+        )));
+    }
+    // Outside `0..1` needs `VK_EXT_depth_range_unrestricted`, which nothing here enables.
+    if [viewport.min_depth, viewport.max_depth]
+        .into_iter()
+        .any(|depth| !(0.0..=1.0).contains(&depth))
+    {
+        return Err(DispatchError::Unsupported(format!(
+            "a depth range of {}..{} reaches outside 0..1",
+            viewport.min_depth, viewport.max_depth
         )));
     }
     Ok(())
@@ -3803,9 +3828,26 @@ fn create_graphics_pipeline(
     let scissors = [bound
         .scissor
         .map_or(full, |rect| clamp_scissor(rect, width, height))];
+    // A guest clipping z to `-w..w`, as GL does, clips so here too: under Vulkan's own `0..w`
+    // everything nearer than the middle of its depth range is lost, the near plane's HUD with it.
+    let negative_one_to_one = bound
+        .viewport
+        .is_some_and(|transform| transform.depth.negative_one_to_one);
+    if negative_one_to_one && !crate::compute::depth_clip_control() {
+        return Err(DispatchError::Unsupported(
+            "the guest clips z to -w..w and the device has no VK_EXT_depth_clip_control".to_owned(),
+        ));
+    }
+    let mut clip_control =
+        vk::PipelineViewportDepthClipControlCreateInfoEXT::default().negative_one_to_one(true);
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewports(&viewports)
         .scissors(&scissors);
+    let viewport_state = if negative_one_to_one {
+        viewport_state.push_next(&mut clip_control)
+    } else {
+        viewport_state
+    };
     // The guest's cull state; culling off when it set none, so winding order cannot fail a draw.
     let (cull_mode, front_face) = crate::depth::rasterisation(bound.cull);
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
@@ -4557,6 +4599,7 @@ mod tests {
             x_offset: 960.0,
             y_scale: -540.0,
             y_offset: 540.0,
+            depth: orbistoun_gpu::DepthMapping::IDENTITY,
         });
         assert_eq!(
             (flipped.x, flipped.width, flipped.y, flipped.height),
@@ -4567,10 +4610,39 @@ mod tests {
             x_offset: 32.0,
             y_scale: 32.0,
             y_offset: 32.0,
+            depth: orbistoun_gpu::DepthMapping::IDENTITY,
         });
         assert_eq!(
             (upright.x, upright.width, upright.y, upright.height),
             (0.0, 64.0, 0.0, 64.0)
+        );
+    }
+
+    /// The guest's depth mapping becomes the viewport's depth range: a GL context's
+    /// `glDepthRange(n, f)` (`ZSCALE = (f - n) / 2`, `ZOFFSET = (f + n) / 2`, clip z `-w..w`) is
+    /// exactly `n..f` under a negative-one-to-one pipeline, and z taken unchanged is `0..1`.
+    #[test]
+    fn the_guest_s_depth_mapping_is_the_viewport_s_depth_range() {
+        let with = |depth| {
+            guest_viewport(orbistoun_gpu::ViewportTransform {
+                x_scale: 960.0,
+                x_offset: 960.0,
+                y_scale: -540.0,
+                y_offset: 540.0,
+                depth,
+            })
+        };
+        let gl = |near: f32, far: f32| orbistoun_gpu::DepthMapping {
+            negative_one_to_one: true,
+            z_scale: (far - near) / 2.0,
+            z_offset: f32::midpoint(far, near),
+        };
+        let range = |viewport: ash::vk::Viewport| (viewport.min_depth, viewport.max_depth);
+        assert_eq!(range(with(gl(0.0, 1.0))), (0.0, 1.0));
+        assert_eq!(range(with(gl(0.25, 0.75))), (0.25, 0.75));
+        assert_eq!(
+            range(with(orbistoun_gpu::DepthMapping::IDENTITY)),
+            (0.0, 1.0)
         );
     }
 

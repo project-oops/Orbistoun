@@ -244,6 +244,7 @@ fn a_window_space_rectangle_covers_the_pixels_its_corners_name() {
         x_offset: 0.0,
         y_scale: WINDOW_SPACE_SCALE,
         y_offset: 0.0,
+        depth: orbistoun_gpu::DepthMapping::IDENTITY,
     };
     for reciprocal_w in [1.0f32, 0.5] {
         let corners = [[2.0f32, 1.0], [2.0, 5.0], [6.0, 1.0]];

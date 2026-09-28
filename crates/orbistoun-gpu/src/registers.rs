@@ -1473,6 +1473,18 @@ const PA_CL_VPORT_XSCALE: u32 = 0xA10F;
 const PA_CL_VTE_CNTL: u32 = 0xA206;
 /// `VPORT_X_SCALE_ENA` through `VPORT_Y_OFFSET_ENA`.
 const VTE_XY_ENABLES: u32 = 0xF;
+/// `VPORT_Z_SCALE_ENA`, `PA_CL_VTE_CNTL` bit 4 (`gfx103.json:13363`).
+const VTE_Z_SCALE_ENA: u32 = 1 << 4;
+/// `VPORT_Z_OFFSET_ENA`, bit 5.
+const VTE_Z_OFFSET_ENA: u32 = 1 << 5;
+/// `PA_CL_VPORT_ZSCALE` (`gfx103.json:3600`, byte `164940`, dword `0xA113`); `PA_CL_VPORT_ZOFFSET`
+/// follows it at `0xA114`.
+const PA_CL_VPORT_ZSCALE: u32 = 0xA113;
+/// `PA_CL_CLIP_CNTL` (`gfx103.json:4653`, byte `165904`, dword `0xA204`).
+const PA_CL_CLIP_CNTL: u32 = 0xA204;
+/// `DX_CLIP_SPACE_DEF`, `PA_CL_CLIP_CNTL` bit 19 (`gfx103.json:13275`): set, clip-space z runs
+/// `0..w`; clear, `-w..w` as GL's does.
+const DX_CLIP_SPACE_DEF: u32 = 1 << 19;
 
 /// The viewport transform a draw's clip-space positions are mapped to the target with:
 /// `x = x_scale * ndc_x + x_offset`, `y = y_scale * ndc_y + y_offset`, in the target's pixels, rows
@@ -1490,6 +1502,35 @@ pub struct ViewportTransform {
     pub y_scale: f32,
     /// `PA_CL_VPORT_YOFFSET`.
     pub y_offset: f32,
+    /// How clip-space z is clipped and becomes depth.
+    pub depth: DepthMapping,
+}
+
+/// How a draw's clip-space z is clipped and mapped to depth: the range it is clipped to, then
+/// `depth = z_scale * ndc_z + z_offset`.
+///
+/// A GL context clips z to `-w..w` and writes `ZSCALE = (far - near) / 2`, `ZOFFSET = (far + near)
+/// / 2` (`gl_draw.c`, the `glDepthRange` arm, in oops-sdk). A host clipping to `0..w` instead drops
+/// everything nearer than the middle of the depth range: Bugdom's HUD, drawn at the near plane,
+/// vanished whole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthMapping {
+    /// Clip-space z runs `-w..w`, GL's convention - `PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF` clear.
+    /// `false` is `0..w`.
+    pub negative_one_to_one: bool,
+    /// `PA_CL_VPORT_ZSCALE` when enabled; one otherwise.
+    pub z_scale: f32,
+    /// `PA_CL_VPORT_ZOFFSET` when enabled; zero otherwise.
+    pub z_offset: f32,
+}
+
+impl DepthMapping {
+    /// Clip z `0..w` taken as depth unchanged: what a stream that sets none of the registers gets.
+    pub const IDENTITY: Self = Self {
+        negative_one_to_one: false,
+        z_scale: 1.0,
+        z_offset: 0.0,
+    };
 }
 
 /// The viewport transform in force at packet `before`, from the last write of each of the four
@@ -1552,11 +1593,33 @@ pub fn viewport_transform_from(
     if last(PA_CL_VTE_CNTL).is_some_and(|value| value & VTE_XY_ENABLES != VTE_XY_ENABLES) {
         return None;
     }
+    let vte = last(PA_CL_VTE_CNTL);
+    // A z term is applied when its enable is set, or when the stream never wrote the control
+    // register, as the x/y terms are. A z register the stream never wrote leaves that term as it
+    // was before the mapping was modelled: z taken unchanged.
+    let enabled = |bit: u32| vte.is_none_or(|value| value & bit != 0);
+    let z_scale = if enabled(VTE_Z_SCALE_ENA) {
+        last(PA_CL_VPORT_ZSCALE).map_or(1.0, f32::from_bits)
+    } else {
+        1.0
+    };
+    let z_offset = if enabled(VTE_Z_OFFSET_ENA) {
+        last(PA_CL_VPORT_ZSCALE + 1).map_or(0.0, f32::from_bits)
+    } else {
+        0.0
+    };
+    let negative_one_to_one =
+        last(PA_CL_CLIP_CNTL).is_some_and(|value| value & DX_CLIP_SPACE_DEF == 0);
     Some(ViewportTransform {
         x_scale: f32::from_bits(last(PA_CL_VPORT_XSCALE)?),
         x_offset: f32::from_bits(last(PA_CL_VPORT_XSCALE + 1)?),
         y_scale: f32::from_bits(last(PA_CL_VPORT_XSCALE + 2)?),
         y_offset: f32::from_bits(last(PA_CL_VPORT_XSCALE + 3)?),
+        depth: DepthMapping {
+            negative_one_to_one,
+            z_scale,
+            z_offset,
+        },
     })
 }
 
@@ -2326,6 +2389,66 @@ mod tests {
     /// The viewport transform in force at a draw is its four registers' last writes before it: the
     /// GL context's 1080p transform has a negative y scale, and a draw before the writes, or after
     /// a `VTE_CNTL` disabling the x/y terms, has none.
+    #[test]
+    fn a_gl_context_s_depth_is_clipped_to_minus_w_and_mapped_by_its_depth_range() {
+        use super::{DepthMapping, RegisterWrite, viewport_transform_at};
+        let at = |register, value: u32| RegisterWrite {
+            packet_offset: 8,
+            register,
+            value,
+        };
+        let xy = [
+            at(0xA10F, 960f32.to_bits()),
+            at(0xA110, 960f32.to_bits()),
+            at(0xA111, (-540f32).to_bits()),
+            at(0xA112, 540f32.to_bits()),
+        ];
+        // What the GL context writes for glDepthRange(0, 1): VTE_CNTL 0x43f, ZSCALE and ZOFFSET a
+        // half, PA_CL_CLIP_CNTL zero.
+        let mut writes = xy.to_vec();
+        writes.extend([
+            at(0xA206, 0x43F),
+            at(0xA113, 0.5f32.to_bits()),
+            at(0xA114, 0.5f32.to_bits()),
+            at(0xA204, 0),
+        ]);
+        let depth = |writes: &[RegisterWrite]| {
+            viewport_transform_at(writes, 100)
+                .expect("the x/y terms were written")
+                .depth
+        };
+        assert_eq!(
+            depth(&writes),
+            DepthMapping {
+                negative_one_to_one: true,
+                z_scale: 0.5,
+                z_offset: 0.5,
+            }
+        );
+        writes.push(RegisterWrite {
+            packet_offset: 9,
+            ..at(0xA204, 1 << 19)
+        });
+        assert!(
+            !depth(&writes).negative_one_to_one,
+            "DX_CLIP_SPACE_DEF set clips to 0..w"
+        );
+        writes.push(RegisterWrite {
+            packet_offset: 10,
+            ..at(0xA206, 0x40F)
+        });
+        assert_eq!(
+            (depth(&writes).z_scale, depth(&writes).z_offset),
+            (1.0, 0.0),
+            "the z terms off take z unchanged"
+        );
+        assert_eq!(
+            depth(&xy),
+            DepthMapping::IDENTITY,
+            "a stream that set none of it keeps the identity"
+        );
+    }
+
     #[test]
     fn the_viewport_transform_is_read_with_its_sign() {
         use super::{RegisterWrite, viewport_transform_at};

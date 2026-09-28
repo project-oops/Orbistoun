@@ -1686,6 +1686,7 @@ fn push_geometry_commands(
                     x_offset: 0.0,
                     y_scale: WINDOW_SPACE_SCALE,
                     y_offset: 0.0,
+                    depth: crate::registers::DepthMapping::IDENTITY,
                 }),
                 crate::registers::PositionSpace::Unmodelled(_) => {
                     *unmodelled_viewports += 1;

@@ -848,7 +848,20 @@ impl VulkanBackend {
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
         self.viewport_transform
-            .map(|t| [t.x_scale, t.x_offset, t.y_scale, t.y_offset].map(f32::to_bits))
+            .map(|t| {
+                (
+                    [
+                        t.x_scale,
+                        t.x_offset,
+                        t.y_scale,
+                        t.y_offset,
+                        t.depth.z_scale,
+                        t.depth.z_offset,
+                    ]
+                    .map(f32::to_bits),
+                    t.depth.negative_one_to_one,
+                )
+            })
             .hash(&mut hasher);
         self.current_viewport
             .map(|r| (r.x, r.y, r.width, r.height))
