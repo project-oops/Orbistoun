@@ -176,6 +176,9 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // not (D714), since the guest's own scanout is what is honoured. A frame due in the window
     // comes with a device copy of its own.
     let drawn_into = orbistoun_gpu::agc_driver::pending_frame_base();
+    if drawn_into.is_some() {
+        keep_every_nth_frame();
+    }
     let (written, shown) = orbistoun_gpu::agc_driver::write_back_at_this_flip_showing(due);
     if !written {
         tracing::warn!("a drawn frame could not be written back at the flip");
@@ -676,6 +679,32 @@ pub fn discard_snapshot(id: u64) {
             backend.drop_snapshot(id);
         }
     });
+}
+
+/// Keeps the frame drawn before every Nth flip, when `ORBISTOUN_FRAME_EVERY` asks.
+fn keep_every_nth_frame() {
+    static EVERY: OnceLock<Option<u64>> = OnceLock::new();
+    static FLIPS: AtomicU64 = AtomicU64::new(0);
+    let Some(every) = *EVERY.get_or_init(|| {
+        orbistoun_env::FRAME_EVERY
+            .get()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|&n| n > 0)
+    }) else {
+        return;
+    };
+    let flip = FLIPS.fetch_add(1, Ordering::Relaxed);
+    if flip % every != 0 {
+        return;
+    }
+    if let (Some((width, height, bytes)), Some(dir)) = (executed_frame(), frames_dir())
+        && let Err(e) = std::fs::write(
+            dir.join(format!("flip-{flip:06}-{width}x{height}.rgba")),
+            bytes,
+        )
+    {
+        tracing::warn!("a kept frame could not be written: {e}");
+    }
 }
 
 /// Keeps a written-back frame on disk, at most once a second, for whoever reads it after the run.
