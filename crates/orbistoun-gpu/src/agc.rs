@@ -422,6 +422,14 @@ fn dcb_set_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
+/// `sceAgcSuspendPoint(...)`: the point a title offers the system to suspend its GPU work at.
+/// Outside a system suspend it answers `0` at once and writes nothing: PPSA02664's arguments
+/// `(0x109, 3, buffer, 0, 1_000_000_000, 0)` returned `0` in 27 us with none of the buffer's 64
+/// bytes changed (obSCEne REQ-20260928T0730Z-7b14). Nothing here suspends a title.
+fn suspend_point(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `sceAgcDcbEventWrite(dcb, event_type, _)`. Measured: `166-agc/dcb-event-write`.
 fn dcb_event_write(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::event_write(args[1] as u32))
@@ -949,109 +957,113 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// family answers its measured `0x0` and writes nothing. This array is the authoritative list; its size is
 /// pinned by `tests/dcb_wiring.rs`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[
-        ("0x7d86501b8094ef57", agc_packet_payload),
-        ("sceAgcCreateShader", create_shader),
-        ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
-        ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
-        ("sceAgcCreatePrimState", create_prim_state),
-        ("sceAgcUpdatePrimState", update_prim_state),
-        ("sceAgcLinkShaders", link_shaders),
-        ("sceAgcDcbEventWrite", dcb_event_write),
-        ("sceAgcDcbSetIndexCount", dcb_set_index_count),
-        ("sceAgcDcbSetNumInstances", dcb_set_num_instances),
-        ("sceAgcDcbDrawIndexAuto", dcb_draw_index_auto),
-        ("sceAgcDcbSetIndexBuffer", dcb_set_index_buffer),
-        ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
-        ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
-        (
-            "sceAgcDcbSetCxRegistersIndirect",
-            dcb_set_cx_registers_indirect,
-        ),
-        ("sceAgcCbNop", cb_nop),
-        ("sceAgcDcbAcquireMem", dcb_acquire_mem),
-        ("sceAgcCbReleaseMem", cb_release_mem),
-        ("sceAgcDcbDmaData", dcb_dma_data),
-        ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
-        ("sceAgcDcbResetQueue", dcb_reset_queue),
-        (
-            "sceAgcDcbWaitUntilSafeForRendering",
-            dcb_wait_until_safe_for_rendering,
-        ),
-        ("sceAgcDcbSetFlip", dcb_set_flip),
-        // Reservation skeletons from measured headers.
-        ("sceAgcCbDispatch", cb_dispatch),
-        ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),
-        ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
-        ("sceAgcDcbDrawIndirect", dcb_draw_indirect),
-        ("sceAgcDcbDrawIndexIndirect", dcb_draw_index_indirect),
-        (
-            "sceAgcDcbSetShRegistersIndirect",
-            dcb_set_sh_registers_indirect,
-        ),
-        (
-            "sceAgcDcbSetUcRegistersIndirect",
-            dcb_set_uc_registers_indirect,
-        ),
-        (
-            "sceAgcDcbStallCommandBufferParser",
-            dcb_stall_command_buffer_parser,
-        ),
-        ("sceAgcAcbAcquireMem", acb_acquire_mem),
-        ("sceAgcDcbPushMarker", dcb_push_marker),
-        ("sceAgcDcbPopMarker", dcb_pop_marker),
-        ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
-        // The whole `sceAgc*Patch*` family, each measured to return 0x0.
-        (
-            "sceAgcSetCxRegIndirectPatchAddRegisters",
-            cx_indirect_patch_add_registers,
-        ),
-        (
-            "sceAgcSetCxRegIndirectPatchSetAddress",
-            cx_indirect_patch_set_address,
-        ),
-        (
-            "sceAgcSetShRegIndirectPatchAddRegisters",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcSetShRegIndirectPatchSetAddress",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcSetUcRegIndirectPatchAddRegisters",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcSetUcRegIndirectPatchSetAddress",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcDmaDataPatchSetDstAddressOrOffset",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
-            agc_patch_returns_ok,
-        ),
-        ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
-        (
-            "sceAgcQueueEndOfPipeActionPatchAddress",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcCbSetShRegisterRangeDirect",
-            cb_set_sh_register_range_direct,
-        ),
-        ("sceAgcDcbDrawIndex", dcb_draw_index),
-        ("sceAgcDcbSetIndexSize", dcb_set_index_size),
-        ("0x53bbd82b51d172db", agc_init_raw),
-        ("sceAgcInit", agc_init),
-        ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
-        ("sceAgcGetRegisterDefaults2", defaults2),
-        ("sceAgcGetRegisterDefaults2Internal", defaults2_internal),
-    ]
+    IMPLEMENTATIONS
 }
+
+/// The list [`implementations`] answers.
+const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
+    ("0x7d86501b8094ef57", agc_packet_payload),
+    ("sceAgcCreateShader", create_shader),
+    ("sceAgcSuspendPoint", suspend_point),
+    ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
+    ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
+    ("sceAgcCreatePrimState", create_prim_state),
+    ("sceAgcUpdatePrimState", update_prim_state),
+    ("sceAgcLinkShaders", link_shaders),
+    ("sceAgcDcbEventWrite", dcb_event_write),
+    ("sceAgcDcbSetIndexCount", dcb_set_index_count),
+    ("sceAgcDcbSetNumInstances", dcb_set_num_instances),
+    ("sceAgcDcbDrawIndexAuto", dcb_draw_index_auto),
+    ("sceAgcDcbSetIndexBuffer", dcb_set_index_buffer),
+    ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
+    ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
+    (
+        "sceAgcDcbSetCxRegistersIndirect",
+        dcb_set_cx_registers_indirect,
+    ),
+    ("sceAgcCbNop", cb_nop),
+    ("sceAgcDcbAcquireMem", dcb_acquire_mem),
+    ("sceAgcCbReleaseMem", cb_release_mem),
+    ("sceAgcDcbDmaData", dcb_dma_data),
+    ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
+    ("sceAgcDcbResetQueue", dcb_reset_queue),
+    (
+        "sceAgcDcbWaitUntilSafeForRendering",
+        dcb_wait_until_safe_for_rendering,
+    ),
+    ("sceAgcDcbSetFlip", dcb_set_flip),
+    // Reservation skeletons from measured headers.
+    ("sceAgcCbDispatch", cb_dispatch),
+    ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),
+    ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
+    ("sceAgcDcbDrawIndirect", dcb_draw_indirect),
+    ("sceAgcDcbDrawIndexIndirect", dcb_draw_index_indirect),
+    (
+        "sceAgcDcbSetShRegistersIndirect",
+        dcb_set_sh_registers_indirect,
+    ),
+    (
+        "sceAgcDcbSetUcRegistersIndirect",
+        dcb_set_uc_registers_indirect,
+    ),
+    (
+        "sceAgcDcbStallCommandBufferParser",
+        dcb_stall_command_buffer_parser,
+    ),
+    ("sceAgcAcbAcquireMem", acb_acquire_mem),
+    ("sceAgcDcbPushMarker", dcb_push_marker),
+    ("sceAgcDcbPopMarker", dcb_pop_marker),
+    ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
+    // The whole `sceAgc*Patch*` family, each measured to return 0x0.
+    (
+        "sceAgcSetCxRegIndirectPatchAddRegisters",
+        cx_indirect_patch_add_registers,
+    ),
+    (
+        "sceAgcSetCxRegIndirectPatchSetAddress",
+        cx_indirect_patch_set_address,
+    ),
+    (
+        "sceAgcSetShRegIndirectPatchAddRegisters",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcSetShRegIndirectPatchSetAddress",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcSetUcRegIndirectPatchAddRegisters",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcSetUcRegIndirectPatchSetAddress",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcDmaDataPatchSetDstAddressOrOffset",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
+        agc_patch_returns_ok,
+    ),
+    ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
+    (
+        "sceAgcQueueEndOfPipeActionPatchAddress",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcCbSetShRegisterRangeDirect",
+        cb_set_sh_register_range_direct,
+    ),
+    ("sceAgcDcbDrawIndex", dcb_draw_index),
+    ("sceAgcDcbSetIndexSize", dcb_set_index_size),
+    ("0x53bbd82b51d172db", agc_init_raw),
+    ("sceAgcInit", agc_init),
+    ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
+    ("sceAgcGetRegisterDefaults2", defaults2),
+    ("sceAgcGetRegisterDefaults2Internal", defaults2_internal),
+];
 
 #[cfg(test)]
 mod tests {
