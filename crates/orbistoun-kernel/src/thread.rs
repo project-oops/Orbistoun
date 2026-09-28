@@ -453,8 +453,11 @@ pub unsafe fn spawn(
     )
     .ok_or(SpawnError::AffinityUnsatisfiable)?;
 
+    // The new thread's logical time starts at this one's (D735).
+    let born = orbistoun_hle::clocks::thread_time();
     if let Some((low, size)) = supplied_stack {
         let body = move || {
+            orbistoun_hle::clocks::begin_thread_at(born);
             become_thread(handle);
             orbistoun_thunk::note_readable_range(low, size);
             note_this_stack(low, size);
@@ -485,6 +488,7 @@ pub unsafe fn spawn(
 
     let slot = next_stack_index();
     let body = move || {
+        orbistoun_hle::clocks::begin_thread_at(born);
         become_thread(handle);
         let base = stack_base_for(slot);
         // The requested size, capped to what fits this slot: slots are `THREAD_STACK_SPACING` apart,

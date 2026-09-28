@@ -48,8 +48,15 @@ const FIXED_EPOCH_SECONDS: u64 = 1_767_225_600;
 /// requested time through [`advance`].
 const STEP_NANOS: u128 = 1_000;
 
-/// The logical clock, in nanoseconds since the guest started.
-static LOGICAL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// This thread's logical time, in nanoseconds since the guest started (D735).
+    ///
+    /// Per thread, so a thread's readings depend only on what it did: one shared counter moved
+    /// by every thread made the main thread's time depend on when the host scheduled the others,
+    /// and two runs of one build diverged within seconds. A thread starts at its creator's time
+    /// ([`begin_thread_at`]).
+    static THREAD_NANOS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Whether the guest reads a repeating clock rather than the host's.
 ///
@@ -68,27 +75,41 @@ fn logical() -> bool {
 #[must_use]
 pub fn since_start_nanos() -> u128 {
     if logical() {
-        let before = LOGICAL_NANOS.fetch_add(
-            u64::try_from(STEP_NANOS).unwrap_or(1),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        let step = u64::try_from(STEP_NANOS).unwrap_or(1);
+        let before = THREAD_NANOS.with(|now| {
+            let before = now.get();
+            now.set(before.saturating_add(step));
+            before
+        });
         return u128::from(before);
     }
     started().elapsed().as_nanos()
 }
 
-/// Moves the logical clock forward by `nanos`, for a guest that asked to wait.
+/// Moves this thread's logical clock forward by `nanos`, for a guest thread that asked to wait.
 ///
 /// A guest that sleeps ten milliseconds and reads a clock that moved a microsecond concludes the
-/// sleep did not happen. Does nothing under the host clock, where the sleep moved it already.
+/// sleep did not happen. Only the waiting thread's clock moves (D735). Does nothing under the host
+/// clock, where the sleep moved it already.
 pub fn advance(nanos: u128) {
     if !logical() {
         return;
     }
-    LOGICAL_NANOS.fetch_add(
-        u64::try_from(nanos).unwrap_or(u64::MAX),
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
+    THREAD_NANOS.with(|now| now.set(now.get().saturating_add(nanos)));
+}
+
+/// This thread's logical time now, without reading it (a reading moves it): what a thread it
+/// creates starts from.
+#[must_use]
+pub fn thread_time() -> u64 {
+    THREAD_NANOS.with(std::cell::Cell::get)
+}
+
+/// Starts the calling thread's logical time at `nanos`: its creator's [`thread_time`] when it
+/// created it, so a new thread never reads an earlier time than the one that made it (D735).
+pub fn begin_thread_at(nanos: u64) {
+    THREAD_NANOS.with(|now| now.set(nanos));
 }
 
 /// Whether this run's clock repeats, for the report to say so.
@@ -208,6 +229,36 @@ mod tests {
         assert!(
             after >= before + 10_000_000,
             "a ten-millisecond sleep did not move the clock ten milliseconds"
+        );
+    }
+
+    /// A thread's logical time moves only with its own readings and waits (D735): another thread
+    /// waiting does not move it, and a thread begun at its creator's time reads from there.
+    #[test]
+    fn a_thread_s_logical_time_is_its_own_and_starts_at_its_creator_s() {
+        if !super::repeats() {
+            return;
+        }
+        let before = super::since_start_nanos();
+        std::thread::spawn(|| super::advance(1_000_000_000))
+            .join()
+            .expect("joins");
+        let after = super::since_start_nanos();
+        assert!(
+            after - before < 1_000_000,
+            "another thread's second-long wait moved this thread's clock"
+        );
+        let born = super::thread_time();
+        let child = std::thread::spawn(move || {
+            super::begin_thread_at(born);
+            super::since_start_nanos()
+        })
+        .join()
+        .expect("joins");
+        assert_eq!(
+            u64::try_from(child).expect("fits"),
+            born,
+            "starts where its creator was"
         );
     }
 
