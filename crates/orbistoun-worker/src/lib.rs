@@ -949,6 +949,20 @@ fn prepare_diagnostics(
         thunks.base(),
         (thunks.total() as u64).saturating_mul(orbistoun_thunk::THUNK_SIZE),
     );
+
+    // After every diagnostic, so an import one names keeps the traced path (D734).
+    link_leaf_imports(thunks);
+}
+
+/// Routes the leaf imports' stubs straight to their implementations (D734), saying how many.
+fn link_leaf_imports(thunks: &orbistoun_thunk::ThunkTable) {
+    match thunks.link_leaves() {
+        Ok(0) => {}
+        Ok(linked) => tracing::info!(
+            "{linked} leaf import(s) call their implementation directly, counted but not traced (D734)"
+        ),
+        Err(e) => tracing::warn!("leaf imports stay on the traced path: {e}"),
+    }
 }
 
 /// Records the conditions this run is under and returns the diagnostics it was asked for.

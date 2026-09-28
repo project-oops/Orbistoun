@@ -145,6 +145,12 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all
 }
 
+/// Implementations a stub may call directly, past the call trace (D734), by symbol name. Each is
+/// in [`implementations`] too.
+pub(crate) fn leaves() -> Vec<(&'static str, orbistoun_core::LeafFn)> {
+    orbistoun_kernel::leaves().to_vec()
+}
+
 /// Every implementation that speaks in floating-point registers.
 ///
 /// Only libc has any: the maths library is defined by IEEE 754, and nothing else declared here

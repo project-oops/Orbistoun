@@ -13,7 +13,7 @@
 //! and the call path does relaxed atomic adds. A bounded ring keeps calls in order, because the
 //! sequence says what the guest was trying to do.
 
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
 
 use orbistoun_core::GuestError;
 
@@ -427,6 +427,93 @@ pub fn forced_return_count() -> u64 {
 /// read. Called once, at table construction, for the same reason the counters are.
 pub fn install_handlers(handlers: Vec<Option<GuestFn>>) {
     let _ = HANDLERS.set(handlers.into_boxed_slice());
+}
+
+/// Each slot's leaf implementation (D734) as an address, zero where there is none. Read by
+/// [`leaf_entry`] through [`LEAF_TARGETS`].
+static LEAVES: std::sync::OnceLock<Box<[u64]>> = std::sync::OnceLock::new();
+
+/// [`COUNTS`] and [`LEAVES`] as [`leaf_entry`] reads them: raw bases, published once both exist
+/// and before any stub routes to it.
+static LEAF_COUNTS: AtomicPtr<AtomicU64> = AtomicPtr::new(std::ptr::null_mut());
+/// See [`LEAF_COUNTS`].
+static LEAF_TARGETS: AtomicPtr<u64> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Records which slots have a leaf implementation (D734), by symbol index. The stubs route to them
+/// only when [`crate::ThunkTable::link_leaves`] is asked, once every diagnostic is installed.
+pub fn install_leaves(leaves: Vec<Option<orbistoun_core::LeafFn>>) {
+    let _ = LEAVES.set(
+        leaves
+            .into_iter()
+            .map(|leaf| leaf.map_or(0, |f| f as usize as u64))
+            .collect(),
+    );
+}
+
+/// Whether slot `index` may be linked to its leaf: it has one, and no diagnostic names it. A
+/// dump, a forced answer or a planted write works on the traced path, so an import a diagnostic
+/// names keeps it.
+pub(crate) fn links_as_leaf(index: usize) -> bool {
+    let has_leaf = LEAVES
+        .get()
+        .and_then(|leaves| leaves.get(index))
+        .is_some_and(|&leaf| leaf != 0);
+    let answer_forced = FORCED_RETURNS
+        .get()
+        .and_then(|forced| forced.get(index))
+        .is_some_and(Option::is_some);
+    let planted = |table: &std::sync::OnceLock<Box<[ForcedWrite]>>| {
+        table
+            .get()
+            .and_then(|writes| writes.get(index))
+            .is_some_and(|plants| !plants.is_empty())
+    };
+    has_leaf
+        && !is_forced(index)
+        && !answer_forced
+        && !planted(&FORCED_WRITES)
+        && !planted(&POLICY_WRITES)
+}
+
+/// Publishes the counters and the leaf table to [`leaf_entry`]. `false` when either is missing,
+/// and then no stub may route to it.
+pub(crate) fn publish_leaf_tables() -> bool {
+    let (Some(counts), Some(leaves)) = (COUNTS.get(), LEAVES.get()) else {
+        return false;
+    };
+    LEAF_COUNTS.store(counts.as_ptr().cast_mut(), Ordering::Release);
+    LEAF_TARGETS.store(leaves.as_ptr().cast_mut(), Ordering::Release);
+    true
+}
+
+/// Where a leaf-linked stub jumps, with its index in `r10` as every stub loads it.
+pub(crate) fn leaf_entry_address() -> u64 {
+    let f: unsafe extern "sysv64" fn() = leaf_entry;
+    f as usize as u64
+}
+
+/// A leaf import's whole call path (D734): its call is counted where every import's is, so the
+/// report's counts stay whole, and its implementation is called with the guest's argument
+/// registers untouched. The stack is aligned for the call whatever the guest left it at, since a
+/// guest's alignment is measured, never assumed (D159); `rbp` holds the guest's `rsp` across it.
+/// Nothing is recorded in the ring and no sequence number is spent.
+#[unsafe(naked)]
+unsafe extern "sysv64" fn leaf_entry() {
+    core::arch::naked_asm!(
+        "mov rax, qword ptr [rip + {counts}]",
+        "lock inc qword ptr [rax + r10*8]",
+        "mov rax, qword ptr [rip + {targets}]",
+        "mov r11, qword ptr [rax + r10*8]",
+        "push rbp",
+        "mov rbp, rsp",
+        "and rsp, -16",
+        "call r11",
+        "mov rsp, rbp",
+        "pop rbp",
+        "ret",
+        counts = sym LEAF_COUNTS,
+        targets = sym LEAF_TARGETS,
+    )
 }
 
 /// Whether a particular import has an implementation behind it.

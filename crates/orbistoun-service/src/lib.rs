@@ -1332,6 +1332,8 @@ impl Service {
         // The floating-point table, bound in the same pass and disjoint from the integer one
         // (D268).
         let mut float_handlers: Vec<Option<orbistoun_core::GuestFloatFn>> = vec![None; total];
+        // The leaves among them, which a stub may call directly (D734).
+        let mut leaves: Vec<Option<orbistoun_core::LeafFn>> = vec![None; total];
         // Functions that resolved and had nowhere to go. Reported, never silent.
         let mut unplaced: Vec<String> = Vec::new();
         for ((_, bytes), slot) in modules.iter().zip(&slots) {
@@ -1340,7 +1342,7 @@ impl Service {
                 &container,
                 bytes,
                 slot.offset,
-                (&mut handlers, &mut float_handlers),
+                (&mut handlers, &mut float_handlers, &mut leaves),
                 &mut unplaced,
             )?;
         }
@@ -1358,8 +1360,10 @@ impl Service {
             &table,
             &mut handlers,
             &mut float_handlers,
+            &mut leaves,
         );
         orbistoun_thunk::install_float_handlers(float_handlers);
+        orbistoun_thunk::dispatch::install_leaves(leaves);
 
         let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
         let mut stub_returns: Vec<Option<u64>> = vec![None; imports];
@@ -1391,14 +1395,12 @@ impl Service {
         container: &orbistoun_elf::Container<'_>,
         bytes: &[u8],
         offset: usize,
-        tables: (
-            &mut [Option<orbistoun_core::GuestFn>],
-            &mut [Option<orbistoun_core::GuestFloatFn>],
-        ),
+        tables: SlotTables<'_>,
         unplaced: &mut Vec<String>,
     ) -> Result<(), ServiceError> {
-        let (handlers, float_handlers) = tables;
+        let (handlers, float_handlers, leaves) = tables;
         let available = symbols::implementations();
+        let leaf_available = symbols::leaves();
         let float_available = symbols::float_implementations();
         for import in container.raw_imports(bytes, &self.hasher)? {
             let nid = Nid::from_raw(import.nid);
@@ -1424,6 +1426,13 @@ impl Service {
                 match handlers.get_mut(slot) {
                     Some(entry) => *entry = Some(*function),
                     None => unplaced.push(resolved.name.to_owned()),
+                }
+                if let Some(((_, leaf), entry)) = leaf_available
+                    .iter()
+                    .find(|(name, _)| *name == resolved.name)
+                    .zip(leaves.get_mut(slot))
+                {
+                    *entry = Some(*leaf);
                 }
             }
         }
@@ -1569,7 +1578,9 @@ impl Service {
         table: &orbistoun_thunk::ThunkTable,
         handlers: &mut [Option<orbistoun_core::GuestFn>],
         float_handlers: &mut [Option<orbistoun_core::GuestFloatFn>],
+        leaves: &mut [Option<orbistoun_core::LeafFn>],
     ) {
+        let leaf_available = symbols::leaves();
         // Bound and published together, so a name is never advertised without a handler.
         let mut by_name = std::collections::BTreeMap::new();
         for (offset, (name, function)) in resolvable.iter().enumerate() {
@@ -1577,6 +1588,13 @@ impl Service {
             let Some(at) = table.address_of(slot) else {
                 continue;
             };
+            if let Some(((_, leaf), entry)) = leaf_available
+                .iter()
+                .find(|(known, _)| known == name)
+                .zip(leaves.get_mut(slot))
+            {
+                *entry = Some(*leaf);
+            }
             let placed = match function {
                 symbols::Resolvable::Integer(f) => handlers
                     .get_mut(slot)
@@ -2300,6 +2318,14 @@ type TitleBinding = (
     Vec<std::collections::BTreeMap<u32, u64>>,
     Vec<String>,
     titleplacement::BindingAccount,
+);
+
+/// The per-slot tables one binding pass fills: integer handlers, floating-point handlers, and the
+/// leaves a stub may call directly (D734).
+type SlotTables<'a> = (
+    &'a mut [Option<orbistoun_core::GuestFn>],
+    &'a mut [Option<orbistoun_core::GuestFloatFn>],
+    &'a mut [Option<orbistoun_core::LeafFn>],
 );
 
 #[cfg(test)]

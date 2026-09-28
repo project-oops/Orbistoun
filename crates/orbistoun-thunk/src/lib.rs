@@ -47,6 +47,10 @@ pub const DISPATCH_AT: usize = 32;
 /// The dispatch instructions are this long, from [`DISPATCH_AT`].
 pub const THUNK_CODE_LEN: usize = 23;
 
+/// Where in a stub the address it jumps to sits: the `mov r11, imm64` operand after the index load.
+/// The shared trampoline, or a leaf's entry (D734).
+const LEAF_TARGET_AT: usize = DISPATCH_AT + 12;
+
 /// `mov r10, imm64` - REX.W + REX.B, then `B8 + r10 & 7`.
 const MOV_R10_IMM64: [u8; 2] = [0x49, 0xBA];
 /// `mov r11, imm64`.
@@ -113,6 +117,8 @@ pub struct ThunkTable {
     count: usize,
     /// Just the guest's own imports, which is what a stub count means.
     imports: usize,
+    /// The bytes mapped for the stubs, whole pages from `base`.
+    mapped: u64,
 }
 
 impl ThunkTable {
@@ -176,7 +182,48 @@ impl ThunkTable {
             base,
             count,
             imports,
+            mapped: len,
         })
+    }
+
+    /// Routes every stub whose import has a leaf implementation, and that no diagnostic names,
+    /// straight to it (D734), and answers how many. Only the stub's jump target changes - never the
+    /// address a guest slot holds, so the link plan is the same either way. Called once, after
+    /// every diagnostic is installed and before the guest runs.
+    ///
+    /// # Errors
+    ///
+    /// When the host refuses to make the stubs writable or executable again.
+    pub fn link_leaves(&self) -> Result<usize, MemError> {
+        let leaves: Vec<usize> = (0..self.count)
+            .filter(|&index| dispatch::links_as_leaf(index))
+            .collect();
+        if leaves.is_empty() || !dispatch::publish_leaf_tables() {
+            return Ok(0);
+        }
+        let entry = dispatch::leaf_entry_address();
+        // The table's own mapping, which `space` reserved: whole pages from `base`.
+        orbistoun_mem::platform::protect(self.base, self.mapped, Protection::READ_WRITE)?;
+        for &index in &leaves {
+            let at = self
+                .base
+                .saturating_add((index as u64).saturating_mul(THUNK_SIZE))
+                .saturating_add(LEAF_TARGET_AT as u64);
+            let dest = usize::try_from(at)
+                .map_err(|_| MemError::HostRefused("thunk address does not fit".to_owned()))?;
+            // SAFETY: `at` is the jump target's eight bytes inside stub `index`, which lies within
+            // the mapping `build_with_named` sized from `count`, writable since the call above; no
+            // guest runs yet, so no thread is inside a stub while it changes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    entry.to_le_bytes().as_ptr(),
+                    std::ptr::with_exposed_provenance_mut::<u8>(dest),
+                    8,
+                );
+            }
+        }
+        orbistoun_mem::platform::protect(self.base, self.mapped, Protection::READ_EXECUTE)?;
+        Ok(leaves.len())
     }
 
     /// Address of the stub for `index`, or `None` if it is past the end, never another import's

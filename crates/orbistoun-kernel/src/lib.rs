@@ -5611,6 +5611,25 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     TABLE
 }
 
+/// Implementations a stub may call directly, past the call trace (D734), by symbol name. Each is
+/// also in [`implementations`], which answers whenever a diagnostic names the import.
+pub fn leaves() -> &'static [(&'static str, orbistoun_core::LeafFn)] {
+    &[("sceKernelGetProcessTimeCounter", leaf_process_time_counter)]
+}
+
+/// [`kernel_get_process_time_counter`], called from its stub. A GL context times every phase of
+/// every draw with it, hundreds of thousands of times a second.
+extern "sysv64" fn leaf_process_time_counter(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    ticks_since()
+}
+
 /// Every implementation, as one table; [`implementations`] is the interface other crates call.
 const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelDirectMemoryQuery", direct_memory_query),
