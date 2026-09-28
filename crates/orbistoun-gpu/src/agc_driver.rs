@@ -1171,21 +1171,36 @@ fn release_protection(p: WriteProtected, hooks: &LazyCopies) {
 /// A write to guest memory faulted: when `address` is in the protected target, its pages get their
 /// protection back and the write can be retried (D720). The host's fault handler asks this for a
 /// faulting write, before [`carry_out_at`].
+///
+/// A frame of that target still on the device (D714) is written back first, so the write lands on
+/// the frame as it does on hardware, where the draws are in memory by then. Let through onto the
+/// memory from before the draws, the next submission would start from that and lose them.
 pub fn written_at(address: u64) -> bool {
     let Some(hooks) = lazy_copies().get() else {
         return false;
     };
-    let Ok(mut protected) = write_protected().lock() else {
-        return false;
-    };
-    match *protected {
-        Some(p) if ranges_overlap(p.pages, (address, 1)) => {
-            release_protection(p, hooks);
-            *protected = None;
-            true
+    {
+        let Ok(mut protected) = write_protected().lock() else {
+            return false;
+        };
+        match *protected {
+            Some(p) if ranges_overlap(p.pages, (address, 1)) => {
+                release_protection(p, hooks);
+                *protected = None;
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, 1)) {
+        let mut memory = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        // A frame that cannot be read back is dropped by the write-back, which forgets what memory
+        // held: the next submission then reads the target in full.
+        let _ = write_back_pending(&mut memory);
+    }
+    true
 }
 
 /// Writes `bytes` into guest memory at `address` - `false`, writing nothing, when the range is not
@@ -2907,6 +2922,59 @@ mod tests {
             "memory holds the fill"
         );
         assert!(super::deferred().lock().expect("list").is_empty());
+        super::forget_written();
+    }
+
+    /// A guest write to a target whose frame is still on the device lands on that frame: on hardware
+    /// the draws are in memory by then, so the pending frame is written back before the faulting
+    /// write runs. Bugdom's menu writes a few words into its target between a frame's submissions;
+    /// letting the write through onto the pre-draw memory handed the next submission the clear, and
+    /// every object drawn before it was lost.
+    #[test]
+    fn a_guest_write_to_a_pending_target_lands_on_its_frame() {
+        use super::{ColourTarget, ComponentSwap, Written};
+        use fake::frame;
+        use std::sync::Arc;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        // The device's frame, as the worker's reader answers it.
+        super::install_frame_reader(|| Some(frame()));
+        let before = memory.to_vec();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            base,
+            bytes: Arc::new(before.clone()),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        super::protect_target(target);
+
+        assert!(
+            super::written_at(base),
+            "the write is the protected target's"
+        );
+        assert!(
+            super::pending_target().is_none(),
+            "the frame is no longer pending"
+        );
+        let mut expected = super::words_of(&before);
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            memory,
+            zerocopy::IntoBytes::as_bytes(expected.as_slice()),
+            "memory holds the frame before the guest's write runs"
+        );
         super::forget_written();
     }
 
