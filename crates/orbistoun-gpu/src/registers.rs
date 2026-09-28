@@ -1645,21 +1645,30 @@ pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetF
 /// any draw used it is not a target.
 #[must_use]
 pub fn colour_target_bases_in(writes: &[RegisterWrite], draws: &[u32]) -> usize {
-    let bases_written = writes
+    // One sweep over the base writes and the draws, each in offset order: the base in force at a
+    // draw is the last write before it. A stream holds thousands of writes and hundreds of draws,
+    // so asking per draw is what a profile of a menu frame found (9% of the guest thread).
+    let mut bases_written: Vec<(u32, u32)> = writes
         .iter()
-        .filter(|write| write.register == CB_COLOR0_BASE);
-    let in_force = |before: u32| {
-        bases_written
-            .clone()
-            .rev()
-            .find(|write| write.packet_offset < before)
-            .map(|write| write.value)
-    };
-    let mut bases: Vec<u32> = draws
-        .iter()
-        .filter_map(|&draw| in_force(draw))
-        .chain(bases_written.clone().next_back().map(|write| write.value))
+        .filter(|write| write.register == CB_COLOR0_BASE)
+        .map(|write| (write.packet_offset, write.value))
         .collect();
+    let left_in_force = bases_written.last().map(|&(_, value)| value);
+    bases_written.sort_by_key(|&(offset, _)| offset);
+    let mut draws = draws.to_vec();
+    draws.sort_unstable();
+    let mut bases: Vec<u32> = left_in_force.into_iter().collect();
+    let mut next = 0;
+    let mut in_force = None;
+    for draw in draws {
+        while let Some(&(offset, value)) = bases_written.get(next)
+            && offset < draw
+        {
+            in_force = Some(value);
+            next += 1;
+        }
+        bases.extend(in_force);
+    }
     bases.sort_unstable();
     bases.dedup();
     bases.len()
