@@ -614,8 +614,8 @@ fn render_frames(out: &mut String, row: &Row, name: &str) {
             if let Some(reproduce) = reproduce {
                 let _ = writeln!(
                     out,
-                    "A frame every {} flips, in order, from the reproduction below.\n",
-                    reproduce.frame_every
+                    "{} frames spaced evenly across the reproduction below, in order.\n",
+                    reproduce.sheet_frames
                 );
             }
         }
@@ -663,8 +663,8 @@ fn render_reproduce(out: &mut String, row: &Row) {
     let _ = writeln!(out, "| Limit | {} s |", reproduce.limit_seconds);
     let _ = writeln!(
         out,
-        "| Frame kept | every {} flips |",
-        reproduce.frame_every
+        "| Frames | one kept every {} flips; {} shown, evenly across the run |",
+        reproduce.frame_every, reproduce.sheet_frames
     );
     let input = if row.inputs {
         format!(
@@ -764,11 +764,20 @@ pub struct Reproduce {
     pub module_sha256: Option<String>,
     /// Seconds the run is given.
     pub limit_seconds: u64,
-    /// A frame is kept every this many flips for the sheet.
+    /// A frame is kept every this many flips while the run goes.
     pub frame_every: u64,
+    /// How many of the kept frames the sheet shows, spaced evenly from the first to the last, so
+    /// the sheet covers the whole run whatever its length.
+    #[serde(default = "default_sheet_frames")]
+    pub sheet_frames: u64,
     /// Whether the sheet is committed beside the record, or kept in the local title library.
     #[serde(default)]
     pub frames: FramesKept,
+}
+
+/// How many frames a sheet shows when its record does not say.
+const fn default_sheet_frames() -> u64 {
+    10
 }
 
 /// Where a title's sheet of frames is kept (D736).
@@ -2052,6 +2061,7 @@ reason = "..."
             module_sha256: Some("ab12".to_owned()),
             limit_seconds: 60,
             frame_every: 30,
+            sheet_frames: 10,
             frames,
         };
         let row = |screenshot: Option<&str>, frames| Row {

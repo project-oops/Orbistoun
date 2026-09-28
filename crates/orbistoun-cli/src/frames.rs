@@ -53,6 +53,21 @@ pub(crate) fn kept(traces: &std::path::Path) -> Result<Vec<Kept>> {
     Ok(kept)
 }
 
+/// `count` of `kept`, spaced evenly from the first to the last: the whole run at a glance
+/// whatever its length. All of them when there are no more than `count`.
+pub(crate) fn spread(kept: &[Kept], count: usize) -> Vec<Kept> {
+    if kept.len() <= count || count == 0 {
+        return kept.to_vec();
+    }
+    if count == 1 {
+        return kept.first().cloned().into_iter().collect();
+    }
+    let last = kept.len() - 1;
+    (0..count)
+        .filter_map(|i| kept.get(i * last / (count - 1)).cloned())
+        .collect()
+}
+
 /// Removes every kept frame from `traces`, so a run's sheet holds that run's frames alone.
 ///
 /// # Errors
@@ -166,6 +181,32 @@ mod tests {
             assert_eq!(at(u32::from(index)), index * 20, "tile {index} in order");
         }
         assert!(super::sheet(&[]).is_none(), "no frames, no sheet");
+    }
+
+    /// A spread keeps the first and the last and spaces the rest evenly between them.
+    #[test]
+    fn a_spread_covers_the_run_from_first_to_last() {
+        let kept: Vec<super::Kept> = (0..34u64)
+            .map(|i| super::Kept {
+                flip: i * 60,
+                width: 1,
+                height: 1,
+                path: std::path::PathBuf::new(),
+            })
+            .collect();
+        let flips = |shown: Vec<super::Kept>| shown.iter().map(|k| k.flip).collect::<Vec<_>>();
+        let ten = flips(super::spread(&kept, 10));
+        assert_eq!(ten.len(), 10);
+        assert_eq!((ten[0], ten[9]), (0, 33 * 60), "first and last");
+        assert!(
+            ten.windows(2).all(|pair| pair[0] < pair[1]),
+            "in order: {ten:?}"
+        );
+        assert_eq!(
+            flips(super::spread(&kept[..4], 10)).len(),
+            4,
+            "fewer than asked: all"
+        );
     }
 
     /// The kept frames are found by name and ordered by flip, not by name.

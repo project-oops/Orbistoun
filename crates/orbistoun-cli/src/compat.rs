@@ -252,11 +252,12 @@ pub(crate) fn cmd_compat_reproduce(
         orbistoun_overrides::FramesKept::Local => paths.title_frames_file(title),
     };
     let kept = crate::frames::kept(&traces)?;
-    let count = crate::frames::write_sheet(&kept, &sheet)?;
+    let shown = crate::frames::spread(&kept, usize::try_from(reproduce.sheet_frames)?);
+    let count = crate::frames::write_sheet(&shown, &sheet)?;
     println!(
-        "wrote {} ({count} frames, one every {} flips)",
+        "wrote {} ({count} of the {} frames kept, evenly across the run)",
         sheet.display(),
-        reproduce.frame_every
+        kept.len()
     );
     Ok(())
 }
