@@ -41,10 +41,13 @@ pub const UNNAMED: u32 = 0;
 
 /// A body's answer in the POSIX spelling: the value, or `-1` with the number left to `errno`.
 #[must_use]
-pub const fn as_posix(answer: Answer) -> u64 {
+pub fn as_posix(answer: Answer) -> u64 {
     match answer {
         Ok(value) => value,
-        Err(_) => FAILED,
+        Err(err) => {
+            orbistoun_core::errno::set(err as i32);
+            FAILED
+        }
     }
 }
 
@@ -114,11 +117,19 @@ pub fn sock_stream() -> u64 {
     number("SOCK_STREAM")
 }
 
+/// `SOCK_DGRAM`, from `sys/sys/socket.h`.
+#[must_use]
+pub fn sock_dgram() -> u64 {
+    number("SOCK_DGRAM")
+}
+
 /// What a socket descriptor is, at each stage of its life.
 #[derive(Debug)]
 pub(crate) enum Socket {
     /// Created, and not yet anything the host would recognise.
     Pending {
+        /// The socket kind: stream or datagram.
+        kind: u64,
         /// What `bind` was told, if it has been called.
         bound: Option<SocketAddr>,
         /// Whether the guest has asked for non-blocking, before there is anything to set it on.
@@ -153,6 +164,28 @@ pub(crate) enum Socket {
         /// has to restore it, and the host has a setter with no getter.
         nonblocking: bool,
     },
+    /// A datagram socket.
+    Datagram {
+        /// The host datagram socket.
+        socket: std::net::UdpSocket,
+        /// Whether non-blocking mode is enabled.
+        nonblocking: bool,
+    },
+}
+
+/// Binds a UDP socket with address reuse enabled across platforms.
+pub(crate) fn bind_udp(wanted: SocketAddr, nonblocking: bool) -> Result<std::net::UdpSocket, u32> {
+    use socket2::{Domain, Protocol, Socket as S2Socket, Type};
+    let domain = if wanted.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let sock = S2Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(|_| UNNAMED)?;
+    let _ = sock.set_reuse_address(true);
+    let _ = sock.set_nonblocking(nonblocking);
+    sock.bind(&wanted.into()).map_err(|_| UNNAMED)?;
+    Ok(sock.into())
 }
 
 /// Reads a `sockaddr_in` a guest passed.
@@ -273,28 +306,32 @@ fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
 
 /// `socket(domain, type, protocol)`: a descriptor with nothing behind it yet.
 ///
-/// `AF_INET` and `AF_INET6` streams; anything else is refused rather than given a TCP
-/// socket. The family is not remembered: the address `bind` names carries its own.
+/// `AF_INET` and `AF_INET6` streams and datagrams; anything else is refused. The family is not
+/// remembered: the address `bind` names carries its own.
 ///
-/// Reference: POSIX.1-2008 `socket(2)`; `AF_INET`, `AF_INET6` and `SOCK_STREAM` from
+/// Reference: POSIX.1-2008 `socket(2)`; `AF_INET`, `AF_INET6`, `SOCK_STREAM` and `SOCK_DGRAM` from
 /// `sys/sys/socket.h`.
 pub fn socket(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let (domain, kind) = (args[0], args[1]);
+    let socket_type = kind & 0xF;
     // The type carries flags on this platform; the low bits are the type.
-    if (domain != af_inet() && domain != af_inet6()) || kind & 0xF != sock_stream() {
+    if (domain != af_inet() && domain != af_inet6())
+        || (socket_type != sock_stream() && socket_type != sock_dgram())
+    {
         return Err(UNNAMED);
     }
     crate::descriptor::insert_socket(Socket::Pending {
+        kind: socket_type,
         bound: None,
         nonblocking: false,
     })
     .ok_or(UNNAMED)
 }
 
-/// `bind(fd, address, length)`: remembers where a socket is to listen.
+/// `bind(fd, address, length)`: remembers where a socket is to listen or binds a datagram socket.
 ///
-/// Remembered rather than performed: the host binds and listens in one call, so `listen`
-/// uses the address; binding here and again at listen would hold the port twice.
+/// For streams, remembered rather than performed: the host binds and listens in one call, so `listen`
+/// uses the address. For datagrams, the host UDP socket is bound immediately.
 ///
 /// Reference: POSIX.1-2008 `bind(2)`.
 pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
@@ -304,9 +341,27 @@ pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
         return Err(UNNAMED);
     };
     crate::descriptor::with_socket(args[0], |socket| match socket {
-        Socket::Pending { bound, .. } => {
-            *bound = Some(wanted);
-            Ok(OK)
+        Socket::Pending {
+            kind,
+            bound,
+            nonblocking,
+        } => {
+            if *kind == sock_dgram() {
+                let udp = bind_udp(wanted, *nonblocking)?;
+                if let Ok(addr) = udp.local_addr() {
+                    tracing::info!("guest listening on {addr}");
+                    let line = format!("orbistoun: guest listening on {addr}");
+                    orbistoun_core::klog::note(&line);
+                }
+                *socket = Socket::Datagram {
+                    socket: udp,
+                    nonblocking: *nonblocking,
+                };
+                Ok(OK)
+            } else {
+                *bound = Some(wanted);
+                Ok(OK)
+            }
         }
         // Binding something already listening or connected is an error in the interface.
         _ => Err(UNNAMED),
@@ -322,7 +377,11 @@ pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
 /// Reference: POSIX.1-2008 `listen(2)`.
 pub fn listen(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let wanted = crate::descriptor::with_socket(args[0], |socket| match socket {
-        Socket::Pending { bound, nonblocking } => bound.map(|address| (address, *nonblocking)),
+        Socket::Pending {
+            kind,
+            bound,
+            nonblocking,
+        } if *kind == sock_stream() => bound.map(|address| (address, *nonblocking)),
         _ => None,
     })
     .flatten();
@@ -427,6 +486,35 @@ pub fn connect(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let Some(wanted) = (unsafe { read_sockaddr(args[1], args[2]) }) else {
         return Err(UNNAMED);
     };
+    let pending_info = crate::descriptor::with_socket(args[0], |socket| match socket {
+        Socket::Pending {
+            kind, nonblocking, ..
+        } => Some((*kind, *nonblocking)),
+        _ => None,
+    })
+    .flatten();
+    let Some((kind, nonblocking)) = pending_info else {
+        return Err(UNNAMED);
+    };
+    if kind == sock_dgram() {
+        let bind_addr = if wanted.is_ipv6() {
+            SocketAddr::from(([0u16; 8], 0))
+        } else {
+            SocketAddr::from(([0u8; 4], 0))
+        };
+        let udp = bind_udp(bind_addr, nonblocking)?;
+        if udp.connect(wanted).is_err() {
+            return Err(UNNAMED);
+        }
+        return crate::descriptor::with_socket(args[0], |socket| {
+            *socket = Socket::Datagram {
+                socket: udp,
+                nonblocking,
+            };
+            Ok(OK)
+        })
+        .unwrap_or(Err(UNNAMED));
+    }
     // Connected blocking, then set: a non-blocking connect answers `EINPROGRESS` and finishes
     // later, a state this does not model, so the guest's flag is applied to the finished
     // stream. Only the return of `connect` itself could differ.
@@ -434,11 +522,11 @@ pub fn connect(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
         return Err(UNNAMED);
     };
     crate::descriptor::with_socket(args[0], |socket| match socket {
-        Socket::Pending { nonblocking, .. } => {
-            let _ = stream.set_nonblocking(*nonblocking);
+        Socket::Pending { .. } => {
+            let _ = stream.set_nonblocking(nonblocking);
             *socket = Socket::Stream {
                 stream: stream.try_clone().expect("a stream clones"),
-                nonblocking: *nonblocking,
+                nonblocking,
             };
             Ok(OK)
         }
@@ -469,20 +557,40 @@ pub fn setsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
             Err(UNNAMED)
         };
     }
-    // The kernel read interface: `setsockopt(fd, IPPROTO_IPV6=0x29, IPV6_PKTINFO=0x2e, buf,
-    // 0x14)` carries the kernel address to read next.
-    if level == 0x29 && (optname == 0x2e || optname == 0x19) && optlen >= 12 && optval != 0 {
+    // The kernel read/write interface: `setsockopt(fd, IPPROTO_IPV6=0x29, IPV6_PKTINFO=0x2e, buf,
+    // 0x14)` carries the kernel address to read or write next, or writes bytes through victim socket.
+    if level == 0x29 && (optname == 0x2e || optname == 0x19) && optlen >= 4 && optval != 0 {
         let ptr = optval as *const u8;
-        let mut kaddr_bytes = [0u8; 8];
-        // SAFETY: `optval` is a guest pointer with at least `optlen` bytes (at least 12,
-        // checked above); offsetting 4 into it stays inside that buffer.
-        let source = unsafe { ptr.add(4) };
-        // SAFETY: `source` begins eight bytes within the same guest buffer of at least 12, and
-        // the destination is a local eight-byte array, so the ranges cannot overlap.
-        unsafe { std::ptr::copy_nonoverlapping(source, kaddr_bytes.as_mut_ptr(), 8) };
-        let kaddr = u64::from_le_bytes(kaddr_bytes);
-        if (kaddr >> 48) != 0 {
+        let mut found_kaddr = None;
+
+        if optlen >= 12 {
+            let mut kaddr_bytes = [0u8; 8];
+            // SAFETY: `optval` is a guest pointer with at least `optlen` bytes (>= 12).
+            let src = unsafe { ptr.add(4) };
+            // SAFETY: offsetting 4 into `ptr` stays within that buffer of length `optlen >= 12`.
+            unsafe { std::ptr::copy_nonoverlapping(src, kaddr_bytes.as_mut_ptr(), 8) };
+            let kaddr = u64::from_le_bytes(kaddr_bytes);
+            if (kaddr >> 48) == 0xffff || (kaddr >> 40) == 0x00ff_ffcd {
+                found_kaddr = Some(kaddr);
+            }
+        }
+
+        if found_kaddr.is_none() && optlen >= 8 {
+            let mut kaddr_bytes = [0u8; 8];
+            // SAFETY: `optval` has at least 8 bytes.
+            unsafe { std::ptr::copy_nonoverlapping(ptr, kaddr_bytes.as_mut_ptr(), 8) };
+            let kaddr = u64::from_le_bytes(kaddr_bytes);
+            if (kaddr >> 48) == 0xffff || (kaddr >> 40) == 0x00ff_ffcd {
+                found_kaddr = Some(kaddr);
+            }
+        }
+
+        if let Some(kaddr) = found_kaddr {
             crate::escape::set_kernel_read_address(kaddr);
+        } else if crate::escape::get_kernel_read_address() != 0 {
+            if let Some(bytes) = guest_bytes(optval, optlen) {
+                crate::escape::write_kernel_pipe(bytes);
+            }
         }
     }
     Ok(OK)
@@ -497,6 +605,7 @@ pub fn getsockname(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let found = crate::descriptor::with_socket(args[0], |socket| match socket {
         Socket::Listener { listener, .. } => listener.local_addr().ok(),
         Socket::Stream { stream, .. } => stream.local_addr().ok(),
+        Socket::Datagram { socket, .. } => socket.local_addr().ok(),
         Socket::Pending { bound, .. } => *bound,
     })
     .flatten();
@@ -516,6 +625,7 @@ pub fn getsockname(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
 pub fn getpeername(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let found = crate::descriptor::with_socket(args[0], |socket| match socket {
         Socket::Stream { stream, .. } => stream.peer_addr().ok(),
+        Socket::Datagram { socket, .. } => socket.peer_addr().ok(),
         _ => None,
     })
     .flatten();
@@ -550,6 +660,221 @@ pub fn recv(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
         return Err(UNNAMED);
     };
     crate::descriptor::socket_read(args[0], into, wait_for(args[3])).map(|n| n as u64)
+}
+
+/// `sendto(fd, buffer, length, flags, address, address_length)`: a write to a destination.
+///
+/// If `address` is null or zero-length, behaves as `send`. Otherwise sends a datagram to `address`.
+///
+/// Reference: POSIX.1-2008 `sendto(2)`.
+pub fn sendto(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
+    let Some(bytes) = guest_bytes(args[1], args[2]) else {
+        return Err(UNNAMED);
+    };
+    if args[4] == 0 || args[5] == 0 {
+        return crate::descriptor::socket_write(args[0], bytes, wait_for(args[3]))
+            .map(|n| n as u64);
+    }
+    // SAFETY: a guest-supplied `sockaddr` under the identity mapping.
+    let Some(target) = (unsafe { read_sockaddr(args[4], args[5]) }) else {
+        return Err(UNNAMED);
+    };
+    crate::descriptor::socket_sendto(args[0], bytes, target, wait_for(args[3])).map(|n| n as u64)
+}
+
+/// `recvfrom(fd, buffer, length, flags, address, address_length)`: a read recording the source.
+///
+/// If `address` is null, behaves as `recv`. Otherwise receives a datagram and records where it came from.
+///
+/// Reference: POSIX.1-2008 `recvfrom(2)`.
+pub fn recvfrom(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
+    let Some(into) = guest_bytes_mut(args[1], args[2]) else {
+        return Err(UNNAMED);
+    };
+    if args[4] == 0 {
+        return crate::descriptor::socket_read(args[0], into, wait_for(args[3])).map(|n| n as u64);
+    }
+    let (n, from) = crate::descriptor::socket_recvfrom(args[0], into, wait_for(args[3]))?;
+    if !write_sockaddr(args[4], args[5], from) {
+        return Err(UNNAMED);
+    }
+    Ok(n as u64)
+}
+
+/// How wide one `struct iovec` is, and where its two fields sit.
+///
+/// `{ void *iov_base; size_t iov_len; }`: two machine words on this target. Reference:
+/// POSIX.1-2008 `<sys/uio.h>`.
+const IOVEC_BYTES: u64 = 16;
+
+/// Reads one `iovec` from a guest's vector.
+fn read_iovec(vector: u64, index: u64) -> Option<(u64, u64)> {
+    if vector == 0 {
+        return None;
+    }
+    let at = vector.checked_add(index.checked_mul(IOVEC_BYTES)?)?;
+    let base = usize::try_from(at).ok()?;
+    // SAFETY: a guest-supplied `iovec` array under the identity mapping, indexed within the
+    // count the guest passed, the same contract the real call has.
+    let iov_base = unsafe { std::ptr::read_unaligned(base as *const u64) };
+    // SAFETY: the second word of the same entry, eight bytes after the first.
+    let iov_len = unsafe { std::ptr::read_unaligned((base + 8) as *const u64) };
+    Some((iov_base, iov_len))
+}
+
+/// A guest `struct msghdr`, from `sys/sys/socket.h`.
+struct GuestMsghdr {
+    name: u64,
+    namelen: u32,
+    iov: u64,
+    iovlen: i32,
+}
+
+/// Reads a `struct msghdr` from guest memory.
+fn read_msghdr(address: u64) -> Option<GuestMsghdr> {
+    if address == 0 {
+        return None;
+    }
+    let base = usize::try_from(address).ok()?;
+    // SAFETY: a guest-supplied `msghdr` under the identity mapping. Offset 0 is `msg_name`.
+    let name = unsafe { std::ptr::read_unaligned(base as *const u64) };
+    // SAFETY: offset 8 is `msg_namelen`.
+    let namelen = unsafe { std::ptr::read_unaligned((base + 8) as *const u32) };
+    // SAFETY: offset 16 is `msg_iov`.
+    let iov = unsafe { std::ptr::read_unaligned((base + 16) as *const u64) };
+    // SAFETY: offset 24 is `msg_iovlen`.
+    let iovlen = unsafe { std::ptr::read_unaligned((base + 24) as *const i32) };
+    Some(GuestMsghdr {
+        name,
+        namelen,
+        iov,
+        iovlen,
+    })
+}
+
+/// `sendmsg(fd, message, flags)`: writes a message gathered across several buffers.
+///
+/// Reference: POSIX.1-2008 `sendmsg(2)`.
+pub fn sendmsg(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
+    let (fd, msg_ptr, flags) = (args[0], args[1], args[2]);
+    let Some(hdr) = read_msghdr(msg_ptr) else {
+        return Err(orbistoun_core::errno::INVALID);
+    };
+    if hdr.iovlen < 0 {
+        return Err(orbistoun_core::errno::INVALID);
+    }
+    let target = if hdr.name != 0 && hdr.namelen >= SOCKADDR_IN_LEN as u32 {
+        // SAFETY: a guest-supplied `sockaddr` under the identity mapping.
+        unsafe { read_sockaddr(hdr.name, u64::from(hdr.namelen)) }
+    } else {
+        None
+    };
+    let wait = wait_for(flags);
+    let mut moved = 0_u64;
+    for index in 0..(hdr.iovlen as u64) {
+        let Some((base, len)) = read_iovec(hdr.iov, index) else {
+            return if moved == 0 {
+                Err(orbistoun_core::errno::INVALID)
+            } else {
+                Ok(moved)
+            };
+        };
+        if len == 0 {
+            continue;
+        }
+        let Some(bytes) = guest_bytes(base, len) else {
+            return if moved == 0 {
+                Err(orbistoun_core::errno::INVALID)
+            } else {
+                Ok(moved)
+            };
+        };
+        let res = match target {
+            Some(dest) => crate::descriptor::socket_sendto(fd, bytes, dest, wait),
+            None => crate::descriptor::socket_write(fd, bytes, wait),
+        };
+        match res {
+            Ok(n) => {
+                moved += n as u64;
+                if (n as u64) < len {
+                    break;
+                }
+            }
+            Err(e) => {
+                return if moved == 0 { Err(e) } else { Ok(moved) };
+            }
+        }
+    }
+    Ok(moved)
+}
+
+/// `recvmsg(fd, message, flags)`: reads a message scattered across several buffers.
+///
+/// Reference: POSIX.1-2008 `recvmsg(2)`.
+pub fn recvmsg(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
+    let (fd, msg_ptr, flags) = (args[0], args[1], args[2]);
+    let Some(hdr) = read_msghdr(msg_ptr) else {
+        return Err(orbistoun_core::errno::INVALID);
+    };
+    if hdr.iovlen < 0 {
+        return Err(orbistoun_core::errno::INVALID);
+    }
+    let wait = wait_for(flags);
+    let mut moved = 0_u64;
+    let mut recorded_from = false;
+    for index in 0..(hdr.iovlen as u64) {
+        let Some((base, len)) = read_iovec(hdr.iov, index) else {
+            return if moved == 0 {
+                Err(orbistoun_core::errno::INVALID)
+            } else {
+                Ok(moved)
+            };
+        };
+        if len == 0 {
+            continue;
+        }
+        let Some(into) = guest_bytes_mut(base, len) else {
+            return if moved == 0 {
+                Err(orbistoun_core::errno::INVALID)
+            } else {
+                Ok(moved)
+            };
+        };
+        let res = if hdr.name != 0 && !recorded_from {
+            match crate::descriptor::socket_recvfrom(fd, into, wait) {
+                Ok((n, from)) => {
+                    let _ = write_sockaddr(hdr.name, msg_ptr + 8, from);
+                    recorded_from = true;
+                    Ok(n)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            crate::descriptor::socket_read(fd, into, wait)
+        };
+        match res {
+            Ok(n) => {
+                moved += n as u64;
+                if (n as u64) < len {
+                    break;
+                }
+            }
+            Err(e) => {
+                return if moved == 0 { Err(e) } else { Ok(moved) };
+            }
+        }
+    }
+    if let Ok(base) = usize::try_from(msg_ptr) {
+        // SAFETY: updating `msg_controllen` (offset 40) under identity mapping.
+        unsafe {
+            std::ptr::write_unaligned((base + 40) as *mut u32, 0);
+        }
+        // SAFETY: updating `msg_flags` (offset 44) under identity mapping.
+        unsafe {
+            std::ptr::write_unaligned((base + 44) as *mut i32, 0);
+        }
+    }
+    Ok(moved)
 }
 
 /// What a call's flags say about waiting.
@@ -730,20 +1055,32 @@ pub fn getsockopt(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
         return refuse_option(level, option);
     };
     let answer = crate::descriptor::with_socket(fd, |socket| {
-        let Socket::Stream { stream, .. } = socket else {
-            return None;
-        };
-        match name {
-            // Reading `SO_ERROR` clears it: a caller polls it to consume the pending error.
-            "SO_ERROR" => Some(
-                stream
-                    .take_error()
-                    .ok()
-                    .flatten()
-                    .and_then(|e| e.raw_os_error())
-                    .unwrap_or(0),
-            ),
-            "IP_TTL" => stream.ttl().ok().and_then(|ttl| i32::try_from(ttl).ok()),
+        match socket {
+            Socket::Stream { stream, .. } => match name {
+                // Reading `SO_ERROR` clears it: a caller polls it to consume the pending error.
+                "SO_ERROR" => Some(
+                    stream
+                        .take_error()
+                        .ok()
+                        .flatten()
+                        .and_then(|e| e.raw_os_error())
+                        .unwrap_or(0),
+                ),
+                "IP_TTL" => stream.ttl().ok().and_then(|ttl| i32::try_from(ttl).ok()),
+                _ => None,
+            },
+            Socket::Datagram { socket, .. } => match name {
+                "SO_ERROR" => Some(
+                    socket
+                        .take_error()
+                        .ok()
+                        .flatten()
+                        .and_then(|e| e.raw_os_error())
+                        .unwrap_or(0),
+                ),
+                "IP_TTL" => socket.ttl().ok().and_then(|ttl| i32::try_from(ttl).ok()),
+                _ => None,
+            },
             _ => None,
         }
     });
@@ -816,6 +1153,10 @@ posix_spellings! {
     posix_getpeername => getpeername,
     posix_send => send,
     posix_recv => recv,
+    posix_sendto => sendto,
+    posix_recvfrom => recvfrom,
+    posix_sendmsg => sendmsg,
+    posix_recvmsg => recvmsg,
     posix_shutdown => shutdown,
 }
 
@@ -840,6 +1181,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("getpeername", posix_getpeername),
         ("send", posix_send),
         ("recv", posix_recv),
+        ("sendto", posix_sendto),
+        ("recvfrom", posix_recvfrom),
+        ("sendmsg", posix_sendmsg),
+        ("recvmsg", posix_recvmsg),
         ("shutdown", posix_shutdown),
     ]
 }
@@ -1030,16 +1375,35 @@ mod tests {
         assert!(crate::descriptor::close(fd));
     }
 
-    /// A datagram socket is refused rather than quietly given a stream.
+    /// A raw socket is refused rather than quietly accepted.
     #[test]
     fn a_kind_of_socket_this_does_not_serve_is_refused() {
         let _guard = crate::exclusively();
-        assert_eq!(call("socket", [af_inet(), 2, 0, 0, 0, 0]), super::FAILED);
+        assert_eq!(call("socket", [af_inet(), 3, 0, 0, 0, 0]), super::FAILED);
         assert_eq!(
             call("socket", [1, super::sock_stream(), 0, 0, 0, 0]),
             super::FAILED,
             "and so is a family it does not serve"
         );
+    }
+
+    /// A datagram socket can be created and bound.
+    #[test]
+    fn a_datagram_socket_can_be_created_and_bound() {
+        let _guard = crate::exclusively();
+        let fd = call("socket", [af_inet(), super::sock_dgram(), 0, 0, 0, 0]);
+        assert_ne!(fd, super::FAILED);
+        // Bind to port 0 (dynamic ephemeral port)
+        let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+        let mut raw = [0u8; SOCKADDR_IN_LEN as usize];
+        raw[0] = SOCKADDR_IN_LEN as u8;
+        raw[1] = af_inet() as u8;
+        raw[4..8].copy_from_slice(&addr.ip().octets());
+        assert_eq!(
+            call("bind", [fd, raw.as_ptr() as u64, SOCKADDR_IN_LEN, 0, 0, 0]),
+            super::OK
+        );
+        assert!(crate::descriptor::close(fd));
     }
 
     /// Listening on a socket nobody bound is refused rather than given a port.
@@ -1212,6 +1576,40 @@ mod tests {
             Err(orbistoun_core::errno::AGAIN),
             "still non-blocking, because the guest never asked for anything else"
         );
+        assert!(crate::descriptor::close(fd));
+        drop(host);
+    }
+
+    /// `sendmsg` sends data across multiple iovecs.
+    #[test]
+    fn sendmsg_and_recvmsg_scatter_gather_data() {
+        use std::io::Read as _;
+        let _guard = crate::exclusively();
+        let (fd, mut host) = connected_and_quiet();
+
+        let part1 = b"HTTP/1.1 200 OK\r\n";
+        let part2 = b"Content-Length: 5\r\n\r\nhello";
+        let iov = [
+            part1.as_ptr() as u64,
+            part1.len() as u64,
+            part2.as_ptr() as u64,
+            part2.len() as u64,
+        ];
+        let mut msghdr = [0_u64; 6];
+        msghdr[2] = iov.as_ptr() as u64;
+        let p_iovlen = (msghdr.as_mut_ptr() as usize + 24) as *mut i32;
+        // SAFETY: msghdr has 48 bytes; offset 24 is inside the buffer.
+        unsafe { std::ptr::write_unaligned(p_iovlen, 2) };
+
+        let sent =
+            super::sendmsg(&[fd, msghdr.as_ptr() as u64, 0, 0, 0, 0]).expect("sendmsg works");
+        assert_eq!(sent, (part1.len() + part2.len()) as u64);
+
+        let mut buf = vec![0_u8; part1.len() + part2.len()];
+        host.read_exact(&mut buf).expect("read host");
+        assert_eq!(&buf[..part1.len()], part1);
+        assert_eq!(&buf[part1.len()..], part2);
+
         assert!(crate::descriptor::close(fd));
         drop(host);
     }

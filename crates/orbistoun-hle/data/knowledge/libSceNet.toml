@@ -176,3 +176,19 @@ assumptions = [
 ]
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
+
+[[function]]
+name = "sceNetSendto"
+arity = 6
+purpose = "Writes to a socket with destination."
+returns = "count"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceNetRecvfrom"
+arity = 6
+purpose = "Reads from a socket and records the sender."
+returns = "count"
+known_by = "assumed"
+found_on = "2026-09-27"

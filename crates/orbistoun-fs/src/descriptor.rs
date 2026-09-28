@@ -223,10 +223,6 @@ fn read_unrecorded(fd: u64, into: &mut [u8]) -> Option<usize> {
     if is_standard(fd) {
         return Some(0);
     }
-    // Descriptor 3 is the read end of the kernel pipe while it is set.
-    if fd == 3 && crate::escape::get_kernel_read_address() != 0 {
-        return Some(crate::escape::read_kernel_pipe(into));
-    }
     let mut table = table().lock().ok()?;
     if let Some(target) = table.get_mut(&fd) {
         return match target {
@@ -288,6 +284,13 @@ impl Wait {
         }
         Restore(stream.set_nonblocking(true).is_ok())
     }
+
+    fn forced_on_udp(self, socket: &std::net::UdpSocket, nonblocking: bool) -> Restore {
+        if self == Self::AsTheSocketIs || nonblocking {
+            return Restore(false);
+        }
+        Restore(socket.set_nonblocking(true).is_ok())
+    }
 }
 
 impl Restore {
@@ -295,6 +298,12 @@ impl Restore {
     fn put_back(self, stream: &std::net::TcpStream, nonblocking: bool) {
         if self.0 {
             let _ = stream.set_nonblocking(nonblocking);
+        }
+    }
+
+    fn put_back_udp(self, socket: &std::net::UdpSocket, nonblocking: bool) {
+        if self.0 {
+            let _ = socket.set_nonblocking(nonblocking);
         }
     }
 }
@@ -332,6 +341,21 @@ pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
             restore.put_back(stream, *nonblocking);
             answered
         }
+        Some(Target::Socket(crate::socket::Socket::Datagram {
+            socket,
+            nonblocking,
+        })) => {
+            let restore = wait.forced_on_udp(socket, *nonblocking);
+            let answered = match socket.recv(into) {
+                Ok(n) => Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(orbistoun_core::errno::AGAIN)
+                }
+                Err(_) => Err(crate::socket::UNNAMED),
+            };
+            restore.put_back_udp(socket, *nonblocking);
+            answered
+        }
         // A listener has no peer to read from: `ENOTCONN` on the hardware (obSCEne
         // `102-net/recv-would-block`).
         Some(Target::Socket(_)) => Err(orbistoun_core::errno::NOT_CONNECTED),
@@ -366,11 +390,151 @@ pub fn socket_write(fd: u64, bytes: &[u8], wait: Wait) -> Result<usize, u32> {
             restore.put_back(stream, *nonblocking);
             answered
         }
+        Some(Target::Socket(crate::socket::Socket::Datagram {
+            socket,
+            nonblocking,
+        })) => {
+            let restore = wait.forced_on_udp(socket, *nonblocking);
+            let answered = match socket.send(bytes) {
+                Ok(n) => Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(orbistoun_core::errno::AGAIN)
+                }
+                Err(_) => Err(crate::socket::UNNAMED),
+            };
+            restore.put_back_udp(socket, *nonblocking);
+            answered
+        }
         Some(Target::Socket(_)) => Err(orbistoun_core::errno::NOT_CONNECTED),
         _ => {
             drop(table);
             write(fd, bytes).ok_or(crate::socket::UNNAMED)
         }
+    }
+}
+
+/// Sends `bytes` to `target` on a socket.
+pub fn socket_sendto(
+    fd: u64,
+    bytes: &[u8],
+    target: std::net::SocketAddr,
+    wait: Wait,
+) -> Result<usize, u32> {
+    use std::io::Write as _;
+    let mut table = table().lock().map_err(|_| crate::socket::UNNAMED)?;
+    match table.get_mut(&fd) {
+        Some(Target::Socket(socket)) => match socket {
+            crate::socket::Socket::Datagram {
+                socket,
+                nonblocking,
+            } => {
+                let restore = wait.forced_on_udp(socket, *nonblocking);
+                let answered = match socket.send_to(bytes, target) {
+                    Ok(n) => Ok(n),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(orbistoun_core::errno::AGAIN)
+                    }
+                    Err(_) => Err(crate::socket::UNNAMED),
+                };
+                restore.put_back_udp(socket, *nonblocking);
+                answered
+            }
+            crate::socket::Socket::Pending {
+                kind, nonblocking, ..
+            } => {
+                if *kind == crate::socket::sock_dgram() {
+                    let nonblock = *nonblocking;
+                    let bind_addr = if target.is_ipv6() {
+                        std::net::SocketAddr::from(([0u16; 8], 0))
+                    } else {
+                        std::net::SocketAddr::from(([0u8; 4], 0))
+                    };
+                    let udp = crate::socket::bind_udp(bind_addr, nonblock)?;
+                    let restore = wait.forced_on_udp(&udp, nonblock);
+                    let answered = match udp.send_to(bytes, target) {
+                        Ok(n) => Ok(n),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            Err(orbistoun_core::errno::AGAIN)
+                        }
+                        Err(_) => Err(crate::socket::UNNAMED),
+                    };
+                    restore.put_back_udp(&udp, nonblock);
+                    *socket = crate::socket::Socket::Datagram {
+                        socket: udp,
+                        nonblocking: nonblock,
+                    };
+                    answered
+                } else {
+                    Err(orbistoun_core::errno::NOT_CONNECTED)
+                }
+            }
+            crate::socket::Socket::Stream {
+                stream,
+                nonblocking,
+            } => {
+                let restore = wait.forced_on(stream, *nonblocking);
+                let answered = match stream.write(bytes) {
+                    Ok(n) => Ok(n),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(orbistoun_core::errno::AGAIN)
+                    }
+                    Err(_) => Err(crate::socket::UNNAMED),
+                };
+                restore.put_back(stream, *nonblocking);
+                answered
+            }
+            crate::socket::Socket::Listener { .. } => Err(orbistoun_core::errno::NOT_CONNECTED),
+        },
+        _ => Err(crate::socket::UNNAMED),
+    }
+}
+
+/// Receives bytes from a socket, returning how many were read and the sender's address.
+pub fn socket_recvfrom(
+    fd: u64,
+    into: &mut [u8],
+    wait: Wait,
+) -> Result<(usize, std::net::SocketAddr), u32> {
+    use std::io::Read as _;
+    let mut table = table().lock().map_err(|_| crate::socket::UNNAMED)?;
+    match table.get_mut(&fd) {
+        Some(Target::Socket(socket)) => match socket {
+            crate::socket::Socket::Datagram {
+                socket,
+                nonblocking,
+            } => {
+                let restore = wait.forced_on_udp(socket, *nonblocking);
+                let answered = match socket.recv_from(into) {
+                    Ok((n, from)) => Ok((n, from)),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(orbistoun_core::errno::AGAIN)
+                    }
+                    Err(_) => Err(crate::socket::UNNAMED),
+                };
+                restore.put_back_udp(socket, *nonblocking);
+                answered
+            }
+            crate::socket::Socket::Stream {
+                stream,
+                nonblocking,
+            } => {
+                let peer = stream.peer_addr().map_err(|_| crate::socket::UNNAMED)?;
+                let restore = wait.forced_on(stream, *nonblocking);
+                let answered = match stream.read(into) {
+                    Ok(n) => Ok((n, peer)),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        Err(orbistoun_core::errno::AGAIN)
+                    }
+                    Err(_) => Err(crate::socket::UNNAMED),
+                };
+                restore.put_back(stream, *nonblocking);
+                answered
+            }
+            crate::socket::Socket::Listener { .. } | crate::socket::Socket::Pending { .. } => {
+                Err(orbistoun_core::errno::NOT_CONNECTED)
+            }
+        },
+        _ => Err(crate::socket::UNNAMED),
     }
 }
 
@@ -392,24 +556,27 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
         let _ = stderr.flush();
         return Some(bytes.len());
     }
-    // Descriptor 4 is the write end of the kernel pipe while its address is set,
-    // and its writes are swallowed as the pipe would.
-    if fd == 4 && crate::escape::get_kernel_read_address() != 0 {
-        return Some(bytes.len());
-    }
-    // A file is writable only if it was opened through `create`; anything opened for reading
-    // refuses, and the error is the guest's answer.
     let mut table = table().lock().ok()?;
-    match table.get_mut(&fd) {
-        // A device that refuses writes says so rather than discarding them.
-        Some(Target::Device(device)) => device.writable().then_some(bytes.len()),
-        Some(Target::File(file)) => file.write(bytes).ok(),
-        Some(Target::Socket(crate::socket::Socket::Stream { stream, .. })) => {
-            stream.write(bytes).ok()
-        }
-        // A queue, a datagram socket, or a descriptor that names nothing: not writable here.
-        _ => None,
+    if let Some(target) = table.get_mut(&fd) {
+        return match target {
+            // A device that refuses writes says so rather than discarding them.
+            Target::Device(device) => device.writable().then_some(bytes.len()),
+            Target::File(file) => file.write(bytes).ok(),
+            Target::Socket(crate::socket::Socket::Stream { stream, .. }) => {
+                stream.write(bytes).ok()
+            }
+            Target::Socket(crate::socket::Socket::Datagram { socket, .. }) => {
+                socket.send(bytes).ok()
+            }
+            // A queue, or a descriptor that names nothing: not writable here.
+            _ => None,
+        };
     }
+    // Descriptor 4 outside the table is the write end of the kernel pipe while its address is set.
+    if fd == 4 && crate::escape::get_kernel_read_address() != 0 {
+        return Some(crate::escape::write_kernel_pipe(bytes));
+    }
+    None
 }
 
 /// Moves the read position, answering where it ended up.
@@ -588,6 +755,13 @@ fn duplicate_socket(socket: &crate::socket::Socket) -> Option<Target> {
             // The mode travels with the copy: `accept` reads this rather than the host.
             nonblocking: *nonblocking,
         },
+        crate::socket::Socket::Datagram {
+            socket,
+            nonblocking,
+        } => crate::socket::Socket::Datagram {
+            socket: socket.try_clone().ok()?,
+            nonblocking: *nonblocking,
+        },
         // Nothing to duplicate yet; a second pending socket would later bind the same address.
         crate::socket::Socket::Pending { .. } => return None,
     };
@@ -664,6 +838,21 @@ pub fn readable(fd: u64) -> bool {
                 let _ = stream.set_nonblocking(*nonblocking);
                 ready
             }
+            crate::socket::Socket::Datagram {
+                socket,
+                nonblocking,
+            } => {
+                if socket.set_nonblocking(true).is_err() {
+                    return false;
+                }
+                let mut byte = [0_u8; 1];
+                let ready = match socket.peek_from(&mut byte) {
+                    Ok(_) => true,
+                    Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+                };
+                let _ = socket.set_nonblocking(*nonblocking);
+                ready
+            }
             // A socket with nothing behind it yet cannot be read from.
             crate::socket::Socket::Pending { .. } => false,
         },
@@ -686,7 +875,10 @@ pub fn writable(fd: u64) -> bool {
     match table.get(&fd) {
         Some(Target::File(_)) => true,
         Some(Target::Socket(socket)) => {
-            matches!(socket, crate::socket::Socket::Stream { .. })
+            matches!(
+                socket,
+                crate::socket::Socket::Stream { .. } | crate::socket::Socket::Datagram { .. }
+            )
         }
         Some(Target::Device(device)) => device.writable(),
         // Nothing is written to a queue.
@@ -740,6 +932,13 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
                 // Remembered as well as applied, so a `MSG_DONTWAIT` call can put it back.
                 *nonblocking = wanted;
                 stream.set_nonblocking(wanted).is_ok()
+            }
+            crate::socket::Socket::Datagram {
+                socket,
+                nonblocking,
+            } => {
+                *nonblocking = wanted;
+                socket.set_nonblocking(wanted).is_ok()
             }
             // Nothing exists behind it yet, so the flag is kept until `listen` or `connect`
             // makes something to put it on (D667).

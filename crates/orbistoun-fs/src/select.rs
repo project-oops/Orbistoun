@@ -226,9 +226,86 @@ fn writable(fd: u64) -> bool {
     crate::descriptor::writable(fd)
 }
 
+/// Reference: POSIX.1-2008 `poll(2)`.
+///
+/// `int poll(struct pollfd *fds, nfds_t nfds, int timeout)`
+pub fn poll(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    const POLLIN: i16 = 0x0001;
+    const POLLPRI: i16 = 0x0002;
+    const POLLOUT: i16 = 0x0004;
+    const POLLNVAL: i16 = 0x0020;
+    const POLLRDNORM: i16 = 0x0040;
+    const POLLWRNORM: i16 = 0x0004;
+
+    let (fds_at, nfds, timeout_raw) = (args[0], args[1] as usize, args[2] as i32);
+    if fds_at == 0 && nfds > 0 {
+        return u64::from(u32::MAX);
+    }
+
+    let started = std::time::Instant::now();
+    let limit = if timeout_raw < 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(timeout_raw as u64))
+    };
+
+    loop {
+        let mut count = 0u64;
+        for i in 0..nfds {
+            let offset = i * 8;
+            let fd_ptr = fds_at + offset as u64;
+            // SAFETY: guest-supplied pointer under identity mapping.
+            let (fd, events) = unsafe {
+                let fd = std::ptr::read(std::ptr::with_exposed_provenance::<i32>(fd_ptr as usize));
+                let ev = std::ptr::read(std::ptr::with_exposed_provenance::<i16>(
+                    (fd_ptr + 4) as usize,
+                ));
+                (fd, ev)
+            };
+
+            let mut revents = 0i16;
+            if fd < 0 {
+                // Negative fd is ignored per POSIX.
+            } else if !crate::descriptor::exists(fd as u64) {
+                revents |= POLLNVAL;
+            } else {
+                if (events & (POLLIN | POLLRDNORM | POLLPRI)) != 0 && readable(fd as u64) {
+                    revents |= events & (POLLIN | POLLRDNORM | POLLPRI);
+                }
+                if (events & (POLLOUT | POLLWRNORM)) != 0 && writable(fd as u64) {
+                    revents |= events & (POLLOUT | POLLWRNORM);
+                }
+            }
+
+            // SAFETY: writing revents back to guest memory at offset + 6.
+            unsafe {
+                std::ptr::write(
+                    std::ptr::with_exposed_provenance_mut::<i16>((fd_ptr + 6) as usize),
+                    revents,
+                );
+            }
+
+            if revents != 0 {
+                count += 1;
+            }
+        }
+
+        let expired = match limit {
+            None => false,
+            Some(d) => started.elapsed() >= d,
+        };
+
+        if count > 0 || expired {
+            return count;
+        }
+
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
 /// Implementations this module provides, by symbol name.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[("select", select)]
+    &[("select", select), ("poll", poll)]
 }
 
 #[cfg(test)]

@@ -1,0 +1,19 @@
+[compat]
+
+[settings]
+
+[experiment]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 39
+calls = 177966
+standing = 100
+default_return = "unimplemented"
+overrides = 2
+propping = 2
+unanswered = 0
+limit_seconds = 5
+build = "v0.1.0 - 233ef29-dirty"
+measured_on = "2026-09-27"
+link_plan = "65f6a59fe52eac13"
+link_plan_stored = "match"

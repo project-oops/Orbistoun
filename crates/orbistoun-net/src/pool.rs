@@ -14,7 +14,22 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 /// Implementations this module provides, by symbol name.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[("sceNetPoolCreate", create), ("sceNetPoolDestroy", destroy)]
+    &[
+        ("sceNetPoolCreate", create),
+        ("sceNetPoolDestroy", destroy),
+        ("sceNetInit", init),
+        ("sceNetTerm", term),
+    ]
+}
+
+/// `sceNetInit(param)`: initializes the network library, returns 0.
+fn init(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
+/// `sceNetTerm()`: terminates the network library, returns 0.
+fn term(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
 }
 
 fn live() -> std::sync::MutexGuard<'static, HashSet<u32>> {

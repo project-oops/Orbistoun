@@ -1,0 +1,44 @@
+library = "libSceLncUtil"
+
+[[function]]
+name = "sceLncUtilGetAppIdOfRunningBigApp"
+arity = 0
+purpose = "Gets the application ID of the running foreground application."
+edge_cases = [
+    "Returns 0xFFFFFFFF (-1) when no foreground big application is running.",
+]
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy application lifecycle query; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceLncUtilGetAppTitleId"
+arity = 2
+purpose = "Gets the title ID of an application."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy application lifecycle query; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceLncUtilSuspendApp"
+arity = 1
+purpose = "Suspends an application."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy application lifecycle control; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceLncUtilKillApp"
+arity = 1
+purpose = "Terminates an application."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy application lifecycle control; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"

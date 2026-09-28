@@ -256,12 +256,15 @@ guest_module! {
         "_ZSt14_Throw_C_errori" => 1, "_ZSt16_Throw_Cpp_errori" => 1,
         // Two arguments: the signal number and the handler. FreeBSD's `signal(3)`.
         "signal" => 2,
+        "sigaction" => 3,
+        "_sigaction" => 3,
         // `getopt(argc, argv, optstring)`. POSIX.1-2008.
         "getopt" => 3,
         // FreeBSD's `__error()`: no arguments, answers a pointer to this thread's `errno`.
         "__error" => 0,
         // `strerror(errnum)`, answering a pointer to a message.
         "strerror" => 1,
+        "_Strerror" => 2,
         // `puts(s)`, which appends a newline where `printf` does not.
         "puts" => 1,
         // `putchar(c)`, one byte to the output stream.
@@ -283,6 +286,15 @@ guest_module! {
         // The raw syscall's spelling: FreeBSD entry 1 is `_exit`, and the name derived from
         // `SYS__exit` binds number 1 to this implementation.
         "_exit" => 1,
+        "fputs" => 2,
+        "setvbuf" => 4,
+        "waitpid" => 3,
+        "execve" => 3,
+        "rfork_thread" => 4,
+        "sceSysmoduleLoadModuleInternal" => 1,
+        "getargc" => 0,
+        "getargv" => 0,
+        "sysconf" => 1,
     }
 }
 
@@ -573,6 +585,11 @@ fn signal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     slot.swap(args[1], std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `sigaction(sig, act, oact)` - examines or changes a signal action.
+fn sigaction(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `getopt(argc, argv, optstring)` - the POSIX option parser.
 ///
 /// The position is kept here and reported through the guest's own `optarg` and `optind`,
@@ -625,12 +642,7 @@ fn getopt(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Reference: FreeBSD `errno(2)`, POSIX.1-2008 `<errno.h>`.
 fn error_location(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    thread_local! {
-        /// This thread's `errno`. A `thread_local` has an address stable for the life of the
-        /// thread.
-        static ERRNO: std::cell::UnsafeCell<i32> = const { std::cell::UnsafeCell::new(0) };
-    }
-    ERRNO.with(|cell| cell.get() as usize as u64)
+    orbistoun_core::errno::location()
 }
 
 /// The largest argument count this will walk.
@@ -1861,6 +1873,21 @@ fn strerror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     })
 }
 
+/// `_Strerror(errnum, buf)` - Dinkumware internal strerror implementation.
+fn _strerror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (number, buffer) = (args[0] as i32, args[1]);
+    let text = format!("error {number}\0");
+    if buffer != 0 {
+        // SAFETY: guest supplied buffer under identity mapping.
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), ptr(buffer), text.len());
+        }
+        buffer
+    } else {
+        strerror(args)
+    }
+}
+
 /// `fprintf(stream, format, ...)` - `printf` with a stream in front.
 ///
 /// A stream that wraps a descriptor is written to that descriptor; anything else goes to the
@@ -2065,6 +2092,95 @@ fn putchar(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let _ = err.write_all(&[byte]);
     let _ = err.flush();
     u64::from(byte)
+}
+
+/// `fputs(str, stream)` - writes a string without a trailing newline.
+///
+/// Reference: ISO C `fputs`; POSIX.1-2008 `fputs(3)`.
+fn fputs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::io::Write as _;
+
+    let text = args[0];
+    if text == 0 {
+        return 0;
+    }
+    // SAFETY: a guest-supplied string under the identity mapping, bounded.
+    let len = unsafe { c_len(text) };
+    // SAFETY: `c_len` established `len` readable bytes from `text`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr(text).cast_const(), len) };
+
+    let mut err = std::io::stderr();
+    if let Some(fd) = orbistoun_fs::open::wrapped_descriptor(args[1]) {
+        orbistoun_fs::descriptor::write(fd, bytes).map_or(0, |written| written as u64)
+    } else {
+        let _ = err.write_all(bytes);
+        let _ = err.flush();
+        len as u64
+    }
+}
+
+/// `setvbuf(stream, buf, mode, size)` - controls stream buffering.
+///
+/// Reference: ISO C `setvbuf`; POSIX.1-2008 `setvbuf(3)`. Returns 0 on success.
+fn setvbuf(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `waitpid(pid, status, options)` - waits for a child process to change state.
+///
+/// In this single-process environment, no children exist; fails with `ECHILD`.
+/// Reference: POSIX.1-2008 `waitpid(2)`.
+fn waitpid(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Some(echild) = orbistoun_hle::constants::abi_constant("errno", "ECHILD") {
+        set_errno(echild);
+    }
+    FAILED
+}
+
+/// `execve(path, argv, envp)` - executes a new program.
+///
+/// In this single-executable environment, process replacement is refused with `ENOENT`.
+/// Reference: POSIX.1-2008 `execve(2)`.
+fn execve(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Some(enoent) = orbistoun_hle::constants::abi_constant("errno", "ENOENT") {
+        set_errno(enoent);
+    }
+    FAILED
+}
+
+/// `rfork_thread(flags, stack, func, arg)` - creates a child thread.
+///
+/// Reference: FreeBSD `rfork_thread(3)`.
+fn rfork_thread(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (_flags, _stack, func, arg) = (args[0], args[1], args[2], args[3]);
+    if func == 0 {
+        if let Some(einval) = orbistoun_hle::constants::abi_constant("errno", "EINVAL") {
+            set_errno(einval);
+        }
+        return FAILED;
+    }
+    let handle = std::thread::spawn(move || {
+        // SAFETY: caller passes executable entry point under identity mapping.
+        let entry: extern "sysv64" fn(u64) -> u64 = unsafe { std::mem::transmute(func) };
+        entry(arg)
+    });
+    std::mem::forget(handle);
+    1000
+}
+
+/// `sceSysmoduleLoadModuleInternal(handle)` - loads an internal system module.
+fn sce_sysmodule_load_module_internal(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+/// `getargc()` - answers argument count (0).
+fn getargc(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
+/// `getargv()` - answers argument vector (NULL).
+fn getargv(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
 }
 
 /// `std::_Random_device()` - the entropy source `std::random_device` reads from.
@@ -2454,30 +2570,13 @@ fn sysctl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// Read from the storage `__error()` hands the guest.
 fn current_errno() -> i32 {
-    let at = error_location(&[0; GUEST_ARG_REGISTERS]);
-    let Ok(at) = usize::try_from(at) else {
-        return 0;
-    };
-    // SAFETY: `error_location` answers the address of this thread's `errno`, which is a live
-    // `i32` owned by this thread for as long as it runs.
-    unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<i32>(at)) }
+    orbistoun_core::errno::get()
 }
 
 /// Sets this thread's `errno`, the way a failing C library call must, in the storage
 /// `__error()` points at.
 fn set_errno(value: i64) {
-    let at = error_location(&[0; GUEST_ARG_REGISTERS]);
-    let Ok(at) = usize::try_from(at) else {
-        return;
-    };
-    // SAFETY: `error_location` answers the address of this thread's `errno`, which is a
-    // live `i32` owned by this thread for as long as it runs.
-    unsafe {
-        std::ptr::write(
-            std::ptr::with_exposed_provenance_mut::<i32>(at),
-            value as i32,
-        );
-    };
+    orbistoun_core::errno::set(value as i32);
 }
 
 /// Turns a vendor-encoded failure into the POSIX one: `errno` set, `-1` returned.
@@ -2503,21 +2602,22 @@ const FAILED: u64 = 0xFFFF_FFFF;
 
 /// Whether a MIB is asking for the list of running processes.
 ///
-/// `kern.proc.proc` (`CTL_KERN`, `KERN_PROC`, `KERN_PROC_PROC`), every component read from the
-/// harvested table.
+/// `kern.proc.proc` (`CTL_KERN`, `KERN_PROC`, `KERN_PROC_PROC` / `KERN_PROC_ALL`), every component read
+/// from the harvested table.
 fn is_process_listing(mib: &[u32]) -> bool {
     let component = |name: &str| {
         orbistoun_hle::constants::abi_constant("sysctl", name)
             .and_then(|value| u32::try_from(value).ok())
     };
-    let (Some(kern), Some(proc), Some(all)) = (
-        component("CTL_KERN"),
-        component("KERN_PROC"),
-        component("KERN_PROC_PROC"),
-    ) else {
+    let (Some(kern), Some(proc)) = (component("CTL_KERN"), component("KERN_PROC")) else {
         return false;
     };
-    mib.len() >= 3 && mib[0] == kern && mib[1] == proc && mib[2] == all
+    let proc_proc = component("KERN_PROC_PROC");
+    let proc_all = component("KERN_PROC_ALL");
+    mib.len() >= 3
+        && mib[0] == kern
+        && mib[1] == proc
+        && (Some(mib[2]) == proc_proc || Some(mib[2]) == proc_all)
 }
 
 /// Answers a process listing with the truth: there are none.
@@ -2826,16 +2926,26 @@ fn operator_delete(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `fopen(path, mode)`.
 ///
-/// Guests dereference the result without checking it, so only a real handle is safe. Read-only:
-/// guest writes land elsewhere (D250).
+/// Guests dereference the result without checking it, so only a real handle is safe.
 fn fopen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
     let Some(path) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return 0;
     };
+    // SAFETY: the guest's mode argument, a NUL-terminated string.
+    let mode_bytes = unsafe { orbistoun_mem::guest::read_cstr(args[1], 16) };
+    let mode = mode_bytes
+        .as_deref()
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .unwrap_or("r");
     // Null rather than an error code: the caller reads this as a pointer (D125), and null
     // faults nearest the cause.
-    orbistoun_fs::open::open(&path).unwrap_or(0)
+    let handle = if mode.contains('w') || mode.contains('a') {
+        orbistoun_fs::open::create(&path)
+    } else {
+        orbistoun_fs::open::open(&path)
+    };
+    handle.unwrap_or(0)
 }
 
 /// `fclose(stream)`.
@@ -2876,6 +2986,42 @@ fn fread(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let read = orbistoun_fs::open::read(stream, into).unwrap_or(0);
     // Whole elements only, which is what the interface promises.
     (read as u64) / size
+}
+
+/// `fwrite(src, size, count, stream)`.
+///
+/// Reference: ISO C `fwrite`; POSIX.1-2008 `fwrite(3)`. Answers the number of full elements written.
+fn fwrite(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::io::Write as _;
+
+    let (src, size, count, stream) = (args[0], args[1], args[2], args[3]);
+    if src == 0 || size == 0 || count == 0 {
+        return 0;
+    }
+    let Some(total) = size
+        .checked_mul(count)
+        .and_then(|n| usize::try_from(n).ok())
+    else {
+        return 0;
+    };
+    let Ok(at) = usize::try_from(src) else {
+        return 0;
+    };
+
+    // SAFETY: the guest supplied this source and declared its size.
+    let bytes =
+        unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), total) };
+    if let Some(fd) = orbistoun_fs::open::wrapped_descriptor(stream) {
+        let written = orbistoun_fs::descriptor::write(fd, bytes).unwrap_or(0);
+        (written as u64) / size
+    } else if let Some(written) = orbistoun_fs::open::write(stream, bytes) {
+        (written as u64) / size
+    } else {
+        let mut err = std::io::stderr();
+        let _ = err.write_all(bytes);
+        let _ = err.flush();
+        count
+    }
 }
 
 /// `fseek(stream, offset, whence)`.
@@ -2920,9 +3066,13 @@ fn ferror(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `fflush(stream)`.
 ///
-/// Nothing to flush: everything opened here is read-only.
-fn fflush(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
+/// Flushes an open stream or descriptor.
+fn fflush(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if orbistoun_fs::open::flush(args[0]) {
+        OK
+    } else {
+        EOF
+    }
 }
 
 /// `fgets(s, size, stream)` - one line, or up to `size - 1` bytes, whichever comes first.
@@ -3005,6 +3155,40 @@ fn srand(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `sysconf(name)` - query system configuration parameters.
+///
+/// Reference: POSIX.1-2008 `<unistd.h>`, FreeBSD `sys/unistd.h`.
+fn sysconf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    const SC_ARG_MAX: u64 = 1;
+    const SC_CHILD_MAX: u64 = 2;
+    const SC_CLK_TCK: u64 = 3;
+    const SC_NGROUPS_MAX: u64 = 4;
+    const SC_OPEN_MAX: u64 = 5;
+    const SC_PAGESIZE: u64 = 47;
+    const SC_NPROCESSORS_CONF: u64 = 57;
+    const SC_NPROCESSORS_ONLN: u64 = 58;
+    const SC_PHYS_PAGES: u64 = 121;
+
+    match args[0] {
+        SC_ARG_MAX => 262_144,
+        SC_CHILD_MAX => 40,
+        SC_CLK_TCK => 1000,
+        SC_NGROUPS_MAX => 1023,
+        SC_OPEN_MAX => 1024,
+        SC_PAGESIZE => orbistoun_core::GUEST_PAGE_SIZE,
+        SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => 8,
+        SC_PHYS_PAGES => 0x40_0000,
+        _ => {
+            if let Some(einval) = orbistoun_hle::constants::abi_constant("errno", "EINVAL") {
+                set_errno(einval);
+            } else {
+                set_errno(i64::from(orbistoun_core::errno::INVALID));
+            }
+            u64::MAX
+        }
+    }
+}
+
 /// Implementations this crate provides, by symbol name.
 ///
 /// Names rather than hashes, so the table can be read and checked against the declarations.
@@ -3041,6 +3225,7 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
 }
 
 /// The functions declared directly in this file.
+#[allow(clippy::too_many_lines)]
 fn core_implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("abort", abort),
@@ -3060,6 +3245,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("fopen", fopen),
         ("fclose", fclose),
         ("fread", fread),
+        ("fwrite", fwrite),
         ("fseek", fseek),
         ("ftell", ftell),
         ("rewind", rewind),
@@ -3108,9 +3294,12 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("strrchr", strrchr),
         ("atexit", atexit),
         ("signal", signal),
+        ("sigaction", sigaction),
+        ("_sigaction", sigaction),
         ("getopt", getopt),
         ("__error", error_location),
         ("strerror", strerror),
+        ("_Strerror", _strerror),
         ("puts", puts),
         ("putchar", putchar),
         ("getpid", getpid),
@@ -3137,6 +3326,18 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("__cxa_guard_acquire", cxa_guard_acquire),
         ("__cxa_guard_release", cxa_guard_release),
         ("__cxa_guard_abort", cxa_guard_abort),
+        ("fputs", fputs),
+        ("setvbuf", setvbuf),
+        ("waitpid", waitpid),
+        ("execve", execve),
+        ("rfork_thread", rfork_thread),
+        (
+            "sceSysmoduleLoadModuleInternal",
+            sce_sysmodule_load_module_internal,
+        ),
+        ("getargc", getargc),
+        ("getargv", getargv),
+        ("sysconf", sysconf),
     ]
 }
 
@@ -3149,6 +3350,8 @@ mod abi_constant_tests {
         /// Every constant this crate looks up by name; adding a lookup means adding a line here.
         const LOOKED_UP: &[(&str, &str)] = &[
             ("errno", "ENOENT"),
+            ("errno", "ECHILD"),
+            ("errno", "EINVAL"),
             ("clock", "CLOCK_REALTIME"),
             ("clock", "CLOCK_REALTIME_PRECISE"),
             ("clock", "CLOCK_REALTIME_FAST"),
@@ -3158,6 +3361,7 @@ mod abi_constant_tests {
             ("sysctl", "CTL_KERN"),
             ("sysctl", "KERN_PROC"),
             ("sysctl", "KERN_PROC_PROC"),
+            ("sysctl", "KERN_PROC_ALL"),
             ("unistd", "W_OK"),
             ("socket", "AF_INET"),
             ("socket", "SOCK_STREAM"),
@@ -3517,6 +3721,7 @@ mod tests {
             "writev",
             "preadv",
             "pwritev",
+            "pipe",
             "fsync",
             "fdatasync",
             "getpagesize",
@@ -4204,5 +4409,16 @@ mod environment {
         assert!(value_of("ORBISTOUN_TEST_C").is_some());
         assert_eq!(call(unsetenv, [name.as_ptr() as u64, 0, 0]), 0);
         assert_eq!(value_of("ORBISTOUN_TEST_C"), None);
+    }
+
+    /// `sysconf(_SC_PAGESIZE)` answers the page size, and an unknown selector answers -1 with EINVAL.
+    #[test]
+    fn sysconf_answers_known_selectors() {
+        assert_eq!(
+            super::sysconf(&[47, 0, 0, 0, 0, 0]),
+            orbistoun_core::GUEST_PAGE_SIZE
+        );
+        assert_eq!(super::sysconf(&[57, 0, 0, 0, 0, 0]), 8);
+        assert_eq!(super::sysconf(&[9999, 0, 0, 0, 0, 0]), u64::MAX);
     }
 }

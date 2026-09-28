@@ -49,6 +49,7 @@ construction and are not comparable with the table above:
 - **kstuff_v1.6.7** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **nanoDNS_0.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **obscene** reached 193 imports, ending at `ran to the time limit`, with 1 function answered by name
+- **payloads** reached 39 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **pldmgr_v0.5.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **prosperous** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **ps5-app-dumper_v1.11** reached 0 imports, ending at `0x1`, with 1 function answered by name
@@ -66,10 +67,10 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1006 / 814 |
+| Functions declared / implemented | 1048 / 859 |
 | Declared in a library that serves nothing | 134 across 18 libraries - names written down, no implementation |
-| Recorded behaviours | 858 - 371 published, 88 measured, 104 guest-observed, 265 assumed |
-| Open questions a hardware probe could settle | 831 |
+| Recorded behaviours | 905 - 388 published, 88 measured, 124 guest-observed, 275 assumed |
+| Open questions a hardware probe could settle | 841 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

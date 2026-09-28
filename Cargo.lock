@@ -2820,6 +2820,8 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-mem",
  "orbistoun-nid",
+ "orbistoun-thunk",
+ "socket2",
  "tracing",
  "windows-sys 0.61.2",
 ]

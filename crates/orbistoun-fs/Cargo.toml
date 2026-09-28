@@ -20,7 +20,9 @@ orbistoun-env = { workspace = true }
 orbistoun-hle = { workspace = true }
 orbistoun-mem = { workspace = true }
 orbistoun-nid = { workspace = true }
+orbistoun-thunk = { workspace = true }
 tracing = { workspace = true }
+socket2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }

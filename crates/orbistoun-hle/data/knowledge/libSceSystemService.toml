@@ -173,3 +173,67 @@ known_by = "guest-observed"
 found_in = ["SCSH00001"]
 assumptions = ["That OK is what the console answers for an accepted request. The launcher that first called it logs the return and treats non-zero as a failure; no hardware read has recorded the value."]
 found_on = "2026-09-24"
+
+[[function]]
+name = "sceSystemServiceGetAppIdOfBigApp"
+arity = 0
+purpose = "Answers the application ID of the foreground big app."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServiceGetMainAppTitleId"
+arity = 2
+purpose = "Answers the main application title ID string."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServiceIsAppSuspended"
+arity = 1
+purpose = "Checks whether an application is currently suspended."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServiceKillApp"
+arity = 1
+purpose = "Terminates an application by ID."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServiceNavigateToGoHome"
+arity = 0
+purpose = "Navigates to the system home screen."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServicePowerTick"
+arity = 0
+purpose = "Resets the system idle timer."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSysUtilSendSystemNotificationWithText"
+arity = 2
+purpose = "Posts a user notification dialog with text."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServiceLaunchWebBrowser"
+arity = 2
+purpose = "Launches the system web browser."
+returns = "status"
+known_by = "assumed"
+found_on = "2026-09-27"

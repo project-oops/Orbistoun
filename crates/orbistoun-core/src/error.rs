@@ -84,6 +84,33 @@ pub mod errno {
     /// Promoted by one conformance check: `pthread_mutex_timedlock` on a held lock with a deadline a
     /// millisecond out.
     pub const TIMED_OUT: u32 = 60;
+
+    thread_local! {
+        /// This thread's `errno`. A `thread_local` has an address stable for the life of the
+        /// thread, and a guest thread is a host thread here, so it is the guest thread's own.
+        static ERRNO: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The address of this thread's `errno` - what FreeBSD's `__error()` answers, since `errno`
+    /// expands to `*__error()` and every guest use dereferences it. Kept here, below every
+    /// crate that sets it, so a failing call anywhere names its number in the same storage.
+    ///
+    /// Reference: FreeBSD `errno(2)`, POSIX.1-2008 `<errno.h>`.
+    #[must_use]
+    pub fn location() -> u64 {
+        ERRNO.with(|cell| cell.as_ptr() as usize as u64)
+    }
+
+    /// This thread's `errno`.
+    #[must_use]
+    pub fn get() -> i32 {
+        ERRNO.with(std::cell::Cell::get)
+    }
+
+    /// Sets this thread's `errno`, the way a failing C library call must.
+    pub fn set(value: i32) {
+        ERRNO.with(|cell| cell.set(value));
+    }
 }
 
 impl GuestError {

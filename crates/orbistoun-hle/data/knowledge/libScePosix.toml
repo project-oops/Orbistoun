@@ -178,6 +178,15 @@ found_on = "2026-09-02"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
+name = "posix_sysconf"
+arity = 1
+purpose = "Returns system configuration information."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2001 sysconf(3)."
+found_on = "2026-09-27"
+
+[[function]]
 name = "getpeername"
 arity = 3
 purpose = "Answers who is at the other end of a connected socket."
@@ -3165,3 +3174,64 @@ cites = "POSIX.1-2008 writev(2)."
 assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
 found_on = "2026-09-02"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "sendto"
+arity = 6
+purpose = "Writes to a socket with destination."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2008 sendto(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "recvfrom"
+arity = 6
+purpose = "Reads from a socket and records the sender."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2008 recvfrom(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "poll"
+arity = 3
+purpose = "Waits for events on file descriptors."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2008 poll(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "pipe"
+arity = 1
+purpose = "Creates an anonymous unidirectional data channel (pipe), returning two file descriptors."
+returns = "status"
+edge_cases = [
+    "pipefd[0] refers to the read end, pipefd[1] refers to the write end.",
+    "Integrated with the descriptor table using a connected loopback stream pair to support fcntl and readiness polling.",
+]
+known_by = "published"
+cites = "POSIX.1-2008 pipe(2)."
+found_in = ["pldmgr"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sendmsg"
+arity = 3
+purpose = "Sends a message on a socket using scatter-gather vector."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2008 sendmsg(2)."
+found_in = ["pldmgr"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "recvmsg"
+arity = 3
+purpose = "Receives a message from a socket using scatter-gather vector."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2008 recvmsg(2)."
+found_on = "2026-09-27"
+

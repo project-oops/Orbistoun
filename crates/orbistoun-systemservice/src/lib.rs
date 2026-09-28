@@ -32,6 +32,14 @@ guest_module! {
         // A system-flag setter. The real signature is unmeasured, so the arity is the trampoline's
         // six; the handler reads none of it.
         "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet" => 6,
+        "sceSystemServiceGetAppIdOfBigApp" => 0,
+        "sceSystemServiceGetMainAppTitleId" => 2,
+        "sceSystemServiceIsAppSuspended" => 1,
+        "sceSystemServiceKillApp" => 1,
+        "sceSystemServiceNavigateToGoHome" => 0,
+        "sceSystemServicePowerTick" => 0,
+        "sceSysUtilSendSystemNotificationWithText" => 2,
+        "sceSystemServiceLaunchWebBrowser" => 2,
     }
 }
 
@@ -75,6 +83,34 @@ pub mod sysmodule {
             "sceSysmoduleLoadModule" => 1,
             "sceSysmoduleUnloadModule" => 1,
             "sceSysmoduleIsLoaded" => 1,
+        }
+    }
+}
+
+/// Application installation utility - `libSceAppInstUtil`.
+pub mod app_inst_util {
+    use orbistoun_hle::guest_module;
+
+    guest_module! {
+        "libSceAppInstUtil" {
+            "sceAppInstUtilInitialize" => 1,
+            "sceAppInstUtilTerminate" => 0,
+            "sceAppInstUtilAppInstallAll" => 3,
+            "Wudg3Xe3heE" => 3,
+        }
+    }
+}
+
+/// Application launch and lifecycle utility - `libSceLncUtil`.
+pub mod lnc_util {
+    use orbistoun_hle::guest_module;
+
+    guest_module! {
+        "libSceLncUtil" {
+            "sceLncUtilGetAppIdOfRunningBigApp" => 0,
+            "sceLncUtilGetAppTitleId" => 2,
+            "sceLncUtilSuspendApp" => 1,
+            "sceLncUtilKillApp" => 1,
         }
     }
 }
@@ -169,6 +205,84 @@ fn hide_splash_screen(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// A setter's contract is that the request was taken. orbistoun keeps no such flag, so nothing
 /// is toggled or written and the call answers `OK`. The handler reads none of its arguments.
 fn disable_notice_screen_skip_flag_auto_set(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn get_app_id_of_big_app(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn get_main_app_title_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    const TITLE_ID: &core::ffi::CStr = c"CUSA00000";
+    let bytes = TITLE_ID.to_bytes_with_nul();
+    if args[0] != 0 && args[1] >= bytes.len() as u64 {
+        // SAFETY: writes null-terminated dummy title ID into guest buffer
+        unsafe {
+            let ptr = args[0] as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        }
+    }
+    OK
+}
+
+fn is_app_suspended(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn kill_app(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn navigate_to_go_home(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn power_tick(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn send_system_notification_with_text(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn app_inst_util_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn app_inst_util_terminate(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn app_inst_util_app_install_all(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn launch_web_browser(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn lnc_util_get_app_id_of_running_big_app(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // 0xFFFF_FFFF (-1) indicates no foreground running big app
+    0xFFFF_FFFF
+}
+
+fn lnc_util_get_app_title_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let buf = args[1];
+    if buf != 0 {
+        // SAFETY: writes null terminator into destination buffer if non-null
+        unsafe {
+            let ptr = buf as *mut u8;
+            *ptr = 0;
+        }
+    }
+    OK
+}
+
+fn lnc_util_suspend_app(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
+fn lnc_util_kill_app(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
@@ -338,9 +452,31 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet",
             disable_notice_screen_skip_flag_auto_set,
         ),
+        ("sceSystemServiceGetAppIdOfBigApp", get_app_id_of_big_app),
+        ("sceSystemServiceGetMainAppTitleId", get_main_app_title_id),
+        ("sceSystemServiceIsAppSuspended", is_app_suspended),
+        ("sceSystemServiceKillApp", kill_app),
+        ("sceSystemServiceNavigateToGoHome", navigate_to_go_home),
+        ("sceSystemServicePowerTick", power_tick),
+        (
+            "sceSysUtilSendSystemNotificationWithText",
+            send_system_notification_with_text,
+        ),
         ("sceSysmoduleLoadModule", sysmodule_load_module),
         ("sceSysmoduleUnloadModule", sysmodule_unload_module),
         ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
+        ("sceAppInstUtilInitialize", app_inst_util_initialize),
+        ("sceAppInstUtilTerminate", app_inst_util_terminate),
+        ("sceAppInstUtilAppInstallAll", app_inst_util_app_install_all),
+        ("Wudg3Xe3heE", app_inst_util_app_install_all),
+        ("sceSystemServiceLaunchWebBrowser", launch_web_browser),
+        (
+            "sceLncUtilGetAppIdOfRunningBigApp",
+            lnc_util_get_app_id_of_running_big_app,
+        ),
+        ("sceLncUtilGetAppTitleId", lnc_util_get_app_title_id),
+        ("sceLncUtilSuspendApp", lnc_util_suspend_app),
+        ("sceLncUtilKillApp", lnc_util_kill_app),
     ]
 }
 
@@ -461,6 +597,8 @@ mod tests {
             .iter()
             .chain(super::user::MODULE.imports.iter())
             .chain(super::sysmodule::MODULE.imports.iter())
+            .chain(super::app_inst_util::MODULE.imports.iter())
+            .chain(super::lnc_util::MODULE.imports.iter())
             .chain(super::error_dialog::MODULE.imports.iter())
             .map(|i| i.name)
             .collect();
@@ -522,5 +660,26 @@ mod tests {
         assert_eq!(param_get_int(&args), 0);
         assert_eq!(u64::from(pair[0]), UNKNOWN_PARAMETER);
         assert_eq!(pair[1], 0xBBBB_BBBB, "the neighbour is untouched");
+    }
+
+    #[test]
+    fn app_inst_util_actions_succeed() {
+        let args = [0_u64; GUEST_ARG_REGISTERS];
+        assert_eq!(super::app_inst_util_initialize(&args), super::OK);
+        assert_eq!(super::app_inst_util_terminate(&args), super::OK);
+        assert_eq!(super::app_inst_util_app_install_all(&args), super::OK);
+    }
+
+    #[test]
+    fn lnc_util_actions_succeed() {
+        let args = [0_u64; GUEST_ARG_REGISTERS];
+        assert_eq!(super::launch_web_browser(&args), super::OK);
+        assert_eq!(
+            super::lnc_util_get_app_id_of_running_big_app(&args),
+            0xFFFF_FFFF
+        );
+        assert_eq!(super::lnc_util_get_app_title_id(&args), super::OK);
+        assert_eq!(super::lnc_util_suspend_app(&args), super::OK);
+        assert_eq!(super::lnc_util_kill_app(&args), super::OK);
     }
 }

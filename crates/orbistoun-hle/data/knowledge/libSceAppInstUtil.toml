@@ -1,0 +1,41 @@
+library = "libSceAppInstUtil"
+
+[[function]]
+name = "sceAppInstUtilInitialize"
+arity = 1
+purpose = "Initializes the package installation utility."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy package installation loop; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceAppInstUtilTerminate"
+arity = 0
+purpose = "Terminates the package installation utility."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy package installation loop; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceAppInstUtilAppInstallAll"
+arity = 3
+purpose = "Installs an application package."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy package installation loop; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "Wudg3Xe3heE"
+arity = 3
+purpose = "Encoded NID entry point for package installation."
+returns = "status"
+known_by = "guest-observed"
+cites = "oopsy-daisy dynamic import table; D727"
+found_in = ["OPSY00001"]
+found_on = "2026-09-27"

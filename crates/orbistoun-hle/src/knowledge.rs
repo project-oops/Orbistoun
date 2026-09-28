@@ -73,6 +73,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceAppContent.toml"),
     ),
     (
+        "libSceAppInstUtil",
+        include_str!("../data/knowledge/libSceAppInstUtil.toml"),
+    ),
+    (
         "libSceCommonDialog",
         include_str!("../data/knowledge/libSceCommonDialog.toml"),
     ),
@@ -91,6 +95,10 @@ const EMBEDDED: &[(&str, &str)] = &[
     (
         "libSceKeyboard",
         include_str!("../data/knowledge/libSceKeyboard.toml"),
+    ),
+    (
+        "libSceLncUtil",
+        include_str!("../data/knowledge/libSceLncUtil.toml"),
     ),
     (
         "libSceMouse",

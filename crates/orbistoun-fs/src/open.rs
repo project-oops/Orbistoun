@@ -209,6 +209,34 @@ pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
     Some(read)
 }
 
+/// Writes `bytes` at the stream's position, answering how many were written: none for a stream
+/// opened read-only, which is every [`open`]ed one.
+///
+/// `None` when the handle names nothing.
+pub fn write(handle: FileHandle, bytes: &[u8]) -> Option<usize> {
+    use std::io::Write as _;
+    with(handle, |open| open.file.write(bytes).unwrap_or(0))
+}
+
+/// Flushes a stream, answering whether it could: every open file for the null stream, as
+/// `fflush(NULL)` asks (ISO C 7.21.5.2). A stream wrapping a descriptor, and one this table does
+/// not hold - the standard streams, written through unbuffered - have nothing to flush, and
+/// succeed.
+pub fn flush(handle: FileHandle) -> bool {
+    use std::io::Write as _;
+    if handle == NO_FILE {
+        return table().lock().is_ok_and(|mut table| {
+            table
+                .values_mut()
+                .fold(true, |ok, open| open.file.flush().is_ok() && ok)
+        });
+    }
+    if wrapped_descriptor(handle).is_some() {
+        return true;
+    }
+    with(handle, |open| open.file.flush().is_ok()).unwrap_or(true)
+}
+
 /// Where to seek from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum From {

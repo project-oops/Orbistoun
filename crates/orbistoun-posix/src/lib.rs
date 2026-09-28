@@ -65,10 +65,15 @@ guest_module! {
         "getpeername" => 3,
         "send" => 4,
         "recv" => 4,
+        "sendto" => 6,
+        "recvfrom" => 6,
+        "sendmsg" => 3,
+        "recvmsg" => 3,
         "shutdown" => 2,
         // Waiting, and printing an address: imported from this library, implemented in
         // `orbistoun-fs` beside the descriptor table (D367).
         "select" => 5,
+        "poll" => 3,
         "inet_ntop" => 4,
         // The timed acquisitions. The POSIX ones take an absolute deadline as their last argument
         // and the `_np` pair a relative span, so each has its own entry point.
@@ -282,7 +287,6 @@ guest_module! {
         "pthread_key_create" => 2,
         "pthread_key_delete" => 1,
         "pthread_setspecific" => 2,
-        "recvfrom" => 0,
         // POSIX unnamed semaphores, written under their POSIX names in `orbistoun-kernel` beside
         // the vendor semaphore calls.
         "sem_init" => 3,
@@ -292,7 +296,8 @@ guest_module! {
         "sem_destroy" => 1,
         "sched_get_priority_max" => 0,
         "sched_get_priority_min" => 0,
-        "sendto" => 0,
+        "posix_sysconf" => 1,
+        "pipe" => 1,
     }
 }
 
@@ -353,8 +358,13 @@ const DELEGATED: &[(&str, &str)] = &[
     ("getpeername", "getpeername"),
     ("send", "send"),
     ("recv", "recv"),
+    ("sendto", "sendto"),
+    ("recvfrom", "recvfrom"),
+    ("sendmsg", "sendmsg"),
+    ("recvmsg", "recvmsg"),
     ("shutdown", "shutdown"),
     ("select", "select"),
+    ("poll", "poll"),
     ("inet_ntop", "inet_ntop"),
     ("lseek", "sceKernelLseek"),
     ("munmap", "sceKernelMunmap"),
@@ -718,6 +728,8 @@ const DELEGATED: &[(&str, &str)] = &[
     ("sem_trywait", "sem_trywait"),
     ("sem_post", "sem_post"),
     ("sem_destroy", "sem_destroy"),
+    ("posix_sysconf", "sysconf"),
+    ("pipe", "pipe"),
 ];
 
 /// Implementations this crate provides, by symbol name.

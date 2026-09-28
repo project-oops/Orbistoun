@@ -95,6 +95,7 @@ guest_module! {
         "sceNetGetsockname" => 3,
         "sceNetHtons" => 1,
         "sceNetInetPton" => 6,
+        "sceNetInit" => 1,
         "sceNetListen" => 2,
         // (name, size, flags) and (pool): served by `pool.rs`.
         "sceNetPoolCreate" => 3,
@@ -109,6 +110,7 @@ guest_module! {
         "sceNetSetsockopt" => 5,
         "sceNetSocket" => 4,
         "sceNetSocketClose" => 1,
+        "sceNetTerm" => 0,
     }
 }
 

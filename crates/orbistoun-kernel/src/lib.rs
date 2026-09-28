@@ -206,9 +206,16 @@ guest_module! {
         "sceKernelAprWaitCommandBuffer" => 6,
         "sceKernelReadTsc" => 0,
         "sceKernelGetTscFrequency" => 0,
+        "sceKernelGetCpuFrequency" => 1,
+        "sceKernelGetCpuTemperature" => 1,
+        "sceKernelGetCurrentFanDuty" => 1,
+        "sceKernelGetSocSensorTemperature" => 2,
+        "sceKernelGetHwModelName" => 2,
+        "sceKernelGetHwSerialNumber" => 2,
         "sceKernelIsStack" => 3,
         "sceKernelGetModuleList" => 3,
         "sceKernelLoadStartModule" => 6,
+        "sceKernelStopUnloadModule" => 6,
         // Refused rather than answered, because the structure it fills is not known (D395).
         "sceKernelGetModuleInfo" => 2,
         "sceKernelIsCex" => 0,
@@ -2375,11 +2382,15 @@ const SYSTEM_VERSION_FILL: u8 = 0xA5;
 /// and filled with a marker byte.
 fn vendor_system_version(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out = args[2];
-    let version = machine().firmware;
+    let mut version = machine().firmware;
     if version == 0 {
-        // Refused, not answered with zero: zero falls in the lowest band and would send the guest down
-        // the path for the oldest system (D397).
-        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw());
+        if orbistoun_core::route::presented() == orbistoun_core::route::Route::Payload {
+            version = 0x1240;
+        } else {
+            // Refused, not answered with zero: zero falls in the lowest band and would send the guest down
+            // the path for the oldest system (D397).
+            return u64::from(GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw());
+        }
     }
     if out == 0 {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
@@ -2403,7 +2414,7 @@ fn vendor_system_version(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn system_version_block(version: u16) -> u64 {
     use std::sync::OnceLock;
     static BLOCK: OnceLock<u64> = OnceLock::new();
-    *BLOCK.get_or_init(|| {
+    let at = *BLOCK.get_or_init(|| {
         // From the shared region, so the address the guest is handed repeats (D584). Filled rather than
         // zeroed, so an unestablished field reads as unset rather than as a valid zero.
         let at = orbistoun_mem::blocks::block(SYSTEM_VERSION_BYTES.div_ceil(8));
@@ -2413,16 +2424,33 @@ fn system_version_block(version: u16) -> u64 {
         let bytes = std::ptr::with_exposed_provenance_mut::<u8>(base);
         // SAFETY: `blocks::block` just handed this address out for at least
         // `SYSTEM_VERSION_BYTES`, and nothing else holds it yet.
-        unsafe { std::ptr::write_bytes(bytes, SYSTEM_VERSION_FILL, SYSTEM_VERSION_BYTES) };
-        // SAFETY: `SYSTEM_VERSION_AT + 2` is inside the same block, whose length the
-        // constants above are declared against.
-        let field = unsafe { bytes.add(SYSTEM_VERSION_AT) };
-        let value = version.to_le_bytes();
-        // SAFETY: two bytes into the block above, from a two-byte array on this frame; the
-        // block came from `blocks::block` and overlaps nothing.
-        unsafe { std::ptr::copy_nonoverlapping(value.as_ptr(), field, 2) };
+        let slice = unsafe { std::slice::from_raw_parts_mut(bytes, SYSTEM_VERSION_BYTES) };
+        slice.fill(SYSTEM_VERSION_FILL);
+        // Structure layout matching `struct Sce_Proc_Param`:
+        // 0x00..0x08: unsigned long structsize = 0x18
+        // 0x08..0x0c: unsigned int magic = 0x1
+        // 0x0c..0x10: unsigned int ent_count = 0x1
+        // 0x10..0x14: unsigned int sdk_ps4_ver = 0
+        slice[0x00..0x08].copy_from_slice(&0x18_u64.to_le_bytes());
+        slice[0x08..0x0c].copy_from_slice(&1_u32.to_le_bytes());
+        slice[0x0c..0x10].copy_from_slice(&1_u32.to_le_bytes());
+        slice[0x10..0x14].copy_from_slice(&0_u32.to_le_bytes());
         at
-    })
+    });
+    if let Ok(base) = usize::try_from(at) {
+        let bytes = std::ptr::with_exposed_provenance_mut::<u8>(base);
+        // SAFETY: `at` was allocated above for `SYSTEM_VERSION_BYTES`.
+        let slice = unsafe { std::slice::from_raw_parts_mut(bytes, SYSTEM_VERSION_BYTES) };
+        // 0x14..0x18: unsigned int sdk_ps5_ver = (version as u32) << 16
+        // Note: in little-endian, offset 0x16..0x18 (`SYSTEM_VERSION_AT`) holds version.to_le_bytes(),
+        // matching guests reading 16 bits at 0x16, while offset 0x14..0x16 is 0x0000.
+        slice[0x14..0x18].copy_from_slice(&(u32::from(version) << 16).to_le_bytes());
+        debug_assert_eq!(
+            &slice[SYSTEM_VERSION_AT..SYSTEM_VERSION_AT + 2],
+            &version.to_le_bytes()
+        );
+    }
+    at
 }
 
 /// What this run presents itself as.
@@ -7563,5 +7591,28 @@ mod tests {
             Some((super::MAPPING_BASE, 0x2_0000)),
             "the span runs from the base to how far the guest reached"
         );
+    }
+
+    /// Verifies that system_version_block populates the full Sce_Proc_Param struct.
+    #[test]
+    fn system_version_block_populates_proc_param() {
+        let block = super::system_version_block(0x1240);
+        assert_ne!(block, 0);
+        let ptr = std::ptr::with_exposed_provenance::<u8>(block as usize);
+        // SAFETY: `block` is allocated for at least `SYSTEM_VERSION_BYTES`.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, super::SYSTEM_VERSION_BYTES) };
+        let structsize = u64::from_le_bytes(bytes[0x00..0x08].try_into().unwrap());
+        assert_eq!(structsize, 0x18);
+        let magic = u32::from_le_bytes(bytes[0x08..0x0c].try_into().unwrap());
+        assert_eq!(magic, 1);
+        let ent_count = u32::from_le_bytes(bytes[0x0c..0x10].try_into().unwrap());
+        assert_eq!(ent_count, 1);
+        let sdk_ps4_ver = u32::from_le_bytes(bytes[0x10..0x14].try_into().unwrap());
+        assert_eq!(sdk_ps4_ver, 0);
+        let sdk_ps5_ver = u32::from_le_bytes(bytes[0x14..0x18].try_into().unwrap());
+        assert_eq!(sdk_ps5_ver, 0x1240_0000);
+        let u16_ver = u16::from_le_bytes(bytes[0x16..0x18].try_into().unwrap());
+        assert_eq!(u16_ver, 0x1240);
+        assert_eq!(bytes[0x18], super::SYSTEM_VERSION_FILL);
     }
 }

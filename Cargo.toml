@@ -224,6 +224,9 @@ tar = { version = "0.4", default-features = false }
 # Test-only: temp directories for the portable containment test.
 tempfile = "3"
 
+# Low-level socket options across platforms (e.g. SO_REUSEADDR before bind).
+socket2 = "0.6"
+
 # Platform reservation APIs, used only by orbistoun-mem. Kept inline rather than as
 # [workspace.dependencies.rustix] sub-tables: a sub-table header would capture
 # every key declared after it, silently moving the internal crates below into it.

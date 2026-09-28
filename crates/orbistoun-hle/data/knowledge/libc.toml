@@ -1260,6 +1260,17 @@ found_in = ["PPSA28061-app0"]
 found_on = "2026-08-20"
 
 [[function]]
+name = "fwrite"
+arity = 4
+purpose = "Writes elements to a stream."
+returns = "count"
+found_by = "published-standard"
+known_by = "published"
+cites = "ISO C 7.21 (stdio.h)"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-09-27"
+
+[[function]]
 name = "free"
 arity = 1
 purpose = "Releases an allocation."
@@ -3234,3 +3245,108 @@ known_by = "assumed"
 assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
 found_on = "2026-09-02"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "_Strerror"
+arity = 2
+purpose = "Internal string error formatting function in Dinkumware libc."
+returns = "status"
+known_by = "published"
+cites = "Dinkumware C Library."
+found_on = "2026-09-27"
+
+[[function]]
+name = "sigaction"
+arity = 3
+purpose = "Examines and changes a signal action."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 sigaction(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "_sigaction"
+arity = 3
+purpose = "Internal FreeBSD spelling of sigaction."
+returns = "status"
+known_by = "published"
+cites = "FreeBSD sigaction(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "fputs"
+arity = 2
+purpose = "Writes a string to a stream without a trailing newline."
+returns = "status"
+known_by = "published"
+cites = "ISO C fputs; POSIX.1-2008 fputs(3)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "sysconf"
+arity = 1
+purpose = "Returns system configuration information."
+returns = "count"
+known_by = "published"
+cites = "POSIX.1-2001 sysconf(3)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "setvbuf"
+arity = 4
+purpose = "Controls stream buffering."
+returns = "status"
+known_by = "published"
+cites = "ISO C setvbuf; POSIX.1-2008 setvbuf(3)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "waitpid"
+arity = 3
+purpose = "Waits for a child process to change state."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 waitpid(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "execve"
+arity = 3
+purpose = "Executes a new program."
+returns = "status"
+known_by = "published"
+cites = "POSIX.1-2008 execve(2)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "rfork_thread"
+arity = 4
+purpose = "Creates a child thread sharing address space."
+returns = "status"
+known_by = "published"
+cites = "FreeBSD rfork_thread(3)."
+found_on = "2026-09-27"
+
+[[function]]
+name = "sceSysmoduleLoadModuleInternal"
+arity = 1
+purpose = "Loads an internal system module."
+returns = "status"
+known_by = "guest-observed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "getargc"
+arity = 0
+purpose = "Answers the argument count for the current process."
+returns = "count"
+known_by = "guest-observed"
+found_on = "2026-09-27"
+
+[[function]]
+name = "getargv"
+arity = 0
+purpose = "Answers the argument vector pointer for the current process."
+returns = "pointer"
+known_by = "guest-observed"
+found_on = "2026-09-27"

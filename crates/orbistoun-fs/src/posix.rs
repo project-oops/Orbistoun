@@ -506,6 +506,70 @@ fn sendfile(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `pipe(fds)`: creates an anonymous unidirectional data channel (pipe).
+///
+/// `fds` is a pointer to two `int`s (`fds[0]` for read, `fds[1]` for write).
+///
+/// Implemented over a connected loopback TCP stream pair so that it fully participates in
+/// socket readiness checks (`select`, `poll`, `kqueue`) and nonblocking configuration (`fcntl`).
+///
+/// Reference: POSIX.1-2008 `pipe(2)`.
+pub fn pipe(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let out_addr = args[0];
+    if out_addr == 0 {
+        return FAILED;
+    }
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(_) => return FAILED,
+    };
+    let local_addr = match listener.local_addr() {
+        Ok(a) => a,
+        Err(_) => return FAILED,
+    };
+    let write_stream = match std::net::TcpStream::connect(local_addr) {
+        Ok(s) => s,
+        Err(_) => return FAILED,
+    };
+    let (read_stream, _) = match listener.accept() {
+        Ok(pair) => pair,
+        Err(_) => return FAILED,
+    };
+    let _ = write_stream.set_nodelay(true);
+    let _ = read_stream.set_nodelay(true);
+
+    let Some(read_fd) = crate::descriptor::insert_socket(crate::socket::Socket::Stream {
+        stream: read_stream,
+        nonblocking: false,
+    }) else {
+        return FAILED;
+    };
+    let Some(write_fd) = crate::descriptor::insert_socket(crate::socket::Socket::Stream {
+        stream: write_stream,
+        nonblocking: false,
+    }) else {
+        crate::descriptor::close(read_fd);
+        return FAILED;
+    };
+
+    let Ok(dest) = usize::try_from(out_addr) else {
+        crate::descriptor::close(read_fd);
+        crate::descriptor::close(write_fd);
+        return FAILED;
+    };
+
+    let fds: [i32; 2] = [read_fd as i32, write_fd as i32];
+    // SAFETY: guest-supplied destination pointer under identity mapping.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            fds.as_ptr().cast::<u8>(),
+            std::ptr::with_exposed_provenance_mut::<u8>(dest),
+            8,
+        );
+    }
+    OK
+}
+
 /// Implementations this module provides, by symbol name.
 ///
 /// Declared in `libc`, where FreeBSD puts them, and implemented here beside the mount model
@@ -539,6 +603,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("fdopen", fdopen),
         ("fileno", fileno),
         ("sendfile", sendfile),
+        ("pipe", pipe),
     ]
 }
 
@@ -900,5 +965,20 @@ mod scatter_gather {
     fn getpagesize_answers_the_guest_page_size() {
         let regs = [0_u64; GUEST_ARG_REGISTERS];
         assert_eq!(super::getpagesize(&regs), orbistoun_core::GUEST_PAGE_SIZE);
+    }
+
+    /// `pipe` creates a connected readable and writable descriptor pair.
+    #[test]
+    fn pipe_creates_connected_pair() {
+        let _guard = exclusively();
+        let mut fds = [0i32; 2];
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = fds.as_mut_ptr() as usize as u64;
+        assert_eq!(super::pipe(&args), super::OK);
+        assert_ne!(fds[0], 0);
+        assert_ne!(fds[1], 0);
+        assert_ne!(fds[0], fds[1]);
+        assert!(crate::descriptor::close(fds[0] as u64));
+        assert!(crate::descriptor::close(fds[1] as u64));
     }
 }

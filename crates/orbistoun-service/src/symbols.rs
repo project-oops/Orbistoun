@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 42] {
+pub(crate) fn modules() -> [ModuleDesc; 44] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -44,6 +44,8 @@ pub(crate) fn modules() -> [ModuleDesc; 42] {
         orbistoun_systemservice::MODULE,
         orbistoun_systemservice::user::MODULE,
         orbistoun_systemservice::sysmodule::MODULE,
+        orbistoun_systemservice::app_inst_util::MODULE,
+        orbistoun_systemservice::lnc_util::MODULE,
         orbistoun_audio::ajm::MODULE,
         orbistoun_audio::audio3d::MODULE,
         orbistoun_audio::audio_in::MODULE,
@@ -192,6 +194,10 @@ const SPELT_DIFFERENTLY: &[(&str, &str)] = &[
     // launcher lists `/user/app` by the raw numbers 196 and 272.
     ("SYS_freebsd11_getdirentries", "sceKernelGetdirentries"),
     ("SYS_freebsd11_getdents", "sceKernelGetdents"),
+    // The FreeBSD 11 stat call (188), served by the POSIX stat implementation.
+    ("SYS_freebsd11_stat", "stat"),
+    // FreeBSD's underscored getcwd call (326), served by the libc getcwd implementation.
+    ("SYS___getcwd", "getcwd"),
     // The process exit is `SYS__exit` in FreeBSD's table (entry 1 is the raw `_exit`), so stripping
     // `SYS_` already yields the name `orbistoun-libc` answers to. The thread exit, `SYS_thr_exit`
     // (431), has no implementation and is not bound to the process exit.
