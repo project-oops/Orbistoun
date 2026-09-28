@@ -1033,6 +1033,7 @@ fn install_guest_region_lookups() {
     orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
     // Where the command processor may write: a fill, a copy, a fence.
     orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
+    orbistoun_gpu::agc_driver::install_queue_lookup(orbistoun_kernel::sync::equeue_exists);
 }
 
 /// Plants the `ORBISTOUN_WRITE` values on every import each clause names.

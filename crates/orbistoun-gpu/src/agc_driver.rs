@@ -92,6 +92,37 @@ fn register_resource(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
 }
 
+/// Whether a handle names a live event queue - the kernel's table, installed by the worker, since
+/// this crate does not reach the kernel.
+pub type QueueLookup = fn(u64) -> bool;
+
+fn queue_lookup() -> &'static OnceLock<QueueLookup> {
+    static LOOKUP: OnceLock<QueueLookup> = OnceLock::new();
+    &LOOKUP
+}
+
+/// Installs the live event-queue check [`add_eq_event`] consults. First install wins.
+pub fn install_queue_lookup(lookup: QueueLookup) {
+    let _ = queue_lookup().set(lookup);
+}
+
+/// `SCE_KERNEL_ERROR_EBADF`: what `sceAgcDriverAddEqEvent` answers for a handle that names no
+/// event queue (obSCEne REQ-20260928T1338Z-5b78, `add-eq-bad-queue`).
+const BAD_QUEUE: u64 = 0x8002_0009;
+
+/// `sceAgcDriverAddEqEvent(queue, ...)`: registers the driver's completion event against a guest
+/// event queue. Measured (obSCEne REQ-20260928T1338Z-5b78, the export found by name): `0` for a
+/// queue the guest created, with the second argument `0` or `1`; `0x80020009` for a handle that
+/// names no queue. What the driver later posts to the queue, and when, is unmeasured - the probe's
+/// submissions never ran - so nothing is posted: the answer is the call's, not the event's.
+fn add_eq_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match queue_lookup().get() {
+        Some(live) if live(args[0]) => 0,
+        Some(_) => BAD_QUEUE,
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+    }
+}
+
 /// `sceAgcDriverSetHsOffchipParam(...)`: sets the hull-shader off-chip parameter, the driver's
 /// `VGT_HS_OFFCHIP_PARAM` (Mesa `ac_cmdbuf_cp.c:374`). Answers `0` for PPSA02664's arguments
 /// `(0, 0x1ff, 0x7400, 0, 3, 0x1e44)` and for all zeros (obSCEne REQ-20260927T1130Z-b3c2). It
@@ -2324,6 +2355,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),
         ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
+        ("sceAgcDriverAddEqEvent", add_eq_event),
         (
             "sceAgcDriverInitResourceRegistration",
             init_resource_registration,
@@ -3145,6 +3177,21 @@ mod tests {
         );
         assert!(super::deferred().lock().expect("list").is_empty());
         super::forget_written();
+    }
+
+    /// `sceAgcDriverAddEqEvent` answers `0` for a live queue and `0x80020009` for any other handle
+    /// (obSCEne REQ-20260928T1338Z-5b78).
+    #[test]
+    fn add_eq_event_answers_as_measured() {
+        super::install_queue_lookup(|handle| handle == 0x5e2d_0000_ee40);
+        let served = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "sceAgcDriverAddEqEvent")
+            .map(|&(_, f)| f)
+            .expect("served");
+        assert_eq!(served(&[0x5e2d_0000_ee40, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(served(&[0x5e2d_0000_ee40, 1, 0, 0, 0, 0]), 0);
+        assert_eq!(served(&[0xdead, 0, 0, 0, 0, 0]), 0x8002_0009);
     }
 
     /// `sceAgcDriverSetHsOffchipParam` is served and answers the measured `0` for PPSA02664's
