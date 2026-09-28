@@ -306,6 +306,7 @@ edge_cases = [
     "MEASURED (obSCEne 040-file/apr-resolve-filepaths, signature-filled buffers): arg2 receives a u32 id per entry, arg3 a u64 size per entry, arg4 a u32 status per entry; arg5 is an input that may be null and is never written. An unresolvable path gets id 0xffffffff, size 0, status 0, and the call returns -1.",
     "MEASURED (obSCEne 040-file/apr-resolve-filepaths): only /app0/... paths are valid (anything else is EINVAL in the kernel log); a multi-path call stops at its first unresolved entry and leaves the later slots as the caller prepared them; and a title without a mounted package filesystem gets the unresolved answer for every path, so no probe shows a real id.",
     "Every size slot is written as a full eight bytes: PPSA25872's stream reads an unwritten slot as its file length, reserves a string that long and traps.",
+    "What a successful resolve answers is not measurable on the test console: native packages cannot be installed on firmware 12.40, and loose native homebrew runs with no /app0 (open answers ENOENT), so every APR probe so far resolved against nothing (obSCEne REQ-20260928T1512Z-c635, REQ-20260928T1338Z-c121).",
 ]
 partial = "A path the title's own index names (D591) resolves to the index's id and size with status 0 and a 0 return; every other path gets the measured unresolved answer. What a successful resolve of a path outside an index returns on hardware - the id, the status, the return value - is not measured, and orbistoun synthesises no id for it."
 known_by = "measured"
