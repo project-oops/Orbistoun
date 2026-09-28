@@ -265,6 +265,40 @@ fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64
     OK
 }
 
+/// `SCE_USER_SERVICE_ERROR_INVALID_ARGUMENT`, measured for a wrong record size or no record.
+const USER_SERVICE_INVALID_ARGUMENT: u64 = 0x8096_0005;
+/// `SCE_USER_SERVICE_ERROR_INVALID_USER_ID`, measured for user ids -1 and 0.
+const USER_SERVICE_INVALID_USER: u64 = 0x8096_0105;
+/// The only record size `sceUserServiceGetGamePresets` accepts, held in the record's first quadword.
+const GAME_PRESETS_BYTES: u64 = 0x30;
+
+/// `sceUserServiceGetGamePresets(user, presets)`: for the signed-in user and a record whose first
+/// quadword is its size, `0x30`, zeroes the other 40 bytes and answers `0` - the console's user had
+/// no presets set, and every field read back zero. A size of 0 or `0x40`, or no record, answers
+/// `0x80960005`; users -1 and 0 `0x80960105`; each writes nothing (obSCEne `-9a3e`, sweep
+/// 20260927-223648, `130-layout/user-game-presets`). Another user than the signed-in one is taken
+/// as invalid as those two were; a bad user with a bad record was not measured, and the user is
+/// checked first.
+fn user_service_get_game_presets(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (user, record) = (args[0], args[1]);
+    if user != u64::from(signed_in_user()) {
+        return USER_SERVICE_INVALID_USER;
+    }
+    if record == 0 {
+        return USER_SERVICE_INVALID_ARGUMENT;
+    }
+    // SAFETY: the guest's record, whose first quadword is its size by the call's contract.
+    if unsafe { orbistoun_mem::guest::read_u64(record) } != Some(GAME_PRESETS_BYTES) {
+        return USER_SERVICE_INVALID_ARGUMENT;
+    }
+    // SAFETY: the same record, 0x30 bytes as its size field says.
+    if unsafe { orbistoun_mem::guest::write_bytes(record + 8, &[0; 40]) } {
+        OK
+    } else {
+        USER_SERVICE_INVALID_ARGUMENT
+    }
+}
+
 /// `sceUserServiceGetInitialUser(out)` - the user a title should start as.
 fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
@@ -331,6 +365,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             user_service_get_login_user_id_list,
         ),
         ("sceUserServiceGetUserName", user_service_get_user_name),
+        (
+            "sceUserServiceGetGamePresets",
+            user_service_get_game_presets,
+        ),
         ("sceErrorDialogInitialize", error_dialog_initialize),
         ("sceSystemServiceParamGetInt", param_get_int),
         ("sceSystemServiceHideSplashScreen", hide_splash_screen),
