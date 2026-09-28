@@ -758,8 +758,8 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     let (target, swap) = pending_target().ok_or(CannotWait)?;
     let span = tiling::surface_words_64kb_rx_bpp4(target.width, target.height) as u64 * 4;
     let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
-        Some(written) if written.base == target.base && written.bytes.len() as u64 == span => {
-            written.bytes
+        Some(written) if written.base == target.base && written.contents.len() as u64 == span => {
+            written.contents
         }
         _ => return Err(CannotWait),
     };
@@ -781,7 +781,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     let guard = superseded.map(|index| {
         let old = list.remove(index);
         crate::perf::span(crate::perf::Span::DiscardSnapshot, || {
-            (hooks.discard)(old.snapshot);
+            old.release_snapshot(hooks);
         });
         old.pages.2
     });
@@ -808,10 +808,12 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
         destination: target.base,
         length: span,
         pages: (pages.0, pages.1, protection),
-        snapshot,
-        target,
-        swap,
-        memory_then,
+        held: Held::Frame {
+            snapshot,
+            target,
+            swap,
+            memory_then,
+        },
     });
     set_pending(None);
     // The display's own copy, beside memory's: released by whoever shows it.
@@ -876,7 +878,7 @@ fn drop_covered(address: u64, length: u64) {
             }
             resolved.push((base, len));
         }
-        (hooks.discard)(copy.snapshot);
+        copy.release_snapshot(hooks);
     }
 }
 
@@ -921,17 +923,42 @@ fn read_target(
     // asked first, since write-watch cannot answer for guest direct memory's mapped views. The
     // pages are protected again before they are compared or read, so a racing write is seen next
     // time rather than lost.
+    // A fill still deferred over the whole target is what memory holds, as far as anything can see:
+    // a touch would have carried it out. Uniform, and nothing to read.
+    if let Some(word) = deferred_fill_over(target.base, length as u64) {
+        let now = Contents::Uniform { word, length };
+        let unchanged = last_written().lock().is_ok_and(|last| {
+            last.as_ref().is_some_and(|written| {
+                written.base == target.base
+                    && matches!(written.contents, Contents::Uniform { word: held, length: kept }
+                        if held == word && kept == length)
+            })
+        });
+        if !unchanged && let Ok(mut last) = last_written().lock() {
+            *last = Some(Written {
+                base: target.base,
+                contents: now,
+                since: None,
+            });
+        }
+        crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
+        return Some(if unchanged {
+            TargetRead::Unchanged
+        } else {
+            TargetRead::Uniform(swapped(word, swap))
+        });
+    }
     let was_protected = protected_unwritten(target);
     protect_target(target);
     let unchanged = last_written().lock().is_ok_and(|last| {
         last.as_ref().is_some_and(|written| {
             written.base == target.base
-                && written.bytes.len() == length
+                && written.contents.len() == length
                 && (was_protected
                     || written.since.and_then(|since| {
                         orbistoun_mem::watch::written_since(target.base, length as u64, since)
                     }) == Some(false)
-                    || memory.holds(target.base, &written.bytes))
+                    || memory.holds(target.base, &written.contents.bytes()))
         })
     });
     if unchanged {
@@ -968,7 +995,7 @@ fn read_target(
     if let Ok(mut last) = last_written().lock() {
         *last = Some(Written {
             base: target.base,
-            bytes: Arc::new(bytes),
+            contents: Contents::Bytes(Arc::new(bytes)),
             since,
         });
     }
@@ -1042,7 +1069,7 @@ fn write_target(
         if let Ok(mut last) = last_written().lock() {
             *last = wrote.then(|| Written {
                 base: target.base,
-                bytes: Arc::new(written),
+                contents: Contents::Bytes(Arc::new(written)),
                 since,
             });
         }
@@ -1066,8 +1093,48 @@ fn last_written() -> &'static Mutex<Option<Written>> {
 #[derive(Debug, Clone)]
 struct Written {
     base: u64,
-    bytes: Arc<Vec<u8>>,
+    contents: Contents,
     since: Option<u64>,
+}
+
+/// What a target's memory held when this last wrote or read it: its bytes, or - under a fill
+/// still deferred over the whole of it (D719) - one word throughout, kept without the bytes.
+#[derive(Debug, Clone)]
+enum Contents {
+    Bytes(Arc<Vec<u8>>),
+    Uniform { word: u32, length: usize },
+}
+
+impl Contents {
+    /// How many bytes.
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Uniform { length, .. } => *length,
+        }
+    }
+
+    /// As words.
+    fn words(&self) -> Vec<u32> {
+        match self {
+            Self::Bytes(bytes) => words_of(bytes),
+            Self::Uniform { word, length } => vec![*word; length / 4],
+        }
+    }
+
+    /// As bytes.
+    fn bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Bytes(bytes) => std::borrow::Cow::Borrowed(bytes.as_slice()),
+            Self::Uniform { word, length } => std::borrow::Cow::Owned(
+                word.to_le_bytes()
+                    .into_iter()
+                    .cycle()
+                    .take(*length)
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Forgets [`last_written`], so the next submission hands its drawer the target as it is.
@@ -1230,6 +1297,110 @@ fn write_guest(address: u64, bytes: &[u8]) -> bool {
     true
 }
 
+/// Fills `[address, address + length)` of guest memory with `pattern`, starting at `address` -
+/// `false`, writing nothing, when the range is not writable guest memory.
+fn fill_guest(address: u64, length: u64, pattern: u32) -> bool {
+    let writable = write_lookup()
+        .get()
+        .is_some_and(|allows| allows(address, length));
+    let (Ok(dest), Ok(count)) = (usize::try_from(address), usize::try_from(length)) else {
+        return false;
+    };
+    if !writable {
+        return false;
+    }
+    unprotect_overlapping(address, length);
+    // SAFETY: the installed lookup vouched that `[address, address + length)` lies inside
+    // identity-mapped guest mappings whose protection allows writes, and a protected target's
+    // pages among them were given their protection back above: `count` writable bytes of this
+    // process. The guest thread that owns them is blocked in the submit this fill belongs to.
+    let target = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(dest), count)
+    };
+    // Whole words as words, since a frame's clears are megabytes. A misaligned destination or a
+    // count that is not whole words keeps the byte loop; the pattern starts at the destination
+    // either way.
+    let whole = count - count % 4;
+    let (words, tail) = target.split_at_mut(whole);
+    match <[u32] as zerocopy::FromBytes>::mut_from_bytes(words) {
+        Ok(words) => words.fill(u32::from_le_bytes(pattern.to_le_bytes())),
+        Err(_) => {
+            for chunk in words.chunks_mut(4) {
+                chunk.copy_from_slice(&pattern.to_le_bytes());
+            }
+        }
+    }
+    tail.copy_from_slice(&pattern.to_le_bytes()[..tail.len()]);
+    true
+}
+
+/// The smallest fill worth deferring: below it, guarding and releasing the pages costs more than
+/// the fill.
+const DEFERRED_FILL_MIN: u64 = 0x1_0000;
+
+/// Defers a fill of whole host pages (D719): its pages are guarded and it is carried out by the
+/// first touch, as a deferred copy is. A frame's clears are megabytes each, and the next draw only
+/// asks what the target holds, which a fill answers without memory ([`deferred_fill_over`]).
+/// `false` when it is not deferred and must be written now.
+fn defer_fill(address: u64, pattern: u32, length: u64) -> bool {
+    let Some(hooks) = lazy_copies().get() else {
+        return false;
+    };
+    if length < DEFERRED_FILL_MIN || address % HOST_PAGE != 0 || length % HOST_PAGE != 0 {
+        return false;
+    }
+    if !write_lookup()
+        .get()
+        .is_some_and(|allows| allows(address, length))
+    {
+        return false;
+    }
+    // A frame still on the device that this fill only partly covers is written back first, on the
+    // path that writes now; one it covers wholly was dropped before this is asked.
+    if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, length)) {
+        return false;
+    }
+    let Ok(mut list) = deferred().lock() else {
+        return false;
+    };
+    // Guarded another way now: a protection kept would be saved as the one to restore (D720).
+    unprotect_overlapping(address, length);
+    // Anything deferred that this fill only partly covers is carried out first, so the guard below
+    // is the only one on these pages.
+    let (touched, kept): (Vec<Deferred>, Vec<Deferred>) = std::mem::take(&mut *list)
+        .into_iter()
+        .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), (address, length)));
+    *list = kept;
+    if !carry_out_all(&touched, hooks) {
+        return false;
+    }
+    let Some(protection) = (hooks.guard)(address, length) else {
+        return false;
+    };
+    list.push(Deferred {
+        destination: address,
+        length,
+        pages: (address, length, protection),
+        held: Held::Fill(pattern),
+    });
+    true
+}
+
+/// The word a fill still deferred over all of `[base, base + length)` puts there, if one is.
+fn deferred_fill_over(base: u64, length: u64) -> Option<u32> {
+    let list = deferred().lock().ok()?;
+    list.iter().find_map(|copy| match copy.held {
+        Held::Fill(pattern)
+            if copy.destination <= base
+                && base.saturating_add(length) <= copy.destination.saturating_add(copy.length)
+                && (base - copy.destination) % 4 == 0 =>
+        {
+            Some(pattern)
+        }
+        _ => None,
+    })
+}
+
 /// Whether `[address, address + length)` touches any byte of `target`'s tiled surface.
 fn overlaps_target(target: ColourTarget, address: u64, length: u64) -> bool {
     let span = tiling::surface_words_64kb_rx_bpp4(target.width, target.height) as u64 * 4;
@@ -1270,20 +1441,48 @@ pub fn install_lazy_copies(hooks: LazyCopies) {
     let _ = lazy_copies().set(hooks);
 }
 
-/// A copy of a colour target into guest memory that has not been carried out yet.
+/// A copy of a colour target, or a fill, into guest memory that has not been carried out yet.
 struct Deferred {
-    /// The copy's destination and length.
+    /// The destination and length.
     destination: u64,
     length: u64,
     /// The guarded host pages covering it, and the protection they had.
     pages: (u64, u64, u32),
-    /// The frame as the copy saw it, on the device.
-    snapshot: u64,
-    target: ColourTarget,
-    swap: ComponentSwap,
-    /// The target's memory as the copy saw it: every word the frame does not cover - a partial edge
-    /// block's padding - comes from here.
-    memory_then: Arc<Vec<u8>>,
+    /// What it writes when carried out.
+    held: Held,
+}
+
+/// What a deferred write puts in memory when it is carried out.
+enum Held {
+    /// A colour target's frame.
+    Frame {
+        /// The frame as the copy saw it, on the device.
+        snapshot: u64,
+        target: ColourTarget,
+        swap: ComponentSwap,
+        /// The target's memory as the copy saw it: every word the frame does not cover - a
+        /// partial edge block's padding - comes from here.
+        memory_then: Contents,
+    },
+    /// One word throughout: a command-processor fill.
+    Fill(u32),
+}
+
+impl Deferred {
+    /// The device snapshot it keeps, if it keeps one.
+    const fn snapshot(&self) -> Option<u64> {
+        match self.held {
+            Held::Frame { snapshot, .. } => Some(snapshot),
+            Held::Fill(_) => None,
+        }
+    }
+
+    /// Lets go of the device snapshot it keeps, unread.
+    fn release_snapshot(&self, hooks: &LazyCopies) {
+        if let Some(snapshot) = self.snapshot() {
+            (hooks.discard)(snapshot);
+        }
+    }
 }
 
 /// Whether any guest memory is guarded for a deferred copy, so reading it would fault into the
@@ -1334,7 +1533,7 @@ fn carry_out(copy: &Deferred, hooks: &LazyCopies) -> bool {
 fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     let (base, len, protection) = copy.pages;
     if !(hooks.release)(base, len, protection) {
-        (hooks.discard)(copy.snapshot);
+        copy.release_snapshot(hooks);
         return false;
     }
     if let Ok(mut resolved) = resolved().lock() {
@@ -1343,22 +1542,31 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         }
         resolved.push((base, len));
     }
-    let Some(frame) = (hooks.take)(copy.snapshot) else {
+    let (snapshot, target, swap, memory_then) = match &copy.held {
+        Held::Fill(pattern) => return fill_guest(copy.destination, copy.length, *pattern),
+        Held::Frame {
+            snapshot,
+            target,
+            swap,
+            memory_then,
+        } => (*snapshot, *target, *swap, memory_then),
+    };
+    let Some(frame) = (hooks.take)(snapshot) else {
         tracing::warn!(
             "a deferred copy's frame could not be read - {:#x} keeps what it held",
             copy.destination
         );
         return false;
     };
-    let (width, height) = (copy.target.width, copy.target.height);
-    let mut tiled = words_of(&copy.memory_then);
+    let (width, height) = (target.width, target.height);
+    let mut tiled = memory_then.words();
     if tiling::tile_surface_64kb_rx_bpp4_mapped(
         &frame,
         width,
         height,
-        copy.target.pipe_bank_xor,
+        target.pipe_bank_xor,
         &mut tiled,
-        |w| swapped(w, copy.swap),
+        |w| swapped(w, swap),
     )
     .is_err()
     {
@@ -1456,8 +1664,10 @@ impl GuestCp<'_> {
         // any memory work that touched it would have written the frame back and left nothing
         // pending.
         let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
-            Some(written) if written.base == target.base && written.bytes.len() as u64 == span => {
-                written.bytes
+            Some(written)
+                if written.base == target.base && written.contents.len() as u64 == span =>
+            {
+                written.contents
             }
             _ => return false,
         };
@@ -1484,7 +1694,7 @@ impl GuestCp<'_> {
         let (guard, superseded_snapshot) = match superseded {
             Some(index) => {
                 let old = list.remove(index);
-                (Some(old.pages.2), Some(old.snapshot))
+                (Some(old.pages.2), old.snapshot())
             }
             None => (None, None),
         };
@@ -1520,10 +1730,12 @@ impl GuestCp<'_> {
             destination,
             length,
             pages: (pages.0, pages.1, protection),
-            snapshot,
-            target,
-            swap,
-            memory_then,
+            held: Held::Frame {
+                snapshot,
+                target,
+                swap,
+                memory_then,
+            },
         });
         true
     }
@@ -1615,43 +1827,15 @@ impl cp::CpMemory for GuestCp<'_> {
             drop_covered(address, count as u64);
             drop_pending_covered(address, count as u64);
         }
+        if defer_fill(address, pattern, count as u64) {
+            return true;
+        }
         if !carry_out_overlapping(address, count as u64)
             || !self.settle_pending(address, count as u64)
         {
             return false;
         }
-        let writable = write_lookup()
-            .get()
-            .is_some_and(|allows| allows(address, count as u64));
-        let Ok(dest) = usize::try_from(address) else {
-            return false;
-        };
-        if !writable {
-            return false;
-        }
-        unprotect_overlapping(address, count as u64);
-        // SAFETY: the installed lookup vouched that `[address, address + count)` lies inside
-        // identity- mapped guest mappings whose protection allows writes, and a protected target's
-        // pages among them were given their protection back above: `count` writable bytes of this
-        // process. The guest thread that owns them is blocked in this submit while they are filled.
-        let target = unsafe {
-            std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(dest), count)
-        };
-        // Whole words as words, since a frame's clears are megabytes. A misaligned destination or a
-        // count that is not whole words keeps the byte loop; the pattern starts at the destination
-        // either way.
-        let whole = count - count % 4;
-        let (words, tail) = target.split_at_mut(whole);
-        match <[u32] as zerocopy::FromBytes>::mut_from_bytes(words) {
-            Ok(words) => words.fill(u32::from_le_bytes(pattern.to_le_bytes())),
-            Err(_) => {
-                for chunk in words.chunks_mut(4) {
-                    chunk.copy_from_slice(&pattern.to_le_bytes());
-                }
-            }
-        }
-        tail.copy_from_slice(&pattern.to_le_bytes()[..tail.len()]);
-        true
+        fill_guest(address, count as u64, pattern)
     }
 
     fn edit_words(&mut self, address: u64, count: usize, edit: &mut dyn FnMut(&mut [u32])) -> bool {
@@ -1684,15 +1868,26 @@ impl cp::CpMemory for GuestCp<'_> {
     }
 
     fn copy(&mut self, source: u64, destination: u64, count: usize) -> bool {
-        // The source is read now, so what is deferred into it is carried out first. The destination
-        // is left to `defer_copy`, which drops a deferred copy this one overwrites completely.
-        if !carry_out_overlapping(source, count as u64) {
-            return false;
-        }
+        // A deferred copy reads nothing of the source's memory - the frame is on the device, and
+        // what memory held under it is remembered - so what is deferred into the source (a fill the
+        // frame was drawn over) stays deferred. The destination is left to `defer_copy`, which drops
+        // a deferred copy this one overwrites completely.
         if Self::defer_copy(source, destination, count) {
             return true;
         }
-        if !self.settle_pending(source, count as u64) {
+        // A source wholly under a deferred fill, with no frame drawn over it, holds the fill's word
+        // throughout: copying it is filling the destination with that word, and reads nothing.
+        if destination % 4 == 0
+            && !pending_target()
+                .is_some_and(|(target, _)| overlaps_target(target, source, count as u64))
+            && let Some(pattern) = deferred_fill_over(source, count as u64)
+        {
+            return self.fill(destination, pattern, count);
+        }
+        // Read now, so what is deferred into it is carried out first.
+        if !carry_out_overlapping(source, count as u64)
+            || !self.settle_pending(source, count as u64)
+        {
             return false;
         }
         let writable = write_lookup()
@@ -2813,7 +3008,7 @@ mod tests {
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
-            bytes: Arc::new(memory.to_vec()),
+            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
             since: None,
         });
         let mut cp = GuestCp {
@@ -2882,7 +3077,7 @@ mod tests {
         let pend = |memory: &[u8]| {
             *super::last_written().lock().expect("slot") = Some(Written {
                 base,
-                bytes: Arc::new(memory.to_vec()),
+                contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
                 since: None,
             });
             super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -2966,7 +3161,7 @@ mod tests {
         fake::install();
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
-            bytes: Arc::new(memory[gap..gap + span].to_vec()),
+            contents: super::Contents::Bytes(Arc::new(memory[gap..gap + span].to_vec())),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -3001,6 +3196,224 @@ mod tests {
         super::forget_written();
     }
 
+    /// A fill of a whole target is deferred (D719): memory is untouched until something reads it,
+    /// the next draw is handed the fill as a uniform target without memory being read, and a read
+    /// finds the fill. Bugdom clears its colour and depth targets every frame, 8 MB each.
+    #[test]
+    fn a_whole_target_fill_waits_until_read_and_answers_as_uniform() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+
+        assert!(cp.fill(base, 0xff00_0000, span));
+        assert!(
+            memory.iter().all(|&b| b == 0xAA),
+            "nothing written at the fill"
+        );
+        let read = |cp: &GuestCp<'_>| {
+            super::read_target(cp, target, ComponentSwap::Standard).expect("readable")
+        };
+        assert!(
+            matches!(read(&cp), TargetRead::Uniform(0xff00_0000)),
+            "the fill, as the draw's starting point"
+        );
+        assert!(
+            memory.iter().all(|&b| b == 0xAA),
+            "and still nothing read or written"
+        );
+        assert!(
+            matches!(read(&cp), TargetRead::Unchanged),
+            "asked again: unchanged"
+        );
+
+        assert!(super::carry_out_before_reading(base, 4));
+        assert!(
+            memory
+                .chunks_exact(4)
+                .all(|w| w == 0xff00_0000u32.to_le_bytes()),
+            "a read finds the fill"
+        );
+        assert!(super::deferred().lock().expect("list").is_empty());
+        super::forget_written();
+    }
+
+    /// A frame drawn over a deferred fill and flipped supersedes the fill, and the first read finds
+    /// the frame tiled over the fill's words - the fill never written on its own.
+    #[test]
+    fn a_frame_flipped_over_a_deferred_fill_is_tiled_over_its_words() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        assert!(super::write_back_at_this_flip());
+        assert_eq!(
+            super::deferred().lock().expect("list").len(),
+            1,
+            "the fill superseded by the frame"
+        );
+        assert!(memory.iter().all(|&b| b == 0xAA), "nothing written yet");
+
+        assert!(super::carry_out_before_reading(base, 4));
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(memory, zerocopy::IntoBytes::as_bytes(expected.as_slice()));
+        super::forget_written();
+    }
+
+    /// A copy of a frame drawn over a deferred fill is deferred without carrying the fill out:
+    /// Bugdom copies its target into a readback buffer after every submission, and each carried
+    /// out its 8 MB clear. The copy's destination later reads as the frame over the fill's words.
+    #[test]
+    fn a_copy_of_a_frame_over_a_deferred_fill_leaves_the_fill_deferred() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let gap = span + page;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; gap + span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + gap + span];
+        let base = memory.as_ptr() as usize as u64;
+        let readback = base + gap as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, memory.len() as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+
+        assert!(cp.copy(base, readback, span));
+        assert!(
+            memory.iter().all(|&b| b == 0xAA),
+            "neither the fill nor the copy written"
+        );
+        assert!(super::carry_out_before_reading(readback, 4));
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            &memory[gap..],
+            zerocopy::IntoBytes::as_bytes(expected.as_slice())
+        );
+        assert!(
+            memory[..span].iter().all(|&b| b == 0xAA),
+            "the target's fill still deferred"
+        );
+        super::set_pending(None);
+        assert!(super::carry_out_before_reading(base, span as u64));
+        super::forget_written();
+    }
+
+    /// A copy out of a deferred fill with nothing drawn over it is a fill of its destination: the
+    /// source is neither carried out nor read. Bugdom's loading screen clears and copies every
+    /// frame without drawing.
+    #[test]
+    fn a_copy_out_of_a_deferred_fill_fills_its_destination() {
+        use super::{GuestCp, MappedRegions, cp::CpMemory};
+        let _guard = serial();
+        let span = 0x1_0000usize;
+        let page = super::HOST_PAGE as usize;
+        let gap = span + page;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; gap + span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + gap + span];
+        let source = memory.as_ptr() as usize as u64;
+        let destination = source + gap as u64;
+        allow_writes_to(source, memory.len() as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        super::set_pending(None);
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(source, 0x0102_0304, span));
+        assert!(cp.copy(source, destination, span));
+        assert!(memory.iter().all(|&b| b == 0xAA), "nothing written or read");
+        assert!(super::carry_out_before_reading(destination, span as u64));
+        assert!(
+            memory[gap..]
+                .chunks_exact(4)
+                .all(|w| w == 0x0102_0304u32.to_le_bytes()),
+            "the destination holds the fill"
+        );
+        assert!(
+            memory[..span].iter().all(|&b| b == 0xAA),
+            "the source still deferred"
+        );
+        assert!(super::carry_out_before_reading(source, span as u64));
+        super::forget_written();
+    }
+
     /// A guest write to a target whose frame is still on the device lands on that frame: on hardware
     /// the draws are in memory by then, so the pending frame is written back before the faulting
     /// write runs. Bugdom's menu writes a few words into its target between a frame's submissions;
@@ -3029,7 +3442,7 @@ mod tests {
         let before = memory.to_vec();
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
-            bytes: Arc::new(before.clone()),
+            contents: super::Contents::Bytes(Arc::new(before.clone())),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -3130,7 +3543,7 @@ mod tests {
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
-            bytes: Arc::new(memory.to_vec()),
+            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));
