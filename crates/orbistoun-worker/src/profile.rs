@@ -68,6 +68,8 @@ fn symbol_of(address: u64) -> Option<String> {
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     /// The longest name kept, in bytes.
     const NAME_BYTES: usize = 512;
+    /// The furthest past a symbol an address is still taken to be inside it, in bytes.
+    const NEAREST_EXPORT_REACH: u64 = 0x4000;
     static HANDLER: Mutex<Option<bool>> = Mutex::new(None);
     let mut ready = HANDLER
         .lock()
@@ -114,6 +116,12 @@ fn symbol_of(address: u64) -> Option<String> {
     if unsafe { SymFromAddr(process, address, &raw mut displacement, info) } == 0 {
         return None;
     }
+    // A module without symbols answers its nearest export, however far away: a graphics driver's
+    // code comes back as a runtime helper tens of kilobytes off. That is not the function, so it
+    // is no name at all.
+    if displacement > NEAREST_EXPORT_REACH {
+        return None;
+    }
     // SAFETY: `info` is the header the call filled in.
     let length = (unsafe { (*info).NameLen } as usize).min(NAME_BYTES);
     let name = info
@@ -139,7 +147,10 @@ fn own_module() -> Option<(u64, std::ffi::OsString)> {
 #[cfg(windows)]
 fn host_place(address: u64) -> Option<String> {
     let (module, offset) = crate::report::host_module_of(address)?;
-    Some(symbol_of(address).unwrap_or_else(|| format!("{module}+{:#x}", offset & !0xff)))
+    Some(match symbol_of(address) {
+        Some(symbol) => format!("{module}!{symbol}"),
+        None => format!("{module}+{:#x}", offset & !0xff),
+    })
 }
 
 /// Counts one thread's `samples` into buckets and prints the largest.
