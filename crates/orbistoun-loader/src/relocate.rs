@@ -382,9 +382,6 @@ fn apply_table(
         unsafe {
             std::ptr::with_exposed_provenance_mut::<u64>(ptr).write_unaligned(value.value());
         }
-        if entry.offset.get() == 0xf7088 {
-            eprintln!("[RELOC DEBUG] 0xf7088: sym_idx={}, value={:#x}", entry.symbol_index(), value.value());
-        }
         writes.push(SlotWrite {
             at: target,
             value: value.value(),

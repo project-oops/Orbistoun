@@ -1413,20 +1413,6 @@ unsafe extern "sysv64" fn on_guest_call(
     orbistoun_core::park::check();
 
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    static STRNCMP_DUMPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    if index == 442 && STRNCMP_DUMPS.fetch_add(1, Ordering::Relaxed) < 10 {
-        let return_addr = unsafe { *(entry_rsp as *const u64) };
-        let s1 = unsafe { *args };
-        let s2 = unsafe { *args.add(1) };
-        let n = unsafe { *args.add(2) };
-        let str1 = unsafe { orbistoun_mem::guest::read_cstr(s1, 64) }
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_default();
-        let str2 = unsafe { orbistoun_mem::guest::read_cstr(s2, 64) }
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_default();
-        eprintln!("[STRNCMP] ret={return_addr:#x} n={n} s1={str1:?} s2={str2:?}");
-    }
 
     // Checked first, so the run stops at exactly the budgeted call rather than near it, as a
     // polling watcher thread would (D238).
