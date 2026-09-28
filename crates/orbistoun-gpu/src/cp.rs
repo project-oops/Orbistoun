@@ -4,8 +4,8 @@
 //! involved: `DMA_DATA` fills and copies, `RELEASE_MEM` end-of-pipe writes, `WAIT_REG_MEM` checks.
 //! That work is reproduced exactly on the CPU. The walk goes in order and stops at the first packet
 //! that needs the GPU, so a fence is written only when the work before it ran (D705). At the first
-//! draw, [`CpMemory::run_draws`] may carry out all the stream's draws together, unless
-//! memory work sits between them ([`Stopped::DrawsInterleaved`]). Register writes and cache control
+//! draw of each segment - the draws between two pieces of memory work - [`CpMemory::run_draws`]
+//! may carry out that segment's draws together (D729). Register writes and cache control
 //! are passed over: nothing here executes register state, and there is no cache before guest
 //! memory. Field layouts are the public PM4 ones, cited from the collection's Mesa tree where used.
 
@@ -14,6 +14,12 @@ use crate::packet::{self, PacketKind, build::measured};
 /// `PKT3_WAIT_REG_MEM` (`sid.h:90`). No measured builder emits it; the open-toolchain GL context
 /// writes it by hand to the public layout.
 pub const WAIT_REG_MEM: u8 = 0x3c;
+
+/// `PKT3_WAIT_REG_MEM64` (`amd_cp_packets_gfx11.h:1764`): `WAIT_REG_MEM` over a 64-bit value -
+/// function and space, the address (8-byte aligned), a 64-bit reference and a 64-bit mask, then
+/// the poll interval (`:1765-1826`). `sceAgcDcbWaitUntilSafeForRendering` writes it on a flip
+/// label (`-5a17`).
+pub const WAIT_REG_MEM64: u8 = 0x93;
 
 /// `PKT3_CLEAR_STATE` (`sid.h:41`): resets register state to its defaults. radeonsi's preamble
 /// emits it with one zero body word (`si_state.c:4880-4881`); it touches no memory.
@@ -123,11 +129,12 @@ pub trait CpMemory {
         }
         self.write(address, &out)
     }
-    /// Carries out every draw in the stream together and writes what they drew into guest memory,
-    /// answering whether that happened (D712). Asked once, at the first draw, and only when no
-    /// memory work sits between the first draw and the last, so running them as one equals running
-    /// them in turn. The default carries out nothing, which leaves the draw as a stop.
-    fn run_draws(&mut self) -> bool {
+    /// Carries out one segment of the stream's draws together and writes what they drew into guest
+    /// memory, answering whether that happened (D712, D729). Asked once per segment, at its first
+    /// draw, after the memory work before it and before the memory work after it; no memory work
+    /// sits between a segment's draws, so running them as one equals running them in turn. The
+    /// default carries out nothing, which leaves the draw as a stop.
+    fn run_draws(&mut self, _segment: &DrawSegment<'_>) -> bool {
         false
     }
     /// Carries out one compute dispatch, its writes landing in guest memory, answering whether
@@ -136,6 +143,24 @@ pub trait CpMemory {
     fn run_dispatch(&mut self, _dispatch: &Dispatch<'_>) -> bool {
         false
     }
+}
+
+/// A run of a stream's draws with no memory work between them, carried out together (D729).
+///
+/// Every register write in the stream still reaches the draws through its own packet, so a
+/// segment's register state is the stream's up to its last draw.
+#[derive(Debug, Clone, Copy)]
+pub struct DrawSegment<'a> {
+    /// The whole stream.
+    pub stream: &'a [u8],
+    /// Byte offset of the segment's first draw packet.
+    pub first: u32,
+    /// Byte offset just past its last draw packet.
+    pub end: u32,
+    /// Whether it is all the stream's GPU work: every draw, no memory work between any two of
+    /// them, and no dispatch anywhere - so the submission as prepared is its draws and nothing
+    /// the command processor carries out itself.
+    pub whole: bool,
 }
 
 /// A compute dispatch as the stream asks for it: where it is, so the registers set before it can
@@ -180,7 +205,7 @@ fn dispatch_direct(
 /// The draw packets a submission's draws are carried out for together: `DRAW_INDEX_2` and
 /// `DRAW_INDEX_AUTO`, the two the translator turns into draws. An indirect draw reads its arguments
 /// from memory at execution time and is not among them.
-const fn is_draw(opcode: u8) -> bool {
+pub(crate) const fn is_draw(opcode: u8) -> bool {
     matches!(opcode, measured::DRAW_INDEX_2 | measured::DRAW_INDEX_AUTO)
 }
 
@@ -193,14 +218,6 @@ pub enum Stopped {
     /// A packet needs the GPU - a draw, a dispatch, or a command not known to be memory-only.
     NeedsGpu {
         /// Byte offset of the packet in the stream.
-        offset: u32,
-        /// Its opcode.
-        opcode: u8,
-    },
-    /// A packet between the stream's first draw and its last is neither a draw nor inert, so the
-    /// draws cannot be carried out together without reordering them around it.
-    DrawsInterleaved {
-        /// Byte offset of that packet in the stream.
         offset: u32,
         /// Its opcode.
         opcode: u8,
@@ -234,7 +251,7 @@ pub struct CpExecution {
     pub releases: usize,
     /// `WAIT_REG_MEM` checks that held.
     pub waits: usize,
-    /// Draw packets carried out, through [`CpMemory::run_draws`].
+    /// Draw packets carried out, through [`CpMemory::run_draws`], one segment at a time.
     pub draws: usize,
     /// Compute dispatches carried out, through [`CpMemory::run_dispatch`].
     pub dispatches: usize,
@@ -277,9 +294,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         result.stopped = Stopped::Malformed { offset: 0 };
         return result;
     }
-    // Whether the draws can run as one, decided before any of them does.
-    let interleaved = interleaved_with_draws(&walked.packets);
-    let mut draws_ran = false;
+    // The draw segments, found before any draw runs; each is carried out at its first draw.
+    let segments = draw_segments(stream, &walked.packets);
+    let mut next_segment = segments.iter().peekable();
     for packet in &walked.packets {
         let offset = packet.offset;
         let opcode = match packet.kind {
@@ -299,16 +316,11 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             continue;
         }
         if is_draw(opcode) {
-            if !draws_ran {
-                if let Some((offset, opcode)) = interleaved {
-                    result.stopped = Stopped::DrawsInterleaved { offset, opcode };
-                    return result;
-                }
-                if !memory.run_draws() {
-                    result.stopped = Stopped::NeedsGpu { offset, opcode };
-                    return result;
-                }
-                draws_ran = true;
+            if let Some(segment) = next_segment.next_if(|segment| segment.first == offset)
+                && !memory.run_draws(segment)
+            {
+                result.stopped = Stopped::NeedsGpu { offset, opcode };
+                return result;
             }
             result.draws += 1;
             continue;
@@ -324,6 +336,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             }),
             WAIT_REG_MEM => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 wait_reg_mem(&body, memory, &mut result)
+            }),
+            WAIT_REG_MEM64 => crate::perf::span(crate::perf::Span::OtherMemory, || {
+                wait_reg_mem64(&body, memory, &mut result)
             }),
             CONTEXT_CONTROL => context_control(&body),
             packet::build::DISPATCH_DIRECT => {
@@ -347,24 +362,38 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
     result
 }
 
-/// The first packet strictly between the stream's first draw and its last that is neither a draw
-/// nor memory-inert, by offset and opcode - `None` when the draws can be carried out together.
-fn interleaved_with_draws(packets: &[packet::Packet]) -> Option<(u32, u8)> {
-    let command = |p: &packet::Packet| match p.kind {
-        PacketKind::Command { opcode } => Some(opcode),
-        _ => None,
-    };
-    let first = packets
-        .iter()
-        .position(|p| command(p).is_some_and(is_draw))?;
-    let last = packets
-        .iter()
-        .rposition(|p| command(p).is_some_and(is_draw))?;
-    packets[first..last].iter().find_map(|p| {
-        let opcode = command(p)?;
-        let body_dwords = p.body_length() as usize / 4;
-        (!is_draw(opcode) && !is_memory_inert(opcode, body_dwords)).then_some((p.offset, opcode))
-    })
+/// The stream's draws split at every packet between two of them that is neither a draw nor
+/// memory-inert (D729): each segment runs from a draw to the last draw before the next such packet.
+fn draw_segments<'a>(stream: &'a [u8], packets: &[packet::Packet]) -> Vec<DrawSegment<'a>> {
+    let mut segments: Vec<DrawSegment<'a>> = Vec::new();
+    let mut open = false;
+    for p in packets {
+        let PacketKind::Command { opcode } = p.kind else {
+            continue;
+        };
+        if is_draw(opcode) {
+            let end = p.body_offset() + p.body_length();
+            match segments.last_mut() {
+                Some(segment) if open => segment.end = end,
+                _ => segments.push(DrawSegment {
+                    stream,
+                    first: p.offset,
+                    end,
+                    whole: false,
+                }),
+            }
+            open = true;
+        } else if !is_memory_inert(opcode, p.body_length() as usize / 4) {
+            open = false;
+        }
+    }
+    let dispatches = packets.iter().any(|p| {
+        matches!(p.kind, PacketKind::Command { opcode } if opcode == packet::build::DISPATCH_DIRECT)
+    });
+    if let [only] = segments.as_mut_slice() {
+        only.whole = !dispatches;
+    }
+    segments
 }
 
 enum Stop {
@@ -607,6 +636,52 @@ fn wait_reg_mem(
     Ok(())
 }
 
+/// `WAIT_REG_MEM64`: function and space, address low and high, reference low and high, mask low
+/// and high, poll interval (`amd_cp_packets_gfx11.h:1765-1826`). As with [`wait_reg_mem`], only a
+/// memory wait with a function the 32-bit form checks is carried out.
+fn wait_reg_mem64(
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [
+        function,
+        addr_low,
+        addr_high,
+        reference_low,
+        reference_high,
+        mask_low,
+        mask_high,
+        ..,
+    ] = *body
+    else {
+        return Err(Stop::Malformed);
+    };
+    if function & WAIT_MEM_SPACE == 0 {
+        return Err(Stop::NeedsGpu);
+    }
+    // `MEM_POLL_ADDR_LO` is bits 31:3: the low three bits are not address (`:1806`).
+    let bytes = memory
+        .read(address(addr_low & !0x7, addr_high), 8)
+        .ok_or(Stop::OutOfBounds)?;
+    let mut word = [0_u8; 8];
+    word.copy_from_slice(&bytes);
+    let mask = u64::from(mask_high) << 32 | u64::from(mask_low);
+    let value = u64::from_le_bytes(word) & mask;
+    let reference = u64::from(reference_high) << 32 | u64::from(reference_low);
+    let holds = match function & 0x7 {
+        WAIT_EQUAL => value == reference,
+        WAIT_NOT_EQUAL => value != reference,
+        WAIT_GREATER_OR_EQUAL => value >= reference,
+        _ => return Err(Stop::NeedsGpu),
+    };
+    if !holds {
+        return Err(Stop::Wait);
+    }
+    result.waits += 1;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CpMemory, Stopped, WAIT_REG_MEM, execute};
@@ -742,6 +817,30 @@ mod tests {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
+    /// The wait `sceAgcDcbWaitUntilSafeForRendering` writes (`-5a17`) holds while the buffer's
+    /// 64-bit label reads `0` and never holds once either half is set: a label released to `1`
+    /// in its high half stops the stream there, as the command processor would wait on it forever.
+    #[test]
+    fn a_wait_until_safe_polls_the_whole_64_bit_label() {
+        let label = 0x1000_u64;
+        // The written words, then the `NOP` body the builder skips over.
+        let mut wait = crate::display::wait_until_safe_words(0, label).to_vec();
+        wait.resize(crate::display::WAIT_UNTIL_SAFE_DWORDS, 0);
+        let mut memory = Fake::default();
+
+        let done = execute(&bytes(&wait), &mut memory);
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(done.waits, 1);
+
+        let mut stream = release(label + 4, 1, 1);
+        stream.extend(wait);
+        let done = execute(&bytes(&stream), &mut memory);
+        assert!(
+            matches!(done.stopped, Stopped::WaitNeverSatisfied { .. }),
+            "{done:?}"
+        );
+    }
+
     /// The GL context's clear self-test runs to completion, and the pixels are really there.
     ///
     /// Register state, a fill of the colour target, a fence, a wait on it, a copy to the readback
@@ -830,7 +929,7 @@ mod tests {
         fn timestamp(&mut self) -> u64 {
             self.inner.timestamp()
         }
-        fn run_draws(&mut self) -> bool {
+        fn run_draws(&mut self, _segment: &super::DrawSegment<'_>) -> bool {
             self.asked += 1;
             self.draws && self.inner.write(0x3000, &0xd4a7_d4a7_u32.to_le_bytes())
         }
@@ -884,33 +983,155 @@ mod tests {
         assert_eq!(memory.inner.word(fence), 0);
     }
 
-    /// Memory work between two draws refuses running them together, by name, before either runs:
-    /// running both at the first would move the fill after the second draw ahead of it.
+    /// Memory whose draw segments the executor carries out in order, recording each segment it was
+    /// handed and, at the moment it ran, the word at `0x2000` - what the memory work before it
+    /// left there. `refuse` names a segment, by its first draw's offset, that it declines.
+    struct Segmenting {
+        inner: Fake,
+        refuse: Option<u32>,
+        seen: Vec<(u32, u32, bool, u32)>,
+    }
+
+    impl CpMemory for Segmenting {
+        fn read(&self, address: u64, length: usize) -> Option<Vec<u8>> {
+            self.inner.read(address, length)
+        }
+        fn write(&mut self, address: u64, bytes: &[u8]) -> bool {
+            self.inner.write(address, bytes)
+        }
+        fn timestamp(&mut self) -> u64 {
+            self.inner.timestamp()
+        }
+        fn run_draws(&mut self, segment: &super::DrawSegment<'_>) -> bool {
+            self.seen.push((
+                segment.first,
+                segment.end,
+                segment.whole,
+                self.inner.word(0x2000),
+            ));
+            self.refuse != Some(segment.first)
+        }
+        /// Every dispatch carried out, writing nothing.
+        fn run_dispatch(&mut self, _dispatch: &super::Dispatch<'_>) -> bool {
+            true
+        }
+    }
+
+    /// Memory work between draws splits them into segments carried out in order (D729): each
+    /// segment's draws run when the walk reaches them, after the memory work before them and
+    /// before the memory work after, and a fence between segments retires only once the draws
+    /// before it ran.
     #[test]
-    fn memory_work_between_draws_is_refused_before_any_draw_runs() {
+    fn memory_work_between_draws_splits_them_into_segments_run_in_order() {
+        let fence = 0x1000_u64;
+        let mut stream = fill(0x2000, 0x1111_1111, 16);
+        let first = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(draw());
+        stream.extend([command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7]);
+        stream.extend(draw());
+        let first_end = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(release(fence, 1, 1));
+        stream.extend(wait_equal(fence, 1));
+        stream.extend(fill(0x2000, 0x2222_2222, 16));
+        let second = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(draw());
+        let second_end = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(release(fence, 1, 2));
+        let mut memory = Segmenting {
+            inner: Fake::default(),
+            refuse: None,
+            seen: Vec::new(),
+        };
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(
+            memory.seen,
+            vec![
+                (first, first_end, false, 0x1111_1111),
+                (second, second_end, false, 0x2222_2222),
+            ],
+            "two segments, each seeing the memory work before it and none after"
+        );
+        assert_eq!(done.draws, 3);
+        assert_eq!(
+            (done.releases, done.waits),
+            (2, 1),
+            "the fence between retired"
+        );
+        assert_eq!(memory.inner.word(fence), 2);
+    }
+
+    /// A segment the executor refuses stops the stream at its first draw: the segment before it
+    /// and the fence between them retired, and nothing after it did (D705).
+    #[test]
+    fn a_refused_segment_stops_at_its_first_draw_after_the_segment_before_retired() {
         let fence = 0x1000_u64;
         let mut stream = draw().to_vec();
-        let between = u32::try_from(stream.len() * 4).expect("small");
-        stream.extend(fill(0x2000, 0x2222_2222, 16));
+        stream.extend(release(fence, 1, 1));
+        let second = u32::try_from(stream.len() * 4).expect("small");
         stream.extend(draw());
-        stream.extend(release(fence, 1, 0xbeef_cafe));
-        let mut memory = Drawing {
+        stream.extend(release(fence, 1, 2));
+        let mut memory = Segmenting {
             inner: Fake::default(),
-            draws: true,
-            asked: 0,
+            refuse: Some(second),
+            seen: Vec::new(),
         };
 
         let done = execute(&bytes(&stream), &mut memory);
 
         assert_eq!(
             done.stopped,
-            Stopped::DrawsInterleaved {
-                offset: between,
-                opcode: measured::DMA_DATA
+            Stopped::NeedsGpu {
+                offset: second,
+                opcode: measured::DRAW_INDEX_AUTO
             }
         );
-        assert_eq!(memory.asked, 0, "the executor is never asked");
-        assert_eq!(memory.inner.word(fence), 0);
+        assert_eq!((done.draws, done.releases), (1, 1));
+        assert_eq!(memory.inner.word(fence), 1, "only the first fence");
+    }
+
+    /// Draws with nothing but register state between them are one segment holding every draw, so
+    /// the executor may prepare them from the stream as it stands.
+    #[test]
+    fn draws_with_only_register_state_between_them_are_one_whole_segment() {
+        let mut stream = draw().to_vec();
+        stream.extend([command_header(measured::SET_SH_REG, 2), 0x8c, 7]);
+        stream.extend(draw());
+        let end = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(release(0x1000, 1, 1));
+        let mut memory = Segmenting {
+            inner: Fake::default(),
+            refuse: None,
+            seen: Vec::new(),
+        };
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.seen, vec![(0, end, true, 0)]);
+    }
+
+    /// A stream with a dispatch in it is not drawn as prepared, even when its draws are one
+    /// segment: the prepared submission carries the dispatch too, which the command processor
+    /// carries out itself, so the segment is prepared from its own stream instead.
+    #[test]
+    fn a_lone_segment_in_a_stream_with_a_dispatch_is_not_whole() {
+        let mut stream = crate::packet::build::dispatch_direct(0xc0, 1, 1).to_vec();
+        let first = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(draw());
+        let end = u32::try_from(stream.len() * 4).expect("small");
+        let mut memory = Segmenting {
+            inner: Fake::default(),
+            refuse: None,
+            seen: Vec::new(),
+        };
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.seen, vec![(first, end, false, 0)]);
     }
 
     /// A `CONTEXT_CONTROL` that only updates its load and shadow enables, as radeonsi's preamble

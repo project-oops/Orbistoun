@@ -89,6 +89,8 @@ pub mod op {
     pub const LABEL: u16 = 248;
     /// Returns from a function with no value.
     pub const RETURN: u16 = 253;
+    /// Ends a fragment invocation without writing its outputs: the pixel is discarded.
+    pub const KILL: u16 = 252;
     /// Unconditional branch.
     pub const BRANCH: u16 = 249;
     /// Branch on a boolean.
@@ -111,6 +113,10 @@ pub mod op {
     pub const COMPOSITE_CONSTRUCT: u16 = 80;
     /// A fixed-length array type.
     pub const TYPE_ARRAY: u16 = 28;
+    /// An array whose length is the bound buffer's, the last member of a storage block.
+    pub const TYPE_RUNTIME_ARRAY: u16 = 29;
+    /// How many elements a storage block's runtime array holds, as the bound buffer has them.
+    pub const ARRAY_LENGTH: u16 = 68;
     /// A structure type.
     pub const TYPE_STRUCT: u16 = 30;
     /// A pointer type.
@@ -179,6 +185,8 @@ pub mod op {
     pub const FMUL: u16 = 133;
     /// Floating-point division.
     pub const FDIV: u16 = 136;
+    /// Converts a float to a signed integer, rounding toward zero; undefined out of range.
+    pub const CONVERT_F_TO_S: u16 = 110;
     /// Converts a signed integer to the float of the same value.
     pub const CONVERT_S_TO_F: u16 = 111;
     /// Converts an unsigned integer to the float of the same value.
@@ -235,6 +243,8 @@ pub mod op {
     /// Ordered means false when either operand is a NaN, as the guest's comparison is. The
     /// unordered forms answer true.
     pub const FORD_EQUAL: u16 = 180;
+    /// Unordered float inequality: true when the operands differ or either is a NaN.
+    pub const FUNORD_NOT_EQUAL: u16 = 183;
     /// Ordered float less-than.
     pub const FORD_LESS_THAN: u16 = 184;
     /// Ordered float greater-than.
@@ -331,6 +341,8 @@ pub mod decoration {
     /// The reference compiler emits it for a write-only image, and it holds for everything stored
     /// to here: a guest's `image_store` writes, and reads go through the sampled binding.
     pub const NON_READABLE: u32 = 25;
+    /// Marks memory the module only ever reads: a draw's bound buffers.
+    pub const NON_WRITABLE: u32 = 24;
     /// Which descriptor set.
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
@@ -1431,6 +1443,19 @@ pub const DRAW_DATA_STRIDE_WORDS: u32 = 16;
 /// The most draws one dispatch carries, and so how many strides the draw-data binding spans.
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 
+/// The descriptor set a draw's buffers are bound in (D733): its own, beside set zero, which a
+/// pipeline owns, so a pipeline serves every draw whatever buffers it binds.
+pub const DRAW_BUFFERS_SET: u32 = 1;
+
+/// Which binding of [`DRAW_BUFFERS_SET`] a primitive shader's buffers are at.
+pub const GEOMETRY_BUFFERS_BINDING: u32 = 0;
+
+/// Which binding of [`DRAW_BUFFERS_SET`] a pixel shader's buffers are at.
+pub const PIXEL_BUFFERS_BINDING: u32 = 1;
+
+/// How many buffers one stage of a draw binds: the length of each binding's array.
+pub const DRAW_BUFFERS_PER_STAGE: u32 = 8;
+
 /// A fragment shader that writes one texel of a storage image, and a colour.
 ///
 /// The colour shows the shader ran; the image shows what it stored. The write instruction, the
@@ -1804,6 +1829,16 @@ static SHAPES: &[ShapeEntry] = &[
     (op::TYPE_FUNCTION, Some(0), &[], Some(1), RestStride::Every),
     // Element type and a constant holding the length.
     (op::TYPE_ARRAY, Some(0), &[1, 2], None, RestStride::Every),
+    // Result id and the element type.
+    (
+        op::TYPE_RUNTIME_ARRAY,
+        Some(0),
+        &[1],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, the block pointer, then the member index as a literal.
+    (op::ARRAY_LENGTH, Some(1), &[0, 2], None, RestStride::Every),
     (op::TYPE_STRUCT, Some(0), &[], Some(1), RestStride::Every),
     // Operand one is a storage class literal, so only operand two is named.
     (op::TYPE_POINTER, Some(0), &[2], None, RestStride::Every),
@@ -1836,6 +1871,13 @@ static SHAPES: &[ShapeEntry] = &[
     (op::ACCESS_CHAIN, Some(1), &[0], Some(2), RestStride::Every),
     (op::LOAD, Some(1), &[0, 2], None, RestStride::Every),
     (op::BITCAST, Some(1), &[0, 2], None, RestStride::Every),
+    (
+        op::CONVERT_F_TO_S,
+        Some(1),
+        &[0, 2],
+        None,
+        RestStride::Every,
+    ),
     (
         op::CONVERT_S_TO_F,
         Some(1),
@@ -1985,6 +2027,13 @@ static SHAPES: &[ShapeEntry] = &[
     (op::INOT_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::FORD_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (
+        op::FUNORD_NOT_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
         op::FORD_LESS_THAN,
         Some(1),
         &[0, 2, 3],
@@ -2013,6 +2062,7 @@ static SHAPES: &[ShapeEntry] = &[
     (op::MEMORY_MODEL, None, &[], None, RestStride::Every),
     (op::FUNCTION_END, None, &[], None, RestStride::Every),
     (op::RETURN, None, &[], None, RestStride::Every),
+    (op::KILL, None, &[], None, RestStride::Every),
     // Control flow. Every operand of these is a label except the control masks and the
     // switch's case values.
     (op::BRANCH, None, &[0], None, RestStride::Every),

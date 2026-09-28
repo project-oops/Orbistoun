@@ -1310,6 +1310,40 @@ fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged {
     }
 }
 
+/// The sampler for a texture of `levels` mip levels, sampled as its sampler descriptor asks; the
+/// default - point sampling clamped to the edge - for a texture no sampler names, so a test that
+/// names a texel gets exactly that texel.
+fn sampler_info(
+    sampling: orbistoun_gpu::TextureSampling,
+    levels: u32,
+) -> vk::SamplerCreateInfo<'static> {
+    let address = |wrap: orbistoun_gpu::TextureWrap| match wrap {
+        orbistoun_gpu::TextureWrap::Repeat => vk::SamplerAddressMode::REPEAT,
+        orbistoun_gpu::TextureWrap::Mirror => vk::SamplerAddressMode::MIRRORED_REPEAT,
+        orbistoun_gpu::TextureWrap::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+    };
+    let filter = |filter: orbistoun_gpu::TextureFilter| match filter {
+        orbistoun_gpu::TextureFilter::Nearest => vk::Filter::NEAREST,
+        orbistoun_gpu::TextureFilter::Linear => vk::Filter::LINEAR,
+    };
+    // Mip filter none reads the base level only, which a maximum level of zero gives. Otherwise the
+    // levels' span: without it the sampler clamps every level request to zero and a levelled sample
+    // reads the fine level, indistinguishable from a translation that ignored the level operand.
+    let (mipmap_mode, max_lod) = match sampling.mip {
+        orbistoun_gpu::MipFilter::None => (vk::SamplerMipmapMode::NEAREST, 0.0),
+        orbistoun_gpu::MipFilter::Nearest => (vk::SamplerMipmapMode::NEAREST, f32_from(levels - 1)),
+        orbistoun_gpu::MipFilter::Linear => (vk::SamplerMipmapMode::LINEAR, f32_from(levels - 1)),
+    };
+    vk::SamplerCreateInfo::default()
+        .mag_filter(filter(sampling.magnify))
+        .min_filter(filter(sampling.minify))
+        .mipmap_mode(mipmap_mode)
+        .address_mode_u(address(sampling.wrap[0]))
+        .address_mode_v(address(sampling.wrap[1]))
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .max_lod(max_lod)
+}
+
 /// Creates a sampled image holding `texels`, `row` of them to a row.
 ///
 /// Optimally tiled and filled by a staging copy: `R8G8B8A8_UNORM` must support sampling with
@@ -1321,6 +1355,7 @@ fn create_texture(
     texels: &[u32],
     row: u32,
     coarse_level: bool,
+    sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
     let device = devices.device;
     let Staged {
@@ -1410,17 +1445,7 @@ fn create_texture(
     let view = unsafe { device.create_image_view(&view_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_image_view(texture)", e))?;
 
-    // Nearest filtering and clamping, so a test that names a texel gets exactly that texel.
-    let sampler_info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::NEAREST)
-        .min_filter(vk::Filter::NEAREST)
-        .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        // Without this the sampler clamps every level request to zero and a levelled sample reads
-        // the fine level, indistinguishable from a translation that ignored the level operand.
-        .max_lod(f32_from(levels - 1));
+    let sampler_info = sampler_info(sampling, levels);
     // SAFETY: the create info outlives the call and the device is live.
     let sampler = unsafe { device.create_sampler(&sampler_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_sampler", e))?;
@@ -1673,11 +1698,18 @@ pub(crate) fn draw_vertices(
             scissor,
             initial: start.initial,
             user_data: start.user_data,
-            texture: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+            textures: &TexturesBound {
+                first: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+                second: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+                sampling: start.sampling,
+            },
             blend: start.blend,
             viewport: start.viewport,
-            second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
             cull: start.cull,
+            draw_buffers: &DrawBuffersBound {
+                buffers: start.buffers,
+                ..NO_DRAW_BUFFERS
+            },
             ..Bound::default()
         },
     )
@@ -1702,6 +1734,8 @@ pub(crate) struct Start<'a> {
     pub(crate) viewport: Option<orbistoun_gpu::ViewportTransform>,
     /// The second texture and its row length.
     pub(crate) second_texture: Option<(&'a [u32], u32)>,
+    /// How each of the two textures is sampled, as its sampler descriptor says.
+    pub(crate) sampling: [orbistoun_gpu::TextureSampling; 2],
     /// The draw's pipeline, as the backend hashed it: a resident draw with a key reuses the
     /// pipeline built for the last draw with the same key. `None` builds afresh.
     pub(crate) pipeline_key: Option<std::num::NonZeroU64>,
@@ -1711,6 +1745,8 @@ pub(crate) struct Start<'a> {
     pub(crate) cull: Option<orbistoun_gpu::depth::CullState>,
     /// The clear the depth attachment takes before the draw.
     pub(crate) depth_clear: Option<crate::depth::DepthClear>,
+    /// The primitive shader's and the pixel shader's buffers (D733).
+    pub(crate) buffers: [&'a [orbistoun_gpu::DrawBuffer]; 2],
 }
 
 /// The Vulkan viewport a guest's transform describes.
@@ -1719,15 +1755,92 @@ pub(crate) struct Start<'a> {
 /// x_ndc + x_offset`. So `width = 2 * x_scale` and `x = x_offset - x_scale`, and likewise for y,
 /// where a negative `y_scale` becomes a negative height (core since Vulkan 1.1): the flip the guest
 /// asked for.
+///
+/// Depth likewise: Vulkan maps `depth = min + (max - min) * t`, where `t` is `ndc_z` clipped to
+/// `0..1`, or `(ndc_z + 1) / 2` under a negative-one-to-one pipeline; the guest maps `depth =
+/// z_scale * ndc_z + z_offset`. So `min = z_offset - z_scale`, `max = z_offset + z_scale` for a
+/// guest clipping to `-w..w`, and `min = z_offset`, `max = z_offset + z_scale` for one clipping to
+/// `0..w`.
 pub(crate) fn guest_viewport(transform: orbistoun_gpu::ViewportTransform) -> vk::Viewport {
+    let depth = transform.depth;
+    let (min_depth, max_depth) = if depth.negative_one_to_one {
+        (
+            depth.z_offset - depth.z_scale,
+            depth.z_offset + depth.z_scale,
+        )
+    } else {
+        (depth.z_offset, depth.z_offset + depth.z_scale)
+    };
     vk::Viewport {
         x: transform.x_offset - transform.x_scale,
         y: transform.y_offset - transform.y_scale,
         width: 2.0 * transform.x_scale,
         height: 2.0 * transform.y_scale,
-        min_depth: 0.0,
-        max_depth: 1.0,
+        min_depth,
+        max_depth,
     }
+}
+
+/// Refuses a viewport the device cannot take: wider or taller than `maxViewportDimensions`, or
+/// reaching outside `viewportBoundsRange` - both invalid usage in Vulkan rather than a clamp. A
+/// window-space draw's viewport (D731) spans `2 * WINDOW_SPACE_SCALE` pixels from `-S`.
+///
+/// # Errors
+///
+/// [`DispatchError::Unsupported`] naming the limit exceeded.
+fn viewport_within_limits(
+    devices: Devices<'_>,
+    viewport: vk::Viewport,
+) -> Result<(), DispatchError> {
+    // SAFETY: the physical device was enumerated from this instance, which outlives the call.
+    let limits = unsafe {
+        devices
+            .instance
+            .get_physical_device_properties(devices.physical)
+    }
+    .limits;
+    let [max_width, max_height] = limits.max_viewport_dimensions;
+    let [low, high] = limits.viewport_bounds_range;
+    let (width, height) = (viewport.width.abs(), viewport.height.abs());
+    if width > f32_from(max_width) || height > f32_from(max_height) {
+        return Err(DispatchError::Unsupported(format!(
+            concat!(
+                "a viewport of {width}x{height} exceeds the device's maxViewportDimensions of ",
+                "{max_width}x{max_height}",
+            ),
+            width = width,
+            height = height,
+            max_width = max_width,
+            max_height = max_height,
+        )));
+    }
+    let x = [viewport.x, viewport.x + viewport.width];
+    let y = [viewport.y, viewport.y + viewport.height];
+    if x.into_iter().chain(y).any(|edge| edge < low || edge > high) {
+        return Err(DispatchError::Unsupported(format!(
+            concat!(
+                "a viewport from ({}, {}) of {}x{} reaches outside the device's ",
+                "viewportBoundsRange [{low}, {high}]",
+            ),
+            viewport.x,
+            viewport.y,
+            viewport.width,
+            viewport.height,
+            low = low,
+            high = high,
+        )));
+    }
+    // Outside `0..1` needs `VK_EXT_depth_range_unrestricted`, which nothing here enables.
+    if [viewport.min_depth, viewport.max_depth]
+        .into_iter()
+        .any(|depth| !(0.0..=1.0).contains(&depth))
+    {
+        return Err(DispatchError::Unsupported(format!(
+            "a depth range of {}..{} reaches outside 0..1",
+            viewport.min_depth, viewport.max_depth
+        )));
+    }
+    Ok(())
 }
 
 /// The colour-blend attachment state a guest's `CB_BLEND0_CONTROL` asks for, or the name of what it
@@ -1838,6 +1951,19 @@ fn render_over(
     let device = &session.device;
     let queue = session.queue;
     let family = session.family;
+    // The draw's buffers (D733), bound as set one whatever the modules read.
+    let draw_buffers = DrawBuffersBound {
+        set: Some(match bound.draw_buffers.set {
+            Some(set) => set,
+            None => crate::draw_buffers::descriptor_set(&session, bound.draw_buffers.buffers)?,
+        }),
+        layout: Some(crate::draw_buffers::set_layout(&session)?),
+        ..*bound.draw_buffers
+    };
+    let bound = Bound {
+        draw_buffers: &draw_buffers,
+        ..bound
+    };
 
     // A resident attachment is drawn on in place: no attachment, render pass, framebuffer or buffer
     // of this draw's own, and no pixels in or out.
@@ -2207,6 +2333,8 @@ struct BindState {
     geometry: Geometry,
     user_data: [u32; USER_DATA_BLOCK_WORDS],
     window_offset: u32,
+    /// The draw's buffers' set (D733), bound as set one.
+    buffers: vk::DescriptorSet,
 }
 
 impl Pipeline {
@@ -2218,6 +2346,7 @@ impl Pipeline {
             geometry: self.geometry,
             user_data: self.user_data,
             window_offset: self.window_offset,
+            buffers: self.draw_buffers,
         }
     }
 }
@@ -2247,6 +2376,20 @@ fn bind_for_draw(device: &ash::Device, command: vk::CommandBuffer, state: &BindS
             &offsets,
         );
     }
+    // The draw's buffers (D733): set one, whose layout every pipeline layout shares.
+    let buffers = [state.buffers];
+    // SAFETY: the set was allocated against the draw-buffer layout this pipeline's layout holds at
+    // set one, and is live until every recorded draw has run.
+    unsafe {
+        device.cmd_bind_descriptor_sets(
+            command,
+            vk::PipelineBindPoint::GRAPHICS,
+            state.layout,
+            orbistoun_spirv::DRAW_BUFFERS_SET,
+            &buffers,
+            &[],
+        );
+    }
     // The draw's user data, where its shaders read it at entry.
     let block = zerocopy::IntoBytes::as_bytes(&state.user_data);
     // SAFETY: recording is open; the layout declares a push-constant range of exactly this many
@@ -2273,13 +2416,15 @@ struct MeshBatch {
 }
 
 /// What must be the same for a draw to join a batch: the pipeline (which carries its shaders,
-/// textures, blend, viewport and scissor), the attachment, the window slot and buffer, and the
-/// fragment stage's user data - everything but the geometry stage's words.
+/// textures, blend, viewport and scissor), the attachment, the window slot and buffer, the draw's
+/// buffers, and the fragment stage's user data - everything but the geometry stage's words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BatchKey {
     pipeline: u64,
     framebuffer: vk::Framebuffer,
     window: (vk::Buffer, u32),
+    /// The draw's buffers' set (D733).
+    buffers: vk::DescriptorSet,
     fragment: DrawWords,
 }
 
@@ -2362,6 +2507,8 @@ fn render_resident(
         built.window_offset = u32::try_from(guest.offset).unwrap_or(0);
         built.geometry = geometry;
         built.user_data = *bound.user_data;
+        // This draw's buffers: a set bound at record time, not a change to the pipeline (D733).
+        built.draw_buffers = bound.draw_buffers.set?;
         Some(built)
     });
     let pipeline =
@@ -3010,6 +3157,7 @@ fn render_resident_with(
                     pipeline: key,
                     framebuffer: pass.framebuffer,
                     window: (built.buffers[1].0, built.window_offset),
+                    buffers: built.draw_buffers,
                     fragment,
                 },
                 built.bind_state(),
@@ -3274,6 +3422,8 @@ struct Pipeline {
     /// The dynamic offset of binding 1: which window-ring slot the draw reads. Zero for a pipeline
     /// that made its own guest-memory buffer.
     window_offset: u32,
+    /// The set of the buffers its latest draw binds (D733), which the draw-buffer cache owns.
+    draw_buffers: vk::DescriptorSet,
 }
 
 /// An attachment dimension as a float, exactly.
@@ -3307,12 +3457,21 @@ fn build_pipeline(
     bound: Bound<'_>,
 ) -> Result<Pipeline, DispatchError> {
     let device = devices.device;
+    if let Some(transform) = bound.viewport {
+        viewport_within_limits(devices, guest_viewport(transform))?;
+    }
+    let (Some(buffers_layout), Some(draw_buffers)) =
+        (bound.draw_buffers.layout, bound.draw_buffers.set)
+    else {
+        return Err(DispatchError::Unsupported(
+            "a pipeline built with no draw-buffer set to bind (D733)".to_owned(),
+        ));
+    };
     let (vertex, fragment) = create_shader_modules(device, shaders)?;
     let resources = create_bound_resources(devices, bound)?;
     let set_layout = create_set_layout(device)?;
-    let set_layouts = [set_layout];
-    let layout = create_pipeline_layout(device, &set_layouts, geometry)?;
-    let (descriptor_pool, set) = allocate_set(device, &set_layouts)?;
+    let layout = create_pipeline_layout(device, &[set_layout, buffers_layout], geometry)?;
+    let (descriptor_pool, set) = allocate_set(device, &[set_layout])?;
     write_descriptor_set(device, set, bound.windows, &resources);
     let handle = create_graphics_pipeline(
         device,
@@ -3343,6 +3502,7 @@ fn build_pipeline(
         window_offset: bound
             .guest_buffer
             .map_or(0, |guest| u32::try_from(guest.offset).unwrap_or(0)),
+        draw_buffers,
     })
 }
 
@@ -3409,17 +3569,19 @@ fn create_bound_resources(
     let buffers = [observation, guest_memory];
     let texture = create_texture(
         devices,
-        bound.texture.0,
-        bound.texture.1,
+        bound.textures.first.0,
+        bound.textures.first.1,
         bound.coarse_level,
+        bound.textures.sampling[0],
     )?;
     // The second texture unit: a pixel shader that samples two textures reads the second here. The
     // default white texel when nothing asked for one.
     let second_texture = create_texture(
         devices,
-        bound.second_texture.0,
-        bound.second_texture.1,
+        bound.textures.second.0,
+        bound.textures.second.1,
         false,
+        bound.textures.sampling[1],
     )?;
     let storage_image = create_storage_image(devices, STORAGE_IMAGE_SIZE)?;
     // One dispatch's span of the draw-data buffer; the batch's offset is given at bind (D718).
@@ -3666,9 +3828,26 @@ fn create_graphics_pipeline(
     let scissors = [bound
         .scissor
         .map_or(full, |rect| clamp_scissor(rect, width, height))];
+    // A guest clipping z to `-w..w`, as GL does, clips so here too: under Vulkan's own `0..w`
+    // everything nearer than the middle of its depth range is lost, the near plane's HUD with it.
+    let negative_one_to_one = bound
+        .viewport
+        .is_some_and(|transform| transform.depth.negative_one_to_one);
+    if negative_one_to_one && !crate::compute::depth_clip_control() {
+        return Err(DispatchError::Unsupported(
+            "the guest clips z to -w..w and the device has no VK_EXT_depth_clip_control".to_owned(),
+        ));
+    }
+    let mut clip_control =
+        vk::PipelineViewportDepthClipControlCreateInfoEXT::default().negative_one_to_one(true);
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewports(&viewports)
         .scissors(&scissors);
+    let viewport_state = if negative_one_to_one {
+        viewport_state.push_next(&mut clip_control)
+    } else {
+        viewport_state
+    };
     // The guest's cull state; culling off when it set none, so winding order cannot fail a draw.
     let (cull_mode, front_face) = crate::depth::rasterisation(bound.cull);
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
@@ -3795,6 +3974,37 @@ pub fn draw_mesh_over(
     )
 }
 
+/// Draws with a mesh stage over seeded guest memory under the guest viewport transform `viewport`
+/// rather than clip space over the whole attachment.
+///
+/// # Errors
+///
+/// When no device is available, when it has no mesh stage, when the viewport exceeds the device's
+/// limits, or when any Vulkan call fails.
+pub fn draw_mesh_over_viewport(
+    mesh_words: &[u32],
+    fragment_words: &[u32],
+    clear: [f32; 4],
+    (width, height): (u32, u32),
+    memory: &[u32],
+    viewport: orbistoun_gpu::ViewportTransform,
+) -> Result<(Pixels, Vec<u32>), DispatchError> {
+    render_over(
+        clear,
+        width,
+        height,
+        Some((mesh_words, fragment_words)),
+        Geometry::Mesh,
+        Bound {
+            windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
+            memory,
+            viewport: Some(viewport),
+            ..Bound::default()
+        },
+    )
+    .map(|drawn| (drawn.pixels, drawn.memory))
+}
+
 /// Draws with a mesh stage over seeded guest memory, restricted to a scissor rectangle.
 ///
 /// The clipped counterpart of [`draw_mesh_over`]: the rectangle restricts rasterisation, so pixels
@@ -3849,9 +4059,17 @@ pub(crate) fn draw_resident(
     let pass = resident.pass(start.depth.is_some()).ok_or_else(|| {
         DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
     })?;
+    // The draw's buffers (D733), in their own set.
+    let buffers_set = {
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::draw_buffers::descriptor_set(&session, start.buffers)?
+    };
     // A draw the open batch already describes joins it and does nothing else (D718): same pipeline
-    // (shaders, textures, blend, depth, cull, viewport and scissor), pass, window and fragment
-    // words. Only mesh draws batch, and a draw after a clear starts a batch of its own.
+    // (shaders, textures, blend, depth, cull, viewport and scissor), pass, window, buffers and
+    // fragment words. Only mesh draws batch, and a draw after a clear starts a batch of its own.
     let key = start
         .pipeline_key
         .filter(|_| vertices.is_none())
@@ -3864,6 +4082,7 @@ pub(crate) fn draw_resident(
                     guest_buffer.buffer,
                     u32::try_from(guest_buffer.offset).unwrap_or(0),
                 ),
+                buffers: buffers_set,
                 fragment,
             }
         });
@@ -3885,15 +4104,23 @@ pub(crate) fn draw_resident(
             guest_buffer: Some(guest_buffer),
             scissor,
             user_data: start.user_data,
-            texture: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+            textures: &TexturesBound {
+                first: start.texture.unwrap_or((&NO_TEXTURE, 1)),
+                second: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+                sampling: start.sampling,
+            },
             blend: start.blend,
             viewport: start.viewport,
-            second_texture: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
             resident: Some(resident),
             pipeline_key: start.pipeline_key,
             depth: start.depth.as_ref(),
             cull: start.cull,
             depth_clear: start.depth_clear,
+            draw_buffers: &DrawBuffersBound {
+                buffers: start.buffers,
+                set: Some(buffers_set),
+                layout: None,
+            },
             ..Bound::default()
         },
     )
@@ -3927,7 +4154,10 @@ pub fn draw_mesh_over_texture(
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
-            texture,
+            textures: &TexturesBound {
+                first: texture,
+                ..NO_TEXTURES
+            },
             ..Bound::default()
         },
     )
@@ -3967,8 +4197,9 @@ struct Bound<'a> {
     windows: [usize; 2],
     /// What the guest-memory window holds before the draw.
     memory: &'a [u32],
-    /// The texels of the sampled image, and how many of them make one row.
-    texture: (&'a [u32], u32),
+    /// The sampled images and how they are sampled. By reference, so `Bound` stays cheap to pass
+    /// by value.
+    textures: &'a TexturesBound<'a>,
     /// The rectangle rasterisation is restricted to, or [`None`] for the whole attachment.
     scissor: Option<vk::Rect2D>,
     /// A caller-owned buffer bound as the guest-memory window (binding 1): a resident buffer
@@ -3991,8 +4222,6 @@ struct Bound<'a> {
     viewport: Option<orbistoun_gpu::ViewportTransform>,
     /// Draw into this attachment in place; `None` draws into a fresh one.
     resident: Option<&'a ResidentAttachment>,
-    /// The second sampled image's texels and row length; the default texel otherwise.
-    second_texture: (&'a [u32], u32),
     /// The key a resident draw's pipeline is cached under; `None` builds and releases one per draw.
     /// Non-zero so the option costs no space.
     pipeline_key: Option<std::num::NonZeroU64>,
@@ -4003,7 +4232,47 @@ struct Bound<'a> {
     cull: Option<orbistoun_gpu::depth::CullState>,
     /// The clear the depth attachment takes before a resident draw.
     depth_clear: Option<crate::depth::DepthClear>,
+    /// The draw's buffers (D733); none by default. By reference, so `Bound` stays cheap to pass by
+    /// value.
+    draw_buffers: &'a DrawBuffersBound<'a>,
 }
+
+/// A draw's buffers (D733) as a draw binds them: each stage's, and once found where the session is
+/// held, their set and its layout, which every pipeline layout holds at set one.
+#[derive(Clone, Copy)]
+struct DrawBuffersBound<'a> {
+    /// The primitive shader's and the pixel shader's buffers.
+    buffers: [&'a [orbistoun_gpu::DrawBuffer]; 2],
+    /// Their set.
+    set: Option<vk::DescriptorSet>,
+    /// The set's layout.
+    layout: Option<vk::DescriptorSetLayout>,
+}
+
+/// The textures a draw samples, each as its texels and row length, and how each is sampled.
+#[derive(Clone, Copy)]
+struct TexturesBound<'a> {
+    /// The first sampled image; the default texel when nothing bound one.
+    first: (&'a [u32], u32),
+    /// The second, likewise.
+    second: (&'a [u32], u32),
+    /// How each is sampled, as its sampler descriptor says.
+    sampling: [orbistoun_gpu::TextureSampling; 2],
+}
+
+/// A draw that samples no texture: the default texel in both slots, point-sampled.
+static NO_TEXTURES: TexturesBound<'static> = TexturesBound {
+    first: (&NO_TEXTURE, 1),
+    second: (&NO_TEXTURE, 1),
+    sampling: [orbistoun_gpu::TextureSampling::CLAMPED_POINT; 2],
+};
+
+/// A draw that binds no buffers.
+static NO_DRAW_BUFFERS: DrawBuffersBound<'static> = DrawBuffersBound {
+    buffers: [&[], &[]],
+    set: None,
+    layout: None,
+};
 
 /// The block a draw that sets no user data pushes.
 static NO_USER_DATA: [u32; USER_DATA_BLOCK_WORDS] = [0; USER_DATA_BLOCK_WORDS];
@@ -4013,7 +4282,7 @@ impl Default for Bound<'_> {
         Self {
             windows: DEFAULT_WINDOWS,
             memory: &[],
-            texture: (&NO_TEXTURE, 1),
+            textures: &NO_TEXTURES,
             scissor: None,
             guest_buffer: None,
             initial: None,
@@ -4022,11 +4291,11 @@ impl Default for Bound<'_> {
             coarse_level: false,
             viewport: None,
             resident: None,
-            second_texture: (&NO_TEXTURE, 1),
             pipeline_key: None,
             depth: None,
             cull: None,
             depth_clear: None,
+            draw_buffers: &NO_DRAW_BUFFERS,
         }
     }
 }
@@ -4280,7 +4549,10 @@ pub fn draw_with_texture(
         Some((vertex_words, fragment_words)),
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
-            texture,
+            textures: &TexturesBound {
+                first: texture,
+                ..NO_TEXTURES
+            },
             coarse_level: true,
             ..Bound::default()
         },
@@ -4327,6 +4599,7 @@ mod tests {
             x_offset: 960.0,
             y_scale: -540.0,
             y_offset: 540.0,
+            depth: orbistoun_gpu::DepthMapping::IDENTITY,
         });
         assert_eq!(
             (flipped.x, flipped.width, flipped.y, flipped.height),
@@ -4337,10 +4610,39 @@ mod tests {
             x_offset: 32.0,
             y_scale: 32.0,
             y_offset: 32.0,
+            depth: orbistoun_gpu::DepthMapping::IDENTITY,
         });
         assert_eq!(
             (upright.x, upright.width, upright.y, upright.height),
             (0.0, 64.0, 0.0, 64.0)
+        );
+    }
+
+    /// The guest's depth mapping becomes the viewport's depth range: a GL context's
+    /// `glDepthRange(n, f)` (`ZSCALE = (f - n) / 2`, `ZOFFSET = (f + n) / 2`, clip z `-w..w`) is
+    /// exactly `n..f` under a negative-one-to-one pipeline, and z taken unchanged is `0..1`.
+    #[test]
+    fn the_guest_s_depth_mapping_is_the_viewport_s_depth_range() {
+        let with = |depth| {
+            guest_viewport(orbistoun_gpu::ViewportTransform {
+                x_scale: 960.0,
+                x_offset: 960.0,
+                y_scale: -540.0,
+                y_offset: 540.0,
+                depth,
+            })
+        };
+        let gl = |near: f32, far: f32| orbistoun_gpu::DepthMapping {
+            negative_one_to_one: true,
+            z_scale: (far - near) / 2.0,
+            z_offset: f32::midpoint(far, near),
+        };
+        let range = |viewport: ash::vk::Viewport| (viewport.min_depth, viewport.max_depth);
+        assert_eq!(range(with(gl(0.0, 1.0))), (0.0, 1.0));
+        assert_eq!(range(with(gl(0.25, 0.75))), (0.25, 0.75));
+        assert_eq!(
+            range(with(orbistoun_gpu::DepthMapping::IDENTITY)),
+            (0.0, 1.0)
         );
     }
 

@@ -22,7 +22,7 @@ guest_module! {
         "sceAgcAcbWaitRegMem" => 6,
         "sceAgcAcbWriteData" => 6,
         "sceAgcCbDispatch" => 6,
-        "sceAgcCbNop" => 6,
+        "sceAgcCbNop" => 2,
         "sceAgcCbReleaseMem" => 6,
         "sceAgcCbSetShRegisterRangeDirect" => 6,
         "sceAgcCbSetShRegistersDirect" => 6,
@@ -65,8 +65,8 @@ guest_module! {
         "sceAgcDmaDataPatchSetDstAddressOrOffset" => 6,
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate" => 6,
         "sceAgcGetIsTrinityMode" => 0,
-        "sceAgcGetRegisterDefaults2" => 6,
-        "sceAgcGetRegisterDefaults2Internal" => 6,
+        "sceAgcGetRegisterDefaults2" => 1,
+        "sceAgcGetRegisterDefaults2Internal" => 1,
         "0x53bbd82b51d172db" => 2,
         "sceAgcInit" => 2,
         "sceAgcQueueEndOfPipeActionPatchAddress" => 6,
@@ -391,20 +391,25 @@ fn dcb_append_spanning(dcb: u64, words: &[u32], dwords: usize) -> u64 {
     cur
 }
 
-/// The flip mode obSCEne's measurement used; the register word for any other is unmeasured.
-const MEASURED_FLIP_MODE: u64 = 1;
+/// The flip modes whose packets are measured: 1 (`-1d54`), 2 and 3 (`-c4e3`). Mode 0 writes
+/// nothing; any higher mode's register word is unmeasured.
+const MEASURED_FLIP_MODES: std::ops::RangeInclusive<u64> = 1..=3;
 
 /// `sceAgcDcbSetFlip(dcb, video_handle, buffer_index, flip_mode, flip_arg)`: queues the flip with
 /// the display and writes the packet whose release carries it out (D728). Measured
-/// (`166-agc/dcb-set-flip`, `-1d54`): 76 bytes written, the cursor advanced 256, the packet's
-/// address answered; a port that is not open or a buffer that is not registered writes nothing and
-/// answers `0`. Another flip mode is refused, its register word being unmeasured.
+/// (`166-agc/dcb-set-flip`, `-1d54` and `-c4e3`): 76 bytes written, the cursor advanced 256, the
+/// packet's address answered; a port that is not open or a buffer that is not registered writes
+/// nothing and answers `0`, and so does flip mode 0. A mode above 3 is refused, its register word
+/// being unmeasured.
 fn dcb_set_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (dcb, handle, index, mode, arg) = (args[0], args[1], args[2], args[3], args[4]);
-    if mode != MEASURED_FLIP_MODE {
+    if mode == 0 {
+        return 0;
+    }
+    if !MEASURED_FLIP_MODES.contains(&mode) {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
     }
-    let Ok(index32) = u32::try_from(index) else {
+    let (Ok(index32), Ok(mode32)) = (u32::try_from(index), u32::try_from(mode)) else {
         return 0;
     };
     let Some((context, label)) = crate::display::queue_flip(handle, index, arg) else {
@@ -412,9 +417,17 @@ fn dcb_set_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     dcb_append_spanning(
         dcb,
-        &crate::display::set_flip_words(index32, arg, context, label),
+        &crate::display::set_flip_words(index32, mode32, arg, context, label),
         crate::display::SET_FLIP_DWORDS,
     )
+}
+
+/// `sceAgcSuspendPoint(...)`: the point a title offers the system to suspend its GPU work at.
+/// Outside a system suspend it answers `0` at once and writes nothing: PPSA02664's arguments
+/// `(0x109, 3, buffer, 0, 1_000_000_000, 0)` returned `0` in 27 us with none of the buffer's 64
+/// bytes changed (obSCEne REQ-20260928T0730Z-7b14). Nothing here suspends a title.
+fn suspend_point(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
 }
 
 /// `sceAgcDcbEventWrite(dcb, event_type, _)`. Measured: `166-agc/dcb-event-write`.
@@ -531,47 +544,168 @@ fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceAgcDcbWaitUntilSafeForRendering(dcb, ...)` - a measured library-level no-op.
-///
-/// obSCEne measures 0 bytes written and `0x0` returned under every condition, with no `GetSize`
-/// symbol in `libSceAgc`. It writes nothing and dereferences no argument, so a null handle needs
-/// no guard.
-fn agc_no_op_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
+/// `sceAgcDcbWaitUntilSafeForRendering(dcb, video_handle, buffer_index)`: writes the wait for the
+/// buffer's flip label to read `0` - the display has taken it off the screen - before drawing into
+/// it. Measured (`-5a17`, sweep 20260927-153242): with a port open, 64 bytes written and the cursor
+/// advanced 128, the packet's address answered, for indices 0, 1 and 4 alike; with no port open,
+/// nothing written and `0` answered.
+fn dcb_wait_until_safe_for_rendering(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (dcb, handle, index) = (args[0], args[1], args[2]);
+    let Ok(index32) = u32::try_from(index) else {
+        return 0;
+    };
+    let Some(label) = crate::display::wait_label(handle, index) else {
+        return 0;
+    };
+    dcb_append_spanning(
+        dcb,
+        &crate::display::wait_until_safe_words(index32, label),
+        crate::display::WAIT_UNTIL_SAFE_DWORDS,
+    )
 }
 
-/// Bytes from a register write's start to its values: the measured `SET_SH_REG` packet is a
-/// header, the register offset, then the values (`166-agc/dcb-set-sh-reg-direct`).
-const REGISTER_PAYLOAD_OFFSET: u64 = 8;
+/// The count field of a header-only `NOP`: `0x3fff`, as in `0xffff1000`, a `NOP` with no body.
+const HEADER_ONLY_COUNT: u32 = 0x3fff;
 
-/// The kind [`agc_packet_payload`] is asked with for a register write.
-const REGISTER_WRITE_KIND: u64 = 1;
+/// What [`agc_packet_payload`] answers for a packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Payload {
+    /// The payload begins this many bytes into the packet.
+    At(u64),
+    /// Null: the packet has no body.
+    Null,
+}
 
-/// `0x7d86501b8094ef57(out, packet, kind)`: where the payload of a packet the guest reserved
-/// begins.
-///
-/// Guest-observed: PPSA02664 calls it with kind 1 on the register write it just reserved with no
-/// values, then fills the values through the answer, so kind 1 answers the measured payload
-/// offset. It also calls it with kind 0 on a data `NOP`, whose layout is unmeasured; that kind is
-/// refused until obSCEne measures it.
+/// What [`agc_packet_payload`] answers for a `kind` on a packet with `header`, or `None` for a
+/// pairing nobody measured.
+/// Measured (`-r1b0`, sweep 20260927-204316, `166-agc/cb-unnamed-ef57`, all answering `0`): kind 1
+/// on `SET_SH_REG` 8; kind 0 on an ordinary `NOP` 4 and on the header-only `NOP` null; kind 2 on an
+/// ordinary `NOP` 8.
+fn payload_offset(header: u32, kind: u64) -> Option<Payload> {
+    if header >> 30 != 3 {
+        return None;
+    }
+    let opcode = ((header >> 8) & 0xff) as u8;
+    let count = (header >> 16) & 0x3fff;
+    match (kind, opcode) {
+        (1, measured::SET_SH_REG) => Some(Payload::At(8)),
+        (0, measured::NOP) if count == HEADER_ONLY_COUNT => Some(Payload::Null),
+        (0, measured::NOP) => Some(Payload::At(4)),
+        (2, measured::NOP) if count != HEADER_ONLY_COUNT => Some(Payload::At(8)),
+        _ => None,
+    }
+}
+
+/// `0x7d86501b8094ef57(out, packet, kind)`: writes where the payload of a packet the guest
+/// reserved begins, or null for a `NOP` with no body, and answers `0` - see [`payload_offset`].
+/// PPSA02664 fills a register write's values through the kind-1 answer and passes the kind-0
+/// answer for its header-only `NOP` to `sceAgcQueueEndOfPipeActionPatchAddress`.
 fn agc_packet_payload(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, packet, kind) = (args[0], args[1], args[2]);
-    if out == 0 || packet == 0 || kind != REGISTER_WRITE_KIND {
+    if out == 0 || packet == 0 {
         return BAD_ARGUMENT;
     }
+    // SAFETY: `packet` is the guest's packet, whose header this reads.
+    let Some(header) = (unsafe { guest::read_u32(packet) }) else {
+        return BAD_ARGUMENT;
+    };
+    let Some(offset) = payload_offset(header, kind) else {
+        return BAD_ARGUMENT;
+    };
+    let answer = match offset {
+        Payload::At(offset) => packet.wrapping_add(offset),
+        Payload::Null => 0,
+    };
     // SAFETY: `out` is the guest-supplied pointer-sized out-parameter.
-    unsafe { guest::write_u64(out, packet.wrapping_add(REGISTER_PAYLOAD_OFFSET)) };
+    unsafe { guest::write_u64(out, answer) };
     OK
 }
 
-/// `sceAgcInit(state, version)` (and alias NID `0x53bbd82b51d172db`).
-///
-/// Measured on Prospero-generation hardware (`166-agc/init`): version 13 (`0xd`) returns `0x0`,
-/// every other version `0x8a6c0004` (`SCE_AGC_ERROR_INVALID_VERSION`), and nothing is written to
-/// `arg0`.
+/// The version the raw init gate accepted first, or `0` before any: the gate is the library's, one
+/// per process.
+static RAW_INIT_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `SCE_AGC_ERROR_INVALID_VERSION`, what either gate answers a version the library will not take.
+const INVALID_VERSION: u64 = 0x8a6c_0004;
+
+/// The versions `0x53bbd82b51d172db` was measured to accept as a process's first call: 8 (`-7e52`,
+/// sweep 20260927-185507, PPSA02664's call) and 13 (sweep 20260915-125124, `(NULL, 13)` first).
+const RAW_FIRST_VERSIONS: [u32; 2] = [8, 13];
+
+/// The raw gate's decision: its answer to `version` with `fixed` accepted before (`0` for none), and
+/// the version fixed after. Measured across three sweeps: the first accepted version is kept, and
+/// from then on that version passes and every other answers `0x8a6c0004` (`-7e52`: 8 then 13, 12,
+/// 14 refused and 8 again passing; 20260915-125124: 13 then 0-12 and 16-64 refused, 13 passing). A
+/// first call with a version outside the two seen to succeed is unmeasured, and refused by name.
+fn raw_init_gate(fixed: u32, version: u32) -> (u64, u32) {
+    match fixed {
+        0 if RAW_FIRST_VERSIONS.contains(&version) => (OK, version),
+        0 => (
+            u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+            0,
+        ),
+        _ if version == fixed => (OK, fixed),
+        _ => (INVALID_VERSION, fixed),
+    }
+}
+
+/// The versions `sceAgcInit` was measured to accept (`-7e41`, `166-agc/init-alias-7e41`).
+const AGC_INIT_VERSIONS: std::ops::RangeInclusive<u32> = 12..=14;
+
+/// The named gate's decision: `version` against the raw gate's fixed version (`0` for none). With
+/// none, 12, 13 and 14 pass (`-7e41`, sweep 20260927-153242); with the raw gate fixed at another
+/// version it answers `0x8a6c0004` (`-7e52`: 13 after raw 8). Anything else is unmeasured.
+fn named_init_gate(fixed: u32, version: u32) -> u64 {
+    if fixed != 0 && version != fixed {
+        INVALID_VERSION
+    } else if fixed == 0 && AGC_INIT_VERSIONS.contains(&version) {
+        OK
+    } else {
+        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `sceAgcInit(state, version)`: [`named_init_gate`]; writes nothing.
 fn agc_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    named_init_gate(
+        RAW_INIT_VERSION.load(std::sync::atomic::Ordering::Acquire),
+        args[1] as u32,
+    )
+}
+
+/// `0x53bbd82b51d172db(state, version)`: a function of its own, 0x60 bytes past `sceAgcInit` in
+/// the library (`-7e41`), answered by [`raw_init_gate`]; writes nothing. The C name obSCEne's
+/// `166-agc/init` calls binds to this NID, so its sweeps are this function's.
+fn agc_init_raw(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::sync::atomic::Ordering;
     let version = args[1] as u32;
-    if version == 13 { OK } else { 0x8a6c_0004 }
+    let mut answer = OK;
+    // The decision and the fix are one step, so two threads' first calls cannot both fix a version.
+    let _ = RAW_INIT_VERSION.fetch_update(Ordering::AcqRel, Ordering::Acquire, |fixed| {
+        let (rc, next) = raw_init_gate(fixed, version);
+        answer = rc;
+        Some(next)
+    });
+    answer
+}
+
+/// A register-defaults descriptor for `version`, or a refusal by name for a version no probe walked.
+fn register_defaults(function: &str, version: u64) -> u64 {
+    u32::try_from(version)
+        .ok()
+        .and_then(|version| crate::register_defaults::descriptor(function, version))
+        .unwrap_or_else(|| u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()))
+}
+
+/// `sceAgcGetRegisterDefaults2(version)`: the library-owned descriptor for `version`, as measured
+/// (`-4d8a`, `-4e9b`).
+fn defaults2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    register_defaults("sceAgcGetRegisterDefaults2", args[0])
+}
+
+/// `sceAgcGetRegisterDefaults2Internal(version)`: the inner variant's descriptor, as measured.
+fn defaults2_internal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    register_defaults("sceAgcGetRegisterDefaults2Internal", args[0])
 }
 
 /// `sceAgcGetIsTrinityMode()` - whether the GPU is the faster revision of this generation.
@@ -587,10 +721,32 @@ fn get_is_trinity_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcCbNop(cb)` - a header-only no-op, measured whole (`166-agc/cb-nop`). It takes no
-/// arguments, so this is the complete encoding.
+/// The longest `NOP` a PM4 header describes: a count field of 14 bits, plus the header and one.
+const NOP_MAX_DWORDS: u64 = 0x3fff + 1;
+
+/// `sceAgcCbNop(cb, dwords)` - a `NOP` `dwords` long, its body reserved and left unwritten.
+///
+/// Measured (`166-agc/cb-nop`): length 1 writes the header-only word `0xffff1000` and answers the
+/// packet's address; length 0 writes nothing, and its answer was not reported, so it is refused.
+/// A longer one follows the public PM4 header, whose count is the length less two - the rule
+/// length 1 is the wrapped case of (`0x3fff`) - with its body skipped, as the measured `NOP` bodies
+/// of `sceAgcDcbSetFlip` and `sceAgcDcbWaitUntilSafeForRendering` are. PPSA02664 asks for 3 and
+/// writes the two body dwords itself.
 fn cb_nop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &packet::build::nop())
+    let dwords = args[1];
+    match dwords {
+        1 => dcb_append(args[0], &packet::build::nop()),
+        2..=NOP_MAX_DWORDS => dcb_append_spanning(
+            args[0],
+            // Its body is every dword after the header.
+            &[packet::build::command_header(
+                measured::NOP,
+                (dwords - 1) as u32,
+            )],
+            dwords as usize,
+        ),
+        _ => BAD_ARGUMENT,
+    }
 }
 
 /// `sceAgcDcbAcquireMem(dcb, ...)` - reserves the 32-byte ACQUIRE_MEM packet, cursor real, body
@@ -797,108 +953,117 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceAgcCreateShader` and the shader-linkage calls (interpolant mapping, primitive state, shader
 /// linker) implement measured behaviour. The command builders are wired through the writer handle
 /// in `arg0` (the private `dcb` module) as pure encoders or reservation skeletons from
-/// [`crate::packet::build`]. `sceAgcDcbWaitUntilSafeForRendering` and the patch family answer
-/// their measured `0x0` and write nothing. This array is the authoritative list; its size is
+/// [`crate::packet::build`]; the flip builders' words come from [`crate::display`]. The patch
+/// family answers its measured `0x0` and writes nothing. This array is the authoritative list; its size is
 /// pinned by `tests/dcb_wiring.rs`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[
-        ("0x7d86501b8094ef57", agc_packet_payload),
-        ("sceAgcCreateShader", create_shader),
-        ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
-        ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
-        ("sceAgcCreatePrimState", create_prim_state),
-        ("sceAgcUpdatePrimState", update_prim_state),
-        ("sceAgcLinkShaders", link_shaders),
-        ("sceAgcDcbEventWrite", dcb_event_write),
-        ("sceAgcDcbSetIndexCount", dcb_set_index_count),
-        ("sceAgcDcbSetNumInstances", dcb_set_num_instances),
-        ("sceAgcDcbDrawIndexAuto", dcb_draw_index_auto),
-        ("sceAgcDcbSetIndexBuffer", dcb_set_index_buffer),
-        ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
-        ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
-        (
-            "sceAgcDcbSetCxRegistersIndirect",
-            dcb_set_cx_registers_indirect,
-        ),
-        ("sceAgcCbNop", cb_nop),
-        ("sceAgcDcbAcquireMem", dcb_acquire_mem),
-        ("sceAgcCbReleaseMem", cb_release_mem),
-        ("sceAgcDcbDmaData", dcb_dma_data),
-        ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
-        ("sceAgcDcbResetQueue", dcb_reset_queue),
-        ("sceAgcDcbWaitUntilSafeForRendering", agc_no_op_returns_ok),
-        ("sceAgcDcbSetFlip", dcb_set_flip),
-        // Reservation skeletons from measured headers.
-        ("sceAgcCbDispatch", cb_dispatch),
-        ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),
-        ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
-        ("sceAgcDcbDrawIndirect", dcb_draw_indirect),
-        ("sceAgcDcbDrawIndexIndirect", dcb_draw_index_indirect),
-        (
-            "sceAgcDcbSetShRegistersIndirect",
-            dcb_set_sh_registers_indirect,
-        ),
-        (
-            "sceAgcDcbSetUcRegistersIndirect",
-            dcb_set_uc_registers_indirect,
-        ),
-        (
-            "sceAgcDcbStallCommandBufferParser",
-            dcb_stall_command_buffer_parser,
-        ),
-        ("sceAgcAcbAcquireMem", acb_acquire_mem),
-        ("sceAgcDcbPushMarker", dcb_push_marker),
-        ("sceAgcDcbPopMarker", dcb_pop_marker),
-        ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
-        // The whole `sceAgc*Patch*` family, each measured to return 0x0.
-        (
-            "sceAgcSetCxRegIndirectPatchAddRegisters",
-            cx_indirect_patch_add_registers,
-        ),
-        (
-            "sceAgcSetCxRegIndirectPatchSetAddress",
-            cx_indirect_patch_set_address,
-        ),
-        (
-            "sceAgcSetShRegIndirectPatchAddRegisters",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcSetShRegIndirectPatchSetAddress",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcSetUcRegIndirectPatchAddRegisters",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcSetUcRegIndirectPatchSetAddress",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcDmaDataPatchSetDstAddressOrOffset",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
-            agc_patch_returns_ok,
-        ),
-        ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
-        (
-            "sceAgcQueueEndOfPipeActionPatchAddress",
-            agc_patch_returns_ok,
-        ),
-        (
-            "sceAgcCbSetShRegisterRangeDirect",
-            cb_set_sh_register_range_direct,
-        ),
-        ("sceAgcDcbDrawIndex", dcb_draw_index),
-        ("sceAgcDcbSetIndexSize", dcb_set_index_size),
-        ("0x53bbd82b51d172db", agc_init),
-        ("sceAgcInit", agc_init),
-        ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
-    ]
+    IMPLEMENTATIONS
 }
+
+/// The list [`implementations`] answers.
+const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
+    ("0x7d86501b8094ef57", agc_packet_payload),
+    ("sceAgcCreateShader", create_shader),
+    ("sceAgcSuspendPoint", suspend_point),
+    ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
+    ("sceAgcUpdateInterpolantMapping", update_interpolant_mapping),
+    ("sceAgcCreatePrimState", create_prim_state),
+    ("sceAgcUpdatePrimState", update_prim_state),
+    ("sceAgcLinkShaders", link_shaders),
+    ("sceAgcDcbEventWrite", dcb_event_write),
+    ("sceAgcDcbSetIndexCount", dcb_set_index_count),
+    ("sceAgcDcbSetNumInstances", dcb_set_num_instances),
+    ("sceAgcDcbDrawIndexAuto", dcb_draw_index_auto),
+    ("sceAgcDcbSetIndexBuffer", dcb_set_index_buffer),
+    ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
+    ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
+    (
+        "sceAgcDcbSetCxRegistersIndirect",
+        dcb_set_cx_registers_indirect,
+    ),
+    ("sceAgcCbNop", cb_nop),
+    ("sceAgcDcbAcquireMem", dcb_acquire_mem),
+    ("sceAgcCbReleaseMem", cb_release_mem),
+    ("sceAgcDcbDmaData", dcb_dma_data),
+    ("sceAgcDcbSetBaseIndirectArgs", dcb_set_base_indirect_args),
+    ("sceAgcDcbResetQueue", dcb_reset_queue),
+    (
+        "sceAgcDcbWaitUntilSafeForRendering",
+        dcb_wait_until_safe_for_rendering,
+    ),
+    ("sceAgcDcbSetFlip", dcb_set_flip),
+    // Reservation skeletons from measured headers.
+    ("sceAgcCbDispatch", cb_dispatch),
+    ("sceAgcDcbDispatchIndirect", dcb_dispatch_indirect),
+    ("sceAgcAcbDispatchIndirect", acb_dispatch_indirect),
+    ("sceAgcDcbDrawIndirect", dcb_draw_indirect),
+    ("sceAgcDcbDrawIndexIndirect", dcb_draw_index_indirect),
+    (
+        "sceAgcDcbSetShRegistersIndirect",
+        dcb_set_sh_registers_indirect,
+    ),
+    (
+        "sceAgcDcbSetUcRegistersIndirect",
+        dcb_set_uc_registers_indirect,
+    ),
+    (
+        "sceAgcDcbStallCommandBufferParser",
+        dcb_stall_command_buffer_parser,
+    ),
+    ("sceAgcAcbAcquireMem", acb_acquire_mem),
+    ("sceAgcDcbPushMarker", dcb_push_marker),
+    ("sceAgcDcbPopMarker", dcb_pop_marker),
+    ("sceAgcDcbWaitRegMem", dcb_wait_reg_mem),
+    // The whole `sceAgc*Patch*` family, each measured to return 0x0.
+    (
+        "sceAgcSetCxRegIndirectPatchAddRegisters",
+        cx_indirect_patch_add_registers,
+    ),
+    (
+        "sceAgcSetCxRegIndirectPatchSetAddress",
+        cx_indirect_patch_set_address,
+    ),
+    (
+        "sceAgcSetShRegIndirectPatchAddRegisters",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcSetShRegIndirectPatchSetAddress",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcSetUcRegIndirectPatchAddRegisters",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcSetUcRegIndirectPatchSetAddress",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcDmaDataPatchSetDstAddressOrOffset",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
+        agc_patch_returns_ok,
+    ),
+    ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
+    (
+        "sceAgcQueueEndOfPipeActionPatchAddress",
+        agc_patch_returns_ok,
+    ),
+    (
+        "sceAgcCbSetShRegisterRangeDirect",
+        cb_set_sh_register_range_direct,
+    ),
+    ("sceAgcDcbDrawIndex", dcb_draw_index),
+    ("sceAgcDcbSetIndexSize", dcb_set_index_size),
+    ("0x53bbd82b51d172db", agc_init_raw),
+    ("sceAgcInit", agc_init),
+    ("sceAgcGetIsTrinityMode", get_is_trinity_mode),
+    ("sceAgcGetRegisterDefaults2", defaults2),
+    ("sceAgcGetRegisterDefaults2Internal", defaults2_internal),
+];
 
 #[cfg(test)]
 mod tests {
@@ -1198,39 +1363,39 @@ mod tests {
         );
     }
 
-    /// `0x7d86501b8094ef57` answers a register write's values, two dwords in, and refuses the
-    /// unmeasured kinds without writing.
+    /// The payload decision on each measured header (`-r1b0`): a register write's values two dwords
+    /// in, a `NOP`'s body one dword in or null when it has none, kind 2 two dwords into a `NOP`, and
+    /// nothing for a pairing no arm covered. `tests/dcb_wiring.rs` runs the handler on real packets.
     #[test]
-    fn the_payload_of_a_reserved_register_write_starts_two_dwords_in() {
-        let mut slot: u64 = 0;
-        let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = std::ptr::addr_of_mut!(slot) as u64;
-        args[1] = 0x7400_0218_7e30;
-        args[2] = 1;
-        assert_eq!(agc_packet_payload(&args), OK);
-        assert_eq!(slot, 0x7400_0218_7e38);
-        for kind in [0, 2] {
-            slot = 0;
-            args[2] = kind;
-            assert_eq!(agc_packet_payload(&args), BAD_ARGUMENT);
-            assert_eq!(slot, 0);
-        }
+    fn the_payload_offsets_are_the_measured_ones() {
+        assert_eq!(payload_offset(0xc003_7600, 1), Some(Payload::At(8)));
+        assert_eq!(payload_offset(0xc002_1000, 0), Some(Payload::At(4)));
+        assert_eq!(payload_offset(0xffff_1000, 0), Some(Payload::Null));
+        assert_eq!(payload_offset(0xc002_1000, 2), Some(Payload::At(8)));
+        assert_eq!(payload_offset(0xffff_1000, 2), None);
+        assert_eq!(payload_offset(0xc003_7600, 0), None);
+        assert_eq!(payload_offset(0x0000_1000, 0), None, "not a type-3 header");
     }
 
-    /// `sceAgcInit` returns 0 for version 13, and 0x8a6c0004 for other versions.
+    /// The raw gate keeps its first accepted version (`-7e52`, 20260915-125124), and refuses an
+    /// unmeasured first version by name without fixing it.
     #[test]
-    fn agc_init_validates_version_and_touches_no_state() {
-        let mut buf = [0x55u8; 64];
-        let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = buf.as_mut_ptr() as u64;
-        args[1] = 13;
+    fn the_raw_gate_keeps_its_first_version() {
+        let unimplemented = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+        assert_eq!(raw_init_gate(0, 12), (unimplemented, 0));
+        assert_eq!(raw_init_gate(0, 8), (OK, 8));
+        assert_eq!(raw_init_gate(8, 13), (INVALID_VERSION, 8));
+        assert_eq!(raw_init_gate(8, 8), (OK, 8));
+        assert_eq!(raw_init_gate(0, 13), (OK, 13));
+        assert_eq!(raw_init_gate(13, 0), (INVALID_VERSION, 13));
+    }
 
-        assert_eq!(agc_init(&args), OK);
-        assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
-
-        args[1] = 12;
-        assert_eq!(agc_init(&args), 0x8a6c_0004);
-        assert_eq!(buf, [0x55u8; 64], "arg0 must remain untouched");
+    /// The named gate passes 12-14 until the raw gate fixes another version.
+    #[test]
+    fn the_named_gate_follows_the_raw_one() {
+        assert_eq!(named_init_gate(0, 13), OK);
+        assert_eq!(named_init_gate(8, 13), INVALID_VERSION);
+        assert_ne!(named_init_gate(0, 1), OK);
     }
 
     /// `sceAgcGetIsTrinityMode` answers `0` for a base machine, keeping a base guest off the faster

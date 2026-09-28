@@ -127,7 +127,7 @@ orbistoun-cli submit check <directory>
 refuses an entry that does not say where it came from. It is never automatic: a finding
 recorded by hand is one somebody decided was true.
 
-`compat record` transcribes the last trace of a title into `compat/<title>.toml`. A run
+`compat record` transcribes the last trace of a title into `compat/<title>/report.toml`. A run
 measuring the emulator as it stands updates the `[status]` slot; a run helped by a loosened
 default or by `learned.toml` answers updates `[experiment]`. Each slot is compared only with
 itself, so no run is refused for its policy (D312). `--force` replaces a better entry within a
@@ -257,7 +257,7 @@ next instruction; naming the instruction itself would mean disassembling a vendo
 | Learned answers | `<data>/learned.toml` | `orbistoun-cli turn --apply` |
 | Names worked out | `symbols/generated.json` | `./bin/orbistoun names`, accumulating |
 | Hashes still unnamed | `symbols/wanted.txt` | the same |
-| What a title reached | `compat/<title>.toml` | `orbistoun-cli compat record` |
+| What a title reached | `compat/<title>/report.toml` | `orbistoun-cli compat record` |
 | What this machine can contribute | `submission/` | `orbistoun-cli submit export` |
 | What is known, and not | `crates/orbistoun-hle/data/knowledge/` | `orbistoun-cli learn` |
 | Window captures | `<data>/screenshots/*.png` | the GUI toolbar's capture button (D162) |

@@ -8,12 +8,14 @@ mod audit;
 mod common;
 mod compat;
 mod corpus;
+mod frames;
 mod learn;
 mod module;
 mod names;
 mod probe;
 mod progress;
 mod questions;
+mod records;
 mod run;
 mod shaders;
 mod status;
@@ -24,7 +26,9 @@ mod worklist;
 
 use crate::audit::{cmd_audit, cmd_harvest};
 use crate::common::library_or;
-use crate::compat::{cmd_compat_list, cmd_compat_markdown, cmd_compat_record};
+use crate::compat::{
+    cmd_compat_list, cmd_compat_markdown, cmd_compat_record, cmd_compat_reproduce,
+};
 use crate::corpus::{cmd_corpus_list, cmd_corpus_run, cmd_corpus_sync};
 use crate::learn::{cmd_knows, cmd_learn};
 use crate::module::{
@@ -685,7 +689,8 @@ enum CompatAction {
     /// Render every record as a ranked markdown table into a tracked file.
     ///
     /// The ranking `list` prints, as a document in the repository, with a per-title page each. A
-    /// title with a screenshot beside its record gets the image embedded.
+    /// title whose `frames.png` is committed beside its record gets the sheet embedded, and every
+    /// page says how to reproduce its run (D736).
     Markdown {
         /// Where the records live.
         #[arg(long, default_value = "compat")]
@@ -693,14 +698,21 @@ enum CompatAction {
         /// Where to write the table.
         #[arg(long, default_value = "COMPATIBILITY.md")]
         out: std::path::PathBuf,
-        /// Directory of `<title>.png` screenshots, relative to the repository root.
-        #[arg(long, default_value = "compat/screenshots")]
-        shots: std::path::PathBuf,
         /// Instead of writing, fail if what is on disk is not what the records render to.
         ///
         /// Checks `COMPATIBILITY.md` and `docs/titles/`, the files `status --check` does not cover.
         #[arg(long)]
         check: bool,
+    },
+    /// Repeat a title's recorded run from its `[reproduce]` section and remake its sheet of frames.
+    ///
+    /// The title build, limit, frame interval and input all come from the record (D736).
+    Reproduce {
+        /// The title, as its record is named.
+        title: String,
+        /// Where the records live.
+        #[arg(long, default_value = "compat")]
+        dir: std::path::PathBuf,
     },
     /// Record what the last run of this title achieved.
     Record {
@@ -858,7 +870,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Names { .. }
         | Command::Learn(..) => dispatch_guest(cli, service)?,
         Command::Compat { .. } | Command::Corpus { .. } | Command::Submit { .. } => {
-            dispatch_records(&cli.command)?;
+            dispatch_records(&cli.command, service, cli.symbols_db.as_deref())?;
         }
         Command::Knows { .. }
         | Command::Status { .. }
@@ -996,16 +1008,18 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
 }
 
 /// The commands that keep the compatibility, corpus and submission records.
-fn dispatch_records(command: &Command) -> Result<()> {
+fn dispatch_records(
+    command: &Command,
+    service: &Service,
+    symbols_db: Option<&std::path::Path>,
+) -> Result<()> {
     match *command {
         Command::Compat { ref action } => match action {
             CompatAction::List { dir } => cmd_compat_list(dir)?,
-            CompatAction::Markdown {
-                dir,
-                out,
-                shots,
-                check,
-            } => cmd_compat_markdown(dir, out, shots, *check)?,
+            CompatAction::Markdown { dir, out, check } => cmd_compat_markdown(dir, out, *check)?,
+            CompatAction::Reproduce { title, dir } => {
+                cmd_compat_reproduce(service, title, dir, symbols_db)?;
+            }
             CompatAction::Record {
                 path,
                 dir,

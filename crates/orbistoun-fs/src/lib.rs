@@ -115,6 +115,10 @@ fn kernel_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // `040-file/open-rejects-null`).
         return u64::from(GuestError::vendor(orbistoun_core::errno::FAULT).as_raw());
     };
+    // A file named as a directory is `ENOTDIR`, as FreeBSD's lookup answers, not a missing path.
+    if mount::names_file_as_directory(&path) {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NOT_A_DIRECTORY).as_raw());
+    }
     let wants_write = args[1] & WRITE_INTENT != 0;
     let opened = if wants_write && mount::is_writable(&path) {
         descriptor::create(&path)
@@ -485,6 +489,47 @@ mod tests {
     /// A positioned read leaves the position alone, and a bad descriptor answers the vendor
     /// code rather than `-1` (D525).
     ///
+    /// A path that asks for a directory - ending in `/` or `/.` - through a file is `ENOTDIR`, as
+    /// FreeBSD's lookup answers; a directory so named, and the file by its own name, open.
+    ///
+    /// Bugdom's file layer asks whether `Textures/3000.tga` is a directory by opening
+    /// `Textures/3000.tga/.`; the host's path normalisation dropped the `/.` and opened the file,
+    /// so every texture read as a directory and none loaded.
+    #[test]
+    fn a_file_named_as_a_directory_is_not_a_directory() {
+        const ENOTDIR: u64 = 0x8002_0014;
+        let _guard = super::exclusively();
+        let root = std::env::temp_dir().join("orbistoun-notdir-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).expect("a directory");
+        std::fs::write(root.join("tex.tga"), b"TGA").expect("a file");
+        mount::clear();
+        mount::mount_data(root.clone());
+
+        let open = |path: &str| {
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = guest_cstr(path);
+            kernel_open(&args)
+        };
+        assert_eq!(open("/data/tex.tga/."), ENOTDIR);
+        assert_eq!(open("/data/tex.tga/"), ENOTDIR);
+        assert!(
+            (open("/data/tex.tga") as i64) >= 0,
+            "the file by its own name"
+        );
+        assert!(
+            (open("/data/sub/.") as i64) >= 0,
+            "a directory named as one"
+        );
+        assert!((open("/data/sub/") as i64) >= 0);
+        assert_eq!(
+            open("/data/missing/."),
+            0x8002_0002,
+            "a path that is not there is still ENOENT"
+        );
+        assert!(mount::resolve_existing("/data/tex.tga/.").is_none());
+    }
+
     /// It reads at an offset and then sequentially, which lands correctly only if the
     /// descriptor never moved. Short reads at the end of a file follow the host's `read_at`;
     /// the hardware's behaviour there is unmeasured.

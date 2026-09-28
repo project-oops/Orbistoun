@@ -429,13 +429,16 @@ pub struct Start {
 /// # Safety
 ///
 /// `start.entry` must point at mapped, executable, fully relocated guest code, and the
-/// thread body will run arbitrary guest instructions on a thread this process owns.
+/// thread body will run arbitrary guest instructions on a thread this process owns. A
+/// `supplied_stack` - `(lowest address, size)` from `scePthreadAttrSetstack` - must be writable
+/// guest memory the guest keeps alive for the thread's life, as its own contract requires.
 pub unsafe fn spawn(
     start: Start,
     name: &str,
     requested_affinity: Affinity,
     requested_priority: i32,
     requested_stack: u64,
+    supplied_stack: Option<(u64, u64)>,
 ) -> Result<ThreadHandle, SpawnError> {
     // The host's core count, although the guest was told the target's: folding a mask onto cores
     // that do not exist here would place threads nowhere.
@@ -450,8 +453,42 @@ pub unsafe fn spawn(
     )
     .ok_or(SpawnError::AffinityUnsatisfiable)?;
 
+    // The new thread's logical time starts at this one's (D735).
+    let born = orbistoun_hle::clocks::thread_time();
+    if let Some((low, size)) = supplied_stack {
+        let body = move || {
+            orbistoun_hle::clocks::begin_thread_at(born);
+            become_thread(handle);
+            orbistoun_thunk::note_readable_range(low, size);
+            note_this_stack(low, size);
+            if let Some(start) = ON_THREAD_START.get() {
+                start();
+            }
+            orbistoun_abi::enter::adopt_guest_float_environment();
+            // The top of the caller's stack, aligned down as a reserved stack's initial pointer is.
+            let top = low.saturating_add(size) / orbistoun_mem::stack::STACK_ALIGN
+                * orbistoun_mem::stack::STACK_ALIGN;
+            // SAFETY: the caller of `spawn` guarantees `entry` is mapped, executable and relocated,
+            // and that the supplied stack is writable guest memory kept alive for the thread.
+            let exit = unsafe {
+                orbistoun_abi::enter::enter_guest_with_argument(start.entry, top, start.argument)
+            };
+            set_exit_value(handle, exit);
+            finish(handle);
+        };
+        let spawned = std::thread::Builder::new()
+            .name(format!("guest:{name}"))
+            .spawn(body)
+            .map_err(|_| SpawnError::HostRefused)?;
+        if let Ok(mut joiners) = joiners().lock() {
+            joiners.insert(handle, spawned);
+        }
+        return Ok(handle);
+    }
+
     let slot = next_stack_index();
     let body = move || {
+        orbistoun_hle::clocks::begin_thread_at(born);
         become_thread(handle);
         let base = stack_base_for(slot);
         // The requested size, capped to what fits this slot: slots are `THREAD_STACK_SPACING` apart,

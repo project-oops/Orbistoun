@@ -10,6 +10,7 @@
 
 pub mod compute;
 mod depth;
+mod draw_buffers;
 pub mod framebuffer;
 pub use compute::{
     Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest, probe,
@@ -162,7 +163,11 @@ struct BoundTexture {
     texels: std::sync::Arc<[u32]>,
     width: u32,
     hash: u64,
+    sampling: orbistoun_gpu::TextureSampling,
 }
+
+/// A bound module's words and their content hash.
+type BoundModule = (std::sync::Arc<[u32]>, u64);
 
 /// A content hash of guest words: what a shader or texture is, for finding the pipeline built for
 /// it.
@@ -243,6 +248,9 @@ pub struct VulkanBackend {
     texture: Option<BoundTexture>,
     /// The second texture, from a `BindTexture` of slot 1.
     second_texture: Option<BoundTexture>,
+    /// The buffers the next draw's primitive shader and pixel shader read through (D733): the
+    /// latest `BindDrawBuffers` for each stage.
+    draw_buffers: [Vec<orbistoun_gpu::DrawBuffer>; 2],
     /// Colour target zero's blend state for the next draw: the latest `SetBlend`; `None` draws
     /// opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
@@ -311,6 +319,7 @@ impl VulkanBackend {
             user_data: [0; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
             texture: None,
             second_texture: None,
+            draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
             current_depth: None,
             depth_stencil: None,
@@ -421,6 +430,7 @@ impl VulkanBackend {
         slot: u32,
         (texels, hash): (&std::sync::Arc<[u32]>, u64),
         (width, height): (u32, u32),
+        sampling: orbistoun_gpu::TextureSampling,
     ) -> Result<(), BackendError> {
         if texels.len() != (width as usize) * (height as usize) {
             return Err(BackendError::Device(format!(
@@ -433,6 +443,7 @@ impl VulkanBackend {
             texels: std::sync::Arc::clone(texels),
             width,
             hash,
+            sampling,
         });
         match slot {
             0 => self.texture = bound,
@@ -821,10 +832,14 @@ impl VulkanBackend {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (shaders, extent).hash(&mut hasher);
-        self.texture.as_ref().map(|t| t.hash).hash(&mut hasher);
+        // The samplers too: each is built with its pipeline's descriptor set.
+        self.texture
+            .as_ref()
+            .map(|t| (t.hash, t.sampling))
+            .hash(&mut hasher);
         self.second_texture
             .as_ref()
-            .map(|t| t.hash)
+            .map(|t| (t.hash, t.sampling))
             .hash(&mut hasher);
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
@@ -833,7 +848,20 @@ impl VulkanBackend {
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
         self.viewport_transform
-            .map(|t| [t.x_scale, t.x_offset, t.y_scale, t.y_offset].map(f32::to_bits))
+            .map(|t| {
+                (
+                    [
+                        t.x_scale,
+                        t.x_offset,
+                        t.y_scale,
+                        t.y_offset,
+                        t.depth.z_scale,
+                        t.depth.z_offset,
+                    ]
+                    .map(f32::to_bits),
+                    t.depth.negative_one_to_one,
+                )
+            })
             .hash(&mut hasher);
         self.current_viewport
             .map(|r| (r.x, r.y, r.width, r.height))
@@ -946,32 +974,58 @@ impl VulkanBackend {
         })
     }
 
-    /// A draw that did not join the open batch: its pipeline and bindings worked out in full.
-    fn draw_whole(
+    /// Binds a stage's buffers for the draws that follow, in a set of their own at the next draw
+    /// (D733). A compute dispatch binds none.
+    fn bind_draw_buffers(
         &mut self,
-        draw: framebuffer::VertexDraw,
-        indexed: bool,
+        stage: ShaderStage,
+        buffers: &[orbistoun_gpu::DrawBuffer],
     ) -> Result<(), BackendError> {
+        let index = match stage {
+            ShaderStage::Vertex => 0,
+            ShaderStage::Fragment => 1,
+            ShaderStage::Compute => {
+                self.refused += 1;
+                return Err(BackendError::Unsupported {
+                    command: "BindDrawBuffers for a compute dispatch",
+                });
+            }
+        };
+        self.draw_buffers[index] = buffers.to_vec();
+        Ok(())
+    }
+
+    /// The bound geometry and fragment modules' words and hashes, and whether the geometry is a mesh
+    /// stage; a draw with either unbound is refused by name.
+    fn bound_modules(&mut self) -> Result<((BoundModule, bool), BoundModule), BackendError> {
         let (Some(vertex_id), Some(fragment_id)) = (self.bound_vertex, self.bound_fragment) else {
             self.refused += 1;
             return Err(BackendError::Unsupported {
                 command: "Draw with no vertex and fragment shaders bound",
             });
         };
-        let vertex_shader = self
+        let vertex = self
             .shaders
             .get(&vertex_id)
             .ok_or(BackendError::UnknownResource(vertex_id))?;
-        let (geometry, geometry_hash, geometry_is_mesh) = (
-            vertex_shader.spirv.clone(),
-            vertex_shader.hash,
-            vertex_shader.mesh,
-        );
-        let fragment_shader = self
+        let fragment = self
             .shaders
             .get(&fragment_id)
             .ok_or(BackendError::UnknownResource(fragment_id))?;
-        let (fragment, fragment_hash) = (fragment_shader.spirv.clone(), fragment_shader.hash);
+        Ok((
+            ((vertex.spirv.clone(), vertex.hash), vertex.mesh),
+            (fragment.spirv.clone(), fragment.hash),
+        ))
+    }
+
+    /// A draw that did not join the open batch: its pipeline and bindings worked out in full.
+    fn draw_whole(
+        &mut self,
+        draw: framebuffer::VertexDraw,
+        indexed: bool,
+    ) -> Result<(), BackendError> {
+        let (((geometry, geometry_hash), geometry_is_mesh), (fragment, fragment_hash)) =
+            self.bound_modules()?;
         let (width, height) = self.render_extent();
         // The viewport a `SetViewport` set restricts the draw to a rectangle; none is the whole
         // attachment.
@@ -995,6 +1049,7 @@ impl VulkanBackend {
         let block = self.user_data;
         let texture = self.texture.clone();
         let second_texture = self.second_texture.clone();
+        let draw_buffers = self.draw_buffers.clone();
         let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
         let start = framebuffer::Start {
             clear: CLEAR_COLOUR,
@@ -1004,10 +1059,18 @@ impl VulkanBackend {
             blend: self.blend,
             viewport: self.viewport_transform,
             second_texture: second_texture.as_ref().map(|t| (&t.texels[..], t.width)),
+            sampling: [
+                texture.as_ref().map(|t| t.sampling).unwrap_or_default(),
+                second_texture
+                    .as_ref()
+                    .map(|t| t.sampling)
+                    .unwrap_or_default(),
+            ],
             pipeline_key: Some(pipeline_key),
             depth,
             cull: self.cull,
             depth_clear,
+            buffers: [&draw_buffers[0], &draw_buffers[1]],
         };
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
@@ -1124,6 +1187,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetViewportTransform(_) => "SetViewportTransform",
         RenderCommand::SetUserData { .. } => "SetUserData",
         RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
@@ -1233,7 +1297,11 @@ impl RenderBackend for VulkanBackend {
                 hash,
                 width,
                 height,
-            } => self.bind_texture(*slot, (texels, *hash), (*width, *height)),
+                sampling,
+            } => self.bind_texture(*slot, (texels, *hash), (*width, *height), *sampling),
+            RenderCommand::BindDrawBuffers { stage, buffers } => {
+                self.bind_draw_buffers(*stage, buffers)
+            }
             // A stage's user data, into its half of the block the next draw pushes: the first
             // sixteen words. A shader taking more is refused where it is translated.
             RenderCommand::SetUserData { stage, words } => {

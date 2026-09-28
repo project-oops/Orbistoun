@@ -17,7 +17,10 @@ use orbistoun_shader::{
 use orbistoun_translate::wavefront::MeshPrimitive;
 use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
-use orbistoun_translate::wavefront::{TextureSource, USER_DATA_STAGE_WORDS, UserData};
+use orbistoun_translate::wavefront::{
+    GeometryInputs, TableBase, TableWord, TextureSource, USER_DATA_STAGE_WORDS, UserData,
+    WINDOW_SPACE_SCALE,
+};
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
 
 use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS};
@@ -25,10 +28,11 @@ use crate::packet::{PacketWalk, walk};
 use crate::registers::{
     BlendControl, ColourTarget, ColourTargetExtent, ColourTargetFormat, DepthControl, DrawCall,
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
-    Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at, colour_target_at,
-    colour_target_bases_in, colour_target_extent_at, colour_target_format_at, decode_blend_control,
-    decode_image_descriptor, depth_control_at, dispatch_calls, draw_calls, primitive_topology_at,
-    register_writes, scissor_at, shader_candidates, stencil_control_at, viewport_transform_from,
+    ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
+    colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
+    colour_target_format_at, decode_blend_control, decode_image_descriptor, depth_control_at,
+    dispatch_calls, draw_calls, primitive_topology_at, register_writes, shader_candidates,
+    stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -80,6 +84,31 @@ const fn stage_salt(stage: Stage) -> u64 {
     }
 }
 
+/// What one draw adds to its primitive shader's translation: the geometry-engine inputs it seeds
+/// (D730), and whether its position export is in window space (D731).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct ForDraw {
+    geometry: Option<GeometryInputs>,
+    window_space: bool,
+}
+
+/// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
+/// position space (D731), in the cache key.
+fn for_draw_salt(for_draw: ForDraw) -> u64 {
+    let geometry = for_draw.geometry.map_or(0, |g| {
+        0x4745_4f4d_0000_0000
+            ^ (u64::from(g.vertices) << 32)
+            ^ (u64::from(g.primitives) << 16)
+            ^ u64::from(g.first_vertex)
+    });
+    geometry
+        ^ if for_draw.window_space {
+            0x5749_4e44_5350_4345
+        } else {
+            0
+        }
+}
+
 /// Distinguishes the same shader translated for different mesh primitives, in the cache key.
 ///
 /// A mesh module's output shape is in the module (D688), so a point and a triangle built from the
@@ -89,20 +118,23 @@ const fn primitive_salt(primitive: MeshPrimitive) -> u64 {
         MeshPrimitive::Points => 0x504f_494e_0000_0001,
         MeshPrimitive::Lines => 0x4c49_4e45_0000_0001,
         MeshPrimitive::Triangles => 0,
+        MeshPrimitive::Rectangles => 0x5245_4354_0000_0001,
     }
 }
 
 /// The mesh primitive a decoded topology asks the translator to assemble, or a refusal naming a
 /// topology that has no mesh-primitive shape.
 ///
-/// Point, line and triangle map onto the three the mesh extension emits. A rectangle list or an
-/// unknown value is refused by name rather than drawn as a triangle.
+/// Point, line and triangle map onto the three the mesh extension emits, and a rectangle list onto
+/// triangles over each rectangle's fourth corner. An unknown value is refused by name rather than
+/// drawn as a triangle.
 fn mesh_primitive_of(topology: PrimitiveTopology) -> Result<MeshPrimitive, PipelineError> {
     match topology {
         PrimitiveTopology::PointList => Ok(MeshPrimitive::Points),
         PrimitiveTopology::LineStrip => Ok(MeshPrimitive::Lines),
         PrimitiveTopology::TriangleStrip => Ok(MeshPrimitive::Triangles),
-        other => Err(PipelineError::NoMeshPrimitive(other)),
+        PrimitiveTopology::RectangleList => Ok(MeshPrimitive::Rectangles),
+        other @ PrimitiveTopology::Other(_) => Err(PipelineError::NoMeshPrimitive(other)),
     }
 }
 
@@ -135,6 +167,10 @@ fn stage_strategy(strategy: Strategy, stage: Stage, widths: WaveWidths) -> (Stra
     };
     (strategy, salt)
 }
+
+/// Distinguishes a module that reads its draw's bound buffers from one that reaches guest memory
+/// only through the window (D733), in the cache key.
+const DRAW_BUFFERS_SALT: u64 = 0x4452_4157_4255_4653;
 
 /// Distinguishes the same shader translated against different memory windows, in the cache key.
 ///
@@ -244,6 +280,21 @@ pub struct SubmissionReport {
     /// descriptor table, whose first eight words are the image descriptor (the GL context's
     /// textured shader loads them with `s_load_dwordx8 s[4:11], s[0:1], 0x00`).
     pub textures: Vec<ImageDescriptor>,
+    /// Draws' sampled texture slots nothing could be bound to - an unreadable descriptor, or one
+    /// this does not read - so the backend would sample its placeholder.
+    pub unbound_textures: usize,
+    /// Draws whose viewport transform the stream turned off (`PA_CL_VTE_CNTL`), so their positions
+    /// are not the clip space the backend draws.
+    pub unmodelled_viewports: usize,
+    /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
+    /// module would read zeros where the guest's data is.
+    pub unwindowed_draws: usize,
+    /// Draws whose shaders read through a buffer the draw could not bind exactly (D733), and why the
+    /// first was refused.
+    pub unbound_buffers: (usize, Option<&'static str>),
+    /// Draws a stage's shader was not prepared for, which would run whatever shader was bound
+    /// before them.
+    pub unshaded_draws: usize,
 }
 
 impl SubmissionReport {
@@ -311,6 +362,9 @@ pub struct Submission {
     /// Colour target zero's element layout (`CB_COLOR0_INFO`), the byte order a frame written back
     /// into it must use. `None` when the stream set none.
     pub colour_target_format: Option<ColourTargetFormat>,
+    /// Colour target zero's delta colour compression (`CB_COLOR0_INFO.DCC_ENABLE`), `None` when
+    /// the target has none.
+    pub colour_target_dcc: Option<crate::registers::ColourTargetDcc>,
     /// How many distinct colour target zero bases the stream wrote: one frame is written back only
     /// when all draws went to one target.
     pub colour_target_bases: usize,
@@ -343,14 +397,132 @@ enum PrepareFailure {
     Unresolved(String),
     /// The address resolved and something after it did not.
     Resolved(String),
+    /// A primitive shader reads the geometry engine's inputs, and it was prepared without a
+    /// draw's geometry to seed them (D730).
+    NeedsGeometry(String),
 }
 
 impl PrepareFailure {
     /// The reason, for a report.
     fn reason(self) -> String {
         match self {
-            Self::Unresolved(reason) | Self::Resolved(reason) => reason,
+            Self::Unresolved(reason) | Self::Resolved(reason) | Self::NeedsGeometry(reason) => {
+                reason
+            }
         }
+    }
+}
+
+/// Colour target zero's base, tiling, element layout and compression, and how many bases the draws
+/// drew into, for a backend to build its pipeline from and a write-back to place its frame by. Each
+/// is `None` when the stream set its register nowhere: state is read, never assumed.
+fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], draws: &[DrawCall]) {
+    submission.colour_target = colour_target_at(writes);
+    submission.colour_target_tiling = colour_swizzle_mode_at(writes);
+    submission.colour_target_format = colour_target_format_at(writes);
+    submission.colour_target_dcc = colour_target_dcc_at(writes);
+    let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();
+    submission.colour_target_bases = colour_target_bases_in(writes, &draw_offsets);
+}
+
+/// The shaders one draw runs, by stage.
+type DrawShaders = Vec<(ShaderStage, ResourceId)>;
+
+/// How many draws a stage's shader was not prepared for: a draw on the draw queue missing its
+/// geometry or its pixel shader, a stage the guest registered aside, since that one is bound once
+/// for the whole stream. Such a draw would run whatever shader the backend bound before it.
+fn unshaded_draws(
+    per_draw: &[DrawShaders],
+    queue: Queue,
+    registered: &[RegisteredShader],
+) -> usize {
+    if queue != Queue::Draw {
+        return 0;
+    }
+    let needed: Vec<ShaderStage> = [ShaderStage::Vertex, ShaderStage::Fragment]
+        .into_iter()
+        .filter(|stage| !registered.iter().any(|r| r.stage == *stage))
+        .collect();
+    per_draw
+        .iter()
+        .filter(|shaders| {
+            !needed
+                .iter()
+                .all(|stage| shaders.iter().any(|(bound, _)| bound == stage))
+        })
+        .count()
+}
+
+/// A candidate that was not prepared: its failure recorded, or a primitive shader that needs a
+/// draw's geometry (D730), with the reason it gave.
+enum Unprepared {
+    Failed,
+    NeedsGeometry(String),
+}
+
+/// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
+/// the reason they gave; what each geometry made; and the refusals already recorded.
+#[derive(Default)]
+struct ByGeometry {
+    /// Candidates prepared without geometry, by whether their positions are in window space (D731),
+    /// and what they became; `None` for a failure.
+    plain: BTreeMap<(u32, u64, bool), Option<ResourceId>>,
+    needs: BTreeMap<(u32, u64), String>,
+    prepared: BTreeMap<(u32, u64, ForDraw), Option<ResourceId>>,
+    refused: std::collections::BTreeSet<(u64, String)>,
+}
+
+/// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
+/// primitive, `PRIM_TYPE` in bits 5:0.
+const VGT_PRIMITIVE_TYPE: u32 = 0xC242;
+/// `DI_PT_TRILIST` and `DI_PT_RECTLIST` (`gfx103.json:691`, `:704`, enum `VGT_DI_PRIM_TYPE`): the
+/// input primitives of three vertices each, the second radeonsi's blits.
+const DI_PT_TRILIST: u32 = 4;
+const DI_PT_RECTLIST: u32 = 17;
+/// `VGT_SHADER_STAGES_EN` (`gfx103.json`, dword `0xA2D5`); its `PRIMGEN_PASSTHRU_EN`, bit 25, hands
+/// the primitive shader its primitive already packed in `v0`, a layout not seeded.
+const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
+const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
+/// `GE_INDX_OFFSET` (`gfx103.json`, byte `198952`, uconfig dword `0xC24A`): added to every vertex
+/// index, so the vertex ids of a draw that sets it are not its indices.
+const GE_INDX_OFFSET: u32 = 0xC24A;
+
+/// The geometry-engine inputs a draw hands its primitive shader, when one subgroup of `lanes`
+/// threads holds it whole (D730), or why not: a non-indexed draw of one instance over a list of
+/// three-vertex primitives, with no index offset and no passthrough.
+fn draw_geometry(
+    draw: &DrawCall,
+    mut latest: impl FnMut(u32) -> Option<u32>,
+    lanes: u32,
+) -> Result<GeometryInputs, String> {
+    let DrawKind::Auto { vertices } = draw.kind else {
+        return Err("an indexed draw's geometry-engine inputs are not seeded".to_owned());
+    };
+    if draw.instances != 1 {
+        return Err(
+            "a draw of more than one instance's geometry-engine inputs are not seeded".to_owned(),
+        );
+    }
+    let topology = latest(VGT_PRIMITIVE_TYPE).map(|value| value & 0x3F);
+    if !matches!(topology, Some(DI_PT_TRILIST | DI_PT_RECTLIST)) {
+        return Err(format!(
+            "the draw's input primitive {topology:?} is not a list of three-vertex primitives, whose geometry-engine inputs are the ones seeded"
+        ));
+    }
+    if latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0) {
+        return Err("a passthrough primitive shader's inputs are not seeded".to_owned());
+    }
+    if latest(GE_INDX_OFFSET).is_some_and(|value| value != 0) {
+        return Err("a draw with an index offset's vertex ids are not seeded".to_owned());
+    }
+    let geometry = GeometryInputs {
+        first_vertex: 0,
+        vertices,
+        primitives: vertices / 3,
+    };
+    match geometry.refusal(lanes) {
+        Some(why) => Err(why.to_owned()),
+        None => Ok(geometry),
     }
 }
 
@@ -429,8 +601,15 @@ pub struct Pipeline {
     bases: BTreeMap<u64, (Vec<u8>, Option<u64>)>,
     /// Each translated module's texture sources, by its resource.
     texture_sources: BTreeMap<ResourceId, Vec<TextureSource>>,
+    /// The translated modules whose shaders read or write guest memory, which reach it only
+    /// through the window.
+    memory_readers: std::collections::BTreeSet<ResourceId>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
+    /// Each translated module's draw buffers, in slot order (D733).
+    buffer_sources: BTreeMap<ResourceId, Vec<orbistoun_translate::draw_buffers::BufferSource>>,
+    /// Bytes read for draw buffers, shared across submissions while unwritten.
+    buffers: crate::draw_buffers::BufferCache,
     next_resource: u64,
     /// Translations kept across runs, consulted before translating and added to after (D113).
     store: Option<crate::translations::TranslationStore>,
@@ -475,7 +654,10 @@ impl Pipeline {
             decoded: BTreeMap::new(),
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
+            memory_readers: std::collections::BTreeSet::new(),
             texels: TexelCache::new(),
+            buffer_sources: BTreeMap::new(),
+            buffers: crate::draw_buffers::BufferCache::default(),
             next_resource: 1,
             store: None,
             depth_fills: crate::depth::PendingFills::default(),
@@ -518,6 +700,9 @@ impl Pipeline {
             dx10_clamp: state.dx10_clamp,
             pixel_inputs: None,
             compute: Some(state.inputs),
+            geometry: None,
+            window_space: false,
+            draw_buffers: false,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -689,7 +874,8 @@ impl Pipeline {
             Some((crate::depth::depth_target_id(&target), target, extent))
         });
         if let Some(extent) = colour_target_extent_at(&writes) {
-            let target = colour_target_id(extent);
+            let base = colour_target_at(&writes).map(|target| target.base);
+            let target = colour_target_id(extent, base);
             submission.targets.insert(target, extent);
             submission.commands.push(RenderCommand::SetRenderTargets {
                 colour: vec![target],
@@ -697,13 +883,9 @@ impl Pipeline {
             });
         }
 
-        // Colour target zero's base and tiling, and the depth, stencil and blend state, for a
-        // backend to build its pipeline from. Each is `None` when the stream set its register
-        // nowhere: state is read, never assumed.
-        submission.colour_target = colour_target_at(&writes);
-        submission.colour_target_tiling = colour_swizzle_mode_at(&writes);
-        submission.colour_target_format = colour_target_format_at(&writes);
-        submission.colour_target_bases = colour_target_bases_in(&writes);
+        // The draws, found once for every pass that walks them.
+        let draws = draw_calls(&walked, stream);
+        record_colour_target(&mut submission, &writes, &draws);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&writes);
@@ -713,17 +895,6 @@ impl Pipeline {
         // Each stage's wave width: the encodings are identical at either width, so the stream's
         // registers are the only source (D145).
         submission.report.wave_widths = crate::registers::wave_widths_at(&writes);
-
-        // The scissor as a viewport the backend restricts a draw to; a stream that set none emits
-        // none, so a draw covers the whole target.
-        if let Some(scissor) = scissor_at(&writes) {
-            submission.commands.push(RenderCommand::SetViewport(Rect {
-                x: i32::try_from(scissor.x).unwrap_or(0),
-                y: i32::try_from(scissor.y).unwrap_or(0),
-                width: scissor.width,
-                height: scissor.height,
-            }));
-        }
 
         // The guest-memory window this frame's shaders read, read once because every module shares
         // it (D703). The default window at address zero is unmapped and reads empty.
@@ -737,8 +908,6 @@ impl Pipeline {
         submission.guest_memory_base = self.window.address();
         submission.report.shaders_found = candidates.len();
 
-        // The draws, found once for both passes that walk them.
-        let draws = draw_calls(&walked, stream);
         let per_draw = span(Span::PrepareShaders, || {
             self.bind_shaders(
                 &candidates,
@@ -748,6 +917,9 @@ impl Pipeline {
                 &mut submission,
             )
         });
+        submission.report.unwindowed_draws =
+            self.unwindowed_draws(&per_draw, &submission.guest_memory);
+        submission.report.unshaded_draws = unshaded_draws(&per_draw, queue, registered);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
         if let Some(clear) =
@@ -763,19 +935,12 @@ impl Pipeline {
                 &mut submission.commands,
                 (&walked, stream, &draws),
                 &writes,
-                &per_draw,
-                depth_target.map(|(id, _, _)| id),
+                (&per_draw, depth_target.map(|(id, _, _)| id)),
+                &mut submission.report.unmodelled_viewports,
             );
         });
         span(Span::PrepareTextures, || {
-            submission.report.textures = texture_census(&submission.commands, memory);
-            if self.feeds_user_data {
-                bind_textures(
-                    &mut submission.commands,
-                    (&self.texture_sources, &mut self.texels),
-                    memory,
-                );
-            }
+            self.bind_resources(&mut submission, memory);
         });
         submission.report.draws = submission
             .commands
@@ -819,8 +984,9 @@ impl Pipeline {
         submission: &mut Submission,
     ) -> Vec<Vec<(ShaderStage, ResourceId)>> {
         // Every (stage, address) prepared so far and what it became; `None` for a failure, so it is
-        // tried and reported once however many draws name it.
-        let mut prepared: BTreeMap<(u32, u64), Option<ResourceId>> = BTreeMap::new();
+        // tried and reported once however many draws name it. A primitive shader that needs a
+        // draw's geometry is prepared per geometry instead (D730).
+        let mut by_geometry = ByGeometry::default();
         let registered_stages: Vec<ShaderStage> = candidates
             .iter()
             .filter(|c| {
@@ -831,13 +997,23 @@ impl Pipeline {
             .map(|c| c.stage)
             .collect();
         for &candidate in candidates {
-            let resource = self.prepare_candidate(candidate, memory, submission);
-            prepared.insert((candidate.stage as u32, candidate.address), resource);
-            if let Some(resource) = resource {
-                submission.commands.push(RenderCommand::BindShader {
-                    stage: candidate.stage,
-                    shader: resource,
-                });
+            let key = (candidate.stage as u32, candidate.address);
+            let plain = (key.0, key.1, false);
+            match self.prepare_candidate(candidate, (memory, ForDraw::default()), submission) {
+                Ok(resource) => {
+                    by_geometry.plain.insert(plain, Some(resource));
+                    submission.commands.push(RenderCommand::BindShader {
+                        stage: candidate.stage,
+                        shader: resource,
+                    });
+                }
+                Err(Unprepared::Failed) => {
+                    by_geometry.plain.insert(plain, None);
+                }
+                // Bound per draw, with each draw's geometry.
+                Err(Unprepared::NeedsGeometry(reason)) => {
+                    by_geometry.needs.insert(key, reason);
+                }
             }
         }
 
@@ -849,11 +1025,37 @@ impl Pipeline {
         // frame rewrites the same addresses before each of many draws.
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
+        let lanes = if submission.report.wave_widths.primitive_w32 {
+            32
+        } else {
+            64
+        };
         for draw in draws {
-            let written: Vec<Option<u32>> = shader_registers
+            let mut written: Vec<Option<u32>> = shader_registers
                 .iter()
                 .map(|&register| sweep.latest(draw.packet_offset, register))
                 .collect();
+            // A primitive shader prepared per geometry runs another module for other geometry, so
+            // the geometry is part of what must repeat.
+            let geometry = draw_geometry(
+                draw,
+                |register| sweep.latest(draw.packet_offset, register),
+                lanes,
+            );
+            if !by_geometry.needs.is_empty()
+                && let Ok(geometry) = geometry
+            {
+                written.extend([
+                    Some(geometry.vertices),
+                    Some(geometry.primitives),
+                    Some(geometry.first_vertex),
+                ]);
+            }
+            // A window-space draw's primitive shader writes its position differently (D731).
+            let window_space = crate::registers::position_space(|register| {
+                sweep.latest(draw.packet_offset, register)
+            }) == crate::registers::PositionSpace::Window;
+            written.push(Some(u32::from(window_space)));
             if previous_writes.as_ref() == Some(&written) {
                 per_draw.push(Vec::clone(&previous_shaders));
                 continue;
@@ -868,18 +1070,16 @@ impl Pipeline {
                 if !queue.permits(stage) || registered_stages.contains(&stage) {
                     continue;
                 }
-                let key = (stage as u32, inferred.address);
-                let resource = if let Some(known) = prepared.get(&key) {
-                    *known
-                } else {
-                    let candidate = Candidate {
-                        address: inferred.address,
-                        stage,
-                    };
-                    let made = self.prepare_candidate(candidate, memory, submission);
-                    prepared.insert(key, made);
-                    made
+                let candidate = Candidate {
+                    address: inferred.address,
+                    stage,
                 };
+                let resource = self.bind_for_draw(
+                    candidate,
+                    (memory, &geometry, window_space),
+                    &mut by_geometry,
+                    submission,
+                );
                 if let Some(resource) = resource {
                     shaders.push((stage, resource));
                 }
@@ -891,21 +1091,190 @@ impl Pipeline {
         per_draw
     }
 
+    /// Binds what each draw's shaders read beside their user data, for a backend that supplies it:
+    /// the textures they sample and the buffers they read through (D733).
+    fn bind_resources(&mut self, submission: &mut Submission, memory: &impl GuestMemory) {
+        submission.report.textures = texture_census(&submission.commands, memory);
+        if !self.feeds_user_data {
+            return;
+        }
+        bind_textures(
+            &mut submission.commands,
+            (&self.texture_sources, &mut self.texels),
+            memory,
+            &mut submission.report.unbound_textures,
+        );
+        crate::draw_buffers::bind_draw_buffers(
+            &mut submission.commands,
+            (&self.buffer_sources, &mut self.buffers),
+            memory,
+            &mut submission.report.unbound_buffers,
+        );
+    }
+
+    /// Records how a translated module reaches guest memory: the buffers a draw binds for it
+    /// (D733), and whether anything else it reads goes through the window.
+    fn note_memory(
+        &mut self,
+        resource: ResourceId,
+        (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
+        (stage, user_data): (Stage, UserData),
+    ) {
+        let again;
+        let decoded = if let Some(decoded) = decoded {
+            decoded
+        } else {
+            again = decode_program(shader, &self.encodings, &self.operands);
+            &again
+        };
+        // The translation refused more buffers than a stage binds, so what is kept here is what
+        // the module declares.
+        let buffers = orbistoun_translate::wavefront::draw_buffers_for(
+            decoded,
+            &self.encodings,
+            stage,
+            user_data,
+        )
+        .unwrap_or_default();
+        if reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
+            self.memory_readers.insert(resource);
+        }
+        if !buffers.sources.is_empty() {
+            self.buffer_sources.insert(resource, buffers.sources);
+        }
+    }
+
+    /// How many draws run a module that reaches guest memory while `window` is empty. A module
+    /// reaches guest memory only through the window; with none mapped it reads zeros, so such a
+    /// draw is counted and refused rather than drawn from them.
+    fn unwindowed_draws(&self, per_draw: &[DrawShaders], window: &[u32]) -> usize {
+        if !window.is_empty() {
+            return 0;
+        }
+        per_draw
+            .iter()
+            .filter(|shaders| {
+                shaders
+                    .iter()
+                    .any(|(_, resource)| self.memory_readers.contains(resource))
+            })
+            .count()
+    }
+
+    /// The module one draw binds for a candidate: the one prepared without geometry, or - for a
+    /// primitive shader that reads the geometry engine's inputs - the one for this draw's geometry
+    /// (D730). A primitive shader of a window-space draw is its own module (D731). Each is prepared
+    /// once however many draws name it.
+    fn bind_for_draw(
+        &mut self,
+        candidate: Candidate,
+        (memory, geometry, window_space): (
+            &impl GuestMemory,
+            &Result<GeometryInputs, String>,
+            bool,
+        ),
+        by_geometry: &mut ByGeometry,
+        submission: &mut Submission,
+    ) -> Option<ResourceId> {
+        // Only the primitive shader writes a position.
+        let window_space = window_space && candidate.stage == ShaderStage::Vertex;
+        let key = (candidate.stage as u32, candidate.address);
+        if !by_geometry.needs.contains_key(&key) {
+            let plain = (key.0, key.1, window_space);
+            if let Some(known) = by_geometry.plain.get(&plain) {
+                return *known;
+            }
+            let for_draw = ForDraw {
+                geometry: None,
+                window_space,
+            };
+            match self.prepare_candidate(candidate, (memory, for_draw), submission) {
+                Ok(resource) => {
+                    by_geometry.plain.insert(plain, Some(resource));
+                    return Some(resource);
+                }
+                Err(Unprepared::Failed) => {
+                    by_geometry.plain.insert(plain, None);
+                    return None;
+                }
+                Err(Unprepared::NeedsGeometry(reason)) => {
+                    by_geometry.needs.insert(key, reason);
+                }
+            }
+        }
+        let needs = by_geometry.needs.get(&key).cloned().unwrap_or_default();
+        self.prepare_with_geometry(
+            candidate,
+            (memory, Some(geometry.clone()), needs, window_space),
+            by_geometry,
+            submission,
+        )
+    }
+
+    /// Prepares a primitive shader that reads the geometry engine's inputs for one draw's geometry
+    /// (D730), once per geometry however many draws share it; a draw whose geometry is not one
+    /// that is seeded records why, once.
+    fn prepare_with_geometry(
+        &mut self,
+        candidate: Candidate,
+        (memory, geometry, needs, window_space): (
+            &impl GuestMemory,
+            Option<Result<GeometryInputs, String>>,
+            String,
+            bool,
+        ),
+        by_geometry: &mut ByGeometry,
+        submission: &mut Submission,
+    ) -> Option<ResourceId> {
+        let geometry = match geometry {
+            Some(Ok(geometry)) => geometry,
+            Some(Err(why)) => {
+                let reason = format!("{needs}; and this draw's cannot be: {why}");
+                if by_geometry
+                    .refused
+                    .insert((candidate.address, reason.clone()))
+                {
+                    submission.report.failures.push(ShaderFailure {
+                        address: candidate.address,
+                        stage: format!("{:?}", candidate.stage).to_lowercase(),
+                        reason,
+                    });
+                }
+                return None;
+            }
+            None => return None,
+        };
+        let for_draw = ForDraw {
+            geometry: Some(geometry),
+            window_space,
+        };
+        let key = (candidate.stage as u32, candidate.address, for_draw);
+        if let Some(known) = by_geometry.prepared.get(&key) {
+            return *known;
+        }
+        let made = self
+            .prepare_candidate(candidate, (memory, for_draw), submission)
+            .ok();
+        by_geometry.prepared.insert(key, made);
+        made
+    }
+
     /// Prepares one shader candidate and records the outcome in the submission's report: the module
     /// travels with the submission when the backend has not seen it, and a failure is counted and
     /// named. The resource it became, or `None` when it could not be prepared.
     fn prepare_candidate(
         &mut self,
         candidate: Candidate,
-        memory: &impl GuestMemory,
+        (memory, for_draw): (&impl GuestMemory, ForDraw),
         submission: &mut Submission,
-    ) -> Option<ResourceId> {
+    ) -> Result<ResourceId, Unprepared> {
         match self.prepare(
             candidate.address,
             candidate.stage,
             (
                 submission.report.primitive_topology,
                 submission.report.wave_widths,
+                for_draw,
             ),
             memory,
         ) {
@@ -913,7 +1282,7 @@ impl Pipeline {
                 // The address resolved, whatever happened to the shader after that.
                 submission.report.addresses_resolved += 1;
                 submission.report.shaders_translated += 1;
-                Some(match prepared {
+                Ok(match prepared {
                     // Only a module the backend has not seen travels with the submission.
                     Prepared::Fresh {
                         resource,
@@ -930,6 +1299,8 @@ impl Pipeline {
                     }
                 })
             }
+            // Not a failure yet: it is prepared again with each draw's geometry.
+            Err(PrepareFailure::NeedsGeometry(reason)) => Err(Unprepared::NeedsGeometry(reason)),
             Err(failure) => {
                 // Counted before the reason is consumed, and apart from the shader outcome: address
                 // resolution is evidence about the address space.
@@ -937,14 +1308,16 @@ impl Pipeline {
                     PrepareFailure::Unresolved(_) => {
                         submission.report.addresses_unresolved += 1;
                     }
-                    PrepareFailure::Resolved(_) => submission.report.addresses_resolved += 1,
+                    PrepareFailure::Resolved(_) | PrepareFailure::NeedsGeometry(_) => {
+                        submission.report.addresses_resolved += 1;
+                    }
                 }
                 submission.report.failures.push(ShaderFailure {
                     address: candidate.address,
                     stage: format!("{:?}", candidate.stage).to_lowercase(),
                     reason: failure.reason(),
                 });
-                None
+                Err(Unprepared::Failed)
             }
         }
     }
@@ -1023,7 +1396,7 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
-        (topology, widths): (Option<PrimitiveTopology>, WaveWidths),
+        (topology, widths, for_draw): (Option<PrimitiveTopology>, WaveWidths, ForDraw),
         memory: &impl GuestMemory,
     ) -> Result<Prepared, PrepareFailure> {
         // A shader already decoded at this address with the same bytes is not decoded again: a
@@ -1032,7 +1405,12 @@ impl Pipeline {
             && let Some(bytes) = memory.read(guest_address_of(address), known.len())
             && bytes == known.as_slice()
         {
-            return self.prepare_decoded(address, stage, (topology, widths), (bytes, None));
+            return self.prepare_decoded(
+                address,
+                stage,
+                (topology, widths, for_draw),
+                (bytes, None),
+            );
         }
         // The register named a GPU address; guest memory is indexed by a guest one. See
         // `guest_address_of`.
@@ -1071,7 +1449,12 @@ impl Pipeline {
 
         let shader = &window[..decoded.consumed];
         self.decoded.insert(address, shader.to_vec());
-        self.prepare_decoded(address, stage, (topology, widths), (shader, Some(&decoded)))
+        self.prepare_decoded(
+            address,
+            stage,
+            (topology, widths, for_draw),
+            (shader, Some(&decoded)),
+        )
     }
 
     /// Translates and caches a shader whose bytes, end-of-program included, are known, or finds its
@@ -1083,7 +1466,7 @@ impl Pipeline {
         &mut self,
         address: u64,
         stage: ShaderStage,
-        (topology, widths): (Option<PrimitiveTopology>, WaveWidths),
+        (topology, widths, for_draw): (Option<PrimitiveTopology>, WaveWidths, ForDraw),
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
     ) -> Result<Prepared, PrepareFailure> {
         let host_stage = host_stage(stage);
@@ -1102,9 +1485,18 @@ impl Pipeline {
         // Keyed by content, stage and primitive: one instruction stream translated for different
         // stages or output shapes gives different modules.
         let user_data = match stage {
-            ShaderStage::Vertex => self.user_data[0],
+            ShaderStage::Vertex => UserData {
+                geometry: for_draw.geometry,
+                window_space: for_draw.window_space,
+                ..self.user_data[0]
+            },
             ShaderStage::Fragment => self.user_data[1],
             ShaderStage::Compute => UserData::default(),
+        };
+        // A live draw binds the buffers its stages read through (D733).
+        let user_data = UserData {
+            draw_buffers: self.feeds_user_data && host_stage != Stage::Compute,
+            ..user_data
         };
         let (strategy, width_salt) = stage_strategy(self.strategy, host_stage, widths);
         // The user-data layout and the wave width are in the module too.
@@ -1114,7 +1506,13 @@ impl Pipeline {
             ^ window_salt(self.window)
             ^ width_salt
             ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
-            ^ crate::pixel_inputs::salt(user_data);
+            ^ crate::pixel_inputs::salt(user_data)
+            ^ for_draw_salt(for_draw)
+            ^ if user_data.draw_buffers {
+                DRAW_BUFFERS_SALT
+            } else {
+                0
+            };
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -1158,6 +1556,7 @@ impl Pipeline {
         self.cache.insert(key, Cached::of(resource, shader));
         // Where each texture the module samples comes from, for binding them per draw.
         self.texture_sources.insert(resource, kept.textures);
+        self.note_memory(resource, (shader, decoded), (host_stage, user_data));
         Ok(Prepared::Fresh {
             resource,
             module: kept.module,
@@ -1204,9 +1603,12 @@ impl Pipeline {
             context.user_data,
         )
         .map_err(|e| {
-            PrepareFailure::Resolved(format!(
-                "the shader at {address:#x} could not be translated: {e}"
-            ))
+            let reason = format!("the shader at {address:#x} could not be translated: {e}");
+            if matches!(e, orbistoun_translate::TranslateError::ReadsGeometryInputs) {
+                PrepareFailure::NeedsGeometry(reason)
+            } else {
+                PrepareFailure::Resolved(reason)
+            }
         })?;
         Ok(crate::translations::Kept {
             bytes: shader.to_vec(),
@@ -1232,13 +1634,14 @@ fn push_geometry_commands(
     commands: &mut Vec<RenderCommand>,
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
     writes: &[RegisterWrite],
-    shaders: &[Vec<(ShaderStage, ResourceId)>],
-    depth_target: Option<ResourceId>,
+    (shaders, depth_target): (&[DrawShaders], Option<ResourceId>),
+    unmodelled_viewports: &mut usize,
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
     let mut blend_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
+    let mut scissor_sent = None;
     // What each stage has bound so far: the up-front binds, then each draw's own.
     let mut bound: Vec<(ShaderStage, ResourceId)> = commands
         .iter()
@@ -1270,12 +1673,46 @@ fn push_geometry_commands(
         // The depth, stencil and cull state in force at this draw, and a clear it asks for.
         depth_sent.push(&mut sweep, at, depth_target, commands);
         // The clip-to-pixel transform in force at this draw, when the stream set one and it
-        // changed.
-        if let Some(transform) = viewport_transform_from(|register| sweep.latest(at, register))
+        // changed. A window-space draw's primitive shader wrote positions this fixed transform
+        // takes back to pixels (D731); a draw whose positions are in any other space is counted,
+        // so it is refused rather than drawn as if they were clip space.
+        let transform =
+            match crate::registers::position_space(|register| sweep.latest(at, register)) {
+                crate::registers::PositionSpace::Clip => {
+                    viewport_transform_from(|register| sweep.latest(at, register))
+                }
+                crate::registers::PositionSpace::Window => Some(ViewportTransform {
+                    x_scale: WINDOW_SPACE_SCALE,
+                    x_offset: 0.0,
+                    y_scale: WINDOW_SPACE_SCALE,
+                    y_offset: 0.0,
+                    depth: crate::registers::DepthMapping::IDENTITY,
+                }),
+                crate::registers::PositionSpace::Unmodelled(_) => {
+                    *unmodelled_viewports += 1;
+                    None
+                }
+            };
+        if let Some(transform) = transform
             && transform_sent != Some(transform)
         {
             commands.push(RenderCommand::SetViewportTransform(transform));
             transform_sent = Some(transform);
+        }
+        // The scissor in force at this draw, as the rectangle the backend restricts it to, when the
+        // stream set one and it changed. A draw before any is unrestricted.
+        if let Some(scissor) = crate::registers::scissor_from(|register| sweep.latest(at, register))
+        {
+            let rect = Rect {
+                x: i32::try_from(scissor.x).unwrap_or(0),
+                y: i32::try_from(scissor.y).unwrap_or(0),
+                width: scissor.width,
+                height: scissor.height,
+            };
+            if scissor_sent != Some(rect) {
+                commands.push(RenderCommand::SetViewport(rect));
+                scissor_sent = Some(rect);
+            }
         }
         // Each stage's user data as it stands at this draw, emitted when it changed. A word the
         // stream never wrote reads zero.
@@ -1355,6 +1792,17 @@ fn texture_census(commands: &[RenderCommand], memory: &impl GuestMemory) -> Vec<
     textures
 }
 
+/// The sampler descriptor at `at`, decoded, or `None` when it is not readable or asks for sampling
+/// no host sampler reproduces exactly ([`crate::registers::decode_sampler_descriptor`]).
+fn read_sampler(at: u64, memory: &impl GuestMemory) -> Option<crate::registers::TextureSampling> {
+    let bytes = memory.read(at, 16)?;
+    let mut words = [0u32; 4];
+    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    crate::registers::decode_sampler_descriptor(words).ok()
+}
+
 /// `SQ_IMG_RSRC_WORD3.TYPE` for a 2D image: 9 (Mesa `ac_descriptors.c:372`, as the SDK's
 /// `gl_pack_descriptors` cites it).
 const IMAGE_TYPE_2D: u32 = 9;
@@ -1368,21 +1816,22 @@ fn bind_textures(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
+    unbound: &mut usize,
 ) {
     // Each draw's textures, where its pixel shader says they are: for every slot the bound fragment
     // module samples, the descriptor at that slot's table offset (zero for a module whose texture
     // did not come from the table). Re-emitted before a draw whenever the table or the module
     // changed.
     let mut out = Vec::with_capacity(commands.len());
-    let (mut table, mut fragment, mut stale) = (None, None, false);
-    let mut read: BTreeMap<(u64, u32), Option<RenderCommand>> = BTreeMap::new();
+    let (mut words, mut fragment, mut stale) = (None, None, false);
+    let mut read: BTreeMap<(u64, u32, Option<u64>), Option<RenderCommand>> = BTreeMap::new();
     for command in commands.drain(..) {
         match &command {
             RenderCommand::SetUserData {
                 stage: ShaderStage::Fragment,
-                words,
+                words: set,
             } => {
-                table = Some(u64::from(words[0]) | u64::from(words[1]) << 32);
+                words = Some(*set);
                 stale = true;
             }
             RenderCommand::BindShader {
@@ -1401,6 +1850,8 @@ fn bind_textures(
                 let default = [TextureSource {
                     slot: 0,
                     table_offset: None,
+                    table: TableBase::default(),
+                    sampler_offset: None,
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
@@ -1408,14 +1859,45 @@ fn bind_textures(
                     slots
                 };
                 for source in slots {
-                    let at = table.map(|t| t + u64::from(source.table_offset.unwrap_or(0)));
+                    // The table where the program formed its address: user-data words or
+                    // constants.
+                    let half = |word: TableWord| match word {
+                        TableWord::UserData(index) => words
+                            .and_then(|w| w.get(usize::try_from(index).ok()?).copied())
+                            .unwrap_or(0),
+                        TableWord::Constant(value) => value,
+                    };
+                    let table = u64::from(half(source.table.low))
+                        | u64::from(half(source.table.high)) << 32;
+                    let at = table + u64::from(source.table_offset.unwrap_or(0));
                     // Read once per descriptor per submission: guest memory does not change while a
                     // submission is prepared, and a frame binds the same few textures many times.
-                    out.extend(at.and_then(|at| {
-                        read.entry((at, source.slot))
-                            .or_insert_with(|| read_texture(at, source.slot, memory, texels))
-                            .clone()
-                    }));
+                    let sampler_at = source
+                        .sampler_offset
+                        .map(|offset| table + u64::from(offset));
+                    let bound = read
+                        .entry((at, source.slot, sampler_at))
+                        .or_insert_with(|| {
+                            let mut bound = read_texture(at, source.slot, memory, texels)?;
+                            // A sampler the module named is read and honoured; one that cannot be
+                            // honoured exactly leaves the texture unbound, so the draw is refused
+                            // rather than sampled some other way.
+                            if let Some(sampler_at) = sampler_at {
+                                let decoded = read_sampler(sampler_at, memory)?;
+                                if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
+                                    *sampling = decoded;
+                                }
+                            }
+                            Some(bound)
+                        })
+                        .clone();
+                    // A texture the module samples and nothing binds draws the backend's
+                    // placeholder, which is not the guest's picture: counted, so the draw is
+                    // refused rather than drawn wrong.
+                    if bound.is_none() {
+                        *unbound += 1;
+                    }
+                    out.extend(bound);
                 }
             }
             _ => {}
@@ -1477,6 +1959,7 @@ fn read_texture(
             texels: cached.texels.clone(),
             width: descriptor.width,
             height: descriptor.height,
+            sampling: crate::registers::TextureSampling::default(),
         });
     }
     // Marked before the bytes are hashed, so a write racing the hash is seen next time.
@@ -1518,6 +2001,7 @@ fn read_texture(
         texels: shared,
         width: descriptor.width,
         height: descriptor.height,
+        sampling: crate::registers::TextureSampling::default(),
     })
 }
 
@@ -1555,6 +2039,7 @@ fn read_tiled_texture(
             texels: cached.texels.clone(),
             width: descriptor.width,
             height: descriptor.height,
+            sampling: crate::registers::TextureSampling::default(),
         });
     }
     let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
@@ -1591,6 +2076,7 @@ fn read_tiled_texture(
         texels: shared,
         width: descriptor.width,
         height: descriptor.height,
+        sampling: crate::registers::TextureSampling::default(),
     })
 }
 
@@ -1634,6 +2120,9 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             dx10_clamp: dx10_clamp(RSRC1_REGISTERS[0]),
             pixel_inputs: None,
             compute: None,
+            geometry: None,
+            window_space: false,
+            draw_buffers: false,
         },
         UserData {
             first_register: 0,
@@ -1643,6 +2132,9 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             // Set by `set_environment` for every backend.
             pixel_inputs: None,
             compute: None,
+            geometry: None,
+            window_space: false,
+            draw_buffers: false,
         },
     ]
 }
@@ -1723,6 +2215,76 @@ impl Pipeline {
             words /= 2;
         }
     }
+}
+
+/// Whether a shader's results depend on guest memory it reaches through the window: any flat,
+/// global, scratch, buffer or scalar buffer access, and any scalar load whose registers something
+/// other than an image instruction reads.
+///
+/// A scalar load that only fills an image's descriptor registers is the exception: the translated
+/// module names its image by the register group, and the texture itself is bound per draw from
+/// where that load reads (the table provenance of `TextureSource`), so the value the module loads
+/// is never used. Which registers are read is found syntactically over the whole program, each
+/// scalar source counted with the register after it, which can only count more reads than there
+/// are - so a load is excused only when nothing else could read what it wrote. Its local data share
+/// and its images are not guest memory the window holds, and neither are the accesses `served`
+/// names, which read the draw's bound buffers (D733).
+fn reaches_guest_memory(
+    decoded: &orbistoun_shader::Decode,
+    encodings: &EncodingTable,
+    served: &BTreeMap<u32, u32>,
+) -> bool {
+    const ACCESSES: [&str; 6] = [
+        "s_buffer_load",
+        "global_",
+        "flat_",
+        "scratch_",
+        "buffer_",
+        "tbuffer_",
+    ];
+    let named: Vec<(&orbistoun_shader::Instruction, &str)> = decoded
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            let family = encodings
+                .encodings()
+                .get(usize::from(instruction.encoding?))?;
+            Some((
+                instruction,
+                encodings.mnemonic_for(&family.name, instruction.opcode)?,
+            ))
+        })
+        .collect();
+    // Every scalar register something other than an image instruction reads: its sources, and the
+    // first operand of a compare, which writes nothing.
+    let mut read = std::collections::BTreeSet::new();
+    for &(instruction, name) in &named {
+        if name.starts_with("image_") {
+            continue;
+        }
+        let first = usize::from(!(name.starts_with("s_cmp") || name.starts_with("s_bitcmp")));
+        for operand in instruction.operands.iter().skip(first) {
+            if let Operand::Scalar(register) = operand {
+                read.extend([*register, register.saturating_add(1)]);
+            }
+        }
+    }
+    named.iter().any(|&(instruction, name)| {
+        if served.contains_key(&instruction.offset) {
+            return false;
+        }
+        if ACCESSES.iter().any(|prefix| name.starts_with(prefix)) {
+            return true;
+        }
+        if !name.starts_with("s_load") {
+            return false;
+        }
+        let Some(Operand::Scalar(first)) = instruction.operands.first() else {
+            return true;
+        };
+        let span = scalar_destination_span(name);
+        (*first..first.saturating_add(span)).any(|register| read.contains(&register))
+    })
 }
 
 /// The 64-bit address a shader forms from two constant scalar registers as the base of its memory
@@ -1866,15 +2428,26 @@ pub const fn guest_address_of(gpu_address: u64) -> u64 {
     gpu_address
 }
 
-/// A content-addressed id for a colour target of a given extent.
+/// An id for a colour target of a given extent at a given base address.
 ///
-/// Keyed by extent rather than base address, because sources agree on the size register and not on
-/// the base register's offset (D702). The backend stores nothing per target, so two same-sized
-/// targets sharing an id is harmless. The top bit keeps target ids disjoint from shader ids, which
-/// count up from one; width and height are at most fourteen bits each, so the extent fits below it.
-fn colour_target_id(extent: ColourTargetExtent) -> ResourceId {
+/// Keyed on the address as well as the extent, as D702 set out for when the backend kept anything
+/// per target: it keeps each target's frame on the device until the flip (D714), so a
+/// double-buffered title's two same-sized targets sharing an id handed one buffer's frame to the
+/// other. A stream that sets no base keeps the extent alone. The top bit keeps target ids disjoint
+/// from shader ids, which count up from one.
+fn colour_target_id(extent: ColourTargetExtent, base: Option<u64>) -> ResourceId {
+    use std::hash::{Hash, Hasher};
     const TARGET_NAMESPACE: u64 = 1 << 63;
-    ResourceId(TARGET_NAMESPACE | (u64::from(extent.width) << 16) | u64::from(extent.height))
+    let key = match base {
+        // Width and height are at most fourteen bits each, so the extent fits below the top bit.
+        None => (u64::from(extent.width) << 16) | u64::from(extent.height),
+        Some(base) => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (base, extent.width, extent.height).hash(&mut hasher);
+            hasher.finish() & !TARGET_NAMESPACE
+        }
+    };
+    ResourceId(TARGET_NAMESPACE | key)
 }
 
 /// The smallest window worth trying: one instruction that ends a program.
@@ -2241,10 +2814,93 @@ mod tests {
             }
         }
         assert_eq!(offsets.len(), 12, "twelve draws: {offsets:?}");
+        // Nothing is mapped, so neither stage's shader was prepared for any draw: each would run
+        // whatever shaders were bound before it.
+        assert_eq!(submission.report.unshaded_draws, 12);
         let mut distinct = offsets.clone();
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), 12, "each draw its own offset: {offsets:?}");
+    }
+
+    /// Each draw is restricted to the scissor in force at it, not the stream's last one. Bugdom
+    /// draws its 3D pane under one scissor and its HUD bars above and below under another; one
+    /// scissor for the whole submission clipped the bars away, leaving the clear colour.
+    #[test]
+    fn each_draw_is_restricted_to_the_scissor_in_force_at_it() {
+        use super::{Pipeline, Rect, RenderCommand};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/captures/agc-gl-cube-fw1240-b.hex");
+        let words: Vec<u32> = std::fs::read_to_string(&path)
+            .expect("the committed capture")
+            .lines()
+            .flat_map(|line| {
+                line.split('#')
+                    .next()
+                    .unwrap_or_default()
+                    .split_whitespace()
+            })
+            .map(|word| u32::from_str_radix(word, 16).expect("a hex word"))
+            .collect();
+        let bytes: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+        let draws = crate::registers::draw_calls(&crate::packet::walk(&bytes), &bytes);
+        assert_eq!(draws.len(), 12);
+        // SET_CONTEXT_REG of GENERIC_SCISSOR_TL and _BR: (x, y) packed as y << 16 | x.
+        let scissor = |(x0, y0): (u32, u32), (x1, y1): (u32, u32)| {
+            [0xC002_6900, 0x90, y0 << 16 | x0, y1 << 16 | x1]
+        };
+        let pane = scissor((0, 140), (1920, 945));
+        let whole = scissor((0, 0), (1920, 1080));
+        // The pane's scissor before the first draw, the whole target's before the seventh.
+        let first = draws[0].packet_offset as usize / 4;
+        let seventh = draws[6].packet_offset as usize / 4;
+        let mut spliced = words[..first].to_vec();
+        spliced.extend(pane);
+        spliced.extend(&words[first..seventh]);
+        spliced.extend(whole);
+        spliced.extend(&words[seventh..]);
+        let stream: Vec<u8> = spliced.into_iter().flat_map(u32::to_le_bytes).collect();
+
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Lane,
+            width: Width::default(),
+        })
+        .expect("a pipeline");
+        let submission = pipeline.submit(&stream, super::Queue::Draw, &[], &Nothing);
+        let mut in_force = None;
+        let mut per_draw = Vec::new();
+        for command in &submission.commands {
+            match command {
+                RenderCommand::SetViewport(rect) => in_force = Some(*rect),
+                RenderCommand::Draw { .. } => per_draw.push(in_force),
+                _ => {}
+            }
+        }
+        let rect = |x, y, width, height| {
+            Some(Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert_eq!(per_draw.len(), 12);
+        assert!(
+            per_draw[..6].iter().all(|r| *r == rect(0, 140, 1920, 805)),
+            "{per_draw:?}"
+        );
+        assert!(
+            per_draw[6..].iter().all(|r| *r == rect(0, 0, 1920, 1080)),
+            "{per_draw:?}"
+        );
     }
 
     /// The base a live vertex program forms is read from its own words (D711), and a register
@@ -2305,7 +2961,7 @@ mod tests {
         let prepare = |pipeline: &mut Pipeline, memory: &At| match pipeline.prepare(
             AT,
             ShaderStage::Vertex,
-            (None, WaveWidths::default()),
+            (None, WaveWidths::default(), super::ForDraw::default()),
             memory,
         ) {
             Ok(Prepared::Fresh { resource, .. }) => (resource, true),
@@ -2333,6 +2989,75 @@ mod tests {
             Some(&rewritten[..decoded + 8]),
             "and its decode, one move longer, replaces the earlier one"
         );
+    }
+
+    /// A shader that reads guest memory is known as one by the resource it became, so a draw that
+    /// runs it with no window mapped can be refused rather than drawn from zeros; a shader that
+    /// reads none is not.
+    #[test]
+    fn a_shader_that_reads_guest_memory_is_known_by_its_resource() {
+        use super::{Pipeline, Prepared, ShaderStage, WaveWidths};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+
+        const AT: u64 = 0x1_0000;
+        struct At(Vec<u8>);
+        impl super::GuestMemory for At {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(AT)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Lane,
+            width: Width::default(),
+        })
+        .expect("a pipeline");
+        let mut prepare = |program: &[u8]| {
+            let mut bytes = program.to_vec();
+            bytes.resize(super::MAX_SHADER_BYTES, 0);
+            match pipeline.prepare(
+                AT,
+                ShaderStage::Vertex,
+                (None, WaveWidths::default(), super::ForDraw::default()),
+                &At(bytes),
+            ) {
+                Ok(Prepared::Fresh { resource, .. }) => resource,
+                other => panic!("the program prepares fresh: {:?}", other.err()),
+            }
+        };
+        let reading = prepare(&console_vertex_program());
+        let silent = prepare(&0xbf81_0000_u32.to_le_bytes());
+        assert!(pipeline.memory_readers.contains(&reading));
+        assert!(!pipeline.memory_readers.contains(&silent));
+    }
+
+    /// A scalar load that only fills an image's descriptor registers - radeonsi's blit pixel
+    /// shader's `s_load_dwordx8 s[8:15], s[0:1], 0x400` before `image_load_mip` - does not make
+    /// the shader depend on the window, since the texture is bound from where it reads; the same
+    /// load with one of its registers read by anything else does.
+    #[test]
+    fn a_load_that_only_names_an_image_does_not_reach_the_window() {
+        use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = |program: &[u32]| -> Vec<u8> {
+            program.iter().flat_map(|word| word.to_le_bytes()).collect()
+        };
+        let load = [0xf40c_0200, 0xfa00_0400];
+        let image = [0xf004_1f08, 0x0002_0002];
+        let read_s9 = 0xbe94_0309;
+        let end = 0xbf81_0000;
+        let only_image = words(&[load[0], load[1], image[0], image[1], end]);
+        let also_read = words(&[load[0], load[1], image[0], image[1], read_s9, end]);
+        let reaches = |bytes: &[u8]| {
+            super::reaches_guest_memory(
+                &decode_program(bytes, &encodings, &operands),
+                &encodings,
+                &std::collections::BTreeMap::new(),
+            )
+        };
+        assert!(!reaches(&only_image));
+        assert!(reaches(&also_read));
     }
 
     /// The window a vertex program places follows its bytes, not its address.
@@ -2394,7 +3119,7 @@ mod tests {
     }
 
     /// A topology maps to the mesh primitive of its shape (D688), or is refused by name when it has
-    /// none, such as a rectangle list or an unknown value.
+    /// none, such as an unknown value.
     #[test]
     fn a_topology_maps_to_its_primitive_or_is_refused_by_name() {
         use super::{MeshPrimitive, PrimitiveTopology, mesh_primitive_of};
@@ -2412,12 +3137,9 @@ mod tests {
             Ok(MeshPrimitive::Triangles)
         );
 
-        let rect = mesh_primitive_of(PrimitiveTopology::RectangleList)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            rect.contains("rectangle list") && rect.contains("refused"),
-            "a rectangle list is refused by name, not drawn as a triangle: {rect}"
+        assert_eq!(
+            mesh_primitive_of(PrimitiveTopology::RectangleList),
+            Ok(MeshPrimitive::Rectangles)
         );
         let other = mesh_primitive_of(PrimitiveTopology::Other(9))
             .unwrap_err()
@@ -2443,9 +3165,13 @@ mod tests {
             primitive_salt(MeshPrimitive::Points),
             primitive_salt(MeshPrimitive::Lines),
             primitive_salt(MeshPrimitive::Triangles),
+            primitive_salt(MeshPrimitive::Rectangles),
         ];
+        let mut distinct = salts.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
         assert!(
-            salts[0] != salts[1] && salts[1] != salts[2] && salts[0] != salts[2],
+            distinct.len() == salts.len(),
             "each primitive salts the cache key differently: {salts:?}"
         );
     }
@@ -2490,5 +3216,64 @@ mod tests {
         let entry = Cached::of(ResourceId(1), &[1, 2]);
         assert!(entry.matches(&[1, 2]));
         assert!(!entry.matches(&[3, 4]));
+    }
+
+    /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list of
+    /// three-vertex primitives that one wave holds, without passthrough or an index offset (D730);
+    /// anything else says why not.
+    #[test]
+    fn a_draw_s_geometry_is_seeded_only_where_one_subgroup_holds_it() {
+        use super::{
+            DI_PT_RECTLIST, DI_PT_TRILIST, GE_INDX_OFFSET, GeometryInputs, PRIMGEN_PASSTHRU_EN,
+            VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN, draw_geometry,
+        };
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = |vertices, instances| DrawCall {
+            packet_offset: 0,
+            instances,
+            kind: DrawKind::Auto { vertices },
+        };
+        let registers = |topology: u32, stages: u32, offset: u32| {
+            move |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(topology),
+                VGT_SHADER_STAGES_EN => Some(stages),
+                GE_INDX_OFFSET => Some(offset),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0x0041_2010, 0), 32),
+            Ok(GeometryInputs {
+                first_vertex: 0,
+                vertices: 3,
+                primitives: 1,
+            })
+        );
+        assert_eq!(
+            draw_geometry(&draw(30, 1), registers(DI_PT_TRILIST, 0, 0), 64).map(|g| g.primitives),
+            Ok(10)
+        );
+        for refused in [
+            draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0), 64),
+            draw_geometry(&draw(3, 1), registers(6, 0, 0), 64),
+            draw_geometry(
+                &draw(3, 1),
+                registers(DI_PT_RECTLIST, PRIMGEN_PASSTHRU_EN, 0),
+                64,
+            ),
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 4), 64),
+            draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0), 64),
+        ] {
+            assert!(refused.is_err(), "{refused:?}");
+        }
+        let indexed = DrawCall {
+            packet_offset: 0,
+            instances: 1,
+            kind: DrawKind::Indexed {
+                indices: 3,
+                address: 0,
+            },
+        };
+        assert!(draw_geometry(&indexed, registers(DI_PT_TRILIST, 0, 0), 64).is_err());
     }
 }

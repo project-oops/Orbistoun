@@ -15,5 +15,7 @@ workspace = true
 [dependencies]
 orbistoun-core = { workspace = true }
 orbistoun-hle = { workspace = true }
+# The save-data parameter block, read through the checked accessors.
+orbistoun-mem = { workspace = true }
 orbistoun-shell = { workspace = true }
 

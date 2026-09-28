@@ -300,15 +300,15 @@ arity = 3
 purpose = "Hands out the response's header block and its size."
 returns = "status"
 edge_cases = [
-    "The block is the library's, valid until the request is deleted, NUL-terminated beyond the size given.",
+    "The block is the library's, valid until the request is deleted.",
     "Each header is a 'Name: value' line ending CRLF; oops-sdk finds Location at the start of a line.",
+    "Measured (obSCEne -9e41, -5f0c, check 102-net/http-lifecycle, sweeps 20260927-153242 and -185507, four responses dumped whole): the block begins with the status line ('HTTP/1.1 200 OK', 'HTTP/1.0 200 OK', 'HTTP/1.1 302 Found'), keeps the header names as the server spelled them, and ends with the blank line and a NUL; the size given counts that NUL, which sits at block[size - 1].",
 ]
 found_by = "static"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
 assumptions = [
-    "The block begins with the status line and ends with an empty line; whether the platform's does is unmeasured.",
-    "Header names are the host's lower-case spelling.",
+    "Header names are the host client's lower-case spelling, where the platform keeps the server's: reqwest does not hand back the spelling on the wire. oops-sdk matches Location case-insensitively.",
 ]
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
@@ -320,13 +320,11 @@ purpose = "Writes whether the response states a length, and the length."
 returns = "status"
 edge_cases = [
     "The result word is 0 when the length is present, which is the case oops-sdk tests.",
+    "Measured (obSCEne -9e41, -5f0c, sweeps 20260927-153242 and -185507): 0 with the 14-byte length of a Content-Length response, 1 with length 0 for a response with neither a length nor chunking (HTTP/1.0, closed by the server), and 2 with length 0 for a chunked one.",
 ]
 found_by = "static"
-known_by = "guest-observed"
-cites = "oops-sdk src/net/http.c (oops_http_tls_get, oops_http_tls_get_to_file), which fetches through this library on hardware; D727"
-assumptions = [
-    "1 for no length and 2 for a chunked body are the published SDK's values, not measured.",
-]
+known_by = "measured"
+cites = "obSCEne REQ-20260927T0002Z-9e41 and REQ-20260927T1740Z-5f0c (sweeps 20260927-153242 and 20260927-185507, check 102-net/http-lifecycle: clen-res-info 0, 1 and 2 with clen-bytes 0xe, 0 and 0); oops-sdk src/net/http.c, which fetches through this library on hardware; D727"
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
 

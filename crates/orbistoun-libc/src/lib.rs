@@ -222,6 +222,7 @@ guest_module! {
         // call, and under-declaring would truncate the arguments before the renderer saw them.
         "memalign" => 2,
         "posix_memalign" => 3,
+        "reallocalign" => 3,
         "printf" => 6,
         // Declared because it must not return: the default stub returns into the trap a compiler
         // places after a `noreturn` call (D177).
@@ -281,6 +282,12 @@ guest_module! {
         "sceLibcMspaceCalloc" => 3,
         "sceLibcMspaceRealloc" => 3,
         "sceLibcMspaceFree" => 2,
+        "sceLibcMspaceCreate" => 4,
+        "sceLibcMspaceDestroy" => 1,
+        "sceLibcMspaceMemalign" => 3,
+        "sceLibcMspaceMallocUsableSize" => 1,
+        "malloc_usable_size" => 1,
+        "aligned_alloc" => 2,
         "exit" => 1,
         "_Exit" => 1,
         // The raw syscall's spelling: FreeBSD entry 1 is `_exit`, and the name derived from
@@ -738,7 +745,88 @@ pub(crate) fn allocate(size: usize, align: usize) -> u64 {
         FILLED_ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         FILLED_HEAP_BYTES.fetch_add(size as u64, std::sync::atomic::Ordering::Relaxed);
     }
-    body as usize as u64
+    let body = body as usize as u64;
+    if align as u64 >= orbistoun_core::GUEST_PAGE_SIZE {
+        if let Ok(mut blocks) = page_blocks().lock() {
+            blocks.insert(
+                body,
+                PageBlock {
+                    size: size as u64,
+                    protected: Vec::new(),
+                },
+            );
+        }
+    }
+    body
+}
+
+/// A live block aligned to the guest page size: the only kind whose pages it owns outright, so the
+/// only kind a guest may re-protect (a guard page below a thread stack it carved from the heap).
+#[derive(Debug)]
+struct PageBlock {
+    /// The bytes the guest asked for.
+    size: u64,
+    /// The ranges re-protected, restored before the block is released.
+    protected: Vec<(u64, u64)>,
+}
+
+/// Every live page-aligned block, by body address.
+fn page_blocks() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, PageBlock>> {
+    static BLOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<u64, PageBlock>>,
+    > = std::sync::OnceLock::new();
+    BLOCKS.get_or_init(Default::default)
+}
+
+/// Re-protects `[address, address + length)` when it lies wholly inside the body of a live
+/// page-aligned heap block, page-aligned at both ends, answering whether the host applied it;
+/// `None` when no such block holds the range, so the caller's other authorities decide.
+///
+/// On hardware, heap memory is the process's own mapped memory and `sceKernelMprotect` changes it;
+/// PPSA21564 carves a thread stack with `sceLibcMspaceMemalign(0x4000, 0xc000)` and makes its first
+/// page a guard, asserting when that is refused. The protection is recorded so `free` restores the
+/// pages before they return to the host heap, where anything else may reuse them.
+#[must_use]
+pub fn protect_heap_range(
+    address: u64,
+    length: u64,
+    protection: orbistoun_mem::Protection,
+) -> Option<bool> {
+    let page = orbistoun_core::GUEST_PAGE_SIZE;
+    if length == 0 || address % page != 0 || length % page != 0 {
+        return None;
+    }
+    let mut blocks = page_blocks().lock().ok()?;
+    let (_, block) = blocks
+        .range_mut(..=address)
+        .next_back()
+        .filter(|(body, block)| {
+            address
+                .checked_add(length)
+                .is_some_and(|end| end <= **body + block.size)
+        })?;
+    let applied = orbistoun_mem::platform::protect(address, length, protection).is_ok();
+    if applied {
+        block.protected.push((address, length));
+    }
+    Some(applied)
+}
+
+/// Restores the pages a guest re-protected inside the block at `body`, and forgets the block.
+fn release_page_block(body: u64) {
+    let Ok(mut blocks) = page_blocks().lock() else {
+        return;
+    };
+    if let Some(block) = blocks.remove(&body) {
+        for (address, length) in block.protected {
+            // Back to what the host heap expects, before the memory is released to it.
+            let _ = orbistoun_mem::platform::protect(
+                address,
+                length,
+                orbistoun_mem::Protection::READ_WRITE,
+            );
+        }
+    }
 }
 
 /// How many allocations this run filled, and how many bytes, so the report shows the fill ran
@@ -870,6 +958,7 @@ pub(crate) fn free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Freeing null is defined and does nothing.
         return 0;
     }
+    release_page_block(pointer);
     if arena::holds(pointer) {
         // Asked before the header is read: a fixed-region block carries the same header as a
         // host-heap one, and `dealloc` on reserved memory is undefined behaviour. The region never
@@ -948,6 +1037,41 @@ fn realloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     fresh
 }
 
+/// `reallocalign(pointer, size, alignment)`: `realloc` whose result is a multiple of `alignment`.
+///
+/// Served here with the rest of the allocator: unserved, the loader bound it to the title's own
+/// `libc.prx`, whose heap holds none of the blocks this library hands out, and PPSA02664's Unity
+/// runtime stored the null it answered for `(NULL, 0x400, 16)` and wrote through it. Null grows
+/// from nothing, as `realloc` does; the contents survive up to the smaller size; a failure answers
+/// null and leaves the original. An alignment that is not a power of two is rounded up to the next
+/// one, as dlmalloc's `internal_memalign` does: the platform answered a 32-aligned block for 24
+/// (obSCEne REQ-20260927T1130Z-d5f4).
+fn reallocalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (pointer, Ok(size), Ok(align)) =
+        (args[0], usize::try_from(args[1]), usize::try_from(args[2]))
+    else {
+        return 0;
+    };
+    let Some(align) = align.max(1).checked_next_power_of_two() else {
+        return 0;
+    };
+    let fresh = allocate(size, align);
+    if fresh == 0 || pointer == 0 {
+        return fresh;
+    }
+    if let Some((old_total, old_offset)) = header_of(pointer) {
+        let keep = old_total.saturating_sub(old_offset).min(size);
+        if keep > 0 {
+            // SAFETY: both allocations are at least `keep` bytes and do not overlap.
+            unsafe { std::ptr::copy_nonoverlapping(ptr(pointer), ptr(fresh), keep) };
+        }
+    }
+    let mut release = [0_u64; GUEST_ARG_REGISTERS];
+    release[0] = pointer;
+    free(&release);
+    fresh
+}
+
 /// The `sceLibcMspace*` family - the platform's exposed Doug Lea `mspace` allocator.
 ///
 /// An mspace is an independent heap arena; these wrap dlmalloc's `mspace_*` calls, which take
@@ -989,6 +1113,69 @@ fn mspace_free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mut request = [0_u64; GUEST_ARG_REGISTERS];
     request[0] = args[1];
     free(&request)
+}
+
+/// `sceLibcMspaceCreate(name, base, capacity, flag)`: an arena handle.
+///
+/// Every mspace is served from the one host heap and the handle is not consulted (D451), so the
+/// handle only has to be distinct and non-null; it is a small block of this allocator's own, which
+/// `sceLibcMspaceDestroy` frees. Unserved, the call bound to the title's bundled libc.prx, whose
+/// arena the rest of this family never reads - PPSA21564's `sceLibcMspaceMemalign` then faulted on
+/// the null that arena answered.
+fn mspace_create(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    allocate(MSPACE_HANDLE_BYTES, HEAP_HEADER)
+}
+
+/// The size of the block an mspace handle is: dlmalloc's `malloc_state` is larger, but nothing
+/// reads through the handle here, so it holds nothing.
+const MSPACE_HANDLE_BYTES: usize = 64;
+
+/// `sceLibcMspaceDestroy(msp)`: releases the handle. dlmalloc's `destroy_mspace` answers the bytes
+/// it released; with every allocation on the shared heap there are none to report beyond the
+/// handle's, so it answers zero.
+fn mspace_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mut release = [0_u64; GUEST_ARG_REGISTERS];
+    release[0] = args[0];
+    free(&release);
+    0
+}
+
+/// `sceLibcMspaceMemalign(msp, alignment, bytes)`: dlmalloc's `mspace_memalign`, which rounds an
+/// alignment that is not a power of two up to the next one (`internal_memalign`), then allocates
+/// from the shared heap.
+fn mspace_memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (Ok(align), Ok(size)) = (usize::try_from(args[1]), usize::try_from(args[2])) else {
+        return 0;
+    };
+    let Some(align) = align.max(1).checked_next_power_of_two() else {
+        return 0;
+    };
+    allocate(size, align)
+}
+
+/// `sceLibcMspaceMallocUsableSize(ptr)` and `malloc_usable_size(ptr)`: dlmalloc's
+/// `mspace_usable_size` - the bytes the block can hold, zero for null. Unserved, each bound to the
+/// bundled libc.prx and read this allocator's blocks with that heap's chunk layout. The platform
+/// answers exactly the size asked for, 100 for `malloc(100)` and for `reallocalign(NULL, 100, 64)`
+/// (obSCEne REQ-20260927T1130Z-d5f4), which is what this header records.
+fn mspace_malloc_usable_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return 0;
+    }
+    header_of(args[0]).map_or(0, |(total, offset)| (total - offset) as u64)
+}
+
+/// `aligned_alloc(alignment, size)` (ISO C 7.22.3.1): a block whose address is a multiple of a
+/// power-of-two `alignment`; any other alignment is refused with null, as FreeBSD's
+/// `aligned_alloc(3)` does.
+fn aligned_alloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (Ok(align), Ok(size)) = (usize::try_from(args[0]), usize::try_from(args[1])) else {
+        return 0;
+    };
+    if !align.is_power_of_two() {
+        return 0;
+    }
+    allocate(size, align)
 }
 
 /// `__cxa_atexit(destructor, argument, dso_handle)`.
@@ -3262,6 +3449,13 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("memchr", memchr),
         ("memalign", memalign),
         ("posix_memalign", posix_memalign),
+        ("reallocalign", reallocalign),
+        ("aligned_alloc", aligned_alloc),
+        ("sceLibcMspaceCreate", mspace_create),
+        ("sceLibcMspaceDestroy", mspace_destroy),
+        ("sceLibcMspaceMemalign", mspace_memalign),
+        ("sceLibcMspaceMallocUsableSize", mspace_malloc_usable_size),
+        ("malloc_usable_size", mspace_malloc_usable_size),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
         ("vsprintf_s", vsprintf_s),
@@ -3992,6 +4186,152 @@ mod tests {
             assert_eq!(p % align, 0, "alignment {align} was not honoured");
             call("free", [p, 0, 0, 0, 0, 0]);
         }
+    }
+
+    /// An mspace is created, allocated from with an alignment, sized and destroyed through the one
+    /// allocator; the handle is usable and not null.
+    #[test]
+    fn an_mspace_lives_its_whole_life_on_the_one_allocator() {
+        let arena = vec![0_u8; 0x1_0000];
+        let base = arena.as_ptr() as u64;
+        let name = b"test\0";
+        let msp = call(
+            "sceLibcMspaceCreate",
+            [name.as_ptr() as u64, base, 0x1_0000, 0, 0, 0],
+        );
+        assert_ne!(msp, 0, "a handle");
+        let p = call("sceLibcMspaceMemalign", [msp, 256, 100, 0, 0, 0]);
+        assert_ne!(p, 0);
+        assert_eq!(p % 256, 0, "the alignment is honoured");
+        assert_eq!(
+            call("sceLibcMspaceMallocUsableSize", [p, 0, 0, 0, 0, 0]),
+            100
+        );
+        assert_eq!(call("sceLibcMspaceMallocUsableSize", [0, 0, 0, 0, 0, 0]), 0);
+        // dlmalloc rounds an alignment that is not a power of two up to the next one.
+        let q = call("sceLibcMspaceMemalign", [msp, 24, 8, 0, 0, 0]);
+        assert_ne!(q, 0);
+        assert_eq!(q % 32, 0, "24 rounded up to 32");
+        call("sceLibcMspaceFree", [msp, p, 0, 0, 0, 0]);
+        call("sceLibcMspaceFree", [msp, q, 0, 0, 0, 0]);
+        assert_eq!(call("sceLibcMspaceDestroy", [msp, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// `aligned_alloc` honours a power-of-two alignment and refuses any other with null.
+    #[test]
+    fn aligned_alloc_honours_a_power_of_two_and_refuses_the_rest() {
+        let p = call("aligned_alloc", [64, 128, 0, 0, 0, 0]);
+        assert_ne!(p, 0);
+        assert_eq!(p % 64, 0);
+        call("free", [p, 0, 0, 0, 0, 0]);
+        assert_eq!(call("aligned_alloc", [24, 48, 0, 0, 0, 0]), 0);
+    }
+
+    /// A page inside a page-aligned block can be made read-only, as a thread stack's guard page is;
+    /// a range outside any such block is not this allocator's to change; and the block is writable
+    /// again for whoever gets its memory after it is freed.
+    #[test]
+    fn a_page_aligned_block_can_carry_a_guard_page() {
+        let page = orbistoun_core::GUEST_PAGE_SIZE;
+        let block = call("sceLibcMspaceMemalign", [0, 0x4000, 0xc000, 0, 0, 0]);
+        assert_eq!(block % 0x4000, 0);
+        let read_only = orbistoun_mem::Protection {
+            read: true,
+            write: false,
+            execute: false,
+        };
+        assert_eq!(
+            super::protect_heap_range(block, 0x4000, read_only),
+            Some(true)
+        );
+        assert_eq!(
+            super::protect_heap_range(block + 0xc000, page, read_only),
+            None,
+            "past the block"
+        );
+        assert_eq!(
+            super::protect_heap_range(block + 1, page, read_only),
+            None,
+            "unaligned"
+        );
+        let small = call("malloc", [64, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            super::protect_heap_range(small & !(page - 1), page, read_only),
+            None,
+            "not page-aligned storage"
+        );
+        call("free", [block, 0, 0, 0, 0, 0]);
+        // The pages went back writable: the next page-aligned block that reuses them can be written.
+        let again = call("sceLibcMspaceMemalign", [0, 0x4000, 0xc000, 0, 0, 0]);
+        // SAFETY: a block this library just returned, at least 0xc000 bytes.
+        unsafe { std::ptr::write_bytes(crate::ptr(again), 0x5a, 0xc000) };
+        call("free", [again, 0, 0, 0, 0, 0]);
+    }
+
+    /// `reallocalign(NULL, n, a)` is an aligned allocation - the call PPSA02664's Unity runtime
+    /// makes to grow an empty array, which the title's own libc answered with null when this was
+    /// not served here.
+    #[test]
+    fn reallocalign_from_null_allocates_aligned() {
+        for align in [16_u64, 64, 4096] {
+            let p = call("reallocalign", [0, 0x400, align, 0, 0, 0]);
+            assert_ne!(p, 0, "alignment {align}");
+            assert_eq!(p % align, 0, "alignment {align} was not honoured");
+            call("free", [p, 0, 0, 0, 0, 0]);
+        }
+    }
+
+    /// Growing keeps the contents and the alignment, and frees the old block's storage.
+    #[test]
+    fn reallocalign_keeps_the_contents_and_the_alignment() {
+        let first = call("reallocalign", [0, 16, 64, 0, 0, 0]);
+        assert_ne!(first, 0);
+        // SAFETY: a 16-byte block this library just returned.
+        unsafe { std::ptr::write_bytes(crate::ptr(first), 0x5a, 16) };
+        let grown = call("reallocalign", [first, 0x1000, 64, 0, 0, 0]);
+        assert_ne!(grown, 0);
+        assert_eq!(grown % 64, 0);
+        // SAFETY: the grown block is at least 16 bytes.
+        let kept = unsafe { std::slice::from_raw_parts(crate::ptr(grown), 16) };
+        assert!(
+            kept.iter().all(|&b| b == 0x5a),
+            "the first 16 bytes survive"
+        );
+        call("free", [grown, 0, 0, 0, 0, 0]);
+    }
+
+    /// An alignment that is not a power of two is rounded up to the next one, as the platform
+    /// answered a 32-aligned block for 24 (obSCEne REQ-20260927T1130Z-d5f4), and the contents move.
+    #[test]
+    fn reallocalign_rounds_an_alignment_up_to_a_power_of_two() {
+        let block = call("malloc", [64, 0, 0, 0, 0, 0]);
+        // SAFETY: a live 64-byte block this library handed out.
+        unsafe { super::ptr(block).write_bytes(0xa5, 64) };
+        let moved = call("reallocalign", [block, 64, 24, 0, 0, 0]);
+        assert_ne!(moved, 0);
+        assert_eq!(moved % 32, 0, "24 rounded up to 32");
+        // SAFETY: the 64-byte block reallocalign answered.
+        let first = unsafe { super::ptr(moved).read() };
+        assert_eq!(first, 0xa5, "the contents moved");
+        call("free", [moved, 0, 0, 0, 0, 0]);
+    }
+
+    /// Both usable-size calls answer exactly what was asked for, as the platform does for
+    /// `malloc(100)` and `reallocalign(NULL, 100, 64)` (obSCEne REQ-20260927T1130Z-d5f4).
+    #[test]
+    fn usable_size_is_the_size_asked_for() {
+        let block = call("malloc", [100, 0, 0, 0, 0, 0]);
+        assert_eq!(call("malloc_usable_size", [block, 0, 0, 0, 0, 0]), 100);
+        assert_eq!(
+            call("sceLibcMspaceMallocUsableSize", [block, 0, 0, 0, 0, 0]),
+            100
+        );
+        call("free", [block, 0, 0, 0, 0, 0]);
+        let aligned = call("reallocalign", [0, 100, 64, 0, 0, 0]);
+        assert_eq!(aligned % 64, 0);
+        assert_eq!(call("malloc_usable_size", [aligned, 0, 0, 0, 0, 0]), 100);
+        call("free", [aligned, 0, 0, 0, 0, 0]);
+        assert_eq!(call("malloc_usable_size", [0, 0, 0, 0, 0, 0]), 0);
     }
 
     #[test]

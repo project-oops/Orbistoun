@@ -95,6 +95,18 @@ pub fn queue(handle: u64, index: u64, arg: u64) -> Option<(u32, u64)> {
     Some((context, label))
 }
 
+/// The label a wait for buffer `index` of port `handle` to leave the screen polls, with the page
+/// that holds it mapped so the command processor can read it - or `None` when the port is not open.
+/// The buffer need not be registered: `-5a17` wrote the wait for index 4 as for 0 and 1.
+#[must_use]
+pub fn wait_label(handle: u64, index: u64) -> Option<u64> {
+    crate::port::with(handle, |_| ())?;
+    let label = label_of(index);
+    (label + 8 <= LABEL_REGION.0 + LABEL_REGION.1
+        && orbistoun_kernel::map_system_region(LABEL_REGION.0, LABEL_REGION.1))
+    .then_some(label)
+}
+
 /// The command processor released `label` with interrupt context id `context`. When that is a
 /// queued flip, the flip is performed and the label of the buffer it replaced on screen is cleared;
 /// anything else is not a flip and is left alone. Answers whether a flip was performed.

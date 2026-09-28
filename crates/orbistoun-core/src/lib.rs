@@ -56,6 +56,14 @@ pub type GuestFn = fn(args: &[u64; GUEST_ARG_REGISTERS]) -> u64;
 pub type GuestFloatFn =
     fn(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64;
 
+/// A guest function called straight from its stub, past the call trace (D734).
+///
+/// For a stateless function the guest calls so often that the traced path is most of its cost,
+/// such as a clock. Takes the six integer argument registers as they arrive and answers `rax`. It
+/// must not panic, must take nothing from the stack, and must answer nothing in a float register:
+/// no boundary spills or checks anything for it.
+pub type LeafFn = extern "sysv64" fn(u64, u64, u64, u64, u64, u64) -> u64;
+
 /// Alignment required of a direct-memory allocation, in bytes.
 ///
 /// Guest allocators assume it and corrupt themselves silently if handed less, so it is

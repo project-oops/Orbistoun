@@ -1,0 +1,200 @@
+# The pad as the title read it, a step per change, timed in its own flips (D721).
+
+[[step]]
+at_flip = 1
+
+[[step]]
+at_flip = 232
+buttons = ["south"]
+
+[[step]]
+at_flip = 307
+
+[[step]]
+at_flip = 456
+buttons = ["south"]
+
+[[step]]
+at_flip = 473
+
+[[step]]
+at_flip = 519
+buttons = ["south"]
+
+[[step]]
+at_flip = 527
+
+[[step]]
+at_flip = 553
+left_stick = [-1.0, 0.0]
+
+[[step]]
+at_flip = 571
+left_stick = [-1.0, -1.0]
+
+[[step]]
+at_flip = 576
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 578
+left_stick = [-1.0, -1.0]
+
+[[step]]
+at_flip = 580
+left_stick = [-1.0, 0.0]
+
+[[step]]
+at_flip = 596
+left_stick = [-1.0, -1.0]
+
+[[step]]
+at_flip = 599
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 601
+
+[[step]]
+at_flip = 615
+buttons = ["south"]
+
+[[step]]
+at_flip = 619
+
+[[step]]
+at_flip = 639
+buttons = ["south"]
+
+[[step]]
+at_flip = 645
+
+[[step]]
+at_flip = 657
+buttons = ["east"]
+
+[[step]]
+at_flip = 661
+
+[[step]]
+at_flip = 670
+buttons = ["south"]
+
+[[step]]
+at_flip = 675
+
+[[step]]
+at_flip = 686
+buttons = ["south"]
+
+[[step]]
+at_flip = 689
+
+[[step]]
+at_flip = 691
+buttons = ["south"]
+
+[[step]]
+at_flip = 694
+
+[[step]]
+at_flip = 696
+buttons = ["south"]
+
+[[step]]
+at_flip = 700
+
+[[step]]
+at_flip = 702
+buttons = ["south"]
+
+[[step]]
+at_flip = 706
+
+[[step]]
+at_flip = 714
+buttons = ["south"]
+
+[[step]]
+at_flip = 721
+
+[[step]]
+at_flip = 726
+buttons = ["south"]
+
+[[step]]
+at_flip = 731
+
+[[step]]
+at_flip = 736
+buttons = ["south"]
+
+[[step]]
+at_flip = 741
+
+[[step]]
+at_flip = 742
+left_stick = [0.0, -1.0]
+
+[[step]]
+at_flip = 744
+left_stick = [-1.0, -1.0]
+
+[[step]]
+at_flip = 748
+buttons = ["south"]
+left_stick = [-1.0, -1.0]
+
+[[step]]
+at_flip = 750
+buttons = ["south"]
+
+[[step]]
+at_flip = 755
+
+[[step]]
+at_flip = 761
+buttons = ["south"]
+
+[[step]]
+at_flip = 762
+buttons = ["south"]
+left_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 768
+left_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 774
+buttons = ["south"]
+left_stick = [0.0, 1.0]
+
+[[step]]
+at_flip = 779
+left_stick = [-1.0, 0.0]
+
+[[step]]
+at_flip = 781
+
+[[step]]
+at_flip = 912
+buttons = ["south"]
+
+[[step]]
+at_flip = 928
+
+[[step]]
+at_flip = 965
+left_stick = [1.0, 0.0]
+
+[[step]]
+at_flip = 970
+left_stick = [1.0, 1.0]
+
+[[step]]
+at_flip = 972
+left_stick = [0.0, 1.0]
+
+[[step]]
+at_flip = 996

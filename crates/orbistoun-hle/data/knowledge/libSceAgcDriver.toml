@@ -5,18 +5,14 @@ name = "sceAgcDriverAddEqEvent"
 arity = 6
 purpose = "Registers a completion event against an event queue, so the driver has somewhere to post when submitted graphics work finishes."
 edge_cases = [
-    "Argument zero is the equeue handle a guest then waits on: PPSA03416 registers 0x5e2d0000ee40 and 0x5e2d0000efe0 here, and its render thread blocks in sceKernelWaitEqueue on the first of them. Nothing implements this, so nothing is ever registered and nothing can ever be posted - which is why that wait never completes (D613).",
-    "The shape mirrors sceVideoOutAddFlipEvent(equeue, handle, udata), which orbistoun does implement by calling sync::register_event_with_udata. What differs is who posts: a flip completes the instant it is accepted because there is no scanout, and no equivalent statement has been established for driver work.",
-    "Two runs of one build disagree on arguments three, four and five: arg3 and arg4 are host addresses that change every run, and arg5 read 0x17/0x20 in one run and 0x80/0x60 in the next. **They are not arguments.** The declaration says six because nothing knew better; the evidence says at most three are real. Argument zero is stable across runs and is the queue - the other two stable values are both zero (D615).",
-    "The two calls name exactly the two queues that have no registrations: UnityFTMFlipQueue (0x5e2d0000ee40, which the render thread then blocks on) and EOP QUEUE (0x5e2d0000efe0). The two queues orbistoun does feed, through sceVideoOutAddFlipEvent, are never waited on.",
+    "Exported by name (0x80056e4d0 in the measured process), beside sceAgcDriverDeleteEqEvent, sceAgcDriverGetEqEventType and sceAgcDriverGetEqContextId. The 2026-09-20 record that it was no retail export was a lookup that failed, not an absence.",
+    "Answers 0 for a queue the caller created, with the second argument 0 or 1, and 0x80020009 (EBADF) for a handle that names no queue: argument zero is the queue.",
+    "PPSA03416 registers UnityFTMFlipQueue (0x5e2d0000ee40, which its render thread then blocks on) and EOP QUEUE (0x5e2d0000efe0) here. What the driver posts to them, and when, is unmeasured: the probe's submissions never ran, so its waits timed out for want of work, not of events. orbistoun registers nothing and posts nothing, so the render thread's wait is the same wait.",
+    "Arguments three to five are not arguments: two runs of one build read host addresses that change every run in three and four, and different values in five.",
 ]
-known_by = "assumed"
-assumptions = [
-    "That argument zero is the queue and not a driver handle. It is read from two calls whose value matches a queue the guest created, which is evidence and not a specification.",
-    "That the surplus registers carry nothing. It is measured across two runs of one build, which is this project's own standard for a measurement, and it is not a reading of the interface.",
-]
+known_by = "measured"
+cites = "obSCEne REQ-20260928T1338Z-5b78 (sweep 20260928-153434, check 166-agc/driver-add-eq-event, log lines 9141-9164: lookup-path name for all four, addr 0x80056e4d0, add-eq-0-0 and add-eq-1-0 rc 0x0, add-eq-bad-queue rc 0x80020009, the submissions' fences never written, as REQ-20260928T1338Z-4060's control showed of that probe's NOP submission); PPSA03416 call arguments from its trace."
 found_on = "2026-09-08"
-note = "Implementing the registration is cheap and would be wrong on its own: a queue that is registered and never posted to is the same wait, arrived at more slowly. What completes driver work in an emulator with no GPU execution - the question D560 answered for flips - is now decided in D705: nothing posts until execution lands (roadmap phase 6), so this stays unimplemented deliberately, and the run report names the resulting starvation rather than papering over it. D705 is `assumed` and retires when execution lands - obSCEne's 3423 (what the console posts) came back not-possible (the symbol is not exported on the retail eboot), so no measurement is coming."
 
 [[function]]
 name = "sceAgcDriverCreateQueue"
@@ -123,8 +119,10 @@ found_on = "2026-09-20"
 name = "sceAgcDriverSetHsOffchipParam"
 purpose = "Configures the hull-shader off-chip LDS parameter for the graphics driver - GPU-driver setup on the same CreateWorkload path."
 edge_cases = [
-    "NOT A RETAIL EXPORT (obSCEne c9e2, sweep 20260920-082906): same status and reason as sceAgcDriverSetTFRing and sceAgcDriverAddEqEvent - an out-of-line SDK inline with no export to measure, to be synthesised in HLE (commit 3212e2a).",
+    "Exported by NID (1MoYIWUIzjA) with its name stripped: the 2026-09-20 sweep looked it up by name only and reported it absent.",
+    "Answers 0 for PPSA02664's arguments (0, 0x1ff, 0x7400, 0, 3, 0x1e44) and for all zeros; writes no guest memory.",
+    "The register it sets shapes tessellation only, which no draw orbistoun carries out reaches.",
 ]
 known_by = "measured"
-cites = "obSCEne c9e2, sweep 20260920-082906, reports/hardware/20260920-082906-eboot.obs.log:3782-3789 and :10398-10405."
+cites = "obSCEne REQ-20260927T1130Z-b3c2 (sweep 20260928-135518, check 166-agc/driver-set-hs-offchip-param, log lines 9106-9114: resolved 0x1 by name or NID 1MoYIWUIzjA, rc 0x0 in arm-ppsa02664 and arm-zeros); obSCEne REQ-20260928T1338Z-4060 (sweep 20260928-153434, lines 9171-9188: the NOP submission after it left its fence unwritten, and so did the same submission with no call before it, so the call is not what stops it); Mesa ac_cmdbuf_cp.c:374 (VGT_HS_OFFCHIP_PARAM)"
 found_on = "2026-09-20"

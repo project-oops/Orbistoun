@@ -3,28 +3,29 @@ library = "libSceAgc"
 [[function]]
 name = "0x7d86501b8094ef57"
 arity = 3
-purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing the payload address through out."
+purpose = "Answers where the payload of a command packet the caller reserved begins: (out, packet, kind), writing the payload address - or null for a packet with no body - through out and returning 0."
 edge_cases = [
-    "GUEST-OBSERVED: PPSA02664 calls it with kind 1 on the SET_SH_REG packet sceAgcCbSetShRegisterRangeDirect returned for a null values array, then writes the register values through the answer. The measured SET_SH_REG layout (header, register offset, values; check 166-agc/dcb-set-sh-reg-direct) puts them at packet + 8, which is what kind 1 answers.",
-    "Kind 0 is called on a data NOP (header 0xffff1000: count field 0x3fff) and the answer is later passed as an address to sceAgcQueueEndOfPipeActionPatchAddress. Its layout is unmeasured, so kind 0 and every other kind are refused until obSCEne measures them.",
-    "NON-EXPORT NID. Imported directly as raw hex NID 0x7d86501b8094ef57 with no declared C export. obSCEne 166-agc/cb-unnamed-ef57 (sweep 20260920-110931) measures a bare synthetic import of it binding null on retail; the probe null-checks before calling, so it reports call-executed 0x0, reason slot-is-null - the probe's caution, not the platform refusing the call.",
-    "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fault earlier, fetching an instruction from 0x0: it calls the slot with no null-check of its own (commit 3212e2a).",
+    "MEASURED (obSCEne -r1b0, reopening -f2ee; sweep 20260927-204316, check 166-agc/cb-unnamed-ef57): a static import binds (0x800599040) and every arm returns 0. Kind 1 on SET_SH_REG (0xc0037600) answers packet + 8; kind 0 on an ordinary NOP (0xc0021000) packet + 4; kind 0 on the header-only NOP 0xffff1000 (count 0x3fff, no body) null; kind 2 on the ordinary NOP packet + 8.",
+    "A kind on an opcode or header form not in those arms is refused and out left alone: the arms do not say whether kind names an opcode, a payload position or both.",
+    "PPSA02664 fills a register write's values through the kind-1 answer, and passes the kind-0 answer for its header-only NOP to sceAgcQueueEndOfPipeActionPatchAddress.",
+    "MUST STAY CALLABLE. Binding the slot to 0x0 in the executable's relocation makes PPSA02664 fetch an instruction from 0x0: it calls the slot with no null-check of its own (commit 3212e2a).",
 ]
-known_by = "guest-observed"
-cites = "PPSA02664 call arguments captured with ORBISTOUN_DUMP (kind 1 on the reserved SET_SH_REG packet, kind 0 on a data NOP); obSCEne sweep 20260914-100833, check 166-agc/dcb-set-sh-reg-direct (the SET_SH_REG layout); commit 3212e2a (null-slot test); obSCEne sweep 20260920-110931, check 166-agc/cb-unnamed-ef57."
+known_by = "measured"
+cites = "obSCEne REQ-20260927T1100Z-r1b0 (sweep 20260927-204316, check 166-agc/cb-unnamed-ef57: call-executed 0x1, rc 0x0 in all four arms, out at packet + 8, null, packet + 4 and packet + 8); PPSA02664 call arguments captured with ORBISTOUN_DUMP."
 found_on = "2026-09-20"
 
 [[function]]
 name = "0x53bbd82b51d172db"
 arity = 2
-purpose = "Alias NID for sceAgcInit(state, version), imported directly by retail titles (including PPSA02664 and PPSA28061)."
+purpose = "An initialisation gate of its own beside sceAgcInit: (state, version), imported directly by retail titles (including PPSA02664 and PPSA28061)."
 edge_cases = [
-    "ALIAS NID FOR sceAgcInit. The standard name sceAgcInit hashes to 0x916dc62dbed07cf8, but published identifier tables list 0x53bbd82b51d172db as an alias for this library's initialization gate. Real titles import this raw identifier.",
-    "RETURN AND VERSION GATE MEASURED (obSCEne b7e4, sweep 20260915-125124). Validates version: returns 0x0 for version 13 and 0x8a6c0004 for all other versions.",
-    "ARG0 IS UNTOUCHED BY HARDWARE (obSCEne a3f0, sweep 20260920, check 166-agc/init). Extent = 0, changed = 0, touches 0 bytes at arg0.",
+    "NOT AN ALIAS OF sceAgcInit (obSCEne -7e41, check 166-agc/init-alias-7e41, sweep 20260927-153242). Imported statically beside the named export, it resolves to 0x800595990 and sceAgcInit to 0x800595930: two entry points 0x60 apart (identical-entry-point 0x0). The published identifier tables that list it against sceAgcInit's name are wrong about the function.",
+    "THE C NAME obSCEne CALLS IN 166-agc/init BINDS TO THIS NID (include/obscene/platform.h declares sceAgcInit as $23LRUSvYu1M, this identifier), so every 166-agc/init row measures this function. Nothing is written through arg0 (extent 0, changed-bytes 0) in any sweep.",
+    "THE FIRST ACCEPTED VERSION IS KEPT. In a fresh process (obSCEne -7e52, check 166-agc/init-raw-gate-7e52, sweep 20260927-185507) PPSA02664's exact call - state 00000000 01000000 then zeros, version 8 - answers 0x0; after it 13, 12 and 14 answer 0x8a6c0004 and 8 still answers 0x0. Sweep 20260915-125124 is the same rule from the other side: its first call was (NULL, 13), answered 0x0, and afterwards only 13 passed. orbistoun keeps the first of 8 or 13 it is given; a first call with any other version is unmeasured and refused by name without fixing one.",
+    "PPSA02664 CALLS IT WITH VERSION 8 from its graphics init routine (image+0x3dd2d: rdi = its state global at image+0x19c9620, esi = 8); answered 0x0 it goes on to its two register-defaults steps (image+0x3dd3d, image+0x3dd4d), which call sceAgcGetRegisterDefaults2 and ...Internal with version 8.",
 ]
-known_by = "published"
-cites = "SELFish REQ-20260909T1250Z-1f74; obSCEne b7e4 (sweep 20260915-125124); obSCEne REQ-20260920T1425Z-a3f0 (sweep 20260920 live console, check 166-agc/init)"
+known_by = "measured"
+cites = "obSCEne REQ-20260927T1730Z-7e52 (sweep 20260927-185507, check 166-agc/init-raw-gate-7e52, log lines 6314-6349: step1 rc 0x0 for version 8, steps 2-4); obSCEne REQ-20260926T2230Z-7e41 (sweep 20260927-153242, check 166-agc/init-alias-7e41: raw-nid-addr 0x800595990, sceAgcInit-addr 0x800595930, identical-entry-point 0x0, rc-alias 0x8a6c0004 for 12-14); obSCEne sweeps 20260915-125124 and 20260920 (check 166-agc/init through the C name bound to this NID: sweep-rc 0x0 for 13, 0x8a6c0004 for every other swept version, extent 0); PPSA02664 call site image+0x3dd2d, arguments captured with ORBISTOUN_DUMP."
 found_in = ["PPSA02664-app0", "PPSA28061-app0"]
 found_on = "2026-09-20"
 
@@ -111,6 +112,7 @@ edge_cases = [
     "The field split used to read it is **derived, not cited**: it is the only reading under which the measured lengths of the other three builders close exactly, which is evidence and is not a document. No further hardware run settles it - it is a question about how these bytes are read, not about what the console did (D565).",
     'MEASURED on hardware (obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-nop-getsize): sceAgcCbNopGetSize answered a reservation of 4 bytes (1 dwords); the builder then advanced the writer by exactly 4 bytes and wrote exactly 4 bytes. Reservation, advance and write extent are three separately reported numbers and all three agree, so the size the library answers is the size it actually emits. Captured on a leg reporting "no GPU library among loaded modules", which is further evidence these builders are pure encoders into a caller buffer and need no driver init.',
     'MEASURED: the size is argument-driven and linear. Sweeping the first argument through 0, 1, 2, 4 and 8 returned reservations of 0, 4, 8, 16 and 32 bytes - exactly four bytes per unit, so this builder emits n dwords where n is that argument. This retires the D565 puzzle that the single captured dword had a count field of 0x3fff which "does not describe a 4-byte packet": the 4-byte capture was simply the n=1 case, and the count field is not a body length for a filler no-op.',
+    "IMPLEMENTED BY LENGTH: sceAgcCbNop(cb, n) reserves n dwords. n = 1 writes the measured 0xffff1000; a longer one writes the public PM4 header whose count is n - 2 (the rule of which 0x3fff is the n = 1 wrap) and leaves its body unwritten, as the measured NOP bodies of sceAgcDcbSetFlip and sceAgcDcbWaitUntilSafeForRendering are; n = 0 reserves nothing and, its answer unreported, is refused. PPSA02664 and PPSA03416 ask for n = 3 and write the two body dwords through the kind-0 answer of 0x7d86501b8094ef57, packet + 4; handed a header-only NOP instead, that answer was null and both titles faulted at image+0x4371d.",
 ]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-100833, eboot leg, reports/hardware/20260914-100833-eboot.obs.log, check 166-agc/cb-nop-getsize."
@@ -519,52 +521,42 @@ assumptions = [
 
 [[function]]
 name = "sceAgcGetRegisterDefaults2"
-purpose = "Returns a pointer to a GPU context-register reset-defaults descriptor for a register set, which the caller searches by register id. sceAgcGetRegisterDefaults2(set_id) -> descriptor*."
-region = { via = "return", bytes = 256 }
+arity = 1
+purpose = "Returns a pointer to the library's register-defaults descriptor for a version: sceAgcGetRegisterDefaults2(version) -> descriptor*."
 edge_cases = [
-    "RETURN CONTRACT, decoded from PPSA28061's call site (eboot image+0x10b9e0). The function answers a pointer the caller dereferences as a descriptor: it reads count at +0x38 (u32), and only when that is non-zero reads records* at +0x30 and walks a table of 12-byte {id:u32, value:u64} records looking for register id 0xe24f806d. The placeholder-as-pointer fault this replaces was a read of +0x38 through orbistoun's 0xf7ff0001 stub answer.",
-    "NO OUTPUT BUFFER - the descriptor is library-owned. The caller sets only edi=set_id before the call (PPSA28061 image+0x10eb44: `mov edi, 0xd; call`), leaving the other argument registers stale; the report's inferred (u32, ptr, ptr...) arity is those leftovers, not real arguments. So the function returns storage it owns, and orbistoun reserves a zeroed region (via = return) and hands the base back rather than filling a caller buffer. A fresh reservation reads as zero, which is the whole of the answer here.",
-    "count = 0 IS A GRACEFUL, TITLE-DESIGNED PATH, not a fake success. With count == 0 the caller takes its own `je` branch (image+0x10b9ef -> 0x10ba2b), writes -1 (unset) into ~90 register-default slots at image+0x1f5a88.. and continues (jmp image+0x10cbc3); it applies no override for 0xe24f806d and proceeds. That is a real answer the title is built to handle - no default for that register - distinct from the placeholder pointer that crashes. The alternative, a records table for set 0xd containing 0xe24f806d's default, is a later sourced step (registers.rs is packet decode, not reset defaults).",
-    "NON-EXPORT, so no probe can call it (commit 3212e2a): the size 256 and the count-zero answer are assumed, not measured. The size is deliberately a number in a file - the descriptor header the caller touches is small (+0x30, +0x38) and a fresh page covers it - and can be changed and re-run without a rebuild.",
+    "MEASURED WHOLE. The descriptor is 64 bytes the library owns: four table pointers at +0x00..+0x18, the tables' entry counts at +0x20..+0x2c, the record array at +0x30 and its count at +0x38. Records are 12 bytes {id, loc, third}; a title resolves one through table loc & 3, slot (loc & 0x3fc) / 4, and reads 8 or 16 bytes at the entry the slot holds (PPSA02664 image+0x3dc26, PPSA28061 image+0x10b9e0). Version 0xd has 0x89 records, 0xc 0x80, 8 0x7f; the fourth table is null in all three.",
+    "orbistoun rebuilds each walked descriptor from crates/orbistoun-gpu/data/register-defaults.toml in memory it owns: the records as measured, each table at its measured length, the entries' measured bytes at their measured distances from one another. Table slots no record names were not read and stay null, which both call sites seen check before reading through. The same address answers every call for a version, as the library's static descriptor does.",
+    "A version no probe walked is refused by name. PPSA02664 asks for version 8 (after its init gate accepts 8), PPSA28061 for 0xd.",
 ]
-known_by = "assumed"
-found_in = ["PPSA28061-app0"]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2310Z-4d8a (sweep 20260927-153242, check 166-agc/register-defaults2-v0xd) and REQ-20260927T1735Z-4e9b (sweep 20260927-185507, check 166-agc/register-defaults-walk-4e9b, log lines 6350-8382: every record of versions 0xd, 0xc and 8, its entry and the 16 bytes there); PPSA02664 image+0x3dc26 (how a title walks it)."
+found_in = ["PPSA28061-app0", "PPSA02664-app0"]
 found_on = "2026-09-21"
-assumptions = [
-    "That register set 0xd has no default worth returning for 0xe24f806d, modelled as count = 0 - the honest floor. A hardware or reference-emulator source for the set-0xd defaults table would replace it with a populated descriptor.",
-    "That 256 bytes covers everything the caller reads through the returned pointer; only +0x30 and +0x38 are seen at the decoded call site.",
-]
 
 [[function]]
 name = "sceAgcGetRegisterDefaults2Internal"
-purpose = "Inner variant of sceAgcGetRegisterDefaults2: returns a pointer to a register reset-defaults descriptor for a register set, searched by the caller for a different register id. sceAgcGetRegisterDefaults2Internal(set_id) -> descriptor*."
-region = { via = "return", bytes = 256 }
+arity = 1
+purpose = "Returns a pointer to the library's inner register-defaults descriptor for a version: sceAgcGetRegisterDefaults2Internal(version) -> descriptor*."
 edge_cases = [
-    "SAME RETURN CONTRACT AS sceAgcGetRegisterDefaults2, one register apart. Decoded from PPSA28061's call site (eboot image+0x10ebc0): the guest reads count at +0x38 (u32), and only when non-zero reads records* at +0x30 and walks 12-byte {id:u32, value:u64} records - here searching for register id 0x6ac156ef (the outer variant searched 0xe24f806d). The run reaches this call immediately after the outer variant's count-zero descriptor was accepted (commit d1502d2), which is what confirmed the two share a shape.",
-    "NO OUTPUT BUFFER - library-owned storage, so orbistoun answers it with a reserved zeroed region (via = return) rather than filling a caller buffer, exactly as the outer variant. count = 0 is the graceful path: the caller takes its `je` branch (image+0x10ebcf -> 0x10ec0b), writes -1 (unset) into its register-default slots at image+0x1f6150.. and continues, applying no override for 0x6ac156ef.",
-    "NON-EXPORT, no probe can call it: the size 256 and count-zero answer are assumed, not measured, and a sourced defaults table for the set is the later step.",
+    "MEASURED WHOLE, the same descriptor shape as sceAgcGetRegisterDefaults2 (see that entry for how it is rebuilt): version 0xd has 0x18 records and all four tables, 0xc 0x1c records, 8 0x16 records with its third table null (length 0).",
+    "A version no probe walked is refused by name.",
 ]
-known_by = "assumed"
-found_in = ["PPSA28061-app0"]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2310Z-4d8a (sweep 20260927-153242, check 166-agc/register-defaults2-v0xd) and REQ-20260927T1735Z-4e9b (sweep 20260927-185507, check 166-agc/register-defaults-walk-4e9b, log lines 6350-8382: every record of versions 0xd, 0xc and 8, its entry and the 16 bytes there); PPSA02664 image+0x3dc26 (how a title walks it)."
+found_in = ["PPSA28061-app0", "PPSA02664-app0"]
 found_on = "2026-09-21"
-assumptions = [
-    "That register set 0xd has no default worth returning for 0x6ac156ef, modelled as count = 0. A sourced set-0xd defaults table would replace it with a populated descriptor.",
-]
 
 [[function]]
 name = "sceAgcInit"
 arity = 2
-purpose = "Initialises the current-generation graphics library. sceAgcInit(state, version): validates version and gates every later AGC call. Attributed to the identifier three titles import first and stall inside."
+purpose = "Initialises the current-generation graphics library: sceAgcInit(state, version) validates the version and writes nothing."
 edge_cases = [
-    "**The identifier a real title imports is 0x53bbd82b51d172db (orbistoun spelling), and this name does not hash to it.** The hash of this name is 0x916dc62dbed07cf8. The published tables list BOTH identifiers against this one name, so the second is an alias no derivation can reach - which is why 30,184 names and 3.9 billion generated candidates never explained it.",
-    "**known_by is published, and that is the ceiling on it.** The attribution is external; this project cannot confirm it the way it confirms every other name, because confirmation here means the hash reproducing and this one demonstrably does not. It is recorded so a reader meeting the bare hash knows what it is believed to be and exactly how much that is worth.",
-    "**The systematic shape matters more than the single name.** Of 116 published libSceAgc identifiers, 108 reproduce and 8 do not; five of the 8 are a second identifier on a name whose first one reproduces. So this library carries a class of alias identifiers, and a future unnameable hash here should be checked against that pattern before a word list is extended.",
-    "PPSA28061 stops inside this library's initialisation; PPSA02664 and PPSA03416 call it, pass it, reach flipped, and fault later in command-buffer construction (the 0xa8 null object, commit b4f7e73/684). All three import and exercise the library, which corroborates the attribution semantically without confirming it.",
-    "RETURN AND VERSION GATE MEASURED (obSCEne b7e4, sweep 20260915-125124). sceAgcInit(state, v) returns 0x0 for v = 13 and 0x8a6c0004 (SCE_AGC_ERROR_INVALID_VERSION) for every other version; 13 is the only version retail FW 12.40 accepts. And it gates the library: sceAgcCreateShader called before sceAgcInit faults (SIGSEGV). So the arity is 2, not 0 - a state buffer at arg0 and a version at arg1 - and the identity attribution being published does not make the behaviour unmeasured, because obSCEne calls the canonical export through the SDK.",
-    "ARG0 IS UNTOUCHED BY HARDWARE (obSCEne a3f0, sweep 20260920, check 166-agc/init). Probe of sceAgcInit(state, 13) across 1024-byte 0xAA sentinels, PPSA02664 descriptor pattern, and pointer-to-pointer confirmed extent = 0, changed = 0, and out-ptr-valid = 0, with rc-null = 0x0. sceAgcInit does not populate a context buffer at arg0; it is a pure library version initialization gate.",
+    "MEASURED BY ITS OWN NAME (obSCEne -7e41, check 166-agc/init-alias-7e41, sweep 20260927-153242): imported statically as the name (orbistoun's hash 0xf87cd0be2dc66d91, obSCEne's $kW3GLb7QfPg) it resolves to 0x800595930 and answers 0x0 for versions 12, 13 and 14 with a 0xCC state, writing nothing (bytes-written-init 0x0).",
+    "AFTER THE RAW GATE HAS KEPT A VERSION it answers 0x8a6c0004 for another (obSCEne -7e52, sweep 20260927-185507: 13 after 0x53bbd82b51d172db accepted 8). Any other version, or a call after the raw gate kept the same one, is unmeasured and refused by name.",
+    "It is not the function retail titles import as 0x53bbd82b51d172db; see that entry.",
 ]
-known_by = "published"
-cites = "SELFish REQ-20260909T1250Z-1f74; obSCEne b7e4 (sweep 20260915-125124); obSCEne REQ-20260920T1425Z-a3f0 (sweep 20260920 live console, check 166-agc/init: extent 0, changed 0, rc-sentinel 0x0, rc-desc 0x0, rc-null 0x0, v=13 -> 0x0)"
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2230Z-7e41 (sweep 20260927-153242, check 166-agc/init-alias-7e41: sceAgcInit-addr 0x800595930, rc-init 0x0 for versions 12, 13, 14, bytes-written-init 0x0)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-09"
 
@@ -610,10 +602,15 @@ found_on = "2026-09-15"
 
 [[function]]
 name = "sceAgcDcbWaitUntilSafeForRendering"
-purpose = "A wait/sync builder that, on retail, emits nothing into the command buffer."
-edge_cases = ["MEASURED LIBRARY NO-OP (obSCEne 166-agc/dcb-wait-until-safe, sweeps 20260917-090300/101310). Its GetSize symbol (sceAgcDcbWaitUntilSafeForRenderingGetSize) is absent from libSceAgc, and the builder writes 0 bytes and returns rc 0x0 on a bare writer (arg1 0 and 1) and on one prepared through sceAgcDcbResetQueue - empty-encoding true under every condition. So it is a genuine library-level no-op, distinct from a failed capture: contrast CbSetShRegistersDirect (partial 0 B with GetSize 0, a library-confirmed empty measurement) where this one has no GetSize at all. agc_no_op_returns_ok answers the measured 0x0 and writes nothing."]
+purpose = "Writes a wait for a display buffer's flip label to read 0 - the buffer is off the screen - before the stream draws into it: (writer, video_handle, buffer_index)."
+edge_cases = [
+    "MEASURED WITH A PORT OPEN (obSCEne -5a17, check 166-agc/dcb-wait-until-safe-for-rendering, sweep 20260927-153242): for indices 0, 1 and 4, twice each, 64 bytes written and the cursor advanced 128, the answer the packet's address (0x200a50078, the form sceAgcDcbSetFlip answers). The words: SET_UCONFIG_REG 0x342 = 0xcb000000 + index; WAIT_REG_MEM64 (0x93) until the 64-bit label at 0xC_8000_40A0 + 8 * index equals 0, memory space, prefetch parser, poll interval 0x40; SET_UCONFIG_REG 0x342 = 0xcb000020 + index; then the header of a NOP whose 16-dword body is skipped unwritten (the written extent is 64).",
+    "Register 0x342 is SQ_THREAD_TRACE_USERDATA_2 (Mesa sid.h R_030D08), a thread-trace marker with no effect on memory; sceAgcDcbSetFlip writes it too. The wait is what matters: the command processor carries it out on the label D728 models, which the display clears when the buffer leaves the screen.",
+    "Index 4 wrote the same wait as 0 and 1 on a port the probe had not registered buffers on, so the builder checks the port, not the buffer. The argument order is (writer, video_handle, buffer_index): swapped, (writer, 0, video_handle) wrote nothing and answered 0.",
+    "NO PORT, NO PACKET. With no port open (the -5a17 no-port arms, and the earlier sweeps 20260917-090300/101310 that ran with none) it writes nothing and answers 0x0, which is why it was first recorded as a library no-op. Its GetSize symbol does not resolve.",
+]
 known_by = "measured"
-cites = "obSCEne sweeps 20260917-090300/101310 (166-agc/dcb-wait-until-safe: GetSize resolved 0x0, bytes 0x0, rc 0x0, empty-encoding 0x1)."
+cites = "obSCEne REQ-20260927T0200Z-5a17 (sweep 20260927-153242, check 166-agc/dcb-wait-until-safe-for-rendering: video-handle 0x4e100100, wait-open-idx{0,1,4}-c{1,2} rc 0x200a50078 and bytes 0x80, extent 64, wait-swapped-idx0 0x0); obSCEne sweeps 20260917-090300/101310 (no port: bytes 0x0, rc 0x0); Mesa amd_cp_packets_gfx11.h:1764-1826 (WAIT_REG_MEM64 layout)."
 found_on = "2026-09-17"
 
 [[function]]
@@ -734,8 +731,23 @@ purpose = "Appends a flip request to a draw command buffer - the guest's ask to 
 edge_cases = [
     "Measured with a port open and two buffers registered (obSCEne -1d54, 166-agc/dcb-set-flip, sweep 20260927-013000 lines 12923-12975): (dcb, video handle, buffer index, flip mode 1, flip arg) writes 76 bytes and advances the cursor 256 - SET_UCONFIG_REG 0x342-0x343 = 0xc7010101 + 8*index, 0; WRITE_DATA to register 0xc343 of the 64-bit flip arg; RELEASE_MEM of the 64-bit value 1 to the buffer's flip label 0xC_8000_40A0 + 8*index with interrupt context id 0x08000101 rising by one per call; then the header of a NOP whose 45-dword body is skipped unwritten. It answers the packet's address (the probe buffer's first byte).",
     "Buffer index 4 with two registered, and a port that is not open (the earlier sweep's bare writers), write nothing and answer 0. That, not a no-op, is what sweep 20260917-124503's empty encoding was.",
+    "Flip modes 2 and 3 write the same 76 bytes but for the first register word, 0xc7010201 and 0xc7010301: the word is 0xc7010001 + (mode << 8) + 8*index. Flip mode 0 writes nothing and answers 0. A second port's flip carries the same flip label and continues the same interrupt context counter.",
     "orbistoun writes exactly that packet, having queued the flip under its context id; the command processor carries the flip out when it reaches the release (D728). PPSA03416 calls it as (dcb, 1, 0, 1, 1).",
 ]
 known_by = "measured"
-cites = "obSCEne -1d54 (166-agc/dcb-set-flip, sweep 20260927-013000 lines 12923-12975): the packet bytes for buffers 0 and 1, twice each, the 0x100 cursor advance, rc the packet address, and nothing written for an unregistered buffer or an unopened port."
+cites = "obSCEne -1d54 (166-agc/dcb-set-flip, sweep 20260927-013000 lines 12923-12975): the packet bytes for buffers 0 and 1, twice each, the 0x100 cursor advance, rc the packet address, and nothing written for an unregistered buffer or an unopened port; obSCEne REQ-20260927T1130Z-c4e3 (sweep 20260928-135518 lines 11191-11257): flip-open-mode0-idx0 0 bytes rc 0x0, flip-open-mode2-idx0 and -mode3-idx0 reg-word 0xc7010201 and 0xc7010301 with the rest of the packet unchanged, port2-flip-pm4 context 0x08000107."
 found_on = "2026-09-19"
+
+[[function]]
+name = "sceAgcSuspendPoint"
+found_by = "static"
+arity = 6
+purpose = "Offers the system a point to suspend the title's GPU work at."
+edge_cases = [
+    "Outside a system suspend it answers 0 promptly and writes nothing: PPSA02664's arguments (0x109, 3, buffer, 0, 0x3b9aca00, 0) returned 0 in 27 us with the buffer's 64 bytes unchanged.",
+    "The kernel names cpu and gpu suspend-timeout faults (0xa0d0c00f, 0xa0d0c00c) for a title that does not reach one while the system suspends; orbistoun never suspends a title.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20260928T0730Z-7b14 (sweep 20260928-135518, check 141-suspend/agc-suspend-point, log lines 6349-6361: resolved by name or NID 2clESPv63Ic at 0x800594980, rc 0x0, elapsed-us 0x1b, bytes-written 0x0, ptr-buf-64b all 0xcc)"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-09-28"

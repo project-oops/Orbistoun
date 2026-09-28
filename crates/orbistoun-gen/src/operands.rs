@@ -365,6 +365,11 @@ pub(crate) fn solve(
         if found.iter().any(|f| f.scale == 1) {
             found.retain(|f| f.scale == 1);
         }
+        // An aligned group also reads as the same field one bit up at twice the scale, its low
+        // bit held at zero by the alignment the reference enforces (a scalar buffer load's
+        // descriptor quad in a field of pairs). Every legal encoding decodes alike either way,
+        // so the lower scale, spanning the whole field, is kept.
+        keep_lowest_equivalent_scale(&mut found);
 
         // What remains must agree on how the bits are read: 242 is vector register 242 under
         // one reading and the constant 1.0 under another. A disagreement is unsolved and
@@ -382,6 +387,29 @@ pub(crate) fn solve(
         solved.push(found.remove(0));
     }
     Some(solved)
+}
+
+/// Drops each scaled reading that is a lower-scale one's field shifted up: a field at scale
+/// `2^n k` and shift `s + n` beside a field of the same kind at scale `k` and shift `s`. Only when every reading is either of the lowest scale or such a shift of one - any other
+/// disagreement is left for the caller to refuse.
+fn keep_lowest_equivalent_scale(found: &mut Vec<Field>) {
+    let Some(lowest) = found.iter().map(|f| f.scale).min() else {
+        return;
+    };
+    let shifted_copy = |f: &Field| {
+        let ratio = f.scale / lowest;
+        f.scale % lowest == 0
+            && ratio.is_power_of_two()
+            && found.iter().any(|g| {
+                g.scale == lowest
+                    && g.kind == f.kind
+                    && g.word == f.word
+                    && g.shift + ratio.trailing_zeros() == f.shift
+            })
+    };
+    if found.iter().all(|f| f.scale == lowest || shifted_copy(f)) {
+        found.retain(|f| f.scale == lowest);
+    }
 }
 
 /// Whether an operand no field explains genuinely occupies no bits.
@@ -816,6 +844,30 @@ opcode_extension = { shift = 21, width = 1, word = 1 }
         assert_eq!(fields[0].kind, Kind::Implicit);
         assert_eq!(fields[0].width, 0);
         assert_eq!(fields[0].implicit.as_deref(), Some("vcc"));
+    }
+
+    /// A descriptor quad in a field of pairs - a scalar buffer load's base, bits 5:0 - also fits
+    /// as a quad index one bit up, since alignment keeps the low bit zero. Both read every legal
+    /// encoding alike, so the solve keeps the field of pairs rather than refusing.
+    #[test]
+    fn an_aligned_quad_in_a_field_of_pairs_solves_as_pairs() {
+        let samples = [
+            sample("s_buffer_load_dword", "s[8:11]", &[4]),
+            sample("s_buffer_load_dword", "s[20:23]", &[10]),
+            sample("s_buffer_load_dword", "s[96:99]", &[48]),
+        ];
+        let fields = solve(
+            &samples,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &Refuses,
+        )
+        .expect("solvable");
+        assert_eq!(
+            (fields[0].shift, fields[0].width, fields[0].scale),
+            (0, 6, 2)
+        );
     }
 
     /// Substitution keeps the modifiers, because for some families they make it legal.

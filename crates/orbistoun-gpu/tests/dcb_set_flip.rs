@@ -19,10 +19,15 @@ fn released(_label: u64, _context: u32) -> bool {
     false
 }
 
+fn wait_label(handle: u64, index: u64) -> Option<u64> {
+    (handle == PORT).then_some(0xC_8000_40A0 + 8 * index)
+}
+
 fn install() {
     display::install(display::Display {
         queue_flip: queue,
         released,
+        wait_label,
     });
 }
 
@@ -91,18 +96,61 @@ fn a_flip_writes_the_measured_packet_and_advances_256_bytes() {
     );
 }
 
-/// An unregistered buffer and an unknown port write nothing and answer `0`, as on hardware; a flip
-/// mode other than the measured one is refused.
+/// An unregistered buffer, an unknown port and flip mode 0 write nothing and answer `0`, as on
+/// hardware (`-1d54`, `-c4e3`); a flip mode above the measured ones is refused.
 #[test]
 fn nothing_is_written_for_an_unregistered_buffer_or_port() {
     install();
-    for (handle, index) in [(PORT, 4), (7, 0)] {
+    for (handle, index, mode) in [(PORT, 4, 1), (7, 0, 1), (PORT, 0, 0)] {
         let writer = Writer::new();
-        assert_eq!(call([writer.handle(), handle, index, 1, 5, 0]), 0);
+        assert_eq!(call([writer.handle(), handle, index, mode, 5, 0]), 0);
         assert_eq!(writer.advanced(), 0);
         assert!(writer.buffer.iter().all(|&b| b == 0xcd));
     }
     let writer = Writer::new();
-    assert_eq!(call([writer.handle(), PORT, 0, 2, 5, 0]), 0xf7ff_0001);
+    assert_eq!(call([writer.handle(), PORT, 0, 4, 5, 0]), 0xf7ff_0001);
     assert_eq!(writer.advanced(), 0);
+}
+
+fn call_wait(args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (_, f) = agc::implementations()
+        .iter()
+        .find(|(n, _)| *n == "sceAgcDcbWaitUntilSafeForRendering")
+        .expect("sceAgcDcbWaitUntilSafeForRendering is wired");
+    f(&args)
+}
+
+/// With a port open, the wait for buffer 4 writes the 64 bytes obSCEne dumped for index 4, skips the
+/// `NOP` body, advances 128 bytes and answers the packet's address (`-5a17`, sweep 20260927-153242,
+/// arm `wait-open-idx4-c1`). Index 4 is not registered on the stand-in port, as on hardware.
+#[test]
+fn a_wait_until_safe_writes_the_measured_packet_and_advances_128_bytes() {
+    install();
+    let writer = Writer::new();
+    let rc = call_wait([writer.handle(), PORT, 4, 0, 0, 0]);
+    assert_eq!(rc, writer.begin(), "the packet's address");
+    assert_eq!(writer.advanced(), 0x80);
+    assert_eq!(
+        hex(&writer.buffer[..64]),
+        concat!(
+            "047901c042030000040000cb009307c0",
+            "13010006c04000800c00000000000000",
+            "00000000ffffffffffffffff40000000",
+            "047901c042030000240000cb00100fc0",
+        )
+    );
+    assert!(
+        writer.buffer[64..0x80].iter().all(|&b| b == 0xcd),
+        "the NOP body is skipped, not written"
+    );
+}
+
+/// With no port open the wait writes nothing and answers `0` (`-5a17`, the no-port arms).
+#[test]
+fn a_wait_until_safe_on_no_port_writes_nothing() {
+    install();
+    let writer = Writer::new();
+    assert_eq!(call_wait([writer.handle(), 7, 0, 0, 0, 0]), 0);
+    assert_eq!(writer.advanced(), 0);
+    assert!(writer.buffer.iter().all(|&b| b == 0xcd));
 }

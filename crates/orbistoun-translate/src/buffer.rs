@@ -90,6 +90,78 @@ pub(crate) fn declare_push_constants(b: &mut Builder, u32_type: Id, count: Id) -
     }
 }
 
+/// A stage's bound draw buffers (D733): an array of storage blocks, each a runtime array of words
+/// as long as the buffer bound there.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DrawBufferArray {
+    /// The variable to bind.
+    pub(crate) variable: Id,
+    /// Pointer to one buffer's block, for its length.
+    pub(crate) block_ptr: Id,
+    /// Pointer to a single word of one buffer.
+    pub(crate) element_ptr: Id,
+}
+
+/// Declares a stage's draw buffers at `binding` of the draw-buffer set, read-only.
+///
+/// The array always has [`orbistoun_spirv::DRAW_BUFFERS_PER_STAGE`] elements, so every module that
+/// binds any shares one layout; a word is reached with three indices: the buffer, the member, the
+/// word.
+pub(crate) fn declare_draw_buffers(b: &mut Builder, u32_type: Id, binding: u32) -> DrawBufferArray {
+    let runtime = b.id();
+    let block = b.id();
+    let count = b.id();
+    let array = b.id();
+    let array_ptr = b.id();
+    let block_ptr = b.id();
+    let element_ptr = b.id();
+    let variable = b.id();
+
+    b.annotate(op::DECORATE, &[runtime.0, decoration::ARRAY_STRIDE, 4]);
+    b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
+    b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::NON_WRITABLE]);
+    b.annotate(
+        op::DECORATE,
+        &[
+            variable.0,
+            decoration::DESCRIPTOR_SET,
+            orbistoun_spirv::DRAW_BUFFERS_SET,
+        ],
+    );
+    b.annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
+
+    b.declare(op::TYPE_RUNTIME_ARRAY, &[runtime.0, u32_type.0]);
+    b.declare(op::TYPE_STRUCT, &[block.0, runtime.0]);
+    b.declare(
+        op::CONSTANT,
+        &[u32_type.0, count.0, orbistoun_spirv::DRAW_BUFFERS_PER_STAGE],
+    );
+    b.declare(op::TYPE_ARRAY, &[array.0, block.0, count.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[array_ptr.0, storage::STORAGE_BUFFER, array.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[block_ptr.0, storage::STORAGE_BUFFER, block.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[element_ptr.0, storage::STORAGE_BUFFER, u32_type.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[array_ptr.0, variable.0, storage::STORAGE_BUFFER],
+    );
+
+    DrawBufferArray {
+        variable,
+        block_ptr,
+        element_ptr,
+    }
+}
+
 /// Binding of the observation window.
 pub(crate) const OBSERVATION: u32 = 0;
 

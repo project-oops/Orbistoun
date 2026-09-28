@@ -11,6 +11,7 @@
 
 pub mod apr;
 pub mod direct;
+pub mod fiber;
 pub mod interrupt;
 pub mod mapped;
 pub mod sync;
@@ -121,6 +122,8 @@ guest_module! {
         "scePthreadCreate" => 5,
         "scePthreadJoin" => 2,
         "scePthreadSelf" => 0,
+        // Two thread handles, the vendor spelling of FreeBSD's `pthread_equal`.
+        "scePthreadEqual" => 2,
         // The calling thread's unique integer id (FreeBSD `pthread_getthreadid_np`) (D452).
         "scePthreadGetthreadid" => 0,
         // Named by guests themselves and confirmed by hash. Titles print diagnostics naming these,
@@ -150,6 +153,7 @@ guest_module! {
         "scePthreadRwlockTryrdlock" => 1, "scePthreadRwlockWrlock" => 1,
         "scePthreadRwlockTrywrlock" => 1, "scePthreadRwlockUnlock" => 1,
         "scePthreadRwlockDestroy" => 1,
+        "scePthreadRwlockattrInit" => 1, "scePthreadRwlockattrDestroy" => 1,
         "posix_pthread_rwlock_init" => 2, "posix_pthread_rwlock_rdlock" => 1,
         "posix_pthread_rwlock_tryrdlock" => 1, "posix_pthread_rwlock_wrlock" => 1,
         "posix_pthread_rwlock_trywrlock" => 1, "posix_pthread_rwlock_unlock" => 1,
@@ -184,6 +188,7 @@ guest_module! {
         "sceKernelReleaseFlexibleMemory" => 2,
         "scePthreadAttrInit" => 1, "scePthreadAttrDestroy" => 1,
         "scePthreadAttrSetstacksize" => 2, "scePthreadAttrGetstacksize" => 2,
+        "scePthreadAttrSetstack" => 3,
         // (thread, attr) and (attr, out): the shapes of FreeBSD `pthread_attr_get_np` and
         // `pthread_attr_getstackaddr`, used by garbage collectors to find the stack they scan.
         "scePthreadAttrGet" => 2, "scePthreadAttrGetstackaddr" => 2,
@@ -2059,13 +2064,13 @@ fn pthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let start = thread::Start { entry, argument };
     // The attribute block the guest built through `scePthreadAttrSet*`: on the hardware a live
     // thread reads back the stack size and affinity its block asked for (obSCEne `031-stackattr`).
-    let (affinity, stack) = thread_attributes(attr);
+    let (affinity, stack, region) = thread_attributes(attr);
 
     // SAFETY: `entry` is a guest address the guest itself is asking to have called, in a
     // fully relocated image - the same contract the real call has. The thread body runs
     // guest instructions, which is the entire purpose of this emulator, and it runs on a
     // stack of its own so an overrun hits a guard page rather than host frames.
-    let spawned = unsafe { thread::spawn(start, &name, affinity, 0, stack) };
+    let spawned = unsafe { thread::spawn(start, &name, affinity, 0, stack, region) };
 
     match spawned {
         Ok(handle) => {
@@ -2112,24 +2117,31 @@ fn spawn_parameters(stack_field: u64, affinity_field: u64) -> (thread::Affinity,
 ///   detach promise is kept by construction (see [`pthread_detach`]).
 /// - Priority: `scePthreadAttrSetschedparam` refuses on a retail attribute on the hardware
 ///   (`0x8002002d`), so priority arrives through `scePthreadSetprio` instead.
-fn thread_attributes(attr: u64) -> (thread::Affinity, u64) {
+fn thread_attributes(attr: u64) -> (thread::Affinity, u64, Option<(u64, u64)>) {
     if attr == 0 {
         return (
             thread::Affinity::default(),
             orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+            None,
         );
     }
     let Some(object) = attr_at(attr) else {
         return (
             thread::Affinity::default(),
             orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+            None,
         );
     };
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let stack_field = unsafe { guest::read_u64(object + ATTR_STACK_SIZE) }.unwrap_or(0);
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let affinity_field = unsafe { guest::read_u64(object + ATTR_AFFINITY) }.unwrap_or(0);
-    spawn_parameters(stack_field, affinity_field)
+    // A stack the guest supplied through `scePthreadAttrSetstack`: its lowest address and size.
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let stack_address = unsafe { guest::read_u64(object + ATTR_STACK_ADDR) }.unwrap_or(0);
+    let region = (stack_address != 0 && stack_field != 0).then_some((stack_address, stack_field));
+    let (affinity, stack) = spawn_parameters(stack_field, affinity_field);
+    (affinity, stack, region)
 }
 
 /// `scePthreadJoin(thread, value)`.
@@ -4061,6 +4073,19 @@ fn set_virtual_range_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Re-protects a range of the guest's heap, answering whether the host applied it, or `None` when
+/// the range is not heap memory the allocator owns outright. Installed by the layer above that owns
+/// both this crate and the C library's allocator.
+pub type HeapProtect = fn(u64, u64, orbistoun_mem::Protection) -> Option<bool>;
+
+static HEAP_PROTECT: OnceLock<HeapProtect> = OnceLock::new();
+
+/// Installs the heap's re-protection, so `sceKernelMprotect` can reach memory the guest carved
+/// from its heap. First install wins.
+pub fn install_heap_protect(protect: HeapProtect) {
+    let _ = HEAP_PROTECT.set(protect);
+}
+
 /// `sceKernelMprotect(addr, len, prot)`: changes the protection of a range already reserved.
 ///
 /// A guest reserves a span, then calls this before handing it to its own allocator, and acts on
@@ -4108,10 +4133,21 @@ fn mprotect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 
     // Not a mapping this crate handed out: for a guest re-protecting its own module that is the
-    // ordinary case (D577). A range inside a region placed for the guest is allowed; a range covered
-    // by nothing is refused.
+    // ordinary case (D577). A range inside a region placed for the guest is allowed. So is a range
+    // of heap memory the allocator owns outright - a guard page below a thread stack carved from
+    // the heap, which the hardware allows since heap memory is the process's own. A range covered by
+    // nothing is refused.
     if region_covering(addr, len).is_none() {
-        return vendor(orbistoun_core::errno::INVALID);
+        let heap = HEAP_PROTECT
+            .get()
+            .and_then(|protect| protect(addr, len, protection));
+        return match heap {
+            Some(true) => {
+                note_requested_protection(addr, len, prot);
+                OK
+            }
+            _ => vendor(orbistoun_core::errno::INVALID),
+        };
     }
     match orbistoun_mem::platform::protect(addr, len, protection) {
         Ok(()) => OK,
@@ -4785,6 +4821,29 @@ fn pthread_attr_getstackaddr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     // SAFETY: an address the guest passed for this call, valid by its contract.
     if args[1] == 0 || !unsafe { guest::write_u64(args[1], value) } {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
+/// `scePthreadAttrSetstack(attr, addr, size)`: POSIX `pthread_attr_setstack` - the thread runs on
+/// the caller's memory, `size` bytes from `addr` up, rather than on a stack this kernel reserves.
+///
+/// A null address is `EINVAL`, as FreeBSD's `pthread_attr_setstack` answers. The address and size
+/// are stored in the attribute's own fields, so `scePthreadAttrGetstackaddr` and
+/// `scePthreadAttrGetstacksize` read them back, and [`thread_attributes`] hands them to the spawn.
+fn pthread_attr_setstack(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (attr, address, size) = (args[0], args[1], args[2]);
+    if address == 0 || size == 0 {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    let Some(object) = attr_at(attr) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    // SAFETY: the attribute object this kernel allocated, whose fields these are.
+    let stored = unsafe { guest::write_u64(object + ATTR_STACK_ADDR, address) };
+    // SAFETY: as above.
+    if !stored || !unsafe { guest::write_u64(object + ATTR_STACK_SIZE, size) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
@@ -5580,6 +5639,25 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     TABLE
 }
 
+/// Implementations a stub may call directly, past the call trace (D734), by symbol name. Each is
+/// also in [`implementations`], which answers whenever a diagnostic names the import.
+pub fn leaves() -> &'static [(&'static str, orbistoun_core::LeafFn)] {
+    &[("sceKernelGetProcessTimeCounter", leaf_process_time_counter)]
+}
+
+/// [`kernel_get_process_time_counter`], called from its stub. A GL context times every phase of
+/// every draw with it, hundreds of thousands of times a second.
+extern "sysv64" fn leaf_process_time_counter(
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+    _: u64,
+) -> u64 {
+    ticks_since()
+}
+
 /// Every implementation, as one table; [`implementations`] is the interface other crates call.
 const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelDirectMemoryQuery", direct_memory_query),
@@ -5634,6 +5712,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadCreate", pthread_create),
     ("scePthreadJoin", pthread_join),
     ("scePthreadSelf", pthread_self),
+    ("scePthreadEqual", pthread_equal),
     ("scePthreadGetthreadid", pthread_getthreadid),
     ("sceKernelCreateSema", create_semaphore),
     ("scePthreadMutexattrInit", pthread_mutexattr_init),
@@ -5695,6 +5774,9 @@ const TABLE: &[(&str, GuestFn)] = &[
         pthread_barrierattr_setpshared,
     ),
     ("pthread_rwlockattr_init", pthread_rwlockattr_init),
+    // The vendor spellings of the same two calls, which retail titles import (PPSA21564).
+    ("scePthreadRwlockattrInit", pthread_rwlockattr_init),
+    ("scePthreadRwlockattrDestroy", pthread_rwlockattr_destroy),
     ("pthread_rwlockattr_destroy", pthread_rwlockattr_destroy),
     (
         "pthread_rwlockattr_getpshared",
@@ -5834,6 +5916,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadAttrInit", pthread_attr_init),
     ("scePthreadAttrDestroy", pthread_attr_destroy),
     ("scePthreadAttrSetstacksize", pthread_attr_setstacksize),
+    ("scePthreadAttrSetstack", pthread_attr_setstack),
     ("scePthreadAttrGetstacksize", pthread_attr_getstacksize),
     ("scePthreadAttrGet", pthread_attr_get),
     ("scePthreadAttrGetstackaddr", pthread_attr_getstackaddr),
@@ -6114,6 +6197,22 @@ mod tests {
         SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `scePthreadEqual` answers non-zero for two copies of one thread's handle and zero for two
+    /// threads' handles: the placeholder it answered unimplemented was non-zero for every pair.
+    #[test]
+    fn sce_pthread_equal_tells_one_thread_from_another() {
+        let (_, equal) = implementations()
+            .iter()
+            .find(|(name, _)| *name == "scePthreadEqual")
+            .expect("scePthreadEqual is implemented");
+        let this = super::pthread_self(&args([0, 0, 0, 0]));
+        let other = std::thread::spawn(|| super::pthread_self(&args([0, 0, 0, 0])))
+            .join()
+            .expect("the other thread answered its handle");
+        assert_ne!(equal(&args([this, this, 0, 0])), 0);
+        assert_eq!(equal(&args([this, other, 0, 0])), 0);
     }
 
     /// `scePthreadGetaffinity` reads back the mask a thread was recorded with; an unknown handle is

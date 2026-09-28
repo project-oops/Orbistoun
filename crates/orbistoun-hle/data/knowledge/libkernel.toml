@@ -1418,6 +1418,22 @@ found_on = "2026-09-02"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
 
 [[function]]
+name = "scePthreadAttrSetstack"
+found_by = "static"
+arity = 3
+purpose = "Sets the memory a thread created with the attribute runs on: its lowest address and size."
+returns = "status"
+edge_cases = [
+    "The thread runs on the caller's memory, entered at its top aligned down to 16 bytes, rather than on a stack this kernel reserves; a test creates a thread with it and reads back an rsp inside the region.",
+    "A null address or a zero size is EINVAL (0x80020016), as FreeBSD's pthread_attr_setstack refuses a null stack.",
+    "PPSA21564 carves the stack from its heap with sceLibcMspaceMemalign(0x4000, 0xc000), guards its lowest page with sceKernelMprotect, and hands the rest here; the engine asserts (Thread.cpp:120) when this is refused.",
+]
+known_by = "published"
+cites = "POSIX.1-2008 pthread_attr_setstack; FreeBSD lib/libthr/thread/thr_attr.c _pthread_attr_setstack"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
 name = "scePthreadAttrSetstacksize"
 arity = 2
 purpose = "A thread attribute object, carrying the stack size, detach state and priority a thread is created with."
@@ -1554,6 +1570,28 @@ known_by = "guest-observed"
 assumptions = ["The block is never freed, by this family's own convention: a guest holding a stale attribute then reads zeroes rather than freed memory."]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-04"
+
+[[function]]
+name = "scePthreadRwlockattrInit"
+found_by = "generated"
+arity = 1
+purpose = "Allocates a read-write lock attribute object and hands back its handle through the pointer given."
+edge_cases = ["The vendor spelling of pthread_rwlockattr_init, served by the same implementation. Unserved, PPSA21564's engine asserted (RwLock.cpp:168) on the placeholder."]
+known_by = "published"
+cites = "POSIX.1-2008 pthread_rwlockattr_init"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
+
+[[function]]
+name = "scePthreadRwlockattrDestroy"
+found_by = "generated"
+arity = 1
+purpose = "Destroys a read-write lock attribute object."
+edge_cases = ["The vendor spelling of pthread_rwlockattr_destroy, served by the same implementation."]
+known_by = "published"
+cites = "POSIX.1-2008 pthread_rwlockattr_destroy"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-27"
 
 [[function]]
 name = "scePthreadCondattrInit"
@@ -2025,6 +2063,22 @@ assumptions = [
     "Which errno values the target returns, and on which conditions, is unverified.",
 ]
 found_on = "2026-08-25"
+
+[[function]]
+name = "scePthreadEqual"
+arity = 2
+purpose = "Whether two thread handles name the same thread: non-zero if they do, zero if not."
+edge_cases = [
+    "Unimplemented, it answered the placeholder, which is non-zero, so every pair of threads compared equal. Mesa's glthread then took the application thread for its own worker (`u_thread_is_self`, `glthread.c` `_mesa_glthread_finish`) and skipped the synchronisation, and both threads executed one context's command batches at once: Craft spun in `tc_batch_execute` on a call id no batch holds.",
+    "Handles are compared by value, as scePthreadSelf hands out one per thread for the thread's life.",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on FreeBSD pthread_equal(3), whose vendor spelling this is: oops-sdk's thread layer calls it where POSIX calls pthread_equal (`src/thread/thread.c`), in builds that run on the hardware.",
+]
+found_in = ["CRFT00001"]
+found_on = "2026-09-27"
 
 [[function]]
 name = "scePthreadSelf"

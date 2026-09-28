@@ -320,7 +320,35 @@ fn resolve_top(guest_path: &str) -> Option<PathBuf> {
     None
 }
 
+/// Whether `guest_path` asks for a directory - it ends in `/` or `/.` - where what exists at the
+/// path is a file.
+///
+/// FreeBSD's lookup answers `ENOTDIR` for it: a trailing slash, or `.`, names the directory it
+/// follows, so what precedes it must be one. Dropping the `.` and the empty components, as
+/// `without_current_dir` does for the walk, would otherwise open the file, and a guest that
+/// asks "is this a directory?" by opening `path/.` would be told yes for every file.
+#[must_use]
+pub fn names_file_as_directory(guest_path: &str) -> bool {
+    let path = guest_path.replace('\\', "/");
+    if !(path.ends_with('/') || path.ends_with("/.")) {
+        return false;
+    }
+    let mut base = path.as_str();
+    while let Some(shorter) = base.strip_suffix("/.").or_else(|| base.strip_suffix('/')) {
+        base = shorter;
+    }
+    if base.is_empty() || !mounts_under(base).is_empty() {
+        return false;
+    }
+    // Something must be there and be a file: a missing name stays `ENOENT`.
+    resolve_inner(base, false)
+        .is_some_and(|host| std::fs::metadata(host).is_ok_and(|found| !found.is_dir()))
+}
+
 fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
+    if names_file_as_directory(guest_path) {
+        return None;
+    }
     // Normalised so `\` from a guest that mixes conventions cannot slip a component past the
     // component walk.
     let guest_path = guest_path.replace('\\', "/");

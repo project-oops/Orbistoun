@@ -2737,6 +2737,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "image",
  "oops-log",
  "orbistoun-corpus",
  "orbistoun-env",
@@ -2758,6 +2759,7 @@ dependencies = [
  "orbistoun-worker",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tracing",
  "winresource",
@@ -3020,6 +3022,7 @@ dependencies = [
  "orbistoun-mem",
  "reqwest",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3185,6 +3188,7 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-core",
  "orbistoun-hle",
+ "orbistoun-mem",
  "orbistoun-shell",
 ]
 

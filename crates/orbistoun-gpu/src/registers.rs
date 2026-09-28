@@ -829,19 +829,25 @@ const CB_COLOR0_BASE: u32 = 0xA318;
 /// [`crate::tiling`] slices before detiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColourTarget {
-    /// Base byte address of the surface in guest memory.
+    /// Base byte address of the surface in guest memory - for a `64KB_R_X` surface, its first
+    /// block.
     pub base: u64,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+    /// The surface's pipe-bank XOR, which moves 256-byte runs within each block
+    /// ([`crate::tiling`]); zero for a surface without one.
+    pub pipe_bank_xor: u8,
 }
 
 /// The colour target a submission set up, from the live values of `CB_COLOR0_BASE` and
 /// `CB_COLOR0_ATTRIB2` among the writes.
 ///
 /// [`None`] unless both were set: a missing half is not invented (D010). The most recent write to
-/// each wins.
+/// each wins. A `64KB_R_X` surface starts on a 64 KiB block, so the low byte of its 256-byte base
+/// is not address: radeonsi ORs the surface's pipe-bank XOR in there (`ac_descriptors.c:1477-1481`,
+/// `cb_color_base |= tile_swizzle`), and it is split out.
 #[must_use]
 pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     let base = writes
@@ -850,10 +856,85 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         .find(|write| write.register == CB_COLOR0_BASE)?
         .value;
     let extent = colour_target_extent_at(writes)?;
+    let (base, pipe_bank_xor) = match colour_swizzle_mode_at(writes) {
+        Some(SwizzleMode::Tiled64KbRX) => (base & !0xFF, (base & 0xFF) as u8),
+        _ => (base, 0),
+    };
     Some(ColourTarget {
         base: u64::from(base) << 8,
         width: extent.width,
         height: extent.height,
+        pipe_bank_xor,
+    })
+}
+
+/// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
+/// `SLICE_MAX` 25:13, `MIP_LEVEL` 29:26.
+const CB_COLOR0_VIEW: u32 = 0xA31B;
+/// `CB_COLOR0_ATTRIB` (`gfx103.json`, byte `167028`, dword `0xA31D`): `NUM_SAMPLES` 14:12,
+/// `NUM_FRAGMENTS` 16:15.
+const CB_COLOR0_ATTRIB: u32 = 0xA31D;
+/// `CB_COLOR0_DCC_BASE` (`gfx103.json`, byte `167060`, dword `0xA325`), in 256-byte units.
+const CB_COLOR0_DCC_BASE: u32 = 0xA325;
+/// `CB_COLOR0_DCC_BASE_EXT` (`gfx103.json`, byte `167584`, dword `0xA3A8`): address bits 47:40 in
+/// `BASE_256B` 7:0.
+const CB_COLOR0_DCC_BASE_EXT: u32 = 0xA3A8;
+/// `CB_COLOR0_INFO.DCC_ENABLE`, bit 28 (`gfx103.json`).
+const INFO_DCC_ENABLE: u32 = 1 << 28;
+/// `CB_COLOR0_ATTRIB3.DCC_PIPE_ALIGNED`, bit 30 (`gfx103.json`).
+const ATTRIB3_DCC_PIPE_ALIGNED: u32 = 1 << 30;
+/// `CB_COLOR0_ATTRIB3.RESOURCE_TYPE`'s value for a 2D surface, `ADDR_RSRC_TEX_2D`
+/// (`addrtypes.h:310`), which radeonsi writes there (`ac_descriptors.c:1328-1329`).
+const RESOURCE_TYPE_2D: u32 = 1;
+
+/// Colour target zero's delta colour compression, when `CB_COLOR0_INFO.DCC_ENABLE` is set: where
+/// its keys are, and whether the target is the single-level, single-slice, single-sample 2D
+/// surface whose keys are one run of whole metadata blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColourTargetDcc {
+    /// The keys' base and layout.
+    pub dcc: crate::dcc::Dcc,
+    /// One 2D slice and one mip level: `ATTRIB2.MAX_MIP`, `CB_COLOR0_VIEW` and
+    /// `ATTRIB3.MIP0_DEPTH` all zero, `ATTRIB3.RESOURCE_TYPE` 2D.
+    pub single_level: bool,
+    /// `CB_COLOR0_ATTRIB`'s sample and fragment counts both one.
+    pub single_sample: bool,
+}
+
+/// Colour target zero's DCC from the live registers, or `None` when `CB_COLOR0_INFO` is unset or
+/// does not enable it. An unwritten `VIEW`, `ATTRIB` or `DCC_BASE_EXT` reads as its reset value,
+/// zero, which `CLEAR_STATE` leaves them at.
+#[must_use]
+pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc> {
+    let last = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    if last(CB_COLOR0_INFO)? & INFO_DCC_ENABLE == 0 {
+        return None;
+    }
+    let base = (u64::from(last(CB_COLOR0_DCC_BASE_EXT).unwrap_or(0) & 0xFF) << 40)
+        | (u64::from(last(CB_COLOR0_DCC_BASE)?) << 8);
+    let attrib3 = last(CB_COLOR0_ATTRIB3)?;
+    let max_mip = last(CB_COLOR0_ATTRIB2)? >> 28;
+    // `ATTRIB3.MIP0_DEPTH` 12:0, `RESOURCE_TYPE` 25:24.
+    let mip0_depth = attrib3 & 0x1FFF;
+    let single_level = max_mip == 0
+        && last(CB_COLOR0_VIEW).unwrap_or(0) == 0
+        && mip0_depth == 0
+        && (attrib3 >> 24) & 0x3 == RESOURCE_TYPE_2D;
+    // `NUM_SAMPLES` and `NUM_FRAGMENTS`, as `log2`, together in 16:12.
+    let samples_and_fragments = (last(CB_COLOR0_ATTRIB).unwrap_or(0) >> 12) & 0x1F;
+    Some(ColourTargetDcc {
+        dcc: crate::dcc::Dcc {
+            base,
+            pipe_aligned: attrib3 & ATTRIB3_DCC_PIPE_ALIGNED != 0,
+        },
+        single_level,
+        single_sample: samples_and_fragments == 0,
     })
 }
 
@@ -1392,6 +1473,18 @@ const PA_CL_VPORT_XSCALE: u32 = 0xA10F;
 const PA_CL_VTE_CNTL: u32 = 0xA206;
 /// `VPORT_X_SCALE_ENA` through `VPORT_Y_OFFSET_ENA`.
 const VTE_XY_ENABLES: u32 = 0xF;
+/// `VPORT_Z_SCALE_ENA`, `PA_CL_VTE_CNTL` bit 4 (`gfx103.json:13363`).
+const VTE_Z_SCALE_ENA: u32 = 1 << 4;
+/// `VPORT_Z_OFFSET_ENA`, bit 5.
+const VTE_Z_OFFSET_ENA: u32 = 1 << 5;
+/// `PA_CL_VPORT_ZSCALE` (`gfx103.json:3600`, byte `164940`, dword `0xA113`); `PA_CL_VPORT_ZOFFSET`
+/// follows it at `0xA114`.
+const PA_CL_VPORT_ZSCALE: u32 = 0xA113;
+/// `PA_CL_CLIP_CNTL` (`gfx103.json:4653`, byte `165904`, dword `0xA204`).
+const PA_CL_CLIP_CNTL: u32 = 0xA204;
+/// `DX_CLIP_SPACE_DEF`, `PA_CL_CLIP_CNTL` bit 19 (`gfx103.json:13275`): set, clip-space z runs
+/// `0..w`; clear, `-w..w` as GL's does.
+const DX_CLIP_SPACE_DEF: u32 = 1 << 19;
 
 /// The viewport transform a draw's clip-space positions are mapped to the target with:
 /// `x = x_scale * ndc_x + x_offset`, `y = y_scale * ndc_y + y_offset`, in the target's pixels, rows
@@ -1409,6 +1502,35 @@ pub struct ViewportTransform {
     pub y_scale: f32,
     /// `PA_CL_VPORT_YOFFSET`.
     pub y_offset: f32,
+    /// How clip-space z is clipped and becomes depth.
+    pub depth: DepthMapping,
+}
+
+/// How a draw's clip-space z is clipped and mapped to depth: the range it is clipped to, then
+/// `depth = z_scale * ndc_z + z_offset`.
+///
+/// A GL context clips z to `-w..w` and writes `ZSCALE = (far - near) / 2`, `ZOFFSET = (far + near)
+/// / 2` (`gl_draw.c`, the `glDepthRange` arm, in oops-sdk). A host clipping to `0..w` instead drops
+/// everything nearer than the middle of the depth range: Bugdom's HUD, drawn at the near plane,
+/// vanished whole.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthMapping {
+    /// Clip-space z runs `-w..w`, GL's convention - `PA_CL_CLIP_CNTL.DX_CLIP_SPACE_DEF` clear.
+    /// `false` is `0..w`.
+    pub negative_one_to_one: bool,
+    /// `PA_CL_VPORT_ZSCALE` when enabled; one otherwise.
+    pub z_scale: f32,
+    /// `PA_CL_VPORT_ZOFFSET` when enabled; zero otherwise.
+    pub z_offset: f32,
+}
+
+impl DepthMapping {
+    /// Clip z `0..w` taken as depth unchanged: what a stream that sets none of the registers gets.
+    pub const IDENTITY: Self = Self {
+        negative_one_to_one: false,
+        z_scale: 1.0,
+        z_offset: 0.0,
+    };
 }
 
 /// The viewport transform in force at packet `before`, from the last write of each of the four
@@ -1428,6 +1550,41 @@ pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<Vi
     })
 }
 
+/// Every `PA_CL_VTE_CNTL` field this reads: the six scale and offset enables (bits 0-5) and
+/// `VTX_XY_FMT`, `VTX_Z_FMT` and `VTX_W0_FMT` (bits 8-10, `gfx103.json:13365-13367`).
+const VTE_FIELDS: u32 = 0x73F;
+/// The value radeonsi gives a window-space shader (`si_state_shaders.cpp:1321-1322`): x, y and z
+/// pre-divided, no scale or offset, and `VTX_W0_FMT` clear - Gallium's `VS_WINDOW_SPACE_POSITION`,
+/// whose fourth component is `1/W` taken as is (`docs/gallium/tgsi.rst:3705-3711`).
+const VTE_WINDOW_SPACE: u32 = 0x300;
+
+/// The space a draw's positions are in, from `PA_CL_VTE_CNTL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionSpace {
+    /// Clip space, mapped through the viewport transform: the x/y terms are on, or the stream
+    /// never wrote the register.
+    Clip,
+    /// Window space, in radeonsi's form (D731).
+    Window,
+    /// The x/y terms off in some other form, with the value that asked for it.
+    Unmodelled(u32),
+}
+
+/// The space the positions of a draw are in, reading each register's value through `last` - a
+/// [`RegisterSweep::latest`] for a caller walking draws in order.
+pub fn position_space(mut last: impl FnMut(u32) -> Option<u32>) -> PositionSpace {
+    match last(PA_CL_VTE_CNTL) {
+        Some(value) if value & VTE_XY_ENABLES != VTE_XY_ENABLES => {
+            if value & VTE_FIELDS == VTE_WINDOW_SPACE {
+                PositionSpace::Window
+            } else {
+                PositionSpace::Unmodelled(value)
+            }
+        }
+        _ => PositionSpace::Clip,
+    }
+}
+
 /// [`viewport_transform_at`], reading each register's value through `last` - a
 /// [`RegisterSweep::latest`] for a caller walking draws in order.
 pub fn viewport_transform_from(
@@ -1436,11 +1593,33 @@ pub fn viewport_transform_from(
     if last(PA_CL_VTE_CNTL).is_some_and(|value| value & VTE_XY_ENABLES != VTE_XY_ENABLES) {
         return None;
     }
+    let vte = last(PA_CL_VTE_CNTL);
+    // A z term is applied when its enable is set, or when the stream never wrote the control
+    // register, as the x/y terms are. A z register the stream never wrote leaves that term as it
+    // was before the mapping was modelled: z taken unchanged.
+    let enabled = |bit: u32| vte.is_none_or(|value| value & bit != 0);
+    let z_scale = if enabled(VTE_Z_SCALE_ENA) {
+        last(PA_CL_VPORT_ZSCALE).map_or(1.0, f32::from_bits)
+    } else {
+        1.0
+    };
+    let z_offset = if enabled(VTE_Z_OFFSET_ENA) {
+        last(PA_CL_VPORT_ZSCALE + 1).map_or(0.0, f32::from_bits)
+    } else {
+        0.0
+    };
+    let negative_one_to_one =
+        last(PA_CL_CLIP_CNTL).is_some_and(|value| value & DX_CLIP_SPACE_DEF == 0);
     Some(ViewportTransform {
         x_scale: f32::from_bits(last(PA_CL_VPORT_XSCALE)?),
         x_offset: f32::from_bits(last(PA_CL_VPORT_XSCALE + 1)?),
         y_scale: f32::from_bits(last(PA_CL_VPORT_XSCALE + 2)?),
         y_offset: f32::from_bits(last(PA_CL_VPORT_XSCALE + 3)?),
+        depth: DepthMapping {
+            negative_one_to_one,
+            z_scale,
+            z_offset,
+        },
     })
 }
 
@@ -1522,16 +1701,37 @@ pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetF
     Some(decode_colour_target_format(value))
 }
 
-/// How many distinct colour target zero base addresses a stream wrote. A submission whose draws are
-/// carried out together and written back as one frame must have drawn into one target, so more
-/// than one is a refusal.
+/// How many distinct colour target zero base addresses a stream's draws drew into, counting the
+/// base left in force after them - the one a frame is written back to. `draws` are the draw
+/// packets' byte offsets. A submission whose draws are carried out together and written back as one
+/// frame must have drawn into one target, so more than one is a refusal; a base overwritten before
+/// any draw used it is not a target.
 #[must_use]
-pub fn colour_target_bases_in(writes: &[RegisterWrite]) -> usize {
-    let mut bases: Vec<u32> = writes
+pub fn colour_target_bases_in(writes: &[RegisterWrite], draws: &[u32]) -> usize {
+    // One sweep over the base writes and the draws, each in offset order: the base in force at a
+    // draw is the last write before it. A stream holds thousands of writes and hundreds of draws,
+    // so asking per draw is what a profile of a menu frame found (9% of the guest thread).
+    let mut bases_written: Vec<(u32, u32)> = writes
         .iter()
         .filter(|write| write.register == CB_COLOR0_BASE)
-        .map(|write| write.value)
+        .map(|write| (write.packet_offset, write.value))
         .collect();
+    let left_in_force = bases_written.last().map(|&(_, value)| value);
+    bases_written.sort_by_key(|&(offset, _)| offset);
+    let mut draws = draws.to_vec();
+    draws.sort_unstable();
+    let mut bases: Vec<u32> = left_in_force.into_iter().collect();
+    let mut next = 0;
+    let mut in_force = None;
+    for draw in draws {
+        while let Some(&(offset, value)) = bases_written.get(next)
+            && offset < draw
+        {
+            in_force = Some(value);
+            next += 1;
+        }
+        bases.extend(in_force);
+    }
     bases.sort_unstable();
     bases.dedup();
     bases.len()
@@ -1680,6 +1880,105 @@ pub struct ImageDescriptor {
     pub tiling: SwizzleMode,
 }
 
+/// How a texture coordinate outside `[0, 1]` is brought back: `SQ_IMG_SAMP_WORD0.CLAMP_X/Y`
+/// (`gfx10-rsrc.json:462-463`), values as radeonsi's `si_tex_wrap` writes them and the SDK's GL
+/// layer uses on hardware (oops-sdk `gl_state.c:gl_hw_wrap`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureWrap {
+    /// `SQ_TEX_WRAP` (0): repeat.
+    Repeat,
+    /// `SQ_TEX_MIRROR` (1): mirrored repeat.
+    Mirror,
+    /// `SQ_TEX_CLAMP_LAST_TEXEL` (2): clamp to the edge texel.
+    ClampToEdge,
+}
+
+/// A texture filter: `SQ_IMG_SAMP_WORD2.XY_MAG_FILTER` / `XY_MIN_FILTER` (`gfx10-rsrc.json:490-491`),
+/// 0 point and 1 bilinear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureFilter {
+    /// Point sampling.
+    Nearest,
+    /// Bilinear.
+    Linear,
+}
+
+/// Between mip levels: `SQ_IMG_SAMP_WORD2.MIP_FILTER` (`gfx10-rsrc.json:493`), 0 none, 1 point, 2
+/// linear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MipFilter {
+    /// The base level only.
+    None,
+    /// The nearest level.
+    Nearest,
+    /// Between the two nearest levels.
+    Linear,
+}
+
+/// How a texture is sampled, from its sampler descriptor (an S#).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureSampling {
+    /// The wrap across and down.
+    pub wrap: [TextureWrap; 2],
+    /// Magnifying.
+    pub magnify: TextureFilter,
+    /// Minifying.
+    pub minify: TextureFilter,
+    /// Between levels.
+    pub mip: MipFilter,
+}
+
+impl TextureSampling {
+    /// Point sampling clamped to the edge: what a texture no sampler names is read with, such as
+    /// one only fetched by index.
+    pub const CLAMPED_POINT: Self = Self {
+        wrap: [TextureWrap::ClampToEdge; 2],
+        magnify: TextureFilter::Nearest,
+        minify: TextureFilter::Nearest,
+        mip: MipFilter::Nearest,
+    };
+}
+
+impl Default for TextureSampling {
+    /// [`Self::CLAMPED_POINT`].
+    fn default() -> Self {
+        Self::CLAMPED_POINT
+    }
+}
+
+/// Decodes a sampler descriptor's four words into how it samples, or names the field it cannot
+/// honour exactly: a border or half-border clamp (which needs the border colour), a mirror-once
+/// mode, an anisotropic filter, or a reserved value. Only the wrap across and down and the three
+/// filters are read; a 2D texture has no third coordinate.
+pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
+    let wrap = |value: u32| match value {
+        0 => Ok(TextureWrap::Repeat),
+        1 => Ok(TextureWrap::Mirror),
+        2 => Ok(TextureWrap::ClampToEdge),
+        _ => Err(concat!(
+            "the sampler clamps to a border or mirrors once, which needs its border colour ",
+            "or a mode with no exact host form"
+        )),
+    };
+    let filter = |value: u32| match value {
+        0 => Ok(TextureFilter::Nearest),
+        1 => Ok(TextureFilter::Linear),
+        _ => Err("the sampler filters anisotropically, which is not reproduced"),
+    };
+    let mip = match (words[2] >> 26) & 0x3 {
+        0 => MipFilter::None,
+        1 => MipFilter::Nearest,
+        2 => MipFilter::Linear,
+        _ => return Err("the sampler's mip filter is a reserved value"),
+    };
+    Ok(TextureSampling {
+        wrap: [wrap(words[0] & 0x7)?, wrap((words[0] >> 3) & 0x7)?],
+        magnify: filter((words[2] >> 20) & 0x3)?,
+        minify: filter((words[2] >> 22) & 0x3)?,
+        mip,
+    })
+}
+
 /// A scissor rectangle - the region a guest restricts rasterisation to - decoded from the
 /// `GENERIC_SCISSOR` top-left and bottom-right register pair.
 ///
@@ -1725,6 +2024,17 @@ pub fn decode_scissor(top_left: u32, bottom_right: u32) -> Scissor {
     }
 }
 
+/// The scissor from `latest`, the value each register holds at some point in a stream, or
+/// [`None`] when only one corner or neither is set: the missing corner is not guessed (D010). What
+/// a draw is restricted to is the scissor in force at it.
+#[must_use]
+pub fn scissor_from(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<Scissor> {
+    Some(decode_scissor(
+        latest(PA_SC_GENERIC_SCISSOR_TL)?,
+        latest(PA_SC_GENERIC_SCISSOR_BR)?,
+    ))
+}
+
 /// The scissor from the live `GENERIC_SCISSOR` writes, or [`None`] when the stream set only one
 /// corner or neither: the missing corner is not guessed (D010). The most recent write to each wins.
 #[must_use]
@@ -1768,6 +2078,54 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 
 #[cfg(test)]
 mod tests {
+
+    /// Sampler words as the SDK's GL layer writes them (`gl_state.c`: `cx | cy << 3` in word 0,
+    /// `mag << 20 | min << 22 | mip << 26` in word 2) decode to the wrap and filters asked for; a
+    /// border clamp and an anisotropic filter are refused rather than approximated.
+    #[test]
+    fn a_sampler_descriptor_decodes_to_its_wrap_and_filters() {
+        use super::{MipFilter, TextureFilter, TextureWrap, decode_sampler_descriptor};
+        let words = |cx: u32, cy: u32, mag: u32, min: u32, mip: u32| {
+            [
+                cx | (cy << 3),
+                0,
+                (mag << 20) | (min << 22) | (mip << 26),
+                0,
+            ]
+        };
+        let repeat_linear = decode_sampler_descriptor(words(0, 1, 1, 1, 2)).expect("decodes");
+        assert_eq!(
+            repeat_linear.wrap,
+            [TextureWrap::Repeat, TextureWrap::Mirror]
+        );
+        assert_eq!(
+            (
+                repeat_linear.magnify,
+                repeat_linear.minify,
+                repeat_linear.mip
+            ),
+            (
+                TextureFilter::Linear,
+                TextureFilter::Linear,
+                MipFilter::Linear
+            )
+        );
+        let clamped = decode_sampler_descriptor(words(2, 2, 0, 0, 0)).expect("decodes");
+        assert_eq!(clamped.wrap, [TextureWrap::ClampToEdge; 2]);
+        assert_eq!(clamped.mip, MipFilter::None);
+        assert!(
+            decode_sampler_descriptor(words(6, 0, 0, 0, 0)).is_err(),
+            "border"
+        );
+        assert!(
+            decode_sampler_descriptor(words(0, 4, 0, 0, 0)).is_err(),
+            "half border"
+        );
+        assert!(
+            decode_sampler_descriptor(words(0, 0, 2, 0, 0)).is_err(),
+            "aniso"
+        );
+    }
 
     /// The sweep answers what the whole stream would, forwards, backwards and past the table.
     #[test]
@@ -2032,6 +2390,66 @@ mod tests {
     /// GL context's 1080p transform has a negative y scale, and a draw before the writes, or after
     /// a `VTE_CNTL` disabling the x/y terms, has none.
     #[test]
+    fn a_gl_context_s_depth_is_clipped_to_minus_w_and_mapped_by_its_depth_range() {
+        use super::{DepthMapping, RegisterWrite, viewport_transform_at};
+        let at = |register, value: u32| RegisterWrite {
+            packet_offset: 8,
+            register,
+            value,
+        };
+        let xy = [
+            at(0xA10F, 960f32.to_bits()),
+            at(0xA110, 960f32.to_bits()),
+            at(0xA111, (-540f32).to_bits()),
+            at(0xA112, 540f32.to_bits()),
+        ];
+        // What the GL context writes for glDepthRange(0, 1): VTE_CNTL 0x43f, ZSCALE and ZOFFSET a
+        // half, PA_CL_CLIP_CNTL zero.
+        let mut writes = xy.to_vec();
+        writes.extend([
+            at(0xA206, 0x43F),
+            at(0xA113, 0.5f32.to_bits()),
+            at(0xA114, 0.5f32.to_bits()),
+            at(0xA204, 0),
+        ]);
+        let depth = |writes: &[RegisterWrite]| {
+            viewport_transform_at(writes, 100)
+                .expect("the x/y terms were written")
+                .depth
+        };
+        assert_eq!(
+            depth(&writes),
+            DepthMapping {
+                negative_one_to_one: true,
+                z_scale: 0.5,
+                z_offset: 0.5,
+            }
+        );
+        writes.push(RegisterWrite {
+            packet_offset: 9,
+            ..at(0xA204, 1 << 19)
+        });
+        assert!(
+            !depth(&writes).negative_one_to_one,
+            "DX_CLIP_SPACE_DEF set clips to 0..w"
+        );
+        writes.push(RegisterWrite {
+            packet_offset: 10,
+            ..at(0xA206, 0x40F)
+        });
+        assert_eq!(
+            (depth(&writes).z_scale, depth(&writes).z_offset),
+            (1.0, 0.0),
+            "the z terms off take z unchanged"
+        );
+        assert_eq!(
+            depth(&xy),
+            DepthMapping::IDENTITY,
+            "a stream that set none of it keeps the identity"
+        );
+    }
+
+    #[test]
     fn the_viewport_transform_is_read_with_its_sign() {
         use super::{RegisterWrite, viewport_transform_at};
         let at = |register, value: f32, packet_offset| RegisterWrite {
@@ -2066,6 +2484,38 @@ mod tests {
             value: 0x430, // VTE_CNTL with the x/y enables clear
         });
         assert!(viewport_transform_at(&writes, 100).is_none());
+    }
+
+    /// A draw's positions are clip space unless `PA_CL_VTE_CNTL` turns the x/y terms off; with
+    /// every scale and offset off and x, y and z pre-divided - the value radeonsi gives a
+    /// window-space shader (`si_state_shaders.cpp:1321-1322`) - they are window space (D731); any
+    /// other value with the x/y terms off is named as unmodelled.
+    #[test]
+    fn a_draw_s_position_space_is_read_from_vte_cntl() {
+        use super::{PositionSpace, position_space};
+        let with = |value: Option<u32>| position_space(|_| value);
+        assert_eq!(with(None), PositionSpace::Clip, "nothing written");
+        assert_eq!(
+            with(Some(0x43F)),
+            PositionSpace::Clip,
+            "radeonsi's clip-space value"
+        );
+        assert_eq!(with(Some(0x300)), PositionSpace::Window);
+        assert_eq!(
+            with(Some(0x700)),
+            PositionSpace::Unmodelled(0x700),
+            "W0 not 1/W"
+        );
+        assert_eq!(
+            with(Some(0x310)),
+            PositionSpace::Unmodelled(0x310),
+            "a z scale"
+        );
+        assert_eq!(
+            with(Some(0x430)),
+            PositionSpace::Unmodelled(0x430),
+            "not pre-divided"
+        );
     }
 
     /// The vertex program is read from `PGM_LO/HI_ES`, not `PGM_LO/HI_VS`: on this generation the
@@ -2482,6 +2932,7 @@ mod tests {
                 base: 0x2_000e_0000,
                 width: 64,
                 height: 64,
+                pipe_bank_xor: 0,
             })
         );
         // A base with no extent cannot be sized; an extent with no base cannot be placed. Both
@@ -2494,6 +2945,85 @@ mod tests {
             colour_target_at(&[write(0xA3B0, 0x000f_c03f)]).is_none(),
             "no base"
         );
+    }
+
+    /// A `64KB_R_X` target's base register carries its pipe-bank XOR in the low byte
+    /// (`ac_descriptors.c:1477-1481`): Craft's third texture writes `0x040286c0`, whose surface
+    /// starts at the 64 KiB block `0x4_0286_0000` with XOR `0xc0`. A linear target's low byte is
+    /// address.
+    #[test]
+    fn a_tiled_target_s_base_splits_into_its_block_and_its_pipe_bank_xor() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let tiled = [
+            write(0xA318, 0x0402_86c0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_at(&tiled),
+            Some(ColourTarget {
+                base: 0x4_0286_0000,
+                width: 256,
+                height: 256,
+                pipe_bank_xor: 0xc0,
+            })
+        );
+        let linear = [
+            write(0xA318, 0x0402_86c0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0),
+        ];
+        assert_eq!(
+            colour_target_at(&linear).map(|t| (t.base, t.pipe_bank_xor)),
+            Some((0x4_0286_c000, 0))
+        );
+    }
+
+    /// Craft's fourth texture target, as its stream writes it: DCC enabled, pipe-aligned keys at
+    /// `0x4_028a_0000`, one level of one 2D slice. Without `DCC_ENABLE` there is none; a mip chain
+    /// or a view of one level is not single-level.
+    #[test]
+    fn a_dcc_target_decodes_its_keys_and_its_shape() {
+        use super::{ColourTargetDcc, colour_target_dcc_at};
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let craft = vec![
+            write(0xA318, 0x0402_86c0),
+            write(0xA31B, 0),
+            write(0xA31C, 0x1002_8028),
+            write(0xA31D, 0),
+            write(0xA325, 0x0402_8a00),
+            write(0xA3A8, 0),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_dcc_at(&craft),
+            Some(ColourTargetDcc {
+                dcc: crate::dcc::Dcc {
+                    base: 0x4_028a_0000,
+                    pipe_aligned: true,
+                },
+                single_level: true,
+                single_sample: true,
+            })
+        );
+        let mut plain = craft.clone();
+        plain.push(write(0xA31C, 0x0002_8028));
+        assert_eq!(colour_target_dcc_at(&plain), None);
+        let mut chain = craft.clone();
+        chain.push(write(0xA3B0, 0x303f_c0ff));
+        assert!(!colour_target_dcc_at(&chain).expect("dcc").single_level);
+        let mut view = craft;
+        view.push(write(0xA31B, 1 << 26));
+        assert!(!colour_target_dcc_at(&view).expect("dcc").single_level);
     }
 
     #[test]
@@ -2526,6 +3056,35 @@ mod tests {
         assert!(mask.writes_target(1));
         assert!(!mask.writes_target(2), "MRT2 is disabled");
         assert_eq!(mask.active_targets(), 2);
+    }
+
+    /// The bases counted are the ones draws drew into, and the one left in force: a base
+    /// overwritten before any draw drew into it is not a target, and a stream whose draws share
+    /// one base and leave it in force has one. A different base in force after the last draw is a
+    /// second, since what is read back is the base left in force.
+    #[test]
+    fn colour_target_bases_are_the_ones_draws_drew_into_and_the_one_left() {
+        use super::{CB_COLOR0_BASE, RegisterWrite, colour_target_bases_in};
+        let base = |packet_offset, value| RegisterWrite {
+            packet_offset,
+            register: CB_COLOR0_BASE,
+            value,
+        };
+        let writes = [base(0, 0x100), base(8, 0x200), base(40, 0x200)];
+        assert_eq!(colour_target_bases_in(&writes, &[16, 32]), 1);
+        assert_eq!(
+            colour_target_bases_in(&writes, &[4, 32]),
+            2,
+            "the first draw drew into 0x100"
+        );
+        let after = [base(8, 0x200), base(40, 0x300)];
+        assert_eq!(colour_target_bases_in(&after, &[16]), 2);
+        assert_eq!(
+            colour_target_bases_in(&after, &[]),
+            1,
+            "no draw: the one left"
+        );
+        assert_eq!(colour_target_bases_in(&[], &[16]), 0);
     }
 
     #[test]

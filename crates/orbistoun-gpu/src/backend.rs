@@ -145,6 +145,20 @@ pub enum RenderCommand {
         width: u32,
         /// Height in texels.
         height: u32,
+        /// How the draws sample it, from the sampler descriptor the pixel shader names.
+        sampling: crate::registers::TextureSampling,
+    },
+    /// The buffers the draws that follow read through at one stage, in the slots its module
+    /// numbered them (D733).
+    ///
+    /// Each is the guest's bytes over the range the draw's descriptor or base names, read when the
+    /// draw was prepared. Emitted before a draw whenever a stage's buffers changed; a stage with
+    /// none is sent as an empty list.
+    BindDrawBuffers {
+        /// The stage whose module reads them.
+        stage: ShaderStage,
+        /// Each slot's buffer.
+        buffers: Vec<DrawBuffer>,
     },
     /// Clear a colour target.
     ClearColour {
@@ -186,6 +200,16 @@ pub enum RenderCommand {
         /// Value the guest associated with this point.
         label: u64,
     },
+}
+
+/// One buffer a draw reads through (D733): the guest's bytes from where its descriptor or base
+/// starts, as many as the draw may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrawBuffer {
+    /// The bytes, shared so a buffer bound for many draws is read and held once.
+    pub bytes: std::sync::Arc<[u8]>,
+    /// [`crate::content_hash`] of the bytes, taken once as they were read.
+    pub hash: u64,
 }
 
 /// Why a backend could not carry out what it was given.

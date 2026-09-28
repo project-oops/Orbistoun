@@ -176,6 +176,9 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // not (D714), since the guest's own scanout is what is honoured. A frame due in the window
     // comes with a device copy of its own.
     let drawn_into = orbistoun_gpu::agc_driver::pending_frame_base();
+    if drawn_into.is_some() {
+        keep_every_nth_frame();
+    }
     let (written, shown) = orbistoun_gpu::agc_driver::write_back_at_this_flip_showing(due);
     if !written {
         tracing::warn!("a drawn frame could not be written back at the flip");
@@ -389,6 +392,7 @@ fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Even
         &tiled,
         width,
         height,
+        0,
         scanout_rgba,
     );
     let bytes = zerocopy::IntoBytes::as_bytes(linear.as_slice());
@@ -677,6 +681,32 @@ pub fn discard_snapshot(id: u64) {
     });
 }
 
+/// Keeps the frame drawn before every Nth flip, when `ORBISTOUN_FRAME_EVERY` asks.
+fn keep_every_nth_frame() {
+    static EVERY: OnceLock<Option<u64>> = OnceLock::new();
+    static FLIPS: AtomicU64 = AtomicU64::new(0);
+    let Some(every) = *EVERY.get_or_init(|| {
+        orbistoun_env::FRAME_EVERY
+            .get()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|&n| n > 0)
+    }) else {
+        return;
+    };
+    let flip = FLIPS.fetch_add(1, Ordering::Relaxed);
+    if flip % every != 0 {
+        return;
+    }
+    if let (Some((width, height, bytes)), Some(dir)) = (executed_frame(), frames_dir())
+        && let Err(e) = std::fs::write(
+            dir.join(format!("flip-{flip:06}-{width}x{height}.rgba")),
+            bytes,
+        )
+    {
+        tracing::warn!("a kept frame could not be written: {e}");
+    }
+}
+
 /// Keeps a written-back frame on disk, at most once a second, for whoever reads it after the run.
 fn keep_latest_frame(frame: &Pixels) {
     // Raw `Rgba8` at the target's extent, so a run that ends mid-frame still leaves the last
@@ -728,6 +758,26 @@ fn write_failed_submission(submission: &Submission) {
 
 /// Writes `submission` under `name`: `failed` for a drive the device refused, `last` for the
 /// run's last submission, which is where a wrong picture is read from.
+/// A stage's draw buffers in a listing: each slot's length and first words, not its bytes.
+fn draw_buffers_line(
+    stage: orbistoun_gpu::ShaderStage,
+    buffers: &[orbistoun_gpu::DrawBuffer],
+) -> String {
+    let slots: Vec<String> = buffers
+        .iter()
+        .map(|buffer| {
+            let first: Vec<String> = buffer
+                .bytes
+                .chunks_exact(4)
+                .take(4)
+                .map(|w| format!("{:#010x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]])))
+                .collect();
+            format!("{} bytes [{}]", buffer.bytes.len(), first.join(" "))
+        })
+        .collect();
+    format!("BindDrawBuffers {{ {stage:?}: {} }}", slots.join(", "))
+}
+
 fn write_submission(submission: &Submission, name: &str) {
     let Some(dir) = frames_dir() else {
         return;
@@ -741,6 +791,9 @@ fn write_submission(submission: &Submission, name: &str) {
                 height,
                 ..
             } => format!("BindTexture {{ slot {slot}, {width}x{height} }}"),
+            orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
+                draw_buffers_line(*stage, buffers)
+            }
             other => format!("{other:x?}"),
         };
         let _ = writeln!(text, "{index:5}  {shown}");
@@ -951,6 +1004,9 @@ fn command_summary(commands: &[orbistoun_gpu::RenderCommand]) -> Vec<String> {
                     texels.last().copied().unwrap_or_default()
                 )
             }
+            orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
+                draw_buffers_line(*stage, buffers)
+            }
             other => format!("{other:?}"),
         };
         lines.push(if count == 1 {
@@ -986,9 +1042,6 @@ fn log_execution() {
         Some(orbistoun_gpu::cp::Stopped::NeedsGpu { offset, opcode }) => format!(
             "stopped at byte {offset:#x}: opcode {opcode:#04x} needs the GPU, so nothing after it retired"
         ),
-        Some(orbistoun_gpu::cp::Stopped::DrawsInterleaved { offset, opcode }) => format!(
-            "stopped at its first draw: opcode {opcode:#04x} at byte {offset:#x} sits between its draws, so they could not run as one"
-        ),
         Some(other) => format!("stopped: {other:?}"),
     };
     let held = if record.held_back == 0 {
@@ -1001,6 +1054,9 @@ fn log_execution() {
     };
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
+    }
+    if let Some(why) = orbistoun_gpu::agc_driver::last_draw_refusal() {
+        tracing::info!("a draw segment was not carried out - {why}");
     }
     tracing::info!(
         "the command processor carried out {} of {} submission(s) to completion, {} with their draws ({} bytes written); the last {last}{held}",

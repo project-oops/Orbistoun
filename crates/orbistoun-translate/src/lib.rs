@@ -12,6 +12,7 @@
 pub mod blocks;
 mod buffer;
 pub mod control;
+pub mod draw_buffers;
 pub mod model;
 pub mod modifiers;
 pub mod predicated;
@@ -182,6 +183,27 @@ pub enum TranslateError {
         /// What specifically was not handled.
         detail: &'static str,
     },
+
+    /// An instruction the decoder named and this translator has no translation for.
+    ///
+    /// The mnemonic is carried so a report names the instruction a shader needs, not only where
+    /// it sits.
+    #[error("instruction at {offset:#x} ({mnemonic}) cannot be translated: {detail}")]
+    NotTranslated {
+        /// Byte offset within the shader.
+        offset: u32,
+        /// The instruction's name, as the encoding table gives it.
+        mnemonic: String,
+        /// Why: [`model::NO_TRANSLATION`].
+        detail: &'static str,
+    },
+
+    /// A primitive shader reads the geometry engine's inputs before writing them, and the
+    /// translation was not given the draw's geometry to seed them with (D730).
+    #[error(
+        "the primitive shader reads the geometry engine's inputs - its system SGPRs (gs_tg_info, merged_wave_info) or its input VGPRs (vertex offsets, vertex id) - before writing them, and no draw's geometry is given to seed them"
+    )]
+    ReadsGeometryInputs,
 
     /// An instruction with no known operand layout was reached.
     #[error(
@@ -400,6 +422,17 @@ pub fn translate_windowed_primitive(
     )
 }
 
+/// The modifier marker an instruction's first source selects - SDWA or DPP - when it has one.
+fn modifier_of(
+    instruction: &orbistoun_shader::Instruction,
+    encodings: &EncodingTable,
+) -> Option<u32> {
+    let family = encodings
+        .encodings()
+        .get(usize::from(instruction.encoding?))?;
+    family.modifier_selected(&[instruction.word])
+}
+
 /// Why a module was built at the slowest fidelity, when that was not what was asked for: a
 /// graphics stage, a guest dispatch, or a shader that touches a lane mask.
 fn fidelity_warnings(
@@ -484,6 +517,18 @@ pub fn translate_with_user_data(
         if !instruction.operands_decoded {
             return Err(TranslateError::OperandsUnknown {
                 offset: instruction.offset,
+            });
+        }
+        if let Some(marker) = modifier_of(instruction, encodings)
+            && !model::sdwa_translated(marker, instruction, encodings)
+        {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "the instruction carries an SDWA or DPP modifier word, which selects parts ",
+                    "of its operands or other lanes' values; only SDWA on the integer ",
+                    "instructions `model::SDWA_INTEGER` names is translated"
+                ),
             });
         }
     }
@@ -575,6 +620,9 @@ mod tests {
                     dx10_clamp: None,
                     pixel_inputs: None,
                     compute: None,
+                    geometry: None,
+                    window_space: false,
+                    draw_buffers: false,
                 },
             )
         };
@@ -827,6 +875,120 @@ mod tests {
             translate(&decoded, &table, Strategy::default()),
             Err(TranslateError::UntrustworthyDecode { .. })
         ));
+    }
+
+    /// A primitive shader that reads the geometry engine's inputs - its system SGPRs s0-s7 or its
+    /// input VGPRs v0-v8 (`si_shader_args.c:304-371`) - before writing them is refused by name:
+    /// nothing seeds them, so it would read zero where the hardware hands it its vertex and
+    /// primitive counts. The same register written first reads what was written.
+    #[test]
+    fn a_primitive_shader_reading_unseeded_geometry_inputs_is_refused() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        const END: u32 = 0xBF81_0000;
+        let (table, operands) = tables();
+        let mesh = |words: &[u32]| {
+            let decoded = decode(&stream(words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Mesh, MeshPrimitive::default()),
+                Window::default(),
+                UserData::default(),
+            )
+        };
+        // s_and_b32 s0, s3, s3: radeonsi's first look at merged_wave_info.
+        let scalar_input = mesh(&[0x8700_0303, END]).expect_err("refused").to_string();
+        assert!(scalar_input.contains("geometry engine"), "{scalar_input}");
+        // v_mov_b32 v1, v5: the vertex id.
+        let vertex_id = mesh(&[0x7E02_0305, END]).expect_err("refused").to_string();
+        assert!(vertex_id.contains("geometry engine"), "{vertex_id}");
+        // s_mov_b32 s3, 1 then s_and_b32 s0, s3, s3: written first.
+        assert!(mesh(&[0xBE83_0381, 0x8700_0303, END]).is_ok());
+        // v_mov_b32 v12, v20: not a geometry input.
+        assert!(mesh(&[0x7E18_0314, END]).is_ok());
+    }
+
+    /// A descriptor loaded through an address the program formed is found where it was formed:
+    /// radeonsi's blit pixel shader moves user-data word 3 into `s0` and the constant 4 into `s1`,
+    /// then loads its image descriptor from `s[0:1] + 0x400`. A pair holding anything else - here
+    /// a sum - is refused where it is sampled, not read as the table at words 0 and 1.
+    #[test]
+    fn a_descriptor_table_is_found_where_the_program_formed_its_address() {
+        use crate::wavefront::{MeshPrimitive, Stage, TableBase, TableWord, UserData};
+        let (table, operands) = tables();
+        let fragment = |words: &[u32]| {
+            let decoded = decode(&stream(words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    count: 4,
+                    ..UserData::default()
+                },
+            )
+        };
+        let load_and_fetch = [
+            // s_load_dwordx8 s[8:15], s[0:1], 0x400
+            0xf40c_0200,
+            0xfa00_0400,
+            0xbf8c_c07f,
+            // image_load_mip v[0:3], v[2:4], s[8:15] dmask:0xf dim:2D unorm
+            0xf004_1f08,
+            0x0002_0002,
+            // exp mrt0 v0, v1, v2, v3 done vm
+            0xf800_180f,
+            0x0302_0100,
+            0xbf81_0000,
+        ];
+        let mut words = vec![0xbe80_0303, 0xbe81_0384];
+        words.extend(load_and_fetch);
+        let translated = fragment(&words).expect("translates");
+        assert_eq!(
+            translated
+                .textures
+                .first()
+                .map(|t| (t.table_offset, t.table)),
+            Some((
+                Some(0x400),
+                TableBase {
+                    low: TableWord::UserData(3),
+                    high: TableWord::Constant(4),
+                }
+            ))
+        );
+        // s_add_i32 s0, s3, s2 in place of the move.
+        let mut words = vec![0x8100_0203, 0xbe81_0384];
+        words.extend(load_and_fetch);
+        let refused = fragment(&words).expect_err("refused").to_string();
+        assert!(refused.contains("not traced"), "{refused}");
+    }
+
+    /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an
+    /// instruction whose SDWA form is translated: a DPP16 `v_mov_b32` and an SDWA `v_mul_f32` are
+    /// refused, radeonsi's `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1` is not.
+    #[test]
+    fn a_modifier_word_is_refused_by_name_unless_its_sdwa_form_is_translated() {
+        let (table, operands) = tables();
+        for words in [[0x7e00_02fa, 0x0000_00ff], [0x1000_00f9, 0x0006_0600]] {
+            let decoded = decode(&stream(&words), &table, &operands);
+            assert!(decoded.is_trustworthy());
+            let refused = translate(&decoded, &table, Strategy::default())
+                .expect_err("refused")
+                .to_string();
+            assert!(refused.contains("SDWA or DPP"), "{refused}");
+        }
+        let decoded = decode(&stream(&[0x3404_00f9, 0x0586_068a]), &table, &operands);
+        assert!(translate(&decoded, &table, Strategy::default()).is_ok());
     }
 
     /// An instruction with no operand layout is refused.

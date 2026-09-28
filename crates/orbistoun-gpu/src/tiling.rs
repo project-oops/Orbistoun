@@ -87,6 +87,7 @@ pub fn detile_surface_64kb_rx_bpp4(
         tiled,
         width,
         height,
+        0,
         |w| w,
     ))
 }
@@ -108,8 +109,18 @@ fn swizzle_tables() -> &'static ([usize; 128], [usize; 128]) {
 /// Words in one 64 KiB block.
 const BLOCK_WORDS: usize = BLOCK_BYTES / 4;
 
-/// [`detile_surface_64kb_rx_bpp4`], passing each texel through `map` (a component swap) in the same
-/// pass, and assuming `tiled` covers the surface.
+/// A surface's pipe-bank XOR as a word offset within its block. The XOR applies at the 256-byte
+/// pipe interleave, `blkOffset ^ (pipeBankXor << m_pipeInterleaveLog2)` in addrlib
+/// (`gfx10addrlib.cpp:4786-4849`), so it permutes 256-byte runs within a block and never moves a
+/// texel out of one. radeonsi carries it in the low byte of the surface's 256-byte base
+/// (`ac_descriptors.c:1477-1481`, `cb_color_base |= tile_swizzle`).
+const fn xor_words(pipe_bank_xor: u8) -> usize {
+    (pipe_bank_xor as usize) << 6
+}
+
+/// [`detile_surface_64kb_rx_bpp4`] for a surface with pipe-bank XOR `pipe_bank_xor` (see
+/// `xor_words`), passing each texel through `map` (a component swap) in the same pass, and
+/// assuming `tiled` covers the surface.
 ///
 /// One thread per row of blocks: each row is a contiguous run of `tiled` and of the linear image,
 /// so the rows convert independently.
@@ -123,9 +134,11 @@ pub fn detile_surface_64kb_rx_bpp4_mapped(
     tiled: &[u32],
     width: u32,
     height: u32,
+    pipe_bank_xor: u8,
     map: impl Fn(u32) -> u32 + Sync,
 ) -> Vec<u32> {
     let (column, row) = swizzle_tables();
+    let xor = xor_words(pipe_bank_xor);
     let (w, extent) = (width as usize, SINGLE_BLOCK_EXTENT as usize);
     let block_row_words = w.div_ceil(extent) * BLOCK_WORDS;
     let mut linear = vec![0u32; w * height as usize];
@@ -135,7 +148,7 @@ pub fn detile_surface_64kb_rx_bpp4_mapped(
             let map = &map;
             scope.spawn(move || {
                 for (dy, out) in rows.chunks_mut(w).enumerate() {
-                    let r = row[dy];
+                    let r = row[dy] ^ xor;
                     for (x, texel) in out.iter_mut().enumerate() {
                         *texel = map(blocks[(x / extent) * BLOCK_WORDS + (column[x % extent] ^ r)]);
                     }
@@ -148,8 +161,15 @@ pub fn detile_surface_64kb_rx_bpp4_mapped(
 
 /// [`tile_surface_64kb_rx_bpp4`], passing each texel through `map`, one thread per row of blocks
 /// as in [`detile_surface_64kb_rx_bpp4_mapped`]. Assumes the sizes the checked form checks.
-fn tile_mapped(linear: &[u32], width: u32, tiled: &mut [u32], map: &(impl Fn(u32) -> u32 + Sync)) {
+fn tile_mapped(
+    linear: &[u32],
+    width: u32,
+    pipe_bank_xor: u8,
+    tiled: &mut [u32],
+    map: &(impl Fn(u32) -> u32 + Sync),
+) {
     let (column, row) = swizzle_tables();
+    let xor = xor_words(pipe_bank_xor);
     let (w, extent) = (width as usize, SINGLE_BLOCK_EXTENT as usize);
     let block_row_words = w.div_ceil(extent) * BLOCK_WORDS;
     std::thread::scope(|scope| {
@@ -159,7 +179,7 @@ fn tile_mapped(linear: &[u32], width: u32, tiled: &mut [u32], map: &(impl Fn(u32
         {
             scope.spawn(move || {
                 for (dy, line) in rows.chunks(w).enumerate() {
-                    let r = row[dy];
+                    let r = row[dy] ^ xor;
                     for (x, &texel) in line.iter().enumerate() {
                         blocks[(x / extent) * BLOCK_WORDS + (column[x % extent] ^ r)] = map(texel);
                     }
@@ -169,8 +189,8 @@ fn tile_mapped(linear: &[u32], width: u32, tiled: &mut [u32], map: &(impl Fn(u32
     });
 }
 
-/// [`tile_surface_64kb_rx_bpp4`], passing each texel through `map` (a component swap) in the same
-/// pass.
+/// [`tile_surface_64kb_rx_bpp4`] for a surface with pipe-bank XOR `pipe_bank_xor` (see
+/// `xor_words`), passing each texel through `map` (a component swap) in the same pass.
 ///
 /// # Errors
 ///
@@ -179,6 +199,7 @@ pub fn tile_surface_64kb_rx_bpp4_mapped(
     linear: &[u32],
     width: u32,
     height: u32,
+    pipe_bank_xor: u8,
     tiled: &mut [u32],
     map: impl Fn(u32) -> u32 + Sync,
 ) -> Result<(), DetileError> {
@@ -190,7 +211,7 @@ pub fn tile_surface_64kb_rx_bpp4_mapped(
             got_words: tiled.len().min(linear.len()),
         });
     }
-    tile_mapped(linear, width, tiled, &map);
+    tile_mapped(linear, width, pipe_bank_xor, tiled, &map);
     Ok(())
 }
 
@@ -208,7 +229,7 @@ pub fn tile_surface_64kb_rx_bpp4(
     height: u32,
     tiled: &mut [u32],
 ) -> Result<(), DetileError> {
-    tile_surface_64kb_rx_bpp4_mapped(linear, width, height, tiled, |w| w)
+    tile_surface_64kb_rx_bpp4_mapped(linear, width, height, 0, tiled, |w| w)
 }
 
 /// The widest surface the single-block swizzle covers, per dimension, at 32 bpp.
@@ -509,6 +530,27 @@ mod tests {
         tiled_byte_offset_64kb_rx_bpp4_surface as at,
     };
     use crate::registers::{ImageDescriptor, RegisterWrite, SwizzleMode};
+
+    /// A pipe-bank XOR moves every texel within its block by the XOR shifted to the 256-byte pipe
+    /// interleave (`gfx10addrlib.cpp:4786-4849`: `blkOffset ^ (pipeBankXor << 8)`), and the two
+    /// directions stay each other's inverse under it.
+    #[test]
+    fn a_pipe_bank_xor_moves_each_texel_within_its_block() {
+        use super::{detile_surface_64kb_rx_bpp4_mapped, tile_surface_64kb_rx_bpp4_mapped};
+        let (width, height) = (256, 130);
+        let linear: Vec<u32> = (0..width * height).collect();
+        let mut tiled = vec![0u32; surface_words_64kb_rx_bpp4(width, height)];
+        tile_surface_64kb_rx_bpp4_mapped(&linear, width, height, 0xc0, &mut tiled, |w| w)
+            .expect("tiles");
+        for (x, y) in [(0, 0), (15, 15), (200, 3), (255, 129), (130, 128)] {
+            let word = (at(x, y, width) ^ (0xc0 << 8)) / 4;
+            assert_eq!(tiled[word], y * width + x, "({x},{y})");
+        }
+        assert_eq!(
+            detile_surface_64kb_rx_bpp4_mapped(&tiled, width, height, 0xc0, |w| w),
+            linear
+        );
+    }
 
     /// Inside the first block, the whole-surface address is the one-block swizzle, for any width.
     #[test]

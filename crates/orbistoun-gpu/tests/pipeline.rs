@@ -235,8 +235,33 @@ fn a_target_size_write_reaches_the_backend_as_set_render_targets() {
     );
 }
 
-/// A stream that sets the generic scissor reaches the backend as a `SetViewport`: the
-/// `GENERIC_SCISSOR` write pair is decoded into the rectangle a draw is restricted to.
+/// Two same-sized colour targets at different addresses are two targets: a double-buffered title
+/// draws alternate frames into each, and the backend keeps each frame on the device until its flip
+/// (D714), so sharing one id handed one buffer's frame to the other (D702's own condition). Bugdom's
+/// menu kept only its last submission's draws from the second frame on.
+#[test]
+fn same_sized_targets_at_different_addresses_are_different_targets() {
+    // SET_CONTEXT_REG (0x69, count 2) writing CB_COLOR0_BASE (offset 0x318) = base >> 8, then the
+    // measured 64x64 CB_COLOR0_ATTRIB2 (offset 0x3b0).
+    let target_of = |base: u64| {
+        let one = (3u32 << 30) | ((2 - 1) << 16) | (0x69 << 8);
+        let words = [one, 0x318, (base >> 8) as u32, one, 0x3b0, 0x000f_c03f];
+        let mut stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        stream.extend(command_stream(SHADER_ADDRESS));
+        let mut pipeline = pipeline();
+        let submission = pipeline.submit(&stream, Queue::Compute, &[], &memory());
+        *submission.targets.keys().next().expect("a sized target")
+    };
+    assert_ne!(target_of(0x40_0000_0000), target_of(0x40_00a0_0000));
+    assert_eq!(
+        target_of(0x40_0000_0000),
+        target_of(0x40_0000_0000),
+        "and stable"
+    );
+}
+
+/// A stream that sets the generic scissor and then draws reaches the backend as a `SetViewport`:
+/// the `GENERIC_SCISSOR` write pair is decoded into the rectangle the draw is restricted to.
 #[test]
 fn a_scissor_write_reaches_the_backend_as_set_viewport() {
     use orbistoun_gpu::Rect;
@@ -247,10 +272,21 @@ fn a_scissor_write_reaches_the_backend_as_set_viewport() {
     // Top-left (x 16, y 8) is 0x0008_0010; bottom-right (x 48, y 56) is 0x0038_0030.
     let top_left = 0x0008_0010;
     let bottom_right = 0x0038_0030;
-    let stream: Vec<u8> = [header, 0x090, top_left, header, 0x091, bottom_right]
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
+    let draw = (3u32 << 30) | ((2 - 1) << 16) | (0x2D << 8); // DRAW_INDEX_AUTO, three vertices
+    let stream: Vec<u8> = [
+        header,
+        0x090,
+        top_left,
+        header,
+        0x091,
+        bottom_right,
+        draw,
+        3,
+        2,
+    ]
+    .iter()
+    .flat_map(|word| word.to_le_bytes())
+    .collect();
 
     let mut pipeline = pipeline();
     let submission = pipeline.submit(&stream, Queue::Draw, &[], &memory());
@@ -310,6 +346,7 @@ fn a_stream_sets_the_pipeline_state_the_submission_carries() {
             base: 0x2_000e_0000,
             width: 64,
             height: 64,
+            pipe_bank_xor: 0,
         }),
         "colour target zero's base and extent reach the submission"
     );

@@ -27,11 +27,12 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 44] {
+pub(crate) fn modules() -> [ModuleDesc; 45] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
         orbistoun_kernel::sync_on_address::MODULE,
+        orbistoun_kernel::fiber::MODULE,
         orbistoun_libc::MODULE,
         orbistoun_posix::MODULE,
         orbistoun_gpu::MODULE,
@@ -106,6 +107,8 @@ pub fn float_implementation_named(name: &str) -> Option<orbistoun_core::GuestFlo
 /// declaration and implementation cannot drift apart silently.
 pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> {
     let mut all = orbistoun_kernel::implementations().to_vec();
+    // User-mode fibers: their own library, switched beside the thread registry (D732).
+    all.extend_from_slice(orbistoun_kernel::fiber::implementations());
     all.extend(orbistoun_libc::implementations());
     all.extend(orbistoun_posix::implementations());
     all.extend_from_slice(orbistoun_video::implementations());
@@ -142,6 +145,12 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     // placeholder a caller reads as failure.
     all.extend_from_slice(orbistoun_systemservice::coredump::implementations());
     all
+}
+
+/// Implementations a stub may call directly, past the call trace (D734), by symbol name. Each is
+/// in [`implementations`] too.
+pub(crate) fn leaves() -> Vec<(&'static str, orbistoun_core::LeafFn)> {
+    orbistoun_kernel::leaves().to_vec()
 }
 
 /// Every implementation that speaks in floating-point registers.
@@ -550,10 +559,6 @@ mod knowledge_tests {
         (
             "libSceRemoteplay",
             "declared as 2 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceSaveData_native",
-            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceWebBrowserDialog",

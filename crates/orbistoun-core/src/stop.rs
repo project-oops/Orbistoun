@@ -21,6 +21,12 @@ pub enum StopReason {
     /// the signal and dies (obSCEne's `030-thread/exception-handler` check). The `code` is the
     /// signal number.
     Signalled,
+    /// The guest reached a state the platform has an answer for that nobody has measured, and no
+    /// honest answer exists to hand back: there is no caller to return a refusal to.
+    ///
+    /// Stopping names the state; carrying on would be inventing what the hardware does. The
+    /// `code` identifies the object involved, and the subsystem logs what the state was.
+    Unmeasured,
 }
 
 impl StopReason {
@@ -30,6 +36,9 @@ impl StopReason {
             Self::Aborted => "the guest called abort",
             Self::Exited => "the guest called exit",
             Self::Signalled => "the guest raised a signal nothing was installed to handle",
+            Self::Unmeasured => {
+                "the guest reached a state whose platform behaviour is unmeasured, with no caller to refuse to"
+            }
         }
     }
 }

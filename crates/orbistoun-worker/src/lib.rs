@@ -532,10 +532,13 @@ fn install_presentation() {
     });
     // Every flip, shown as it is presented.
     orbistoun_video::install_flip_observer(render::present_flip);
+    // Heap memory the guest re-protects, such as a stack guard page carved from its heap.
+    orbistoun_kernel::install_heap_protect(orbistoun_libc::protect_heap_range);
     // Flips a command buffer carries, queued by their builder and carried out at their release
     // (D728).
     orbistoun_gpu::display::install(orbistoun_gpu::display::Display {
         queue_flip: orbistoun_video::queued::queue,
+        wait_label: orbistoun_video::queued::wait_label,
         released: orbistoun_video::queued::released,
     });
     // A launcher's request to start another title, which the front end carries out.
@@ -946,6 +949,20 @@ fn prepare_diagnostics(
         thunks.base(),
         (thunks.total() as u64).saturating_mul(orbistoun_thunk::THUNK_SIZE),
     );
+
+    // After every diagnostic, so an import one names keeps the traced path (D734).
+    link_leaf_imports(thunks);
+}
+
+/// Routes the leaf imports' stubs straight to their implementations (D734), saying how many.
+fn link_leaf_imports(thunks: &orbistoun_thunk::ThunkTable) {
+    match thunks.link_leaves() {
+        Ok(0) => {}
+        Ok(linked) => tracing::info!(
+            "{linked} leaf import(s) call their implementation directly, counted but not traced (D734)"
+        ),
+        Err(e) => tracing::warn!("leaf imports stay on the traced path: {e}"),
+    }
 }
 
 /// Records the conditions this run is under and returns the diagnostics it was asked for.
@@ -1016,6 +1033,7 @@ fn install_guest_region_lookups() {
     orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
     // Where the command processor may write: a fill, a copy, a fence.
     orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
+    orbistoun_gpu::agc_driver::install_queue_lookup(orbistoun_kernel::sync::equeue_exists);
 }
 
 /// Plants the `ORBISTOUN_WRITE` values on every import each clause names.
@@ -3326,6 +3344,14 @@ mod tests {
 
     /// Drives `serve` over in-memory pipes, so the protocol loop is tested with no process
     /// involved.
+    /// Held by every test that drives the process's input capture: a `Run` request stops capture
+    /// when it ends, so one finishing in parallel would cut another test's recording short.
+    fn capture_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn exchange(requests: &[Request]) -> Vec<Event> {
         exchange_noting_hangup(requests).0
     }
@@ -3444,6 +3470,7 @@ mod tests {
     /// told (D721).
     #[test]
     fn input_is_captured_only_when_asked_and_reads_back_as_a_script() {
+        let _capture = capture_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("input").join("capture.toml");
         let mut pressed = orbistoun_input::PadState::default();
@@ -3471,6 +3498,7 @@ mod tests {
     /// A missing guest is a request failure, not a halted run.
     #[test]
     fn a_missing_guest_is_a_request_failure_not_a_halted_run() {
+        let _capture = capture_lock();
         // `Failed` means the request was wrong; `Terminated` means a guest was loaded and then
         // stopped. The two must stay distinguishable.
         let events = exchange(&[Request::Run {
@@ -3540,6 +3568,7 @@ mod tests {
     /// A real container reaches placement and halts with a stated reason.
     #[test]
     fn a_real_container_reaches_placement_and_halts_honestly() {
+        let _capture = capture_lock();
         // A run that stops says so, rather than looking like a guest that ran and did nothing
         // (D010).
         let dir = tempfile::tempdir().expect("tempdir");

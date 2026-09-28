@@ -344,6 +344,14 @@ pub fn take_spans() -> [(u64, u64); SPANS] {
 #[cfg(test)]
 mod tests {
     use super::{Count, Phase, Span};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// The tests that [`super::take`] share its global totals, which a take resets, so they run
+    /// one at a time.
+    fn serial() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// A span is measured only when detail is on, and taking resets it. `Drive` because nothing in
     /// this crate enters it: the counters are global, and a copy test beside this one would count.
@@ -367,6 +375,7 @@ mod tests {
     /// once.
     #[test]
     fn the_first_frame_closes_at_the_first_flip() {
+        let _guard = serial();
         super::add(Phase::Build, std::time::Duration::from_millis(2));
         let _ = super::take();
         let first = super::close_first_frame().expect("the first flip closes it");
@@ -377,6 +386,7 @@ mod tests {
     /// What is added is what is taken, and taking resets it.
     #[test]
     fn a_take_answers_what_was_added_and_starts_again() {
+        let _guard = serial();
         let _ = super::take();
         super::add(Phase::Present, std::time::Duration::from_millis(3));
         super::count(Count::Flips);

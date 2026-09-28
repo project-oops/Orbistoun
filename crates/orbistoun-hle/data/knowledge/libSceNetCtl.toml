@@ -2,16 +2,27 @@ library = "libSceNetCtl"
 
 [[function]]
 name = "sceNetCtlGetInfo"
+arity = 2
+purpose = "Writes one item of the network configuration into a 256-byte buffer: sceNetCtlGetInfo(code, info)."
+returns = "status"
+edge_cases = [
+    "Measured on a wired console (obSCEne -5c1e/-9e41, check 102-net/netctl-info, sweep 20260927-153242): every code 1-20 rewrites all 256 bytes (bytes-written 0x100), whatever it answers. Codes 5-10 answer 0x80412109 with the buffer zeroed. Code 1 holds u32 0, code 2 six hardware-address bytes, code 3 u32 1500, code 4 u32 1, codes 14-18 dotted strings (the address, the netmask, the default route, the primary and secondary DNS server); 11, 12, 13, 19 and 20 answer 0 with nothing in the first 64 bytes.",
+    "orbistoun reports the host adapter holding the host's outward address as that console: its hardware address, MTU, address, netmask, gateway and DNS servers, read from the operating system at each call. The device is always the wired one, so the wireless codes answer as the measured wired console did and a host's Wi-Fi name never reaches a title.",
+    "A code outside 1-20 was never asked about and is refused with the buffer left alone.",
+    "Bytes 64-255 are zero (obSCEne -5f0c, sweep 20260927-185507: codes 2, 3, 14 and 20 dumped whole, tail-nonzero-bytes 0x0). SCOPE of the measurement: the console's answers with its link down were not measured, so a code whose value the host cannot give (no link out, no gateway, fewer than two DNS servers) answers orbistoun's host-failed placeholder rather than a guessed code.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20260926T2140Z-5c1e and REQ-20260927T0002Z-9e41 (sweep 20260927-153242, check 102-net/netctl-info: rc per code 1-20, bytes-written 0x100, code dumps); oops-sdk src/net/netctl.c (the code names, and the zeroed 256-byte query buffer, on hardware)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 122 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceNetCtlInit"
 arity = 0
 purpose = "Starts the network-configuration library."
 returns = "status"
-edge_cases = ["Answers zero: it holds nothing the host network needs, and oops-sdk's netctl.c treats zero as ready."]
+edge_cases = ["Answers zero, twice over (measured: obSCEne -5c1e, 102-net/netctl-info init rc1/rc2 0x0): it holds nothing the host network needs."]
 found_by = "generated"
 known_by = "guest-observed"
 cites = "oops-sdk src/net/netctl.c (oops_net_ctl_init), which runs on hardware"

@@ -84,6 +84,10 @@ v_cmp_gt_f32_e32 vcc, v5, v6
 v_cmp_gt_f32_e32 vcc, v200, v255
 v_cmp_gt_f32_e32 vcc, -1, v88
 v_cmp_gt_f32_e32 vcc, s70, v240
+v_cmp_neq_f32_e32 vcc, v3, v4
+v_cmp_neq_f32_e32 vcc, v255, v150
+v_cmp_neq_f32_e32 vcc, 0.5, v61
+v_cmp_neq_f32_e32 vcc, s99, v222
 
 // ---- v_mbcnt: where a lane learns its own index ---------------------------------
 //

@@ -161,6 +161,19 @@ pub const PROFILE: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// Keep the frame drawn before every Nth flip, so a run can be looked at as a sequence.
+///
+/// A headless run leaves one picture, at its end; whether a menu came up, and whether it drew,
+/// happens in between. Each kept frame is read off the device, which waits for it.
+pub const FRAME_EVERY: Var = Var {
+    name: "ORBISTOUN_FRAME_EVERY",
+    kind: Kind::Diagnostic,
+    summary: "N keeps the frame drawn before every Nth flip in the traces directory, as flip-<n>-<w>x<h>.rgba",
+    example: "30",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
 /// Measure a submission's finer spans and print them once a second.
 ///
 /// The always-on phases say which part of a frame is slow; these say which part of a submission is,
@@ -251,8 +264,8 @@ pub const DUMP: Var = Var {
 
 /// Post a flip completion to every event queue, not only the ones registered for it.
 ///
-/// A title can register a completion on its own queue through `sceAgcDriverAddEqEvent`, which
-/// nothing implements, and then block on that queue. This does not model the registration; it asks
+/// A title can register a completion on its own queue through `sceAgcDriverAddEqEvent`, whose
+/// posts are unmeasured and not made, and then block on that queue. This does not model the posts; it asks
 /// what the guest does next if that wait completed. Off by default, and it intervenes (D227).
 pub const FLIP_TO_ALL: Var = Var {
     name: "ORBISTOUN_FLIP_TO_ALL",
@@ -618,6 +631,7 @@ pub const REGISTRY: &[Var] = &[
     PERF_DETAIL,
     TRACE_SUBMITS,
     PROFILE,
+    FRAME_EVERY,
     LIMIT,
     COMMIT,
     LLM_API_KEY,
@@ -699,6 +713,7 @@ mod tests {
         super::PERF_DETAIL,
         super::TRACE_SUBMITS,
         super::PROFILE,
+        super::FRAME_EVERY,
         super::LIMIT,
         super::COMMIT,
         super::LLM_API_KEY,

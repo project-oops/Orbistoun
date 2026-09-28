@@ -9,24 +9,11 @@ use anyhow::{Context, Result};
 /// Reads the same directory `compat list` does, so a submission carries what the tree carries.
 fn gathered_results(dir: &std::path::Path) -> Result<orbistoun_submit::Results> {
     let mut results = orbistoun_submit::Results::default();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        // Not an error: a machine with no recorded title still has measurements worth sending.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(results),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    // Not an error: a machine with no recorded title still has measurements worth sending.
+    let Some(records) = crate::records::read_all(dir)? else {
+        return Ok(results);
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "toml") {
-            continue;
-        }
-        let Some(title) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let file = orbistoun_overrides::OverrideFile::from_toml(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+    for (title, file) in records {
         if let Some(status) = file.status {
             results.status.insert(title.clone(), status);
         }

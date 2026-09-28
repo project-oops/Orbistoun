@@ -2,9 +2,19 @@ library = "libSceUserService"
 
 [[function]]
 name = "sceUserServiceGetGamePresets"
-found_in = ["PPSA02664-app0"]
+arity = 2
+purpose = "Reads a user's game presets into a record whose first quadword is its size: sceUserServiceGetGamePresets(user, presets)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne -9a3e, sweep 20260927-223648, check 130-layout/user-game-presets): the initial user and a record of size 0x30 answer 0x0, the size kept and the other 40 bytes zeroed; a size of 0 or 0x40, or a null record, 0x80960005; user -1 or 0 0x80960105; nothing is written when refused.",
+    "The zero fields are what a console whose user set no presets reads back; orbistoun presents that user. A user other than the signed-in one answers as -1 and 0 did, and with both user and record wrong the user is checked first, which no arm settled.",
+    "PPSA21564 calls it for user 1 (orbistoun's signed-in user) and user 0.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20260927T2110Z-9a3e (sweep 20260927-223648, check 130-layout/user-game-presets, log lines 5885-5900)."
+found_in = ["PPSA02664-app0", "PPSA21564-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceUserServiceGetLoginUserIdList"

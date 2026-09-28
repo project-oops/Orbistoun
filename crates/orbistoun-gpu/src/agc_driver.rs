@@ -92,6 +92,45 @@ fn register_resource(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
 }
 
+/// Whether a handle names a live event queue - the kernel's table, installed by the worker, since
+/// this crate does not reach the kernel.
+pub type QueueLookup = fn(u64) -> bool;
+
+fn queue_lookup() -> &'static OnceLock<QueueLookup> {
+    static LOOKUP: OnceLock<QueueLookup> = OnceLock::new();
+    &LOOKUP
+}
+
+/// Installs the live event-queue check [`add_eq_event`] consults. First install wins.
+pub fn install_queue_lookup(lookup: QueueLookup) {
+    let _ = queue_lookup().set(lookup);
+}
+
+/// `SCE_KERNEL_ERROR_EBADF`: what `sceAgcDriverAddEqEvent` answers for a handle that names no
+/// event queue (obSCEne REQ-20260928T1338Z-5b78, `add-eq-bad-queue`).
+const BAD_QUEUE: u64 = 0x8002_0009;
+
+/// `sceAgcDriverAddEqEvent(queue, ...)`: registers the driver's completion event against a guest
+/// event queue. Measured (obSCEne REQ-20260928T1338Z-5b78, the export found by name): `0` for a
+/// queue the guest created, with the second argument `0` or `1`; `0x80020009` for a handle that
+/// names no queue. What the driver later posts to the queue, and when, is unmeasured - the probe's
+/// submissions never ran - so nothing is posted: the answer is the call's, not the event's.
+fn add_eq_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match queue_lookup().get() {
+        Some(live) if live(args[0]) => 0,
+        Some(_) => BAD_QUEUE,
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// `sceAgcDriverSetHsOffchipParam(...)`: sets the hull-shader off-chip parameter, the driver's
+/// `VGT_HS_OFFCHIP_PARAM` (Mesa `ac_cmdbuf_cp.c:374`). Answers `0` for PPSA02664's arguments
+/// `(0, 0x1ff, 0x7400, 0, 3, 0x1e44)` and for all zeros (obSCEne REQ-20260927T1130Z-b3c2). It
+/// writes no guest memory; the register only shapes tessellation, which draws here do not reach.
+fn set_hs_offchip_param(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `sceAgcDriverInitResourceRegistration(...)` - stub, returns `0x8a6c9018`.
 fn init_resource_registration(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
@@ -246,44 +285,255 @@ struct GuestCp<'a> {
     submission: Option<&'a Submission>,
 }
 
+/// The stream as one segment's draws see it (D729): every packet up to the segment's last draw,
+/// with each draw and each dispatch before its first replaced by a `NOP` of the same length. Every
+/// register write before the segment still runs, so its draws see the register state the stream
+/// gives them; no earlier segment's draw is drawn again, no dispatch the command processor already
+/// carried out is dispatched again, and nothing after the segment is read.
+fn segment_stream(segment: &cp::DrawSegment<'_>) -> Vec<u8> {
+    let end = (segment.end as usize).min(segment.stream.len());
+    let mut bytes = segment.stream[..end].to_vec();
+    for packet in &crate::packet::walk(&bytes).packets {
+        let crate::packet::PacketKind::Command { opcode } = packet.kind else {
+            continue;
+        };
+        let dispatch = opcode == crate::packet::build::DISPATCH_DIRECT;
+        if packet.offset >= segment.first || !(cp::is_draw(opcode) || dispatch) {
+            continue;
+        }
+        let header = crate::packet::build::command_header(
+            crate::packet::build::measured::NOP,
+            packet.body_length() / 4,
+        );
+        let at = packet.offset as usize;
+        bytes[at..at + 4].copy_from_slice(&header.to_le_bytes());
+    }
+    bytes
+}
+
+/// The shaders a submission could not prepare, as a clause for a refusal - empty when none failed.
+fn shader_failures(submission: &Submission) -> String {
+    use std::fmt::Write as _;
+    let mut clause = String::new();
+    for failure in &submission.report.failures {
+        let _ = write!(
+            clause,
+            "; its {} shader at {:#x} was not prepared: {}",
+            failure.stage, failure.address, failure.reason
+        );
+    }
+    clause
+}
+
+/// Why a submission's draws cannot be drawn as the guest asked, from what preparing them found:
+/// positions that are not clip space, memory reads with nowhere to read from, textures or buffers
+/// that could not be bound, or a stage with no shader. `None` when nothing stands in the way.
+fn unmodelled_draws(submission: &Submission) -> Option<String> {
+    let report = &submission.report;
+    if report.unmodelled_viewports > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) turn the viewport transform off, and positions that are not ",
+                "clip space are not modelled"
+            ),
+            report.unmodelled_viewports
+        ));
+    }
+    if report.unwindowed_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) run a shader that reads guest memory, and no window is mapped ",
+                "for it to read through"
+            ),
+            report.unwindowed_draws
+        ));
+    }
+    if report.unbound_textures > 0 {
+        return Some(format!(
+            concat!(
+                "{} sampled texture slot(s) had no texture bound, and the placeholder is ",
+                "not the guest's picture"
+            ),
+            report.unbound_textures
+        ));
+    }
+    if report.unshaded_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) have a stage whose shader was not prepared, and would run the ",
+                "shader bound before them{}"
+            ),
+            report.unshaded_draws,
+            shader_failures(submission)
+        ));
+    }
+    if let (refused @ 1.., why) = report.unbound_buffers {
+        return Some(format!(
+            "{refused} draw(s) read through a buffer that could not be bound: {}",
+            why.unwrap_or("no reason was kept")
+        ));
+    }
+    None
+}
+
+/// Why the most recent draw segment was not carried out, for the run report.
+fn draw_refusal() -> &'static Mutex<Option<String>> {
+    static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
+    &REFUSAL
+}
+
+fn note_draw_refusal(why: String) {
+    *draw_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(why);
+}
+
+/// Why the most recent draw segment was refused, if one was.
+#[must_use]
+pub fn last_draw_refusal() -> Option<String> {
+    draw_refusal()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 impl GuestCp<'_> {
+    /// Carries out one segment of the stream's draws (D729): a segment holding every draw is the
+    /// submission as prepared; any other is prepared from [`segment_stream`] through the live
+    /// pipeline, carrying the modules the whole submission brought for the backend.
+    fn draw_segment(&mut self, segment: &cp::DrawSegment<'_>) -> Result<(), String> {
+        let whole = self
+            .submission
+            .ok_or("no submission is being carried out")?;
+        if segment.whole {
+            return self.draw_into_target(whole);
+        }
+        let bytes = segment_stream(segment);
+        let mut prepared = {
+            let mut live = live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+            let prepared = pipeline.submit(&bytes, Queue::Draw, &[], &self.memory);
+            keep_new_translations(pipeline);
+            prepared
+        };
+        for (id, module) in &whole.modules {
+            prepared
+                .modules
+                .entry(*id)
+                .or_insert_with(|| module.clone());
+        }
+        self.draw_into_target(&prepared)
+    }
+
+    /// Leaves every block of a DCC target stored uncompressed, with its key saying so, before its
+    /// draws run. The frame is then written back as uncompressed blocks under uncompressed keys - a
+    /// state the hardware's own writes leave - and nothing here compresses. Keys all uncompressed
+    /// already need nothing; keys all cleared to `0000` mean every bit of every block is zero, so
+    /// the surface is filled with zeros and its keys marked uncompressed, which is exactly what
+    /// expanding them leaves. Any other key state needs per-block key addressing and is refused,
+    /// with nothing written.
+    fn expand_dcc(&mut self, target: ColourTarget, dcc: crate::dcc::Dcc) -> Result<(), String> {
+        let start = crate::dcc::meta_start(dcc);
+        let length = crate::dcc::meta_bytes(target.width, target.height, dcc.pipe_aligned);
+        let keys = usize::try_from(length)
+            .ok()
+            .and_then(|length| cp::CpMemory::read(self, start, length))
+            .ok_or("its DCC keys are not readable guest memory")?;
+        match crate::dcc::classify(&keys) {
+            crate::dcc::Keys::Uncompressed => Ok(()),
+            crate::dcc::Keys::Clear0000 => {
+                let span = tiling::surface_words_64kb_rx_bpp4(target.width, target.height) * 4;
+                let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
+                if cp::CpMemory::fill(self, target.base, 0, span)
+                    && cp::CpMemory::fill(self, start, keys_uncompressed, keys.len())
+                {
+                    Ok(())
+                } else {
+                    Err("its cleared DCC blocks could not be expanded in guest memory".to_owned())
+                }
+            }
+            crate::dcc::Keys::Other => Err(concat!(
+                "its DCC keys are neither all uncompressed nor all cleared to 0000, and decoding ",
+                "them needs per-block key addressing, which is not modelled"
+            )
+            .to_owned()),
+        }
+    }
+
     /// Reads the target, has the executor draw over it, and - after every submission, or at the
-    /// flip - writes the result back where the guest reads it (D714). `false`, with nothing
+    /// flip - writes the result back where the guest reads it (D714). Why not, with nothing
     /// written, at the first thing that is not exact.
-    fn draw_into_target(&mut self) -> bool {
+    fn draw_into_target(&mut self, submission: &Submission) -> Result<(), String> {
         let (Some(execute), Some(read)) = (draw_executor().get(), frame_reader().get()) else {
-            return false;
+            return Err("no device is installed to draw with".to_owned());
         };
-        let Some(submission) = self.submission else {
-            return false;
-        };
-        let Some((target, swap)) = writable_target(submission) else {
-            return false;
-        };
+        let (target, swap) = writable_target(submission).ok_or_else(|| {
+            format!(
+                concat!(
+                    "its colour target is not one a frame can be written back to exactly: ",
+                    "{:?}, {:?}, {:?}, {} base(s), {} extent(s)",
+                ),
+                submission.colour_target,
+                submission.colour_target_tiling,
+                submission.colour_target_format,
+                submission.colour_target_bases,
+                submission.targets.len()
+            )
+        })?;
+        if let Some(why) = unmodelled_draws(submission) {
+            return Err(why);
+        }
+        if let Some(dcc) = submission.colour_target_dcc
+            && let Some(why) = crate::dcc::unsupported(
+                submission.colour_target_tiling,
+                dcc.single_level,
+                dcc.single_sample,
+            )
+        {
+            return Err(format!(
+                "its colour target uses {why}, which is not modelled"
+            ));
+        }
         // The executor holds one frame per extent, so a frame still pending for another target is
         // written back before this one is drawn over it (D714).
         if pending_target().is_some_and(|(pending, _)| pending.base != target.base)
             && !write_back_pending(self)
         {
-            return false;
+            return Err(
+                "the frame pending for another target could not be written back".to_owned(),
+            );
+        }
+        if let Some(dcc) = submission.colour_target_dcc {
+            self.expand_dcc(target, dcc.dcc)?;
         }
         if !write_back_at_flip() {
             return draw_over(self, target, swap, |before| {
                 execute(submission, before).then(read).flatten()
+            })
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "the device did not draw it, or it could not be written back{}",
+                    shader_failures(submission)
+                )
             });
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
         // each of the many submissions a GL frame takes (D714).
-        let Some(before) = read_target(self, target, swap) else {
-            return false;
-        };
+        let before = read_target(self, target, swap)
+            .ok_or("its colour target is not readable guest memory")?;
         if !execute(submission, before.before()) {
             forget_written();
             set_pending(None);
-            return false;
+            return Err(format!(
+                "the device did not draw it{}",
+                shader_failures(submission)
+            ));
         }
         set_pending(Some((target, swap)));
-        true
+        Ok(())
     }
 }
 
@@ -547,8 +797,8 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     let (target, swap) = pending_target().ok_or(CannotWait)?;
     let span = tiling::surface_words_64kb_rx_bpp4(target.width, target.height) as u64 * 4;
     let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
-        Some(written) if written.base == target.base && written.bytes.len() as u64 == span => {
-            written.bytes
+        Some(written) if written.base == target.base && written.contents.len() as u64 == span => {
+            written.contents
         }
         _ => return Err(CannotWait),
     };
@@ -570,7 +820,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     let guard = superseded.map(|index| {
         let old = list.remove(index);
         crate::perf::span(crate::perf::Span::DiscardSnapshot, || {
-            (hooks.discard)(old.snapshot);
+            old.release_snapshot(hooks);
         });
         old.pages.2
     });
@@ -597,10 +847,12 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
         destination: target.base,
         length: span,
         pages: (pages.0, pages.1, protection),
-        snapshot,
-        target,
-        swap,
-        memory_then,
+        held: Held::Frame {
+            snapshot,
+            target,
+            swap,
+            memory_then,
+        },
     });
     set_pending(None);
     // The display's own copy, beside memory's: released by whoever shows it.
@@ -665,7 +917,7 @@ fn drop_covered(address: u64, length: u64) {
             }
             resolved.push((base, len));
         }
-        (hooks.discard)(copy.snapshot);
+        copy.release_snapshot(hooks);
     }
 }
 
@@ -710,17 +962,42 @@ fn read_target(
     // asked first, since write-watch cannot answer for guest direct memory's mapped views. The
     // pages are protected again before they are compared or read, so a racing write is seen next
     // time rather than lost.
+    // A fill still deferred over the whole target is what memory holds, as far as anything can see:
+    // a touch would have carried it out. Uniform, and nothing to read.
+    if let Some(word) = deferred_fill_over(target.base, length as u64) {
+        let now = Contents::Uniform { word, length };
+        let unchanged = last_written().lock().is_ok_and(|last| {
+            last.as_ref().is_some_and(|written| {
+                written.base == target.base
+                    && matches!(written.contents, Contents::Uniform { word: held, length: kept }
+                        if held == word && kept == length)
+            })
+        });
+        if !unchanged && let Ok(mut last) = last_written().lock() {
+            *last = Some(Written {
+                base: target.base,
+                contents: now,
+                since: None,
+            });
+        }
+        crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
+        return Some(if unchanged {
+            TargetRead::Unchanged
+        } else {
+            TargetRead::Uniform(swapped(word, swap))
+        });
+    }
     let was_protected = protected_unwritten(target);
     protect_target(target);
     let unchanged = last_written().lock().is_ok_and(|last| {
         last.as_ref().is_some_and(|written| {
             written.base == target.base
-                && written.bytes.len() == length
+                && written.contents.len() == length
                 && (was_protected
                     || written.since.and_then(|since| {
                         orbistoun_mem::watch::written_since(target.base, length as u64, since)
                     }) == Some(false)
-                    || memory.holds(target.base, &written.bytes))
+                    || memory.holds(target.base, &written.contents.bytes()))
         })
     });
     if unchanged {
@@ -747,6 +1024,7 @@ fn read_target(
             &words_of(&bytes),
             width,
             height,
+            target.pipe_bank_xor,
             |w| swapped(w, swap),
         )),
     };
@@ -756,7 +1034,7 @@ fn read_target(
     if let Ok(mut last) = last_written().lock() {
         *last = Some(Written {
             base: target.base,
-            bytes: Arc::new(bytes),
+            contents: Contents::Bytes(Arc::new(bytes)),
             since,
         });
     }
@@ -812,9 +1090,14 @@ fn write_target(
         let mut tiled_ok = false;
         let mut written = Vec::new();
         let edited = memory.edit_words(target.base, words, &mut |tiled| {
-            tiled_ok = tiling::tile_surface_64kb_rx_bpp4_mapped(after, width, height, tiled, |w| {
-                swapped(w, swap)
-            })
+            tiled_ok = tiling::tile_surface_64kb_rx_bpp4_mapped(
+                after,
+                width,
+                height,
+                target.pipe_bank_xor,
+                tiled,
+                |w| swapped(w, swap),
+            )
             .is_ok();
             // What memory holds now, for the next submission's unchanged check.
             written = zerocopy::IntoBytes::as_bytes(&*tiled).to_vec();
@@ -825,7 +1108,7 @@ fn write_target(
         if let Ok(mut last) = last_written().lock() {
             *last = wrote.then(|| Written {
                 base: target.base,
-                bytes: Arc::new(written),
+                contents: Contents::Bytes(Arc::new(written)),
                 since,
             });
         }
@@ -849,8 +1132,48 @@ fn last_written() -> &'static Mutex<Option<Written>> {
 #[derive(Debug, Clone)]
 struct Written {
     base: u64,
-    bytes: Arc<Vec<u8>>,
+    contents: Contents,
     since: Option<u64>,
+}
+
+/// What a target's memory held when this last wrote or read it: its bytes, or - under a fill
+/// still deferred over the whole of it (D719) - one word throughout, kept without the bytes.
+#[derive(Debug, Clone)]
+enum Contents {
+    Bytes(Arc<Vec<u8>>),
+    Uniform { word: u32, length: usize },
+}
+
+impl Contents {
+    /// How many bytes.
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes(bytes) => bytes.len(),
+            Self::Uniform { length, .. } => *length,
+        }
+    }
+
+    /// As words.
+    fn words(&self) -> Vec<u32> {
+        match self {
+            Self::Bytes(bytes) => words_of(bytes),
+            Self::Uniform { word, length } => vec![*word; length / 4],
+        }
+    }
+
+    /// As bytes.
+    fn bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        match self {
+            Self::Bytes(bytes) => std::borrow::Cow::Borrowed(bytes.as_slice()),
+            Self::Uniform { word, length } => std::borrow::Cow::Owned(
+                word.to_le_bytes()
+                    .into_iter()
+                    .cycle()
+                    .take(*length)
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// Forgets [`last_written`], so the next submission hands its drawer the target as it is.
@@ -954,21 +1277,36 @@ fn release_protection(p: WriteProtected, hooks: &LazyCopies) {
 /// A write to guest memory faulted: when `address` is in the protected target, its pages get their
 /// protection back and the write can be retried (D720). The host's fault handler asks this for a
 /// faulting write, before [`carry_out_at`].
+///
+/// A frame of that target still on the device (D714) is written back first, so the write lands on
+/// the frame as it does on hardware, where the draws are in memory by then. Let through onto the
+/// memory from before the draws, the next submission would start from that and lose them.
 pub fn written_at(address: u64) -> bool {
     let Some(hooks) = lazy_copies().get() else {
         return false;
     };
-    let Ok(mut protected) = write_protected().lock() else {
-        return false;
-    };
-    match *protected {
-        Some(p) if ranges_overlap(p.pages, (address, 1)) => {
-            release_protection(p, hooks);
-            *protected = None;
-            true
+    {
+        let Ok(mut protected) = write_protected().lock() else {
+            return false;
+        };
+        match *protected {
+            Some(p) if ranges_overlap(p.pages, (address, 1)) => {
+                release_protection(p, hooks);
+                *protected = None;
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, 1)) {
+        let mut memory = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        // A frame that cannot be read back is dropped by the write-back, which forgets what memory
+        // held: the next submission then reads the target in full.
+        let _ = write_back_pending(&mut memory);
+    }
+    true
 }
 
 /// Writes `bytes` into guest memory at `address` - `false`, writing nothing, when the range is not
@@ -996,6 +1334,110 @@ fn write_guest(address: u64, bytes: &[u8]) -> bool {
         );
     }
     true
+}
+
+/// Fills `[address, address + length)` of guest memory with `pattern`, starting at `address` -
+/// `false`, writing nothing, when the range is not writable guest memory.
+fn fill_guest(address: u64, length: u64, pattern: u32) -> bool {
+    let writable = write_lookup()
+        .get()
+        .is_some_and(|allows| allows(address, length));
+    let (Ok(dest), Ok(count)) = (usize::try_from(address), usize::try_from(length)) else {
+        return false;
+    };
+    if !writable {
+        return false;
+    }
+    unprotect_overlapping(address, length);
+    // SAFETY: the installed lookup vouched that `[address, address + length)` lies inside
+    // identity-mapped guest mappings whose protection allows writes, and a protected target's
+    // pages among them were given their protection back above: `count` writable bytes of this
+    // process. The guest thread that owns them is blocked in the submit this fill belongs to.
+    let target = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(dest), count)
+    };
+    // Whole words as words, since a frame's clears are megabytes. A misaligned destination or a
+    // count that is not whole words keeps the byte loop; the pattern starts at the destination
+    // either way.
+    let whole = count - count % 4;
+    let (words, tail) = target.split_at_mut(whole);
+    match <[u32] as zerocopy::FromBytes>::mut_from_bytes(words) {
+        Ok(words) => words.fill(u32::from_le_bytes(pattern.to_le_bytes())),
+        Err(_) => {
+            for chunk in words.chunks_mut(4) {
+                chunk.copy_from_slice(&pattern.to_le_bytes());
+            }
+        }
+    }
+    tail.copy_from_slice(&pattern.to_le_bytes()[..tail.len()]);
+    true
+}
+
+/// The smallest fill worth deferring: below it, guarding and releasing the pages costs more than
+/// the fill.
+const DEFERRED_FILL_MIN: u64 = 0x1_0000;
+
+/// Defers a fill of whole host pages (D719): its pages are guarded and it is carried out by the
+/// first touch, as a deferred copy is. A frame's clears are megabytes each, and the next draw only
+/// asks what the target holds, which a fill answers without memory ([`deferred_fill_over`]).
+/// `false` when it is not deferred and must be written now.
+fn defer_fill(address: u64, pattern: u32, length: u64) -> bool {
+    let Some(hooks) = lazy_copies().get() else {
+        return false;
+    };
+    if length < DEFERRED_FILL_MIN || address % HOST_PAGE != 0 || length % HOST_PAGE != 0 {
+        return false;
+    }
+    if !write_lookup()
+        .get()
+        .is_some_and(|allows| allows(address, length))
+    {
+        return false;
+    }
+    // A frame still on the device that this fill only partly covers is written back first, on the
+    // path that writes now; one it covers wholly was dropped before this is asked.
+    if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, length)) {
+        return false;
+    }
+    let Ok(mut list) = deferred().lock() else {
+        return false;
+    };
+    // Guarded another way now: a protection kept would be saved as the one to restore (D720).
+    unprotect_overlapping(address, length);
+    // Anything deferred that this fill only partly covers is carried out first, so the guard below
+    // is the only one on these pages.
+    let (touched, kept): (Vec<Deferred>, Vec<Deferred>) = std::mem::take(&mut *list)
+        .into_iter()
+        .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), (address, length)));
+    *list = kept;
+    if !carry_out_all(&touched, hooks) {
+        return false;
+    }
+    let Some(protection) = (hooks.guard)(address, length) else {
+        return false;
+    };
+    list.push(Deferred {
+        destination: address,
+        length,
+        pages: (address, length, protection),
+        held: Held::Fill(pattern),
+    });
+    true
+}
+
+/// The word a fill still deferred over all of `[base, base + length)` puts there, if one is.
+fn deferred_fill_over(base: u64, length: u64) -> Option<u32> {
+    let list = deferred().lock().ok()?;
+    list.iter().find_map(|copy| match copy.held {
+        Held::Fill(pattern)
+            if copy.destination <= base
+                && base.saturating_add(length) <= copy.destination.saturating_add(copy.length)
+                && (base - copy.destination) % 4 == 0 =>
+        {
+            Some(pattern)
+        }
+        _ => None,
+    })
 }
 
 /// Whether `[address, address + length)` touches any byte of `target`'s tiled surface.
@@ -1038,20 +1480,48 @@ pub fn install_lazy_copies(hooks: LazyCopies) {
     let _ = lazy_copies().set(hooks);
 }
 
-/// A copy of a colour target into guest memory that has not been carried out yet.
+/// A copy of a colour target, or a fill, into guest memory that has not been carried out yet.
 struct Deferred {
-    /// The copy's destination and length.
+    /// The destination and length.
     destination: u64,
     length: u64,
     /// The guarded host pages covering it, and the protection they had.
     pages: (u64, u64, u32),
-    /// The frame as the copy saw it, on the device.
-    snapshot: u64,
-    target: ColourTarget,
-    swap: ComponentSwap,
-    /// The target's memory as the copy saw it: every word the frame does not cover - a partial edge
-    /// block's padding - comes from here.
-    memory_then: Arc<Vec<u8>>,
+    /// What it writes when carried out.
+    held: Held,
+}
+
+/// What a deferred write puts in memory when it is carried out.
+enum Held {
+    /// A colour target's frame.
+    Frame {
+        /// The frame as the copy saw it, on the device.
+        snapshot: u64,
+        target: ColourTarget,
+        swap: ComponentSwap,
+        /// The target's memory as the copy saw it: every word the frame does not cover - a
+        /// partial edge block's padding - comes from here.
+        memory_then: Contents,
+    },
+    /// One word throughout: a command-processor fill.
+    Fill(u32),
+}
+
+impl Deferred {
+    /// The device snapshot it keeps, if it keeps one.
+    const fn snapshot(&self) -> Option<u64> {
+        match self.held {
+            Held::Frame { snapshot, .. } => Some(snapshot),
+            Held::Fill(_) => None,
+        }
+    }
+
+    /// Lets go of the device snapshot it keeps, unread.
+    fn release_snapshot(&self, hooks: &LazyCopies) {
+        if let Some(snapshot) = self.snapshot() {
+            (hooks.discard)(snapshot);
+        }
+    }
 }
 
 /// Whether any guest memory is guarded for a deferred copy, so reading it would fault into the
@@ -1102,7 +1572,7 @@ fn carry_out(copy: &Deferred, hooks: &LazyCopies) -> bool {
 fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     let (base, len, protection) = copy.pages;
     if !(hooks.release)(base, len, protection) {
-        (hooks.discard)(copy.snapshot);
+        copy.release_snapshot(hooks);
         return false;
     }
     if let Ok(mut resolved) = resolved().lock() {
@@ -1111,18 +1581,32 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         }
         resolved.push((base, len));
     }
-    let Some(frame) = (hooks.take)(copy.snapshot) else {
+    let (snapshot, target, swap, memory_then) = match &copy.held {
+        Held::Fill(pattern) => return fill_guest(copy.destination, copy.length, *pattern),
+        Held::Frame {
+            snapshot,
+            target,
+            swap,
+            memory_then,
+        } => (*snapshot, *target, *swap, memory_then),
+    };
+    let Some(frame) = (hooks.take)(snapshot) else {
         tracing::warn!(
             "a deferred copy's frame could not be read - {:#x} keeps what it held",
             copy.destination
         );
         return false;
     };
-    let (width, height) = (copy.target.width, copy.target.height);
-    let mut tiled = words_of(&copy.memory_then);
-    if tiling::tile_surface_64kb_rx_bpp4_mapped(&frame, width, height, &mut tiled, |w| {
-        swapped(w, copy.swap)
-    })
+    let (width, height) = (target.width, target.height);
+    let mut tiled = memory_then.words();
+    if tiling::tile_surface_64kb_rx_bpp4_mapped(
+        &frame,
+        width,
+        height,
+        target.pipe_bank_xor,
+        &mut tiled,
+        |w| swapped(w, swap),
+    )
     .is_err()
     {
         return false;
@@ -1179,7 +1663,7 @@ pub fn carry_out_at(address: u64) -> bool {
     let Some(hooks) = lazy_copies().get() else {
         return false;
     };
-    {
+    let carried = {
         let Ok(mut list) = deferred().lock() else {
             return false;
         };
@@ -1187,9 +1671,20 @@ pub fn carry_out_at(address: u64) -> bool {
             .into_iter()
             .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), (address, 1)));
         *list = kept;
-        if !touched.is_empty() {
-            return carry_out_all(&touched, hooks);
+        (!touched.is_empty()).then(|| carry_out_all(&touched, hooks))
+    };
+    if let Some(carried) = carried {
+        // A target under a deferred fill is guarded rather than protected, so a touch of it arrives
+        // here and not at `written_at`. Its frame on the device goes into memory first all the
+        // same: on hardware the draws are there by the time the guest looks.
+        if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, 1)) {
+            let mut memory = GuestCp {
+                memory: MappedRegions::current(),
+                submission: None,
+            };
+            let _ = write_back_pending(&mut memory);
         }
+        return carried;
     }
     // Another thread carried it out while this one waited for the list.
     resolved()
@@ -1219,8 +1714,10 @@ impl GuestCp<'_> {
         // any memory work that touched it would have written the frame back and left nothing
         // pending.
         let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
-            Some(written) if written.base == target.base && written.bytes.len() as u64 == span => {
-                written.bytes
+            Some(written)
+                if written.base == target.base && written.contents.len() as u64 == span =>
+            {
+                written.contents
             }
             _ => return false,
         };
@@ -1247,7 +1744,7 @@ impl GuestCp<'_> {
         let (guard, superseded_snapshot) = match superseded {
             Some(index) => {
                 let old = list.remove(index);
-                (Some(old.pages.2), Some(old.snapshot))
+                (Some(old.pages.2), old.snapshot())
             }
             None => (None, None),
         };
@@ -1283,10 +1780,12 @@ impl GuestCp<'_> {
             destination,
             length,
             pages: (pages.0, pages.1, protection),
-            snapshot,
-            target,
-            swap,
-            memory_then,
+            held: Held::Frame {
+                snapshot,
+                target,
+                swap,
+                memory_then,
+            },
         });
         true
     }
@@ -1325,8 +1824,19 @@ impl cp::CpMemory for GuestCp<'_> {
         RELEASED.with(|released| released.borrow_mut().push((address, context)));
     }
 
-    fn run_draws(&mut self) -> bool {
-        crate::perf::span(crate::perf::Span::RunDraws, || self.draw_into_target())
+    fn run_draws(&mut self, segment: &cp::DrawSegment<'_>) -> bool {
+        crate::perf::span(crate::perf::Span::RunDraws, || {
+            match self.draw_segment(segment) {
+                Ok(()) => true,
+                Err(why) => {
+                    note_draw_refusal(format!(
+                        "the draws at bytes {:#x}..{:#x}: {why}",
+                        segment.first, segment.end
+                    ));
+                    false
+                }
+            }
+        })
     }
 
     fn run_dispatch(&mut self, dispatch: &cp::Dispatch<'_>) -> bool {
@@ -1367,43 +1877,15 @@ impl cp::CpMemory for GuestCp<'_> {
             drop_covered(address, count as u64);
             drop_pending_covered(address, count as u64);
         }
+        if defer_fill(address, pattern, count as u64) {
+            return true;
+        }
         if !carry_out_overlapping(address, count as u64)
             || !self.settle_pending(address, count as u64)
         {
             return false;
         }
-        let writable = write_lookup()
-            .get()
-            .is_some_and(|allows| allows(address, count as u64));
-        let Ok(dest) = usize::try_from(address) else {
-            return false;
-        };
-        if !writable {
-            return false;
-        }
-        unprotect_overlapping(address, count as u64);
-        // SAFETY: the installed lookup vouched that `[address, address + count)` lies inside
-        // identity- mapped guest mappings whose protection allows writes, and a protected target's
-        // pages among them were given their protection back above: `count` writable bytes of this
-        // process. The guest thread that owns them is blocked in this submit while they are filled.
-        let target = unsafe {
-            std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(dest), count)
-        };
-        // Whole words as words, since a frame's clears are megabytes. A misaligned destination or a
-        // count that is not whole words keeps the byte loop; the pattern starts at the destination
-        // either way.
-        let whole = count - count % 4;
-        let (words, tail) = target.split_at_mut(whole);
-        match <[u32] as zerocopy::FromBytes>::mut_from_bytes(words) {
-            Ok(words) => words.fill(u32::from_le_bytes(pattern.to_le_bytes())),
-            Err(_) => {
-                for chunk in words.chunks_mut(4) {
-                    chunk.copy_from_slice(&pattern.to_le_bytes());
-                }
-            }
-        }
-        tail.copy_from_slice(&pattern.to_le_bytes()[..tail.len()]);
-        true
+        fill_guest(address, count as u64, pattern)
     }
 
     fn edit_words(&mut self, address: u64, count: usize, edit: &mut dyn FnMut(&mut [u32])) -> bool {
@@ -1436,16 +1918,43 @@ impl cp::CpMemory for GuestCp<'_> {
     }
 
     fn copy(&mut self, source: u64, destination: u64, count: usize) -> bool {
-        // The source is read now, so what is deferred into it is carried out first. The destination
-        // is left to `defer_copy`, which drops a deferred copy this one overwrites completely.
-        if !carry_out_overlapping(source, count as u64) {
-            return false;
-        }
+        // A deferred copy reads nothing of the source's memory - the frame is on the device, and
+        // what memory held under it is remembered - so what is deferred into the source (a fill the
+        // frame was drawn over) stays deferred. The destination is left to `defer_copy`, which drops
+        // a deferred copy this one overwrites completely.
         if Self::defer_copy(source, destination, count) {
             return true;
         }
-        if !carry_out_overlapping(destination, count as u64)
+        // A source wholly under a deferred fill, with no frame drawn over it, holds the fill's word
+        // throughout: copying it is filling the destination with that word, and reads nothing.
+        if destination % 4 == 0
+            && !pending_target()
+                .is_some_and(|(target, _)| overlaps_target(target, source, count as u64))
+            && let Some(pattern) = deferred_fill_over(source, count as u64)
+        {
+            return self.fill(destination, pattern, count);
+        }
+        // Read now, so what is deferred into it is carried out first.
+        if !carry_out_overlapping(source, count as u64)
             || !self.settle_pending(source, count as u64)
+        {
+            return false;
+        }
+        let writable = write_lookup()
+            .get()
+            .is_some_and(|allows| allows(destination, count as u64));
+        let Ok(dest) = usize::try_from(destination) else {
+            return false;
+        };
+        if !writable || self.memory.read(source, count).is_none() {
+            return false;
+        }
+        // The copy is sure to happen now, so what is deferred or pending wholly inside its
+        // destination is dropped unread as a fill drops it (D719): carrying a frame out only for
+        // this copy to overwrite every byte of it was a whole-frame tiling per frame.
+        drop_covered(destination, count as u64);
+        drop_pending_covered(destination, count as u64);
+        if !carry_out_overlapping(destination, count as u64)
             || !self.settle_pending(destination, count as u64)
         {
             return false;
@@ -1453,15 +1962,6 @@ impl cp::CpMemory for GuestCp<'_> {
         let Some(from) = self.memory.read(source, count) else {
             return false;
         };
-        let writable = write_lookup()
-            .get()
-            .is_some_and(|allows| allows(destination, count as u64));
-        let Ok(dest) = usize::try_from(destination) else {
-            return false;
-        };
-        if !writable {
-            return false;
-        }
         unprotect_overlapping(destination, count as u64);
         // SAFETY: `from` is `count` readable guest bytes and the installed lookup vouched that the
         // destination's `count` bytes are writable identity-mapped guest memory (a protected
@@ -1677,18 +2177,20 @@ static TRANSLATIONS_AT: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// The kept translations read before the guest started, until the live pipeline takes them.
 static TRANSLATIONS: Mutex<Option<crate::translations::TranslationStore>> = Mutex::new(None);
 
-/// Reads the title's kept translations from `path` and makes every one `translator`'s, before the
-/// guest starts, so a draw finds its module already made (D113). Returns what the refill did and
-/// how many translations are kept.
+/// Reads the title's kept translations from `path` and makes every one this translator's, before
+/// the guest starts, so a draw finds its module already made (D113). `build` is the build line; the
+/// translator is that and a digest of its sources, so an edited tree retranslates. Returns what the
+/// refill did and how many translations are kept.
 pub fn prepare_translations(
     path: std::path::PathBuf,
-    translator: &str,
+    build: &str,
 ) -> (crate::translations::Refill, usize) {
+    let translator = crate::translations::translator(build);
     let mut store = crate::translations::TranslationStore::load(&path);
     let tables = orbistoun_shader::EncodingTable::builtin()
         .and_then(|e| orbistoun_shader::OperandTable::builtin().map(|o| (e, o)));
     let refill = match tables {
-        Ok((encodings, operands)) => store.refill(translator, (&encodings, &operands)),
+        Ok((encodings, operands)) => store.refill(&translator, (&encodings, &operands)),
         Err(e) => {
             tracing::warn!("the kept translations were not refilled: {e}");
             crate::translations::Refill::default()
@@ -1852,6 +2354,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverCreateQueue", create_queue),
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),
+        ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
+        ("sceAgcDriverAddEqEvent", add_eq_event),
         (
             "sceAgcDriverInitResourceRegistration",
             init_resource_registration,
@@ -1872,6 +2376,76 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
     use std::sync::{Mutex, PoisonError};
+
+    /// A segment's stream keeps every packet up to its last draw, register writes included, turns
+    /// each earlier draw into a `NOP` of the same length, and leaves out everything after (D729).
+    #[test]
+    fn a_segment_stream_keeps_register_state_and_silences_earlier_draws() {
+        use crate::packet::build::{command_header, measured};
+        let set = [command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7];
+        let draw = [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2];
+        let fill = [
+            command_header(measured::DMA_DATA, 6),
+            0x8000_0000 | (2 << 29) | (3 << 20),
+            1,
+            0,
+            0x2000,
+            0,
+            16,
+        ];
+        let mut words = set.to_vec();
+        words.extend(draw);
+        words.extend(fill);
+        let first = u32::try_from(words.len() * 4).expect("small");
+        words.extend(set);
+        words.extend(draw);
+        let end = u32::try_from(words.len() * 4).expect("small");
+        words.extend(fill);
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let segment = super::segment_stream(&crate::cp::DrawSegment {
+            stream: &stream,
+            first,
+            end,
+            whole: false,
+        });
+
+        let mut expected = stream[..end as usize].to_vec();
+        expected[12..16].copy_from_slice(&command_header(measured::NOP, 2).to_le_bytes());
+        assert_eq!(segment, expected);
+        let walked = crate::packet::walk(&segment);
+        assert!(walked.is_trustworthy());
+        assert_eq!(walked.packets.len(), 5, "every packet kept, none split");
+    }
+
+    /// A dispatch before a segment is memory work the command processor already carried out
+    /// (D729), so the segment's stream silences it as it does an earlier draw: drawn again it
+    /// would be a second dispatch, and on a device with no compute shader bound, a refusal.
+    #[test]
+    fn a_segment_stream_silences_the_dispatches_before_it() {
+        use crate::packet::build::{command_header, dispatch_direct, measured};
+        let set = [command_header(measured::SET_CONTEXT_REG, 2), 0x318, 7];
+        let draw = [command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2];
+        let mut words = set.to_vec();
+        let dispatch_at = words.len() * 4;
+        words.extend(dispatch_direct(0xc0, 1, 1));
+        let first = u32::try_from(words.len() * 4).expect("small");
+        words.extend(draw);
+        let end = u32::try_from(words.len() * 4).expect("small");
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        let segment = super::segment_stream(&crate::cp::DrawSegment {
+            stream: &stream,
+            first,
+            end,
+            whole: false,
+        });
+
+        let mut expected = stream.clone();
+        expected[dispatch_at..dispatch_at + 4]
+            .copy_from_slice(&command_header(measured::NOP, 4).to_le_bytes());
+        assert_eq!(segment, expected);
+    }
 
     /// A dispatch writes back exactly the words it changed, as runs.
     #[test]
@@ -1894,6 +2468,7 @@ mod tests {
             base: 0x10_0000,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         assert!(
             !overlaps_target(target, 0x0f_ff00, 0x100),
@@ -1983,6 +2558,7 @@ mod tests {
             base: BASE,
             width,
             height,
+            pipe_bank_xor: 0,
         };
         let mut seen = None;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Alternate, |before| {
@@ -2041,11 +2617,13 @@ mod tests {
             base: BASE,
             width,
             height,
+            pipe_bank_xor: 0,
         };
         let expected = crate::tiling::detile_surface_64kb_rx_bpp4_mapped(
             &words_of(&memory.0),
             width,
             height,
+            0,
             |w| swapped(w, ComponentSwap::Alternate),
         );
         let mut handed = None;
@@ -2064,11 +2642,14 @@ mod tests {
     #[test]
     fn a_target_outside_guest_memory_is_refused_unwritten() {
         use super::{ColourTarget, ComponentSwap, draw_over};
+        // Refused or not, reading the target asks and re-protects the shared slots (D720).
+        let _guard = serial();
         let mut memory = Block(vec![0x5a; 65536]);
         let target = ColourTarget {
             base: BASE + 0x1_0000,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         let mut ran = false;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Standard, |before| {
@@ -2093,6 +2674,7 @@ mod tests {
                 base: 0x7400_0000_0000,
                 width: 1920,
                 height: 1080,
+                pipe_bank_xor: 0,
             }),
             colour_target_tiling: Some(SwizzleMode::Tiled64KbRX),
             colour_target_format: Some(decode_colour_target_format(0x0001_80a8 | (1 << 11))),
@@ -2148,8 +2730,9 @@ mod tests {
         );
     }
 
-    /// These tests share the process-global region and last-submission stores, so they run one at a
-    /// time. A poisoned lock is recovered rather than cascading a panic across the others.
+    /// These tests share the process-global region and last-submission stores, the last-written
+    /// target and its write protection, so they run one at a time - any test reaching `draw_over`,
+    /// `read_target` or a submission included. A poisoned lock is recovered rather than cascading a panic across the others.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2473,10 +3056,11 @@ mod tests {
             base,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
-            bytes: Arc::new(memory.to_vec()),
+            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
             since: None,
         });
         let mut cp = GuestCp {
@@ -2534,6 +3118,7 @@ mod tests {
             base: 0,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
@@ -2544,7 +3129,7 @@ mod tests {
         let pend = |memory: &[u8]| {
             *super::last_written().lock().expect("slot") = Some(Written {
                 base,
-                bytes: Arc::new(memory.to_vec()),
+                contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
                 since: None,
             });
             super::set_pending(Some((target, ComponentSwap::Standard)));
@@ -2557,7 +3142,7 @@ mod tests {
         assert_eq!(memory, before.as_slice(), "nothing written at the flip");
         assert!(super::carry_out_before_reading(base, 4));
         let mut expected = super::words_of(&before);
-        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, &mut expected, |w| w)
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
             .expect("tiles");
         assert_eq!(
             memory,
@@ -2594,6 +3179,486 @@ mod tests {
         super::forget_written();
     }
 
+    /// `sceAgcDriverAddEqEvent` answers `0` for a live queue and `0x80020009` for any other handle
+    /// (obSCEne REQ-20260928T1338Z-5b78).
+    #[test]
+    fn add_eq_event_answers_as_measured() {
+        super::install_queue_lookup(|handle| handle == 0x5e2d_0000_ee40);
+        let served = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "sceAgcDriverAddEqEvent")
+            .map(|&(_, f)| f)
+            .expect("served");
+        assert_eq!(served(&[0x5e2d_0000_ee40, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(served(&[0x5e2d_0000_ee40, 1, 0, 0, 0, 0]), 0);
+        assert_eq!(served(&[0xdead, 0, 0, 0, 0, 0]), 0x8002_0009);
+    }
+
+    /// `sceAgcDriverSetHsOffchipParam` is served and answers the measured `0` for PPSA02664's
+    /// arguments and for zeros (obSCEne REQ-20260927T1130Z-b3c2).
+    #[test]
+    fn set_hs_offchip_param_answers_zero_as_measured() {
+        let served = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "sceAgcDriverSetHsOffchipParam")
+            .map(|&(_, f)| f)
+            .expect("served");
+        assert_eq!(served(&[0, 0x1ff, 0x7400, 0, 3, 0x1e44]), 0);
+        assert_eq!(served(&[0; GUEST_ARG_REGISTERS]), 0);
+    }
+
+    /// A DMA copy over the whole of a deferred copy's destination drops it unread, as a covering
+    /// fill does (D719). Bugdom copies its target into one buffer at the end of every submission;
+    /// carrying the last frame's copy out only for the next frame's first copy to overwrite it was
+    /// a whole-frame tiling per frame.
+    #[test]
+    fn a_copy_over_a_deferred_frame_drops_it_unread() {
+        use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
+        use fake::{DISCARDED, TAKEN};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        // The copy's source, then the target it is copied over, a host page apart: a deferred copy
+        // is guarded in whole pages, and a source sharing one would be read through it.
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; 2 * span + 3 * page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..];
+        let gap = span + page;
+        memory[..span].fill(0x5C);
+        let source = memory.as_ptr() as usize as u64;
+        let base = source + gap as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            base,
+            contents: super::Contents::Bytes(Arc::new(memory[gap..gap + span].to_vec())),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        assert!(super::write_back_at_this_flip());
+        assert!(
+            !super::deferred().lock().expect("list").is_empty(),
+            "deferred"
+        );
+
+        let taken = TAKEN.load(Ordering::SeqCst);
+        let discarded = DISCARDED.load(Ordering::SeqCst);
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.copy(source, base, span));
+        assert_eq!(
+            TAKEN.load(Ordering::SeqCst),
+            taken,
+            "a covered frame is never read"
+        );
+        assert_eq!(
+            DISCARDED.load(Ordering::SeqCst),
+            discarded + 1,
+            "its snapshot is let go"
+        );
+        assert!(
+            memory[gap..gap + span].iter().all(|&b| b == 0x5C),
+            "memory holds the copy"
+        );
+        assert!(super::deferred().lock().expect("list").is_empty());
+        super::forget_written();
+    }
+
+    /// A fill of a whole target is deferred (D719): memory is untouched until something reads it,
+    /// the next draw is handed the fill as a uniform target without memory being read, and a read
+    /// finds the fill. Bugdom clears its colour and depth targets every frame, 8 MB each.
+    #[test]
+    fn a_whole_target_fill_waits_until_read_and_answers_as_uniform() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+
+        assert!(cp.fill(base, 0xff00_0000, span));
+        assert!(
+            memory.iter().all(|&b| b == 0xAA),
+            "nothing written at the fill"
+        );
+        let read = |cp: &GuestCp<'_>| {
+            super::read_target(cp, target, ComponentSwap::Standard).expect("readable")
+        };
+        assert!(
+            matches!(read(&cp), TargetRead::Uniform(0xff00_0000)),
+            "the fill, as the draw's starting point"
+        );
+        assert!(
+            memory.iter().all(|&b| b == 0xAA),
+            "and still nothing read or written"
+        );
+        assert!(
+            matches!(read(&cp), TargetRead::Unchanged),
+            "asked again: unchanged"
+        );
+
+        assert!(super::carry_out_before_reading(base, 4));
+        assert!(
+            memory
+                .chunks_exact(4)
+                .all(|w| w == 0xff00_0000u32.to_le_bytes()),
+            "a read finds the fill"
+        );
+        assert!(super::deferred().lock().expect("list").is_empty());
+        super::forget_written();
+    }
+
+    /// A frame drawn over a deferred fill and flipped supersedes the fill, and the first read finds
+    /// the frame tiled over the fill's words - the fill never written on its own.
+    #[test]
+    fn a_frame_flipped_over_a_deferred_fill_is_tiled_over_its_words() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        assert!(super::write_back_at_this_flip());
+        assert_eq!(
+            super::deferred().lock().expect("list").len(),
+            1,
+            "the fill superseded by the frame"
+        );
+        assert!(memory.iter().all(|&b| b == 0xAA), "nothing written yet");
+
+        assert!(super::carry_out_before_reading(base, 4));
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(memory, zerocopy::IntoBytes::as_bytes(expected.as_slice()));
+        super::forget_written();
+    }
+
+    /// A copy of a frame drawn over a deferred fill is deferred without carrying the fill out:
+    /// Bugdom copies its target into a readback buffer after every submission, and each carried
+    /// out its 8 MB clear. The copy's destination later reads as the frame over the fill's words.
+    #[test]
+    fn a_copy_of_a_frame_over_a_deferred_fill_leaves_the_fill_deferred() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let gap = span + page;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; gap + span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + gap + span];
+        let base = memory.as_ptr() as usize as u64;
+        let readback = base + gap as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, memory.len() as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+
+        assert!(cp.copy(base, readback, span));
+        assert!(
+            memory.iter().all(|&b| b == 0xAA),
+            "neither the fill nor the copy written"
+        );
+        assert!(super::carry_out_before_reading(readback, 4));
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            &memory[gap..],
+            zerocopy::IntoBytes::as_bytes(expected.as_slice())
+        );
+        assert!(
+            memory[..span].iter().all(|&b| b == 0xAA),
+            "the target's fill still deferred"
+        );
+        super::set_pending(None);
+        assert!(super::carry_out_before_reading(base, span as u64));
+        super::forget_written();
+    }
+
+    /// A copy out of a deferred fill with nothing drawn over it is a fill of its destination: the
+    /// source is neither carried out nor read. Bugdom's loading screen clears and copies every
+    /// frame without drawing.
+    #[test]
+    fn a_copy_out_of_a_deferred_fill_fills_its_destination() {
+        use super::{GuestCp, MappedRegions, cp::CpMemory};
+        let _guard = serial();
+        let span = 0x1_0000usize;
+        let page = super::HOST_PAGE as usize;
+        let gap = span + page;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; gap + span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + gap + span];
+        let source = memory.as_ptr() as usize as u64;
+        let destination = source + gap as u64;
+        allow_writes_to(source, memory.len() as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        super::set_pending(None);
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(source, 0x0102_0304, span));
+        assert!(cp.copy(source, destination, span));
+        assert!(memory.iter().all(|&b| b == 0xAA), "nothing written or read");
+        assert!(super::carry_out_before_reading(destination, span as u64));
+        assert!(
+            memory[gap..]
+                .chunks_exact(4)
+                .all(|w| w == 0x0102_0304u32.to_le_bytes()),
+            "the destination holds the fill"
+        );
+        assert!(
+            memory[..span].iter().all(|&b| b == 0xAA),
+            "the source still deferred"
+        );
+        assert!(super::carry_out_before_reading(source, span as u64));
+        super::forget_written();
+    }
+
+    /// A guest write to a target whose frame is still on the device lands on that frame: on hardware
+    /// the draws are in memory by then, so the pending frame is written back before the faulting
+    /// write runs. Bugdom's menu writes a few words into its target between a frame's submissions;
+    /// letting the write through onto the pre-draw memory handed the next submission the clear, and
+    /// every object drawn before it was lost.
+    #[test]
+    fn a_guest_write_to_a_pending_target_lands_on_its_frame() {
+        use super::{ColourTarget, ComponentSwap, Written};
+        use fake::frame;
+        use std::sync::Arc;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        // The device's frame, as the worker's reader answers it.
+        super::install_frame_reader(|| Some(frame()));
+        let before = memory.to_vec();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            base,
+            contents: super::Contents::Bytes(Arc::new(before.clone())),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        super::protect_target(target);
+
+        assert!(
+            super::written_at(base),
+            "the write is the protected target's"
+        );
+        assert!(
+            super::pending_target().is_none(),
+            "the frame is no longer pending"
+        );
+        let mut expected = super::words_of(&before);
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            memory,
+            zerocopy::IntoBytes::as_bytes(expected.as_slice()),
+            "memory holds the frame before the guest's write runs"
+        );
+        super::forget_written();
+    }
+
+    /// A guest touch of a pending target under a deferred fill lands on its frame, as a write to a
+    /// protected one does: the fill is carried out and the frame written back over it before the
+    /// access runs. Bugdom's menu writes into its cleared target between submissions; carrying out
+    /// only the fill handed the next submission the clear, and the menu drew as its last layer
+    /// alone.
+    #[test]
+    fn a_guest_touch_of_a_pending_target_under_a_deferred_fill_lands_on_its_frame() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::install_frame_reader(|| Some(frame()));
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+
+        assert!(super::carry_out_at(base), "the fault is answered");
+        assert!(
+            super::pending_target().is_none(),
+            "the frame is no longer pending"
+        );
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            memory,
+            zerocopy::IntoBytes::as_bytes(expected.as_slice()),
+            "memory holds the frame over the fill before the guest's access runs"
+        );
+        super::forget_written();
+    }
+
+    /// Before a DCC target's draws, its blocks are left uncompressed under uncompressed keys: keys
+    /// cleared to `0000` expand to a zero surface with every key `0xFF`, keys already uncompressed
+    /// change nothing, and any other key state is refused with nothing written.
+    #[test]
+    fn a_dcc_target_is_expanded_before_its_draws_or_refused() {
+        use super::{ColourTarget, GuestCp, MappedRegions};
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let keys = 0x1000;
+        let buffer: &'static mut [u8] =
+            Box::leak(vec![0u8; span + keys + 0x2000].into_boxed_slice());
+        let buffer_at = buffer.as_ptr() as usize as u64;
+        allow_writes_to(buffer_at, buffer.len() as u64);
+        set_guest_regions(vec![region_of(buffer)]);
+        // The keys start on a 4 KiB metadata block, as addrlib aligns them.
+        let meta = (buffer_at + span as u64 + 0xFFF) & !0xFFF;
+        let base = buffer_at;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        let dcc = crate::dcc::Dcc {
+            base: meta | 0x300,
+            pipe_aligned: true,
+        };
+        let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+
+        buffer[..span].fill(0xAB);
+        buffer[at(meta)..at(meta) + keys].fill(0x00);
+        assert_eq!(cp.expand_dcc(target, dcc), Ok(()));
+        assert!(
+            buffer[..span].iter().all(|&b| b == 0),
+            "the cleared blocks' zeros"
+        );
+        assert!(
+            buffer[at(meta)..at(meta) + keys].iter().all(|&b| b == 0xFF),
+            "every key uncompressed"
+        );
+
+        buffer[..span].fill(0x5A);
+        assert_eq!(cp.expand_dcc(target, dcc), Ok(()));
+        assert!(buffer[..span].iter().all(|&b| b == 0x5A), "left as it is");
+
+        buffer[at(meta) + 7] = 0x20;
+        assert!(cp.expand_dcc(target, dcc).is_err());
+        assert!(buffer[..span].iter().all(|&b| b == 0x5A), "nothing written");
+        assert_eq!(buffer[at(meta) + 7], 0x20);
+        super::forget_written();
+    }
+
     /// A fill over the whole pending target drops the frame rather than writing it back (D719), and
     /// forgets what memory held, so the next read is a full one. No frame reader is installed, so a
     /// write-back would fail the fill.
@@ -2610,10 +3675,11 @@ mod tests {
             base,
             width: 16,
             height: 8,
+            pipe_bank_xor: 0,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             base,
-            bytes: Arc::new(memory.to_vec()),
+            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
             since: None,
         });
         super::set_pending(Some((target, ComponentSwap::Standard)));

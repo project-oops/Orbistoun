@@ -93,27 +93,16 @@ fn titles_block(dir: &std::path::Path) -> Result<String> {
 
     let mut honest: Vec<(String, orbistoun_overrides::Status)> = Vec::new();
     let mut helped: Vec<(String, orbistoun_overrides::Status)> = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(format!(
-                "{TITLES_OPEN}\n\nNo records yet.\n\n{TITLES_CLOSE}"
-            ));
-        }
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(records) = crate::records::read_all(dir)? else {
+        return Ok(format!(
+            "{TITLES_OPEN}
+
+No records yet.
+
+{TITLES_CLOSE}"
+        ));
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "toml") {
-            continue;
-        }
-        let Some(title) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let file = orbistoun_overrides::OverrideFile::from_toml(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+    for (title, file) in records {
         if let Some(status) = file.status {
             honest.push((title.clone(), status));
         }

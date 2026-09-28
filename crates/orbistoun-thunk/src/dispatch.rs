@@ -13,7 +13,7 @@
 //! and the call path does relaxed atomic adds. A bounded ring keeps calls in order, because the
 //! sequence says what the guest was trying to do.
 
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
 
 use orbistoun_core::GuestError;
 
@@ -102,7 +102,9 @@ mod overflow {
     /// Publishes the area for a call, answering what was there before.
     ///
     /// Saved and restored rather than cleared, so an implementation that calls back into another
-    /// import does not leave the outer call reading nothing.
+    /// import does not leave the outer call reading nothing. Neither end is inlined, for the reason
+    /// `enter_import` gives: a call can end on another thread than it began (D732).
+    #[inline(never)]
     pub(super) fn begin(entry_rsp: u64) -> u64 {
         // `[entry_rsp]` is the return address the guest's `call` pushed, so the first argument that
         // did not fit is the word above it.
@@ -114,7 +116,8 @@ mod overflow {
         AREA.with(|held| held.replace(area))
     }
 
-    /// Puts back what `begin` answered.
+    /// Puts back what `begin` answered, on the thread running now.
+    #[inline(never)]
     pub(super) fn end(previous: u64) {
         AREA.with(|held| held.set(previous));
     }
@@ -424,6 +427,93 @@ pub fn forced_return_count() -> u64 {
 /// read. Called once, at table construction, for the same reason the counters are.
 pub fn install_handlers(handlers: Vec<Option<GuestFn>>) {
     let _ = HANDLERS.set(handlers.into_boxed_slice());
+}
+
+/// Each slot's leaf implementation (D734) as an address, zero where there is none. Read by
+/// [`leaf_entry`] through [`LEAF_TARGETS`].
+static LEAVES: std::sync::OnceLock<Box<[u64]>> = std::sync::OnceLock::new();
+
+/// [`COUNTS`] and [`LEAVES`] as [`leaf_entry`] reads them: raw bases, published once both exist
+/// and before any stub routes to it.
+static LEAF_COUNTS: AtomicPtr<AtomicU64> = AtomicPtr::new(std::ptr::null_mut());
+/// See [`LEAF_COUNTS`].
+static LEAF_TARGETS: AtomicPtr<u64> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Records which slots have a leaf implementation (D734), by symbol index. The stubs route to them
+/// only when [`crate::ThunkTable::link_leaves`] is asked, once every diagnostic is installed.
+pub fn install_leaves(leaves: Vec<Option<orbistoun_core::LeafFn>>) {
+    let _ = LEAVES.set(
+        leaves
+            .into_iter()
+            .map(|leaf| leaf.map_or(0, |f| f as usize as u64))
+            .collect(),
+    );
+}
+
+/// Whether slot `index` may be linked to its leaf: it has one, and no diagnostic names it. A
+/// dump, a forced answer or a planted write works on the traced path, so an import a diagnostic
+/// names keeps it.
+pub(crate) fn links_as_leaf(index: usize) -> bool {
+    let has_leaf = LEAVES
+        .get()
+        .and_then(|leaves| leaves.get(index))
+        .is_some_and(|&leaf| leaf != 0);
+    let answer_forced = FORCED_RETURNS
+        .get()
+        .and_then(|forced| forced.get(index))
+        .is_some_and(Option::is_some);
+    let planted = |table: &std::sync::OnceLock<Box<[ForcedWrite]>>| {
+        table
+            .get()
+            .and_then(|writes| writes.get(index))
+            .is_some_and(|plants| !plants.is_empty())
+    };
+    has_leaf
+        && !is_forced(index)
+        && !answer_forced
+        && !planted(&FORCED_WRITES)
+        && !planted(&POLICY_WRITES)
+}
+
+/// Publishes the counters and the leaf table to [`leaf_entry`]. `false` when either is missing,
+/// and then no stub may route to it.
+pub(crate) fn publish_leaf_tables() -> bool {
+    let (Some(counts), Some(leaves)) = (COUNTS.get(), LEAVES.get()) else {
+        return false;
+    };
+    LEAF_COUNTS.store(counts.as_ptr().cast_mut(), Ordering::Release);
+    LEAF_TARGETS.store(leaves.as_ptr().cast_mut(), Ordering::Release);
+    true
+}
+
+/// Where a leaf-linked stub jumps, with its index in `r10` as every stub loads it.
+pub(crate) fn leaf_entry_address() -> u64 {
+    let f: unsafe extern "sysv64" fn() = leaf_entry;
+    f as usize as u64
+}
+
+/// A leaf import's whole call path (D734): its call is counted where every import's is, so the
+/// report's counts stay whole, and its implementation is called with the guest's argument
+/// registers untouched. The stack is aligned for the call whatever the guest left it at, since a
+/// guest's alignment is measured, never assumed (D159); `rbp` holds the guest's `rsp` across it.
+/// Nothing is recorded in the ring and no sequence number is spent.
+#[unsafe(naked)]
+unsafe extern "sysv64" fn leaf_entry() {
+    core::arch::naked_asm!(
+        "mov rax, qword ptr [rip + {counts}]",
+        "lock inc qword ptr [rax + r10*8]",
+        "mov rax, qword ptr [rip + {targets}]",
+        "mov r11, qword ptr [rax + r10*8]",
+        "push rbp",
+        "mov rbp, rsp",
+        "and rsp, -16",
+        "call r11",
+        "mov rsp, rbp",
+        "pop rbp",
+        "ret",
+        counts = sym LEAF_COUNTS,
+        targets = sym LEAF_TARGETS,
+    )
 }
 
 /// Whether a particular import has an implementation behind it.
@@ -1377,15 +1467,32 @@ unsafe extern "sysv64" fn on_guest_call(
     // The dispatch is split out so every answer leaves through one point, where the return below is
     // recorded; `handler` is handed over rather than looked up again. `INSIDE` brackets exactly the
     // handler, so an implementation asking what it is inside gets its own thread's answer (D621).
-    let outer = INSIDE.with(|inside| inside.replace((index as u32).wrapping_add(1)));
+    let outer = enter_import(index);
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
-    INSIDE.with(|inside| inside.set(outer));
+    leave_import(outer);
 
     record_return(sequence, answer);
 
     answer
+}
+
+/// Marks this thread as inside import `index`, answering what it was inside before.
+///
+/// Never inlined, nor is `leave_import`: a fiber switch suspends a call inside its handler and
+/// may resume it on another host thread (D732), and a thread-local's address computed once for
+/// both ends of the call would then name the first thread's slot. A call of its own computes it
+/// afresh on whichever thread is running.
+#[inline(never)]
+fn enter_import(index: u64) -> u32 {
+    INSIDE.with(|inside| inside.replace((index as u32).wrapping_add(1)))
+}
+
+/// Puts back what `enter_import` answered, on the thread running now.
+#[inline(never)]
+fn leave_import(outer: u32) {
+    INSIDE.with(|inside| inside.set(outer));
 }
 
 /// Counts one call of `index` and, for its first calls, folds its argument shapes in.

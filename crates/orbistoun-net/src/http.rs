@@ -12,8 +12,9 @@
 //! status code, a header block holding the response's `Location`, a content-length answer whose
 //! result word is zero when the length is present, and `sceHttpReadData` counting bytes down to
 //! zero at the end of the body. What that code does not exercise - the other content-length
-//! result words, the exact layout of the header block, the platform's own error codes - is
-//! written down as assumed in `libSceHttp.toml`.
+//! result words, the header block's layout and size, a few error codes - obSCEne measured against
+//! a server the console reached (`-9e41`, `-5f0c`); what is still unmeasured is written down as
+//! assumed in `libSceHttp.toml`.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -590,8 +591,9 @@ fn get_all_response_headers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     let held = locked(&response);
     let at = held.header_block.as_ptr().expose_provenance() as u64;
-    // The terminator is not counted.
-    let size = held.header_block.len() as u64 - 1;
+    // The terminator is counted: on hardware every block ends with a blank line and then the NUL
+    // at `block[size - 1]` (`-5f0c`, sweep 20260927-185507).
+    let size = held.header_block.len() as u64;
     // SAFETY: the guest's `char **`, valid by the call's contract.
     let pointer = unsafe { guest::write_u64(args[1], at) };
     // SAFETY: the guest's `size_t *`, likewise.

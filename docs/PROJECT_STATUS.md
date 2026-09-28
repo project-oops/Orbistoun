@@ -7,6 +7,7 @@ out of date.
 
 | Title | Reach | Imports | Calls | Standing | Ends | Link plan |
 |---|---|---|---|---|---|---|
+| BUGD00001 | presented | 55 | 115,754,224 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` match |
 | PPSA99980 | flipped | 246 | 444,296 | 100% | `ran to the time limit` | - |
 | PPSA03416-app0 | flipped | 224 | 470,362 | 100% | `image+0x3f8f0` | - |
 | PPSA02664-app0 | flipped | 224 | 418,362 | 100% | `image+0x3f8f0` | - |
@@ -49,7 +50,6 @@ construction and are not comparable with the table above:
 - **kstuff_v1.6.7** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **nanoDNS_0.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **obscene** reached 193 imports, ending at `ran to the time limit`, with 1 function answered by name
-- **payloads** reached 39 imports, ending at `ran to the time limit`, with 2 functions answered by name
 - **pldmgr_v0.5.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **prosperous** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **ps5-app-dumper_v1.11** reached 0 imports, ending at `0x1`, with 1 function answered by name
@@ -67,10 +67,10 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1048 / 859 |
-| Declared in a library that serves nothing | 134 across 18 libraries - names written down, no implementation |
-| Recorded behaviours | 905 - 388 published, 88 measured, 124 guest-observed, 275 assumed |
-| Open questions a hardware probe could settle | 841 |
+| Functions declared / implemented | 1022 / 839 |
+| Declared in a library that serves nothing | 129 across 17 libraries - names written down, no implementation |
+| Recorded behaviours | 876 - 374 published, 103 measured, 104 guest-observed, 268 assumed |
+| Open questions a hardware probe could settle | 836 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

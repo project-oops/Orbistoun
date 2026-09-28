@@ -390,6 +390,16 @@ pub(crate) struct Session {
     properties: Properties,
 }
 
+/// Whether the session's device clips z to `-w..w` on request (`VK_EXT_depth_clip_control`).
+static DEPTH_CLIP_CONTROL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a pipeline may clip z to `-w..w`, as a GL guest does: the device enabled
+/// `VK_EXT_depth_clip_control`.
+pub(crate) fn depth_clip_control() -> bool {
+    DEPTH_CLIP_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The shared session, created on first use and never destroyed.
 ///
 /// A failure is cached with the stage that failed, so a machine with no device does not repeat the
@@ -517,21 +527,39 @@ impl Session {
                 .extension_name_as_c_str()
                 .is_ok_and(|name| name == ash::ext::mesh_shader::NAME)
         });
-        let mesh_names = [ash::ext::mesh_shader::NAME.as_ptr()];
-        let enabled_extensions: &[*const core::ffi::c_char] =
-            if mesh_offered { &mesh_names } else { &[] };
+        // `VK_EXT_depth_clip_control` where the device has it: a GL guest clips z to `-w..w`, and a
+        // pipeline can clip so only with it.
+        let clip_control_offered = extensions.iter().any(|extension| {
+            extension
+                .extension_name_as_c_str()
+                .is_ok_and(|name| name == ash::ext::depth_clip_control::NAME)
+        });
+        let enabled_extensions: Vec<*const core::ffi::c_char> = [
+            (mesh_offered, ash::ext::mesh_shader::NAME.as_ptr()),
+            (
+                clip_control_offered,
+                ash::ext::depth_clip_control::NAME.as_ptr(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(offered, name)| offered.then_some(name))
+        .collect();
         let mut wanted_mesh =
             vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(mesh_offered);
+        let mut wanted_clip_control = vk::PhysicalDeviceDepthClipControlFeaturesEXT::default()
+            .depth_clip_control(clip_control_offered);
 
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
             .enabled_features(&wanted_features)
-            .enabled_extension_names(enabled_extensions)
+            .enabled_extension_names(&enabled_extensions)
             .push_next(&mut wanted_float16)
-            .push_next(&mut wanted_mesh);
+            .push_next(&mut wanted_mesh)
+            .push_next(&mut wanted_clip_control);
         // SAFETY: the physical device is valid and the create info outlives the call.
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
+        DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
         Ok((device, wanted_features, wanted_mesh.mesh_shader))
     }
 

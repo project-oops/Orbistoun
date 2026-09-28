@@ -29,14 +29,13 @@ fn records() -> Vec<(String, Status)> {
     let Ok(entries) = std::fs::read_dir(compat_dir()) else {
         return out;
     };
+    // A title is a directory holding its `report.toml` (D736).
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "toml") {
+        let path = entry.path().join("report.toml");
+        if !path.is_file() {
             continue;
         }
-        let Some(title) = path.file_stem().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
+        let title = entry.file_name().to_string_lossy().into_owned();
         let text = std::fs::read_to_string(&path).expect("reading a record");
         let file = OverrideFile::from_toml(&text)
             .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
