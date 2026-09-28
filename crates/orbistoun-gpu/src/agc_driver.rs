@@ -1632,7 +1632,7 @@ pub fn carry_out_at(address: u64) -> bool {
     let Some(hooks) = lazy_copies().get() else {
         return false;
     };
-    {
+    let carried = {
         let Ok(mut list) = deferred().lock() else {
             return false;
         };
@@ -1640,9 +1640,20 @@ pub fn carry_out_at(address: u64) -> bool {
             .into_iter()
             .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), (address, 1)));
         *list = kept;
-        if !touched.is_empty() {
-            return carry_out_all(&touched, hooks);
+        (!touched.is_empty()).then(|| carry_out_all(&touched, hooks))
+    };
+    if let Some(carried) = carried {
+        // A target under a deferred fill is guarded rather than protected, so a touch of it arrives
+        // here and not at `written_at`. Its frame on the device goes into memory first all the
+        // same: on hardware the draws are there by the time the guest looks.
+        if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, 1)) {
+            let mut memory = GuestCp {
+                memory: MappedRegions::current(),
+                submission: None,
+            };
+            let _ = write_back_pending(&mut memory);
         }
+        return carried;
     }
     // Another thread carried it out while this one waited for the list.
     resolved()
@@ -3485,6 +3496,62 @@ mod tests {
             memory,
             zerocopy::IntoBytes::as_bytes(expected.as_slice()),
             "memory holds the frame before the guest's write runs"
+        );
+        super::forget_written();
+    }
+
+    /// A guest touch of a pending target under a deferred fill lands on its frame, as a write to a
+    /// protected one does: the fill is carried out and the frame written back over it before the
+    /// access runs. Bugdom's menu writes into its cleared target between submissions; carrying out
+    /// only the fill handed the next submission the clear, and the menu drew as its last layer
+    /// alone.
+    #[test]
+    fn a_guest_touch_of_a_pending_target_under_a_deferred_fill_lands_on_its_frame() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::install_frame_reader(|| Some(frame()));
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+
+        assert!(super::carry_out_at(base), "the fault is answered");
+        assert!(
+            super::pending_target().is_none(),
+            "the frame is no longer pending"
+        );
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            memory,
+            zerocopy::IntoBytes::as_bytes(expected.as_slice()),
+            "memory holds the frame over the fill before the guest's access runs"
         );
         super::forget_written();
     }
