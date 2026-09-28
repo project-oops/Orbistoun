@@ -1910,18 +1910,20 @@ static TRANSLATIONS_AT: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// The kept translations read before the guest started, until the live pipeline takes them.
 static TRANSLATIONS: Mutex<Option<crate::translations::TranslationStore>> = Mutex::new(None);
 
-/// Reads the title's kept translations from `path` and makes every one `translator`'s, before the
-/// guest starts, so a draw finds its module already made (D113). Returns what the refill did and
-/// how many translations are kept.
+/// Reads the title's kept translations from `path` and makes every one this translator's, before
+/// the guest starts, so a draw finds its module already made (D113). `build` is the build line; the
+/// translator is that and a digest of its sources, so an edited tree retranslates. Returns what the
+/// refill did and how many translations are kept.
 pub fn prepare_translations(
     path: std::path::PathBuf,
-    translator: &str,
+    build: &str,
 ) -> (crate::translations::Refill, usize) {
+    let translator = crate::translations::translator(build);
     let mut store = crate::translations::TranslationStore::load(&path);
     let tables = orbistoun_shader::EncodingTable::builtin()
         .and_then(|e| orbistoun_shader::OperandTable::builtin().map(|o| (e, o)));
     let refill = match tables {
-        Ok((encodings, operands)) => store.refill(translator, (&encodings, &operands)),
+        Ok((encodings, operands)) => store.refill(&translator, (&encodings, &operands)),
         Err(e) => {
             tracing::warn!("the kept translations were not refilled: {e}");
             crate::translations::Refill::default()

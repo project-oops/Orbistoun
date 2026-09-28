@@ -11,6 +11,21 @@ use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
 use orbistoun_translate::wavefront::{MeshPrimitive, Stage, TextureSource, UserData, Window};
 use orbistoun_translate::{Strategy, translate_with_user_data};
 
+/// A digest of the translator's sources and tables as this crate was built (`build.rs`).
+pub const TRANSLATOR_INPUTS: &str = env!("ORBISTOUN_TRANSLATOR_INPUTS");
+
+/// The translator in `build`: the build line for whoever reads the file, and the digest of what
+/// translates, so a build from an edited tree is another translator though it names the same
+/// commit.
+#[must_use]
+pub fn translator(build: &str) -> String {
+    identity(build, TRANSLATOR_INPUTS)
+}
+
+fn identity(build: &str, inputs: &str) -> String {
+    format!("{build} - translator {inputs}")
+}
+
 /// What a translation was made against: the same shader under another of these is another module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Context {
@@ -185,7 +200,8 @@ fn translate(
 
 #[cfg(test)]
 mod tests {
-    use super::{Context, TranslationStore, translate};
+    use super::{Context, TranslationStore, identity, translate};
+    use crate::translator_inputs::digest;
     use orbistoun_shader::{EncodingTable, OperandTable};
     use orbistoun_translate::Strategy;
     use orbistoun_translate::wavefront::{MeshPrimitive, Stage, UserData, Window};
@@ -260,5 +276,60 @@ mod tests {
 
         let again = store.refill("this build", (&encodings, &operands));
         assert_eq!((again.kept, again.translated), (1, 0));
+    }
+
+    /// Two uncommitted builds name the same commit; an edit to the translator between them makes
+    /// them two translators, and the second translates the first's entries again. On 2026-09-28 an
+    /// edit to the export translation was served the previous build's modules.
+    #[test]
+    fn an_uncommitted_translator_edit_is_another_translator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = dir.path().join("orbistoun-gpu");
+        let export = dir.path().join("orbistoun-translate/src/export.rs");
+        std::fs::create_dir_all(export.parent().expect("parent")).expect("mkdir");
+        std::fs::create_dir_all(&base).expect("mkdir");
+        let roots = ["../orbistoun-translate/src"];
+        std::fs::write(&export, "fn export() {}\n").expect("written");
+        let before = format!("{:016x}", digest(&base, &roots));
+        std::fs::write(&export, "fn export() { discard_invalid(); }\n").expect("written");
+        let after = format!("{:016x}", digest(&base, &roots));
+
+        let build = "v0.1.0 - 41eab6e-dirty";
+        let (first, second) = (identity(build, &before), identity(build, &after));
+        assert_ne!(first, second);
+
+        let (encodings, operands) = tables();
+        let mut kept = translate(&TRIVIAL, context(), &encodings, &operands).expect("translates");
+        let module = kept.module.clone();
+        let mut store = TranslationStore::default();
+        store.refill(&first, (&encodings, &operands));
+        kept.module = vec![0xdead_beef];
+        store.insert(1, kept);
+        let refill = store.refill(&second, (&encodings, &operands));
+        assert_eq!(refill.translated, 1);
+        assert_eq!(store.get(1, &TRIVIAL).map(|k| &k.module), Some(&module));
+    }
+
+    /// Line endings alone are not an edit.
+    #[test]
+    fn line_endings_do_not_move_the_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("src/a.rs");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, "a\nb\n").expect("written");
+        let lf = digest(dir.path(), &["src"]);
+        std::fs::write(&file, "a\r\nb\r\n").expect("written");
+        assert_eq!(digest(dir.path(), &["src"]), lf);
+    }
+
+    /// The stamped digest is the tree's: `build.rs` hashed the roots the tests hash.
+    #[test]
+    fn the_stamped_digest_is_the_trees() {
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            format!("{:016x}", digest(base, crate::translator_inputs::ROOTS)),
+            super::TRANSLATOR_INPUTS
+        );
+        assert!(super::translator("v").ends_with(super::TRANSLATOR_INPUTS));
     }
 }

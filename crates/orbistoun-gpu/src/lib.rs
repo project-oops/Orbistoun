@@ -25,6 +25,8 @@ pub mod registers;
 mod render;
 pub mod tiling;
 pub mod translations;
+#[cfg(test)]
+mod translator_inputs;
 
 /// A content hash of guest words - what a shader or texture is, for recognising it again.
 ///
