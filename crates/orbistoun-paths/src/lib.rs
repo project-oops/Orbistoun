@@ -310,6 +310,12 @@ impl Paths {
         self.shared.title_dir(title).join("link-plan.json")
     }
 
+    /// Where one title's sheet of frames is kept when it is not committed beside its record: a
+    /// title whose frames are its publisher's output (D736).
+    pub fn title_frames_file(&self, title: &str) -> PathBuf {
+        self.shared.title_dir(title).join("frames.png")
+    }
+
     /// Where one title's kept shader translations are stored (D113).
     pub fn title_translations_file(&self, title: &str) -> PathBuf {
         self.shared

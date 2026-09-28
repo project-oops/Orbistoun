@@ -1,7 +1,13 @@
 # compat/
 
 What each title needs, and what it last did. One directory per title, named by its title id and
-tracked by git, holding its record, `report.toml` (D736).
+tracked by git (D736):
+
+- `report.toml` - the record, below.
+- `inputs.toml` - the pad script its run replays, when it needs one.
+- `frames.png` - a sheet of the frames that run drew, committed only for a title built from open
+  sources here (`frames = "committed"` under `[reproduce]`); a retail title's stays in the local
+  title library. `orbistoun-cli compat reproduce <title>` repeats the run and remakes it.
 
 Nothing here is guest material. A record holds a title identifier, settings, and numbers read off
 a run - never guest bytes, never a path into a title library. Guest material lives in the title

@@ -51,8 +51,8 @@ pub(crate) fn cmd_compat_list(dir: &std::path::Path) -> Result<()> {
 /// A `.toml` that only configures a title and has measured nothing is skipped. The `status`
 /// baseline is preferred over the `experiment` slot, which is marked when used.
 fn compat_rows(
+    dir: &std::path::Path,
     records: Vec<(String, orbistoun_overrides::OverrideFile)>,
-    shots: &std::path::Path,
 ) -> Vec<(orbistoun_overrides::Row, orbistoun_overrides::Title, String)> {
     let mut rows = Vec::new();
     for (title, file) in records {
@@ -64,15 +64,14 @@ fn compat_rows(
             // A file that only configures a title and has measured nothing is not a row.
             (None, None) => continue,
         };
-        // A screenshot if one sits beside the record, embedded relative to the repository root,
-        // where the table is written by default.
-        let shot = shots.join(format!("{title}.png"));
-        let screenshot = shot.exists().then(|| {
-            shots
-                .join(format!("{title}.png"))
-                .to_string_lossy()
-                .replace('\\', "/")
-        });
+        // The sheet of frames when one is committed beside the record, as a path from the
+        // repository root, where the table is written by default (D736).
+        let title_dir = crate::records::title_dir(dir, &title);
+        let sheet = title_dir.join(orbistoun_overrides::FRAMES_FILE);
+        let screenshot = sheet
+            .is_file()
+            .then(|| sheet.to_string_lossy().replace('\\', "/"));
+        let inputs = title_dir.join(orbistoun_overrides::INPUTS_FILE).is_file();
         let notes = status.notes.clone();
         rows.push((
             orbistoun_overrides::Row {
@@ -82,6 +81,8 @@ fn compat_rows(
                 experiment,
                 screenshot,
                 hardware: file.hardware.clone(),
+                reproduce: file.reproduce.clone(),
+                inputs,
             },
             file.title,
             notes,
@@ -115,14 +116,13 @@ fn compat_drift(
 pub(crate) fn cmd_compat_markdown(
     dir: &std::path::Path,
     out: &std::path::Path,
-    shots: &std::path::Path,
     check: bool,
 ) -> Result<()> {
     let Some(records) = crate::records::read_all(dir)? else {
         println!("no records yet - {} does not exist", dir.display());
         return Ok(());
     };
-    let rows = compat_rows(records, shots);
+    let rows = compat_rows(dir, records);
     if rows.is_empty() {
         println!("no titles recorded yet");
         return Ok(());
@@ -183,6 +183,94 @@ pub(crate) fn cmd_compat_markdown(
     std::fs::write(out, &doc).with_context(|| format!("writing {}", out.display()))?;
     println!("wrote {} ({count} titles)", out.display());
     Ok(())
+}
+
+/// `compat reproduce` - repeat a title's recorded run and remake its sheet of frames (D736).
+///
+/// Everything comes from the record: the title build it must be, how long it runs, how often a
+/// frame is kept, and the input it replays (`inputs.toml` beside it). The run records its own
+/// result as any run does. The sheet goes beside the record when the record says it is committed,
+/// and into the local title library otherwise.
+pub(crate) fn cmd_compat_reproduce(
+    service: &orbistoun_service::Service,
+    title: &str,
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+) -> Result<()> {
+    let record = load_compat(dir, title)?;
+    let Some(reproduce) = record.reproduce else {
+        anyhow::bail!(
+            "{} has no [reproduce] section: add limit_seconds and frame_every to say how its run is \
+             repeated",
+            compat_path(dir, title).display()
+        );
+    };
+    let library = crate::common::library_or(None);
+    let module = service
+        .discover_titles(&library)
+        .with_context(|| format!("listing the titles in {}", library.display()))?
+        .into_iter()
+        .map(|entry| entry.module)
+        .find(|module| title_id(module).as_deref() == Some(title))
+        .with_context(|| format!("no title {title} in {}", library.display()))?;
+    let bytes = std::fs::read(&module).with_context(|| format!("reading {}", module.display()))?;
+    let found = module_sha256(&bytes);
+    if let Some(pinned) = &reproduce.module_sha256
+        && *pinned != found
+    {
+        anyhow::bail!(
+            "{} is build {found}, and the record was made with {pinned}: this run would not \
+             reproduce it",
+            module.display()
+        );
+    }
+
+    let paths = orbistoun_paths::Paths::resolve();
+    let traces = paths.traces_dir();
+    crate::frames::clear(&traces)?;
+    let inputs = crate::records::title_dir(dir, title).join(orbistoun_overrides::INPUTS_FILE);
+    // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+    unsafe {
+        std::env::set_var(
+            orbistoun_env::FRAME_EVERY.name,
+            reproduce.frame_every.to_string(),
+        );
+    }
+    crate::run::cmd_run(
+        &module,
+        reproduce.limit_seconds,
+        0,
+        None,
+        (symbols_db, inputs.is_file().then_some(inputs.as_path())),
+        (false, false),
+    )?;
+
+    let sheet = match reproduce.frames {
+        orbistoun_overrides::FramesKept::Committed => {
+            crate::records::title_dir(dir, title).join(orbistoun_overrides::FRAMES_FILE)
+        }
+        orbistoun_overrides::FramesKept::Local => paths.title_frames_file(title),
+    };
+    let kept = crate::frames::kept(&traces)?;
+    let count = crate::frames::write_sheet(&kept, &sheet)?;
+    println!(
+        "wrote {} ({count} frames, one every {} flips)",
+        sheet.display(),
+        reproduce.frame_every
+    );
+    Ok(())
+}
+
+/// A title module's SHA-256, as the link plan keys it (D724).
+fn module_sha256(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
 }
 
 /// `compat record` - transcribe the last run of a title into its record.
@@ -609,23 +697,21 @@ measured_on = "2026-09-10"
         )
         .unwrap();
         let out = root.path().join("COMPATIBILITY.md");
-        let shots = dir.join("screenshots");
 
         // A fresh write leaves the tree current, so `--check` passes.
-        super::cmd_compat_markdown(&dir, &out, &shots, false).expect("write");
-        super::cmd_compat_markdown(&dir, &out, &shots, true)
-            .expect("a freshly written tree is current");
+        super::cmd_compat_markdown(&dir, &out, false).expect("write");
+        super::cmd_compat_markdown(&dir, &out, true).expect("a freshly written tree is current");
 
         // One hand-edited cell in the table is caught, and the file is named.
         let good = std::fs::read_to_string(&out).unwrap();
         std::fs::write(&out, good.replacen("2026-09-10", "2026-09-11", 1)).unwrap();
-        let err = super::cmd_compat_markdown(&dir, &out, &shots, true)
+        let err = super::cmd_compat_markdown(&dir, &out, true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("COMPATIBILITY.md"), "names the table: {err}");
 
         // Rewriting restores it; a wholly deleted page is caught and named too.
-        super::cmd_compat_markdown(&dir, &out, &shots, false).expect("rewrite");
+        super::cmd_compat_markdown(&dir, &out, false).expect("rewrite");
         let page = out
             .parent()
             .unwrap()
@@ -633,7 +719,7 @@ measured_on = "2026-09-10"
             .join("titles")
             .join("dist.md");
         std::fs::remove_file(&page).unwrap();
-        let err = super::cmd_compat_markdown(&dir, &out, &shots, true)
+        let err = super::cmd_compat_markdown(&dir, &out, true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("dist.md"), "names the page: {err}");

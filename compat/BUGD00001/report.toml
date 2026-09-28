@@ -1,0 +1,30 @@
+[title]
+id = "BUGD00001"
+name = "Bugdom"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "02f32873772f7e74b474cd1b0004a829e3f0b9a867ab05d9452ecf7a03e60ca1"
+limit_seconds = 60
+frame_every = 60
+frames = "committed"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 55
+calls = 115754224
+standing = 100
+default_return = "unimplemented"
+frames = 2097
+unanswered = 9
+limit_seconds = 60
+build = "v0.1.0 - 41eab6e-dirty"
+measured_on = "2026-09-28"
+link_plan = "9f7f3056cdba0a6b"
+link_plan_stored = "match"

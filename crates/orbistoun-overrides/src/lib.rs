@@ -407,10 +407,15 @@ pub struct Row {
     pub status: Status,
     /// Whether `status` above is actually the experiment slot, shown so a reader is not misled.
     pub experiment: bool,
-    /// A screenshot for a guest with graphical output, as a path relative to the written file.
+    /// The committed sheet of the recorded run's frames, as a path relative to the repository
+    /// root (`compat/<title>/frames.png`) (D736).
     pub screenshot: Option<String>,
     /// What the hardware does with the title, where somebody attested it (D708).
     pub hardware: Option<Hardware>,
+    /// How the recorded run is repeated, where the record says.
+    pub reproduce: Option<Reproduce>,
+    /// Whether an `inputs.toml` sits beside the record.
+    pub inputs: bool,
 }
 
 impl Row {
@@ -493,12 +498,12 @@ pub fn render_markdown(rows: &[Row]) -> String {
     out
 }
 
-/// Where a title's captures live, relative to the page that embeds them.
-const CAPTURES: &str = "../../compat/screenshots";
+/// The repository root, relative to a title's page.
+const ROOT: &str = "../..";
 
 /// The stand-in for a capture nobody has taken: a file rather than an omission, so a page is
 /// never read as broken or incomplete (D660).
-const NO_CAPTURE: &str = "../../compat/screenshots/no-capture.svg";
+const NO_CAPTURE: &str = "../../compat/no-capture.svg";
 
 /// One title's page: what it is, how far it got, and what has been captured of it.
 ///
@@ -593,25 +598,84 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
         let _ = writeln!(out, "> {}\n", md_cell(notes));
     }
 
-    let _ = writeln!(out, "## Captures\n");
-    // Both rows always, so pages differ by image rather than layout.
-    for (what, held) in [("Menu", row.screenshot.as_deref()), ("Gameplay", None)] {
-        match held {
-            Some(path) => {
+    render_frames(&mut out, row, name);
+    render_reproduce(&mut out, row);
+    out
+}
+
+/// A page's sheet of frames, or why it has none (D736).
+fn render_frames(out: &mut String, row: &Row, name: &str) {
+    use core::fmt::Write as _;
+
+    let _ = writeln!(out, "## Frames\n");
+    match (&row.screenshot, &row.reproduce) {
+        (Some(path), reproduce) => {
+            let _ = writeln!(out, "![frames of {name}]({ROOT}/{path})\n");
+            if let Some(reproduce) = reproduce {
                 let _ = writeln!(
                     out,
-                    "**{what}**\n\n![{what} of {name}]({CAPTURES}/{path})\n"
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "**{what}** - not captured yet.\n\n![no capture yet]({NO_CAPTURE})\n"
+                    "A frame every {} flips, in order, from the reproduction below.\n",
+                    reproduce.frame_every
                 );
             }
         }
+        (None, Some(reproduce)) if reproduce.frames == FramesKept::Local => {
+            let _ = writeln!(
+                out,
+                concat!(
+                    "Kept in the local title library, not here: this title's frames are its ",
+                    "publisher's output. The reproduction below makes them.\n"
+                )
+            );
+        }
+        _ => {
+            let _ = writeln!(
+                out,
+                "Not captured yet.\n\n![no capture yet]({NO_CAPTURE})\n"
+            );
+        }
     }
-    out
+}
+
+/// How to repeat the recorded run, or that nobody has said (D736).
+fn render_reproduce(out: &mut String, row: &Row) {
+    use core::fmt::Write as _;
+
+    let _ = writeln!(out, "## Reproduce\n");
+    let Some(reproduce) = &row.reproduce else {
+        let _ = writeln!(
+            out,
+            "_No reproduction recorded: the record has no `[reproduce]` section._"
+        );
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "```text\norbistoun-cli compat reproduce {}\n```\n",
+        row.title
+    );
+    let _ = writeln!(out, "| | |\n|---|---|");
+    let build = reproduce
+        .module_sha256
+        .as_deref()
+        .map_or_else(|| "_any - not pinned_".to_owned(), |sha| format!("`{sha}`"));
+    let _ = writeln!(out, "| Title build | {build} |");
+    let _ = writeln!(out, "| Limit | {} s |", reproduce.limit_seconds);
+    let _ = writeln!(
+        out,
+        "| Frame kept | every {} flips |",
+        reproduce.frame_every
+    );
+    let input = if row.inputs {
+        format!(
+            "[`{INPUTS_FILE}`]({ROOT}/compat/{}/{INPUTS_FILE})",
+            row.title
+        )
+    } else {
+        "_none - the run takes no input_".to_owned()
+    };
+    let _ = writeln!(out, "| Input | {input} |");
+    let _ = writeln!(out, "| Clock | logical (D582, D735) |");
 }
 
 /// Escape the two characters that break a markdown table cell.
@@ -688,6 +752,43 @@ impl Hardware {
     }
 }
 
+/// How a title's recorded run is repeated, and where the sheet of its frames is kept (D736).
+///
+/// Everything a run needs beyond the title and orbistoun: the title build it was made with, how
+/// long it ran and how often a frame was kept. The input it replays sits beside the record as
+/// `inputs.toml`. Runs repeat under the logical clock (D582, D735).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reproduce {
+    /// The sha256 of the title module the run was made with; a reproduction refuses another build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_sha256: Option<String>,
+    /// Seconds the run is given.
+    pub limit_seconds: u64,
+    /// A frame is kept every this many flips for the sheet.
+    pub frame_every: u64,
+    /// Whether the sheet is committed beside the record, or kept in the local title library.
+    #[serde(default)]
+    pub frames: FramesKept,
+}
+
+/// Where a title's sheet of frames is kept (D736).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FramesKept {
+    /// In the local title library, never the repository: the default, and the only choice for a
+    /// title whose frames are its publisher's output.
+    #[default]
+    Local,
+    /// Beside the record as `frames.png`: for a title built from open sources in this collection.
+    Committed,
+}
+
+/// The file a title's sheet of frames is kept in, beside its record or in the title library.
+pub const FRAMES_FILE: &str = "frames.png";
+
+/// The file a title's replayed input is kept in, beside its record.
+pub const INPUTS_FILE: &str = "inputs.toml";
+
 /// One override file, as it appears on disk.
 ///
 /// `BTreeMap` throughout so serialisation is deterministic and diffs show no ordering churn.
@@ -703,6 +804,9 @@ pub struct OverrideFile {
     /// hardware status as unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware: Option<Hardware>,
+    /// How the recorded run is repeated, and where its frames go (D736).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reproduce: Option<Reproduce>,
     /// Compatibility entries, keyed by behaviour name.
     #[serde(default)]
     pub compat: BTreeMap<String, CompatEntry>,
@@ -1232,6 +1336,7 @@ reason = "..."
         let f = OverrideFile {
             title: super::Title::default(),
             hardware: None,
+            reproduce: None,
             compat: BTreeMap::new(),
             settings,
             status: None,
@@ -1275,6 +1380,8 @@ reason = "..."
                 experiment: true,
                 screenshot: None,
                 hardware: None,
+                reproduce: None,
+                inputs: false,
             },
             Row {
                 name: None,
@@ -1283,6 +1390,8 @@ reason = "..."
                 experiment: false,
                 screenshot: Some("screenshots/far.png".to_owned()),
                 hardware: None,
+                reproduce: None,
+                inputs: false,
             },
         ];
         let md = render_markdown(&rows);
@@ -1320,6 +1429,8 @@ reason = "..."
             experiment: false,
             screenshot: None,
             hardware: None,
+            reproduce: None,
+            inputs: false,
         };
         assert!(
             !super::render_title_page(&row, &super::Title::default(), "").contains("Link plan")
@@ -1343,6 +1454,8 @@ reason = "..."
             experiment: false,
             screenshot: None,
             hardware: None,
+            reproduce: None,
+            inputs: false,
         };
         assert_eq!(row.on_hardware(), "unknown");
         assert!(render_markdown(std::slice::from_ref(&row)).contains("| unknown |"));
@@ -1380,6 +1493,8 @@ reason = "..."
             experiment: false,
             screenshot: None,
             hardware: None,
+            reproduce: None,
+            inputs: false,
         }];
         let md = render_markdown(&rows);
         assert!(md.contains("## Screenshots"));
@@ -1702,6 +1817,8 @@ reason = "..."
                 experiment: false,
                 screenshot: None,
                 hardware: None,
+                reproduce: None,
+                inputs: false,
             })
             .collect();
         let table = render_markdown(&rows);
@@ -1924,5 +2041,53 @@ reason = "..."
         let mine = Resolved::for_run("SCSH00001", &dir);
         assert_eq!(mine.text(super::FILESYSTEM_VIEW), Some("sandbox"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A title's page embeds its committed sheet and says how to reproduce the run; a retail
+    /// title's sheet is said to be local, never linked (D736).
+    #[test]
+    fn a_page_shows_its_sheet_and_how_to_reproduce_the_run() {
+        use super::{FramesKept, Reproduce, Title, render_title_page};
+        let reproduce = |frames| Reproduce {
+            module_sha256: Some("ab12".to_owned()),
+            limit_seconds: 60,
+            frame_every: 30,
+            frames,
+        };
+        let row = |screenshot: Option<&str>, frames| Row {
+            name: None,
+            title: "T0001".to_owned(),
+            status: status(Reach::Flipped, 1, 1),
+            experiment: false,
+            screenshot: screenshot.map(str::to_owned),
+            hardware: None,
+            reproduce: Some(reproduce(frames)),
+            inputs: true,
+        };
+        let committed = render_title_page(
+            &row(Some("compat/T0001/frames.png"), FramesKept::Committed),
+            &Title::default(),
+            "",
+        );
+        assert!(
+            committed.contains("](../../compat/T0001/frames.png)"),
+            "{committed}"
+        );
+        assert!(
+            committed.contains("orbistoun-cli compat reproduce T0001"),
+            "{committed}"
+        );
+        assert!(
+            committed.contains("../../compat/T0001/inputs.toml"),
+            "{committed}"
+        );
+        assert!(committed.contains("`ab12`"), "{committed}");
+
+        let local = render_title_page(&row(None, FramesKept::Local), &Title::default(), "");
+        assert!(local.contains("local title library"), "{local}");
+        assert!(
+            !local.contains("frames.png"),
+            "a local sheet is never linked: {local}"
+        );
     }
 }

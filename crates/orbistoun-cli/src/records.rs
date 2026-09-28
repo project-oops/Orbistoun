@@ -80,4 +80,25 @@ mod tests {
             .collect();
         assert_eq!(titles, ["A0001", "B0001"], "sorted, and only the two");
     }
+
+    /// A sheet of frames sits in the repository only where its record says it is committed: a
+    /// retail title's frames are its publisher's output and never ours to publish (D736).
+    #[test]
+    fn a_committed_sheet_belongs_to_a_title_that_says_so() {
+        let compat = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat");
+        let records = super::read_all(&compat).expect("reads").unwrap_or_default();
+        for (title, file) in records {
+            let sheet = super::title_dir(&compat, &title).join(orbistoun_overrides::FRAMES_FILE);
+            if !sheet.exists() {
+                continue;
+            }
+            let kept = file.reproduce.map(|r| r.frames);
+            assert_eq!(
+                kept,
+                Some(orbistoun_overrides::FramesKept::Committed),
+                "{} is committed, and {title}'s record does not say frames = \"committed\"",
+                sheet.display()
+            );
+        }
+    }
 }
