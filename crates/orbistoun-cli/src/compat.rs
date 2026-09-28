@@ -185,13 +185,70 @@ pub(crate) fn cmd_compat_markdown(
     Ok(())
 }
 
-/// `compat reproduce` - repeat a title's recorded run and remake its sheet of frames (D736).
+/// How often a run keeps a frame when nothing else asked: often enough for a sheet to space its
+/// frames evenly across any run a record makes (D736).
+pub(crate) const DEFAULT_FRAME_EVERY: u64 = 30;
+
+/// How a run was made, for its record's `[reproduce]` section (D736).
+pub(crate) struct RunTaken<'a> {
+    /// The limit it ran under, in seconds; zero is none.
+    pub(crate) limit_seconds: u64,
+    /// The pad script it replayed, when it replayed one.
+    pub(crate) input: Option<&'a std::path::Path>,
+    /// How often it kept a frame.
+    pub(crate) frame_every: u64,
+}
+
+/// `compat reproduce` - repeat a recorded run and remake its sheet of frames (D736), for one title
+/// or, with `--all`, every title whose record says how.
 ///
 /// Everything comes from the record: the title build it must be, how long it runs, how often a
 /// frame is kept, and the input it replays (`inputs.toml` beside it). The run records its own
 /// result as any run does. The sheet goes beside the record when the record says it is committed,
 /// and into the local title library otherwise.
 pub(crate) fn cmd_compat_reproduce(
+    service: &orbistoun_service::Service,
+    (title, all): (Option<&str>, bool),
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+) -> Result<()> {
+    match (title, all) {
+        (Some(title), false) => reproduce_one(service, title, dir, symbols_db),
+        (None, true) => reproduce_all(service, dir, symbols_db),
+        _ => anyhow::bail!("name one title, or pass --all"),
+    }
+}
+
+/// Every title whose record says how, one after another; a title that cannot be reproduced here -
+/// absent from the library, another build, no `[reproduce]` - is named and passed over.
+fn reproduce_all(
+    service: &orbistoun_service::Service,
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut done = 0usize;
+    let mut passed_over: Vec<(String, String)> = Vec::new();
+    for (title, file) in crate::records::read_all(dir)?.unwrap_or_default() {
+        if file.reproduce.is_none() {
+            passed_over.push((title, "its record has no [reproduce] section".to_owned()));
+            continue;
+        }
+        println!("== {title}");
+        match reproduce_one(service, &title, dir, symbols_db) {
+            Ok(()) => done += 1,
+            Err(e) => passed_over.push((title, format!("{e:#}"))),
+        }
+    }
+    println!();
+    println!("reproduced {done} title(s)");
+    for (title, why) in &passed_over {
+        println!("  passed over {title}: {why}");
+    }
+    Ok(())
+}
+
+/// One title's recorded run, repeated, and its sheet remade.
+fn reproduce_one(
     service: &orbistoun_service::Service,
     title: &str,
     dir: &std::path::Path,
@@ -200,8 +257,7 @@ pub(crate) fn cmd_compat_reproduce(
     let record = load_compat(dir, title)?;
     let Some(reproduce) = record.reproduce else {
         anyhow::bail!(
-            "{} has no [reproduce] section: add limit_seconds and frame_every to say how its run is \
-             repeated",
+            "{} has no [reproduce] section: a run recorded into its [status] writes one",
             compat_path(dir, title).display()
         );
     };
@@ -225,9 +281,6 @@ pub(crate) fn cmd_compat_reproduce(
         );
     }
 
-    let paths = orbistoun_paths::Paths::resolve();
-    let traces = paths.traces_dir();
-    crate::frames::clear(&traces)?;
     let inputs = crate::records::title_dir(dir, title).join(orbistoun_overrides::INPUTS_FILE);
     // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
     unsafe {
@@ -244,21 +297,95 @@ pub(crate) fn cmd_compat_reproduce(
         (symbols_db, inputs.is_file().then_some(inputs.as_path())),
         (false, false),
     )?;
+    // Written whether or not the run was kept as the record's best: a reproduction's sheet is the
+    // point of asking for one.
+    match write_title_sheet(dir, title, &reproduce, &orbistoun_paths::Paths::resolve())? {
+        Some((sheet, shown, kept)) => println!(
+            "wrote {} ({shown} of the {kept} frames kept, evenly across the run)",
+            sheet.display()
+        ),
+        None => println!("the run kept no frames, so {title} has no sheet"),
+    }
+    Ok(())
+}
 
+/// Writes `title`'s sheet from the frames the last run kept, where its record says: beside the
+/// record when committed, in the local title library otherwise. The sheet, how many frames it
+/// shows and how many were kept; `None` when the run kept none.
+///
+/// # Errors
+///
+/// When the frames cannot be read or the sheet cannot be written.
+pub(crate) fn write_title_sheet(
+    dir: &std::path::Path,
+    title: &str,
+    reproduce: &orbistoun_overrides::Reproduce,
+    paths: &orbistoun_paths::Paths,
+) -> Result<Option<(std::path::PathBuf, usize, usize)>> {
+    let kept = crate::frames::kept(&paths.traces_dir())?;
+    if kept.is_empty() {
+        return Ok(None);
+    }
     let sheet = match reproduce.frames {
         orbistoun_overrides::FramesKept::Committed => {
             crate::records::title_dir(dir, title).join(orbistoun_overrides::FRAMES_FILE)
         }
         orbistoun_overrides::FramesKept::Local => paths.title_frames_file(title),
     };
-    let kept = crate::frames::kept(&traces)?;
     let shown = crate::frames::spread(&kept, usize::try_from(reproduce.sheet_frames)?);
     let count = crate::frames::write_sheet(&shown, &sheet)?;
-    println!(
-        "wrote {} ({count} of the {} frames kept, evenly across the run)",
-        sheet.display(),
-        kept.len()
-    );
+    Ok(Some((sheet, count, kept.len())))
+}
+
+/// Brings a record's `[reproduce]` section, its `inputs.toml` and its sheet up to the run just
+/// recorded into its `[status]` slot (D736): the build pinned, the limit, input and frame interval
+/// it ran with, and the frames it kept. How many frames a sheet shows and where it goes stay as
+/// the record had them - local, until somebody marks a title's frames committed.
+fn note_reproduction(
+    dir: &std::path::Path,
+    title: &str,
+    module: &std::path::Path,
+    taken: &RunTaken<'_>,
+    paths: &orbistoun_paths::Paths,
+) -> Result<()> {
+    let mut file = load_compat(dir, title)?;
+    let bytes = std::fs::read(module).with_context(|| format!("reading {}", module.display()))?;
+    let mut reproduce = file
+        .reproduce
+        .clone()
+        .unwrap_or(orbistoun_overrides::Reproduce {
+            module_sha256: None,
+            limit_seconds: 0,
+            frame_every: DEFAULT_FRAME_EVERY,
+            sheet_frames: orbistoun_overrides::DEFAULT_SHEET_FRAMES,
+            frames: orbistoun_overrides::FramesKept::Local,
+        });
+    reproduce.module_sha256 = Some(module_sha256(&bytes));
+    reproduce.limit_seconds = taken.limit_seconds;
+    reproduce.frame_every = taken.frame_every;
+    file.reproduce = Some(reproduce.clone());
+    write_compat(dir, title, &file)?;
+
+    // The input beside the record is the one this run replayed, or none when it replayed none.
+    let inputs = crate::records::title_dir(dir, title).join(orbistoun_overrides::INPUTS_FILE);
+    match taken.input {
+        Some(input) => {
+            let same = std::fs::canonicalize(input).ok() == std::fs::canonicalize(&inputs).ok();
+            if !same {
+                std::fs::copy(input, &inputs)
+                    .with_context(|| format!("copying {} beside the record", input.display()))?;
+            }
+        }
+        None if inputs.is_file() => {
+            std::fs::remove_file(&inputs)
+                .with_context(|| format!("removing {}", inputs.display()))?;
+        }
+        None => {}
+    }
+
+    if let Some((sheet, shown, kept)) = write_title_sheet(dir, title, &reproduce, paths)? {
+        println!("  frames: {} ({shown} of the {kept} kept)", sheet.display());
+    }
     Ok(())
 }
 
@@ -455,7 +582,11 @@ fn write_compat(
 /// Recording is automatic, so the record stays derived from runs rather than depending on someone
 /// to act on a prompt (D182). It is safe unattended because of slot routing: a run with stub
 /// answers cannot overwrite the unassisted number.
-pub(crate) fn record_compat(path: &std::path::Path, trace: &orbistoun_report::trace::CallTrace) {
+pub(crate) fn record_compat(
+    path: &std::path::Path,
+    trace: &orbistoun_report::trace::CallTrace,
+    taken: &RunTaken<'_>,
+) {
     let dir = std::path::Path::new("compat");
     let Some(title) = title_id(path) else {
         return;
@@ -493,7 +624,7 @@ pub(crate) fn record_compat(path: &std::path::Path, trace: &orbistoun_report::tr
 
     // Written rather than suggested. Slot routing keeps this safe unattended (D312).
     match keep_status(dir, &title, &status, &title_metadata(path), false) {
-        Ok(Kept::Written { slot, path }) => {
+        Ok(Kept::Written { slot, path: record }) => {
             println!();
             println!(
                 "  recorded [{slot}] {} - {} imports, {} calls, {}% standing",
@@ -502,7 +633,15 @@ pub(crate) fn record_compat(path: &std::path::Path, trace: &orbistoun_report::tr
                 status.calls,
                 status.standing
             );
-            println!("  {}", path.display());
+            println!("  {}", record.display());
+            // The baseline is what a reproduction repeats; an experiment rests on answers nothing
+            // measured, so it is not what the record reproduces (D736).
+            if slot == "status"
+                && let Err(e) =
+                    note_reproduction(dir, &title, path, taken, &orbistoun_paths::Paths::resolve())
+            {
+                println!("  could not note how to reproduce it: {e:#}");
+            }
         }
         // A record as good as this run is the ordinary outcome; one holding something better means
         // a regression, which is reported.
@@ -672,6 +811,87 @@ mod tests {
 
     /// The compat `--check` fails on a hand-edited generated file, and passes on a fresh one.
     ///
+    /// A run recorded into `[status]` leaves its record reproducible (D736): the build pinned, the
+    /// limit, input and frame interval it ran with, its input beside the record, and a sheet - in
+    /// the local title library until the record says its frames are committed. A later run with no
+    /// input takes the stale one away.
+    #[test]
+    fn a_recorded_run_leaves_its_record_reproducible() {
+        use orbistoun_overrides::{FramesKept, INPUTS_FILE};
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let dir = root.path().join("compat");
+        let data = root.path().join("data");
+        let paths = orbistoun_paths::Paths::resolve_with(
+            &orbistoun_paths::EnvSnapshot {
+                portable_flag: false,
+                data_dir: Some(data.clone()),
+            },
+            None,
+            None,
+        );
+        let traces = paths.traces_dir();
+        std::fs::create_dir_all(&traces).unwrap();
+        for flip in 0..12u64 {
+            std::fs::write(
+                traces.join(format!("flip-{:06}-4x4.rgba", flip * 30)),
+                vec![0x40; 64],
+            )
+            .unwrap();
+        }
+        let module = root.path().join("eboot.bin");
+        std::fs::write(&module, b"a title build").unwrap();
+        let input = root.path().join("capture.toml");
+        std::fs::write(&input, "[[step]]\nat_flip = 1\n").unwrap();
+        std::fs::create_dir_all(crate::records::title_dir(&dir, "T0001")).unwrap();
+        std::fs::write(crate::records::report_path(&dir, "T0001"), "").unwrap();
+
+        let taken = |input| super::RunTaken {
+            limit_seconds: 45,
+            input,
+            frame_every: 30,
+        };
+        super::note_reproduction(&dir, "T0001", &module, &taken(Some(&input)), &paths)
+            .expect("noted");
+        let reproduce = super::load_compat(&dir, "T0001")
+            .unwrap()
+            .reproduce
+            .expect("a [reproduce] section");
+        assert_eq!(
+            reproduce.module_sha256.as_deref(),
+            Some(super::module_sha256(b"a title build").as_str())
+        );
+        assert_eq!((reproduce.limit_seconds, reproduce.frame_every), (45, 30));
+        assert_eq!(reproduce.frames, FramesKept::Local, "local until marked");
+        let beside = crate::records::title_dir(&dir, "T0001");
+        assert!(
+            beside.join(INPUTS_FILE).is_file(),
+            "the input copied beside the record"
+        );
+        assert!(
+            paths.title_frames_file("T0001").is_file(),
+            "the sheet in the library"
+        );
+        assert!(
+            !beside.join("frames.png").exists(),
+            "and not beside the record"
+        );
+
+        let mut file = super::load_compat(&dir, "T0001").unwrap();
+        if let Some(reproduce) = file.reproduce.as_mut() {
+            reproduce.frames = FramesKept::Committed;
+        }
+        super::write_compat(&dir, "T0001", &file).unwrap();
+        super::note_reproduction(&dir, "T0001", &module, &taken(None), &paths).expect("noted");
+        assert!(
+            beside.join("frames.png").is_file(),
+            "committed: beside the record"
+        );
+        assert!(
+            !beside.join(INPUTS_FILE).exists(),
+            "a run with no input takes it away"
+        );
+    }
+
     /// A guard is trusted only once made to fail (D227), so both a corrupted table and a deleted
     /// page are exercised.
     #[test]

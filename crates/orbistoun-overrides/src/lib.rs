@@ -776,8 +776,11 @@ pub struct Reproduce {
 }
 
 /// How many frames a sheet shows when its record does not say.
+pub const DEFAULT_SHEET_FRAMES: u64 = 10;
+
+/// [`DEFAULT_SHEET_FRAMES`], for serde.
 const fn default_sheet_frames() -> u64 {
-    10
+    DEFAULT_SHEET_FRAMES
 }
 
 /// Where a title's sheet of frames is kept (D736).

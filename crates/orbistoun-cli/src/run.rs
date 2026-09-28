@@ -23,6 +23,23 @@ fn set_profile_for_run(profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Has the run keep a frame every so many flips, answering how many: what `ORBISTOUN_FRAME_EVERY`
+/// already says, or [`crate::compat::DEFAULT_FRAME_EVERY`]. The previous run's frames are cleared
+/// first, so the frames the record's sheet is made from are this run's alone (D736).
+fn keep_frames_for_run() -> Result<u64> {
+    let asked = orbistoun_env::FRAME_EVERY
+        .get()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&every| every > 0);
+    let every = asked.unwrap_or(crate::compat::DEFAULT_FRAME_EVERY);
+    if asked.is_none() {
+        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+        unsafe { std::env::set_var(orbistoun_env::FRAME_EVERY.name, every.to_string()) };
+    }
+    crate::frames::clear(&orbistoun_paths::Paths::resolve().traces_dir())?;
+    Ok(every)
+}
+
 /// `link` - link a title in a worker process and store its plan, entering nothing (D724).
 pub(crate) fn cmd_link(
     path: &std::path::Path,
@@ -123,6 +140,7 @@ pub(crate) fn cmd_run(
     (staged, relink): (bool, bool),
 ) -> Result<()> {
     set_profile_for_run(profile)?;
+    let frame_every = keep_frames_for_run()?;
     let mut worker =
         orbistoun_worker::WorkerHandle::spawn_self().context("spawning a worker process")?;
 
@@ -168,7 +186,15 @@ pub(crate) fn cmd_run(
     if orbistoun_report::trace::wrote_a_trace(before_stamp, trace_stamp(path)) {
         if let Some(after) = previous_trace(path) {
             report_progress(before.as_ref(), &after);
-            record_compat(path, &after);
+            record_compat(
+                path,
+                &after,
+                &crate::compat::RunTaken {
+                    limit_seconds: limit,
+                    input,
+                    frame_every,
+                },
+            );
         }
     } else {
         println!();

@@ -709,7 +709,11 @@ enum CompatAction {
     /// The title build, limit, frame interval and input all come from the record (D736).
     Reproduce {
         /// The title, as its record is named.
-        title: String,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        title: Option<String>,
+        /// Every title whose record says how, one after another.
+        #[arg(long)]
+        all: bool,
         /// Where the records live.
         #[arg(long, default_value = "compat")]
         dir: std::path::PathBuf,
@@ -1017,8 +1021,8 @@ fn dispatch_records(
         Command::Compat { ref action } => match action {
             CompatAction::List { dir } => cmd_compat_list(dir)?,
             CompatAction::Markdown { dir, out, check } => cmd_compat_markdown(dir, out, *check)?,
-            CompatAction::Reproduce { title, dir } => {
-                cmd_compat_reproduce(service, title, dir, symbols_db)?;
+            CompatAction::Reproduce { title, all, dir } => {
+                cmd_compat_reproduce(service, (title.as_deref(), *all), dir, symbols_db)?;
             }
             CompatAction::Record {
                 path,
