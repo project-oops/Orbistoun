@@ -283,6 +283,7 @@ guest_module! {
         "sceLibcMspaceDestroy" => 1,
         "sceLibcMspaceMemalign" => 3,
         "sceLibcMspaceMallocUsableSize" => 1,
+        "malloc_usable_size" => 1,
         "aligned_alloc" => 2,
         "exit" => 1,
         "_Exit" => 1,
@@ -1029,17 +1030,19 @@ fn realloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Served here with the rest of the allocator: unserved, the loader bound it to the title's own
 /// `libc.prx`, whose heap holds none of the blocks this library hands out, and PPSA02664's Unity
 /// runtime stored the null it answered for `(NULL, 0x400, 16)` and wrote through it. Null grows
-/// from nothing, as `realloc` does; the contents survive up to the smaller size; a failure,
-/// including an alignment that is not a power of two, answers null and leaves the original.
+/// from nothing, as `realloc` does; the contents survive up to the smaller size; a failure answers
+/// null and leaves the original. An alignment that is not a power of two is rounded up to the next
+/// one, as dlmalloc's `internal_memalign` does: the platform answered a 32-aligned block for 24
+/// (obSCEne REQ-20260927T1130Z-d5f4).
 fn reallocalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (pointer, Ok(size), Ok(align)) =
         (args[0], usize::try_from(args[1]), usize::try_from(args[2]))
     else {
         return 0;
     };
-    if !align.is_power_of_two() {
+    let Some(align) = align.max(1).checked_next_power_of_two() else {
         return 0;
-    }
+    };
     let fresh = allocate(size, align);
     if fresh == 0 || pointer == 0 {
         return fresh;
@@ -1138,9 +1141,11 @@ fn mspace_memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     allocate(size, align)
 }
 
-/// `sceLibcMspaceMallocUsableSize(ptr)`: dlmalloc's `mspace_usable_size` - the bytes the block can
-/// hold, zero for null. Unserved, it bound to the bundled libc.prx and read this allocator's
-/// blocks with that heap's chunk layout.
+/// `sceLibcMspaceMallocUsableSize(ptr)` and `malloc_usable_size(ptr)`: dlmalloc's
+/// `mspace_usable_size` - the bytes the block can hold, zero for null. Unserved, each bound to the
+/// bundled libc.prx and read this allocator's blocks with that heap's chunk layout. The platform
+/// answers exactly the size asked for, 100 for `malloc(100)` and for `reallocalign(NULL, 100, 64)`
+/// (obSCEne REQ-20260927T1130Z-d5f4), which is what this header records.
 fn mspace_malloc_usable_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return 0;
@@ -3264,6 +3269,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceLibcMspaceDestroy", mspace_destroy),
         ("sceLibcMspaceMemalign", mspace_memalign),
         ("sceLibcMspaceMallocUsableSize", mspace_malloc_usable_size),
+        ("malloc_usable_size", mspace_malloc_usable_size),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
         ("vsprintf_s", vsprintf_s),
@@ -3992,7 +3998,10 @@ mod tests {
         let p = call("sceLibcMspaceMemalign", [msp, 256, 100, 0, 0, 0]);
         assert_ne!(p, 0);
         assert_eq!(p % 256, 0, "the alignment is honoured");
-        assert!(call("sceLibcMspaceMallocUsableSize", [p, 0, 0, 0, 0, 0]) >= 100);
+        assert_eq!(
+            call("sceLibcMspaceMallocUsableSize", [p, 0, 0, 0, 0, 0]),
+            100
+        );
         assert_eq!(call("sceLibcMspaceMallocUsableSize", [0, 0, 0, 0, 0, 0]), 0);
         // dlmalloc rounds an alignment that is not a power of two up to the next one.
         let q = call("sceLibcMspaceMemalign", [msp, 24, 8, 0, 0, 0]);
@@ -4086,16 +4095,38 @@ mod tests {
         call("free", [grown, 0, 0, 0, 0, 0]);
     }
 
-    /// An alignment that is not a power of two is refused with null, and the original survives.
+    /// An alignment that is not a power of two is rounded up to the next one, as the platform
+    /// answered a 32-aligned block for 24 (obSCEne REQ-20260927T1130Z-d5f4), and the contents move.
     #[test]
-    fn reallocalign_refuses_a_bad_alignment_and_keeps_the_original() {
-        let block = call("malloc", [32, 0, 0, 0, 0, 0]);
-        assert_eq!(call("reallocalign", [block, 64, 24, 0, 0, 0]), 0);
+    fn reallocalign_rounds_an_alignment_up_to_a_power_of_two() {
+        let block = call("malloc", [64, 0, 0, 0, 0, 0]);
+        // SAFETY: a live 64-byte block this library handed out.
+        unsafe { super::ptr(block).write_bytes(0xa5, 64) };
+        let moved = call("reallocalign", [block, 64, 24, 0, 0, 0]);
+        assert_ne!(moved, 0);
+        assert_eq!(moved % 32, 0, "24 rounded up to 32");
+        // SAFETY: the 64-byte block reallocalign answered.
+        let first = unsafe { super::ptr(moved).read() };
+        assert_eq!(first, 0xa5, "the contents moved");
+        call("free", [moved, 0, 0, 0, 0, 0]);
+    }
+
+    /// Both usable-size calls answer exactly what was asked for, as the platform does for
+    /// `malloc(100)` and `reallocalign(NULL, 100, 64)` (obSCEne REQ-20260927T1130Z-d5f4).
+    #[test]
+    fn usable_size_is_the_size_asked_for() {
+        let block = call("malloc", [100, 0, 0, 0, 0, 0]);
+        assert_eq!(call("malloc_usable_size", [block, 0, 0, 0, 0, 0]), 100);
         assert_eq!(
-            call("realloc", [block, 64, 0, 0, 0, 0]) % 16,
-            0,
-            "still a live block"
+            call("sceLibcMspaceMallocUsableSize", [block, 0, 0, 0, 0, 0]),
+            100
         );
+        call("free", [block, 0, 0, 0, 0, 0]);
+        let aligned = call("reallocalign", [0, 100, 64, 0, 0, 0]);
+        assert_eq!(aligned % 64, 0);
+        assert_eq!(call("malloc_usable_size", [aligned, 0, 0, 0, 0, 0]), 100);
+        call("free", [aligned, 0, 0, 0, 0, 0]);
+        assert_eq!(call("malloc_usable_size", [0, 0, 0, 0, 0, 0]), 0);
     }
 
     #[test]

@@ -1820,11 +1820,26 @@ arity = 1
 purpose = "Answers how many bytes an allocated block can hold."
 edge_cases = [
     "Zero for null; otherwise the block's usable bytes from this allocator's header. Bound to the bundled libc.prx it read this allocator's blocks with that heap's chunk layout.",
+    "Exactly the size asked for, not a rounded chunk size: 100 for malloc(100) and for reallocalign(NULL, 100, 64).",
 ]
-known_by = "published"
-cites = "Doug Lea dlmalloc 2.8.6 (public domain) mspace interface, which the platform's sceLibcMspace* family wraps; D451 (one host heap, arena handle not consulted); mspace_usable_size"
+known_by = "measured"
+cites = "obSCEne REQ-20260927T1130Z-d5f4 (sweep 20260928-135518, check 035-libc/reallocalign-usable-size, log lines 2002-2027: usable size 0x64 for malloc-100 and reallocalign-100-64, NID 3j5sEugWSnw); Doug Lea dlmalloc 2.8.6 (public domain) mspace interface; D451 (one host heap, arena handle not consulted)"
 found_in = ["PPSA21564-app0"]
 found_on = "2026-09-27"
+
+[[function]]
+name = "malloc_usable_size"
+found_by = "static"
+arity = 1
+purpose = "Answers how many bytes an allocated block can hold."
+edge_cases = [
+    "Zero for null; otherwise exactly the size asked for: 100 for malloc(100) and for reallocalign(NULL, 100, 64).",
+    "Served with the rest of the allocator: bound to the bundled libc.prx it would read this allocator's blocks with that heap's chunk layout.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20260927T1130Z-d5f4 (sweep 20260928-135518, check 035-libc/reallocalign-usable-size, log lines 2002-2027: usable size 0x64 for malloc-100 and reallocalign-100-64, NID L0QZxn0SNzQ)"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-09-28"
 
 [[function]]
 name = "aligned_alloc"
@@ -1847,11 +1862,12 @@ purpose = "Resizes an allocation, as realloc does, to a block whose address is a
 edge_cases = [
     "Unserved, the loader bound it to the title's own libc.prx, whose heap owns none of the blocks this library's malloc family hands out. PPSA02664's Unity runtime grew an empty array with reallocalign(NULL, 0x400, 16), got null from that heap, stored it and wrote through it: the fault at image+0xafafdb that stopped PPSA02664 and PPSA03416.",
     "A null pointer allocates; the contents survive up to the smaller of the two sizes; the old block is freed.",
-    "An alignment that is not a power of two, or a failed allocation, answers null and leaves the original block alive.",
+    "An alignment that is not a power of two is served, errno untouched: 24 answered a 32-aligned block. It is rounded up to the next power of two, as dlmalloc's internal_memalign does.",
+    "A zero size answers a live block, not null.",
+    "A failed allocation answers null and leaves the original block alive.",
 ]
-known_by = "guest-observed"
-cites = "PPSA02664 image+0xafaf8c: reallocalign(old, size, 0x10) with the result stored at the array's base; realloc's contract (ISO C 7.22.3.5) with memalign's alignment"
-assumptions = ["Whether the platform frees and answers a minimum block for a zero size, as FreeBSD's realloc does, is unmeasured; this allocates the minimum block and frees the original."]
+known_by = "measured"
+cites = "obSCEne REQ-20260927T1130Z-d5f4 (sweep 20260928-135518, check 035-libc/reallocalign-usable-size, log lines 2002-2027, NID BoTA41abbDg: (NULL, 0x400, 16) 16-aligned with errno 0; (p, 0, 16) non-null; (p, 64, 24) 0x88000af40 with errno 0; (p, 64, 0x10000) 64 KiB aligned with the contents kept); PPSA02664 image+0xafaf8c: reallocalign(old, size, 0x10) with the result stored at the array's base"
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-09-27"
 
