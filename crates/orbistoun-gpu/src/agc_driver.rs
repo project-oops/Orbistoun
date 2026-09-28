@@ -1692,8 +1692,24 @@ impl cp::CpMemory for GuestCp<'_> {
         if Self::defer_copy(source, destination, count) {
             return true;
         }
+        if !self.settle_pending(source, count as u64) {
+            return false;
+        }
+        let writable = write_lookup()
+            .get()
+            .is_some_and(|allows| allows(destination, count as u64));
+        let Ok(dest) = usize::try_from(destination) else {
+            return false;
+        };
+        if !writable || self.memory.read(source, count).is_none() {
+            return false;
+        }
+        // The copy is sure to happen now, so what is deferred or pending wholly inside its
+        // destination is dropped unread as a fill drops it (D719): carrying a frame out only for
+        // this copy to overwrite every byte of it was a whole-frame tiling per frame.
+        drop_covered(destination, count as u64);
+        drop_pending_covered(destination, count as u64);
         if !carry_out_overlapping(destination, count as u64)
-            || !self.settle_pending(source, count as u64)
             || !self.settle_pending(destination, count as u64)
         {
             return false;
@@ -1701,15 +1717,6 @@ impl cp::CpMemory for GuestCp<'_> {
         let Some(from) = self.memory.read(source, count) else {
             return false;
         };
-        let writable = write_lookup()
-            .get()
-            .is_some_and(|allows| allows(destination, count as u64));
-        let Ok(dest) = usize::try_from(destination) else {
-            return false;
-        };
-        if !writable {
-            return false;
-        }
         unprotect_overlapping(destination, count as u64);
         // SAFETY: `from` is `count` readable guest bytes and the installed lookup vouched that the
         // destination's `count` bytes are writable identity-mapped guest memory (a protected
@@ -2920,6 +2927,75 @@ mod tests {
                 .chunks_exact(4)
                 .all(|w| w == 0x1122_3344u32.to_le_bytes()),
             "memory holds the fill"
+        );
+        assert!(super::deferred().lock().expect("list").is_empty());
+        super::forget_written();
+    }
+
+    /// A DMA copy over the whole of a deferred copy's destination drops it unread, as a covering
+    /// fill does (D719). Bugdom copies its target into one buffer at the end of every submission;
+    /// carrying the last frame's copy out only for the next frame's first copy to overwrite it was
+    /// a whole-frame tiling per frame.
+    #[test]
+    fn a_copy_over_a_deferred_frame_drops_it_unread() {
+        use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written, cp::CpMemory};
+        use fake::{DISCARDED, TAKEN};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        // The copy's source, then the target it is copied over, a host page apart: a deferred copy
+        // is guarded in whole pages, and a source sharing one would be read through it.
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; 2 * span + 3 * page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..];
+        let gap = span + page;
+        memory[..span].fill(0x5C);
+        let source = memory.as_ptr() as usize as u64;
+        let base = source + gap as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+        };
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            base,
+            bytes: Arc::new(memory[gap..gap + span].to_vec()),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        assert!(super::write_back_at_this_flip());
+        assert!(
+            !super::deferred().lock().expect("list").is_empty(),
+            "deferred"
+        );
+
+        let taken = TAKEN.load(Ordering::SeqCst);
+        let discarded = DISCARDED.load(Ordering::SeqCst);
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.copy(source, base, span));
+        assert_eq!(
+            TAKEN.load(Ordering::SeqCst),
+            taken,
+            "a covered frame is never read"
+        );
+        assert_eq!(
+            DISCARDED.load(Ordering::SeqCst),
+            discarded + 1,
+            "its snapshot is let go"
+        );
+        assert!(
+            memory[gap..gap + span].iter().all(|&b| b == 0x5C),
+            "memory holds the copy"
         );
         assert!(super::deferred().lock().expect("list").is_empty());
         super::forget_written();
