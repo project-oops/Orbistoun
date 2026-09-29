@@ -12,6 +12,16 @@ s_setprio 3
 s_setprio 0x3fff
 s_setprio 0xffff
 
+// ---- s_waitcnt_depctr: a sixteen-bit counter mask and nothing else -----------------
+//
+// SOPP, as `s_setprio`. A mask the counter fields spell exactly prints as their names, which the
+// solver does not read (0x0 and 0x1 both do), so every sample is one they do not.
+s_waitcnt_depctr 0x7fff
+s_waitcnt_depctr 0xffe3
+s_waitcnt_depctr 0x1234
+s_waitcnt_depctr 0xfffe
+s_waitcnt_depctr 0xffff
+
 // ---- s_waitcnt_vscnt: a destination and a sixteen-bit count ------------------------
 //
 // SOPK. radeonsi writes `null` as the register (code 125, in the same field); varied

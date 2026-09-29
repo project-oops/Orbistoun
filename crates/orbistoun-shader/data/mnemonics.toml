@@ -358,6 +358,11 @@ opcode = 33
 name = "s_clause"
 
 [[mnemonic]]
+family = "SOPP"
+opcode = 35
+name = "s_waitcnt_depctr"
+
+[[mnemonic]]
 family = "VINTRP"
 opcode = 0
 name = "v_interp_p1_f32_e32"

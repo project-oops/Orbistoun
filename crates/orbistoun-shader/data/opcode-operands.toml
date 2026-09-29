@@ -532,6 +532,13 @@ samples = 4
 operands = [{ word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]
+family = "SOPP"
+opcode = 35
+mnemonic = "s_waitcnt_depctr"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
 family = "VINTRP"
 opcode = 0
 mnemonic = "v_interp_p1_f32_e32"

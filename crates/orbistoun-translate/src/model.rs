@@ -100,6 +100,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_sub_i32",
     "s_waitcnt",
     "s_waitcnt_vscnt",
+    "s_waitcnt_depctr",
     "s_wqm_b32",
     "s_wqm_b64",
     "s_xor_b32",
@@ -1759,11 +1760,14 @@ pub fn instruction<M: Model + ?Sized>(
         //   the host driver.
         // - `s_setprio` sets the wave's issue priority among waves, which orders nothing.
         // - `s_waitcnt_vscnt` waits for vector stores, ordered as `s_waitcnt` orders loads.
+        // - `s_waitcnt_depctr` holds issue until named dependency counters drain, covering a
+        //   hardware hazard between one instruction's write and the next one's read; the host
+        //   orders every result before its use.
         // - `s_barrier` waits for the workgroup's other waves. Every module here is one invocation
         //   standing in for one wave, and a workgroup of more than one wave is refused where its
         //   entry state is built, so there is never another wave to wait for.
         "s_endpgm" | "s_waitcnt" | "s_clause" | "s_nop" | "s_inst_prefetch" | "s_setprio"
-        | "s_waitcnt_vscnt" | "s_barrier" => Ok(()),
+        | "s_waitcnt_vscnt" | "s_waitcnt_depctr" | "s_barrier" => Ok(()),
 
         // The export, which is why a fragment stage exists at all (D553).
         "exp" => export(model, instruction),

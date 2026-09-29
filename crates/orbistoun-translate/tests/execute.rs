@@ -5069,7 +5069,8 @@ fn the_scalar_bit_field_operations_take_and_place_their_fields() {
     assert_eq!(scalar(&registers, 6), 0x9abc_1234, "the high halves");
 }
 
-/// A priority hint, a barrier in a one-wave group and a store-counter wait change nothing.
+/// A priority hint, a barrier in a one-wave group, a store-counter wait and a dependency-counter
+/// wait change nothing.
 #[test]
 fn the_scheduling_instructions_change_nothing() {
     if !device_or_skip("the_scheduling_instructions_change_nothing") {
@@ -5081,6 +5082,7 @@ fn the_scheduling_instructions_change_nothing() {
         head("s_barrier"),
         // s_waitcnt_vscnt null, 0: the SOPK destination field at bit 16.
         head("s_waitcnt_vscnt") | (125 << 16),
+        head("s_waitcnt_depctr") | 0xffe3,
         s_endpgm(),
     ]);
     assert_eq!(vector(&registers, 1), 7, "got {registers:?}");

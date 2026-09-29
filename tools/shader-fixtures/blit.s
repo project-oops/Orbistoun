@@ -20,6 +20,10 @@ s_setprio 3
 s_barrier
 s_setprio 0
 
+// ---- A dependency-counter wait ACO places after a hazard, in a pixel shader --------
+s_waitcnt_depctr 0xffe3
+s_waitcnt_depctr 0xfffe
+
 // ---- The geometry engine's counts, out of the system SGPRs -------------------------
 s_bfe_u32 s0, s2, 0x90016
 s_bfe_u32 s2, s2, 0x9000c
