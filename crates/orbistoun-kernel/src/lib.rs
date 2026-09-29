@@ -1224,13 +1224,29 @@ fn next_mapping_base(len: u64) -> u64 {
     NEXT.fetch_add(step, Ordering::Relaxed)
 }
 
-/// Virtual addresses already handed out, as `(address, len)` by the physical offset mapped.
+/// Where one physical range is mapped, and by how many of the guest's views.
+#[derive(Debug, Clone, Copy)]
+struct Alias {
+    /// The address it is mapped at.
+    base: u64,
+    /// Its length.
+    len: u64,
+    /// Views the guest holds of it: the map that placed it, and each later map answered with it.
+    /// The guest unmaps each view on its own - a buffer's CPU view closes while its GPU view stays
+    /// - so the alias lasts while any does.
+    views: u32,
+}
+
+/// The table of aliases, keyed by the physical offset mapped.
+type Aliases = std::collections::BTreeMap<u64, Alias>;
+
+/// Virtual addresses already handed out, by the physical offset mapped.
 ///
 /// A guest maps a physical range, fills it, and maps it again expecting its data back, so a second
 /// map of the same physical memory returns the first address. An entry holds only while both the
-/// physical memory and the mapping exist, and only for maps no longer than the one it records.
-fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, (u64, u64)>> {
-    static MAPPED: OnceLock<Mutex<std::collections::BTreeMap<u64, (u64, u64)>>> = OnceLock::new();
+/// physical memory and a view of it exist, and only for maps no longer than the one it records.
+fn physical_mappings() -> &'static Mutex<Aliases> {
+    static MAPPED: OnceLock<Mutex<Aliases>> = OnceLock::new();
     MAPPED.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
 }
 
@@ -1239,23 +1255,23 @@ fn physical_mappings() -> &'static Mutex<std::collections::BTreeMap<u64, (u64, u
 /// The run may be several recorded mappings - a buffer batch-mapped in pieces - as long as each
 /// piece starts at the virtual and physical address the one before ends at, so the whole range is
 /// one span of addresses holding exactly that memory in order.
-fn contiguous_alias(
-    mapped: &std::collections::BTreeMap<u64, (u64, u64)>,
-    physical: u64,
-    len: u64,
-) -> Option<u64> {
-    let &(start, _) = mapped.get(&physical)?;
+///
+/// Answers the address and the physical offsets of the pieces that make it up.
+fn contiguous_alias(mapped: &Aliases, physical: u64, len: u64) -> Option<(u64, Vec<u64>)> {
+    let start = mapped.get(&physical)?.base;
     let (mut covered, mut next_physical, mut next_virtual) = (0_u64, physical, start);
+    let mut pieces = Vec::new();
     while covered < len {
-        let &(base, piece) = mapped.get(&next_physical)?;
-        if base != next_virtual || piece == 0 {
+        let alias = mapped.get(&next_physical)?;
+        if alias.base != next_virtual || alias.len == 0 {
             return None;
         }
-        covered = covered.checked_add(piece)?;
-        next_physical = next_physical.checked_add(piece)?;
-        next_virtual = next_virtual.checked_add(piece)?;
+        pieces.push(next_physical);
+        covered = covered.checked_add(alias.len)?;
+        next_physical = next_physical.checked_add(alias.len)?;
+        next_virtual = next_virtual.checked_add(alias.len)?;
     }
-    Some(start)
+    Some((start, pieces))
 }
 
 /// Forgets every alias whose physical offset lies in `[start, start + len)`: the memory was
@@ -1266,19 +1282,34 @@ fn forget_physical(start: u64, len: u64) {
     }
 }
 
-/// Forgets every alias whose mapping starts in `[address, address + len)`: the guest unmapped it.
+/// Lets go of one view of every alias whose mapping starts in `[address, address + len)`: the guest
+/// unmapped it. An alias another view still holds stays, and so does what is kept about its
+/// address; one with no view left is forgotten.
 fn forget_mapped(address: u64, len: u64) {
+    let inside = |base: u64| base >= address && base - address < len;
+    let mut held = Vec::new();
     if let Ok(mut mapped) = physical_mappings().lock() {
-        mapped.retain(|_, &mut (base, _)| base < address || base - address >= len);
+        mapped.retain(|_, alias| {
+            if !inside(alias.base) {
+                return true;
+            }
+            alias.views = alias.views.saturating_sub(1);
+            if alias.views > 0 {
+                held.push(alias.base);
+            }
+            alias.views > 0
+        });
     }
+    // An address another view still maps keeps what is kept about it.
+    let forgotten = |base: u64| inside(base) && !held.contains(&base);
     if let Ok(mut reserved) = reservations().lock() {
-        reserved.retain(|&(base, _)| base < address || base - address >= len);
+        reserved.retain(|&(base, _)| !forgotten(base));
     }
     if let Ok(mut flexible) = flexible_mappings().lock() {
-        flexible.retain(|&base| base < address || base - address >= len);
+        flexible.retain(|&base| !forgotten(base));
     }
     if let Ok(mut requested) = requested_protections().lock() {
-        requested.retain(|&(base, _, _)| base < address || base - address >= len);
+        requested.retain(|&(base, _, _)| !forgotten(base));
     }
 }
 
@@ -1323,8 +1354,14 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
     // Already mapped and covering what is asked for: the guest gets the address it had, with its
     // data. A longer map is a different mapping.
-    if let Ok(mapped) = physical_mappings().lock() {
-        if let Some(existing) = contiguous_alias(&mapped, physical, len) {
+    if let Ok(mut mapped) = physical_mappings().lock() {
+        if let Some((existing, pieces)) = contiguous_alias(&mapped, physical, len) {
+            // Another view of the same memory, which the guest will unmap on its own.
+            for piece in pieces {
+                if let Some(alias) = mapped.get_mut(&piece) {
+                    alias.views = alias.views.saturating_add(1);
+                }
+            }
             drop(mapped);
             // SAFETY: an address the guest passed for this call, valid by its contract.
             return if unsafe { guest::write_u64(out, existing) } {
@@ -1407,7 +1444,14 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     if let Ok(mut mapped) = physical_mappings().lock() {
-        mapped.insert(physical, (base, len));
+        mapped.insert(
+            physical,
+            Alias {
+                base,
+                len,
+                views: 1,
+            },
+        );
     }
     OK
 }
@@ -1547,7 +1591,14 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
     mapping_placed(base, len, protection, true);
     note_requested_protection(base, len, prot);
     if let Ok(mut mapped) = physical_mappings().lock() {
-        mapped.insert(physical, (base, len));
+        mapped.insert(
+            physical,
+            Alias {
+                base,
+                len,
+                views: 1,
+            },
+        );
     }
     OK
 }
@@ -4004,8 +4055,8 @@ fn query_region(addr: u64) -> Option<QueryRegion> {
             let direct = physical_mappings().lock().ok().and_then(|mapped| {
                 mapped
                     .iter()
-                    .find(|&(_, &(base, len))| within(base, len))
-                    .map(|(&physical, &(base, _))| physical + start.saturating_sub(base))
+                    .find(|&(_, alias)| within(alias.base, alias.len))
+                    .map(|(&physical, alias)| physical + start.saturating_sub(alias.base))
             });
             let flexible = flexible_mappings()
                 .lock()
@@ -6989,6 +7040,61 @@ mod tests {
         assert_eq!(
             seen, 0x5eed,
             "and holds what was written through the batch map"
+        );
+    }
+
+    /// Two views of one memory are two mappings, and unmapping one leaves the other: oops-mesa's
+    /// winsys maps a buffer at its GPU address, maps it again for the CPU (answered with the GPU
+    /// address), unmaps the CPU view when the buffer closes and keeps the GPU one, then hands the
+    /// pages to a new buffer whose CPU map must see - and write - what the GPU address holds.
+    #[test]
+    fn unmapping_one_view_leaves_the_alias_the_other_holds() {
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let map = |physical: u64, len: u64, at: u64| {
+            let mut out = at;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = std::ptr::addr_of_mut!(out) as usize as u64;
+            args[1] = len;
+            args[2] = 3;
+            args[4] = physical;
+            assert_eq!(super::map_named_direct_memory(&args), 0, "maps");
+            out
+        };
+        let size = 0x4_0000_u64;
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = size;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+
+        let gpu = map(physical, size, 0x6e60_0000_0000);
+        let cpu = map(physical, size, 0);
+        assert_eq!(cpu, gpu, "the CPU view answers the GPU address");
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = cpu;
+        args[1] = size;
+        assert_eq!(super::munmap(&args), 0, "the CPU view closes");
+
+        let again = map(physical, size, 0);
+        assert_eq!(again, gpu, "the GPU view still holds the memory");
+        // SAFETY: the last word of the live mapping the map above answered read-write.
+        unsafe { std::ptr::write_volatile((again + size - 8) as usize as *mut u64, 0xde5c) };
+        // SAFETY: as above - the same live mapping, read through the GPU address.
+        let seen = unsafe { std::ptr::read_volatile((gpu + size - 8) as usize as *const u64) };
+        assert_eq!(seen, 0xde5c, "what the CPU writes, the GPU address reads");
+
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = gpu;
+        args[1] = size;
+        assert_eq!(super::munmap(&args), 0, "the second view closes");
+        assert_eq!(super::munmap(&args), 0, "and the GPU one");
+        assert_ne!(
+            map(physical, size, 0),
+            gpu,
+            "with no view left, it is not handed back"
         );
     }
 
