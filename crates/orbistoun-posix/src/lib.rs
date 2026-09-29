@@ -270,6 +270,7 @@ guest_module! {
         "_open" => 3,
         "_close" => 1,
         "_read" => 3,
+        "_fcntl" => 3,
         // Thread calls with no vendor-named twin, written under their POSIX names in
         // `orbistoun-kernel` beside the thread registry (D367).
         "pthread_detach" => 1,
@@ -372,6 +373,7 @@ const DELEGATED: &[(&str, &str)] = &[
     ("_open", "sceKernelOpen"),
     ("_close", "sceKernelClose"),
     ("_read", "sceKernelRead"),
+    ("_fcntl", "fcntl"),
     ("pthread_detach", "pthread_detach"),
     ("pthread_exit", "pthread_exit"),
     ("fstat", "fstat"),

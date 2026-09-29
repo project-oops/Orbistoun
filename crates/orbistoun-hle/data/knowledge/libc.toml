@@ -1087,12 +1087,12 @@ edge_cases = [
     "It is a pair, which is why an unimplemented answer is worse than most: a guest reads the flags, changes one bit and writes them back, so a placeholder does not stay where it was put. zftpd handed one straight back to F_SETFL and closed its web listener.",
     "O_NONBLOCK is honoured - set on the underlying socket - because it is the one flag a server's event loop depends on.",
     "FD_CLOEXEC is remembered and does nothing: nothing here ever execs, so there is no moment at which it could have an effect. It reads back as it was set.",
-    "F_DUPFD copies to the lowest free descriptor at or above the argument, and does not carry FD_CLOEXEC; F_DUPFD_CLOEXEC does.",
+    "F_DUPFD copies to the lowest free descriptor at or above the argument, and does not carry FD_CLOEXEC. F_DUPFD_CLOEXEC is refused with -1 and EOPNOTSUPP (45): measured on hardware by oops-mesa on 2026-09-25 on a descriptor for an open regular file (F_DUPFD_CLOEXEC=-1 errno 45, F_DUPFD=15 errno 0; oops-mesa patch 003). Mesa's DRI frontend reads that refusal and falls back to F_DUPFD, so SuperTuxKart creates no screen without it.",
     "Every other command is refused. A lock, an owner or a seal would need machinery nothing here has, and answering success would tell a guest it held a lock it does not.",
     "What was set is forgotten when the descriptor closes, so a number that comes back around does not inherit the last one's flags.",
 ]
 known_by = "published"
-cites = "POSIX.1-2008 fcntl(2); the commands and O_NONBLOCK from sys/sys/fcntl.h."
+cites = "POSIX.1-2008 fcntl(2); the commands and O_NONBLOCK from sys/sys/fcntl.h; oops-mesa patches/003-os-dupfd-passes-through-when-the-platform-cannot-dup.patch, the hardware dup probe from src/platform/dri_loader.c."
 found_in = ["zftpd"]
 found_on = "2026-08-30"
 

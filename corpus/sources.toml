@@ -348,7 +348,7 @@ asset = []
 
 [[source]]
 name = "STKT00001"
-target = "titles"
+target = "staged"
 kind = "local"
 sources = [
     "../oops-apps/src/oops-titles/supertuxkart/dist/supertuxkart-title-prospero.zip",
@@ -357,7 +357,10 @@ sources = [
 archive = true
 licence = "the port is ours (same suite, D043); the game is its upstream's, under its own licence"
 cite = "https://github.com/project-oops/oops-apps"
-asset = []
+
+[[source.asset]]
+file = "supertuxkart-title-prospero.zip"
+sha256 = "9c59f177c4ad88ea7cc2dece2011a74d969eecd2808b8dddb72ac00f21a8e608"
 
 [[source]]
 name = "CXTH00001"

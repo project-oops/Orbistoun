@@ -119,17 +119,24 @@ fn fcntl(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         remember(fd, flags);
         return 0;
     }
-    if command == number("fcntl", "F_DUPFD") || command == number("fcntl", "F_DUPFD_CLOEXEC") {
+    // The platform does not duplicate with close-on-exec: `F_DUPFD_CLOEXEC` is refused with
+    // `EOPNOTSUPP` while `F_DUPFD` duplicates. Measured on hardware by oops-mesa on 2026-09-25, on
+    // a descriptor for an open regular file: `F_DUPFD_CLOEXEC=-1 errno 45, F_DUPFD=15 errno 0`
+    // (oops-mesa `patches/003-os-dupfd-passes-through-when-the-platform-cannot-dup.patch`).
+    // Mesa's DRI frontend reads that refusal and falls back to `F_DUPFD`.
+    if command == number("fcntl", "F_DUPFD_CLOEXEC") {
+        if let Ok(unsupported) = i32::try_from(number("errno", "EOPNOTSUPP")) {
+            orbistoun_core::errno::set(unsupported);
+        }
+        return FAILED;
+    }
+    if command == number("fcntl", "F_DUPFD") {
         let Some(copy) = crate::descriptor::duplicate_above(fd, argument) else {
             return FAILED;
         };
+        // A plain duplicate does not carry the close-on-exec flag.
         let mut copied = flags;
-        if command == number("fcntl", "F_DUPFD_CLOEXEC") {
-            copied.descriptor |= number("fcntl", "FD_CLOEXEC");
-        } else {
-            // A plain duplicate does not carry the close-on-exec flag.
-            copied.descriptor &= !number("fcntl", "FD_CLOEXEC");
-        }
+        copied.descriptor &= !number("fcntl", "FD_CLOEXEC");
         remember(copy, copied);
         return copy;
     }
@@ -194,6 +201,21 @@ mod tests {
     fn an_unserved_command_is_refused() {
         assert_eq!(call([1, number("F_GETLK"), 0, 0, 0, 0]), super::FAILED);
         assert_eq!(call([1, number("F_SETOWN"), 0, 0, 0, 0]), super::FAILED);
+    }
+
+    /// `F_DUPFD_CLOEXEC` is refused with `EOPNOTSUPP`, as the platform answered oops-mesa on
+    /// hardware (`F_DUPFD_CLOEXEC=-1 errno 45, F_DUPFD=15 errno 0`).
+    #[test]
+    fn only_the_plain_duplicate_is_served() {
+        let _guard = crate::exclusively();
+        let err = 2;
+        orbistoun_core::errno::set(0);
+        assert_eq!(
+            call([err, number("F_DUPFD_CLOEXEC"), 3, 0, 0, 0]),
+            u64::MAX,
+            "refused"
+        );
+        assert_eq!(orbistoun_core::errno::get(), 45, "with EOPNOTSUPP");
     }
 
     /// Closing a descriptor forgets what was set on it, so a reused number starts clean.
