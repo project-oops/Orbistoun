@@ -521,6 +521,166 @@ pub fn detile_texture(
     )
 }
 
+/// Texels per side of a 32-bpp `4KB_D_X` block: 4 KiB of four-byte texels, 32 x 32.
+const DX_BLOCK_EXTENT: u32 = 32;
+/// Bytes one `4KB_D_X` block holds.
+const DX_BLOCK_BYTES: usize = 4096;
+
+/// Where each of the low seven bits of `x`, then of `y`, lands in a 32-bpp `4KB_D_X` block's
+/// byte offset: the offset is the XOR of the entries whose coordinate bit is set. Bits 5 and 6
+/// lie above the 32-texel block and fold into the pipe bits, which is what the `_X` names.
+///
+/// From addrlib (`gfx10addrlib.cpp`, `gfx10SwizzlePattern.h`) for this console's configuration -
+/// family NV, revision 0x82 (GFX1013), `GB_ADDR_CONFIG` 0x4: 16 pipes, a 256-byte interleave, no
+/// RB+ - read off `Addr2ComputeSurfaceAddrFromCoord` one coordinate bit at a time, and confirmed
+/// to be the whole equation over 200,000 texels of a 1024 x 1024 surface. The same library and
+/// configuration give the `64KB_R_X` layout above for all 2,073,600 texels of a display surface,
+/// the layout measured on hardware; radeonsi in the guest lays its surfaces out with them.
+const DX_X_BITS: [usize; 7] = [0x4, 0x8, 0x80, 0x200, 0x800, 0x400, 0x100];
+/// The same for `y`.
+const DX_Y_BITS: [usize; 7] = [0x10, 0x20, 0x40, 0x100, 0x400, 0x800, 0x200];
+
+/// Byte offset of texel `(x, y)` in a 32-bpp `4KB_D_X` surface `width` texels wide: its block,
+/// row-major with the pitch rounded up to whole blocks, then its place in the block.
+#[must_use]
+pub fn tiled_byte_offset_4kb_dx_bpp4_surface(x: u32, y: u32, width: u32) -> usize {
+    let blocks_per_row = width.div_ceil(DX_BLOCK_EXTENT) as usize;
+    let block = (y / DX_BLOCK_EXTENT) as usize * blocks_per_row + (x / DX_BLOCK_EXTENT) as usize;
+    let mut offset = 0;
+    for (bit, place) in DX_X_BITS.iter().enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in DX_Y_BITS.iter().enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    block * DX_BLOCK_BYTES + offset
+}
+
+/// Words a whole 32-bpp `4KB_D_X` surface occupies: every block it touches, whole.
+#[must_use]
+pub fn surface_words_4kb_dx_bpp4(width: u32, height: u32) -> usize {
+    width.div_ceil(DX_BLOCK_EXTENT) as usize
+        * height.div_ceil(DX_BLOCK_EXTENT) as usize
+        * (DX_BLOCK_BYTES / 4)
+}
+
+/// How a colour target's texels lie in memory, for the swizzle modes modelled at 32 bpp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SurfaceLayout {
+    /// `64KB_R_X`, the render-target mode measured on hardware.
+    #[default]
+    Rx64Kb,
+    /// `4KB_D_X`, from addrlib under the configuration that reproduces the measured one.
+    Dx4Kb,
+}
+
+impl SurfaceLayout {
+    /// The layout a swizzle mode names, or `None` for one not modelled.
+    #[must_use]
+    pub const fn of(mode: SwizzleMode) -> Option<Self> {
+        match mode {
+            SwizzleMode::Tiled64KbRX => Some(Self::Rx64Kb),
+            SwizzleMode::Tiled4KbDX => Some(Self::Dx4Kb),
+            _ => None,
+        }
+    }
+
+    /// Words a whole surface of this layout occupies.
+    #[must_use]
+    pub fn words(self, width: u32, height: u32) -> usize {
+        match self {
+            Self::Rx64Kb => surface_words_64kb_rx_bpp4(width, height),
+            Self::Dx4Kb => surface_words_4kb_dx_bpp4(width, height),
+        }
+    }
+
+    /// Whether a surface of this layout with pipe-bank XOR `pipe_bank_xor` is modelled: every
+    /// `64KB_R_X` one, and a `4KB_D_X` one without an XOR.
+    #[must_use]
+    pub const fn models(self, pipe_bank_xor: u8) -> bool {
+        match self {
+            Self::Rx64Kb => true,
+            Self::Dx4Kb => pipe_bank_xor == 0,
+        }
+    }
+
+    /// Detiles a whole surface into a linear, row-major image, each texel through `map`.
+    ///
+    /// # Panics
+    ///
+    /// When `tiled` is shorter than [`Self::words`].
+    #[must_use]
+    pub fn detile_mapped(
+        self,
+        tiled: &[u32],
+        width: u32,
+        height: u32,
+        pipe_bank_xor: u8,
+        map: impl Fn(u32) -> u32 + Sync,
+    ) -> Vec<u32> {
+        match self {
+            Self::Rx64Kb => {
+                detile_surface_64kb_rx_bpp4_mapped(tiled, width, height, pipe_bank_xor, map)
+            }
+            Self::Dx4Kb => {
+                let mut linear = Vec::with_capacity(width as usize * height as usize);
+                for y in 0..height {
+                    for x in 0..width {
+                        linear.push(map(
+                            tiled[tiled_byte_offset_4kb_dx_bpp4_surface(x, y, width) / 4]
+                        ));
+                    }
+                }
+                linear
+            }
+        }
+    }
+
+    /// Tiles a linear, row-major image into a whole surface, each texel through `map`, leaving
+    /// the words the image does not cover as they were.
+    ///
+    /// # Errors
+    ///
+    /// [`DetileError::TiledDataTooShort`] when `tiled` does not cover the surface or `linear` is
+    /// not `width * height` texels.
+    pub fn tile_mapped(
+        self,
+        linear: &[u32],
+        width: u32,
+        height: u32,
+        pipe_bank_xor: u8,
+        tiled: &mut [u32],
+        map: impl Fn(u32) -> u32 + Sync,
+    ) -> Result<(), DetileError> {
+        match self {
+            Self::Rx64Kb => {
+                tile_surface_64kb_rx_bpp4_mapped(linear, width, height, pipe_bank_xor, tiled, map)
+            }
+            Self::Dx4Kb => {
+                let needed_words = surface_words_4kb_dx_bpp4(width, height);
+                let texels = width as usize * height as usize;
+                if tiled.len() < needed_words || linear.len() != texels {
+                    return Err(DetileError::TiledDataTooShort {
+                        needed_words: needed_words.max(texels),
+                        got_words: tiled.len().min(linear.len()),
+                    });
+                }
+                for (y, row) in linear.chunks(width as usize).enumerate() {
+                    for (x, &texel) in row.iter().enumerate() {
+                        tiled[tiled_byte_offset_4kb_dx_bpp4_surface(x as u32, y as u32, width)
+                            / 4] = map(texel);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -904,5 +1064,102 @@ mod tests {
             Err(DetileError::TiledDataTooShort { got_words, .. }) => assert_eq!(got_words, 8),
             other => panic!("expected a too-short refusal, got {other:?}"),
         }
+    }
+
+    /// `4KB_D_X` offsets are addrlib's for this console's configuration, at three sizes whose
+    /// pitch and height are not whole blocks (the probe's corners and eight texels each), and
+    /// each size's extent is addrlib's surface size.
+    #[test]
+    fn dx_4kb_offsets_are_addrlibs() {
+        use super::{surface_words_4kb_dx_bpp4, tiled_byte_offset_4kb_dx_bpp4_surface as dx};
+        /// Width, height, addrlib's surface bytes, and texels with addrlib's offsets.
+        type Case = (u32, u32, usize, &'static [(u32, u32, usize)]);
+        let cases: [Case; 3] = [
+            (
+                165,
+                165,
+                147_456,
+                &[
+                    (0, 0, 0),
+                    (164, 0, 21632),
+                    (0, 164, 124_992),
+                    (164, 164, 146_624),
+                    (34, 54, 30824),
+                    (8, 51, 28208),
+                    (111, 11, 14012),
+                    (5, 71, 49908),
+                    (39, 35, 31932),
+                    (60, 35, 30384),
+                    (124, 132, 114_624),
+                    (150, 133, 116_952),
+                ],
+            ),
+            (
+                100,
+                37,
+                32768,
+                &[
+                    (0, 0, 0),
+                    (99, 0, 13580),
+                    (0, 36, 18496),
+                    (99, 36, 32076),
+                    (98, 1, 13592),
+                    (41, 30, 4964),
+                    (24, 25, 3856),
+                    (48, 23, 6256),
+                    (4, 33, 18576),
+                    (12, 12, 960),
+                    (80, 22, 11616),
+                    (13, 1, 660),
+                ],
+            ),
+            (
+                1000,
+                70,
+                393_216,
+                &[
+                    (0, 0, 0),
+                    (999, 0, 128_396),
+                    (0, 69, 262_736),
+                    (999, 69, 391_132),
+                    (536, 45, 197_456),
+                    (28, 53, 132_816),
+                    (719, 53, 225_244),
+                    (626, 12, 80968),
+                    (420, 27, 53680),
+                    (447, 10, 57260),
+                    (893, 64, 376_196),
+                    (648, 27, 83760),
+                ],
+            ),
+        ];
+        for (width, height, bytes, texels) in cases {
+            assert_eq!(
+                surface_words_4kb_dx_bpp4(width, height) * 4,
+                bytes,
+                "{width}x{height}"
+            );
+            for &(x, y, want) in texels {
+                assert_eq!(dx(x, y, width), want, "({x},{y}) in {width}x{height}");
+            }
+        }
+    }
+
+    /// A `4KB_D_X` surface tiles and detiles back to the image it was given.
+    #[test]
+    fn dx_4kb_tiles_and_detiles_round_trip() {
+        use super::SurfaceLayout;
+        let (width, height) = (165, 165);
+        let linear: Vec<u32> = (0..width * height)
+            .map(|i: u32| i.wrapping_mul(2_654_435_761))
+            .collect();
+        let mut tiled = vec![0u32; SurfaceLayout::Dx4Kb.words(width, height)];
+        SurfaceLayout::Dx4Kb
+            .tile_mapped(&linear, width, height, 0, &mut tiled, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            SurfaceLayout::Dx4Kb.detile_mapped(&tiled, width, height, 0, |w| w),
+            linear
+        );
     }
 }

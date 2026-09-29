@@ -839,6 +839,9 @@ pub struct ColourTarget {
     /// The surface's pipe-bank XOR, which moves 256-byte runs within each block
     /// ([`crate::tiling`]); zero for a surface without one.
     pub pipe_bank_xor: u8,
+    /// How its texels lie in memory: the layout its swizzle mode names, `64KB_R_X` where the
+    /// mode is not one modelled (a target is written back only in a modelled one).
+    pub layout: crate::tiling::SurfaceLayout,
 }
 
 /// The colour target a submission set up, from the live values of `CB_COLOR0_BASE` and
@@ -856,7 +859,10 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         .find(|write| write.register == CB_COLOR0_BASE)?
         .value;
     let extent = colour_target_extent_at(writes)?;
-    let (base, pipe_bank_xor) = match colour_swizzle_mode_at(writes) {
+    let mode = colour_swizzle_mode_at(writes);
+    // The pipe-bank XOR rides in the base's low byte for `64KB_R_X`. A `4KB_D_X` base is only
+    // 4 KiB aligned, so its low byte is address, and the base is taken whole.
+    let (base, pipe_bank_xor) = match mode {
         Some(SwizzleMode::Tiled64KbRX) => (base & !0xFF, (base & 0xFF) as u8),
         _ => (base, 0),
     };
@@ -865,6 +871,9 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         width: extent.width,
         height: extent.height,
         pipe_bank_xor,
+        layout: mode
+            .and_then(crate::tiling::SurfaceLayout::of)
+            .unwrap_or_default(),
     })
 }
 
@@ -1411,6 +1420,10 @@ const ADDR_SW_LINEAR: u32 = 0;
 /// (`src/amd/addrlib/inc/addrtypes.h:254` in oops-mesa, `AddrSwizzleMode`).
 const ADDR_SW_64KB_R_X: u32 = 27;
 
+/// `COLOR_SW_MODE` value for `ADDR_SW_4KB_D_X` (`src/amd/addrlib/inc/addrtypes.h` in oops-mesa,
+/// `AddrSwizzleMode`).
+const ADDR_SW_4KB_D_X: u32 = 22;
+
 /// The tiling (swizzle) mode of a surface - a colour target or a texture.
 ///
 /// Only the two modes orbistoun acts on are named: linear and 64KB_R_X. Any other is carried by its
@@ -1423,6 +1436,8 @@ pub enum SwizzleMode {
     Linear,
     /// 64KB_R_X, the mode [`crate::tiling`] detiles (`ADDR_SW_64KB_R_X`).
     Tiled64KbRX,
+    /// 4KB_D_X (`ADDR_SW_4KB_D_X`), which radeonsi gives a small colour surface.
+    Tiled4KbDX,
     /// A mode orbistoun does not model, carried by its raw five-bit swizzle-mode value.
     Other(u32),
 }
@@ -1437,6 +1452,7 @@ pub fn decode_swizzle_mode(field: u32) -> SwizzleMode {
     match field & 0x1F {
         ADDR_SW_LINEAR => SwizzleMode::Linear,
         ADDR_SW_64KB_R_X => SwizzleMode::Tiled64KbRX,
+        ADDR_SW_4KB_D_X => SwizzleMode::Tiled4KbDX,
         other => SwizzleMode::Other(other),
     }
 }
@@ -2933,6 +2949,7 @@ mod tests {
                 width: 64,
                 height: 64,
                 pipe_bank_xor: 0,
+                layout: crate::tiling::SurfaceLayout::Rx64Kb,
             })
         );
         // A base with no extent cannot be sized; an extent with no base cannot be placed. Both
@@ -2970,6 +2987,7 @@ mod tests {
                 width: 256,
                 height: 256,
                 pipe_bank_xor: 0xc0,
+                layout: crate::tiling::SurfaceLayout::Rx64Kb,
             })
         );
         let linear = [

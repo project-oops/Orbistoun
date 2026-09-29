@@ -1932,8 +1932,25 @@ fn read_texture(
     }
     match descriptor.tiling {
         SwizzleMode::Linear => {}
-        // The one tiled layout measured: the same surface layout sampled as rendered.
-        SwizzleMode::Tiled64KbRX => return read_tiled_texture(&descriptor, slot, memory, texels),
+        // The tiled layouts modelled, each sampled as it is rendered (crate::tiling).
+        SwizzleMode::Tiled64KbRX => {
+            return read_tiled_texture(
+                &descriptor,
+                crate::tiling::SurfaceLayout::Rx64Kb,
+                slot,
+                memory,
+                texels,
+            );
+        }
+        SwizzleMode::Tiled4KbDX => {
+            return read_tiled_texture(
+                &descriptor,
+                crate::tiling::SurfaceLayout::Dx4Kb,
+                slot,
+                memory,
+                texels,
+            );
+        }
         SwizzleMode::Other(_) => return None,
     }
     let pitch_field = words[4] & 0x3fff;
@@ -2022,12 +2039,19 @@ type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
 /// one address never share texels.
 fn read_tiled_texture(
     descriptor: &ImageDescriptor,
+    layout: crate::tiling::SurfaceLayout,
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    let span = crate::tiling::surface_words_64kb_rx_bpp4(descriptor.width, descriptor.height) * 4;
-    let key = (descriptor.base, descriptor.width, descriptor.height, 0);
+    let span = layout.words(descriptor.width, descriptor.height) * 4;
+    // A linear texture keys by its pitch; a tiled one by a value no pitch takes, one per layout,
+    // so the same memory read in two layouts is never taken for the other.
+    let tag = match layout {
+        crate::tiling::SurfaceLayout::Rx64Kb => 0,
+        crate::tiling::SurfaceLayout::Dx4Kb => u32::MAX,
+    };
+    let key = (descriptor.base, descriptor.width, descriptor.height, tag);
     if let Some(cached) = texels.get(&key)
         && cached.since.and_then(|since| {
             orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
@@ -2054,8 +2078,8 @@ fn read_tiled_texture(
                 .chunks_exact(4)
                 .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
                 .collect();
-            crate::tiling::detile_surface_64kb_rx_bpp4(&words, descriptor.width, descriptor.height)
-                .ok()?
+            layout
+                .detile_mapped(&words, descriptor.width, descriptor.height, 0, |w| w)
                 .into()
         }
     };
