@@ -816,6 +816,30 @@ impl Pipeline {
         self
     }
 
+    /// The register writes `stream` runs under, and how many are its own: the state earlier
+    /// submissions left first, so the stream's own writes win, then the stream's (D737). A stream
+    /// that clears state, or a pipeline that does not carry it, has only its own.
+    pub fn writes_in_force(
+        &self,
+        walked: &PacketWalk,
+        stream: &[u8],
+    ) -> (Vec<RegisterWrite>, usize) {
+        let own = register_writes(walked, stream, &self.vocabulary);
+        let count = own.len();
+        if !self.carries_state || last_clear(walked).is_some() {
+            return (own, count);
+        }
+        let carried = self
+            .carried
+            .iter()
+            .map(|(&register, &value)| RegisterWrite {
+                packet_offset: 0,
+                register,
+                value,
+            });
+        (carried.chain(own).collect(), count)
+    }
+
     /// Advances the carried register state past `stream`, once it has been carried out (D737):
     /// every register it wrote now holds its last value there. A stream that clears state
     /// (`CLEAR_STATE`) leaves only what it wrote after its last clear. Nothing, unless
@@ -892,25 +916,9 @@ impl Pipeline {
     ) -> Submission {
         use crate::perf::{Span, span};
         let walked = span(Span::PrepareWalk, || walk(stream));
-        let own = span(Span::PrepareRegisters, || {
-            register_writes(&walked, stream, &self.vocabulary)
+        let (writes, own_writes) = span(Span::PrepareRegisters, || {
+            self.writes_in_force(&walked, stream)
         });
-        let own_writes = own.len();
-        // The state earlier submissions left comes first, so the stream's own writes win; a stream
-        // that clears state starts from its clear (D737).
-        let writes = if self.carries_state && last_clear(&walked).is_none() {
-            self.carried
-                .iter()
-                .map(|(&register, &value)| RegisterWrite {
-                    packet_offset: 0,
-                    register,
-                    value,
-                })
-                .chain(own)
-                .collect()
-        } else {
-            own
-        };
         let inferred = shader_candidates(&writes, &self.vocabulary);
 
         let mut submission = Submission {

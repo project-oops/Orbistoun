@@ -619,27 +619,23 @@ impl GuestCp<'_> {
     /// it over its window as guest memory holds it now, and writes back exactly the words it
     /// changed. Nothing is written unless the whole dispatch ran exactly.
     fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
-        static VOCABULARY: OnceLock<Option<crate::registers::Vocabulary>> = OnceLock::new();
         let execute = dispatch_executor()
             .get()
             .ok_or("no device is installed to run it")?;
-        let vocabulary = VOCABULARY
-            .get_or_init(|| crate::registers::Vocabulary::builtin().ok())
-            .as_ref()
-            .ok_or("the register vocabulary did not load")?;
         let walked = crate::packet::walk(dispatch.stream);
-        let writes = crate::registers::register_writes(&walked, dispatch.stream, vocabulary);
-        let state = crate::dispatch::state_at(
-            &writes,
-            dispatch.offset,
-            dispatch.groups,
-            dispatch.initiator,
-        )?;
         let prepared = {
             let mut live = live_pipeline()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+            // The registers in force: what earlier submissions left, then the stream's (D737).
+            let (writes, _) = pipeline.writes_in_force(&walked, dispatch.stream);
+            let state = crate::dispatch::state_at(
+                &writes,
+                dispatch.offset,
+                dispatch.groups,
+                dispatch.initiator,
+            )?;
             pipeline.prepare_dispatch(&state, &self.memory)?
         };
         let span = prepared.window.words() as usize * 4;
