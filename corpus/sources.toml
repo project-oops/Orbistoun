@@ -360,7 +360,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "supertuxkart-title-prospero.zip"
-sha256 = "9c59f177c4ad88ea7cc2dece2011a74d969eecd2808b8dddb72ac00f21a8e608"
+sha256 = "6fd49d5dcc60a6ab50117655f6f990892e503b02384853f9c9cca750242e94ae"
 
 [[source]]
 name = "CXTH00001"
