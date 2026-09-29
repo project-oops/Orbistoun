@@ -25,6 +25,18 @@ found_in = ["ftpsrv"]
 found_on = "2026-08-29"
 
 [[function]]
+name = "_fcntl"
+arity = 3
+purpose = "The underscored spelling of `fcntl`, and the same function."
+returns = "status"
+edge_cases = ["FreeBSD's own underscored spelling, which its C library uses internally. oops-mesa's winsys and Mesa's DRI frontend reach `fcntl` through it; unserved, its placeholder ended SuperTuxKart's screen creation before any ioctl."]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["That the underscored and public spellings are one function on this platform, as they are on FreeBSD."]
+found_in = ["STKT00001"]
+found_on = "2026-09-29"
+
+[[function]]
 name = "_read"
 arity = 3
 purpose = "The underscored spelling of `read`, and the same function pointer. Declared 2026-08-29."
