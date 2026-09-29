@@ -254,13 +254,16 @@ pub fn poll(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         for i in 0..nfds {
             let offset = i * 8;
             let fd_ptr = fds_at + offset as u64;
-            // SAFETY: guest-supplied pointer under identity mapping.
-            let (fd, events) = unsafe {
-                let fd = std::ptr::read(std::ptr::with_exposed_provenance::<i32>(fd_ptr as usize));
-                let ev = std::ptr::read(std::ptr::with_exposed_provenance::<i16>(
+            // SAFETY: the guest's pollfd array holds `nfds` entries of eight bytes under the
+            // identity mapping; this reads the descriptor at the entry's start.
+            let fd = unsafe {
+                std::ptr::read(std::ptr::with_exposed_provenance::<i32>(fd_ptr as usize))
+            };
+            // SAFETY: the same entry's `events` field, four bytes in.
+            let events = unsafe {
+                std::ptr::read(std::ptr::with_exposed_provenance::<i16>(
                     (fd_ptr + 4) as usize,
-                ));
-                (fd, ev)
+                ))
             };
 
             let mut revents = 0i16;

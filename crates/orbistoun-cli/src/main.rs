@@ -1119,6 +1119,23 @@ fn main() -> Result<()> {
         return run_as_worker();
     }
 
+    // The verbs run on a thread of their own with room to spare: a debug build's frames are large
+    // enough that `compat markdown` and `questions --premises` overflowed the main thread's
+    // default stack. Worker mode stays on the main thread above, where the guest runs.
+    std::thread::Builder::new()
+        .name("orbistoun-cli".to_owned())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(run_cli)
+        .context("starting the command thread")?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The stack the command thread runs with.
+const CLI_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Parses the command line and runs its verb.
+fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let symbol_db = match cli.symbols_db.as_ref() {
         // The shipped database loads unless a path is given (D188).

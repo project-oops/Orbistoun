@@ -592,6 +592,32 @@ fn write_compat(
     Ok(path)
 }
 
+/// Whether a run is not recorded, saying why when it is not, so it is not mistaken for a run with
+/// nothing to record.
+///
+/// Only a title id is recorded - letters, digits, dot, dash, underscore - not whatever the
+/// containing directory is called. And an intervened run is not a result about the emulator: a
+/// diagnostic that maps memory, plants a value or forces an answer changes the program being
+/// measured (D355).
+fn declines_to_record(title: &str, trace: &orbistoun_report::trace::CallTrace) -> bool {
+    if !title
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        println!();
+        println!("  not recorded: {title:?} is a directory name, not a title id");
+        println!("  move the module under a directory named for the title to record it");
+        return true;
+    }
+    if trace.conditions.intervened {
+        println!();
+        println!("  not recorded: this run was under a diagnostic, so what it reached is");
+        println!("  a fact about the intervention rather than about the title");
+        return true;
+    }
+    false
+}
+
 /// Keeps what a run achieved, in the slot its policy belongs to.
 ///
 /// Recording is automatic, so the record stays derived from runs rather than depending on someone
@@ -606,24 +632,7 @@ pub(crate) fn record_compat(
     let Some(title) = title_id(path) else {
         return;
     };
-    // Only a title id is recorded - letters, digits, dot, dash, underscore - not whatever the
-    // containing directory is called. A run that declines to record says so, so it is not mistaken
-    // for a run with nothing to record.
-    if !title
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-    {
-        println!();
-        println!("  not recorded: {title:?} is a directory name, not a title id");
-        println!("  move the module under a directory named for the title to record it");
-        return;
-    }
-    // An intervened run is not a result about the emulator: a diagnostic that maps memory, plants a
-    // value or forces an answer changes the program being measured (D355).
-    if trace.conditions.intervened {
-        println!();
-        println!("  not recorded: this run was under a diagnostic, so what it reached is");
-        println!("  a fact about the intervention rather than about the title");
+    if declines_to_record(&title, trace) {
         return;
     }
     let status = orbistoun_report::trace::status_of(trace, orbistoun_nid::today());

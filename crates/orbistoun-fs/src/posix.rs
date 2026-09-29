@@ -519,21 +519,17 @@ pub fn pipe(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if out_addr == 0 {
         return FAILED;
     }
-    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
-        Ok(l) => l,
-        Err(_) => return FAILED,
+    let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") else {
+        return FAILED;
     };
-    let local_addr = match listener.local_addr() {
-        Ok(a) => a,
-        Err(_) => return FAILED,
+    let Ok(local_addr) = listener.local_addr() else {
+        return FAILED;
     };
-    let write_stream = match std::net::TcpStream::connect(local_addr) {
-        Ok(s) => s,
-        Err(_) => return FAILED,
+    let Ok(write_stream) = std::net::TcpStream::connect(local_addr) else {
+        return FAILED;
     };
-    let (read_stream, _) = match listener.accept() {
-        Ok(pair) => pair,
-        Err(_) => return FAILED,
+    let Ok((read_stream, _)) = listener.accept() else {
+        return FAILED;
     };
     let _ = write_stream.set_nodelay(true);
     let _ = read_stream.set_nodelay(true);

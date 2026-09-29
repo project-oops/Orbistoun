@@ -226,9 +226,12 @@ pub fn flush(handle: FileHandle) -> bool {
     use std::io::Write as _;
     if handle == NO_FILE {
         return table().lock().is_ok_and(|mut table| {
-            table
-                .values_mut()
-                .fold(true, |ok, open| open.file.flush().is_ok() && ok)
+            // Every file is flushed, even after one fails.
+            let mut all = true;
+            for open in table.values_mut() {
+                all &= open.file.flush().is_ok();
+            }
+            all
         });
     }
     if wrapped_descriptor(handle).is_some() {
