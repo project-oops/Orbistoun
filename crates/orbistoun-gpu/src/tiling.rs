@@ -568,6 +568,22 @@ pub fn surface_words_4kb_dx_bpp4(width: u32, height: u32) -> usize {
         * (DX_BLOCK_BYTES / 4)
 }
 
+/// Texels per side of a 32-bpp 256-byte micro block (`Block256_2d`), the unit a mip tail places
+/// its levels in.
+const MICRO_EXTENT: u32 = 8;
+
+/// Level `level`'s extent in a chain whose level 0 is `width` x `height`: each side halved per
+/// level, never below one (`GetMipSize`).
+const fn mip_extent(width: u32, height: u32, level: u32) -> (u32, u32) {
+    const fn halve(side: u32, level: u32) -> u32 {
+        match side.checked_shr(level) {
+            Some(0) | None => 1,
+            Some(side) => side,
+        }
+    }
+    (halve(width, level), halve(height, level))
+}
+
 /// How a colour target's texels lie in memory, for the swizzle modes modelled at 32 bpp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SurfaceLayout {
@@ -596,6 +612,151 @@ impl SurfaceLayout {
             Self::Rx64Kb => surface_words_64kb_rx_bpp4(width, height),
             Self::Dx4Kb => surface_words_4kb_dx_bpp4(width, height),
         }
+    }
+
+    /// `log2` of the bytes one block of this layout holds (`GetBlockSizeLog2`).
+    const fn block_log2(self) -> u32 {
+        match self {
+            Self::Rx64Kb => 16,
+            Self::Dx4Kb => 12,
+        }
+    }
+
+    /// A block's extent in 32-bit texels, across and down: its texel bits split evenly, as
+    /// `ComputeBlockDimensionForSurf` gives a thin 2D surface.
+    const fn block_extent(self) -> (u32, u32) {
+        let texels_log2 = self.block_log2() - 2;
+        (1 << (texels_log2 - texels_log2 / 2), 1 << (texels_log2 / 2))
+    }
+
+    /// The first level of a `levels`-level 2D chain, level 0 `width` x `height`, that lies in the
+    /// mip tail - the one block every level from it down shares - or `levels` when none does.
+    ///
+    /// `Gfx10Lib::ComputeSurfaceInfoMacroTiled` (`gfx10addrlib.cpp:3904-3940`): a level is in the
+    /// tail when it fits half a block across and a whole block down (`GetMipTailDim`) and no more
+    /// levels follow than a tail holds (`GetMaxNumMipsInTail`). A single level has no tail.
+    #[must_use]
+    pub const fn first_level_in_tail(self, width: u32, height: u32, levels: u32) -> u32 {
+        if levels <= 1 {
+            return levels;
+        }
+        let (block_width, block_height) = self.block_extent();
+        let log2 = self.block_log2();
+        let most_in_tail = if log2 <= 11 {
+            1 + (1 << (log2 - 9))
+        } else {
+            log2 - 4
+        };
+        let mut level = 0;
+        while level < levels {
+            let (w, h) = mip_extent(width, height, level);
+            if w <= block_width / 2 && h <= block_height && levels - level <= most_in_tail {
+                return level;
+            }
+            level += 1;
+        }
+        levels
+    }
+
+    /// Bytes level `level` of a chain occupies outside the tail: its extent padded to whole blocks.
+    const fn level_bytes(self, width: u32, height: u32, level: u32) -> u64 {
+        let (block_width, block_height) = self.block_extent();
+        let (w, h) = mip_extent(width, height, level);
+        w.next_multiple_of(block_width) as u64 * h.next_multiple_of(block_height) as u64 * 4
+    }
+
+    /// Where level `level` of a `levels`-level 2D chain, level 0 `width` x `height`, starts,
+    /// in bytes from the surface's base; `None` for a level in the mip tail or past the chain.
+    ///
+    /// The chain is stored smallest first (`gfx10addrlib.cpp:3995-4010`): the tail's block, when
+    /// there is one, then each level above it upwards, so level 0 comes last. Within its place a
+    /// level is laid out as a single-level surface of its own extent would be.
+    #[must_use]
+    pub const fn level_offset(
+        self,
+        width: u32,
+        height: u32,
+        levels: u32,
+        level: u32,
+    ) -> Option<u64> {
+        let first_in_tail = self.first_level_in_tail(width, height, levels);
+        if level >= first_in_tail {
+            return None;
+        }
+        let mut offset = if first_in_tail < levels {
+            1 << self.block_log2()
+        } else {
+            0
+        };
+        let mut below = level + 1;
+        while below < first_in_tail {
+            offset += self.level_bytes(width, height, below);
+            below += 1;
+        }
+        Some(offset)
+    }
+
+    /// Where level `level` of a `levels`-level 2D chain, level 0 `width` x `height`, lies in the
+    /// mip tail's block, as the texel of that block its own `(0, 0)` is; `None` for a level outside
+    /// the tail or past the chain. The tail's block is the chain's first (`macroBlockOffset` 0).
+    ///
+    /// `gfx10addrlib.cpp:4012-4063`: the level's place in the tail is an offset, `16 << m` or
+    /// `m << 8` for `m` counting down from the tail's capacity, whose bits interleave into x and y
+    /// in units of the 256-byte micro block - 8 x 8 texels at 32 bpp. Both layouts' blocks are an
+    /// even power of two, so x and y are not exchanged.
+    #[must_use]
+    pub const fn tail_origin(
+        self,
+        width: u32,
+        height: u32,
+        levels: u32,
+        level: u32,
+    ) -> Option<(u32, u32)> {
+        let first_in_tail = self.first_level_in_tail(width, height, levels);
+        if level < first_in_tail || level >= levels {
+            return None;
+        }
+        let log2 = self.block_log2();
+        let most_in_tail = if log2 <= 11 {
+            1 + (1 << (log2 - 9))
+        } else {
+            log2 - 4
+        };
+        let m = most_in_tail - 1 - (level - first_in_tail);
+        let offset = if m > 6 { 16 << m } else { m << 8 };
+        let mut x = 0;
+        let mut y = 0;
+        let mut bit = 0;
+        while bit < 6 {
+            x |= (offset >> (9 + bit)) & (1 << bit);
+            y |= (offset >> (8 + bit)) & (1 << bit);
+            bit += 1;
+        }
+        Some((x * MICRO_EXTENT, y * MICRO_EXTENT))
+    }
+
+    /// A block's extent in 32-bit texels, across and down.
+    #[must_use]
+    pub const fn block_texels(self) -> (u32, u32) {
+        self.block_extent()
+    }
+
+    /// Bytes a whole `levels`-level 2D chain, level 0 `width` x `height`, occupies
+    /// (`surfSize`).
+    #[must_use]
+    pub const fn chain_bytes(self, width: u32, height: u32, levels: u32) -> u64 {
+        let first_in_tail = self.first_level_in_tail(width, height, levels);
+        let mut bytes = if first_in_tail < levels {
+            1 << self.block_log2()
+        } else {
+            0
+        };
+        let mut level = 0;
+        while level < first_in_tail {
+            bytes += self.level_bytes(width, height, level);
+            level += 1;
+        }
+        bytes
     }
 
     /// Whether a surface of this layout with pipe-bank XOR `pipe_bank_xor` is modelled: every
@@ -1161,5 +1322,192 @@ mod tests {
             SurfaceLayout::Dx4Kb.detile_mapped(&tiled, width, height, 0, |w| w),
             linear
         );
+    }
+
+    /// A mip chain's levels lie where addrlib puts them for this console's configuration
+    /// (`Addr2ComputeSurfaceInfo` with `pMipInfo`), levels in the tail have no place of their own,
+    /// and the chain's size is addrlib's `surfSize`.
+    #[test]
+    fn mip_levels_lie_where_addrlib_puts_them() {
+        use super::SurfaceLayout::{self, Dx4Kb, Rx64Kb};
+        /// Layout, level 0's extent, levels, the chain's bytes, each level's offset out of the tail.
+        type Chain = (SurfaceLayout, u32, u32, u32, u64, &'static [u64]);
+        let cases: [Chain; 8] = [
+            (
+                Rx64Kb,
+                2048,
+                1024,
+                12,
+                11_272_192,
+                &[2_883_584, 786_432, 262_144, 131_072, 65536],
+            ),
+            (
+                Rx64Kb,
+                1920,
+                1080,
+                11,
+                12_648_448,
+                &[3_801_088, 1_179_648, 393_216, 131_072, 65536],
+            ),
+            (Rx64Kb, 300, 200, 9, 655_360, &[262_144, 131_072, 65536]),
+            (Rx64Kb, 100, 37, 3, 131_072, &[65536]),
+            (Rx64Kb, 64, 64, 7, 65536, &[]),
+            (Dx4Kb, 165, 165, 8, 208_896, &[61440, 24576, 8192, 4096]),
+            (
+                Dx4Kb,
+                1000,
+                70,
+                10,
+                589_824,
+                &[196_608, 65536, 32768, 16384, 8192, 4096],
+            ),
+            (Dx4Kb, 16, 16, 5, 4096, &[]),
+        ];
+        for (layout, width, height, levels, bytes, offsets) in cases {
+            let shape = format!("{layout:?} {width}x{height} x{levels}");
+            assert_eq!(layout.chain_bytes(width, height, levels), bytes, "{shape}");
+            let in_tail = u32::try_from(offsets.len()).expect("few levels");
+            assert_eq!(
+                layout.first_level_in_tail(width, height, levels),
+                in_tail,
+                "{shape}"
+            );
+            for level in 0..levels {
+                let want = offsets.get(level as usize).copied();
+                assert_eq!(
+                    layout.level_offset(width, height, levels, level),
+                    want,
+                    "{shape} {level}"
+                );
+            }
+        }
+        // One level has no tail, whatever its size.
+        assert_eq!(Rx64Kb.level_offset(64, 64, 1, 0), Some(0));
+        assert_eq!(Rx64Kb.chain_bytes(64, 64, 1), 65536);
+    }
+
+    /// Level 0 of a chain is laid out as a single-level surface of its extent, from where the
+    /// chain places it: addrlib's texel addresses (`Addr2ComputeSurfaceAddrFromCoord`, mip 0 of
+    /// the chain) less the level's offset are the single-level ones.
+    #[test]
+    fn a_levels_texels_are_a_single_level_surfaces_from_its_offset() {
+        use super::SurfaceLayout::{Dx4Kb, Rx64Kb};
+        use super::{
+            tiled_byte_offset_4kb_dx_bpp4_surface as dx,
+            tiled_byte_offset_64kb_rx_bpp4_surface as rx,
+        };
+        /// Level 0's extent, levels, and texels with addrlib's address for each.
+        type Texels = (u32, u32, u32, &'static [(u32, u32, u64)]);
+        let rx_cases: [Texels; 2] = [
+            (
+                2048,
+                1024,
+                12,
+                &[
+                    (0, 0, 2_883_584),
+                    (1, 0, 2_883_588),
+                    (2047, 1023, 11_268_348),
+                    (100, 200, 3_986_816),
+                    (1500, 3, 3_647_408),
+                ],
+            ),
+            (
+                1920,
+                1080,
+                11,
+                &[
+                    (0, 0, 3_801_088),
+                    (1919, 1079, 12_626_428),
+                    (777, 555, 8_131_636),
+                    (33, 1000, 10_704_132),
+                ],
+            ),
+        ];
+        for (width, height, levels, texels) in rx_cases {
+            let base = Rx64Kb
+                .level_offset(width, height, levels, 0)
+                .expect("level 0");
+            for &(x, y, want) in texels {
+                assert_eq!(
+                    base + rx(x, y, width) as u64,
+                    want,
+                    "({x},{y}) in {width}x{height}"
+                );
+            }
+        }
+        let base = Dx4Kb.level_offset(165, 165, 8, 0).expect("level 0");
+        for (x, y, want) in [
+            (0, 0, 61440),
+            (164, 164, 208_064),
+            (34, 54, 92264),
+            (111, 11, 75452),
+        ] {
+            assert_eq!(base + dx(x, y, 165) as u64, want, "({x},{y})");
+        }
+    }
+
+    /// A tail level's origin in the tail's block is addrlib's `mipTailCoordX`/`Y`, for each level
+    /// in the tail, and a level outside it has none.
+    #[test]
+    fn tail_levels_lie_where_addrlib_puts_them() {
+        use super::SurfaceLayout::{Dx4Kb, Rx64Kb};
+        let rx = [
+            (64, 0),
+            (0, 64),
+            (32, 0),
+            (0, 32),
+            (16, 0),
+            (8, 16),
+            (0, 24),
+        ];
+        for (level, origin) in (4..11).zip(rx) {
+            assert_eq!(
+                Rx64Kb.tail_origin(1024, 128, 11, level),
+                Some(origin),
+                "{level}"
+            );
+        }
+        assert_eq!(Rx64Kb.tail_origin(1024, 128, 11, 3), None);
+        let dx = [(16, 0), (8, 16), (0, 24), (0, 16), (8, 8)];
+        for (level, origin) in (2..7).zip(dx) {
+            assert_eq!(Dx4Kb.tail_origin(64, 32, 7, level), Some(origin), "{level}");
+        }
+        assert_eq!(Dx4Kb.tail_origin(64, 32, 7, 7), None, "past the chain");
+    }
+
+    /// A tail level's texels are the block's at its origin: addrlib's addresses for level 6 of a
+    /// 1024x128 `64KB_R_X` chain and level 2 of a 64x32 `4KB_D_X` one, through the target's own
+    /// tiling, which leaves the rest of the block - the other levels - as it was.
+    #[test]
+    fn a_tail_level_is_tiled_at_its_origin_in_the_block() {
+        use super::SurfaceLayout::{self, Dx4Kb, Rx64Kb};
+        use crate::registers::ColourTarget;
+        /// Layout, the level's extent, its origin, and texels with addrlib's byte for each.
+        type Level = (SurfaceLayout, u32, u32, (u32, u32), [(u32, u32, usize); 2]);
+        let cases: [Level; 2] = [
+            (Rx64Kb, 16, 32, (32, 0), [(0, 0, 2048), (15, 31, 6908)]),
+            (Dx4Kb, 16, 8, (16, 0), [(0, 0, 2048), (15, 7, 2812)]),
+        ];
+        for (layout, width, height, origin, texels) in cases {
+            let target = ColourTarget {
+                base: 0,
+                width,
+                height,
+                pipe_bank_xor: 0,
+                layout,
+                tail: Some(origin),
+            };
+            let linear: Vec<u32> = (1..=width * height).collect();
+            let mut tiled = vec![0xEEEE_EEEE; target.words()];
+            target
+                .tile_mapped(&linear, &mut tiled, |w| w)
+                .expect("tiles");
+            for (x, y, byte) in texels {
+                assert_eq!(tiled[byte / 4], y * width + x + 1, "{layout:?} ({x},{y})");
+            }
+            let written = tiled.iter().filter(|&&w| w != 0xEEEE_EEEE).count();
+            assert_eq!(written, linear.len(), "only the level's texels");
+            assert_eq!(target.detile_mapped(&tiled, |w| w), linear);
+        }
     }
 }

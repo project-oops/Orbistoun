@@ -97,6 +97,38 @@ pub const fn meta_bytes(width: u32, height: u32, pipe_aligned: bool) -> u64 {
     (across * down) << block.bytes_log2
 }
 
+/// The bytes of DCC metadata a `levels`-level 2D chain of a `64KB_R_X` surface has, level 0
+/// `width` by `height` 32-bit texels (`dccRamSize`, `gfx10addrlib.cpp:436-468`): one metadata block
+/// for the mip tail when there is one, then each level above it padded to whole blocks. A single
+/// level is [`meta_bytes`].
+#[must_use]
+pub const fn chain_meta_bytes(width: u32, height: u32, levels: u32, pipe_aligned: bool) -> u64 {
+    if levels <= 1 {
+        return meta_bytes(width, height, pipe_aligned);
+    }
+    let block = meta_block(2, pipe_aligned);
+    let first_in_tail =
+        crate::tiling::SurfaceLayout::Rx64Kb.first_level_in_tail(width, height, levels);
+    let mut bytes = if first_in_tail < levels {
+        1 << block.bytes_log2
+    } else {
+        0
+    };
+    let mut level = 0;
+    while level < first_in_tail {
+        let across = max_one(width >> level).div_ceil(block.width) as u64;
+        let down = max_one(height >> level).div_ceil(block.height) as u64;
+        bytes += (across * down) << block.bytes_log2;
+        level += 1;
+    }
+    bytes
+}
+
+/// A mip level's side, never below one (`GetMipSize`).
+const fn max_one(side: u32) -> u32 {
+    if side == 0 { 1 } else { side }
+}
+
 /// The metadata's first byte: the base aligned down to a metadata block, which is the alignment
 /// addrlib gives it (`dccRamBaseAlign`, `gfx10addrlib.cpp:426`), dropping the pipe XOR radeonsi
 /// ORs into the low bits.
@@ -131,18 +163,18 @@ pub fn classify(keys: &[u8]) -> Keys {
 }
 
 /// Why a DCC target's metadata is not one this writes back to, or `None` when it is: a
-/// single-sample, single-level, single-slice 2D `64KB_R_X` surface - the case whose metadata is
-/// one run of whole blocks.
+/// single-sample, single-slice 2D `64KB_R_X` surface of any number of levels - the case whose
+/// metadata is one run of whole blocks ([`chain_meta_bytes`]).
 #[must_use]
 pub const fn unsupported(
     tiling: Option<SwizzleMode>,
-    single_level: bool,
+    single_slice: bool,
     single_sample: bool,
 ) -> Option<&'static str> {
     if !matches!(tiling, Some(SwizzleMode::Tiled64KbRX)) {
         Some("DCC on a swizzle mode other than 64KB_R_X")
-    } else if !single_level {
-        Some("DCC on a target with more than one mip level or slice, or a view of one")
+    } else if !single_slice {
+        Some("DCC on a target with more than one slice, or a view of one")
     } else if !single_sample {
         Some("DCC on a multisampled target")
     } else {
@@ -176,6 +208,22 @@ mod tests {
         assert_eq!(meta_bytes(512, 512, true), 0x1000);
         assert_eq!(meta_bytes(1024, 1024, true), 0x4000);
         assert_eq!(meta_bytes(1920, 1080, true), 4 * 3 * 0x1000);
+    }
+
+    /// A mip chain's keys are addrlib's `dccRamSize` for this configuration (pipe-aligned), and
+    /// one level's are [`meta_bytes`].
+    #[test]
+    fn a_mip_chains_keys_are_addrlibs_size() {
+        use super::chain_meta_bytes;
+        assert_eq!(chain_meta_bytes(2048, 1024, 12, true), 57344);
+        assert_eq!(chain_meta_bytes(1920, 1080, 11, true), 81920);
+        assert_eq!(chain_meta_bytes(300, 200, 9, true), 16384);
+        assert_eq!(chain_meta_bytes(100, 37, 3, true), 8192);
+        assert_eq!(chain_meta_bytes(64, 64, 7, true), 4096);
+        assert_eq!(
+            chain_meta_bytes(1920, 1080, 1, true),
+            meta_bytes(1920, 1080, true)
+        );
     }
 
     /// The metadata starts at its block, whatever XOR sits in the base's low bits.

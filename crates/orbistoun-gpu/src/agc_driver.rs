@@ -437,10 +437,19 @@ impl GuestCp<'_> {
     /// already need nothing; keys all cleared to `0000` mean every bit of every block is zero, so
     /// the surface is filled with zeros and its keys marked uncompressed, which is exactly what
     /// expanding them leaves. Any other key state needs per-block key addressing and is refused,
-    /// with nothing written.
-    fn expand_dcc(&mut self, target: ColourTarget, dcc: crate::dcc::Dcc) -> Result<(), String> {
+    /// with nothing written. A mip chain's keys and blocks are taken whole, every level's
+    /// together, so the level drawn needs no per-level key addressing either.
+    fn expand_dcc(&mut self, target: crate::registers::ColourTargetDcc) -> Result<(), String> {
+        let crate::registers::ColourTargetDcc {
+            dcc,
+            surface,
+            extent,
+            levels,
+            ..
+        } = target;
         let start = crate::dcc::meta_start(dcc);
-        let length = crate::dcc::meta_bytes(target.width, target.height, dcc.pipe_aligned);
+        let length =
+            crate::dcc::chain_meta_bytes(extent.width, extent.height, levels, dcc.pipe_aligned);
         let keys = usize::try_from(length)
             .ok()
             .and_then(|length| cp::CpMemory::read(self, start, length))
@@ -448,9 +457,14 @@ impl GuestCp<'_> {
         match crate::dcc::classify(&keys) {
             crate::dcc::Keys::Uncompressed => Ok(()),
             crate::dcc::Keys::Clear0000 => {
-                let span = target.layout.words(target.width, target.height) * 4;
+                let span = usize::try_from(tiling::SurfaceLayout::Rx64Kb.chain_bytes(
+                    extent.width,
+                    extent.height,
+                    levels,
+                ))
+                .map_err(|_| "its surface is larger than this host addresses".to_owned())?;
                 let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
-                if cp::CpMemory::fill(self, target.base, 0, span)
+                if cp::CpMemory::fill(self, surface, 0, span)
                     && cp::CpMemory::fill(self, start, keys_uncompressed, keys.len())
                 {
                     Ok(())
@@ -492,7 +506,7 @@ impl GuestCp<'_> {
         if let Some(dcc) = submission.colour_target_dcc
             && let Some(why) = crate::dcc::unsupported(
                 submission.colour_target_tiling,
-                dcc.single_level,
+                dcc.single_slice,
                 dcc.single_sample,
             )
         {
@@ -502,7 +516,7 @@ impl GuestCp<'_> {
         }
         // The executor holds one frame per extent, so a frame still pending for another target is
         // written back before this one is drawn over it (D714).
-        if pending_target().is_some_and(|(pending, _)| pending.base != target.base)
+        if pending_target().is_some_and(|(pending, _)| pending != target)
             && !write_back_pending(self)
         {
             return Err(
@@ -510,7 +524,7 @@ impl GuestCp<'_> {
             );
         }
         if let Some(dcc) = submission.colour_target_dcc {
-            self.expand_dcc(target, dcc.dcc)?;
+            self.expand_dcc(dcc)?;
         }
         if !write_back_at_flip() {
             return draw_over(self, target, swap, |before| {
@@ -799,9 +813,9 @@ pub const fn memory_order(word: u32, swap: ComponentSwap) -> u32 {
 fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     let hooks = lazy_copies().get().ok_or(CannotWait)?;
     let (target, swap) = pending_target().ok_or(CannotWait)?;
-    let span = target.layout.words(target.width, target.height) as u64 * 4;
+    let span = target.words() as u64 * 4;
     let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
-        Some(written) if written.base == target.base && written.contents.len() as u64 == span => {
+        Some(written) if written.target == target && written.contents.len() as u64 == span => {
             written.contents
         }
         _ => return Err(CannotWait),
@@ -882,7 +896,7 @@ fn drop_pending_covered(address: u64, length: u64) {
     let Some((target, _)) = pending_target() else {
         return;
     };
-    let span = target.layout.words(target.width, target.height) as u64 * 4;
+    let span = target.words() as u64 * 4;
     if target.base >= address && target.base.saturating_add(span) <= address.saturating_add(length)
     {
         set_pending(None);
@@ -957,9 +971,8 @@ fn read_target(
     target: ColourTarget,
     swap: ComponentSwap,
 ) -> Option<TargetRead> {
-    let (width, height) = (target.width, target.height);
     let read_started = std::time::Instant::now();
-    let length = target.layout.words(width, height) * 4;
+    let length = target.words() * 4;
     // Unchanged is asked of the host first: whether any page of the target has been written since
     // this last wrote or read it. Only where the host cannot say, or says it was, are the bytes
     // compared - a write of the same bytes is still unchanged. Read-only and unwritten (D720) is
@@ -972,14 +985,14 @@ fn read_target(
         let now = Contents::Uniform { word, length };
         let unchanged = last_written().lock().is_ok_and(|last| {
             last.as_ref().is_some_and(|written| {
-                written.base == target.base
+                written.target == target
                     && matches!(written.contents, Contents::Uniform { word: held, length: kept }
                         if held == word && kept == length)
             })
         });
         if !unchanged && let Ok(mut last) = last_written().lock() {
             *last = Some(Written {
-                base: target.base,
+                target,
                 contents: now,
                 since: None,
             });
@@ -995,7 +1008,7 @@ fn read_target(
     protect_target(target);
     let unchanged = last_written().lock().is_ok_and(|last| {
         last.as_ref().is_some_and(|written| {
-            written.base == target.base
+            written.target == target
                 && written.contents.len() == length
                 && (was_protected
                     || written.since.and_then(|since| {
@@ -1024,20 +1037,14 @@ fn read_target(
     });
     let before = match uniform {
         Some(word) => TargetRead::Uniform(swapped(word, swap)),
-        None => TargetRead::Changed(target.layout.detile_mapped(
-            &words_of(&bytes),
-            width,
-            height,
-            target.pipe_bank_xor,
-            |w| swapped(w, swap),
-        )),
+        None => TargetRead::Changed(target.detile_mapped(&words_of(&bytes), |w| swapped(w, swap))),
     };
     // What the drawer is handed is what memory holds now: with the frame kept on the device until
     // the flip, memory still holding these bytes means nothing else has written the target since
     // (D714).
     if let Ok(mut last) = last_written().lock() {
         *last = Some(Written {
-            base: target.base,
+            target,
             contents: Contents::Bytes(Arc::new(bytes)),
             since,
         });
@@ -1086,19 +1093,15 @@ fn write_target(
     swap: ComponentSwap,
     after: &[u32],
 ) -> bool {
-    let (width, height) = (target.width, target.height);
     crate::perf::measure(crate::perf::Phase::WriteTarget, || {
         // Tiled straight into the target, in place, rather than read out, converted and written
         // again.
-        let words = target.layout.words(width, height);
+        let words = target.words();
         let mut tiled_ok = false;
         let mut written = Vec::new();
         let edited = memory.edit_words(target.base, words, &mut |tiled| {
             tiled_ok = target
-                .layout
-                .tile_mapped(after, width, height, target.pipe_bank_xor, tiled, |w| {
-                    swapped(w, swap)
-                })
+                .tile_mapped(after, tiled, |w| swapped(w, swap))
                 .is_ok();
             // What memory holds now, for the next submission's unchanged check.
             written = zerocopy::IntoBytes::as_bytes(&*tiled).to_vec();
@@ -1108,7 +1111,7 @@ fn write_target(
         let since = orbistoun_mem::watch::mark(target.base, words as u64 * 4);
         if let Ok(mut last) = last_written().lock() {
             *last = wrote.then(|| Written {
-                base: target.base,
+                target,
                 contents: Contents::Bytes(Arc::new(written)),
                 since,
             });
@@ -1128,11 +1131,11 @@ fn last_written() -> &'static Mutex<Option<Written>> {
     &LAST
 }
 
-/// A target's base, the bytes its memory held when this last wrote or read it, and the host's mark
+/// A target, the bytes its memory held when this last wrote or read it, and the host's mark
 /// of that moment when it keeps one.
 #[derive(Debug, Clone)]
 struct Written {
-    base: u64,
+    target: ColourTarget,
     contents: Contents,
     since: Option<u64>,
 }
@@ -1206,7 +1209,7 @@ fn protect_target(target: ColourTarget) {
     let Some(hooks) = lazy_copies().get() else {
         return;
     };
-    let span = target.layout.words(target.width, target.height) as u64 * 4;
+    let span = target.words() as u64 * 4;
     let pages = page_span(target.base, span);
     // A deferred copy guarding these pages would be carried out by the next reader; protecting them
     // now would save its no-access as the protection to restore. The list is held throughout, so no
@@ -1443,7 +1446,7 @@ fn deferred_fill_over(base: u64, length: u64) -> Option<u32> {
 
 /// Whether `[address, address + length)` touches any byte of `target`'s tiled surface.
 fn overlaps_target(target: ColourTarget, address: u64, length: u64) -> bool {
-    let span = target.layout.words(target.width, target.height) as u64 * 4;
+    let span = target.words() as u64 * 4;
     address < target.base.saturating_add(span) && target.base < address.saturating_add(length)
 }
 
@@ -1708,18 +1711,22 @@ impl GuestCp<'_> {
         let Some((target, swap)) = pending_target() else {
             return false;
         };
-        let span = target.layout.words(target.width, target.height) as u64 * 4;
+        let span = target.words() as u64 * 4;
         let length = count as u64;
-        if source != target.base || length != span || overlaps_target(target, destination, length) {
+        // A level in a mip tail shares its block with the tail's other levels, so a copy of the
+        // block is more than the frame on the device.
+        if target.tail.is_some()
+            || source != target.base
+            || length != span
+            || overlaps_target(target, destination, length)
+        {
             return false;
         }
         // The target's memory as this copy sees it: what the draws started from, unchanged since -
         // any memory work that touched it would have written the frame back and left nothing
         // pending.
         let memory_then = match last_written().lock().ok().and_then(|last| last.clone()) {
-            Some(written)
-                if written.base == target.base && written.contents.len() as u64 == span =>
-            {
+            Some(written) if written.target == target && written.contents.len() as u64 == span => {
                 written.contents
             }
             _ => return false,
@@ -2473,6 +2480,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         assert!(
             !overlaps_target(target, 0x0f_ff00, 0x100),
@@ -2564,6 +2572,7 @@ mod tests {
             height,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         let mut seen = None;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Alternate, |before| {
@@ -2624,6 +2633,7 @@ mod tests {
             height,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         let expected = crate::tiling::detile_surface_64kb_rx_bpp4_mapped(
             &words_of(&memory.0),
@@ -2657,6 +2667,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         let mut ran = false;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Standard, |before| {
@@ -2683,6 +2694,7 @@ mod tests {
                 height: 1080,
                 pipe_bank_xor: 0,
                 layout: crate::tiling::SurfaceLayout::Rx64Kb,
+                tail: None,
             }),
             colour_target_tiling: Some(SwizzleMode::Tiled64KbRX),
             colour_target_format: Some(decode_colour_target_format(0x0001_80a8 | (1 << 11))),
@@ -3066,9 +3078,10 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
-            base,
+            target,
             contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
             since: None,
         });
@@ -3129,6 +3142,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
@@ -3138,7 +3152,7 @@ mod tests {
         fake::install();
         let pend = |memory: &[u8]| {
             *super::last_written().lock().expect("slot") = Some(Written {
-                base,
+                target,
                 contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
                 since: None,
             });
@@ -3246,12 +3260,13 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
         fake::install();
         *super::last_written().lock().expect("slot") = Some(Written {
-            base,
+            target,
             contents: super::Contents::Bytes(Arc::new(memory[gap..gap + span].to_vec())),
             since: None,
         });
@@ -3308,6 +3323,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3371,6 +3387,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3427,6 +3444,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         allow_writes_to(base, memory.len() as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3528,6 +3546,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3536,7 +3555,7 @@ mod tests {
         super::install_frame_reader(|| Some(frame()));
         let before = memory.to_vec();
         *super::last_written().lock().expect("slot") = Some(Written {
-            base,
+            target,
             contents: super::Contents::Bytes(Arc::new(before.clone())),
             since: None,
         });
@@ -3586,6 +3605,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3621,59 +3641,65 @@ mod tests {
 
     /// Before a DCC target's draws, its blocks are left uncompressed under uncompressed keys: keys
     /// cleared to `0000` expand to a zero surface with every key `0xFF`, keys already uncompressed
-    /// change nothing, and any other key state is refused with nothing written.
+    /// change nothing, and any other key state is refused with nothing written. A mip chain's
+    /// blocks and keys are taken whole: a 256x128 chain of three levels is the tail's block and two
+    /// levels' (256 KiB), under the tail's metadata block and one per level (12 KiB).
     #[test]
     fn a_dcc_target_is_expanded_before_its_draws_or_refused() {
-        use super::{ColourTarget, GuestCp, MappedRegions};
+        use super::{GuestCp, MappedRegions};
+        use crate::registers::{ColourTargetDcc, ColourTargetExtent};
         let _guard = serial();
-        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
-        let keys = 0x1000;
-        let buffer: &'static mut [u8] =
-            Box::leak(vec![0u8; span + keys + 0x2000].into_boxed_slice());
-        let buffer_at = buffer.as_ptr() as usize as u64;
-        allow_writes_to(buffer_at, buffer.len() as u64);
-        set_guest_regions(vec![region_of(buffer)]);
-        // The keys start on a 4 KiB metadata block, as addrlib aligns them.
-        let meta = (buffer_at + span as u64 + 0xFFF) & !0xFFF;
-        let base = buffer_at;
-        let target = ColourTarget {
-            base,
-            width: 16,
-            height: 8,
-            pipe_bank_xor: 0,
-            layout: crate::tiling::SurfaceLayout::Rx64Kb,
-        };
-        let dcc = crate::dcc::Dcc {
-            base: meta | 0x300,
-            pipe_aligned: true,
-        };
-        let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
-        let mut cp = GuestCp {
-            memory: MappedRegions::current(),
-            submission: None,
-        };
+        for (width, height, levels, span, keys) in [
+            (16, 8, 1, 0x1_0000, 0x1000),
+            (256, 128, 3, 0x4_0000, 0x3000),
+        ] {
+            let buffer: &'static mut [u8] =
+                Box::leak(vec![0u8; span + keys + 0x2000].into_boxed_slice());
+            let buffer_at = buffer.as_ptr() as usize as u64;
+            allow_writes_to(buffer_at, buffer.len() as u64);
+            set_guest_regions(vec![region_of(buffer)]);
+            // The keys start on a 4 KiB metadata block, as addrlib aligns them.
+            let meta = (buffer_at + span as u64 + 0xFFF) & !0xFFF;
+            let target = ColourTargetDcc {
+                dcc: crate::dcc::Dcc {
+                    base: meta | 0x300,
+                    pipe_aligned: true,
+                },
+                surface: buffer_at,
+                extent: ColourTargetExtent { width, height },
+                levels,
+                single_slice: true,
+                single_sample: true,
+            };
+            let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
+            let mut cp = GuestCp {
+                memory: MappedRegions::current(),
+                submission: None,
+            };
 
-        buffer[..span].fill(0xAB);
-        buffer[at(meta)..at(meta) + keys].fill(0x00);
-        assert_eq!(cp.expand_dcc(target, dcc), Ok(()));
-        assert!(
-            buffer[..span].iter().all(|&b| b == 0),
-            "the cleared blocks' zeros"
-        );
-        assert!(
-            buffer[at(meta)..at(meta) + keys].iter().all(|&b| b == 0xFF),
-            "every key uncompressed"
-        );
+            buffer[..span + 0x10].fill(0xAB);
+            buffer[at(meta)..at(meta) + keys].fill(0x00);
+            assert_eq!(cp.expand_dcc(target), Ok(()));
+            assert!(
+                buffer[..span].iter().all(|&b| b == 0),
+                "the cleared blocks' zeros, {width}x{height}"
+            );
+            assert_eq!(buffer[span], 0xAB, "nothing past the surface");
+            assert!(
+                buffer[at(meta)..at(meta) + keys].iter().all(|&b| b == 0xFF),
+                "every key uncompressed"
+            );
 
-        buffer[..span].fill(0x5A);
-        assert_eq!(cp.expand_dcc(target, dcc), Ok(()));
-        assert!(buffer[..span].iter().all(|&b| b == 0x5A), "left as it is");
+            buffer[..span].fill(0x5A);
+            assert_eq!(cp.expand_dcc(target), Ok(()));
+            assert!(buffer[..span].iter().all(|&b| b == 0x5A), "left as it is");
 
-        buffer[at(meta) + 7] = 0x20;
-        assert!(cp.expand_dcc(target, dcc).is_err());
-        assert!(buffer[..span].iter().all(|&b| b == 0x5A), "nothing written");
-        assert_eq!(buffer[at(meta) + 7], 0x20);
-        super::forget_written();
+            buffer[at(meta) + keys - 1] = 0x20;
+            assert!(cp.expand_dcc(target).is_err());
+            assert!(buffer[..span].iter().all(|&b| b == 0x5A), "nothing written");
+            assert_eq!(buffer[at(meta) + keys - 1], 0x20);
+            super::forget_written();
+        }
     }
 
     /// A fill over the whole pending target drops the frame rather than writing it back (D719), and
@@ -3694,9 +3720,10 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            tail: None,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
-            base,
+            target,
             contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
             since: None,
         });

@@ -801,12 +801,37 @@ pub fn decode_colour_target_extent(attrib2: u32) -> ColourTargetExtent {
     }
 }
 
-/// The colour target's dimensions, from the live value of `CB_COLOR0_ATTRIB2` among the writes.
+/// The colour target's dimensions, from the live value of `CB_COLOR0_ATTRIB2` among the writes:
+/// the level `CB_COLOR0_VIEW.MIP_LEVEL` names of a mip chain, whose sides halve per level from
+/// `ATTRIB2`'s level 0, never below one.
 ///
 /// [`None`] when the stream never sets it: a target size is not guessed (D010). The most recent
 /// write wins, the value live at the draw.
 #[must_use]
 pub fn colour_target_extent_at(writes: &[RegisterWrite]) -> Option<ColourTargetExtent> {
+    let last = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    let attrib2 = last(CB_COLOR0_ATTRIB2)?;
+    let mip0 = decode_colour_target_extent(attrib2);
+    // `ATTRIB2.MAX_MIP`, 31:28: a single level is level 0 whatever the view says.
+    let level = if attrib2 >> 28 == 0 {
+        0
+    } else {
+        (last(CB_COLOR0_VIEW).unwrap_or(0) >> VIEW_MIP_LEVEL_SHIFT) & 0xF
+    };
+    Some(ColourTargetExtent {
+        width: (mip0.width >> level).max(1),
+        height: (mip0.height >> level).max(1),
+    })
+}
+
+/// Level 0's dimensions, `CB_COLOR0_ATTRIB2` as written.
+fn colour_target_mip0_extent_at(writes: &[RegisterWrite]) -> Option<ColourTargetExtent> {
     let value = writes
         .iter()
         .rev()
@@ -842,6 +867,98 @@ pub struct ColourTarget {
     /// How its texels lie in memory: the layout its swizzle mode names, `64KB_R_X` where the
     /// mode is not one modelled (a target is written back only in a modelled one).
     pub layout: crate::tiling::SurfaceLayout,
+    /// For a mip level in its chain's tail, where in the tail's block - at [`Self::base`] - its
+    /// `(0, 0)` lies; the level shares that block with the other levels in the tail.
+    pub tail: Option<(u32, u32)>,
+}
+
+impl ColourTarget {
+    /// The extent of the surface its words span: its own, or the tail's whole block.
+    const fn span_extent(&self) -> (u32, u32) {
+        match self.tail {
+            Some(_) => self.layout.block_texels(),
+            None => (self.width, self.height),
+        }
+    }
+
+    /// Words its memory spans from [`Self::base`]: the whole tail block for a level in one.
+    #[must_use]
+    pub fn words(&self) -> usize {
+        let (width, height) = self.span_extent();
+        self.layout.words(width, height)
+    }
+
+    /// Detiles it into a linear, row-major image of its own extent, each texel through `map`.
+    ///
+    /// # Panics
+    ///
+    /// When `tiled` is shorter than [`Self::words`].
+    #[must_use]
+    pub fn detile_mapped(&self, tiled: &[u32], map: impl Fn(u32) -> u32 + Sync) -> Vec<u32> {
+        let (span_width, span_height) = self.span_extent();
+        let whole =
+            self.layout
+                .detile_mapped(tiled, span_width, span_height, self.pipe_bank_xor, map);
+        match self.tail {
+            None => whole,
+            Some((x, y)) => (y..y + self.height)
+                .flat_map(|row| {
+                    let start = (row * span_width + x) as usize;
+                    whole[start..start + self.width as usize].iter().copied()
+                })
+                .collect(),
+        }
+    }
+
+    /// Tiles a linear, row-major image of its own extent into it, each texel through `map`,
+    /// leaving every other word - the tail's other levels among them - as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::tiling::DetileError::TiledDataTooShort`] when `tiled` does not cover
+    /// [`Self::words`] or `linear` is not its extent.
+    pub fn tile_mapped(
+        &self,
+        linear: &[u32],
+        tiled: &mut [u32],
+        map: impl Fn(u32) -> u32 + Sync,
+    ) -> Result<(), crate::tiling::DetileError> {
+        let Some((x, y)) = self.tail else {
+            return self.layout.tile_mapped(
+                linear,
+                self.width,
+                self.height,
+                self.pipe_bank_xor,
+                tiled,
+                map,
+            );
+        };
+        let (span_width, span_height) = self.span_extent();
+        let texels = self.width as usize * self.height as usize;
+        if tiled.len() < self.words() || linear.len() != texels {
+            return Err(crate::tiling::DetileError::TiledDataTooShort {
+                needed_words: self.words().max(texels),
+                got_words: tiled.len().min(linear.len()),
+            });
+        }
+        let mut whole =
+            self.layout
+                .detile_mapped(tiled, span_width, span_height, self.pipe_bank_xor, |w| w);
+        for (row, texels) in linear.chunks(self.width as usize).enumerate() {
+            let start = ((y + row as u32) * span_width + x) as usize;
+            for (slot, &texel) in whole[start..start + texels.len()].iter_mut().zip(texels) {
+                *slot = map(texel);
+            }
+        }
+        self.layout.tile_mapped(
+            &whole,
+            span_width,
+            span_height,
+            self.pipe_bank_xor,
+            tiled,
+            |w| w,
+        )
+    }
 }
 
 /// The colour target a submission set up, from the live values of `CB_COLOR0_BASE` and
@@ -851,14 +968,22 @@ pub struct ColourTarget {
 /// each wins. A `64KB_R_X` surface starts on a 64 KiB block, so the low byte of its 256-byte base
 /// is not address: radeonsi ORs the surface's pipe-bank XOR in there (`ac_descriptors.c:1477-1481`,
 /// `cb_color_base |= tile_swizzle`), and it is split out.
+///
+/// The base is the whole surface's, and `CB_COLOR0_VIEW.MIP_LEVEL` picks the level drawn: the
+/// target is that level, where the chain places it ([`crate::tiling::SurfaceLayout::level_offset`])
+/// at its own extent, or a level in the mip tail at the tail's block with its origin there. [`None`]
+/// for a chain in a swizzle mode whose chains are not modelled, or a level past the chain.
 #[must_use]
 pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
-    let base = writes
-        .iter()
-        .rev()
-        .find(|write| write.register == CB_COLOR0_BASE)?
-        .value;
-    let extent = colour_target_extent_at(writes)?;
+    let last = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    let base = last(CB_COLOR0_BASE)?;
+    let extent = colour_target_mip0_extent_at(writes)?;
     let mode = colour_swizzle_mode_at(writes);
     // The pipe-bank XOR rides in the base's low byte for `64KB_R_X`. A `4KB_D_X` base is only
     // 4 KiB aligned, so its low byte is address, and the base is taken whole.
@@ -866,20 +991,42 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         Some(SwizzleMode::Tiled64KbRX) => (base & !0xFF, (base & 0xFF) as u8),
         _ => (base, 0),
     };
+    let layout = mode.and_then(crate::tiling::SurfaceLayout::of);
+    // `ATTRIB2.MAX_MIP`, 31:28; an unwritten `VIEW` reads as its reset value, level 0.
+    let levels = (last(CB_COLOR0_ATTRIB2)? >> 28) + 1;
+    // A level outside the tail lies at its own offset; one in the tail at the tail's block, the
+    // chain's first, at the origin the tail gives it.
+    let (level, offset, tail) = if levels == 1 {
+        (0, 0, None)
+    } else {
+        let layout = layout?;
+        let level = (last(CB_COLOR0_VIEW).unwrap_or(0) >> VIEW_MIP_LEVEL_SHIFT) & 0xF;
+        match layout.level_offset(extent.width, extent.height, levels, level) {
+            Some(offset) => (level, offset, None),
+            None => (
+                level,
+                0,
+                Some(layout.tail_origin(extent.width, extent.height, levels, level)?),
+            ),
+        }
+    };
     Some(ColourTarget {
-        base: u64::from(base) << 8,
-        width: extent.width,
-        height: extent.height,
+        base: (u64::from(base) << 8) + offset,
+        width: (extent.width >> level).max(1),
+        height: (extent.height >> level).max(1),
         pipe_bank_xor,
-        layout: mode
-            .and_then(crate::tiling::SurfaceLayout::of)
-            .unwrap_or_default(),
+        layout: layout.unwrap_or_default(),
+        tail,
     })
 }
 
 /// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
 /// `SLICE_MAX` 25:13, `MIP_LEVEL` 29:26.
 const CB_COLOR0_VIEW: u32 = 0xA31B;
+/// `CB_COLOR0_VIEW`'s `SLICE_START` and `SLICE_MAX` together.
+const VIEW_SLICES: u32 = 0x03FF_FFFF;
+/// `CB_COLOR0_VIEW.MIP_LEVEL`'s shift; the field is four bits.
+const VIEW_MIP_LEVEL_SHIFT: u32 = 26;
 /// `CB_COLOR0_ATTRIB` (`gfx103.json`, byte `167028`, dword `0xA31D`): `NUM_SAMPLES` 14:12,
 /// `NUM_FRAGMENTS` 16:15.
 const CB_COLOR0_ATTRIB: u32 = 0xA31D;
@@ -897,15 +1044,22 @@ const ATTRIB3_DCC_PIPE_ALIGNED: u32 = 1 << 30;
 const RESOURCE_TYPE_2D: u32 = 1;
 
 /// Colour target zero's delta colour compression, when `CB_COLOR0_INFO.DCC_ENABLE` is set: where
-/// its keys are, and whether the target is the single-level, single-slice, single-sample 2D
-/// surface whose keys are one run of whole metadata blocks.
+/// its keys are, the whole surface they describe, and whether that surface is the single-slice,
+/// single-sample 2D one whose keys are one run of whole metadata blocks, every level's together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColourTargetDcc {
     /// The keys' base and layout.
     pub dcc: crate::dcc::Dcc,
-    /// One 2D slice and one mip level: `ATTRIB2.MAX_MIP`, `CB_COLOR0_VIEW` and
-    /// `ATTRIB3.MIP0_DEPTH` all zero, `ATTRIB3.RESOURCE_TYPE` 2D.
-    pub single_level: bool,
+    /// The surface's first byte, `CB_COLOR0_BASE` without its pipe-bank XOR: level 0 of a single
+    /// level, the mip tail's block of a chain.
+    pub surface: u64,
+    /// Level 0's extent (`ATTRIB2`).
+    pub extent: ColourTargetExtent,
+    /// Levels in the chain, `ATTRIB2.MAX_MIP` plus one.
+    pub levels: u32,
+    /// One 2D slice: `CB_COLOR0_VIEW`'s slices and `ATTRIB3.MIP0_DEPTH` all zero,
+    /// `ATTRIB3.RESOURCE_TYPE` 2D.
+    pub single_slice: bool,
     /// `CB_COLOR0_ATTRIB`'s sample and fragment counts both one.
     pub single_sample: bool,
 }
@@ -928,11 +1082,10 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
     let base = (u64::from(last(CB_COLOR0_DCC_BASE_EXT).unwrap_or(0) & 0xFF) << 40)
         | (u64::from(last(CB_COLOR0_DCC_BASE)?) << 8);
     let attrib3 = last(CB_COLOR0_ATTRIB3)?;
-    let max_mip = last(CB_COLOR0_ATTRIB2)? >> 28;
+    let attrib2 = last(CB_COLOR0_ATTRIB2)?;
     // `ATTRIB3.MIP0_DEPTH` 12:0, `RESOURCE_TYPE` 25:24.
     let mip0_depth = attrib3 & 0x1FFF;
-    let single_level = max_mip == 0
-        && last(CB_COLOR0_VIEW).unwrap_or(0) == 0
+    let single_slice = last(CB_COLOR0_VIEW).unwrap_or(0) & VIEW_SLICES == 0
         && mip0_depth == 0
         && (attrib3 >> 24) & 0x3 == RESOURCE_TYPE_2D;
     // `NUM_SAMPLES` and `NUM_FRAGMENTS`, as `log2`, together in 16:12.
@@ -942,7 +1095,10 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
             base,
             pipe_aligned: attrib3 & ATTRIB3_DCC_PIPE_ALIGNED != 0,
         },
-        single_level,
+        surface: u64::from(last(CB_COLOR0_BASE)? & !0xFF) << 8,
+        extent: decode_colour_target_extent(attrib2),
+        levels: (attrib2 >> 28) + 1,
+        single_slice,
         single_sample: samples_and_fragments == 0,
     })
 }
@@ -2950,6 +3106,7 @@ mod tests {
                 height: 64,
                 pipe_bank_xor: 0,
                 layout: crate::tiling::SurfaceLayout::Rx64Kb,
+                tail: None,
             })
         );
         // A base with no extent cannot be sized; an extent with no base cannot be placed. Both
@@ -2988,6 +3145,7 @@ mod tests {
                 height: 256,
                 pipe_bank_xor: 0xc0,
                 layout: crate::tiling::SurfaceLayout::Rx64Kb,
+                tail: None,
             })
         );
         let linear = [
@@ -3003,7 +3161,7 @@ mod tests {
 
     /// Craft's fourth texture target, as its stream writes it: DCC enabled, pipe-aligned keys at
     /// `0x4_028a_0000`, one level of one 2D slice. Without `DCC_ENABLE` there is none; a mip chain
-    /// or a view of one level is not single-level.
+    /// counts its levels, and a view of other slices is not single-slice.
     #[test]
     fn a_dcc_target_decodes_its_keys_and_its_shape() {
         use super::{ColourTargetDcc, colour_target_dcc_at};
@@ -3029,7 +3187,13 @@ mod tests {
                     base: 0x4_028a_0000,
                     pipe_aligned: true,
                 },
-                single_level: true,
+                surface: 0x4_0286_0000,
+                extent: ColourTargetExtent {
+                    width: 256,
+                    height: 256,
+                },
+                levels: 1,
+                single_slice: true,
                 single_sample: true,
             })
         );
@@ -3038,10 +3202,73 @@ mod tests {
         assert_eq!(colour_target_dcc_at(&plain), None);
         let mut chain = craft.clone();
         chain.push(write(0xA3B0, 0x303f_c0ff));
-        assert!(!colour_target_dcc_at(&chain).expect("dcc").single_level);
-        let mut view = craft;
-        view.push(write(0xA31B, 1 << 26));
-        assert!(!colour_target_dcc_at(&view).expect("dcc").single_level);
+        let chained = colour_target_dcc_at(&chain).expect("dcc");
+        assert_eq!((chained.levels, chained.single_slice), (4, true));
+        let mut level = chain;
+        level.push(write(0xA31B, 1 << 26));
+        assert!(colour_target_dcc_at(&level).expect("dcc").single_slice);
+        let mut slices = craft;
+        slices.push(write(0xA31B, 1 << 13));
+        assert!(!colour_target_dcc_at(&slices).expect("dcc").single_slice);
+    }
+
+    /// SuperTuxKart's 2048x1024 target, as its stream writes it: twelve levels (`MAX_MIP` 11) in
+    /// `64KB_R_X`, the view on level 0. The target is level 0 where addrlib places it in the
+    /// chain, last; a view of level 1 is that level, at its own extent; a level in the tail is the
+    /// tail's block, the chain's first, with the level's origin in it; a single level stays at the
+    /// base.
+    #[test]
+    fn a_mip_chains_target_is_the_level_its_view_names() {
+        use super::{RegisterWrite, colour_target_at};
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let chain = vec![
+            write(0xA318, 0x0404_c0c0),
+            write(0xA31B, 0),
+            write(0xA3B0, 0xb1ff_c3ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        let target = colour_target_at(&chain).expect("a target");
+        assert_eq!(
+            (
+                target.base,
+                target.width,
+                target.height,
+                target.pipe_bank_xor
+            ),
+            (0x4_04c0_0000 + 2_883_584, 2048, 1024, 0xc0)
+        );
+        let mut one = chain.clone();
+        one.push(write(0xA31B, 1 << 26));
+        assert_eq!(
+            colour_target_extent_at(&one),
+            Some(ColourTargetExtent {
+                width: 1024,
+                height: 512
+            }),
+            "the attachment is the level's"
+        );
+        let target = colour_target_at(&one).expect("level 1");
+        assert_eq!(
+            (target.base, target.width, target.height),
+            (0x4_04c0_0000 + 786_432, 1024, 512)
+        );
+        let mut tail = chain.clone();
+        tail.push(write(0xA31B, 5 << 26));
+        let target = colour_target_at(&tail).expect("level 5");
+        assert_eq!(
+            (target.base, target.width, target.height, target.tail),
+            (0x4_04c0_0000, 64, 32, Some((64, 0)))
+        );
+        let mut single = chain;
+        single.push(write(0xA3B0, 0x01ff_c3ff));
+        assert_eq!(
+            colour_target_at(&single).map(|t| t.base),
+            Some(0x4_04c0_0000)
+        );
     }
 
     #[test]
