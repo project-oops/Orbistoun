@@ -590,6 +590,11 @@ pub struct Pipeline {
     /// Whether translated shaders read their stage's user data at entry. Set by
     /// [`Self::feeding_user_data`] for a backend that supplies it per draw.
     feeds_user_data: bool,
+    /// Whether each submission is prepared on the register state the ones before it left (D737).
+    /// Set by [`Self::carrying_register_state`] for a live guest.
+    carries_state: bool,
+    /// That state: the last value each register was written, by the submissions carried so far.
+    carried: BTreeMap<u32, u32>,
     /// Each stage's user-data layout for the submission being prepared, vertex then fragment.
     user_data: [UserData; 2],
     /// Shader bytes, by content hash, to the resource holding the translation.
@@ -649,6 +654,8 @@ impl Pipeline {
             window: Window::default(),
             places_window: false,
             feeds_user_data: false,
+            carries_state: false,
+            carried: BTreeMap::new(),
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
             decoded: BTreeMap::new(),
@@ -798,6 +805,39 @@ impl Pipeline {
         self
     }
 
+    /// Prepares each submission on the register state the ones before it left, as the GPU runs
+    /// it (D737): state advances by [`Self::carry`], once a submission has been carried out.
+    ///
+    /// For a live guest, whose submissions are one queue's. Streams prepared by hand stay each
+    /// whole.
+    #[must_use]
+    pub const fn carrying_register_state(mut self) -> Self {
+        self.carries_state = true;
+        self
+    }
+
+    /// Advances the carried register state past `stream`, once it has been carried out (D737):
+    /// every register it wrote now holds its last value there. A stream that clears state
+    /// (`CLEAR_STATE`) leaves only what it wrote after its last clear. Nothing, unless
+    /// [`Self::carrying_register_state`].
+    pub fn carry(&mut self, stream: &[u8]) {
+        if !self.carries_state {
+            return;
+        }
+        let walked = walk(stream);
+        let writes = register_writes(&walked, stream, &self.vocabulary);
+        let cleared = last_clear(&walked);
+        if cleared.is_some() {
+            self.carried.clear();
+        }
+        for write in writes
+            .iter()
+            .filter(|write| cleared.is_none_or(|at| write.packet_offset > at))
+        {
+            self.carried.insert(write.register, write.value);
+        }
+    }
+
     /// Places the guest-memory window every shader this pipeline translates is built against.
     ///
     /// The default is at address zero, which refuses every access a real guest shader makes. Clears
@@ -852,15 +892,31 @@ impl Pipeline {
     ) -> Submission {
         use crate::perf::{Span, span};
         let walked = span(Span::PrepareWalk, || walk(stream));
-        let writes = span(Span::PrepareRegisters, || {
+        let own = span(Span::PrepareRegisters, || {
             register_writes(&walked, stream, &self.vocabulary)
         });
+        let own_writes = own.len();
+        // The state earlier submissions left comes first, so the stream's own writes win; a stream
+        // that clears state starts from its clear (D737).
+        let writes = if self.carries_state && last_clear(&walked).is_none() {
+            self.carried
+                .iter()
+                .map(|(&register, &value)| RegisterWrite {
+                    packet_offset: 0,
+                    register,
+                    value,
+                })
+                .chain(own)
+                .collect()
+        } else {
+            own
+        };
         let inferred = shader_candidates(&writes, &self.vocabulary);
 
         let mut submission = Submission {
             report: SubmissionReport {
                 packets: walked.packets.len(),
-                register_writes: writes.len(),
+                register_writes: own_writes,
                 ..SubmissionReport::default()
             },
             ..Submission::default()
@@ -955,6 +1011,20 @@ impl Pipeline {
 
         submission
     }
+}
+
+/// The offset of a stream's last `CLEAR_STATE`, which resets register state to its defaults, or
+/// `None` when it has none.
+fn last_clear(walked: &PacketWalk) -> Option<u32> {
+    walked
+        .packets
+        .iter()
+        .rev()
+        .find(|packet| {
+            matches!(packet.kind, crate::packet::PacketKind::Command { opcode }
+                if opcode == crate::cp::CLEAR_STATE)
+        })
+        .map(|packet| packet.offset)
 }
 
 /// The outcome of preparing one shader.
@@ -2845,6 +2915,83 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), 12, "each draw its own offset: {offsets:?}");
+    }
+
+    /// A live pipeline prepares each submission on the register state the ones before it left
+    /// (D737): the colour target one stream sized is the next stream's too, once the first is
+    /// carried, and a stream that clears state starts from its clear. A pipeline that does not
+    /// carry state prepares each stream on its own.
+    #[test]
+    fn register_state_carries_to_the_next_submission() {
+        use super::Pipeline;
+        use crate::packet::build::{command_header, nop, set_context_register};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let bytes =
+            |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        let pipeline = || {
+            Pipeline::new(Strategy::Predicated {
+                fidelity: Fidelity::Lane,
+                width: Width::default(),
+            })
+            .expect("a pipeline")
+        };
+        // `CB_COLOR0_ATTRIB2`: 256 x 128.
+        let sized = bytes(&set_context_register(0x3B0, (255 << 14) | 127));
+        let later = bytes(&nop());
+        let cleared = bytes(&[command_header(crate::cp::CLEAR_STATE, 1), 0]);
+
+        let mut live = pipeline().carrying_register_state();
+        live.submit(&sized, super::Queue::Draw, &[], &Nothing);
+        assert!(
+            live.submit(&later, super::Queue::Draw, &[], &Nothing)
+                .targets
+                .is_empty(),
+            "nothing carried before the first is carried out"
+        );
+        live.carry(&sized);
+        let next = live.submit(&later, super::Queue::Draw, &[], &Nothing);
+        assert_eq!(
+            next.targets
+                .values()
+                .map(|e| (e.width, e.height))
+                .collect::<Vec<_>>(),
+            vec![(256, 128)],
+            "the next stream draws into the target the first sized"
+        );
+        assert_eq!(
+            next.report.register_writes, 0,
+            "counted as the stream's own"
+        );
+        assert!(
+            live.submit(&cleared, super::Queue::Draw, &[], &Nothing)
+                .targets
+                .is_empty(),
+            "a clear starts from itself"
+        );
+        live.carry(&cleared);
+        assert!(
+            live.submit(&later, super::Queue::Draw, &[], &Nothing)
+                .targets
+                .is_empty(),
+            "and nothing from before it carries past it"
+        );
+
+        let mut whole = pipeline();
+        whole.carry(&sized);
+        assert!(
+            whole
+                .submit(&later, super::Queue::Draw, &[], &Nothing)
+                .targets
+                .is_empty(),
+            "a pipeline that does not carry state prepares each stream on its own"
+        );
     }
 
     /// Each draw is restricted to the scissor in force at it, not the stream's last one. Bugdom

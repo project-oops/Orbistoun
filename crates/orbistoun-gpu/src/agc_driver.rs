@@ -2279,7 +2279,12 @@ fn submit_described_timed(descriptor: u64) -> u64 {
             .ok()
             // A live guest's shaders name their own buffers, so the window is placed from them
             // (D711).
-            .map(|pipeline| pipeline.placing_window_from_shaders().feeding_user_data())
+            .map(|pipeline| {
+                pipeline
+                    .placing_window_from_shaders()
+                    .feeding_user_data()
+                    .carrying_register_state()
+            })
             .map(|pipeline| {
                 match TRANSLATIONS.lock().ok().and_then(|mut slot| slot.take()) {
                     Some(store) => pipeline.with_translation_store(store),
@@ -2332,6 +2337,14 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         )
     });
     hand_releases_to_display();
+    // What this submission left in the registers is what the next one starts from (D737).
+    if let Some(pipeline) = live_pipeline()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        pipeline.carry(&bytes);
+    }
     if executed.draws == 0
         && let Ok(mut pending) = undelivered_modules().lock()
     {
