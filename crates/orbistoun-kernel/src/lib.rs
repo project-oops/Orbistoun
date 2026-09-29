@@ -1503,9 +1503,12 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             outcome = placed;
         }
     }
-    // Written whatever the outcome, so a stopped batch still says how far it got.
+    // Written whatever the outcome, so a stopped batch still says how far it got. Four bytes:
+    // `completed` is an `int *`, as the SDK and obSCEne's probe declare it, and SuperTuxKart's
+    // winsys keeps it beside a saved register an eight-byte write zeroed half of.
+    let done = u32::try_from(done).unwrap_or(u32::MAX);
     // SAFETY: an address the guest passed for this call, valid by its contract.
-    let _ = unsafe { guest::write_u64(completed, done) };
+    let _ = unsafe { guest::write_u32(completed, done) };
     outcome
 }
 
@@ -6954,13 +6957,17 @@ mod tests {
                     [va + page * PAGE, physical + page * PAGE, PAGE, 0x33]
                 })
                 .collect();
-            let mut completed = 0_u64;
+            // Eight bytes of ones: `completed` is an `int`, so the four after it must survive.
+            let mut completed = u64::MAX;
             let mut args = [0_u64; GUEST_ARG_REGISTERS];
             args[0] = entries.as_ptr() as usize as u64;
             args[1] = 64;
             args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
             assert_eq!(super::batch_map(&args), 0, "batch {batch} maps");
-            assert_eq!(completed, 64, "every entry of batch {batch}");
+            assert_eq!(
+                completed, 0xffff_ffff_0000_0040,
+                "every entry of batch {batch}, written as four bytes"
+            );
         }
         // SAFETY: the last word of the batch-mapped buffer, mapped read-write just above.
         unsafe { std::ptr::write_volatile((va + size - 8) as usize as *mut u64, 0x5eed) };
