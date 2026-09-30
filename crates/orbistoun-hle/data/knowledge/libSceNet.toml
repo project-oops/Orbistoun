@@ -192,3 +192,20 @@ purpose = "Reads from a socket and records the sender."
 returns = "count"
 known_by = "assumed"
 found_on = "2026-09-27"
+
+[[function]]
+name = "sceNetInit"
+arity = 1
+purpose = "Initializes the network library, taking a pointer to an initialization parameter structure."
+returns = "status"
+known_by = "guest-observed"
+found_on = "2026-09-28"
+
+[[function]]
+name = "sceNetTerm"
+arity = 0
+purpose = "Terminates the network library."
+returns = "status"
+known_by = "guest-observed"
+found_on = "2026-09-28"
+

@@ -83,7 +83,9 @@ case "${1:-}" in
     send() {
       from="$1" to="$2"
       archive_path="$work/$ARCHIVE"
-      ( cd "$from" && tar --exclude=./target --exclude=./.git --exclude=./titles \
+      # Every build directory, not just `target`: one for another host (`target-win`) is
+      # gigabytes the VM builds for itself, and filled its disk.
+      ( cd "$from" && tar --exclude='./target*' --exclude=./.git --exclude=./titles \
           --exclude=./site -czf "$archive_path" . )
       native="$archive_path"
       if command -v cygpath >/dev/null 2>&1; then
