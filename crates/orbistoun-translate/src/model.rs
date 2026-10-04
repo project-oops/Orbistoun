@@ -135,6 +135,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_lshrrev_b32_e32",
     "v_lshl_add_u32",
     "v_lshl_or_b32",
+    "v_add_nc_u16",
+    "v_lshlrev_b16",
+    "v_pack_b32_f16",
+    "v_pk_mad_u16",
     "v_lshrrev_b64",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
@@ -770,6 +774,13 @@ pub trait Model {
     /// must share.
     fn memory_high(&self) -> u32 {
         0
+    }
+    /// Takes an `s_load_dwordx8` of an image descriptor from a traced table as the image's name,
+    /// for a dispatch that binds that image itself: the load reads no memory, and its registers
+    /// must not then be read as values. `false` where that is not how this model binds images.
+    fn load_descriptor_opaquely(&mut self, first: u32, registers: u32) -> bool {
+        let _ = (first, registers);
+        false
     }
 
     /// Whether every guest-memory access must be placed exactly: a module whose writes land in
@@ -1871,6 +1882,11 @@ fn vector_instruction<M: Model + ?Sized>(
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
 
+        // Sixteen-bit arithmetic on register halves, as ACO forms an image copy's coordinates.
+        "v_add_nc_u16" | "v_lshlrev_b16" => half_arithmetic(model, instruction, name),
+        "v_pack_b32_f16" => pack_half_words(model, instruction),
+        "v_pk_mad_u16" => packed_multiply_add(model, instruction),
+
         // A lane learns its own index by counting the mask bits below itself; no instruction hands
         // it over.
         "v_mbcnt_lo_u32_b32" | "v_mbcnt_hi_u32_b32" => mask_bit_count(model, instruction, name),
@@ -1963,9 +1979,23 @@ fn memory_instruction<M: Model + ?Sized>(
     // Only the untyped buffer accesses and the local data share are checked against an exact
     // module's window so far; any other access to guest memory is refused there rather than left
     // to fold into it.
+    // An image descriptor a dispatch loads from its table names the image the host binds from that
+    // table, so the load reads no memory here; its registers are then only an image's name.
+    if name == "s_load_dwordx8"
+        && let Some(Operand::Scalar(first)) = instruction.operands.first()
+        && model.load_descriptor_opaquely(u32::from(*first), 8)
+    {
+        model.count();
+        return Ok(());
+    }
+    // An image a dispatch fetches from or stores to is bound whole and written back exactly, so
+    // its accesses need no window.
     if model.exact_memory()
         && !name.starts_with("buffer_")
-        && !matches!(name, "ds_write_b32" | "ds_read_b32")
+        && !matches!(
+            name,
+            "ds_write_b32" | "ds_read_b32" | "image_load" | "image_load_mip" | "image_store"
+        )
     {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -4596,6 +4626,7 @@ const SDWA_MARKER: u32 = 249;
 /// The integer short-form instructions translated in their SDWA form: the operation is the same
 /// over the selected parts, and none of them has the float modifiers SDWA also carries.
 pub const SDWA_INTEGER: &[&str] = &[
+    "v_mov_b32_e32",
     "v_add_nc_u32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
@@ -4788,8 +4819,14 @@ fn sdwa_integer<M: Model + ?Sized>(
         });
     }
     let fields = SdwaFields::read(word);
-    let (Some(Operand::Vector(register)), Some(Operand::Vector(vsrc1))) =
-        (instruction.operands.first(), instruction.operands.get(2))
+    // A move has one source; the short form's first source field holds the SDWA marker.
+    let unary = name == "v_mov_b32_e32";
+    let vsrc1 = match instruction.operands.get(2) {
+        Some(Operand::Vector(vsrc1)) => Some(*vsrc1),
+        _ => None,
+    };
+    let (Some(Operand::Vector(register)), true) =
+        (instruction.operands.first(), unary || vsrc1.is_some())
     else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -4798,14 +4835,27 @@ fn sdwa_integer<M: Model + ?Sized>(
     };
     let register = u32::from(*register);
     let first = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
-    let second = sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?;
+    let second = match vsrc1 {
+        Some(vsrc1) if !unary => Some(sdwa_operand(
+            instruction,
+            u32::from(vsrc1),
+            fields.src1_scalar,
+        )?),
+        _ => None,
+    };
     let low_five = model.constant(31);
     for lane in running_lanes(model) {
         let a = model.read_source(instruction, &first, lane)?;
-        let b = model.read_source(instruction, &second, lane)?;
         let a = sdwa_select(model, instruction, a, fields.select[0])?;
-        let b = sdwa_select(model, instruction, b, fields.select[1])?;
+        let b = match &second {
+            Some(second) => {
+                let b = model.read_source(instruction, second, lane)?;
+                sdwa_select(model, instruction, b, fields.select[1])?
+            }
+            None => a,
+        };
         let result = match name {
+            "v_mov_b32_e32" => a,
             "v_add_nc_u32_e32" => model.binary(op::IADD, a, b),
             "v_or_b32_e32" => model.binary(op::BITWISE_OR, a, b),
             // The reversed shifts: the amount is the first source.
@@ -4832,6 +4882,211 @@ fn sdwa_integer<M: Model + ?Sized>(
         )?;
         let value = sdwa_place(model, instruction, result, old, fields)?;
         model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `op_sel`, bits 14:11 of a long-form vector instruction's first word: for each source and then
+/// the destination, whether its sixteen-bit operand is the register's high half (AMD's published
+/// RDNA instruction set, `OPSEL`). On this generation a sixteen-bit result keeps the other half of
+/// its destination (ACO `instr_is_16bit` and `can_use_opsel`, `aco_ir.cpp:600-743`).
+const OP_SEL_SHIFT: u32 = 11;
+
+/// One sixteen-bit operand as a 32-bit value, zero above: its register's low half, or its high half
+/// when `high`. An inline float is a half here and a constant's high half is not established, so
+/// both are refused.
+fn read_half<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    operand: &Operand,
+    lane: u32,
+    high: bool,
+) -> Result<Id, TranslateError> {
+    let register = matches!(operand, Operand::Vector(_) | Operand::Scalar(_));
+    if matches!(operand, Operand::Named(_)) || (high && !register) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a sixteen-bit source that is an inline float, or the high half of a constant, ",
+                "which is not translated"
+            ),
+        });
+    }
+    let value = model.read_source(instruction, operand, lane)?;
+    if high {
+        let sixteen = model.constant(16);
+        return Ok(model.binary(op::SHIFT_RIGHT_LOGICAL, value, sixteen));
+    }
+    let low = model.constant(0xFFFF);
+    Ok(model.binary(op::BITWISE_AND, value, low))
+}
+
+/// Writes a sixteen-bit result into a register's low half, or its high half when `high`, keeping
+/// the other half.
+fn write_half<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (register, lane): (u32, u32),
+    result: Id,
+    high: bool,
+) -> Result<(), TranslateError> {
+    let old = model.read_source(
+        instruction,
+        &Operand::Vector(u16::try_from(register).unwrap_or(u16::MAX)),
+        lane,
+    )?;
+    let low = model.constant(0xFFFF);
+    let field = model.binary(op::BITWISE_AND, result, low);
+    let (placed, kept) = if high {
+        let sixteen = model.constant(16);
+        (
+            model.binary(op::SHIFT_LEFT_LOGICAL, field, sixteen),
+            model.binary(op::BITWISE_AND, old, low),
+        )
+    } else {
+        let high_half = model.constant(0xFFFF_0000);
+        (field, model.binary(op::BITWISE_AND, old, high_half))
+    };
+    let merged = model.binary(op::BITWISE_OR, kept, placed);
+    model.write_vector_lane(register, lane, merged);
+    Ok(())
+}
+
+/// `v_add_nc_u16` and `v_lshlrev_b16` (AMD's published RDNA instruction set): sixteen-bit operands
+/// chosen by `op_sel`, a sixteen-bit result into the half it names. The add wraps; the reversed
+/// shift takes its amount from the first source's low four bits. Clamp, which saturates the add,
+/// and the float modifiers are refused.
+fn half_arithmetic<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 2)?;
+    let (destination, first, second) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit result's destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let select = instruction.word >> OP_SEL_SHIFT & 0xF;
+    let low_four = model.constant(15);
+    for lane in running_lanes(model) {
+        let a = read_half(model, instruction, first, lane, select & 1 != 0)?;
+        let b = read_half(model, instruction, second, lane, select & 2 != 0)?;
+        let result = if name == "v_add_nc_u16" {
+            model.binary(op::IADD, a, b)
+        } else {
+            let amount = model.binary(op::BITWISE_AND, a, low_four);
+            model.binary(op::SHIFT_LEFT_LOGICAL, b, amount)
+        };
+        write_half(
+            model,
+            instruction,
+            (register, lane),
+            result,
+            select & 8 != 0,
+        )?;
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_pack_b32_f16 d, a, b`: the first source's half in bits 15:0 and the second's in 31:16, each
+/// the half `op_sel` names; a whole word, whatever the destination held (AMD's published RDNA
+/// instruction set; ACO `can_use_opsel` gives it no destination select). The bits move unchanged.
+fn pack_half_words<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 2)?;
+    let (destination, first, second) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a half pack's destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let select = instruction.word >> OP_SEL_SHIFT & 0xF;
+    if select & 8 != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_pack_b32_f16 with a destination select, which it does not take",
+        });
+    }
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let low = read_half(model, instruction, first, lane, select & 1 != 0)?;
+        let high = read_half(model, instruction, second, lane, select & 2 != 0)?;
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
+        let packed = model.binary(op::BITWISE_OR, low, high);
+        model.write_vector_lane(register, lane, packed);
+    }
+    model.count();
+    Ok(())
+}
+
+/// A packed instruction's half selects (AMD's published RDNA instruction set, `VOP3P`): `op_sel`,
+/// bits 13:11 of the first word, picks each source's half for the low result; `op_sel_hi` - bits
+/// 28:27 of the second word for the first two sources, bit 14 of the first for the third - for
+/// the high result. Negation (the first word's 10:8, the second's 31:29) and clamp (bit 15) are
+/// refused.
+fn packed_selects(instruction: &Instruction) -> Result<[[bool; 3]; 2], TranslateError> {
+    let second = instruction.second_word.unwrap_or(0);
+    if instruction.word & (0x7 << 8 | 1 << 15) != 0 || second >> 29 != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a packed instruction's negation or clamp, which is not translated",
+        });
+    }
+    let low = [11, 12, 13].map(|bit| instruction.word >> bit & 1 != 0);
+    let high = [
+        second >> 27 & 1 != 0,
+        second >> 28 & 1 != 0,
+        instruction.word >> 14 & 1 != 0,
+    ];
+    Ok([low, high])
+}
+
+/// `v_pk_mad_u16 d, a, b, c`: in each half of the result, the product of `a` and `b`'s selected
+/// halves plus `c`'s, wrapping at sixteen bits (AMD's published RDNA instruction set). The low
+/// result takes the halves `op_sel` picks and the high one those `op_sel_hi` picks.
+fn packed_multiply_add<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let selects = packed_selects(instruction)?;
+    let [destination, multiplicand, multiplier, addend] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_pk_mad_u16 does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_pk_mad_u16 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let low = model.constant(0xFFFF);
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let mut halves = Vec::with_capacity(2);
+        for select in selects {
+            let left = read_half(model, instruction, multiplicand, lane, select[0])?;
+            let right = read_half(model, instruction, multiplier, lane, select[1])?;
+            let offset = read_half(model, instruction, addend, lane, select[2])?;
+            let product = model.binary(op::IMUL, left, right);
+            let sum = model.binary(op::IADD, product, offset);
+            halves.push(model.binary(op::BITWISE_AND, sum, low));
+        }
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);
+        let packed = model.binary(op::BITWISE_OR, halves[0], high);
+        model.write_vector_lane(register, lane, packed);
     }
     model.count();
     Ok(())
@@ -5293,14 +5548,71 @@ struct ImageAccess {
     fetches: bool,
     /// Whether the level of detail comes from an address register rather than being named.
     levelled: bool,
+    /// Which of the address and the components are sixteen bits wide.
+    halves: Halves,
 }
+
+/// `A16` and `D16`: whether an image access's address elements, and its components, are sixteen
+/// bits, two to a register, the first in the low half.
+#[derive(Clone, Copy)]
+struct Halves {
+    address: bool,
+    data: bool,
+}
+
+/// `A16` and `D16`, bits 30 and 31 of an image instruction's second word (AMD's published RDNA
+/// instruction set, `MIMG`; the reference assembler sets exactly these for `a16` and `d16`).
+const IMAGE_A16: u32 = 1 << 30;
+const IMAGE_D16: u32 = 1 << 31;
+/// Fields of an image instruction's first word that change which registers it reads or writes:
+/// `NSA` (2:1) lists the address registers apart, `R128` (15) takes a four-register descriptor,
+/// and `TFE` (16) and `LWE` (17) return a status word beyond the components.
+const IMAGE_LAYOUT_FIELDS: u32 = 0x3 << 1 | 1 << 15 | 1 << 16 | 1 << 17;
 
 /// Address registers a two-dimensional access uses, by instruction.
 ///
-/// Two for a coordinate and three where the level is one of them: the assembler refuses an address
-/// operand whose register count does not match the instruction's dimensionality field.
-const fn address_registers(levelled: bool) -> u32 {
-    if levelled { 3 } else { 2 }
+/// Two elements for a coordinate and three where the level is one of them: the assembler refuses
+/// an address operand whose register count does not match the instruction's dimensionality field.
+/// Sixteen-bit elements pack two to a register.
+const fn address_registers(levelled: bool, a16: bool) -> u32 {
+    let elements: u32 = if levelled { 3 } else { 2 };
+    if a16 { elements.div_ceil(2) } else { elements }
+}
+
+/// Registers `components` occupy: one each, or two to a register under `D16`.
+const fn data_registers(components: u32, d16: bool) -> u32 {
+    if d16 {
+        components.div_ceil(2)
+    } else {
+        components
+    }
+}
+
+/// Address element `index` of an access: a whole register, or under `A16` a half of one, zero
+/// above.
+fn address_element<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (address, a16): (u32, bool),
+    index: u32,
+    lane: u32,
+) -> Result<Id, TranslateError> {
+    if !a16 {
+        return model.read_source(
+            instruction,
+            &Operand::Vector(address_of(address + index)),
+            lane,
+        );
+    }
+    let word = model.read_source(
+        instruction,
+        &Operand::Vector(address_of(address + index / 2)),
+        lane,
+    )?;
+    let shift = model.constant(16 * (index % 2));
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+    let low = model.constant(0xFFFF);
+    Ok(model.binary(op::BITWISE_AND, shifted, low))
 }
 
 /// Reads a texture access's operands, refusing anything it cannot use.
@@ -5329,6 +5641,20 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // A load reads a texel by integer coordinate and names no sampler; a sample takes a position
     // across the image and names one.
     let fetches = matches!(name, "image_load" | "image_load_mip");
+    let second = instruction.second_word.unwrap_or(0);
+    let a16 = second & IMAGE_A16 != 0;
+    let d16 = second & IMAGE_D16 != 0;
+    if instruction.word & IMAGE_LAYOUT_FIELDS != 0 {
+        return Err(refuse(concat!(
+            "an image access with its address registers listed apart, a four-register ",
+            "descriptor, or a status word returned - which registers it uses is not modelled"
+        )));
+    }
+    if a16 && !fetches && name != "image_store" {
+        return Err(refuse(
+            "a sample whose position is sixteen-bit halves, which is not translated",
+        ));
+    }
     // The level from a register rather than named: the last address element, after the coordinates,
     // as compiled levelled samples place it, and as `image_load_mip` takes its integer level.
     let levelled = matches!(name, "image_sample_l" | "image_load_mip");
@@ -5369,8 +5695,14 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // The address registers and the components coming back both have to fit.
     let address = u32::from(*address);
     let destination = u32::from(*destination);
-    if address + address_registers(levelled) > VECTOR_REGISTERS
-        || destination + mask.count_ones() > VECTOR_REGISTERS
+    if d16 && mask.count_ones() % 2 != 0 {
+        return Err(refuse(concat!(
+            "an odd number of sixteen-bit components, whose last register's high half is not ",
+            "established"
+        )));
+    }
+    if address + address_registers(levelled, a16) > VECTOR_REGISTERS
+        || destination + data_registers(mask.count_ones(), d16) > VECTOR_REGISTERS
     {
         return Err(refuse(
             "a texture access runs past the end of the vector register file",
@@ -5385,7 +5717,53 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
         mask,
         fetches,
         levelled,
+        halves: Halves {
+            address: a16,
+            data: d16,
+        },
     })
+}
+
+/// Writes a texel's components back: the ones the mask selects, into consecutive registers, so a
+/// hole in the mask leaves no hole in the destination. Under `D16` each is narrowed to a half and two
+/// share a register, the first in the low half.
+fn write_components<M: Model + ?Sized>(
+    model: &mut M,
+    texel: Id,
+    (mask, destination, d16): (u32, u32, bool),
+    lane: u32,
+) {
+    let f32_type = model.f32_type();
+    let u32_type = model.u32_type();
+    let mut returned = Vec::new();
+    for component in 0..IMAGE_COMPONENTS {
+        if mask & (1 << component) == 0 {
+            continue;
+        }
+        let builder = model.builder();
+        let extracted = builder.id();
+        builder.function(
+            op::COMPOSITE_EXTRACT,
+            &[f32_type.0, extracted.0, texel.0, component],
+        );
+        let bits = builder.id();
+        builder.function(op::BITCAST, &[u32_type.0, bits.0, extracted.0]);
+        returned.push(bits);
+    }
+    if !d16 {
+        for (register, bits) in (destination..).zip(returned) {
+            model.write_vector_lane(register, lane, bits);
+        }
+        return;
+    }
+    let sixteen = model.constant(16);
+    for (register, pair) in (destination..).zip(returned.chunks(2)) {
+        let low = model.float_bits_to_half(pair[0]);
+        let high = model.float_bits_to_half(pair[1]);
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
+        let packed = model.binary(op::BITWISE_OR, low, high);
+        model.write_vector_lane(register, lane, packed);
+    }
 }
 
 fn image_sample<M: Model + ?Sized>(
@@ -5406,7 +5784,9 @@ fn image_sample<M: Model + ?Sized>(
         mask,
         fetches,
         levelled,
+        halves,
     } = image_access(instruction, name)?;
+    let a16 = halves.address;
 
     let texture = model.sampled_image(descriptor, sampler).map_err(refuse)?;
 
@@ -5415,20 +5795,17 @@ fn image_sample<M: Model + ?Sized>(
     // SPIR-V instruction with different operands.
     let named_level = name.ends_with("_lz") || levelled;
 
-    let f32_type = model.f32_type();
-    let u32_type = model.u32_type();
     let zero = model.constant(0);
     let constant_level = model.as_float(zero);
 
     for lane in running_lanes(model) {
-        // Two dimensions from consecutive registers; the dimensionality field was checked above.
-        let u = model.read_source(instruction, &Operand::Vector(address_of(address)), lane)?;
-        let v = model.read_source(instruction, &Operand::Vector(address_of(address + 1)), lane)?;
+        // Two dimensions from consecutive elements; the dimensionality field was checked above.
+        let u = address_element(model, instruction, (address, a16), 0, lane)?;
+        let v = address_element(model, instruction, (address, a16), 1, lane)?;
         // The level, where the instruction takes one from a register: the last address element. A
         // fetch's level is an integer, a sample's a float.
         let level = if levelled {
-            let bits =
-                model.read_source(instruction, &Operand::Vector(address_of(address + 2)), lane)?;
+            let bits = address_element(model, instruction, (address, a16), 2, lane)?;
             if fetches { bits } else { model.as_float(bits) }
         } else if fetches {
             zero
@@ -5488,24 +5865,7 @@ fn image_sample<M: Model + ?Sized>(
             );
         }
 
-        // The mask says which components come back, and they land in consecutive registers, so a
-        // hole in the mask leaves no hole in the destination.
-        let mut written = 0;
-        for component in 0..IMAGE_COMPONENTS {
-            if mask & (1 << component) == 0 {
-                continue;
-            }
-            let builder = model.builder();
-            let extracted = builder.id();
-            builder.function(
-                op::COMPOSITE_EXTRACT,
-                &[f32_type.0, extracted.0, texel.0, component],
-            );
-            let bits = builder.id();
-            builder.function(op::BITCAST, &[u32_type.0, bits.0, extracted.0]);
-            model.write_vector_lane(destination + written, lane, bits);
-            written += 1;
-        }
+        write_components(model, texel, (mask, destination, halves.data), lane);
     }
 
     model.count();
@@ -5533,18 +5893,24 @@ fn image_store<M: Model + ?Sized>(
         address,
         descriptor,
         mask,
+        halves,
         ..
     } = image_access(instruction, name)?;
+    let Halves {
+        address: a16,
+        data: d16,
+    } = halves;
 
     let stored = model.storage_image(descriptor).map_err(refuse)?;
     let zero = model.constant(0);
 
     for lane in running_lanes(model) {
-        let u = model.read_source(instruction, &Operand::Vector(address_of(address)), lane)?;
-        let v = model.read_source(instruction, &Operand::Vector(address_of(address + 1)), lane)?;
+        let u = address_element(model, instruction, (address, a16), 0, lane)?;
+        let v = address_element(model, instruction, (address, a16), 1, lane)?;
 
         // The texel's components, taken in mask order from consecutive registers, so a hole in the
-        // mask reads no register for that component.
+        // mask reads no register for that component. Under `D16` two halves share a register, the
+        // first in the low half, each widened back to a float.
         let mut components = [model.as_float(zero); IMAGE_COMPONENTS as usize];
         let mut read = 0;
         for (component, slot) in components.iter_mut().enumerate() {
@@ -5552,8 +5918,16 @@ fn image_store<M: Model + ?Sized>(
             if mask & (1 << selected) == 0 {
                 continue;
             }
-            let source = Operand::Vector(address_of(data + read));
-            let bits = model.read_source(instruction, &source, lane)?;
+            let register = if d16 { read / 2 } else { read };
+            let source = Operand::Vector(address_of(data + register));
+            let mut bits = model.read_source(instruction, &source, lane)?;
+            if d16 {
+                let shift = model.constant(16 * (read % 2));
+                let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, bits, shift);
+                let low = model.constant(0xFFFF);
+                let half = model.binary(op::BITWISE_AND, shifted, low);
+                bits = model.half_to_float_bits(half);
+            }
             *slot = model.as_float(bits);
             read += 1;
         }

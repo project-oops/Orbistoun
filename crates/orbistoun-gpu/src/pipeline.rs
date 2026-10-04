@@ -1930,6 +1930,7 @@ fn bind_textures(
                     table_offset: None,
                     table: TableBase::default(),
                     sampler_offset: None,
+                    user_data: None,
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]

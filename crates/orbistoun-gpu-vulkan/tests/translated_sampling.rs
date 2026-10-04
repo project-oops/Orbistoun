@@ -595,12 +595,14 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 table_offset: Some(0x40),
                 table: TableBase::default(),
                 sampler_offset: None,
+                user_data: None,
             },
             TextureSource {
                 slot: 1,
                 table_offset: Some(0x00),
                 table: TableBase::default(),
                 sampler_offset: None,
+                user_data: None,
             },
         ]
     );
@@ -714,6 +716,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             table_offset: Some(0x00),
             table: TableBase::default(),
             sampler_offset: Some(0x20),
+            user_data: None,
         }]
     );
 }

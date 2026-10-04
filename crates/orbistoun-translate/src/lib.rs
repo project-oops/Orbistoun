@@ -291,6 +291,9 @@ pub struct Translated {
     /// The textures the module samples, in binding order, and where each one's descriptor
     /// came from. Empty for a module that samples nothing and for every model but the wavefront.
     pub textures: Vec<wavefront::TextureSource>,
+    /// Where a compute module's stored image's descriptor came from. `None` for a module that
+    /// stores to no image, and for a pixel shader, whose storage image is the harness's.
+    pub storage: Option<wavefront::TextureSource>,
 }
 
 impl Translated {
@@ -544,10 +547,11 @@ pub fn translate_with_user_data(
                 warnings,
                 required_subgroup: None,
                 textures: Vec::new(),
+                storage: None,
             })
         }
         Fidelity::Wavefront => {
-            let (module, instructions, textures) = wavefront::translate_with_user_data(
+            let (module, instructions, (textures, storage)) = wavefront::translate_with_user_data(
                 decode,
                 encodings,
                 width,
@@ -563,6 +567,7 @@ pub fn translate_with_user_data(
                 warnings,
                 required_subgroup: None,
                 textures,
+                storage,
             })
         }
         Fidelity::Subgroup => {
@@ -576,6 +581,7 @@ pub fn translate_with_user_data(
                 warnings,
                 required_subgroup: Some(required_subgroup),
                 textures: Vec::new(),
+                storage: None,
             })
         }
         // `resolve` turns Auto into a concrete level, so this is unreachable.
@@ -971,6 +977,159 @@ mod tests {
         words.extend(load_and_fetch);
         let refused = fragment(&words).expect_err("refused").to_string();
         assert!(refused.contains("not traced"), "{refused}");
+    }
+
+    /// SuperTuxKart's compute image copy, as ACO compiled it for radeonsi in the guest: it fetches
+    /// from the image whose descriptor is user data `s[8:15]`, and stores to the one it loads from
+    /// `s[3] | 4 << 32` at `0x3c0`. It translates as a compute module, and says where each image's
+    /// descriptor is: one in the user data, one in the table.
+    #[test]
+    fn a_compute_image_copy_names_where_both_its_images_are() {
+        use crate::wavefront::{
+            ComputeInputs, MeshPrimitive, Stage, TableBase, TableWord, UserData,
+        };
+        let (table, operands) = tables();
+        let copy = [
+            0xbe80_0303,
+            0xbe81_0384,
+            0xf40c_0600,
+            0xfa00_03c0,
+            0x8700_ff04,
+            0x0000_03ff,
+            0x9384_ff04,
+            0x000a_000a,
+            0x9910_1110,
+            0x7e00_02f9,
+            0x0004_1501,
+            0x9900_0400,
+            0xcc09_4000,
+            0x1c00_0010,
+            0xd714_1002,
+            0x0202_0081,
+            0xd703_0004,
+            0x0202_0005,
+            0xd703_0803,
+            0x0202_0406,
+            0xd703_0002,
+            0x0202_0406,
+            0xd711_0005,
+            0x0202_0504,
+            0xd703_4004,
+            0x0201_0302,
+            0xbfa1_0001,
+            0xf000_1f08,
+            0xc002_0605,
+            0xf000_1f08,
+            0xc002_0404,
+            0xd703_0801,
+            0x0202_0005,
+            0xd711_0008,
+            0x0202_0701,
+            0xd703_4001,
+            0x0201_0303,
+            0xbf8c_0070,
+            0xf020_1f08,
+            0xc006_0608,
+            0xf020_1f08,
+            0xc006_0401,
+            0xbf81_0000,
+        ];
+        let compute = |words: &[u32]| {
+            let decoded = decode(&stream(words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Compute, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    count: 16,
+                    compute: Some(ComputeInputs {
+                        workgroup_ids: [true, true, false],
+                        thread_id_components: 2,
+                        threads: [8, 8, 1],
+                        unwritten_user_data: 0,
+                    }),
+                    ..UserData::default()
+                },
+            )
+        };
+        let translated = compute(&copy).expect("translates");
+        // The loaded descriptor's registers name the stored image and hold no value: a program
+        // that reads one - here `s_mov_b32 s2, s24` after the load - is refused.
+        let mut reads = copy.to_vec();
+        reads.insert(4, 0xbe82_0318);
+        let refused = compute(&reads).expect_err("refused").to_string();
+        assert!(refused.contains("as a value"), "{refused}");
+        let fetched = translated
+            .textures
+            .first()
+            .copied()
+            .expect("a fetched image");
+        assert_eq!((fetched.user_data, fetched.table_offset), (Some(8), None));
+        let stored = translated.storage.expect("a stored image");
+        assert_eq!(
+            (stored.user_data, stored.table_offset, stored.table),
+            (
+                None,
+                Some(0x3c0),
+                TableBase {
+                    low: TableWord::UserData(3),
+                    high: TableWord::Constant(4),
+                }
+            )
+        );
+    }
+
+    /// An image load with sixteen-bit address and data (`a16 d16`, ACO's image copy) translates;
+    /// one returning a status word (`tfe`) or an odd number of sixteen-bit components, whose
+    /// registers are not modelled, is refused rather than read some other way.
+    #[test]
+    fn sixteen_bit_image_operands_translate_and_unmodelled_layouts_are_refused() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let fragment = |load: [u32; 2]| {
+            let words = [
+                // s_load_dwordx8 s[8:15], s[0:1], 0x400
+                0xf40c_0200,
+                0xfa00_0400,
+                0xbf8c_c07f,
+                load[0],
+                load[1],
+                // exp mrt0 v0, v1, v0, v1 done vm
+                0xf800_180f,
+                0x0100_0100,
+                0xbf81_0000,
+            ];
+            let mut program = vec![0xbe80_0303, 0xbe81_0384];
+            program.extend(words);
+            let decoded = decode(&stream(&program), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    count: 4,
+                    ..UserData::default()
+                },
+            )
+        };
+        // image_load v[0:1], v2, s[8:15] dmask:0xf dim:2D unorm a16 d16
+        let load = [0xf000_1f08, 0xc002_0002];
+        assert!(fragment(load).is_ok(), "{:?}", fragment(load).err());
+        let status = fragment([load[0] | 1 << 16, load[1]]).expect_err("refused");
+        assert!(status.to_string().contains("status word"), "{status}");
+        // dmask:0x7 - three halves.
+        let odd = fragment([(load[0] & !0xf00) | 0x700, load[1]]).expect_err("refused");
+        assert!(odd.to_string().contains("odd number"), "{odd}");
     }
 
     /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an

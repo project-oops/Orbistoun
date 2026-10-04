@@ -656,15 +656,19 @@ fn declare_attribute_inputs(
 
 /// Declares the `vec4` colour output a fragment module exports to, and answers it with its type.
 ///
-/// [`None`] for a compute module.
+/// [`None`] for a compute module, which still declares the `vec4` an image access's texel needs.
 fn declare_colour_output(
     b: &mut Builder,
-    f32_type: Id,
-    vec4: Id,
+    (f32_type, vec4): (Id, Id),
     output_ptr: Id,
-    output: Option<Id>,
+    (output, stage): (Option<Id>, Stage),
 ) -> Option<(Id, Id)> {
-    let colour = output?;
+    let Some(colour) = output else {
+        if stage == Stage::Compute {
+            b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
+        }
+        return None;
+    };
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
     b.declare(op::TYPE_POINTER, &[output_ptr.0, OUTPUT, vec4.0]);
     b.declare(op::VARIABLE, &[output_ptr.0, colour.0, OUTPUT]);
@@ -1069,12 +1073,8 @@ pub struct Wavefront<'a> {
     /// Each descriptor register group's descriptor-table offsets, from [`descriptor_table_loads`]:
     /// the image descriptors', then the sampler descriptors'.
     descriptor_loads: (DescriptorLoads, DescriptorLoads),
-    /// The storage image, declared the first time an instruction stores to one.
-    ///
-    /// Declaring it declares a capability that a device without the matching feature refuses, so a
-    /// module that never stores never declares one (D692). The image descriptor register it was
-    /// first named with rides along, so stores follow the same register rules as samples.
-    stored: Option<(model::Stored, u32)>,
+    /// Where a compute module's image descriptors come from, and what it did to their registers.
+    images: ImageTrace,
     bool_type: Id,
     /// Pointer to one lane of one vector register.
     lane_ptr: Id,
@@ -1127,6 +1127,11 @@ const GEOMETRY_INPUT_VGPRS: u32 = 9;
 impl Wavefront<'_> {
     /// The texture sources this module samples, in slot order.
     #[must_use]
+    pub fn image_sources(&self) -> (Vec<TextureSource>, Option<TextureSource>) {
+        (self.texture_sources(), self.images.stored_source)
+    }
+
+    /// The texture sources this module samples, in slot order.
     pub fn texture_sources(&self) -> Vec<TextureSource> {
         self.textures
             .iter()
@@ -1161,6 +1166,7 @@ impl Wavefront<'_> {
         if slot > 1 {
             return Err("this shader reads more than two textures, and two bindings exist (D690)");
         }
+        let user_data = self.resident_descriptor(descriptor)?;
         let (table, table_offset) = match self.descriptor_loads.0.get(&descriptor) {
             None => (TableBase::default(), None),
             Some(loads) if loads.len() == 1 => match loads.first().copied() {
@@ -1179,11 +1185,10 @@ impl Wavefront<'_> {
                 ));
             }
         };
-        let first_resolved = self
-            .textures
-            .first()
-            .is_none_or(|first| first.source.table_offset.is_some());
-        if slot == 1 && (table_offset.is_none() || !first_resolved) {
+        let first_resolved = self.textures.first().is_none_or(|first| {
+            first.source.table_offset.is_some() || first.source.user_data.is_some()
+        });
+        if slot == 1 && ((table_offset.is_none() && user_data.is_none()) || !first_resolved) {
             return Err(concat!(
                 "this shader reads two textures and at least one descriptor did not come from ",
                 "its descriptor table, so which is which cannot be told (D690)"
@@ -1194,7 +1199,32 @@ impl Wavefront<'_> {
             table_offset,
             table,
             sampler_offset: None,
+            user_data,
         })
+    }
+
+    /// For a compute module, the user-data word a descriptor not loaded from a table starts at:
+    /// its eight registers must lie in the seeded user data, unwritten by the program. A compute
+    /// dispatch has no table at fixed user-data words to fall back on, so anything else is
+    /// refused. `None` at any other stage, and for a descriptor a table load put there.
+    fn resident_descriptor(&self, descriptor: u32) -> Result<Option<u32>, &'static str> {
+        if self.stage != Stage::Compute || self.descriptor_loads.0.contains_key(&descriptor) {
+            return Ok(None);
+        }
+        let (first, count) = self.images.user_data_registers;
+        let span = model::IMAGE_DESCRIPTOR_REGISTERS;
+        let seeded = descriptor >= first && descriptor + span <= first + count;
+        let untouched = (descriptor..descriptor + span).all(|register| {
+            register >= u128::BITS || self.images.written_scalars >> register & 1 == 0
+        });
+        if seeded && untouched {
+            Ok(Some(descriptor - first))
+        } else {
+            Err(concat!(
+                "a compute program reads an image descriptor that is neither loaded from a table ",
+                "nor still in the user data it was seeded with, so which image it names is not traced"
+            ))
+        }
     }
 }
 
@@ -1453,7 +1483,7 @@ impl<'a> Wavefront<'a> {
         let mesh_reserved = MeshReserved::new(&mut b, stage, primitive, parameters);
         emit_header(&mut b, stage, primitive, main, output);
         declare_base_types(&mut b, &ids);
-        let output = declare_colour_output(&mut b, f32_type, vec4, output_ptr, output);
+        let output = declare_colour_output(&mut b, (f32_type, vec4), output_ptr, (output, stage));
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
         system.declare(&mut b, vec4, bool_type);
         let mesh = declare_mesh_outputs(
@@ -1517,7 +1547,7 @@ impl<'a> Wavefront<'a> {
             u16_type: None,
             textures: Vec::new(),
             descriptor_loads: Default::default(),
-            stored: None,
+            images: ImageTrace::seeded(user_data.first_register, user_data.count),
             bool_type,
             lane_ptr: files.lane_ptr,
             scalar_ptr: files.scalar_ptr,
@@ -1838,6 +1868,9 @@ impl<'a> Wavefront<'a> {
     /// Notes a guest-visible read of a register, and, in a mesh module, a geometry-engine input
     /// read before anything wrote it.
     fn note_read(&mut self, scalar: bool, register: u32) {
+        if scalar && register < u128::BITS && self.images.opaque_scalars >> register & 1 != 0 {
+            self.images.reads_opaque = true;
+        }
         if self.stage != Stage::Mesh || self.reads_geometry_input {
             return;
         }
@@ -1891,6 +1924,15 @@ impl<'a> Wavefront<'a> {
     pub fn finish(mut self) -> Result<(Vec<u32>, usize), TranslateError> {
         if self.reads_geometry_input {
             return Err(TranslateError::ReadsGeometryInputs);
+        }
+        if self.images.reads_opaque {
+            return Err(TranslateError::Unsupported {
+                offset: 0,
+                detail: concat!(
+                    "a dispatch reads an image descriptor it loaded from its table as a value, ",
+                    "and the load binds the image rather than reading the words"
+                ),
+            });
         }
         if self.reads_unwritten {
             return Err(TranslateError::Unsupported {
@@ -2264,6 +2306,19 @@ impl Model for Wavefront<'_> {
         self.dispatch.is_some()
     }
 
+    fn load_descriptor_opaquely(&mut self, first: u32, registers: u32) -> bool {
+        let traced = self.descriptor_loads.0.contains_key(&first);
+        if !self.exact_memory() || !traced || registers != model::IMAGE_DESCRIPTOR_REGISTERS {
+            return false;
+        }
+        for register in first..first + registers {
+            if register < u128::BITS {
+                self.images.opaque_scalars |= 1 << register;
+            }
+        }
+        true
+    }
+
     fn note_escape(&mut self, escaped: Id, lane: Option<u32>) {
         if let Some(state) = self.dispatch {
             state.note(self, escaped, lane);
@@ -2353,6 +2408,10 @@ impl Model for Wavefront<'_> {
     }
 
     fn write_scalar(&mut self, register: u32, value: Id) {
+        if register < u128::BITS {
+            self.images.written_scalars |= 1 << register;
+            self.images.opaque_scalars &= !(1 << register);
+        }
         // A write into either descriptor group means the next sample does not read the texture the
         // last one did. Recorded here because this is the only place that sees writes (D690).
         for bound in &mut self.textures {
@@ -2418,13 +2477,13 @@ impl Model for Wavefront<'_> {
     fn storage_image(&mut self, descriptor: u32) -> Result<model::Stored, &'static str> {
         // The fragment stage only: the harness binds its storage image with fragment stage flags,
         // and the `vec4` texel type comes from the colour output, which only a fragment module has.
-        if self.stage != Stage::Fragment {
+        if self.stage == Stage::Mesh {
             return Err(concat!(
-                "only a fragment module stores to an image here - a storage image is bound with ",
-                "fragment stage flags, and a guest's pixel shader is what asked for one"
+                "a primitive shader stores to an image, and its stage binds none - a storage image ",
+                "is bound to a pixel shader or a compute dispatch"
             ));
         }
-        if let Some((stored, was)) = self.stored {
+        if let Some((stored, was)) = self.images.stored {
             if was != descriptor {
                 return Err(concat!(
                     "this shader stores to more than one image and a pipeline binds one - ",
@@ -2434,6 +2493,14 @@ impl Model for Wavefront<'_> {
                 ));
             }
             return Ok(stored);
+        }
+
+        // A compute module's storage image is the guest's, so where its descriptor came from is what
+        // binds it; a fragment module's is a harness image.
+        if self.stage == Stage::Compute {
+            let mut source = self.new_texture_source(descriptor)?;
+            source.slot = 0;
+            self.images.stored_source = Some(source);
         }
 
         let image = self.builder.id();
@@ -2482,7 +2549,7 @@ impl Model for Wavefront<'_> {
             texel,
             value: self.vec4,
         };
-        self.stored = Some((stored, descriptor));
+        self.images.stored = Some((stored, descriptor));
         Ok(stored)
     }
 
@@ -2494,10 +2561,11 @@ impl Model for Wavefront<'_> {
         // The fragment stage only: the harness binds its sampled image with fragment stage flags,
         // and the `vec4` type a sample answers with is declared by the colour output, which only a
         // fragment module has.
-        if self.stage != Stage::Fragment {
+        // A compute module fetches: with no derivatives, a sample's level is not defined there.
+        if self.stage == Stage::Mesh || (self.stage == Stage::Compute && sampler.is_some()) {
             return Err(concat!(
-                "only a fragment module samples a texture here - a sampled image is bound with ",
-                "fragment stage flags, and a guest's textured shading is what asked for one"
+                "only a pixel shader samples a texture here, and a compute dispatch fetches one - ",
+                "a primitive shader's image and a compute sample are not bound"
             ));
         }
         if let Some(bound) = self
@@ -2771,6 +2839,44 @@ impl Model for Wavefront<'_> {
     }
 }
 
+/// What a module tracks to say where a compute dispatch's image descriptors are.
+#[derive(Debug, Clone, Copy, Default)]
+struct ImageTrace {
+    /// The storage image, declared the first time an instruction stores to one.
+    ///
+    /// Declaring it declares a capability that a device without the matching feature refuses, so a
+    /// module that never stores never declares one (D692). The image descriptor register it was
+    /// first named with rides along, so stores follow the same register rules as samples.
+    stored: Option<(model::Stored, u32)>,
+    /// Where the stored image's descriptor came from, for a compute module, whose storage image is
+    /// the guest's own rather than a harness image.
+    stored_source: Option<TextureSource>,
+    /// Scalar registers the program has written, one bit each: a descriptor still in the registers
+    /// the user data seeded is read from the user data.
+    written_scalars: u128,
+    /// The user-data registers this stage was seeded with: the first, and how many.
+    user_data_registers: (u32, u32),
+    /// Scalar registers holding an image descriptor a dispatch loaded from its table without
+    /// reading memory, one bit each: the image is bound from the table itself, so the registers
+    /// hold nothing a value read could use.
+    opaque_scalars: u128,
+    /// Whether anything read one of those registers as a value.
+    reads_opaque: bool,
+}
+
+impl ImageTrace {
+    fn seeded(first: u32, count: u32) -> Self {
+        Self {
+            user_data_registers: (first, count),
+            ..Self::default()
+        }
+    }
+}
+
+/// The textures a module samples, in slot order, and its stored image, where each one's
+/// descriptor came from.
+pub type ImageSources = (Vec<TextureSource>, Option<TextureSource>);
+
 /// Which texture a translated module samples at which binding, and where its descriptor comes from:
 /// the descriptor table the image descriptor was loaded from, and the byte offset in it. `None` when
 /// the module did not load it from a table; a pipeline then reads offset zero of the table at the
@@ -2789,6 +2895,11 @@ pub struct TextureSource {
     /// came from anywhere else: the texture is then read with default sampling.
     #[serde(default)]
     pub sampler_offset: Option<u32>,
+    /// The stage's user-data word the descriptor's eight registers start at, when the program
+    /// reads it where the user data put it, never having written those registers: a compute
+    /// dispatch's descriptors arrive this way. `None` for a descriptor from a table.
+    #[serde(default)]
+    pub user_data: Option<u32>,
 }
 
 /// One half of a descriptor table's 64-bit address, as the program formed it before loading from
@@ -3094,7 +3205,7 @@ pub fn translate_with_user_data(
     (stage, primitive): (Stage, MeshPrimitive),
     window: Window,
     user_data: UserData,
-) -> Result<(Vec<u32>, usize, Vec<TextureSource>), TranslateError> {
+) -> Result<(Vec<u32>, usize, ImageSources), TranslateError> {
     if user_data.count > USER_DATA_STAGE_WORDS
         || user_data.block_offset + user_data.count > USER_DATA_BLOCK_WORDS
     {
@@ -3136,7 +3247,7 @@ pub fn translate_with_user_data(
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     crate::control::emit(&mut module, decode, encodings)?;
-    let sources = module.texture_sources();
+    let sources = module.image_sources();
     let (words, translated) = module.finish()?;
     Ok((words, translated, sources))
 }

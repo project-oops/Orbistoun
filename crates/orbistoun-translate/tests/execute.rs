@@ -5269,6 +5269,129 @@ fn sdwa_selects_its_sources_and_places_its_result() {
     assert_eq!(vector(&registers, 6), 0xffff_fff0, "a word sign-extended");
 }
 
+/// The source code of vector register zero; register `n` is this plus `n`.
+const VGPR_0: u32 = 256;
+
+/// A long-form instruction with `op_sel` (bits 14:11): which sources, then the destination, are
+/// high halves.
+fn vop3_op_sel(name: &str, dst: u32, sources: [u32; 3], op_sel: u32) -> [u32; 2] {
+    let [first, second] = vop3(name, dst, sources, 0, 0);
+    [first | (op_sel << 11), second]
+}
+
+/// A packed instruction: `op_sel` (bits 13:11) and `op_sel_hi` (sources one and two in the second
+/// word's 28:27, source three in the first word's bit 14).
+fn vop3p(name: &str, dst: u32, sources: [u32; 3], op_sel: u32, op_sel_hi: u32) -> [u32; 2] {
+    [
+        head(name) | ((op_sel_hi >> 2 & 1) << 14) | (op_sel << 11) | dst,
+        ((op_sel_hi & 3) << 27) | (sources[2] << 18) | (sources[1] << 9) | sources[0],
+    ]
+}
+
+/// ACO's image-copy coordinate arithmetic, on register halves: `v_pk_mad_u16` multiplies and adds
+/// each half, its halves picked by `op_sel` and `op_sel_hi`; `v_add_nc_u16` wraps at sixteen bits
+/// and writes only the half its destination select names; `v_lshlrev_b16` shifts a source's high
+/// half; `v_pack_b32_f16` joins two halves; an SDWA move sets a high word and keeps the low one.
+#[test]
+fn sixteen_bit_arithmetic_works_on_register_halves() {
+    if !device_or_skip("sixteen_bit_arithmetic_works_on_register_halves") {
+        return;
+    }
+    let halves = |program: &mut Vec<u32>| {
+        program.extend(v_mov_literal(0, 0x0003_0005));
+        program.extend(v_mov_literal(1, 0x0002_0007));
+        program.extend(v_mov_literal(2, 0x0010_0020));
+    };
+    let mut program = Vec::new();
+    halves(&mut program);
+    program.extend(vop3p(
+        "v_pk_mad_u16",
+        3,
+        [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+        0,
+        0b111,
+    ));
+    program.extend(vop3p(
+        "v_pk_mad_u16",
+        4,
+        [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+        0b001,
+        0b110,
+    ));
+    program.extend(v_mov_literal(5, 0xaaaa_bbbb));
+    program.extend(vop3_op_sel("v_add_nc_u16", 5, [VGPR_0, 128 + 1, 0], 0b1000));
+    program.extend(v_mov_literal(6, 0x1234_5678));
+    program.extend(v_mov_literal(7, 0x0000_ffff));
+    program.extend(vop3_op_sel("v_add_nc_u16", 6, [VGPR_0 + 7, 128 + 2, 0], 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        0x0016_0043,
+        "5*7+0x20 low, 3*2+0x10 high"
+    );
+    assert_eq!(
+        vector(&registers, 4),
+        0x001a_0035,
+        "the first source's halves swapped: 3*7+0x20 low, 5*2+0x10 high"
+    );
+    assert_eq!(vector(&registers, 5), 0x0006_bbbb, "5+1 into the high half");
+    assert_eq!(
+        vector(&registers, 6),
+        0x1234_0001,
+        "0xffff+2 wraps; the high half kept"
+    );
+
+    let mut program = Vec::new();
+    halves(&mut program);
+    program.extend(v_mov_literal(3, 0xdead_0000));
+    program.extend(vop3_op_sel(
+        "v_lshlrev_b16",
+        3,
+        [128 + 17, VGPR_0, 0],
+        0b0010,
+    ));
+    program.extend(vop3_op_sel(
+        "v_pack_b32_f16",
+        4,
+        [VGPR_0, VGPR_0 + 1, 0],
+        0b0001,
+    ));
+    program.extend(v_mov_literal(5, 0x1111_2222));
+    program.extend(vop2_sdwa(
+        "v_mov_b32_e32",
+        5,
+        0,
+        Sdwa {
+            src0: 0,
+            src0_scalar: false,
+            src0_sel: SEL_WORD_0,
+            src0_sext: false,
+            src1_sel: SEL_DWORD,
+            src1_sext: false,
+            dst_sel: SEL_WORD_1,
+            dst_unused: 2,
+        },
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        0xdead_0006,
+        "the high half 3, shifted by 17 & 15"
+    );
+    assert_eq!(
+        vector(&registers, 4),
+        0x0007_0003,
+        "v0's high half, then v1's low"
+    );
+    assert_eq!(
+        vector(&registers, 5),
+        0x0005_2222,
+        "a word moved up, the low one kept"
+    );
+}
+
 /// The primitive export word: vertex indices packed ten bits apart, by `v_lshl_or_b32` and
 /// `v_or_b32`.
 #[test]

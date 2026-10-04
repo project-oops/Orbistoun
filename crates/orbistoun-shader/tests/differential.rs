@@ -79,6 +79,9 @@ fn permitted_families(mnemonic: &str) -> &'static [&'static str] {
         &["SMEM"]
     } else if mnemonic.starts_with("s_") {
         &["SOP1", "SOP2", "SOPC", "SOPK", "SOPP", "SMEM"]
+    } else if mnemonic.starts_with("v_pk_") {
+        // The packed sixteen-bit operations have an encoding of their own.
+        &["VOP3P"]
     } else if mnemonic.starts_with("v_") {
         &["VOP1", "VOP2", "VOPC", "VOP3", "VINTRP"]
     } else if mnemonic.starts_with("global_")
@@ -141,6 +144,10 @@ const FIXTURES: &[(&str, &str)] = &[
     (
         "blit",
         "radeonsi's blit shaders: geometry-engine counts, corner selection, texel loads",
+    ),
+    (
+        "copy",
+        "radeonsi's compute image copy: sixteen-bit and packed coordinates, a16 d16 images",
     ),
 ];
 
