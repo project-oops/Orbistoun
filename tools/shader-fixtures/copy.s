@@ -14,6 +14,7 @@
 // target triple: amdgcn-mesa-mesa3d
 
 // ---- The coordinate, in sixteen-bit halves ----------------------------------------
+s_mul_i32 s16, s16, s4
 v_pk_mad_u16 v0, s16, s0, v0
 v_lshlrev_b16 v2, 1, v0
 v_add_nc_u16 v4, v2, 1

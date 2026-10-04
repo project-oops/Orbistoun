@@ -4,6 +4,13 @@
 // Operands only. `op_sel`, which picks a source's or the destination's high half, is a modifier in
 // bits 14:11 of the first word, and a varied sample of it would read as a field of its own.
 
+// ---- s_mul_i32: SOP2, two sources --------------------------------------------------------
+s_mul_i32 s16, s16, s4
+s_mul_i32 s101, s5, s99
+s_mul_i32 s0, -1, s77
+s_mul_i32 s40, s3, 4
+s_mul_i32 s9, 64, s62
+
 // ---- v_add_nc_u16: VOP3, two sources --------------------------------------------------
 v_add_nc_u16 v4, v5, v2
 v_add_nc_u16 v200, s5, v9

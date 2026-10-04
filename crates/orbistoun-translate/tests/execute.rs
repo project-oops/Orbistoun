@@ -2425,6 +2425,36 @@ fn scalar_logic_sets_the_condition_code_from_its_result() {
     }
 }
 
+/// `s_mul_i32` writes the product's low word and leaves the condition code as it was: set by a
+/// non-zero `s_and_b32` before it, the code still holds after a multiply by zero, and clear, it
+/// stays clear after a non-zero product.
+#[test]
+fn scalar_multiply_keeps_the_condition_code() {
+    if !device_or_skip("scalar_multiply_keeps_the_condition_code") {
+        return;
+    }
+    for (code_from, multiplier, expect_written) in [(128 + 1, 128, 42u32), (128, 128 + 3, 0)] {
+        let program = [
+            sop2("s_and_b32", 2, 128 + 1, code_from),
+            sop2("s_mul_i32", 4, 128 + 7, multiplier),
+            branch("s_cbranch_scc0", 1),
+            s_mov_inline(3, 42),
+            s_endpgm(),
+        ];
+        let (registers, _) = run_memory(Fidelity::Lane, &program);
+        assert_eq!(
+            scalar(&registers, 4),
+            7 * (multiplier - 128),
+            "the product; registers were {registers:?}"
+        );
+        assert_eq!(
+            scalar(&registers, 3),
+            expect_written,
+            "the branch reads the and's code, not the multiply's; registers were {registers:?}"
+        );
+    }
+}
+
 /// Scalar addition sets the condition code on signed overflow, not on a non-zero result.
 #[test]
 fn scalar_addition_sets_the_condition_code_on_signed_overflow() {

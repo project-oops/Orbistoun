@@ -92,6 +92,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_movk_i32",
     "s_inst_prefetch",
     "s_mulk_i32",
+    "s_mul_i32",
     "s_or_b32",
     "s_or_b64",
     "s_pack_hh_b32_b16",
@@ -1820,7 +1821,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
         // as its destination.
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_or_b32" | "s_xor_b32" | "s_lshl_b32"
-        | "s_bfe_u32" => scalar_integer(model, instruction, name),
+        | "s_bfe_u32" | "s_mul_i32" => scalar_integer(model, instruction, name),
 
         // Field assembly that writes no condition code: two 16-bit halves into one word, and a
         // run of ones into a register pair.
@@ -3156,9 +3157,9 @@ fn combine<M: Model + ?Sized>(
 
 /// Translates the 32-bit scalar arithmetic and logic.
 ///
-/// Every one writes the condition code: the logical operations to whether the result is non-zero,
-/// the arithmetic ones to whether the signed operation overflowed. Dropping it would leave the next
-/// branch reading a stale code.
+/// Every one but the multiply writes the condition code: the logical operations to whether the
+/// result is non-zero, the add and subtract to whether the signed operation overflowed. Dropping it
+/// would leave the next branch reading a stale code. `s_mul_i32` leaves it as it was.
 fn scalar_integer<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -3200,7 +3201,7 @@ fn scalar_integer<M: Model + ?Sized>(
             let both = model.binary(op::BITWISE_AND, left_differs, right_differs);
             let sign = model.constant(0x8000_0000);
             let overflow = model.binary(op::BITWISE_AND, both, sign);
-            (result, model.is_not_zero(overflow))
+            (result, Some(model.is_not_zero(overflow)))
         }
         "s_and_b32" | "s_or_b32" | "s_xor_b32" => {
             let spirv = match name {
@@ -3209,20 +3210,23 @@ fn scalar_integer<M: Model + ?Sized>(
                 _ => op::BITWISE_XOR,
             };
             let result = model.binary(spirv, left, right);
-            (result, model.is_not_zero(result))
+            (result, Some(model.is_not_zero(result)))
         }
         // `S_LSHL_B32`: `D = S0 << S1[4:0]`, the condition code whether the result is non-zero.
         "s_lshl_b32" => {
             let five = model.constant(31);
             let amount = model.binary(op::BITWISE_AND, right, five);
             let result = model.binary(op::SHIFT_LEFT_LOGICAL, left, amount);
-            (result, model.is_not_zero(result))
+            (result, Some(model.is_not_zero(result)))
         }
         // `S_BFE_U32`: `D = (S0 >> S1[4:0]) & ((1 << S1[22:16]) - 1)`, and the condition code.
         "s_bfe_u32" => {
             let result = bit_field_extract(model, left, right);
-            (result, model.is_not_zero(result))
+            (result, Some(model.is_not_zero(result)))
         }
+        // `S_MUL_I32`: the product's low 32 bits, which signed and unsigned multiplication share;
+        // the condition code is not written.
+        "s_mul_i32" => (model.binary(op::IMUL, left, right), None),
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
@@ -3239,7 +3243,9 @@ fn scalar_integer<M: Model + ?Sized>(
         None if to_m0 => model.write_m0(result),
         None => model.write_scalar(register, result),
     }
-    model.set_condition_code(condition);
+    if let Some(condition) = condition {
+        model.set_condition_code(condition);
+    }
     model.count();
     Ok(())
 }

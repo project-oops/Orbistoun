@@ -244,6 +244,11 @@ name = "s_bfm_b64"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 38
+name = "s_mul_i32"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 39
 name = "s_bfe_u32"
 

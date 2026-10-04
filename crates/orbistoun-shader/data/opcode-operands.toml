@@ -364,6 +364,13 @@ samples = 7
 operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
+family = "SOP2"
+opcode = 38
+mnemonic = "s_mul_i32"
+samples = 5
+operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
 family = "SOPC"
 opcode = 0
 mnemonic = "s_cmp_eq_i32"
