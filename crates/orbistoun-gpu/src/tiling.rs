@@ -1045,6 +1045,11 @@ mod tests {
             height: 64,
             format: 56, // GFX10_FORMAT_8_8_8_8_UNORM, a 32-bpp format
             tiling: SwizzleMode::Tiled64KbRX,
+            pipe_bank_xor: 0,
+            levels: 1,
+            base_level: 0,
+            last_level: 0,
+            compression: None,
         };
         let mut guest = vec![0u32; 256 + 4096];
         guest[256 + 4348 / 4] = RED;
@@ -1068,6 +1073,11 @@ mod tests {
             height: 64,
             format: 56, // GFX10_FORMAT_8_8_8_8_UNORM, a 32-bpp format
             tiling: SwizzleMode::Linear,
+            pipe_bank_xor: 0,
+            levels: 1,
+            base_level: 0,
+            last_level: 0,
+            compression: None,
         };
         assert_eq!(
             detile_texture(&descriptor, &[0u32; 4096], 0x2_000e_0000),
@@ -1085,6 +1095,11 @@ mod tests {
             height: 64,
             format: 71, // GFX10_FORMAT_16_16_16_16_FLOAT, eight bytes per texel
             tiling: SwizzleMode::Tiled64KbRX,
+            pipe_bank_xor: 0,
+            levels: 1,
+            base_level: 0,
+            last_level: 0,
+            compression: None,
         };
         assert_eq!(
             detile_texture(&descriptor, &[0u32; 4096], 0x2_000e_0000),

@@ -2050,6 +2050,55 @@ pub struct ImageDescriptor {
     /// one [`crate::tiling`] detiles; `Linear` reads straight; `Other` is a mode to refuse rather
     /// than read with the wrong swizzle.
     pub tiling: SwizzleMode,
+    /// The surface's pipe-bank XOR, which radeonsi ORs into dword 0's low bits below the block's
+    /// alignment (`ac_descriptors.c:767`, `desc[0] |= surf->tile_swizzle`); zero for a linear one.
+    pub pipe_bank_xor: u8,
+    /// Levels in the surface's mip chain, `SQ_IMG_RSRC_WORD5.MAX_MIP` (bits 7:4) plus one: what
+    /// places each level (`ac_descriptors.c:546`, `num_levels - 1`).
+    pub levels: u32,
+    /// The first level the view reads, `SQ_IMG_RSRC_WORD3.BASE_LEVEL` (bits 15:12).
+    pub base_level: u32,
+    /// The view's last level, `SQ_IMG_RSRC_WORD3.LAST_LEVEL` (bits 19:16).
+    pub last_level: u32,
+    /// Delta colour compression, when `SQ_IMG_RSRC_WORD6.COMPRESSION_EN` (bit 21) is set: the keys
+    /// at `META_DATA_ADDRESS_LO` (word 6 bits 31:24, address bits 15:8) and word 7 (address bits
+    /// 47:16), laid out pipe-aligned when `META_PIPE_ALIGNED` (bit 19) says so
+    /// (`ac_descriptors.c:748-765`).
+    pub compression: Option<crate::dcc::Dcc>,
+}
+
+impl ImageDescriptor {
+    /// The level the view reads first, as the colour target the same surface would be drawn
+    /// through: its first byte, extent and layout, and for a level in the mip tail its origin in
+    /// the tail's block - or `None` for a tiling, or a level's place, not modelled.
+    #[must_use]
+    pub fn base_level_surface(&self) -> Option<ColourTarget> {
+        let layout = crate::tiling::SurfaceLayout::of(self.tiling)?;
+        let (offset, tail) = if self.levels <= 1 {
+            (0, None)
+        } else {
+            match layout.level_offset(self.width, self.height, self.levels, self.base_level) {
+                Some(offset) => (offset, None),
+                None => (
+                    0,
+                    Some(layout.tail_origin(
+                        self.width,
+                        self.height,
+                        self.levels,
+                        self.base_level,
+                    )?),
+                ),
+            }
+        };
+        Some(ColourTarget {
+            base: self.base + offset,
+            width: (self.width >> self.base_level).max(1),
+            height: (self.height >> self.base_level).max(1),
+            pipe_bank_xor: self.pipe_bank_xor,
+            layout,
+            tail,
+        })
+    }
 }
 
 /// How a texture coordinate outside `[0, 1]` is brought back: `SQ_IMG_SAMP_WORD0.CLAMP_X/Y`
@@ -2233,18 +2282,44 @@ pub fn scissor_at(writes: &[RegisterWrite]) -> Option<Scissor> {
 pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
     // dword 1 (`mid`) carries the base's high byte, the format and the width's low bits; dword 2
     // (`extent`) the width's high bits and the height; dword 3 (`tiling_word`) the tiling mode.
-    let [base_low, mid, extent, tiling_word, ..] = words;
-    let base = (u64::from(base_low) | (u64::from(mid & 0xFF) << 32)) << 8;
+    let [
+        base_low,
+        mid,
+        extent,
+        tiling_word,
+        _,
+        levels_word,
+        meta_word,
+        meta_high,
+    ] = words;
+    // Tiling mode: dword 3 bits 24:20 (`SQ_IMG_RSRC_WORD3.SW_MODE`, gfx10-rsrc.json).
+    let tiling = decode_swizzle_mode((tiling_word >> 20) & 0x1F);
+    // The pipe-bank XOR sits in the 256-byte units below the block's alignment: 64 KiB for
+    // `64KB_R_X`, 4 KiB for `4KB_D_X`. A linear surface has none.
+    let xor_bits = match tiling {
+        SwizzleMode::Tiled64KbRX => 0xFF,
+        SwizzleMode::Tiled4KbDX => 0xF,
+        _ => 0,
+    };
+    let base = (u64::from(base_low & !xor_bits) | (u64::from(mid & 0xFF) << 32)) << 8;
     // Width minus one: low two bits in dword 1 bits 31:30, the rest in dword 2 bits 11:0.
     let width = (((mid >> 30) & 0x3) | ((extent & 0xFFF) << 2)) + 1;
     let height = ((extent >> 14) & 0x3FFF) + 1;
+    let compression = (meta_word >> 21 & 1 != 0).then(|| crate::dcc::Dcc {
+        base: (u64::from(meta_high) << 16) | (u64::from(meta_word >> 24) << 8),
+        pipe_aligned: meta_word >> 19 & 1 != 0,
+    });
     ImageDescriptor {
         base,
         width,
         height,
         format: (mid >> 20) & 0x1FF,
-        // Tiling mode: dword 3 bits 24:20 (`SQ_IMG_RSRC_WORD3.SW_MODE`, gfx10-rsrc.json).
-        tiling: decode_swizzle_mode((tiling_word >> 20) & 0x1F),
+        tiling,
+        pipe_bank_xor: (base_low & xor_bits) as u8,
+        levels: (levels_word >> 4 & 0xF) + 1,
+        base_level: tiling_word >> 12 & 0xF,
+        last_level: tiling_word >> 16 & 0xF,
+        compression,
     }
 }
 
@@ -3540,6 +3615,11 @@ mod tests {
                 height: 2,
                 format: 0x0A,
                 tiling: SwizzleMode::Linear,
+                pipe_bank_xor: 0,
+                levels: 1,
+                base_level: 0,
+                last_level: 0,
+                compression: None,
             }
         );
 
@@ -3553,7 +3633,75 @@ mod tests {
                 height: 1080,
                 format: 0x0C,
                 tiling: SwizzleMode::Tiled64KbRX,
+                pipe_bank_xor: 0,
+                levels: 1,
+                base_level: 0,
+                last_level: 0,
+                compression: None,
             }
+        );
+    }
+
+    /// The texture SuperTuxKart's image copy reads, as its user data holds it: the pipe-bank XOR
+    /// split off the base, ten levels (`MAX_MIP` 9) viewed from level 0, and DCC keys at
+    /// `0x4_0916_0000`, pipe-aligned. Level 0 is where addrlib places it in that chain, last, at
+    /// `0x60000`; a view of level 6 is in the mip tail, at the chain's first block.
+    #[test]
+    fn a_compressed_mip_chain_texture_decodes_where_its_level_lies() {
+        use super::{ImageDescriptor, decode_image_descriptor};
+        let words = [
+            0x0409_00c0,
+            0xc380_0000,
+            0x807f_c07f,
+            0x91b0_0fac,
+            0,
+            0x0040_0090,
+            0x006b_0000,
+            0x0004_0916,
+        ];
+        let descriptor = decode_image_descriptor(words);
+        assert_eq!(
+            descriptor,
+            ImageDescriptor {
+                base: 0x4_0900_0000,
+                width: 512,
+                height: 512,
+                format: 0x38,
+                tiling: SwizzleMode::Tiled64KbRX,
+                pipe_bank_xor: 0xc0,
+                levels: 10,
+                base_level: 0,
+                last_level: 0,
+                compression: Some(crate::dcc::Dcc {
+                    base: 0x4_0916_0000,
+                    pipe_aligned: true,
+                }),
+            }
+        );
+        let level_zero = descriptor.base_level_surface().expect("placed");
+        assert_eq!(
+            (
+                level_zero.base,
+                level_zero.width,
+                level_zero.pipe_bank_xor,
+                level_zero.tail
+            ),
+            (0x4_0906_0000, 512, 0xc0, None)
+        );
+        let tail = ImageDescriptor {
+            base_level: 6,
+            ..descriptor
+        }
+        .base_level_surface()
+        .expect("placed");
+        assert_eq!(
+            (tail.base, tail.width, tail.height, tail.tail.is_some()),
+            (0x4_0900_0000, 8, 8, true)
+        );
+        assert_eq!(
+            crate::dcc::chain_meta_bytes(512, 512, 10, true),
+            16384,
+            "addrlib's dccRamSize for the chain"
         );
     }
 

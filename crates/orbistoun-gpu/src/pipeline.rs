@@ -2011,25 +2011,14 @@ fn read_texture(
     match descriptor.tiling {
         SwizzleMode::Linear => {}
         // The tiled layouts modelled, each sampled as it is rendered (crate::tiling).
-        SwizzleMode::Tiled64KbRX => {
-            return read_tiled_texture(
-                &descriptor,
-                crate::tiling::SurfaceLayout::Rx64Kb,
-                slot,
-                memory,
-                texels,
-            );
-        }
-        SwizzleMode::Tiled4KbDX => {
-            return read_tiled_texture(
-                &descriptor,
-                crate::tiling::SurfaceLayout::Dx4Kb,
-                slot,
-                memory,
-                texels,
-            );
+        SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled4KbDX => {
+            return read_tiled_texture(&descriptor, slot, memory, texels);
         }
         SwizzleMode::Other(_) => return None,
+    }
+    // A linear chain's levels are not placed here, so only a single level is read.
+    if descriptor.levels > 1 || descriptor.compression.is_some() {
+        return None;
     }
     let pitch_field = words[4] & 0x3fff;
     let pitch = if pitch_field == 0 {
@@ -2111,55 +2100,93 @@ struct CachedTexels {
 /// Texels read from guest memory, by where they lie and their shape.
 type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
 
-/// A 32-bpp `64KB_R_X` texture, read whole, detiled into row-major texels and bound.
+/// A tiled 32-bpp texture's first viewed level, read whole, detiled into row-major texels and
+/// bound.
 ///
-/// The cache key's pitch is zero, a value no linear surface has, so a tiled and a linear surface at
-/// one address never share texels.
+/// The level is where its chain places it, a mip-tail level at its origin in the tail's block,
+/// read through the same tiling a colour target of that shape is drawn through. A compressed
+/// surface's keys decide what it holds: every key uncompressed, the bytes as they are; every key
+/// cleared to `0000`, zero throughout; anything else needs per-block key addressing and binds
+/// nothing, so the draw is refused rather than sampled from compressed bytes.
+///
+/// The cache key's last word is no pitch a linear surface has - a tag per layout and tail origin,
+/// and whether the keys cleared it - so the same memory read another way never shares texels.
 fn read_tiled_texture(
     descriptor: &ImageDescriptor,
-    layout: crate::tiling::SurfaceLayout,
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    let span = layout.words(descriptor.width, descriptor.height) * 4;
-    // A linear texture keys by its pitch; a tiled one by a value no pitch takes, one per layout,
-    // so the same memory read in two layouts is never taken for the other.
-    let tag = match layout {
-        crate::tiling::SurfaceLayout::Rx64Kb => 0,
-        crate::tiling::SurfaceLayout::Dx4Kb => u32::MAX,
+    let surface = descriptor.base_level_surface()?;
+    if !surface.layout.models(surface.pipe_bank_xor) {
+        return None;
+    }
+    let cleared = match descriptor.compression {
+        None => false,
+        Some(dcc) => {
+            if surface.layout != crate::tiling::SurfaceLayout::Rx64Kb {
+                return None;
+            }
+            let bytes = crate::dcc::chain_meta_bytes(
+                descriptor.width,
+                descriptor.height,
+                descriptor.levels,
+                dcc.pipe_aligned,
+            );
+            let keys = memory.read(crate::dcc::meta_start(dcc), usize::try_from(bytes).ok()?)?;
+            match crate::dcc::classify(keys) {
+                crate::dcc::Keys::Uncompressed => false,
+                crate::dcc::Keys::Clear0000 => true,
+                crate::dcc::Keys::Other => return None,
+            }
+        }
     };
-    let key = (descriptor.base, descriptor.width, descriptor.height, tag);
+    let (width, height) = (surface.width, surface.height);
+    let span = surface.words() * 4;
+    let layout_tag = match surface.layout {
+        crate::tiling::SurfaceLayout::Rx64Kb => 0,
+        crate::tiling::SurfaceLayout::Dx4Kb => 1 << 31,
+    };
+    let tail_tag = surface
+        .tail
+        .map_or(0, |(x, y)| 1 << 30 | (x & 0x3FFF) << 14 | (y & 0x3FFF));
+    let tag = layout_tag | tail_tag | u32::from(cleared) << 29 | 1 << 28;
+    let key = (surface.base, width, height, tag);
     if let Some(cached) = texels.get(&key)
-        && cached.since.and_then(|since| {
-            orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
-        }) == Some(false)
+        && cached
+            .since
+            .and_then(|since| orbistoun_mem::watch::written_since(surface.base, span as u64, since))
+            == Some(false)
     {
         return Some(RenderCommand::BindTexture {
             slot,
             hash: cached.hash,
             texels: cached.texels.clone(),
-            width: descriptor.width,
-            height: descriptor.height,
+            width,
+            height,
             sampling: crate::registers::TextureSampling::default(),
         });
     }
-    let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
-    let bytes = memory.read(descriptor.base, span)?;
-    let mut hasher = crate::ContentHasher::new(span / 4);
-    hasher.bytes(bytes);
-    let hash = hasher.finish();
-    let shared = match texels.get(&key) {
-        Some(cached) if cached.hash == hash => cached.texels.clone(),
-        _ => {
-            let words: Vec<u32> = bytes
-                .chunks_exact(4)
-                .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
-                .collect();
-            layout
-                .detile_mapped(&words, descriptor.width, descriptor.height, 0, |w| w)
-                .into()
-        }
+    let since = orbistoun_mem::watch::mark(surface.base, span as u64);
+    let (hash, shared): (u64, std::sync::Arc<[u32]>) = if cleared {
+        let zeros = vec![0u32; width as usize * height as usize];
+        (crate::content_hash(&zeros), zeros.into())
+    } else {
+        let bytes = memory.read(surface.base, span)?;
+        let mut hasher = crate::ContentHasher::new(span / 4);
+        hasher.bytes(bytes);
+        let hash = hasher.finish();
+        let shared = match texels.get(&key) {
+            Some(cached) if cached.hash == hash => cached.texels.clone(),
+            _ => {
+                let words: Vec<u32> = bytes
+                    .chunks_exact(4)
+                    .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+                    .collect();
+                surface.detile_mapped(&words, |w| w).into()
+            }
+        };
+        (hash, shared)
     };
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
         texels.clear();
@@ -2176,8 +2203,8 @@ fn read_tiled_texture(
         slot,
         hash,
         texels: shared,
-        width: descriptor.width,
-        height: descriptor.height,
+        width,
+        height,
         sampling: crate::registers::TextureSampling::default(),
     })
 }
@@ -2719,9 +2746,10 @@ mod tests {
                 self.0.get(start..start.checked_add(length)?)
             }
         }
-        // One 64 KiB block past the descriptor, at a 256-byte-aligned base.
-        let (table, texels, width, height) = (0x1000_u64, 0x1100_u64, 8u32, 4u32);
-        let mut bytes = vec![0u8; 0x100 + 0x1_0000];
+        // One 64 KiB block after the descriptor, on the block alignment the layout has: the
+        // descriptor's low base bits are the pipe-bank XOR, not address.
+        let (table, texels, width, height) = (0x1000_u64, 0x1_0000_u64, 8u32, 4u32);
+        let mut bytes = vec![0u8; 0xF000 + 0x1_0000];
         let descriptor = [
             (texels >> 8) as u32,
             ((texels >> 40) as u32 & 0xff) | (56 << 20) | (((width - 1) & 3) << 30),
