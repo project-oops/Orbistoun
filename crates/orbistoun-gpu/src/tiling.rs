@@ -619,6 +619,15 @@ pub enum SurfaceLayout {
     Rx64Kb,
     /// `4KB_D_X`, from addrlib under the configuration that reproduces the measured one.
     Dx4Kb,
+    /// `LINEAR`: rows at a 256-byte-aligned pitch, 64 texels, which the hardware derives from the
+    /// width (`ADDR_SW_LINEAR`, as [`crate::registers::linear_pitch`] gives it for an image with no
+    /// custom pitch; a colour target has no pitch register to give another).
+    Linear,
+}
+
+/// A linear surface's row pitch in texels: its width rounded up to 64, 256 bytes.
+const fn linear_row_pitch(width: u32) -> u32 {
+    width.next_multiple_of(64)
 }
 
 impl SurfaceLayout {
@@ -628,7 +637,8 @@ impl SurfaceLayout {
         match mode {
             SwizzleMode::Tiled64KbRX => Some(Self::Rx64Kb),
             SwizzleMode::Tiled4KbDX => Some(Self::Dx4Kb),
-            _ => None,
+            SwizzleMode::Linear => Some(Self::Linear),
+            SwizzleMode::Other(_) => None,
         }
     }
 
@@ -638,6 +648,10 @@ impl SurfaceLayout {
         match self {
             Self::Rx64Kb => surface_words_64kb_rx_bpp4(width, height),
             Self::Dx4Kb => surface_words_4kb_dx_bpp4(width, height),
+            // Every row but the last at its pitch; the last ends at its width.
+            Self::Linear => {
+                linear_row_pitch(width) as usize * (height.max(1) as usize - 1) + width as usize
+            }
         }
     }
 
@@ -645,7 +659,9 @@ impl SurfaceLayout {
     const fn block_log2(self) -> u32 {
         match self {
             Self::Rx64Kb => 16,
+            // A linear surface has no blocks; its "block" is a row's 256 bytes, never a tail's.
             Self::Dx4Kb => 12,
+            Self::Linear => 8,
         }
     }
 
@@ -664,7 +680,8 @@ impl SurfaceLayout {
     /// levels follow than a tail holds (`GetMaxNumMipsInTail`). A single level has no tail.
     #[must_use]
     pub const fn first_level_in_tail(self, width: u32, height: u32, levels: u32) -> u32 {
-        if levels <= 1 {
+        // A linear chain has no tail: every level has rows of its own.
+        if levels <= 1 || matches!(self, Self::Linear) {
             return levels;
         }
         let (block_width, block_height) = self.block_extent();
@@ -687,6 +704,10 @@ impl SurfaceLayout {
 
     /// Bytes level `level` of a chain occupies outside the tail: its extent padded to whole blocks.
     const fn level_bytes(self, width: u32, height: u32, level: u32) -> u64 {
+        if matches!(self, Self::Linear) {
+            let (w, h) = mip_layout_extent(width, height, level);
+            return linear_row_pitch(w) as u64 * h as u64 * 4;
+        }
         let (block_width, block_height) = self.block_extent();
         let (w, h) = mip_layout_extent(width, height, level);
         w.next_multiple_of(block_width) as u64 * h.next_multiple_of(block_height) as u64 * 4
@@ -706,6 +727,12 @@ impl SurfaceLayout {
         levels: u32,
         level: u32,
     ) -> Option<u64> {
+        if matches!(self, Self::Linear) {
+            return match linear_level(width, height, levels, level) {
+                Some((offset, _)) => Some(offset),
+                None => None,
+            };
+        }
         let first_in_tail = self.first_level_in_tail(width, height, levels);
         if level >= first_in_tail {
             return None;
@@ -792,7 +819,7 @@ impl SurfaceLayout {
     pub const fn models(self, pipe_bank_xor: u8) -> bool {
         match self {
             Self::Rx64Kb => true,
-            Self::Dx4Kb => pipe_bank_xor == 0,
+            Self::Dx4Kb | Self::Linear => pipe_bank_xor == 0,
         }
     }
 
@@ -824,6 +851,13 @@ impl SurfaceLayout {
                     }
                 }
                 linear
+            }
+            Self::Linear => {
+                let pitch = linear_row_pitch(width) as usize;
+                (0..height as usize)
+                    .flat_map(|row| tiled[row * pitch..][..width as usize].iter().copied())
+                    .map(map)
+                    .collect()
             }
         }
     }
@@ -861,6 +895,23 @@ impl SurfaceLayout {
                     for (x, &texel) in row.iter().enumerate() {
                         tiled[tiled_byte_offset_4kb_dx_bpp4_surface(x as u32, y as u32, width)
                             / 4] = map(texel);
+                    }
+                }
+                Ok(())
+            }
+            Self::Linear => {
+                let needed_words = self.words(width, height);
+                let texels = width as usize * height as usize;
+                if tiled.len() < needed_words || linear.len() != texels {
+                    return Err(DetileError::TiledDataTooShort {
+                        needed_words: needed_words.max(texels),
+                        got_words: tiled.len().min(linear.len()),
+                    });
+                }
+                let pitch = linear_row_pitch(width) as usize;
+                for (y, row) in linear.chunks(width as usize).enumerate() {
+                    for (slot, &texel) in tiled[y * pitch..][..row.len()].iter_mut().zip(row) {
+                        *slot = map(texel);
                     }
                 }
                 Ok(())
@@ -1537,7 +1588,10 @@ mod tests {
                 height,
                 pipe_bank_xor: 0,
                 layout,
-                tail: Some(origin),
+                place: crate::registers::Place::Within {
+                    span: layout.block_texels(),
+                    origin,
+                },
             };
             let linear: Vec<u32> = (1..=width * height).collect();
             let mut tiled = vec![0xEEEE_EEEE; target.words()];
@@ -1598,5 +1652,63 @@ mod tests {
         assert_eq!(linear_level(65, 7, 4, 2), Some((256, 64)));
         assert_eq!(linear_level(65, 7, 4, 4), None);
         assert_eq!(linear_level(100, 30, 1, 0), Some((0, 128)));
+    }
+
+    /// A level stored padded reads at its chain's stride: level 1 of a 129 x 17 `4KB_D_X` chain is
+    /// 64 texels wide but laid out 65 wide, so 96 to a row, and level 1 of a 100 x 30 linear chain
+    /// sits at 2048 with a 64-texel pitch. addrlib's addresses for each, through the target the
+    /// chain gives the level.
+    #[test]
+    fn a_padded_level_reads_at_its_chains_stride() {
+        use super::SurfaceLayout::{self, Dx4Kb, Linear};
+        use crate::registers::{Place, chain_level};
+        /// Layout, level 0's extent, levels, and texels of level 1 with addrlib's byte for each.
+        type Case = (SurfaceLayout, (u32, u32), u32, &'static [(u32, u32, u64)]);
+        let cases: [Case; 2] = [
+            (
+                Dx4Kb,
+                (129, 17),
+                8,
+                &[
+                    (0, 0, 16384),
+                    (63, 7, 24316),
+                    (33, 1, 21524),
+                    (40, 5, 22096),
+                ],
+            ),
+            (
+                Linear,
+                (100, 30),
+                3,
+                &[(0, 0, 2048), (49, 14, 5828), (7, 3, 2844)],
+            ),
+        ];
+        for (layout, extent, levels, texels) in cases {
+            let target = chain_level((0, 0), extent, (levels, 1), layout).expect("placed");
+            assert_eq!(
+                (target.width, target.height),
+                (extent.0 >> 1, extent.1 >> 1),
+                "{layout:?}"
+            );
+            let (width, height) = (target.width, target.height);
+            let linear: Vec<u32> = (1..=width * height).collect();
+            let mut words = vec![0u32; target.words()];
+            target
+                .tile_mapped(&linear, &mut words, |w| w)
+                .expect("tiles");
+            for &(x, y, byte) in texels {
+                let at = usize::try_from(byte - target.base).expect("in range") / 4;
+                assert_eq!(words[at], y * width + x + 1, "{layout:?} ({x},{y})");
+            }
+            assert_eq!(target.detile_mapped(&words, |w| w), linear, "{layout:?}");
+        }
+        let dx = chain_level((0, 0), (129, 17), (8, 1), Dx4Kb).expect("placed");
+        assert_eq!(
+            dx.place,
+            Place::Within {
+                span: (65, 9),
+                origin: (0, 0)
+            }
+        );
     }
 }

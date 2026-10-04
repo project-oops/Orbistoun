@@ -2469,10 +2469,14 @@ fn read_tiled_texture(
     let layout_tag = match surface.layout {
         crate::tiling::SurfaceLayout::Rx64Kb => 0,
         crate::tiling::SurfaceLayout::Dx4Kb => 1 << 31,
+        crate::tiling::SurfaceLayout::Linear => 1 << 27,
     };
-    let tail_tag = surface
-        .tail
-        .map_or(0, |(x, y)| 1 << 30 | (x & 0x3FFF) << 14 | (y & 0x3FFF));
+    let tail_tag = match surface.place {
+        crate::registers::Place::Whole => 0,
+        crate::registers::Place::Within { origin: (x, y), .. } => {
+            1 << 30 | (x & 0x3FFF) << 14 | (y & 0x3FFF)
+        }
+    };
     let tag = layout_tag | tail_tag | u32::from(cleared) << 29 | 1 << 28;
     let key = (surface.base, width, height, tag);
     if let Some(cached) = texels.get(&key)

@@ -348,7 +348,7 @@ fn a_stream_sets_the_pipeline_state_the_submission_carries() {
             height: 64,
             pipe_bank_xor: 0,
             layout: orbistoun_gpu::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: orbistoun_gpu::registers::Place::Whole,
         }),
         "colour target zero's base and extent reach the submission"
     );

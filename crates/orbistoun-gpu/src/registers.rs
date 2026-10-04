@@ -867,17 +867,82 @@ pub struct ColourTarget {
     /// How its texels lie in memory: the layout its swizzle mode names, `64KB_R_X` where the
     /// mode is not one modelled (a target is written back only in a modelled one).
     pub layout: crate::tiling::SurfaceLayout,
-    /// For a mip level in its chain's tail, where in the tail's block - at [`Self::base`] - its
-    /// `(0, 0)` lies; the level shares that block with the other levels in the tail.
-    pub tail: Option<(u32, u32)>,
+    /// Where its texels lie in the surface its words span.
+    pub place: Place,
+}
+
+/// Where a level's texels lie in the surface its words span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Place {
+    /// The surface is exactly the level: its words are a surface of the level's own extent.
+    #[default]
+    Whole,
+    /// The level lies at `origin` in a surface of `span` texels: a mip-tail level in the tail's
+    /// block, shared with the tail's other levels, or a level whose chain stores it padded - an
+    /// odd side's level is laid out rounded up (`GetMipSize`) while its texels are rounded down.
+    Within {
+        /// The surface's extent.
+        span: (u32, u32),
+        /// Where the level's `(0, 0)` is in it.
+        origin: (u32, u32),
+    },
+}
+
+/// Level `level` of a `levels`-level 2D chain at `base`, level 0 `width` x `height`, laid out as
+/// `layout` lays a chain out: where it starts, its extent - each side halved per level rounding
+/// down, never below one - and where its texels lie in what its words span. `None` for a level
+/// past the chain, or one whose place `layout` does not give.
+#[must_use]
+pub fn chain_level(
+    (base, pipe_bank_xor): (u64, u8),
+    (width, height): (u32, u32),
+    (levels, level): (u32, u32),
+    layout: crate::tiling::SurfaceLayout,
+) -> Option<ColourTarget> {
+    let level = if levels <= 1 { 0 } else { level };
+    if level >= levels.max(1) {
+        return None;
+    }
+    let extent = ((width >> level).max(1), (height >> level).max(1));
+    let (offset, place) = if levels <= 1 {
+        (0, Place::Whole)
+    } else if let Some(offset) = layout.level_offset(width, height, levels, level) {
+        let span = crate::tiling::mip_layout_extent(width, height, level);
+        let place = if span == extent {
+            Place::Whole
+        } else {
+            Place::Within {
+                span,
+                origin: (0, 0),
+            }
+        };
+        (offset, place)
+    } else {
+        let origin = layout.tail_origin(width, height, levels, level)?;
+        (
+            0,
+            Place::Within {
+                span: layout.block_texels(),
+                origin,
+            },
+        )
+    };
+    Some(ColourTarget {
+        base: base + offset,
+        width: extent.0,
+        height: extent.1,
+        pipe_bank_xor,
+        layout,
+        place,
+    })
 }
 
 impl ColourTarget {
-    /// The extent of the surface its words span: its own, or the tail's whole block.
+    /// The extent of the surface its words span: its own, or the one it lies within.
     const fn span_extent(&self) -> (u32, u32) {
-        match self.tail {
-            Some(_) => self.layout.block_texels(),
-            None => (self.width, self.height),
+        match self.place {
+            Place::Within { span, .. } => span,
+            Place::Whole => (self.width, self.height),
         }
     }
 
@@ -899,9 +964,9 @@ impl ColourTarget {
         let whole =
             self.layout
                 .detile_mapped(tiled, span_width, span_height, self.pipe_bank_xor, map);
-        match self.tail {
-            None => whole,
-            Some((x, y)) => (y..y + self.height)
+        match self.place {
+            Place::Whole => whole,
+            Place::Within { origin: (x, y), .. } => (y..y + self.height)
                 .flat_map(|row| {
                     let start = (row * span_width + x) as usize;
                     whole[start..start + self.width as usize].iter().copied()
@@ -911,7 +976,8 @@ impl ColourTarget {
     }
 
     /// Tiles a linear, row-major image of its own extent into it, each texel through `map`,
-    /// leaving every other word - the tail's other levels among them - as it was.
+    /// leaving every other word - the tail's other levels, or a padded level's padding, among
+    /// them - as it was.
     ///
     /// # Errors
     ///
@@ -923,7 +989,7 @@ impl ColourTarget {
         tiled: &mut [u32],
         map: impl Fn(u32) -> u32 + Sync,
     ) -> Result<(), crate::tiling::DetileError> {
-        let Some((x, y)) = self.tail else {
+        let Place::Within { origin: (x, y), .. } = self.place else {
             return self.layout.tile_mapped(
                 linear,
                 self.width,
@@ -994,30 +1060,20 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     let layout = mode.and_then(crate::tiling::SurfaceLayout::of);
     // `ATTRIB2.MAX_MIP`, 31:28; an unwritten `VIEW` reads as its reset value, level 0.
     let levels = (last(CB_COLOR0_ATTRIB2)? >> 28) + 1;
-    // A level outside the tail lies at its own offset; one in the tail at the tail's block, the
-    // chain's first, at the origin the tail gives it.
-    let (level, offset, tail) = if levels == 1 {
-        (0, 0, None)
-    } else {
-        let layout = layout?;
-        let level = (last(CB_COLOR0_VIEW).unwrap_or(0) >> VIEW_MIP_LEVEL_SHIFT) & 0xF;
-        match layout.level_offset(extent.width, extent.height, levels, level) {
-            Some(offset) => (level, offset, None),
-            None => (
-                level,
-                0,
-                Some(layout.tail_origin(extent.width, extent.height, levels, level)?),
-            ),
-        }
+    let level = (last(CB_COLOR0_VIEW).unwrap_or(0) >> VIEW_MIP_LEVEL_SHIFT) & 0xF;
+    // A chain's level lies where the layout places it; a single level in an unmodelled mode keeps
+    // its base, and is written back only if its mode is modelled.
+    let layout = match layout {
+        Some(layout) => layout,
+        None if levels == 1 => crate::tiling::SurfaceLayout::default(),
+        None => return None,
     };
-    Some(ColourTarget {
-        base: (u64::from(base) << 8) + offset,
-        width: (extent.width >> level).max(1),
-        height: (extent.height >> level).max(1),
-        pipe_bank_xor,
-        layout: layout.unwrap_or_default(),
-        tail,
-    })
+    chain_level(
+        (u64::from(base) << 8, pipe_bank_xor),
+        (extent.width, extent.height),
+        (levels, level),
+        layout,
+    )
 }
 
 /// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
@@ -2090,31 +2146,12 @@ impl ImageDescriptor {
     /// the tail's block - or `None` for a tiling, or a level's place, not modelled.
     #[must_use]
     pub fn base_level_surface(&self) -> Option<ColourTarget> {
-        let layout = crate::tiling::SurfaceLayout::of(self.tiling)?;
-        let (offset, tail) = if self.levels <= 1 {
-            (0, None)
-        } else {
-            match layout.level_offset(self.width, self.height, self.levels, self.base_level) {
-                Some(offset) => (offset, None),
-                None => (
-                    0,
-                    Some(layout.tail_origin(
-                        self.width,
-                        self.height,
-                        self.levels,
-                        self.base_level,
-                    )?),
-                ),
-            }
-        };
-        Some(ColourTarget {
-            base: self.base + offset,
-            width: (self.width >> self.base_level).max(1),
-            height: (self.height >> self.base_level).max(1),
-            pipe_bank_xor: self.pipe_bank_xor,
-            layout,
-            tail,
-        })
+        chain_level(
+            (self.base, self.pipe_bank_xor),
+            (self.width, self.height),
+            (self.levels, self.base_level),
+            crate::tiling::SurfaceLayout::of(self.tiling)?,
+        )
     }
 }
 
@@ -2529,7 +2566,7 @@ mod tests {
             );
         }
     }
-    use super::{BlendFactor, CombineFunc, StencilOp};
+    use super::{BlendFactor, CombineFunc, Place, StencilOp};
     use super::{
         BufferDescriptor, ColourTarget, ColourTargetExtent, CompareFunc, DispatchCall, DrawKind,
         DrawOrDispatch, ImageDescriptor, RegisterWrite, Scissor, SwizzleMode, Vocabulary,
@@ -3198,7 +3235,7 @@ mod tests {
                 height: 64,
                 pipe_bank_xor: 0,
                 layout: crate::tiling::SurfaceLayout::Rx64Kb,
-                tail: None,
+                place: Place::Whole,
             })
         );
         // A base with no extent cannot be sized; an extent with no base cannot be placed. Both
@@ -3237,7 +3274,7 @@ mod tests {
                 height: 256,
                 pipe_bank_xor: 0xc0,
                 layout: crate::tiling::SurfaceLayout::Rx64Kb,
-                tail: None,
+                place: Place::Whole,
             })
         );
         let linear = [
@@ -3352,8 +3389,16 @@ mod tests {
         tail.push(write(0xA31B, 5 << 26));
         let target = colour_target_at(&tail).expect("level 5");
         assert_eq!(
-            (target.base, target.width, target.height, target.tail),
-            (0x4_04c0_0000, 64, 32, Some((64, 0)))
+            (target.base, target.width, target.height, target.place),
+            (
+                0x4_04c0_0000,
+                64,
+                32,
+                Place::Within {
+                    span: (128, 128),
+                    origin: (64, 0)
+                }
+            )
         );
         let mut single = chain;
         single.push(write(0xA3B0, 0x01ff_c3ff));
@@ -3701,9 +3746,9 @@ mod tests {
                 level_zero.base,
                 level_zero.width,
                 level_zero.pipe_bank_xor,
-                level_zero.tail
+                level_zero.place
             ),
-            (0x4_0906_0000, 512, 0xc0, None)
+            (0x4_0906_0000, 512, 0xc0, Place::Whole)
         );
         let tail = ImageDescriptor {
             base_level: 6,
@@ -3712,7 +3757,12 @@ mod tests {
         .base_level_surface()
         .expect("placed");
         assert_eq!(
-            (tail.base, tail.width, tail.height, tail.tail.is_some()),
+            (
+                tail.base,
+                tail.width,
+                tail.height,
+                matches!(tail.place, Place::Within { .. })
+            ),
             (0x4_0900_0000, 8, 8, true)
         );
         assert_eq!(

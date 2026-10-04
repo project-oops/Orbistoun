@@ -1750,9 +1750,9 @@ impl GuestCp<'_> {
         };
         let span = target.words() as u64 * 4;
         let length = count as u64;
-        // A level in a mip tail shares its block with the tail's other levels, so a copy of the
-        // block is more than the frame on the device.
-        if target.tail.is_some()
+        // A level within a larger surface - a mip tail's block, or a padded level - shares its
+        // words with what is not the frame, so a copy of them is more than the frame on the device.
+        if target.place != crate::registers::Place::Whole
             || source != target.base
             || length != span
             || overlaps_target(target, destination, length)
@@ -2530,7 +2530,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         assert!(
             !overlaps_target(target, 0x0f_ff00, 0x100),
@@ -2622,7 +2622,7 @@ mod tests {
             height,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         let mut seen = None;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Alternate, |before| {
@@ -2683,7 +2683,7 @@ mod tests {
             height,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         let expected = crate::tiling::detile_surface_64kb_rx_bpp4_mapped(
             &words_of(&memory.0),
@@ -2717,7 +2717,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         let mut ran = false;
         let wrote = draw_over(&mut memory, target, ComponentSwap::Standard, |before| {
@@ -2744,7 +2744,7 @@ mod tests {
                 height: 1080,
                 pipe_bank_xor: 0,
                 layout: crate::tiling::SurfaceLayout::Rx64Kb,
-                tail: None,
+                place: crate::registers::Place::Whole,
             }),
             colour_target_tiling: Some(SwizzleMode::Tiled64KbRX),
             colour_target_format: Some(decode_colour_target_format(0x0001_80a8 | (1 << 11))),
@@ -3128,7 +3128,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
@@ -3192,7 +3192,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
         let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
@@ -3310,7 +3310,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3373,7 +3373,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3437,7 +3437,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3494,7 +3494,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         allow_writes_to(base, memory.len() as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3596,7 +3596,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3655,7 +3655,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         allow_writes_to(base, span as u64);
         set_guest_regions(vec![region_of(memory)]);
@@ -3770,7 +3770,7 @@ mod tests {
             height: 8,
             pipe_bank_xor: 0,
             layout: crate::tiling::SurfaceLayout::Rx64Kb,
-            tail: None,
+            place: crate::registers::Place::Whole,
         };
         *super::last_written().lock().expect("slot") = Some(Written {
             target,
