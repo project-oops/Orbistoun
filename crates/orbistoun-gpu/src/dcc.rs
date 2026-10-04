@@ -91,7 +91,20 @@ pub const fn meta_block(element_log2: u32, pipe_aligned: bool) -> MetaBlock {
 /// blocks, a block's bytes each.
 #[must_use]
 pub const fn meta_bytes(width: u32, height: u32, pipe_aligned: bool) -> u64 {
-    let block = meta_block(2, pipe_aligned);
+    texel_meta_bytes(width, height, 2, pipe_aligned)
+}
+
+/// [`meta_bytes`] for a single level of `2^element_log2`-byte texels: at one byte a texel a 4 KiB
+/// metadata block covers 1024 x 1024 texels, so a 512 x 512 level has one (addrlib's `dccRamSize`
+/// and `metaBlkWidth` under this configuration).
+#[must_use]
+pub const fn texel_meta_bytes(
+    width: u32,
+    height: u32,
+    element_log2: u32,
+    pipe_aligned: bool,
+) -> u64 {
+    let block = meta_block(element_log2, pipe_aligned);
     let across = width.div_ceil(block.width) as u64;
     let down = height.div_ceil(block.height) as u64;
     (across * down) << block.bytes_log2
@@ -204,6 +217,25 @@ mod tests {
         assert_eq!(meta_bytes(512, 512, true), 0x1000);
         assert_eq!(meta_bytes(1024, 1024, true), 0x4000);
         assert_eq!(meta_bytes(1920, 1080, true), 4 * 3 * 0x1000);
+    }
+
+    /// At one byte a texel a metadata block covers 1024 x 1024 texels: addrlib's `dccRamSize` for
+    /// 512 x 512, 300 x 200, 1024 x 1024 and 2048 x 512 single-level 8-bpp `64KB_R_X` surfaces.
+    #[test]
+    fn one_byte_texels_take_addrlibs_key_bytes() {
+        use super::texel_meta_bytes;
+        for (width, height, bytes) in [
+            (512, 512, 4096),
+            (300, 200, 4096),
+            (1024, 1024, 4096),
+            (2048, 512, 8192),
+        ] {
+            assert_eq!(
+                texel_meta_bytes(width, height, 0, true),
+                bytes,
+                "{width}x{height}"
+            );
+        }
     }
 
     /// A mip chain's keys are addrlib's `dccRamSize` for this configuration (pipe-aligned), and

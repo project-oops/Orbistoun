@@ -703,6 +703,11 @@ impl GuestCp<'_> {
                 ));
             }
         }
+        // Cleared keys the stored image was read through, marked uncompressed now that every texel
+        // of it is written back as stored.
+        if let Some((keys, bytes)) = prepared.images.stored_keys_to_expand {
+            writes.push((keys, vec![crate::dcc::KEY_UNCOMPRESSED; bytes]));
+        }
         let writable = write_lookup().get();
         if !writes
             .iter()

@@ -57,6 +57,50 @@ pub fn tiled_byte_offset_64kb_rx_bpp4_surface(x: u32, y: u32, width: u32) -> usi
         + tiled_byte_offset_64kb_rx_bpp4(x % SINGLE_BLOCK_EXTENT, y % SINGLE_BLOCK_EXTENT) as usize
 }
 
+/// Texels per side of an 8-bpp `64KB_R_X` block: 64 KiB of one-byte texels, 256 x 256.
+const RX_BPP1_BLOCK_EXTENT: u32 = 256;
+
+/// Where each of the low eight bits of `x`, then of `y`, lands in an 8-bpp `64KB_R_X` block's byte
+/// offset: the offset is the XOR of the entries whose coordinate bit is set.
+///
+/// From addrlib for this console's configuration - family NV, revision 0x82, `GB_ADDR_CONFIG` 0x4,
+/// the one whose 32-bpp `64KB_R_X` equation is the layout measured on hardware - read off
+/// `Addr2ComputeSurfaceAddrFromCoord` one coordinate bit at a time. The same rule, row-major blocks
+/// with this equation inside each and no rotation between them, gives addrlib's address for all
+/// 262,144 texels of a 512 x 512 surface.
+const RX_BPP1_X_BITS: [usize; 8] = [0x1, 0x2, 0x4, 0x140, 0x200, 0x800, 0x2400, 0x8000];
+/// The same for `y`.
+const RX_BPP1_Y_BITS: [usize; 8] = [0x10, 0x8, 0x20, 0x100, 0x280, 0x400, 0x1800, 0x4000];
+
+/// Byte offset of texel `(x, y)` in an 8-bpp `64KB_R_X` surface `width` texels wide: its block,
+/// row-major, then its place in the block, before any pipe-bank XOR.
+#[must_use]
+pub fn tiled_byte_offset_64kb_rx_bpp1_surface(x: u32, y: u32, width: u32) -> usize {
+    let blocks_per_row = width.div_ceil(RX_BPP1_BLOCK_EXTENT) as usize;
+    let block =
+        (y / RX_BPP1_BLOCK_EXTENT) as usize * blocks_per_row + (x / RX_BPP1_BLOCK_EXTENT) as usize;
+    let mut offset = 0;
+    for (bit, place) in RX_BPP1_X_BITS.iter().enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in RX_BPP1_Y_BITS.iter().enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    block * BLOCK_BYTES + offset
+}
+
+/// Bytes a whole 8-bpp `64KB_R_X` surface occupies: every block it touches, whole.
+#[must_use]
+pub fn surface_bytes_64kb_rx_bpp1(width: u32, height: u32) -> usize {
+    width.div_ceil(RX_BPP1_BLOCK_EXTENT) as usize
+        * height.div_ceil(RX_BPP1_BLOCK_EXTENT) as usize
+        * BLOCK_BYTES
+}
+
 /// Words a whole 32-bpp `64KB_R_X` surface occupies: every block it touches, whole.
 #[must_use]
 pub fn surface_words_64kb_rx_bpp4(width: u32, height: u32) -> usize {
@@ -1710,5 +1754,26 @@ mod tests {
                 origin: (0, 0)
             }
         );
+    }
+
+    /// The 8-bpp `64KB_R_X` layout gives addrlib's address for each texel sampled, block corners
+    /// and texels across blocks of a 512 x 512 surface among them.
+    #[test]
+    fn an_8_bpp_rx_surface_lies_where_addrlib_puts_it() {
+        use super::{surface_bytes_64kb_rx_bpp1, tiled_byte_offset_64kb_rx_bpp1_surface as at};
+        for (x, y, want) in [
+            (0, 0, 0),
+            (255, 255, 61695),
+            (256, 0, 65536),
+            (0, 256, 131_072),
+            (511, 511, 258_303),
+            (37, 412, 150_437),
+            (300, 77, 69748),
+            (129, 3, 32793),
+        ] {
+            assert_eq!(at(x, y, 512), want, "({x},{y})");
+        }
+        assert_eq!(surface_bytes_64kb_rx_bpp1(512, 512), 262_144);
+        assert_eq!(surface_bytes_64kb_rx_bpp1(300, 200), 131_072);
     }
 }

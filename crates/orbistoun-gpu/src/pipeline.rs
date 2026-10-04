@@ -1061,6 +1061,10 @@ pub struct DispatchImages {
     pub stored: Option<DispatchTexels>,
     /// Where the stored image lies, and the bytes it spanned before the dispatch.
     pub stored_surface: Option<(DispatchSurface, Vec<u8>)>,
+    /// The stored image's compression keys, as `(first byte, bytes)`, when they were all cleared:
+    /// it was read as the zeros they mean, and once every texel is written back they are marked
+    /// uncompressed - expanded, a state the hardware's own writes leave.
+    pub stored_keys_to_expand: Option<(u64, usize)>,
 }
 
 /// A dispatch image's texel format: the guest's `8_8_8_8_UNORM`, or its single-channel `8_UNORM`.
@@ -1089,6 +1093,17 @@ impl TexelFormat {
 pub enum DispatchSurface {
     /// A tiled level.
     Tiled(ColourTarget),
+    /// A single-level 8-bpp `64KB_R_X` image.
+    TiledBytes {
+        /// Its first byte.
+        base: u64,
+        /// Width in texels.
+        width: u32,
+        /// Height in texels.
+        height: u32,
+        /// Its pipe-bank XOR, applied within each block as at four bytes a texel.
+        pipe_bank_xor: u8,
+    },
     /// A linear image's level.
     Linear {
         /// Its first byte.
@@ -1110,7 +1125,7 @@ impl DispatchSurface {
     pub const fn base(&self) -> u64 {
         match self {
             Self::Tiled(target) => target.base,
-            Self::Linear { base, .. } => *base,
+            Self::TiledBytes { base, .. } | Self::Linear { base, .. } => *base,
         }
     }
 
@@ -1119,7 +1134,9 @@ impl DispatchSurface {
     pub const fn extent(&self) -> (u32, u32) {
         match self {
             Self::Tiled(target) => (target.width, target.height),
-            Self::Linear { width, height, .. } => (*width, *height),
+            Self::TiledBytes { width, height, .. } | Self::Linear { width, height, .. } => {
+                (*width, *height)
+            }
         }
     }
 
@@ -1129,6 +1146,9 @@ impl DispatchSurface {
     pub fn bytes(&self) -> usize {
         match self {
             Self::Tiled(target) => target.words() * 4,
+            Self::TiledBytes { width, height, .. } => {
+                crate::tiling::surface_bytes_64kb_rx_bpp1(*width, *height)
+            }
             Self::Linear {
                 width,
                 height,
@@ -1147,6 +1167,15 @@ impl DispatchSurface {
     pub fn detile(&self, spanned: &[u8]) -> Vec<u32> {
         match self {
             Self::Tiled(target) => target.detile_mapped(&words_of_bytes(spanned), |w| w),
+            Self::TiledBytes {
+                width,
+                height,
+                pipe_bank_xor,
+                ..
+            } => (0..*height)
+                .flat_map(|y| (0..*width).map(move |x| (x, y)))
+                .map(|(x, y)| u32::from(spanned[byte_at_rx_bpp1(x, y, *width, *pipe_bank_xor)]))
+                .collect(),
             Self::Linear {
                 width,
                 height,
@@ -1193,6 +1222,13 @@ impl DispatchSurface {
                 }
                 Ok(())
             }
+            Self::TiledBytes { pipe_bank_xor, .. } => {
+                for (index, &texel) in texels.iter().enumerate() {
+                    let (x, y) = (index as u32 % width, index as u32 / width);
+                    spanned[byte_at_rx_bpp1(x, y, width, *pipe_bank_xor)] = texel.to_le_bytes()[0];
+                }
+                Ok(())
+            }
             Self::Linear {
                 pitch,
                 bytes_per_texel,
@@ -1209,6 +1245,14 @@ impl DispatchSurface {
             }
         }
     }
+}
+
+/// Where texel `(x, y)` of an 8-bpp `64KB_R_X` surface `width` wide lies, its pipe-bank XOR
+/// applied: the 256-byte runs within each block move by it, `blkOffset ^ (pipeBankXor << 8)`
+/// (`gfx10addrlib.cpp:4786-4849`), as at four bytes a texel.
+fn byte_at_rx_bpp1(x: u32, y: u32, width: u32, pipe_bank_xor: u8) -> usize {
+    crate::tiling::tiled_byte_offset_64kb_rx_bpp1_surface(x, y, width)
+        ^ (usize::from(pipe_bank_xor) << 8)
 }
 
 /// Little-endian words from bytes, a trailing partial word dropped.
@@ -1252,7 +1296,7 @@ fn dispatch_images(
     if let Some(source) = textures.first() {
         let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
         let (width, height) = surface.extent();
-        let texels = match surface_keys(&descriptor, memory)? {
+        let texels = match surface_keys(&descriptor, format, memory)? {
             crate::dcc::Keys::Uncompressed => surface.detile(&read_spanned(&surface, memory)?),
             crate::dcc::Keys::Clear0000 => vec![0; width as usize * height as usize],
             crate::dcc::Keys::Other => {
@@ -1272,17 +1316,27 @@ fn dispatch_images(
     }
     if let Some(source) = storage {
         let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
-        if surface_keys(&descriptor, memory)? != crate::dcc::Keys::Uncompressed {
-            return Err(concat!(
-                "the stored image is compressed with keys that are not all uncompressed, and ",
-                "writing uncompressed texels under them is not modelled"
-            )
-            .to_owned());
-        }
         let spanned = read_spanned(&surface, memory)?;
         let (width, height) = surface.extent();
+        let texels = match surface_keys(&descriptor, format, memory)? {
+            crate::dcc::Keys::Uncompressed => surface.detile(&spanned),
+            crate::dcc::Keys::Clear0000 => {
+                images.stored_keys_to_expand = descriptor
+                    .compression
+                    .zip(surface_key_bytes(&descriptor, format))
+                    .map(|(dcc, bytes)| (crate::dcc::meta_start(dcc), bytes));
+                vec![0; width as usize * height as usize]
+            }
+            crate::dcc::Keys::Other => {
+                return Err(concat!(
+                    "the stored image's compression keys need per-block addressing, which is not ",
+                    "modelled"
+                )
+                .to_owned());
+            }
+        };
         images.stored = Some(DispatchTexels {
-            texels: surface.detile(&spanned),
+            texels,
             format,
             width,
             height,
@@ -1347,11 +1401,35 @@ fn dispatch_image_surface(
             .ok_or("a linear dispatch image whose level is not placed here")?;
         return Ok((surface, descriptor, format));
     }
-    // The tiled layouts are modelled at four bytes a texel; another size swizzles differently.
+    // At one byte a texel, a single uncompressed `64KB_R_X` level is modelled.
+    if format == TexelFormat::R8
+        && descriptor.tiling == SwizzleMode::Tiled64KbRX
+        && descriptor.levels <= 1
+    {
+        let surface = DispatchSurface::TiledBytes {
+            base: descriptor.base,
+            width: descriptor.width,
+            height: descriptor.height,
+            pipe_bank_xor: descriptor.pipe_bank_xor,
+        };
+        return Ok((surface, descriptor, format));
+    }
+    // The other tiled layouts are modelled at four bytes a texel; another size swizzles
+    // differently.
     if format != TexelFormat::Rgba8 {
         return Err(format!(
-            "a tiled dispatch image of {}-byte texels, whose layout is not modelled",
-            format.bytes()
+            "a {:?} dispatch image of {}-byte texels, {}x{}, {} level(s) viewed from {}{}, whose layout is not modelled",
+            descriptor.tiling,
+            format.bytes(),
+            descriptor.width,
+            descriptor.height,
+            descriptor.levels,
+            descriptor.base_level,
+            if descriptor.compression.is_some() {
+                ", compressed"
+            } else {
+                ""
+            }
         ));
     }
     let surface = descriptor
@@ -1370,6 +1448,7 @@ fn dispatch_image_surface(
 /// compression.
 fn surface_keys(
     descriptor: &ImageDescriptor,
+    format: TexelFormat,
     memory: &impl GuestMemory,
 ) -> Result<crate::dcc::Keys, String> {
     let Some(dcc) = descriptor.compression else {
@@ -1378,17 +1457,31 @@ fn surface_keys(
     if descriptor.tiling != SwizzleMode::Tiled64KbRX {
         return Err("a compressed image in a layout other than 64KB_R_X".to_owned());
     }
-    let bytes = crate::dcc::chain_meta_bytes(
-        descriptor.width,
-        descriptor.height,
-        descriptor.levels,
-        dcc.pipe_aligned,
-    );
-    let keys = usize::try_from(bytes)
-        .ok()
-        .and_then(|bytes| memory.read(crate::dcc::meta_start(dcc), bytes))
+    let bytes = surface_key_bytes(descriptor, format)
+        .ok_or_else(|| "a compressed one-byte-texel mip chain".to_owned())?;
+    let keys = memory
+        .read(crate::dcc::meta_start(dcc), bytes)
         .ok_or_else(|| "an image's compression keys are not readable".to_owned())?;
     Ok(crate::dcc::classify(keys))
+}
+
+/// How many bytes a compressed image's keys take, or `None` where their layout is not modelled: a
+/// chain's keys at one byte a texel. One level's are whole metadata blocks.
+fn surface_key_bytes(descriptor: &ImageDescriptor, format: TexelFormat) -> Option<usize> {
+    let dcc = descriptor.compression?;
+    let bytes = match format {
+        TexelFormat::Rgba8 => crate::dcc::chain_meta_bytes(
+            descriptor.width,
+            descriptor.height,
+            descriptor.levels,
+            dcc.pipe_aligned,
+        ),
+        TexelFormat::R8 if descriptor.levels <= 1 => {
+            crate::dcc::texel_meta_bytes(descriptor.width, descriptor.height, 0, dcc.pipe_aligned)
+        }
+        TexelFormat::R8 => return None,
+    };
+    usize::try_from(bytes).ok()
 }
 
 /// The level a linear image's view reads first, where its chain places it: one level at the pitch
