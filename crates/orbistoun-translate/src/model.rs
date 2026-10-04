@@ -140,6 +140,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_lshlrev_b16",
     "v_pack_b32_f16",
     "v_pk_mad_u16",
+    "v_pk_lshlrev_b16",
     "v_lshrrev_b64",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
@@ -1887,6 +1888,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_add_nc_u16" | "v_lshlrev_b16" => half_arithmetic(model, instruction, name),
         "v_pack_b32_f16" => pack_half_words(model, instruction),
         "v_pk_mad_u16" => packed_multiply_add(model, instruction),
+        "v_pk_lshlrev_b16" => packed_shift_left(model, instruction),
 
         // A lane learns its own index by counting the mask bits below itself; no instruction hands
         // it over.
@@ -5098,6 +5100,42 @@ fn packed_multiply_add<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `v_pk_lshlrev_b16 d, a, b`: in each half of the result, `b`'s selected half shifted left by the
+/// low four bits of `a`'s, wrapping at sixteen bits (AMD's published RDNA instruction set). The low
+/// result takes the halves `op_sel` picks and the high one those `op_sel_hi` picks.
+fn packed_shift_left<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let selects = packed_selects(instruction)?;
+    let (destination, amount, value) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_pk_lshlrev_b16 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let low = model.constant(0xFFFF);
+    let low_four = model.constant(15);
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let mut halves = Vec::with_capacity(2);
+        for select in selects {
+            let by = read_half(model, instruction, amount, lane, select[0])?;
+            let by = model.binary(op::BITWISE_AND, by, low_four);
+            let shifted = read_half(model, instruction, value, lane, select[1])?;
+            let shifted = model.binary(op::SHIFT_LEFT_LOGICAL, shifted, by);
+            halves.push(model.binary(op::BITWISE_AND, shifted, low));
+        }
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);
+        let packed = model.binary(op::BITWISE_OR, halves[0], high);
+        model.write_vector_lane(register, lane, packed);
+    }
+    model.count();
+    Ok(())
+}
+
 /// `v_lshl_or_b32 d, a, b, c`: `(a << b[4:0]) | c` per lane (AMD's published RDNA instruction set,
 /// `V_LSHL_OR_B32`).
 fn shift_or<M: Model + ?Sized>(
@@ -5701,12 +5739,6 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // The address registers and the components coming back both have to fit.
     let address = u32::from(*address);
     let destination = u32::from(*destination);
-    if d16 && mask.count_ones() % 2 != 0 {
-        return Err(refuse(concat!(
-            "an odd number of sixteen-bit components, whose last register's high half is not ",
-            "established"
-        )));
-    }
     if address + address_registers(levelled, a16) > VECTOR_REGISTERS
         || destination + data_registers(mask.count_ones(), d16) > VECTOR_REGISTERS
     {
@@ -5735,10 +5767,11 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
 /// share a register, the first in the low half.
 fn write_components<M: Model + ?Sized>(
     model: &mut M,
+    instruction: &Instruction,
     texel: Id,
     (mask, destination, d16): (u32, u32, bool),
     lane: u32,
-) {
+) -> Result<(), TranslateError> {
     let f32_type = model.f32_type();
     let u32_type = model.u32_type();
     let mut returned = Vec::new();
@@ -5760,16 +5793,28 @@ fn write_components<M: Model + ?Sized>(
         for (register, bits) in (destination..).zip(returned) {
             model.write_vector_lane(register, lane, bits);
         }
-        return;
+        return Ok(());
     }
     let sixteen = model.constant(16);
     for (register, pair) in (destination..).zip(returned.chunks(2)) {
         let low = model.float_bits_to_half(pair[0]);
-        let high = model.float_bits_to_half(pair[1]);
-        let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
-        let packed = model.binary(op::BITWISE_OR, low, high);
+        let packed = if let Some(&second) = pair.get(1) {
+            let high = model.float_bits_to_half(second);
+            let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
+            model.binary(op::BITWISE_OR, low, high)
+        } else {
+            // An odd count's last half writes only its own sixteen bits: ACO keeps other values in
+            // the register's high half across a D16 image load (`aco_ir.cpp:1001-1004`, a D16
+            // load's result overwrites its own bytes), so the hardware leaves that half alone.
+            let old =
+                model.read_source(instruction, &Operand::Vector(address_of(register)), lane)?;
+            let high_half = model.constant(0xFFFF_0000);
+            let kept = model.binary(op::BITWISE_AND, old, high_half);
+            model.binary(op::BITWISE_OR, kept, low)
+        };
         model.write_vector_lane(register, lane, packed);
     }
+    Ok(())
 }
 
 fn image_sample<M: Model + ?Sized>(
@@ -5871,7 +5916,13 @@ fn image_sample<M: Model + ?Sized>(
             );
         }
 
-        write_components(model, texel, (mask, destination, halves.data), lane);
+        write_components(
+            model,
+            instruction,
+            texel,
+            (mask, destination, halves.data),
+            lane,
+        )?;
     }
 
     model.count();

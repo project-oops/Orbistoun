@@ -11,6 +11,13 @@ s_mul_i32 s0, -1, s77
 s_mul_i32 s40, s3, 4
 s_mul_i32 s9, 64, s62
 
+// ---- v_pk_lshlrev_b16: VOP3P, a shift count then the value ------------------------------
+v_pk_lshlrev_b16 v0, 1, v0
+v_pk_lshlrev_b16 v200, v5, v9
+v_pk_lshlrev_b16 v255, v12, s30
+v_pk_lshlrev_b16 v9, s101, v77
+v_pk_lshlrev_b16 v130, v88, 4
+
 // ---- v_add_nc_u16: VOP3, two sources --------------------------------------------------
 v_add_nc_u16 v4, v5, v2
 v_add_nc_u16 v200, s5, v9

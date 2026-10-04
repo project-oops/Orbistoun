@@ -1085,8 +1085,8 @@ mod tests {
         );
     }
 
-    /// An image load with sixteen-bit address and data (`a16 d16`, ACO's image copy) translates;
-    /// one returning a status word (`tfe`) or an odd number of sixteen-bit components, whose
+    /// An image load with sixteen-bit address and data (`a16 d16`, ACO's image copy) translates, an
+    /// odd number of sixteen-bit components too; one returning a status word (`tfe`), whose
     /// registers are not modelled, is refused rather than read some other way.
     #[test]
     fn sixteen_bit_image_operands_translate_and_unmodelled_layouts_are_refused() {
@@ -1128,9 +1128,8 @@ mod tests {
         assert!(fragment(load).is_ok(), "{:?}", fragment(load).err());
         let status = fragment([load[0] | 1 << 16, load[1]]).expect_err("refused");
         assert!(status.to_string().contains("status word"), "{status}");
-        // dmask:0x7 - three halves.
-        let odd = fragment([(load[0] & !0xf00) | 0x700, load[1]]).expect_err("refused");
-        assert!(odd.to_string().contains("odd number"), "{odd}");
+        // dmask:0x7 - three halves, the last register's high half kept.
+        assert!(fragment([(load[0] & !0xf00) | 0x700, load[1]]).is_ok());
     }
 
     /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an

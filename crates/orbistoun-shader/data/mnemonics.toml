@@ -564,6 +564,11 @@ name = "v_lshl_or_b32"
 
 [[mnemonic]]
 family = "VOP3P"
+opcode = 4
+name = "v_pk_lshlrev_b16"
+
+[[mnemonic]]
+family = "VOP3P"
 opcode = 9
 name = "v_pk_mad_u16"
 

@@ -5422,6 +5422,32 @@ fn sixteen_bit_arithmetic_works_on_register_halves() {
     );
 }
 
+/// `v_pk_lshlrev_b16` shifts each half by the low four bits of its own amount, picked by
+/// `op_sel` for the low result and `op_sel_hi` for the high one.
+#[test]
+fn a_packed_shift_moves_each_half_by_its_own_amount() {
+    if !device_or_skip("a_packed_shift_moves_each_half_by_its_own_amount") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0003_0005));
+    program.extend(v_mov_literal(1, 0x0002_0007));
+    program.extend(vop3p(
+        "v_pk_lshlrev_b16",
+        6,
+        [VGPR_0 + 1, VGPR_0, 0],
+        0,
+        0b011,
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 6),
+        0x000c_0280,
+        "each half shifted by its own amount: 5 << 7 low, 3 << 2 high"
+    );
+}
+
 /// The primitive export word: vertex indices packed ten bits apart, by `v_lshl_or_b32` and
 /// `v_or_b32`.
 #[test]
