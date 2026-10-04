@@ -496,6 +496,14 @@ fn dispatch_image(
 ) -> orbistoun_gpu_vulkan::compute_images::DispatchImage<'_> {
     orbistoun_gpu_vulkan::compute_images::DispatchImage {
         texels: &image.texels,
+        format: match image.format {
+            orbistoun_gpu::pipeline::TexelFormat::Rgba8 => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba8
+            }
+            orbistoun_gpu::pipeline::TexelFormat::R8 => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::R8
+            }
+        },
         width: image.width,
         height: image.height,
     }

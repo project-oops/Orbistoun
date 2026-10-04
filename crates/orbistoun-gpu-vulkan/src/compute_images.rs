@@ -10,15 +10,39 @@ use ash::vk;
 
 use crate::compute::DispatchError;
 
-/// The format both images are created in: four eight-bit normalised channels, the guest's
-/// `8_8_8_8_UNORM` in the same byte order.
-const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+/// A dispatch image's texel format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchFormat {
+    /// Four eight-bit normalised channels, the guest's `8_8_8_8_UNORM` in the same byte order.
+    Rgba8,
+    /// One eight-bit normalised channel, the guest's `8_UNORM`.
+    R8,
+}
+
+impl DispatchFormat {
+    const fn vulkan(self) -> vk::Format {
+        match self {
+            Self::Rgba8 => vk::Format::R8G8B8A8_UNORM,
+            Self::R8 => vk::Format::R8_UNORM,
+        }
+    }
+
+    /// Bytes one texel takes.
+    const fn bytes(self) -> usize {
+        match self {
+            Self::Rgba8 => 4,
+            Self::R8 => 1,
+        }
+    }
+}
 
 /// One image a dispatch reads or writes, as linear texels.
 #[derive(Debug, Clone, Copy)]
 pub struct DispatchImage<'a> {
-    /// Row-major texels, `width * height` of them.
+    /// Row-major texels, `width * height` of them, each its bits in the low bytes of a word.
     pub texels: &'a [u32],
+    /// What a texel is.
+    pub format: DispatchFormat,
     /// Width in texels.
     pub width: u32,
     /// Height in texels.
@@ -43,6 +67,7 @@ struct Bound {
     view: vk::ImageView,
     staging: vk::Buffer,
     staging_memory: vk::DeviceMemory,
+    format: DispatchFormat,
     width: u32,
     height: u32,
 }
@@ -85,6 +110,7 @@ impl BoundImages {
                         view,
                         staging,
                         staging_memory,
+                        format: image.format,
                         width: image.width,
                         height: image.height,
                     });
@@ -261,18 +287,27 @@ impl BoundImages {
         let Some(image) = self.images.iter().find(|image| image.stored) else {
             return Ok(None);
         };
-        let words = image.width as usize * image.height as usize;
-        let bytes = (words * 4) as vk::DeviceSize;
+        let texels = image.width as usize * image.height as usize;
+        let size = image.format.bytes();
+        let bytes = (texels * size) as vk::DeviceSize;
         // SAFETY: the memory is host-visible and coherent, holds `bytes`, and is not mapped; the
         // copy into it has completed.
         let mapped = unsafe {
             device.map_memory(image.staging_memory, 0, bytes, vk::MemoryMapFlags::empty())
         }
         .map_err(|e| DispatchError::Vulkan("map_memory(stored image)", e))?;
-        // SAFETY: the mapping covers `words` whole `u32`s and nothing writes it while it is read.
-        let texels =
-            unsafe { std::slice::from_raw_parts(mapped.cast::<u32>().cast_const(), words) }
-                .to_vec();
+        // SAFETY: the mapping covers `bytes` bytes and nothing writes it while it is read.
+        let raw =
+            unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().cast_const(), texels * size) };
+        let texels = raw
+            .chunks_exact(size)
+            .map(|texel| {
+                texel
+                    .iter()
+                    .rev()
+                    .fold(0_u32, |word, &byte| word << 8 | u32::from(byte))
+            })
+            .collect();
         // SAFETY: mapped just above.
         unsafe { device.unmap_memory(image.staging_memory) };
         Ok(Some(texels))
@@ -391,7 +426,7 @@ fn create_image(
     };
     let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(FORMAT)
+        .format(texels.format.vulkan())
         .extent(vk::Extent3D {
             width: texels.width,
             height: texels.height,
@@ -427,7 +462,7 @@ fn create_image(
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(FORMAT)
+            .format(texels.format.vulkan())
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -444,7 +479,7 @@ fn create_image(
             return Err(DispatchError::Vulkan("create_image_view(dispatch)", e));
         }
     };
-    let staged = staging_buffer((instance, physical, device), texels.texels);
+    let staged = staging_buffer((instance, physical, device), texels);
     match staged {
         Ok((staging, staging_memory)) => Ok((image, memory, view, staging, staging_memory)),
         Err(e) => {
@@ -481,9 +516,15 @@ fn allocate(
 /// A host-visible buffer holding `texels`, a transfer source and destination.
 fn staging_buffer(
     (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
-    texels: &[u32],
+    image: DispatchImage<'_>,
 ) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
-    let bytes = (texels.len() * 4) as vk::DeviceSize;
+    let size = image.format.bytes();
+    let packed: Vec<u8> = image
+        .texels
+        .iter()
+        .flat_map(|texel| texel.to_le_bytes().into_iter().take(size))
+        .collect();
+    let bytes = packed.len() as vk::DeviceSize;
     let info = vk::BufferCreateInfo::default()
         .size(bytes)
         .usage(vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST)
@@ -509,9 +550,9 @@ fn staging_buffer(
     let filled = unsafe { device.bind_buffer_memory(buffer, memory, 0) }.and_then(|()| {
         // SAFETY: the memory is host-visible, holds `bytes`, and is not mapped.
         let mapped = unsafe { device.map_memory(memory, 0, bytes, vk::MemoryMapFlags::empty()) }?;
-        // SAFETY: the mapping covers `texels.len()` whole `u32`s, exclusively ours while mapped.
+        // SAFETY: the mapping covers `packed.len()` bytes, exclusively ours while mapped.
         unsafe {
-            std::ptr::copy_nonoverlapping(texels.as_ptr(), mapped.cast::<u32>(), texels.len());
+            std::ptr::copy_nonoverlapping(packed.as_ptr(), mapped.cast::<u8>(), packed.len());
         }
         // SAFETY: mapped just above, and the copy into it has finished.
         unsafe { device.unmap_memory(memory) };

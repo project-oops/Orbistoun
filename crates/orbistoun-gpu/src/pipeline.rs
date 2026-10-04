@@ -1059,8 +1059,28 @@ pub struct DispatchImages {
     pub fetched: Option<DispatchTexels>,
     /// The stored image, as it was before the dispatch.
     pub stored: Option<DispatchTexels>,
-    /// Where the stored image lies, and the words it spanned before the dispatch.
-    pub stored_surface: Option<(DispatchSurface, Vec<u32>)>,
+    /// Where the stored image lies, and the bytes it spanned before the dispatch.
+    pub stored_surface: Option<(DispatchSurface, Vec<u8>)>,
+}
+
+/// A dispatch image's texel format: the guest's `8_8_8_8_UNORM`, or its single-channel `8_UNORM`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TexelFormat {
+    /// Four eight-bit normalised channels, a texel a word.
+    Rgba8,
+    /// One eight-bit normalised channel, a texel a byte.
+    R8,
+}
+
+impl TexelFormat {
+    /// Bytes one texel takes.
+    #[must_use]
+    pub const fn bytes(self) -> u32 {
+        match self {
+            Self::Rgba8 => 4,
+            Self::R8 => 1,
+        }
+    }
 }
 
 /// Where a dispatch image lies in guest memory: a tiled level, placed as a colour target of that
@@ -1069,7 +1089,7 @@ pub struct DispatchImages {
 pub enum DispatchSurface {
     /// A tiled level.
     Tiled(ColourTarget),
-    /// A single-level linear image.
+    /// A linear image's level.
     Linear {
         /// Its first byte.
         base: u64,
@@ -1079,6 +1099,8 @@ pub enum DispatchSurface {
         height: u32,
         /// Texels from one row's start to the next's.
         pitch: u32,
+        /// Bytes one texel takes.
+        bytes_per_texel: u32,
     },
 }
 
@@ -1101,58 +1123,87 @@ impl DispatchSurface {
         }
     }
 
-    /// Words it spans from [`Self::base`]: the last row ends at its width, not its pitch.
+    /// Bytes it spans from [`Self::base`]: a tiled level's whole surface; a linear one's rows at
+    /// their pitch, the last ending at its width.
     #[must_use]
-    pub fn words(&self) -> usize {
+    pub fn bytes(&self) -> usize {
         match self {
-            Self::Tiled(target) => target.words(),
+            Self::Tiled(target) => target.words() * 4,
             Self::Linear {
                 width,
                 height,
                 pitch,
+                bytes_per_texel,
                 ..
-            } => *pitch as usize * (*height as usize - 1) + *width as usize,
+            } => {
+                (*pitch as usize * (*height as usize - 1) + *width as usize)
+                    * *bytes_per_texel as usize
+            }
         }
     }
 
-    /// Its texels, row-major, from the words it spans.
+    /// Its texels, row-major, each its bits in the low bytes of a word, from the bytes it spans.
     #[must_use]
-    pub fn detile(&self, spanned: &[u32]) -> Vec<u32> {
+    pub fn detile(&self, spanned: &[u8]) -> Vec<u32> {
         match self {
-            Self::Tiled(target) => target.detile_mapped(spanned, |w| w),
+            Self::Tiled(target) => target.detile_mapped(&words_of_bytes(spanned), |w| w),
             Self::Linear {
                 width,
                 height,
                 pitch,
+                bytes_per_texel,
                 ..
-            } => (0..*height as usize)
-                .flat_map(|row| {
-                    let start = row * *pitch as usize;
-                    spanned[start..start + *width as usize].iter().copied()
-                })
-                .collect(),
+            } => {
+                let size = *bytes_per_texel as usize;
+                (0..*height as usize)
+                    .flat_map(|row| {
+                        let start = row * *pitch as usize * size;
+                        spanned[start..start + *width as usize * size]
+                            .chunks_exact(size)
+                            .map(|texel| {
+                                texel
+                                    .iter()
+                                    .rev()
+                                    .fold(0_u32, |word, &byte| word << 8 | u32::from(byte))
+                            })
+                    })
+                    .collect()
+            }
         }
     }
 
-    /// Places row-major texels into the words it spans, leaving the rest as they were.
+    /// Places row-major texels into the bytes it spans, leaving the rest as they were.
     ///
     /// # Errors
     ///
-    /// When the texels or the words do not match its extent.
-    pub fn tile(&self, texels: &[u32], spanned: &mut [u32]) -> Result<(), String> {
+    /// When the texels or the bytes do not match its extent.
+    pub fn tile(&self, texels: &[u32], spanned: &mut [u8]) -> Result<(), String> {
+        let (width, height) = self.extent();
+        if texels.len() != width as usize * height as usize || spanned.len() < self.bytes() {
+            return Err("a dispatch image's texels do not match its extent".to_owned());
+        }
         match self {
-            Self::Tiled(target) => target
-                .tile_mapped(texels, spanned, |w| w)
-                .map_err(|e| format!("{e:?}")),
-            Self::Linear { width, pitch, .. } => {
-                if texels.len() != self.extent().0 as usize * self.extent().1 as usize
-                    || spanned.len() < self.words()
-                {
-                    return Err("a linear image's texels do not match its extent".to_owned());
+            Self::Tiled(target) => {
+                let mut words = words_of_bytes(spanned);
+                target
+                    .tile_mapped(texels, &mut words, |w| w)
+                    .map_err(|e| format!("{e:?}"))?;
+                for (bytes, word) in spanned.chunks_exact_mut(4).zip(&words) {
+                    bytes.copy_from_slice(&word.to_le_bytes());
                 }
-                for (row, texels) in texels.chunks(*width as usize).enumerate() {
-                    let start = row * *pitch as usize;
-                    spanned[start..start + texels.len()].copy_from_slice(texels);
+                Ok(())
+            }
+            Self::Linear {
+                pitch,
+                bytes_per_texel,
+                ..
+            } => {
+                let size = *bytes_per_texel as usize;
+                for (row, texels) in texels.chunks(width as usize).enumerate() {
+                    let start = row * *pitch as usize * size;
+                    for (bytes, texel) in spanned[start..].chunks_exact_mut(size).zip(texels) {
+                        bytes.copy_from_slice(&texel.to_le_bytes()[..size]);
+                    }
                 }
                 Ok(())
             }
@@ -1160,11 +1211,21 @@ impl DispatchSurface {
     }
 }
 
+/// Little-endian words from bytes, a trailing partial word dropped.
+fn words_of_bytes(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect()
+}
+
 /// One image a dispatch binds, as linear texels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTexels {
-    /// Row-major texels.
+    /// Row-major texels, each its bits in the low bytes of a word.
     pub texels: Vec<u32>,
+    /// What a texel is.
+    pub format: TexelFormat,
     /// Width in texels.
     pub width: u32,
     /// Height in texels.
@@ -1189,7 +1250,7 @@ fn dispatch_images(
     }
     let mut images = DispatchImages::default();
     if let Some(source) = textures.first() {
-        let (surface, descriptor) = dispatch_image_surface(state, source, memory)?;
+        let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
         let (width, height) = surface.extent();
         let texels = match surface_keys(&descriptor, memory)? {
             crate::dcc::Keys::Uncompressed => surface.detile(&read_spanned(&surface, memory)?),
@@ -1204,12 +1265,13 @@ fn dispatch_images(
         };
         images.fetched = Some(DispatchTexels {
             texels,
+            format,
             width,
             height,
         });
     }
     if let Some(source) = storage {
-        let (surface, descriptor) = dispatch_image_surface(state, source, memory)?;
+        let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
         if surface_keys(&descriptor, memory)? != crate::dcc::Keys::Uncompressed {
             return Err(concat!(
                 "the stored image is compressed with keys that are not all uncompressed, and ",
@@ -1221,6 +1283,7 @@ fn dispatch_images(
         let (width, height) = surface.extent();
         images.stored = Some(DispatchTexels {
             texels: surface.detile(&spanned),
+            format,
             width,
             height,
         });
@@ -1235,7 +1298,7 @@ fn dispatch_image_surface(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
     memory: &impl GuestMemory,
-) -> Result<(DispatchSurface, ImageDescriptor), String> {
+) -> Result<(DispatchSurface, ImageDescriptor, TexelFormat), String> {
     use orbistoun_translate::wavefront::TableWord;
     let user = |index: u32| {
         state
@@ -1265,16 +1328,31 @@ fn dispatch_image_surface(
         }
     }
     let descriptor = decode_image_descriptor(words);
-    if words[3] >> 28 != IMAGE_TYPE_2D || descriptor.format != FORMAT_8_8_8_8_UNORM {
-        return Err("a dispatch image that is not a 2D 8_8_8_8_UNORM image".to_owned());
+    let format = match descriptor.format {
+        FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
+        FORMAT_8_UNORM => TexelFormat::R8,
+        _ => None.ok_or_else(|| format!("a dispatch image of format {}", descriptor.format))?,
+    };
+    if words[3] >> 28 != IMAGE_TYPE_2D {
+        return Err(format!(
+            "a dispatch image of type {}, not 2D",
+            words[3] >> 28
+        ));
     }
     if descriptor.last_level != descriptor.base_level {
         return Err("a dispatch image view of more than one level".to_owned());
     }
     if descriptor.tiling == SwizzleMode::Linear {
-        let surface = linear_surface(&descriptor, words[4])
+        let surface = linear_surface(&descriptor, words[4], format.bytes())
             .ok_or("a linear dispatch image whose level is not placed here")?;
-        return Ok((surface, descriptor));
+        return Ok((surface, descriptor, format));
+    }
+    // The tiled layouts are modelled at four bytes a texel; another size swizzles differently.
+    if format != TexelFormat::Rgba8 {
+        return Err(format!(
+            "a tiled dispatch image of {}-byte texels, whose layout is not modelled",
+            format.bytes()
+        ));
     }
     let surface = descriptor
         .base_level_surface()
@@ -1285,7 +1363,7 @@ fn dispatch_image_surface(
                 descriptor.tiling
             )
         })?;
-    Ok((DispatchSurface::Tiled(surface), descriptor))
+    Ok((DispatchSurface::Tiled(surface), descriptor, format))
 }
 
 /// What an image's compression keys say about all its blocks: uncompressed for an image without
@@ -1316,14 +1394,21 @@ fn surface_keys(
 /// The level a linear image's view reads first, where its chain places it: one level at the pitch
 /// its descriptor gives, or a chain's level at the pitch addrlib's layout gives every level. `None`
 /// for a compressed linear image, which has no keys to read it through, or a custom-pitch chain.
-fn linear_surface(descriptor: &ImageDescriptor, word4: u32) -> Option<DispatchSurface> {
+fn linear_surface(
+    descriptor: &ImageDescriptor,
+    word4: u32,
+    bytes_per_texel: u32,
+) -> Option<DispatchSurface> {
     if descriptor.compression.is_some() {
         return None;
     }
     let level = descriptor.base_level;
     let (offset, pitch) = if descriptor.levels <= 1 {
-        (0, crate::registers::linear_pitch(word4, descriptor.width))
-    } else if word4.trailing_zeros() >= 14 {
+        (
+            0,
+            crate::registers::linear_pitch(word4, descriptor.width, bytes_per_texel),
+        )
+    } else if word4.trailing_zeros() >= 14 && bytes_per_texel == 4 {
         crate::tiling::linear_level(
             descriptor.width,
             descriptor.height,
@@ -1338,18 +1423,16 @@ fn linear_surface(descriptor: &ImageDescriptor, word4: u32) -> Option<DispatchSu
         width: (descriptor.width >> level).max(1),
         height: (descriptor.height >> level).max(1),
         pitch,
+        bytes_per_texel,
     })
 }
 
-/// The words a dispatch image spans.
-fn read_spanned(surface: &DispatchSurface, memory: &impl GuestMemory) -> Result<Vec<u32>, String> {
-    let bytes = memory
-        .read(surface.base(), surface.words() * 4)
-        .ok_or_else(|| format!("a dispatch image at {:#x} is not readable", surface.base()))?;
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-        .collect())
+/// The bytes a dispatch image spans.
+fn read_spanned(surface: &DispatchSurface, memory: &impl GuestMemory) -> Result<Vec<u8>, String> {
+    memory
+        .read(surface.base(), surface.bytes())
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| format!("a dispatch image at {:#x} is not readable", surface.base()))
 }
 
 /// The outcome of preparing one shader.
@@ -2204,6 +2287,8 @@ const IMAGE_TYPE_2D: u32 = 9;
 
 /// `GFX10_FORMAT_8_8_8_8_UNORM` (`gfx10-rsrc.json:61`).
 const FORMAT_8_8_8_8_UNORM: u32 = 56;
+/// `GFX10_FORMAT_8_UNORM` (`gfx10-rsrc.json:6`): one eight-bit normalised channel.
+const FORMAT_8_UNORM: u32 = 1;
 
 /// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
 /// table names a texture read exactly, so the draws that follow sample the guest's own texels.
@@ -2339,7 +2424,8 @@ fn read_texture(
         width,
         height,
         pitch,
-    }) = linear_surface(&descriptor, words[4])
+        ..
+    }) = linear_surface(&descriptor, words[4], 4)
     else {
         return None;
     };
@@ -3205,24 +3291,45 @@ mod tests {
     }
 
     /// A linear dispatch image spans its rows at their pitch, the last ending at its width; its
-    /// texels come out row-major, and going back in they change only their own words.
+    /// texels come out row-major, and going back in they change only their own bytes - a word
+    /// each at four bytes a texel, a byte each at one.
     #[test]
     fn a_linear_dispatch_image_reads_and_writes_its_rows_at_their_pitch() {
         use super::DispatchSurface;
-        let surface = DispatchSurface::Linear {
+        let words = DispatchSurface::Linear {
             base: 0x1000,
             width: 3,
             height: 2,
             pitch: 64,
+            bytes_per_texel: 4,
         };
-        assert_eq!(surface.words(), 64 + 3);
-        let mut spanned: Vec<u32> = (0..67).collect();
-        assert_eq!(surface.detile(&spanned), vec![0, 1, 2, 64, 65, 66]);
-        surface
+        assert_eq!(words.bytes(), (64 + 3) * 4);
+        let mut spanned: Vec<u8> = (0..67_u32).flat_map(u32::to_le_bytes).collect();
+        assert_eq!(words.detile(&spanned), vec![0, 1, 2, 64, 65, 66]);
+        words
             .tile(&[10, 11, 12, 13, 14, 15], &mut spanned)
             .expect("tiles");
-        assert_eq!(&spanned[..4], &[10, 11, 12, 3]);
-        assert_eq!(&spanned[63..], &[63, 13, 14, 15]);
+        assert_eq!(
+            &spanned[..16],
+            &[10, 0, 0, 0, 11, 0, 0, 0, 12, 0, 0, 0, 3, 0, 0, 0]
+        );
+        assert_eq!(&spanned[64 * 4..64 * 4 + 4], &[13, 0, 0, 0]);
+
+        let bytes = DispatchSurface::Linear {
+            base: 0x1000,
+            width: 3,
+            height: 2,
+            pitch: 256,
+            bytes_per_texel: 1,
+        };
+        assert_eq!(bytes.bytes(), 256 + 3);
+        let mut spanned: Vec<u8> = (0..259_u32).map(|i| i as u8).collect();
+        assert_eq!(bytes.detile(&spanned), vec![0, 1, 2, 0, 1, 2]);
+        bytes
+            .tile(&[7, 8, 9, 10, 11, 12], &mut spanned)
+            .expect("tiles");
+        assert_eq!(&spanned[..4], &[7, 8, 9, 3]);
+        assert_eq!(&spanned[255..], &[255, 10, 11, 12]);
     }
 
     /// The backend's user-data block and the translator's share one layout: size and each stage's

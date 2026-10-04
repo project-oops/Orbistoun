@@ -13,7 +13,7 @@
 //! ```
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
-use orbistoun_gpu_vulkan::compute_images::{DispatchImage, DispatchImages};
+use orbistoun_gpu_vulkan::compute_images::{DispatchFormat, DispatchImage, DispatchImages};
 use orbistoun_gpu_vulkan::dispatch_guest;
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::Width;
@@ -110,11 +110,13 @@ fn a_dispatch_copies_one_image_into_another() {
             &DispatchImages {
                 fetched: Some(DispatchImage {
                     texels: &source,
+                    format: DispatchFormat::Rgba8,
                     width: SIDE,
                     height: SIDE,
                 }),
                 stored: Some(DispatchImage {
                     texels: &destination,
+                    format: DispatchFormat::Rgba8,
                     width: SIDE,
                     height: SIDE,
                 }),
@@ -124,4 +126,43 @@ fn a_dispatch_copies_one_image_into_another() {
         assert!(!done.escaped, "{form}");
         assert_eq!(done.stored.as_deref(), Some(source.as_slice()), "{form}");
     }
+}
+
+/// One component a texel, `dmask:0x1`: `image_load v2, v[0:1], s[0:7]` then the same store.
+const COPY_R8: [u32; 7] = [
+    0xf000_1108,
+    0x0000_0200,
+    0xbf8c_0000,
+    0xf020_1108,
+    0x0002_0200,
+    0xbf81_0000,
+    0xbf9f_0000,
+];
+
+/// A single-channel image copies exactly: every byte value reaches the same place in the
+/// destination, bound as `R8_UNORM` on both sides.
+#[test]
+fn a_dispatch_copies_a_single_channel_image() {
+    if !device_or_skip("single-channel image copy") {
+        return;
+    }
+    let source: Vec<u32> = (0..SIDE * SIDE).map(|i| (i * 4 + 3) & 0xff).collect();
+    let destination = vec![0_u32; (SIDE * SIDE) as usize];
+    let image = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::R8,
+        width: SIDE,
+        height: SIDE,
+    };
+    let done = dispatch_guest(
+        &translated(&COPY_R8),
+        &[0],
+        (&[0; 16], [1, 1, 1]),
+        &DispatchImages {
+            fetched: Some(image(&source)),
+            stored: Some(image(&destination)),
+        },
+    )
+    .expect("dispatched");
+    assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
 }

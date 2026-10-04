@@ -604,7 +604,7 @@ pub fn last_dispatch_refusal() -> Option<String> {
 }
 
 /// The runs of words that differ between `before` and `after`, as `(first word, words)`.
-fn changed_runs(before: &[u32], after: &[u32]) -> Vec<(usize, usize)> {
+fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut start = None;
     for (index, (old, new)) in before.iter().zip(after).enumerate() {
@@ -677,39 +677,40 @@ impl GuestCp<'_> {
         if after.len() != before.len() {
             return Err("the device answered a window of another size".to_owned());
         }
-        let mut writes = Vec::new();
+        let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
         if let Some(base) = base {
             for (first, words) in changed_runs(&before, &after) {
-                writes.push((
-                    base + first as u64 * 4,
-                    after[first..first + words].to_vec(),
-                ));
+                let bytes = after[first..first + words]
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .collect();
+                writes.push((base + first as u64 * 4, bytes));
             }
         }
-        // The stored image's texels, tiled back over what it held, and only the words that changed
-        // written - the rest of its blocks, a mip tail's other levels among them, are untouched.
-        if let Some((surface, tiled_before)) = &prepared.images.stored_surface {
+        // The stored image's texels, placed back over what it held, and only the bytes that
+        // changed written - the rest of its blocks, a mip tail's other levels among them, are
+        // untouched.
+        if let Some((surface, spanned_before)) = &prepared.images.stored_surface {
             let texels = stored.ok_or("the device did not answer the stored image")?;
-            let mut tiled = tiled_before.clone();
+            let mut spanned = spanned_before.clone();
             surface
-                .tile(&texels, &mut tiled)
+                .tile(&texels, &mut spanned)
                 .map_err(|e| format!("the stored image could not be tiled back: {e}"))?;
-            for (first, words) in changed_runs(tiled_before, &tiled) {
+            for (first, bytes) in changed_runs(spanned_before, &spanned) {
                 writes.push((
-                    surface.base() + first as u64 * 4,
-                    tiled[first..first + words].to_vec(),
+                    surface.base() + first as u64,
+                    spanned[first..first + bytes].to_vec(),
                 ));
             }
         }
         let writable = write_lookup().get();
         if !writes
             .iter()
-            .all(|(at, words)| writable.is_some_and(|allows| allows(*at, words.len() as u64 * 4)))
+            .all(|(at, bytes)| writable.is_some_and(|allows| allows(*at, bytes.len() as u64)))
         {
             return Err("it wrote guest memory that is not writable".to_owned());
         }
-        for (at, words) in writes {
-            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        for (at, bytes) in writes {
             if !cp::CpMemory::write(self, at, &bytes) {
                 return Err("a write back into guest memory was refused".to_owned());
             }

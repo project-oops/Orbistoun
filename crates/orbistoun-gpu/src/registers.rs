@@ -2123,18 +2123,19 @@ pub struct ImageDescriptor {
     pub compression: Option<crate::dcc::Dcc>,
 }
 
-/// The row pitch, in texels, of a 32-bpp linear 2D image whose descriptor's dword 4 is `word4`.
+/// The row pitch, in texels, of a linear 2D image of `bytes_per_texel`-byte texels whose
+/// descriptor's dword 4 is `word4`.
 ///
-/// Zero there means the pitch the hardware derives from the width: rows aligned to 256 bytes, 64
-/// texels (addrlib's `ADDR_SW_LINEAR` pitch, `gfx9addrlib.cpp:5117-5127`; oops-sdk writes it zero
-/// for every 2D texture and relies on exactly that on hardware, `gl_state.c:4334`). Anything else
-/// is the custom pitch less one: the low bits in `DEPTH` (12:0) and the top bit in `PITCH_MSB`
-/// (13) (`gfx10-rsrc.json:403-404`).
+/// Zero there means the pitch the hardware derives from the width: rows aligned to 256 bytes - 64
+/// four-byte texels, 256 one-byte ones (addrlib's `ADDR_SW_LINEAR` pitch, `256 / elementBytes`,
+/// `gfx10addrlib.cpp:5079`; oops-sdk writes it zero for every 2D texture and relies on exactly that
+/// on hardware, `gl_state.c:4334`). Anything else is the custom pitch less one: the low bits in
+/// `DEPTH` (12:0) and the top bit in `PITCH_MSB` (13) (`gfx10-rsrc.json:403-404`).
 #[must_use]
-pub const fn linear_pitch(word4: u32, width: u32) -> u32 {
+pub const fn linear_pitch(word4: u32, width: u32, bytes_per_texel: u32) -> u32 {
     let field = word4 & 0x3FFF;
     if field == 0 {
-        width.next_multiple_of(64)
+        width.next_multiple_of(256 / bytes_per_texel)
     } else {
         field + 1
     }
@@ -3779,10 +3780,12 @@ mod tests {
     fn a_linear_pitch_is_256_byte_rows_unless_the_descriptor_names_one() {
         use super::linear_pitch;
         for (width, pitch) in [(100, 128), (65, 128), (64, 64), (512, 512), (1000, 1024)] {
-            assert_eq!(linear_pitch(0, width), pitch, "{width}");
+            assert_eq!(linear_pitch(0, width, 4), pitch, "{width}");
         }
-        assert_eq!(linear_pitch(199, 100), 200, "a custom pitch");
-        assert_eq!(linear_pitch(1 << 13 | 7, 100), 8200, "PITCH_MSB");
+        assert_eq!(linear_pitch(0, 100, 1), 256, "256 one-byte texels to a row");
+        assert_eq!(linear_pitch(0, 512, 1), 512);
+        assert_eq!(linear_pitch(199, 100, 4), 200, "a custom pitch");
+        assert_eq!(linear_pitch(1 << 13 | 7, 100, 4), 8200, "PITCH_MSB");
     }
 
     /// A scissor decodes its rectangle from the GENERIC_SCISSOR corners.
