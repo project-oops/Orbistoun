@@ -116,17 +116,13 @@ pub const fn chain_meta_bytes(width: u32, height: u32, levels: u32, pipe_aligned
     };
     let mut level = 0;
     while level < first_in_tail {
-        let across = max_one(width >> level).div_ceil(block.width) as u64;
-        let down = max_one(height >> level).div_ceil(block.height) as u64;
+        let (mip_width, mip_height) = crate::tiling::mip_layout_extent(width, height, level);
+        let across = mip_width.div_ceil(block.width) as u64;
+        let down = mip_height.div_ceil(block.height) as u64;
         bytes += (across * down) << block.bytes_log2;
         level += 1;
     }
     bytes
-}
-
-/// A mip level's side, never below one (`GetMipSize`).
-const fn max_one(side: u32) -> u32 {
-    if side == 0 { 1 } else { side }
 }
 
 /// The metadata's first byte: the base aligned down to a metadata block, which is the alignment

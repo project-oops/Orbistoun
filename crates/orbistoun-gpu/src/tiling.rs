@@ -572,16 +572,43 @@ pub fn surface_words_4kb_dx_bpp4(width: u32, height: u32) -> usize {
 /// its levels in.
 const MICRO_EXTENT: u32 = 8;
 
-/// Level `level`'s extent in a chain whose level 0 is `width` x `height`: each side halved per
-/// level, never below one (`GetMipSize`).
-const fn mip_extent(width: u32, height: u32, level: u32) -> (u32, u32) {
-    const fn halve(side: u32, level: u32) -> u32 {
-        match side.checked_shr(level) {
-            Some(0) | None => 1,
-            Some(side) => side,
-        }
+/// Level `level`'s extent as a chain's layout counts it, level 0 `width` x `height`: each side
+/// halved per level, rounding up, never below one (`Gfx10Lib::GetMipSize`, `ShiftCeil`,
+/// `gfx10addrlib.h:367-383`). A level's texels are its sides halved rounding down; the layout
+/// rounds up, so an odd side's level is padded rather than cut.
+pub const fn mip_layout_extent(width: u32, height: u32, level: u32) -> (u32, u32) {
+    (shift_ceil(width, level), shift_ceil(height, level))
+}
+
+/// `side` halved `level` times, rounding up, never below one.
+const fn shift_ceil(side: u32, level: u32) -> u32 {
+    let side = if side == 0 { 1 } else { side };
+    if level >= 32 {
+        return 1;
     }
-    (halve(width, level), halve(height, level))
+    let shifted = (side + (1 << level) - 1) >> level;
+    if shifted == 0 { 1 } else { shifted }
+}
+
+/// Where level `level` of a `levels`-level linear 2D chain, level 0 `width` x `height`, starts in
+/// bytes from the surface's base, and its row pitch in texels; `None` past the chain.
+///
+/// `Gfx10Lib::HwlComputeSurfaceInfoLinear` (`gfx10addrlib.cpp:5084-5105`): the levels are stored
+/// last first, each its rows at a 256-byte-aligned pitch - 64 texels - its own height apart.
+#[must_use]
+pub const fn linear_level(width: u32, height: u32, levels: u32, level: u32) -> Option<(u64, u32)> {
+    if level >= levels {
+        return None;
+    }
+    let mut offset = 0;
+    let mut below = levels;
+    while below > level + 1 {
+        below -= 1;
+        let (w, h) = mip_layout_extent(width, height, below);
+        offset += w.next_multiple_of(64) as u64 * h as u64 * 4;
+    }
+    let (w, _) = mip_layout_extent(width, height, level);
+    Some((offset, w.next_multiple_of(64)))
 }
 
 /// How a colour target's texels lie in memory, for the swizzle modes modelled at 32 bpp.
@@ -649,7 +676,7 @@ impl SurfaceLayout {
         };
         let mut level = 0;
         while level < levels {
-            let (w, h) = mip_extent(width, height, level);
+            let (w, h) = mip_layout_extent(width, height, level);
             if w <= block_width / 2 && h <= block_height && levels - level <= most_in_tail {
                 return level;
             }
@@ -661,7 +688,7 @@ impl SurfaceLayout {
     /// Bytes level `level` of a chain occupies outside the tail: its extent padded to whole blocks.
     const fn level_bytes(self, width: u32, height: u32, level: u32) -> u64 {
         let (block_width, block_height) = self.block_extent();
-        let (w, h) = mip_extent(width, height, level);
+        let (w, h) = mip_layout_extent(width, height, level);
         w.next_multiple_of(block_width) as u64 * h.next_multiple_of(block_height) as u64 * 4
     }
 
@@ -1524,5 +1551,52 @@ mod tests {
             assert_eq!(written, linear.len(), "only the level's texels");
             assert_eq!(target.detile_mapped(&tiled, |w| w), linear);
         }
+    }
+
+    /// At odd sizes a chain's levels are laid out with their sides rounded up, as addrlib's
+    /// `GetMipSize` does: a 129-wide level 1 is 65 wide, too wide for the tail, so the tail starts
+    /// at level 2 - rounding down would have put it at level 1 and every level above it in the
+    /// wrong place. Offsets, tails and sizes are addrlib's for each.
+    #[test]
+    fn odd_sized_chains_lie_where_addrlib_puts_them() {
+        use super::SurfaceLayout::{self, Dx4Kb, Rx64Kb};
+        /// Layout, level 0's extent, levels, the chain's bytes, and each level's offset out of
+        /// the tail.
+        type Chain = (SurfaceLayout, u32, u32, u32, u64, &'static [u64]);
+        let cases: [Chain; 5] = [
+            (Rx64Kb, 129, 129, 8, 393_216, &[131_072, 65536]),
+            (Rx64Kb, 257, 3, 9, 458_752, &[262_144, 131_072, 65536]),
+            (Rx64Kb, 65, 513, 10, 720_896, &[393_216, 196_608, 65536]),
+            (Dx4Kb, 33, 33, 6, 24576, &[8192, 4096]),
+            (Dx4Kb, 129, 17, 8, 49152, &[28672, 16384, 8192, 4096]),
+        ];
+        for (layout, width, height, levels, bytes, offsets) in cases {
+            let shape = format!("{layout:?} {width}x{height} x{levels}");
+            assert_eq!(layout.chain_bytes(width, height, levels), bytes, "{shape}");
+            for level in 0..levels {
+                let want = offsets.get(level as usize).copied();
+                assert_eq!(
+                    layout.level_offset(width, height, levels, level),
+                    want,
+                    "{shape} {level}"
+                );
+            }
+        }
+        assert_eq!(crate::dcc::chain_meta_bytes(129, 129, 8, true), 12288);
+        assert_eq!(crate::dcc::chain_meta_bytes(65, 513, 10, true), 20480);
+    }
+
+    /// A linear chain stores its last level first, each at its own 64-texel pitch and rounded-up
+    /// height: addrlib's offsets for 100 x 30 and 65 x 7.
+    #[test]
+    fn a_linear_chain_lies_where_addrlib_puts_it() {
+        use super::linear_level;
+        assert_eq!(linear_level(100, 30, 3, 0), Some((5888, 128)));
+        assert_eq!(linear_level(100, 30, 3, 1), Some((2048, 64)));
+        assert_eq!(linear_level(100, 30, 3, 2), Some((0, 64)));
+        assert_eq!(linear_level(65, 7, 4, 0), Some((1792, 128)));
+        assert_eq!(linear_level(65, 7, 4, 2), Some((256, 64)));
+        assert_eq!(linear_level(65, 7, 4, 4), None);
+        assert_eq!(linear_level(100, 30, 1, 0), Some((0, 128)));
     }
 }

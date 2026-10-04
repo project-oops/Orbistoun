@@ -621,7 +621,7 @@ pub struct Pipeline {
     /// Fills not yet matched against a depth target, which may clear one a later submission binds.
     depth_fills: crate::depth::PendingFills,
     /// Guest dispatch modules, by the program's bytes, its entry state and its window.
-    dispatch_modules: BTreeMap<u64, Vec<u32>>,
+    dispatch_modules: BTreeMap<u64, (Vec<u32>, orbistoun_translate::wavefront::ImageSources)>,
 }
 
 /// A guest compute dispatch made ready to run: its module, the window it was built against, and the
@@ -630,8 +630,12 @@ pub struct Pipeline {
 pub struct PreparedDispatch {
     /// The translated module.
     pub module: Vec<u32>,
-    /// The guest memory it reads and writes.
-    pub window: Window,
+    /// The guest memory it reads and writes through its buffers; `None` for a program that
+    /// addresses none.
+    pub window: Option<Window>,
+    /// The images it fetches from and stores to, as linear texels, and where the stored one lies
+    /// in guest memory.
+    pub images: DispatchImages,
     /// Its user data, from word zero of the block.
     pub push: Vec<u32>,
     /// How many groups run.
@@ -699,6 +703,8 @@ impl Pipeline {
             usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some())
         })
         .map_err(str::to_owned)?;
+        let window_or_none = placed;
+        let placed = placed.unwrap_or_default();
         let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
         let user_data = UserData {
             first_register: 0,
@@ -734,8 +740,8 @@ impl Pipeline {
                 Width::Wave32 => 1 << 10,
                 Width::Wave64 => 0,
             };
-        let module = if let Some(module) = self.dispatch_modules.get(&key) {
-            module.clone()
+        let (module, sources) = if let Some(cached) = self.dispatch_modules.get(&key) {
+            cached.clone()
         } else {
             let strategy = Strategy::Predicated {
                 fidelity: orbistoun_translate::Fidelity::Wavefront,
@@ -752,12 +758,16 @@ impl Pipeline {
             .map_err(|e| {
                 format!("the compute program at {address:#x} could not be translated: {e}")
             })?;
-            self.dispatch_modules.insert(key, translated.module.clone());
-            translated.module
+            let sources = (translated.textures.clone(), translated.storage);
+            self.dispatch_modules
+                .insert(key, (translated.module.clone(), sources.clone()));
+            (translated.module, sources)
         };
+        let images = dispatch_images(state, &sources, memory)?;
         Ok(PreparedDispatch {
             module,
-            window: placed,
+            window: window_or_none,
+            images,
             // The whole block the module declares; a word the stream never wrote, which the
             // translation refused a program for reading, and the rest of the block are zero.
             push: {
@@ -1033,6 +1043,308 @@ fn last_clear(walked: &PacketWalk) -> Option<u32> {
                 if opcode == crate::cp::CLEAR_STATE)
         })
         .map(|packet| packet.offset)
+}
+
+/// A dispatch's images: the one it fetches from and the one it stores to, each as linear texels
+/// read from guest memory, and where the stored one lies so what the dispatch wrote can be tiled
+/// back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchImages {
+    /// The fetched image.
+    pub fetched: Option<DispatchTexels>,
+    /// The stored image, as it was before the dispatch.
+    pub stored: Option<DispatchTexels>,
+    /// Where the stored image lies, and the words it spanned before the dispatch.
+    pub stored_surface: Option<(DispatchSurface, Vec<u32>)>,
+}
+
+/// Where a dispatch image lies in guest memory: a tiled level, placed as a colour target of that
+/// shape would be, or a linear image's rows at their pitch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchSurface {
+    /// A tiled level.
+    Tiled(ColourTarget),
+    /// A single-level linear image.
+    Linear {
+        /// Its first byte.
+        base: u64,
+        /// Width in texels.
+        width: u32,
+        /// Height in texels.
+        height: u32,
+        /// Texels from one row's start to the next's.
+        pitch: u32,
+    },
+}
+
+impl DispatchSurface {
+    /// Its first byte.
+    #[must_use]
+    pub const fn base(&self) -> u64 {
+        match self {
+            Self::Tiled(target) => target.base,
+            Self::Linear { base, .. } => *base,
+        }
+    }
+
+    /// Its extent in texels.
+    #[must_use]
+    pub const fn extent(&self) -> (u32, u32) {
+        match self {
+            Self::Tiled(target) => (target.width, target.height),
+            Self::Linear { width, height, .. } => (*width, *height),
+        }
+    }
+
+    /// Words it spans from [`Self::base`]: the last row ends at its width, not its pitch.
+    #[must_use]
+    pub fn words(&self) -> usize {
+        match self {
+            Self::Tiled(target) => target.words(),
+            Self::Linear {
+                width,
+                height,
+                pitch,
+                ..
+            } => *pitch as usize * (*height as usize - 1) + *width as usize,
+        }
+    }
+
+    /// Its texels, row-major, from the words it spans.
+    #[must_use]
+    pub fn detile(&self, spanned: &[u32]) -> Vec<u32> {
+        match self {
+            Self::Tiled(target) => target.detile_mapped(spanned, |w| w),
+            Self::Linear {
+                width,
+                height,
+                pitch,
+                ..
+            } => (0..*height as usize)
+                .flat_map(|row| {
+                    let start = row * *pitch as usize;
+                    spanned[start..start + *width as usize].iter().copied()
+                })
+                .collect(),
+        }
+    }
+
+    /// Places row-major texels into the words it spans, leaving the rest as they were.
+    ///
+    /// # Errors
+    ///
+    /// When the texels or the words do not match its extent.
+    pub fn tile(&self, texels: &[u32], spanned: &mut [u32]) -> Result<(), String> {
+        match self {
+            Self::Tiled(target) => target
+                .tile_mapped(texels, spanned, |w| w)
+                .map_err(|e| format!("{e:?}")),
+            Self::Linear { width, pitch, .. } => {
+                if texels.len() != self.extent().0 as usize * self.extent().1 as usize
+                    || spanned.len() < self.words()
+                {
+                    return Err("a linear image's texels do not match its extent".to_owned());
+                }
+                for (row, texels) in texels.chunks(*width as usize).enumerate() {
+                    let start = row * *pitch as usize;
+                    spanned[start..start + texels.len()].copy_from_slice(texels);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// One image a dispatch binds, as linear texels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchTexels {
+    /// Row-major texels.
+    pub texels: Vec<u32>,
+    /// Width in texels.
+    pub width: u32,
+    /// Height in texels.
+    pub height: u32,
+}
+
+/// Reads a dispatch's images from guest memory, by where its module said each descriptor came
+/// from: its user data, or a table its user data and constants address.
+///
+/// # Errors
+///
+/// Each refusal by name: a second fetched image, a descriptor not readable or not written, an image
+/// that is not a single 2D `8_8_8_8_UNORM` level in a modelled layout, or compression whose keys say
+/// anything but what a plain read or write keeps exact.
+fn dispatch_images(
+    state: &crate::dispatch::DispatchState,
+    (textures, storage): &orbistoun_translate::wavefront::ImageSources,
+    memory: &impl GuestMemory,
+) -> Result<DispatchImages, String> {
+    if textures.len() > 1 {
+        return Err("the program fetches from more than one image, and one is bound".to_owned());
+    }
+    let mut images = DispatchImages::default();
+    if let Some(source) = textures.first() {
+        let (surface, descriptor) = dispatch_image_surface(state, source, memory)?;
+        let (width, height) = surface.extent();
+        let texels = match surface_keys(&descriptor, memory)? {
+            crate::dcc::Keys::Uncompressed => surface.detile(&read_spanned(&surface, memory)?),
+            crate::dcc::Keys::Clear0000 => vec![0; width as usize * height as usize],
+            crate::dcc::Keys::Other => {
+                return Err(concat!(
+                    "the fetched image's compression keys need per-block addressing, which is ",
+                    "not modelled"
+                )
+                .to_owned());
+            }
+        };
+        images.fetched = Some(DispatchTexels {
+            texels,
+            width,
+            height,
+        });
+    }
+    if let Some(source) = storage {
+        let (surface, descriptor) = dispatch_image_surface(state, source, memory)?;
+        if surface_keys(&descriptor, memory)? != crate::dcc::Keys::Uncompressed {
+            return Err(concat!(
+                "the stored image is compressed with keys that are not all uncompressed, and ",
+                "writing uncompressed texels under them is not modelled"
+            )
+            .to_owned());
+        }
+        let spanned = read_spanned(&surface, memory)?;
+        let (width, height) = surface.extent();
+        images.stored = Some(DispatchTexels {
+            texels: surface.detile(&spanned),
+            width,
+            height,
+        });
+        images.stored_surface = Some((surface, spanned));
+    }
+    Ok(images)
+}
+
+/// The image a dispatch source names: its descriptor read from the user data or its table,
+/// decoded, and placed.
+fn dispatch_image_surface(
+    state: &crate::dispatch::DispatchState,
+    source: &TextureSource,
+    memory: &impl GuestMemory,
+) -> Result<(DispatchSurface, ImageDescriptor), String> {
+    use orbistoun_translate::wavefront::TableWord;
+    let user = |index: u32| {
+        state
+            .user_data
+            .get(index as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| "an image descriptor's user data was never written".to_owned())
+    };
+    let mut words = [0u32; 8];
+    if let Some(first) = source.user_data {
+        for (i, word) in (first..).zip(words.iter_mut()) {
+            *word = user(i)?;
+        }
+    } else {
+        let half = |word: TableWord| match word {
+            TableWord::UserData(index) => user(index),
+            TableWord::Constant(value) => Ok(value),
+        };
+        let table = u64::from(half(source.table.low)?) | u64::from(half(source.table.high)?) << 32;
+        let at = table + u64::from(source.table_offset.unwrap_or(0));
+        let bytes = memory
+            .read(at, 32)
+            .ok_or_else(|| format!("an image descriptor at {at:#x} is not readable"))?;
+        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+            *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+    }
+    let descriptor = decode_image_descriptor(words);
+    if words[3] >> 28 != IMAGE_TYPE_2D || descriptor.format != FORMAT_8_8_8_8_UNORM {
+        return Err("a dispatch image that is not a 2D 8_8_8_8_UNORM image".to_owned());
+    }
+    if descriptor.last_level != descriptor.base_level {
+        return Err("a dispatch image view of more than one level".to_owned());
+    }
+    if descriptor.tiling == SwizzleMode::Linear {
+        let surface = linear_surface(&descriptor, words[4])
+            .ok_or("a linear dispatch image whose level is not placed here")?;
+        return Ok((surface, descriptor));
+    }
+    let surface = descriptor
+        .base_level_surface()
+        .filter(|surface| surface.layout.models(surface.pipe_bank_xor))
+        .ok_or_else(|| {
+            format!(
+                "a dispatch image's layout or level placement is not modelled: {:?}",
+                descriptor.tiling
+            )
+        })?;
+    Ok((DispatchSurface::Tiled(surface), descriptor))
+}
+
+/// What an image's compression keys say about all its blocks: uncompressed for an image without
+/// compression.
+fn surface_keys(
+    descriptor: &ImageDescriptor,
+    memory: &impl GuestMemory,
+) -> Result<crate::dcc::Keys, String> {
+    let Some(dcc) = descriptor.compression else {
+        return Ok(crate::dcc::Keys::Uncompressed);
+    };
+    if descriptor.tiling != SwizzleMode::Tiled64KbRX {
+        return Err("a compressed image in a layout other than 64KB_R_X".to_owned());
+    }
+    let bytes = crate::dcc::chain_meta_bytes(
+        descriptor.width,
+        descriptor.height,
+        descriptor.levels,
+        dcc.pipe_aligned,
+    );
+    let keys = usize::try_from(bytes)
+        .ok()
+        .and_then(|bytes| memory.read(crate::dcc::meta_start(dcc), bytes))
+        .ok_or_else(|| "an image's compression keys are not readable".to_owned())?;
+    Ok(crate::dcc::classify(keys))
+}
+
+/// The level a linear image's view reads first, where its chain places it: one level at the pitch
+/// its descriptor gives, or a chain's level at the pitch addrlib's layout gives every level. `None`
+/// for a compressed linear image, which has no keys to read it through, or a custom-pitch chain.
+fn linear_surface(descriptor: &ImageDescriptor, word4: u32) -> Option<DispatchSurface> {
+    if descriptor.compression.is_some() {
+        return None;
+    }
+    let level = descriptor.base_level;
+    let (offset, pitch) = if descriptor.levels <= 1 {
+        (0, crate::registers::linear_pitch(word4, descriptor.width))
+    } else if word4.trailing_zeros() >= 14 {
+        crate::tiling::linear_level(
+            descriptor.width,
+            descriptor.height,
+            descriptor.levels,
+            level,
+        )?
+    } else {
+        return None;
+    };
+    Some(DispatchSurface::Linear {
+        base: descriptor.base + offset,
+        width: (descriptor.width >> level).max(1),
+        height: (descriptor.height >> level).max(1),
+        pitch,
+    })
+}
+
+/// The words a dispatch image spans.
+fn read_spanned(surface: &DispatchSurface, memory: &impl GuestMemory) -> Result<Vec<u32>, String> {
+    let bytes = memory
+        .read(surface.base(), surface.words() * 4)
+        .ok_or_else(|| format!("a dispatch image at {:#x} is not readable", surface.base()))?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect())
 }
 
 /// The outcome of preparing one shader.
@@ -2017,17 +2329,22 @@ fn read_texture(
         }
         SwizzleMode::Other(_) => return None,
     }
-    // A linear chain's levels are not placed here, so only a single level is read.
-    if descriptor.levels > 1 || descriptor.compression.is_some() {
+    let Some(DispatchSurface::Linear {
+        base,
+        width,
+        height,
+        pitch,
+    }) = linear_surface(&descriptor, words[4])
+    else {
         return None;
-    }
-    let pitch_field = words[4] & 0x3fff;
-    let pitch = if pitch_field == 0 {
-        descriptor.width
-    } else {
-        pitch_field + 1
     };
-    let (width, height) = (descriptor.width as usize, descriptor.height as usize);
+    let descriptor = ImageDescriptor {
+        base,
+        width,
+        height,
+        ..descriptor
+    };
+    let (width, height) = (width as usize, height as usize);
     let row_bytes = pitch as usize * 4;
     let span = row_bytes * (height - 1) + width * 4;
     let key = (descriptor.base, descriptor.width, descriptor.height, pitch);
@@ -2876,6 +3193,27 @@ mod tests {
         let mut three_d = bytes;
         three_d[12..16].copy_from_slice(&((0xa_u32 << 28) | 0xfac).to_le_bytes());
         assert!(read_texture(table, 0, &Memory(three_d), &mut cache).is_none());
+    }
+
+    /// A linear dispatch image spans its rows at their pitch, the last ending at its width; its
+    /// texels come out row-major, and going back in they change only their own words.
+    #[test]
+    fn a_linear_dispatch_image_reads_and_writes_its_rows_at_their_pitch() {
+        use super::DispatchSurface;
+        let surface = DispatchSurface::Linear {
+            base: 0x1000,
+            width: 3,
+            height: 2,
+            pitch: 64,
+        };
+        assert_eq!(surface.words(), 64 + 3);
+        let mut spanned: Vec<u32> = (0..67).collect();
+        assert_eq!(surface.detile(&spanned), vec![0, 1, 2, 64, 65, 66]);
+        surface
+            .tile(&[10, 11, 12, 13, 14, 15], &mut spanned)
+            .expect("tiles");
+        assert_eq!(&spanned[..4], &[10, 11, 12, 3]);
+        assert_eq!(&spanned[63..], &[63, 13, 14, 15]);
     }
 
     /// The backend's user-data block and the translator's share one layout: size and each stage's

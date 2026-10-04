@@ -475,15 +475,30 @@ pub fn execute_draws(submission: &Submission, before: Before<'_>) -> bool {
 pub fn execute_dispatch(
     module: &[u32],
     memory: &[u32],
-    push: &[u32],
-    groups: [u32; 3],
-) -> Result<(Vec<u32>, bool), String> {
+    (push, groups): (&[u32], [u32; 3]),
+    images: &orbistoun_gpu::pipeline::DispatchImages,
+) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
+    let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
+        fetched: images.fetched.as_ref().map(dispatch_image),
+        stored: images.stored.as_ref().map(dispatch_image),
+    };
     on_device(|| {
-        orbistoun_gpu_vulkan::dispatch_guest(module, memory, push, groups)
-            .map(|done| (done.memory, done.escaped))
+        orbistoun_gpu_vulkan::dispatch_guest(module, memory, (push, groups), &bound)
+            .map(|done| (done.memory, done.escaped, done.stored))
             .map_err(|e| format!("the device refused it: {e:?}"))
     })
     .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
+}
+
+/// One dispatch image as the device takes it, borrowing its texels.
+fn dispatch_image(
+    image: &orbistoun_gpu::pipeline::DispatchTexels,
+) -> orbistoun_gpu_vulkan::compute_images::DispatchImage<'_> {
+    orbistoun_gpu_vulkan::compute_images::DispatchImage {
+        texels: &image.texels,
+        width: image.width,
+        height: image.height,
+    }
 }
 
 /// The backend a running guest's submissions are drawn on, kept for the run.

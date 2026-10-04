@@ -234,7 +234,7 @@ fn build_pipeline(
     buffer: vk::Buffer,
     size: vk::DeviceSize,
     (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
-    push_bytes: u32,
+    (push_bytes, images): (u32, &crate::compute_images::BoundImages),
 ) -> Result<BoundPipeline, DispatchError> {
     let module = for_this_device(module);
     let shader_info = vk::ShaderModuleCreateInfo::default().code(&module);
@@ -243,7 +243,7 @@ fn build_pipeline(
     let shader = unsafe { device.create_shader_module(&shader_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module", e))?;
 
-    let bindings = [
+    let mut bindings = vec![
         vk::DescriptorSetLayoutBinding::default()
             .binding(0)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -255,6 +255,8 @@ fn build_pipeline(
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::COMPUTE),
     ];
+    // The images a guest dispatch reads and writes, at the bindings its module names them.
+    bindings.extend(images.layout_bindings());
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     // SAFETY: the create info outlives the call.
     let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
@@ -286,9 +288,12 @@ fn build_pipeline(
         unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None) }
             .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
 
-    let pool_sizes = [vk::DescriptorPoolSize::default()
-        .ty(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(2)];
+    let mut pool_sizes = vec![
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(2),
+    ];
+    pool_sizes.extend(images.pool_sizes());
     let pool_info = vk::DescriptorPoolCreateInfo::default()
         .pool_sizes(&pool_sizes)
         .max_sets(1);
@@ -325,6 +330,7 @@ fn build_pipeline(
     ];
     // SAFETY: the write refers to a live set and a live buffer, and the slices outlive the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
+    images.write(device, sets[0]);
 
     Ok(BoundPipeline {
         shader,
@@ -635,7 +641,7 @@ fn dispatch_core(
     module: &[u32],
     binding0: &DispatchBuffer,
     binding1: &DispatchBuffer,
-    (groups, push): ([u32; 3], &[u32]),
+    (groups, push, images): ([u32; 3], &[u32], &crate::compute_images::BoundImages),
 ) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
     let push_bytes = u32::try_from(push.len() * 4)
         .map_err(|_| DispatchError::Vulkan("push constants", vk::Result::ERROR_UNKNOWN))?;
@@ -645,7 +651,7 @@ fn dispatch_core(
         binding0.buffer,
         binding0.size,
         (binding1.buffer, binding1.offset, binding1.size),
-        push_bytes,
+        (push_bytes, images),
     )?;
     let pipeline = bound.pipeline;
     let pipeline_layout = bound.layout;
@@ -671,6 +677,8 @@ fn dispatch_core(
     // SAFETY: the command buffer is freshly allocated and not recording.
     unsafe { device.begin_command_buffer(command, &begin) }
         .map_err(|e| DispatchError::Vulkan("begin_command_buffer", e))?;
+    // The images' texels reach the device before anything runs over them.
+    images.record_upload(device, command);
     // SAFETY: recording is open and the pipeline is live.
     unsafe { device.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, pipeline) };
     // SAFETY: recording is open; the layout and set match the pipeline.
@@ -698,6 +706,7 @@ fn dispatch_core(
     }
     // SAFETY: recording is open and a pipeline is bound.
     unsafe { device.cmd_dispatch(command, groups[0], groups[1], groups[2]) };
+    images.record_readback(device, command);
     // SAFETY: recording is open.
     unsafe { device.end_command_buffer(command) }
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
@@ -792,7 +801,7 @@ pub fn dispatch(
         module,
         &binding0,
         &binding1,
-        (groups, &[]),
+        (groups, &[], &crate::compute_images::BoundImages::none()),
     )?;
 
     // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
@@ -840,7 +849,7 @@ pub(crate) fn dispatch_bound(
         module,
         observation,
         window,
-        (groups, &[]),
+        (groups, &[], &crate::compute_images::BoundImages::none()),
     )
 }
 
@@ -886,7 +895,7 @@ pub(crate) fn dispatch_reading_window(
         module,
         &observation,
         window,
-        (groups, &[]),
+        (groups, &[], &crate::compute_images::BoundImages::none()),
     );
 
     // The throwaway observation is destroyed whether or not the dispatch succeeded.
@@ -908,6 +917,8 @@ pub struct GuestDispatch {
     /// Whether an access left the window or went through a descriptor whose addressing is not
     /// modelled; the result is then not the guest's and must not reach its memory.
     pub escaped: bool,
+    /// The stored image's texels after the dispatch, when it bound one.
+    pub stored: Option<Vec<u32>>,
 }
 
 /// Words of the observation a guest dispatch module declares: the register-observation layout,
@@ -923,8 +934,8 @@ const GUEST_OBSERVATION_WORDS: usize = 16;
 pub fn dispatch_guest(
     module: &[u32],
     memory: &[u32],
-    push: &[u32],
-    groups: [u32; 3],
+    (push, groups): (&[u32], [u32; 3]),
+    images: &crate::compute_images::DispatchImages<'_>,
 ) -> Result<GuestDispatch, DispatchError> {
     // Draws already queued finish first: the window was read from guest memory they write.
     crate::framebuffer::settle_session()?;
@@ -978,15 +989,24 @@ pub fn dispatch_guest(
         words: memory.len(),
         offset: 0,
     };
-    let (observed, after) = dispatch_core(
+    let bound = crate::compute_images::BoundImages::create((instance, physical, device), images)?;
+    let dispatched = dispatch_core(
         device,
         queue,
         family,
         module,
         &observation,
         &window,
-        (groups, push),
-    )?;
+        (groups, push, &bound),
+    );
+    let stored = dispatched
+        .as_ref()
+        .ok()
+        .map(|_| bound.read_stored(device))
+        .transpose();
+    bound.destroy(device);
+    let (observed, after) = dispatched?;
+    let stored = stored?.flatten();
 
     // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
     unsafe { device.destroy_buffer(observation_buffer, None) };
@@ -1000,6 +1020,7 @@ pub fn dispatch_guest(
     Ok(GuestDispatch {
         memory: after,
         escaped: observed.first().is_some_and(|&flag| flag != 0),
+        stored,
     })
 }
 

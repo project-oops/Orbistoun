@@ -555,12 +555,21 @@ impl GuestCp<'_> {
     }
 }
 
-/// Runs a guest compute dispatch's module over its window: the module, the window's words before,
-/// the push-constant block and the grid. Answers the window's words after and whether any access
-/// escaped the window, or why the device could not run it. Installed by the worker, which owns the
-/// graphics device.
-pub type DispatchExecutor =
-    fn(&[u32], &[u32], &[u32], [u32; 3]) -> Result<(Vec<u32>, bool), String>;
+/// Runs a guest compute dispatch's module over its window and images: the module, the window's
+/// words before, the push-constant block and the grid, and the images it fetches from and stores
+/// to. Answers the window's words after, whether any access escaped the window, and the stored
+/// image's texels after, or why the device could not run it. Installed by the worker, which owns
+/// the graphics device.
+pub type DispatchExecutor = fn(
+    &[u32],
+    &[u32],
+    (&[u32], [u32; 3]),
+    &crate::pipeline::DispatchImages,
+) -> Result<DispatchDone, String>;
+
+/// What a dispatch left: the window's words, whether an access escaped it, and the stored image's
+/// texels when it bound one.
+pub type DispatchDone = (Vec<u32>, bool, Option<Vec<u32>>);
 
 fn dispatch_executor() -> &'static OnceLock<DispatchExecutor> {
     static EXECUTOR: OnceLock<DispatchExecutor> = OnceLock::new();
@@ -638,14 +647,26 @@ impl GuestCp<'_> {
             )?;
             pipeline.prepare_dispatch(&state, &self.memory)?
         };
-        let span = prepared.window.words() as usize * 4;
-        let bytes = cp::CpMemory::read(self, prepared.window.address(), span)
-            .ok_or("its window is not readable guest memory")?;
-        let before: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-            .collect();
-        let (after, escaped) = execute(&prepared.module, &before, &prepared.push, prepared.groups)?;
+        // A program with no buffer runs over one word nobody reads, and writes nothing back there.
+        let (base, before) = match prepared.window {
+            Some(window) => {
+                let span = window.words() as usize * 4;
+                let bytes = cp::CpMemory::read(self, window.address(), span)
+                    .ok_or("its window is not readable guest memory")?;
+                let words: Vec<u32> = bytes
+                    .chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                    .collect();
+                (Some(window.address()), words)
+            }
+            None => (None, vec![0]),
+        };
+        let (after, escaped, stored) = execute(
+            &prepared.module,
+            &before,
+            (&prepared.push, prepared.groups),
+            &prepared.images,
+        )?;
         if escaped {
             return Err(concat!(
                 "an access left its window or went through a buffer descriptor whose addressing ",
@@ -656,20 +677,40 @@ impl GuestCp<'_> {
         if after.len() != before.len() {
             return Err("the device answered a window of another size".to_owned());
         }
-        let runs = changed_runs(&before, &after);
-        let base = prepared.window.address();
+        let mut writes = Vec::new();
+        if let Some(base) = base {
+            for (first, words) in changed_runs(&before, &after) {
+                writes.push((
+                    base + first as u64 * 4,
+                    after[first..first + words].to_vec(),
+                ));
+            }
+        }
+        // The stored image's texels, tiled back over what it held, and only the words that changed
+        // written - the rest of its blocks, a mip tail's other levels among them, are untouched.
+        if let Some((surface, tiled_before)) = &prepared.images.stored_surface {
+            let texels = stored.ok_or("the device did not answer the stored image")?;
+            let mut tiled = tiled_before.clone();
+            surface
+                .tile(&texels, &mut tiled)
+                .map_err(|e| format!("the stored image could not be tiled back: {e}"))?;
+            for (first, words) in changed_runs(tiled_before, &tiled) {
+                writes.push((
+                    surface.base() + first as u64 * 4,
+                    tiled[first..first + words].to_vec(),
+                ));
+            }
+        }
         let writable = write_lookup().get();
-        if !runs.iter().all(|&(first, words)| {
-            writable.is_some_and(|allows| allows(base + first as u64 * 4, words as u64 * 4))
-        }) {
+        if !writes
+            .iter()
+            .all(|(at, words)| writable.is_some_and(|allows| allows(*at, words.len() as u64 * 4)))
+        {
             return Err("it wrote guest memory that is not writable".to_owned());
         }
-        for (first, words) in runs {
-            let bytes: Vec<u8> = after[first..first + words]
-                .iter()
-                .flat_map(|w| w.to_le_bytes())
-                .collect();
-            if !cp::CpMemory::write(self, base + first as u64 * 4, &bytes) {
+        for (at, words) in writes {
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            if !cp::CpMemory::write(self, at, &bytes) {
                 return Err("a write back into guest memory was refused".to_owned());
             }
         }

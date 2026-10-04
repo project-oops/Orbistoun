@@ -9,6 +9,7 @@
 //! lazily, through the session [`compute`] and [`framebuffer`] share.
 
 pub mod compute;
+pub mod compute_images;
 mod depth;
 mod draw_buffers;
 pub mod framebuffer;

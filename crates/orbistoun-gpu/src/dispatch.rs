@@ -235,7 +235,8 @@ const MOST_WINDOW_WORDS: u32 = 1 << 16;
 /// guest page.
 const PAGE: u64 = 0x4000;
 
-/// Places a dispatch's window over every buffer its program addresses.
+/// Places a dispatch's window over every buffer its program addresses, or answers `None` for a
+/// program that addresses none.
 ///
 /// Every untyped buffer access names its descriptor's scalar registers; each must be user data the
 /// stream wrote, since a descriptor loaded from memory is not known before the program runs. The
@@ -244,14 +245,14 @@ const PAGE: u64 = 0x4000;
 ///
 /// # Errors
 ///
-/// A buffer access whose descriptor is not in known user data, no buffer access at all, buffers
+/// A buffer access whose descriptor is not in known user data, buffers
 /// spanning more than a window holds, or no readable placement.
 pub fn place_window(
     state: &DispatchState,
     decode: &Decode,
     encodings: &EncodingTable,
     readable: impl Fn(u64, u64) -> bool,
-) -> Result<Window, &'static str> {
+) -> Result<Option<Window>, &'static str> {
     let families = encodings.encodings();
     let mut span: Option<(u64, u64)> = None;
     for instruction in &decode.instructions {
@@ -282,8 +283,10 @@ pub fn place_window(
             Some((low, high)) => (low.min(base), high.max(end)),
         });
     }
-    let (low, high) =
-        span.ok_or("the program addresses no buffer, so there is no window to place")?;
+    // A program that addresses no buffer - an image copy - has no window to place.
+    let Some((low, high)) = span else {
+        return Ok(None);
+    };
     let needed_words = (high - low).div_ceil(4).max(1);
     if needed_words > u64::from(MOST_WINDOW_WORDS) {
         return Err("the program's buffers span more guest memory than one window addresses");
@@ -298,7 +301,7 @@ pub fn place_window(
             && readable(base, length)
             && let Some(window) = Window::spanning_address(base, words)
         {
-            return Ok(window);
+            return Ok(Some(window));
         }
         if base < PAGE || base - PAGE + length < high {
             return Err(concat!(
@@ -444,7 +447,8 @@ mod tests {
         let window = place_window(&state, &decode, &encodings, |at, len| {
             at >= start && at + len <= end
         })
-        .expect("placed");
+        .expect("placed")
+        .expect("a window over its buffers");
         assert_eq!((window.address(), window.words()), (0x4_0186_0000, 1 << 16));
 
         assert!(

@@ -15,6 +15,7 @@
 //! ```
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
+use orbistoun_gpu_vulkan::compute_images::DispatchImages;
 use orbistoun_gpu_vulkan::dispatch_guest;
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::Width;
@@ -124,8 +125,8 @@ fn a_dispatch_clears_the_buffer_its_descriptor_names() {
     let done = dispatch_guest(
         &module(),
         &before,
-        &user_data(WINDOW + 0x100, 3 * 64 * 16),
-        [3, 1, 1],
+        (&user_data(WINDOW + 0x100, 3 * 64 * 16), [3, 1, 1]),
+        &DispatchImages::default(),
     )
     .expect("dispatched");
     assert!(!done.escaped, "every store landed in the window");
@@ -149,8 +150,13 @@ fn stores_past_a_raw_buffers_records_are_dropped() {
     let before = vec![BEFORE; WINDOW_WORDS as usize];
     // Sixty-three whole stores fit in 1008 bytes; the sixty-fourth lies wholly past them, so how a
     // store straddling the end is checked does not enter into it.
-    let done = dispatch_guest(&module(), &before, &user_data(WINDOW, 1008), [1, 1, 1])
-        .expect("dispatched");
+    let done = dispatch_guest(
+        &module(),
+        &before,
+        (&user_data(WINDOW, 1008), [1, 1, 1]),
+        &DispatchImages::default(),
+    )
+    .expect("dispatched");
     assert!(!done.escaped);
     assert!(
         done.memory[..252]
@@ -176,8 +182,13 @@ fn a_descriptor_outside_the_window_is_an_escape() {
         WINDOW + (1 << 32),
         WINDOW + u64::from(WINDOW_WORDS) * 4 - 0x100,
     ] {
-        let done = dispatch_guest(&module(), &before, &user_data(base, 64 * 16), [1, 1, 1])
-            .expect("dispatched");
+        let done = dispatch_guest(
+            &module(),
+            &before,
+            (&user_data(base, 64 * 16), [1, 1, 1]),
+            &DispatchImages::default(),
+        )
+        .expect("dispatched");
         assert!(done.escaped, "{base:#x}");
     }
 }
