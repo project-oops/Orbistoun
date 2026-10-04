@@ -1052,6 +1052,7 @@ mod tests {
                         thread_id_components: 2,
                         threads: [8, 8, 1],
                         unwritten_user_data: 0,
+                        partial: None,
                     }),
                     ..UserData::default()
                 },

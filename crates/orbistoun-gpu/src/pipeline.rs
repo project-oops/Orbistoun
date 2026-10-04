@@ -739,7 +739,12 @@ impl Pipeline {
             ^ match state.width {
                 Width::Wave32 => 1 << 10,
                 Width::Wave64 => 0,
-            };
+            }
+            // A partial group's mask is compiled in, so its shape is part of the module's name.
+            ^ inputs.partial.map_or(0, |partial| {
+                let shape = [partial.last, partial.threads];
+                content_hash(zerocopy::IntoBytes::as_bytes(shape.as_flattened())) | 1
+            });
         let (module, sources) = if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()
         } else {

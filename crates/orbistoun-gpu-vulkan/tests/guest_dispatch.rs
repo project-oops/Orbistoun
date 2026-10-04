@@ -20,7 +20,7 @@ use orbistoun_gpu_vulkan::dispatch_guest;
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::Width;
 use orbistoun_translate::wavefront::{
-    ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+    ComputeInputs, MeshPrimitive, PartialGroups, Stage, UserData, Window, translate_with_user_data,
 };
 
 fn device_or_skip(what: &str) -> bool {
@@ -66,6 +66,14 @@ fn module() -> Vec<u32> {
 
 /// The clear, translated with the user-data words in `unwritten` marked as never written.
 fn translated(unwritten: u32) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
+    translated_with(unwritten, None)
+}
+
+/// The clear, translated for a dispatch whose last group may be a partial one.
+fn translated_with(
+    unwritten: u32,
+    partial: Option<PartialGroups>,
+) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let bytes: Vec<u8> = CLEAR.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -85,6 +93,7 @@ fn translated(unwritten: u32) -> Result<Vec<u32>, orbistoun_translate::Translate
                 thread_id_components: 1,
                 threads: [64, 1, 1],
                 unwritten_user_data: unwritten,
+                partial,
             }),
             ..UserData::default()
         },
@@ -132,6 +141,40 @@ fn a_dispatch_clears_the_buffer_its_descriptor_names() {
     assert!(!done.escaped, "every store landed in the window");
     for (index, &word) in done.memory.iter().enumerate() {
         let expected = if (0x40..0x40 + 3 * 64 * 4).contains(&index) {
+            VALUE[index % 4]
+        } else {
+            BEFORE
+        };
+        assert_eq!(word, expected, "word {index}");
+    }
+}
+
+/// A partial last group runs only its partial count of threads (`PARTIAL_TG_EN`): of two groups
+/// of 64, the second runs ten, so the clear reaches 64 + 10 slots and the rest keep what they held.
+#[test]
+fn a_partial_last_group_runs_only_its_partial_threads() {
+    if !device_or_skip("guest clear, partial last group") {
+        return;
+    }
+    let module = translated_with(
+        0,
+        Some(PartialGroups {
+            last: [1, 0, 0],
+            threads: [10, 1, 1],
+        }),
+    )
+    .expect("the clear translates");
+    let before = vec![BEFORE; WINDOW_WORDS as usize];
+    let done = dispatch_guest(
+        &module,
+        &before,
+        (&user_data(WINDOW + 0x100, 2 * 64 * 16), [2, 1, 1]),
+        &DispatchImages::default(),
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    for (index, &word) in done.memory.iter().enumerate() {
+        let expected = if (0x40..0x40 + (64 + 10) * 4).contains(&index) {
             VALUE[index % 4]
         } else {
             BEFORE

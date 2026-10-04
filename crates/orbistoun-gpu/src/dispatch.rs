@@ -10,7 +10,7 @@
 
 use orbistoun_shader::{Decode, EncodingTable, Operand};
 use orbistoun_translate::Width;
-use orbistoun_translate::wavefront::{ComputeInputs, Window};
+use orbistoun_translate::wavefront::{ComputeInputs, PartialGroups, Window};
 
 use crate::registers::RegisterWrite;
 
@@ -83,10 +83,6 @@ fn check_initiator(
         return Err("the dispatch initiator does not enable the compute shader");
     }
     for (bit, why) in [
-        (
-            initiator::PARTIAL_TG_EN,
-            "a partial thread group (PARTIAL_TG_EN) is not modelled",
-        ),
         (
             initiator::USE_THREAD_DIMENSIONS,
             "a grid given in threads (USE_THREAD_DIMENSIONS) is not modelled",
@@ -176,16 +172,37 @@ pub fn state_at(
     let thread_id_components = ((rsrc2_word >> rsrc2::TIDIG_COMP_CNT_SHIFT) & 0x3) + 1;
 
     let mut threads = [0_u32; 3];
-    for (i, slot) in threads.iter_mut().enumerate() {
+    let mut partial_threads = [0_u32; 3];
+    for (i, (slot, partial)) in threads.iter_mut().zip(&mut partial_threads).enumerate() {
         let register = NUM_THREAD_X + u32::try_from(i).unwrap_or(0);
         let Some(word) = latest(register) else {
             return Err(
                 "COMPUTE_NUM_THREAD_X/Y/Z were never written, so the group's shape is unknown",
             );
         };
-        // `NUM_THREAD_FULL`, bits 15:0; the partial count applies only with PARTIAL_TG_EN.
+        // `NUM_THREAD_FULL`, bits 15:0, and `NUM_THREAD_PARTIAL`, bits 31:16, which the last group
+        // along the dimension runs under PARTIAL_TG_EN.
         *slot = word & 0xFFFF;
+        *partial = word >> 16;
     }
+    let partial = if initiator_word & initiator::PARTIAL_TG_EN == 0 {
+        None
+    } else {
+        // radv and radeonsi write a whole group's count where the grid divides evenly, never zero
+        // (`radv_cmd_buffer.c:14779-14785`); a group of zero threads, or more than a whole one,
+        // is not one a dispatch asks for.
+        if partial_threads
+            .iter()
+            .zip(&threads)
+            .any(|(&partial, &full)| partial == 0 || partial > full)
+        {
+            return Err("a partial thread group of none, or more than a whole group's, threads");
+        }
+        Some(PartialGroups {
+            last: groups.map(|count| count.saturating_sub(1)),
+            threads: partial_threads,
+        })
+    };
 
     let user_data: Vec<Option<u32>> = (0..user_sgprs).map(|i| latest(USER_DATA_0 + i)).collect();
     // A word never written is passed as zero and the translator refuses a program that reads it.
@@ -202,6 +219,7 @@ pub fn state_at(
             thread_id_components,
             threads,
             unwritten_user_data,
+            partial,
         },
         width: if initiator_word & initiator::CS_W32_EN != 0 {
             Width::Wave32
@@ -374,6 +392,7 @@ mod tests {
                 thread_id_components: 1,
                 threads: [64, 1, 1],
                 unwritten_user_data: 1 << 1,
+                partial: None,
             }
         );
         assert_eq!(state.width, Width::Wave64);

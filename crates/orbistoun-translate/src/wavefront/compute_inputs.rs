@@ -34,6 +34,20 @@ pub struct ComputeInputs {
     /// refused, since the register holds a value nothing here knows.
     #[serde(default)]
     pub unwritten_user_data: u32,
+    /// A dispatch whose last group along a dimension runs fewer threads (`PARTIAL_TG_EN`).
+    #[serde(default)]
+    pub partial: Option<PartialGroups>,
+}
+
+/// The last group along each dimension of a dispatch with partial groups, and how many threads it
+/// runs along that dimension (`COMPUTE_NUM_THREAD_X/Y/Z.NUM_THREAD_PARTIAL`): radv and radeonsi write
+/// the remainder there, a whole group when the grid divides evenly (`radv_cmd_buffer.c:14777-14808`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PartialGroups {
+    /// The last group's index along each dimension: the grid's size less one.
+    pub last: [u32; 3],
+    /// Threads a last group runs along each dimension.
+    pub threads: [u32; 3],
 }
 
 impl ComputeInputs {
@@ -160,9 +174,87 @@ impl DispatchState {
             n @ 33.. => (1_u32 << (n - 32)) - 1,
             _ => 0,
         };
-        let (low, high) = (Model::constant(module, low), Model::constant(module, high));
+        let (low, high) = match inputs.partial {
+            Some(partial) => Self::partial_mask(module, (id, inputs.threads), partial, threads),
+            None => (Model::constant(module, low), Model::constant(module, high)),
+        };
         module.store_scalar(EXEC_LO, low);
         module.store_scalar(EXEC_HI, high);
+    }
+
+    /// The execution mask of a group that may be a partial one: each thread runs unless, along a
+    /// dimension where it lies past the partial count, this group is the last.
+    fn partial_mask(
+        module: &mut Wavefront<'_>,
+        (id, shape): (Id, [u32; 3]),
+        partial: PartialGroups,
+        threads: u32,
+    ) -> (Id, Id) {
+        let (u32_type, bool_type) = (module.u32_type, module.bool_type);
+        // Whether this group is the last along each dimension.
+        let mut last = [None; 3];
+        for (dimension, slot) in last.iter_mut().enumerate() {
+            if partial.threads[dimension] >= shape[dimension] {
+                continue;
+            }
+            let index = u32::try_from(dimension).unwrap_or(0);
+            let value = module.builder.id();
+            module
+                .builder
+                .function(op::COMPOSITE_EXTRACT, &[u32_type.0, value.0, id.0, index]);
+            let wanted = Model::constant(module, partial.last[dimension]);
+            let is_last = module.builder.id();
+            module
+                .builder
+                .function(op::IEQUAL, &[bool_type.0, is_last.0, value.0, wanted.0]);
+            *slot = Some(is_last);
+        }
+        let [x, y, _] = shape;
+        let zero = Model::constant(module, 0);
+        let mut halves = [zero, zero];
+        for lane in 0..module.lanes.min(threads) {
+            let ids = [lane % x, (lane / x) % y, lane / (x * y)];
+            // The dimensions along which this thread lies past a last group's count.
+            let mut off: Option<Id> = None;
+            for dimension in 0..3 {
+                let Some(is_last) = last[dimension] else {
+                    continue;
+                };
+                if ids[dimension] < partial.threads[dimension] {
+                    continue;
+                }
+                off = Some(match off {
+                    None => is_last,
+                    Some(before) => {
+                        let either = module.builder.id();
+                        module.builder.function(
+                            op::LOGICAL_OR,
+                            &[bool_type.0, either.0, before.0, is_last.0],
+                        );
+                        either
+                    }
+                });
+            }
+            let bit = Model::constant(module, 1 << (lane % 32));
+            let contribution = match off {
+                None => bit,
+                Some(off) => {
+                    let chosen = module.builder.id();
+                    module
+                        .builder
+                        .function(op::SELECT, &[u32_type.0, chosen.0, off.0, zero.0, bit.0]);
+                    chosen
+                }
+            };
+            let half = (lane / 32) as usize;
+            let merged = module.builder.id();
+            module.builder.function(
+                op::BITWISE_OR,
+                &[u32_type.0, merged.0, halves[half].0, contribution.0],
+            );
+            halves[half] = merged;
+        }
+        (halves[0], halves[1])
     }
 
     /// Records an escape: sets the flag when `escaped` holds, for `lane` when it is active, or
@@ -237,6 +329,7 @@ mod tests {
             thread_id_components: components,
             threads,
             unwritten_user_data: 0,
+            partial: None,
         }
     }
 

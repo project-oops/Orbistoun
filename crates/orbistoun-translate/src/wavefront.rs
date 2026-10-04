@@ -23,7 +23,7 @@ use crate::{TranslateError, Width};
 
 mod compute_inputs;
 mod pixel_inputs;
-pub use compute_inputs::ComputeInputs;
+pub use compute_inputs::{ComputeInputs, PartialGroups};
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
 
 /// Lanes in a wavefront.

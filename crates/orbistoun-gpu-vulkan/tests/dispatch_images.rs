@@ -80,6 +80,7 @@ fn translated(program: &[u32]) -> Vec<u32> {
                 thread_id_components: 2,
                 threads: [SIDE, SIDE, 1],
                 unwritten_user_data: 0,
+                partial: None,
             }),
             ..UserData::default()
         },
