@@ -408,6 +408,41 @@ pub struct UserData {
     /// that stores through such a buffer is refused; without it every access reaches the window.
     #[serde(default)]
     pub draw_buffers: bool,
+    /// The fourth word of each draw buffer's descriptor at the draw the module is translated for
+    /// (D738), by slot: the `FORMAT` and selects a format load converts by. `None` when the module
+    /// is translated for no particular draw, and then a format load is refused.
+    #[serde(default)]
+    pub buffer_formats: Option<BufferFormats>,
+}
+
+/// Each draw buffer's descriptor's fourth word at one draw, by slot (D738). `None` for a slot whose
+/// buffer is not a descriptor the draw resolved.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct BufferFormats(pub [Option<u32>; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize]);
+
+/// Whether a program converts a buffer load by its descriptor's format (D738), and so is translated
+/// per draw with [`UserData::buffer_formats`].
+#[must_use]
+pub fn reads_buffer_formats(decode: &Decode, encodings: &EncodingTable) -> bool {
+    decode.instructions.iter().any(|instruction| {
+        instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode))
+            .is_some_and(|name| name.starts_with("buffer_load_format_"))
+    })
 }
 
 /// The viewport scale a window-space draw runs under (D731), in pixels, on both axes, with no
@@ -1033,6 +1068,8 @@ pub struct Wavefront<'a> {
     /// Whether a mesh module's position export is in window space (D731); see
     /// [`UserData::window_space`].
     window_space: bool,
+    /// Each draw buffer's descriptor's fourth word at the draw, by slot (D738).
+    buffer_formats: Option<BufferFormats>,
     /// The primitive a mesh module assembles. Read only at [`Stage::Mesh`].
     primitive: MeshPrimitive,
     /// The four-component float vector, which the stages that have one share.
@@ -1470,10 +1507,7 @@ impl<'a> Wavefront<'a> {
 
         // The colour output of a fragment module, reserved before the entry point because its
         // interface must name it.
-        let output = match stage {
-            Stage::Compute | Stage::Mesh => None,
-            Stage::Fragment => Some(b.id()),
-        };
+        let output = (stage == Stage::Fragment).then(|| b.id());
         let vec4 = b.id();
         let output_ptr = b.id();
         // Reserved before the header for the same reason: every input the entry point touches must
@@ -1529,6 +1563,7 @@ impl<'a> Wavefront<'a> {
             mesh,
             rectangles,
             window_space: user_data.window_space,
+            buffer_formats: user_data.buffer_formats,
             primitive,
             vec4,
             memory_base: window.base,
@@ -2747,6 +2782,14 @@ impl Model for Wavefront<'_> {
     fn draw_buffer_slot(&self, instruction: &Instruction) -> Option<u32> {
         let (_, served) = self.draw_buffers.as_ref()?;
         served.get(&instruction.offset).copied()
+    }
+
+    fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
+        self.buffer_formats?
+            .0
+            .get(usize::try_from(slot).ok()?)
+            .copied()
+            .flatten()
     }
 
     fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {

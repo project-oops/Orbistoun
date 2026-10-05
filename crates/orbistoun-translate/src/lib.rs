@@ -205,6 +205,13 @@ pub enum TranslateError {
     )]
     ReadsGeometryInputs,
 
+    /// A buffer load converts by its descriptor's format, which is the draw's (D738), and the
+    /// translation was not given a draw's descriptors.
+    #[error(
+        "the shader converts a buffer load by the format its descriptor names, which is the draw's (D738), and no draw's descriptors are given"
+    )]
+    NeedsBufferFormats,
+
     /// An instruction with no known operand layout was reached.
     #[error(
         "instruction at {offset:#x} ({name}, first word {word:#010x}) has no operand layout; cannot translate what it operates on{}",
@@ -725,6 +732,7 @@ mod tests {
                     geometry: None,
                     window_space: false,
                     draw_buffers: false,
+                    buffer_formats: None,
                 },
             )
         };
@@ -1250,7 +1258,8 @@ mod tests {
     #[test]
     fn an_instruction_with_no_operand_layout_is_refused() {
         let (table, operands) = tables();
-        let decoded = decode(&stream(&[0xE000_0000, 0x0000_0000]), &table, &operands);
+        // MUBUF opcode 48, `buffer_atomic_swap`, whose layout nothing has recorded.
+        let decoded = decode(&stream(&[0xE0C0_0000, 0x0000_0000]), &table, &operands);
         let untranslatable = decoded.instructions.iter().any(|i| !i.operands_decoded);
         assert!(untranslatable, "the fixture must include an unknown layout");
         let refused = translate(&decoded, &table, Strategy::default());

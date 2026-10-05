@@ -114,6 +114,26 @@ name = "tbuffer_store_format_xyzw"
 
 [[mnemonic]]
 family = "MUBUF"
+opcode = 0
+name = "buffer_load_format_x"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 1
+name = "buffer_load_format_xy"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 2
+name = "buffer_load_format_xyz"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 3
+name = "buffer_load_format_xyzw"
+
+[[mnemonic]]
+family = "MUBUF"
 opcode = 12
 name = "buffer_load_dword"
 
@@ -191,6 +211,11 @@ name = "s_buffer_load_dwordx4"
 family = "SMEM"
 opcode = 11
 name = "s_buffer_load_dwordx8"
+
+[[mnemonic]]
+family = "SMEM"
+opcode = 12
+name = "s_buffer_load_dwordx16"
 
 [[mnemonic]]
 family = "SOP1"

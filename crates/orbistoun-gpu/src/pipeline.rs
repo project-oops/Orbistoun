@@ -85,11 +85,13 @@ const fn stage_salt(stage: Stage) -> u64 {
 }
 
 /// What one draw adds to its primitive shader's translation: the geometry-engine inputs it seeds
-/// (D730), and whether its position export is in window space (D731).
+/// (D730), whether its position export is in window space (D731), and the formats its buffers'
+/// descriptors name for a format load (D738).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct ForDraw {
     geometry: Option<GeometryInputs>,
     window_space: bool,
+    buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
 }
 
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
@@ -101,7 +103,16 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             ^ (u64::from(g.primitives) << 16)
             ^ u64::from(g.first_vertex)
     });
+    let formats = for_draw.buffer_formats.map_or(0, |formats| {
+        let words: Vec<u32> = formats
+            .0
+            .iter()
+            .flat_map(|word| [u32::from(word.is_some()), word.unwrap_or(0)])
+            .collect();
+        0x4655_4d54_0000_0000 ^ crate::content_hash(&words)
+    });
     geometry
+        ^ formats
         ^ if for_draw.window_space {
             0x5749_4e44_5350_4345
         } else {
@@ -725,6 +736,7 @@ impl Pipeline {
             geometry: None,
             window_space: false,
             draw_buffers: false,
+            buffer_formats: None,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -1629,6 +1641,12 @@ impl Pipeline {
                 sweep.latest(draw.packet_offset, register)
             }) == crate::registers::PositionSpace::Window;
             written.push(Some(u32::from(window_space)));
+            // The vertex stage's user data, which names the buffers whose formats a format load
+            // converts by (D738).
+            let vertex_words = stage_user_data(&mut sweep, draw.packet_offset, 0);
+            if !by_geometry.needs.is_empty() {
+                written.extend(vertex_words.iter().map(|&word| Some(word)));
+            }
             if previous_writes.as_ref() == Some(&written) {
                 per_draw.push(Vec::clone(&previous_shaders));
                 continue;
@@ -1649,7 +1667,7 @@ impl Pipeline {
                 };
                 let resource = self.bind_for_draw(
                     candidate,
-                    (memory, &geometry, window_space),
+                    (memory, &geometry, window_space, &vertex_words),
                     &mut by_geometry,
                     submission,
                 );
@@ -1782,10 +1800,11 @@ impl Pipeline {
     fn bind_for_draw(
         &mut self,
         candidate: Candidate,
-        (memory, geometry, window_space): (
+        (memory, geometry, window_space, words): (
             &impl GuestMemory,
             &Result<GeometryInputs, String>,
             bool,
+            &[u32; USER_DATA_WORDS],
         ),
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
@@ -1801,6 +1820,7 @@ impl Pipeline {
             let for_draw = ForDraw {
                 geometry: None,
                 window_space,
+                buffer_formats: None,
             };
             match self.prepare_candidate(candidate, (memory, for_draw), submission) {
                 Ok(resource) => {
@@ -1817,12 +1837,55 @@ impl Pipeline {
             }
         }
         let needs = by_geometry.needs.get(&key).cloned().unwrap_or_default();
+        let buffer_formats = (candidate.stage == ShaderStage::Vertex)
+            .then(|| self.draw_buffer_formats(candidate.address, words, memory))
+            .flatten();
         self.prepare_with_geometry(
             candidate,
             (memory, Some(geometry.clone()), needs, window_space),
+            buffer_formats,
             by_geometry,
             submission,
         )
+    }
+
+    /// The fourth word of each buffer descriptor a vertex shader with a format load reads through,
+    /// at a draw with these user-data words (D738); `None` for a shader without one, or one whose
+    /// buffers are not traced. A slot whose descriptor word cannot be resolved stays `None`, and a
+    /// format load through it is then refused.
+    fn draw_buffer_formats(
+        &self,
+        address: u64,
+        words: &[u32; USER_DATA_WORDS],
+        memory: &impl GuestMemory,
+    ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
+        let shader = self.decoded.get(&address)?;
+        let decoded = decode_program(shader, &self.encodings, &self.operands);
+        if !orbistoun_translate::wavefront::reads_buffer_formats(&decoded, &self.encodings) {
+            return None;
+        }
+        let user_data = UserData {
+            draw_buffers: true,
+            ..self.user_data[0]
+        };
+        let buffers = orbistoun_translate::wavefront::draw_buffers_for(
+            &decoded,
+            &self.encodings,
+            host_stage(ShaderStage::Vertex),
+            user_data,
+        )
+        .ok()?;
+        let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
+        for (slot, source) in formats.0.iter_mut().zip(&buffers.sources) {
+            if let orbistoun_translate::draw_buffers::BufferSource::Descriptor {
+                words: traced,
+                ..
+            } = source
+            {
+                *slot = crate::draw_buffers::resolve_word(traced[3], words, memory).ok();
+            }
+        }
+        Some(formats)
     }
 
     /// Prepares a primitive shader that reads the geometry engine's inputs for one draw's geometry
@@ -1837,11 +1900,15 @@ impl Pipeline {
             String,
             bool,
         ),
+        buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
     ) -> Option<ResourceId> {
         let geometry = match geometry {
-            Some(Ok(geometry)) => geometry,
+            Some(Ok(geometry)) => Some(geometry),
+            // A shader prepared per draw for its buffers' formats (D738) is tried without the
+            // geometry; one that also reads the geometry is then refused by its translation.
+            Some(Err(_)) if buffer_formats.is_some() => None,
             Some(Err(why)) => {
                 let reason = format!("{needs}; and this draw's cannot be: {why}");
                 if by_geometry
@@ -1859,8 +1926,9 @@ impl Pipeline {
             None => return None,
         };
         let for_draw = ForDraw {
-            geometry: Some(geometry),
+            geometry,
             window_space,
+            buffer_formats,
         };
         let key = (candidate.stage as u32, candidate.address, for_draw);
         if let Some(known) = by_geometry.prepared.get(&key) {
@@ -2102,6 +2170,7 @@ impl Pipeline {
             ShaderStage::Vertex => UserData {
                 geometry: for_draw.geometry,
                 window_space: for_draw.window_space,
+                buffer_formats: for_draw.buffer_formats,
                 ..self.user_data[0]
             },
             ShaderStage::Fragment => self.user_data[1],
@@ -2218,7 +2287,11 @@ impl Pipeline {
         )
         .map_err(|e| {
             let reason = format!("the shader at {address:#x} could not be translated: {e}");
-            if matches!(e, orbistoun_translate::TranslateError::ReadsGeometryInputs) {
+            if matches!(
+                e,
+                orbistoun_translate::TranslateError::ReadsGeometryInputs
+                    | orbistoun_translate::TranslateError::NeedsBufferFormats
+            ) {
                 PrepareFailure::NeedsGeometry(reason)
             } else {
                 PrepareFailure::Resolved(reason)
@@ -2236,6 +2309,21 @@ impl Pipeline {
                 .collect(),
         })
     }
+}
+
+/// A stage's user-data words as they stand at `at`, the stage by its index in
+/// [`USER_DATA_REGISTERS`]; a word the stream never wrote reads zero.
+fn stage_user_data(
+    sweep: &mut crate::registers::RegisterSweep<'_>,
+    at: u32,
+    stage: usize,
+) -> [u32; USER_DATA_WORDS] {
+    let mut words = [0u32; USER_DATA_WORDS];
+    let (_, first) = USER_DATA_REGISTERS[stage];
+    for (register, word) in (first..).zip(words.iter_mut()) {
+        *word = sweep.latest(at, register).unwrap_or(0);
+    }
+    words
 }
 
 /// Colour target zero's output state in force at a draw, as commands where it changed since
@@ -2968,6 +3056,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             geometry: None,
             window_space: false,
             draw_buffers: false,
+            buffer_formats: None,
         },
         UserData {
             first_register: 0,
@@ -2980,6 +3069,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             geometry: None,
             window_space: false,
             draw_buffers: false,
+            buffer_formats: None,
         },
     ]
 }

@@ -176,6 +176,34 @@ operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "MUBUF"
+opcode = 0
+mnemonic = "buffer_load_format_x"
+samples = 5
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 1
+mnemonic = "buffer_load_format_xy"
+samples = 5
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 2
+mnemonic = "buffer_load_format_xyz"
+samples = 5
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
+opcode = 3
+mnemonic = "buffer_load_format_xyzw"
+samples = 5
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 24, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "MUBUF"
 opcode = 12
 mnemonic = "buffer_load_dword"
 samples = 15
@@ -291,6 +319,13 @@ family = "SMEM"
 opcode = 11
 mnemonic = "s_buffer_load_dwordx8"
 samples = 3
+operands = [{ word = 0, shift = 6, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 6, kind = "source", scale = 2 }, { word = 1, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "SMEM"
+opcode = 12
+mnemonic = "s_buffer_load_dwordx16"
+samples = 5
 operands = [{ word = 0, shift = 6, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 6, kind = "source", scale = 2 }, { word = 1, shift = 0, width = 16, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]

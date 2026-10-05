@@ -35,6 +35,14 @@ v_xor_b32_e32 v250, s3, v9
 v_min3_i16 v3, v4, v5, v6
 v_cmpx_le_i16_e32 0, v2
 
+// ---- A vertex fetch: radeonsi's 8- and 16-bit vertex elements, converted by the format the
+// buffer's descriptor names (si_nir_lower_vs_inputs.c), and a whole constant block -------
+buffer_load_format_x v1, v4, s[8:11], 0 idxen
+buffer_load_format_xy v[2:3], v4, s[8:11], 0 idxen
+buffer_load_format_xyz v[5:7], v4, s[12:15], 0 idxen
+buffer_load_format_xyzw v[8:11], v4, s[16:19], 0 idxen
+s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
+
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

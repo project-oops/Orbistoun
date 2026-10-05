@@ -17,6 +17,11 @@
 0x000064 4 v_xor_b32_e32 v250, s3, v9
 0x000068 8 v_min3_i16 v3, v4, v5, v6
 0x000070 4 v_cmpx_le_i16_e32 0, v2
-0x000074 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x00007c 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x000084 4 s_endpgm
+0x000074 8 buffer_load_format_x v1, v4, s[8:11], 0 idxen
+0x00007c 8 buffer_load_format_xy v[2:3], v4, s[8:11], 0 idxen
+0x000084 8 buffer_load_format_xyz v[5:7], v4, s[12:15], 0 idxen
+0x00008c 8 buffer_load_format_xyzw v[8:11], v4, s[16:19], 0 idxen
+0x000094 8 s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
+0x00009c 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0000a4 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0000ac 4 s_endpgm

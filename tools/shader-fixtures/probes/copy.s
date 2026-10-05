@@ -88,3 +88,33 @@ v_pk_add_u16 v200, v5, v9
 v_pk_add_u16 v255, v12, s30
 v_pk_add_u16 v9, s101, v77
 v_pk_add_u16 v130, v88, 4
+
+// ---- buffer_load_format_x .. _xyzw: MUBUF, a vertex index into a descriptor. High and
+// uncorrelated registers, as memory.s learned to, and a register soffset beside the inline zero.
+buffer_load_format_x v1, v40, s[8:11], s3 idxen
+buffer_load_format_x v37, v2, s[16:19], s13 idxen
+buffer_load_format_x v200, v55, s[96:99], s101 idxen
+buffer_load_format_x v60, v9, s[32:35], 0 idxen
+buffer_load_format_x v130, v250, s[44:47], s43 idxen
+buffer_load_format_xy v[1:2], v40, s[8:11], s3 idxen
+buffer_load_format_xy v[37:38], v2, s[16:19], s13 idxen
+buffer_load_format_xy v[200:201], v55, s[96:99], s101 idxen
+buffer_load_format_xy v[60:61], v9, s[32:35], 0 idxen
+buffer_load_format_xy v[130:131], v250, s[44:47], s43 idxen
+buffer_load_format_xyz v[1:3], v40, s[8:11], s3 idxen
+buffer_load_format_xyz v[37:39], v2, s[16:19], s13 idxen
+buffer_load_format_xyz v[200:202], v55, s[96:99], s101 idxen
+buffer_load_format_xyz v[60:62], v9, s[32:35], 0 idxen
+buffer_load_format_xyz v[130:132], v250, s[44:47], s43 idxen
+buffer_load_format_xyzw v[1:4], v40, s[8:11], s3 idxen
+buffer_load_format_xyzw v[37:40], v2, s[16:19], s13 idxen
+buffer_load_format_xyzw v[200:203], v55, s[96:99], s101 idxen
+buffer_load_format_xyzw v[60:63], v9, s[32:35], 0 idxen
+buffer_load_format_xyzw v[130:133], v250, s[44:47], s43 idxen
+
+// ---- s_buffer_load_dwordx16: SMEM, sixteen words of a constant buffer, at the extremes.
+s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
+s_buffer_load_dwordx16 s[88:103], s[100:103], 0xfff0
+s_buffer_load_dwordx16 s[48:63], s[84:87], 0x8000
+s_buffer_load_dwordx16 s[0:15], s[68:71], 0x1234
+s_buffer_load_dwordx16 s[64:79], s[36:39], 0x7ffc

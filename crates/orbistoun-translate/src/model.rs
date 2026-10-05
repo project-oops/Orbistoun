@@ -29,6 +29,10 @@ pub const SUPPORTED: &[&str] = &[
     "buffer_store_dwordx2",
     "buffer_store_dwordx3",
     "buffer_store_dwordx4",
+    "buffer_load_format_x",
+    "buffer_load_format_xy",
+    "buffer_load_format_xyz",
+    "buffer_load_format_xyzw",
     "tbuffer_load_format_x",
     "tbuffer_load_format_xy",
     "tbuffer_load_format_xyz",
@@ -648,6 +652,13 @@ pub trait Model {
     /// reaches guest memory through the window. `None` in a model that binds no draw buffers.
     fn draw_buffer_slot(&self, instruction: &Instruction) -> Option<u32> {
         let _ = instruction;
+        None
+    }
+
+    /// The fourth word of the descriptor of the draw buffer at `slot`, at the draw this module is
+    /// translated for (D738); `None` when no draw's descriptors were given.
+    fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
+        let _ = slot;
         None
     }
 
@@ -2073,6 +2084,9 @@ fn memory_instruction<M: Model + ?Sized>(
         // Untyped buffer access at any width: `buffer_memory` reads the width from the name and
         // refuses one it does not know. `tbuffer_` does not start with `buffer_`, so the families
         // stay distinct. The local data share follows.
+        name if name.starts_with("buffer_load_format_") => {
+            format_buffer_load(model, instruction, name)
+        }
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
         "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
@@ -4179,6 +4193,182 @@ fn typed_buffer_memory<M: Model + ?Sized>(
     } else {
         packed_buffer_memory(model, instruction, format, loading)
     }
+}
+
+/// `SQ_BUF_RSRC_WORD3.FORMAT`, bits 18:12 (`gfx10-rsrc.json`): a `GFX10_FORMAT` code, numbered as
+/// the typed-buffer table's are - all 77 of the table's codes name the same format there.
+const DESCRIPTOR_FORMAT_SHIFT: u32 = 12;
+
+/// `buffer_load_format_x` .. `_xyzw` (D738): a typed load whose format is its descriptor's. The
+/// element is fetched and converted as a typed load of that format converts it, then each channel
+/// written is what the descriptor's select for it names - `DST_SEL_X..W`, bits 11:0, `SQ_SEL_0` and
+/// `SQ_SEL_1` the constants and 4 to 7 the element's components. One is `1` for an integer format
+/// and `1.0` for the others. A select of a component the format lacks, or a reserved code, is
+/// refused rather than guessed. An element outside the buffer reads as zeros under the same
+/// selects, as an untyped load answers zero.
+fn format_buffer_load<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    use orbistoun_shader::ComponentKind;
+    let channels = typed_channels(name).ok_or(TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "a format load does not name its channels",
+    })?;
+    let slot = model
+        .draw_buffer_slot(instruction)
+        .ok_or(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format load through a buffer a draw does not bind, whose format is not known",
+        })?;
+    let word3 = model
+        .buffer_descriptor_format(slot)
+        .ok_or(TranslateError::NeedsBufferFormats)?;
+    let (format, selects, total_bits) = descriptor_format(instruction, word3, channels)?;
+    let one = if matches!(format.kind, ComponentKind::Uint | ComponentKind::Sint) {
+        1
+    } else {
+        1.0f32.to_bits()
+    };
+
+    let [data, vaddr, resource_operand, soffset] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a buffer access does not have four operands",
+        });
+    };
+    let (Operand::Vector(register), Operand::Scalar(resource_base)) = (data, resource_operand)
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format load's data is not vector registers or its resource not scalar ones",
+        });
+    };
+    let (register, resource_base) = (u32::from(*register), u32::from(*resource_base));
+    if resource_base + 4 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a buffer resource constant runs past the end of the register file",
+        });
+    }
+    let word = instruction.word;
+    let literal_offset = word & 0xFFF;
+    let offen = word & (1 << 12) != 0;
+    let idxen = word & (1 << 13) != 0;
+    if offen && idxen {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format load with both address modifiers, which is not translated",
+        });
+    }
+    let resource = read_buffer_resource(model, resource_base);
+    let (slot, addressed) = buffer_reach(model, instruction, true, resource)?;
+    let flags = model.read_scalar(resource_base + 3);
+    let instruction_offset = model.constant(literal_offset);
+    let element_bytes = total_bits.div_ceil(8);
+    let element_words = total_bits.div_ceil(32);
+    let zero = model.constant(0);
+    let one = model.constant(one);
+
+    for lane in running_lanes(model) {
+        let scalar_offset = model.read_source(instruction, soffset, lane)?;
+        let address_register = (idxen || offen)
+            .then(|| model.read_source(instruction, vaddr, lane))
+            .transpose()?;
+        let (vindex, voffset) = if idxen {
+            (address_register, None)
+        } else {
+            (None, address_register)
+        };
+        let offset = model.add(instruction_offset, voffset.unwrap_or(zero));
+        let index = vindex.unwrap_or(zero);
+        let base = buffer_address(
+            model,
+            &addressed,
+            scalar_offset,
+            instruction_offset,
+            voffset,
+            vindex,
+        );
+        let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, element_bytes);
+        let fetched = read_element(model, slot, base, element_words)?;
+        let values = element_components(model, format, &fetched, outside);
+        for (channel, &select) in selects.iter().take(channels as usize).enumerate() {
+            let value = match select {
+                0 => zero,
+                1 => one,
+                component => values[(component - 4) as usize],
+            };
+            model.write_vector_lane(register + channel as u32, lane, value);
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// A fetched element's components in order, x first, each converted as its format says and zero
+/// when `outside` the buffer.
+fn element_components<M: Model + ?Sized>(
+    model: &mut M,
+    format: &orbistoun_shader::BufferFormat,
+    fetched: &[Id],
+    outside: Id,
+) -> Vec<Id> {
+    let zero = model.constant(0);
+    let mut values = Vec::with_capacity(format.components());
+    if format.is_plain_words() {
+        values.extend(fetched.iter().copied());
+    } else {
+        let mut bit = 0u32;
+        for &width in format.widths.iter().rev() {
+            let word = fetched[(bit / 32) as usize];
+            values.push(packed_component(model, word, bit % 32, width, format.kind));
+            bit += width;
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| pick(model, outside, zero, value))
+        .collect()
+}
+
+/// What a format load's descriptor word says it converts by (D738): the format its `FORMAT` code
+/// names, the selects for each channel, and the element's width in bits. Refused for a code with no
+/// meaning, a format the typed loads do not convert, or a select of a component the format lacks
+/// among the `channels` written.
+fn descriptor_format(
+    instruction: &Instruction,
+    word3: u32,
+    channels: u32,
+) -> Result<(&'static orbistoun_shader::BufferFormat, [u32; 4], u32), TranslateError> {
+    let formats =
+        BUFFER_FORMATS.get_or_init(|| orbistoun_shader::FormatTable::builtin().unwrap_or_default());
+    let format = formats.get(word3 >> DESCRIPTOR_FORMAT_SHIFT & 0x7F).ok_or(
+        TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format load's descriptor names a format code with no meaning",
+        },
+    )?;
+    let components = u32::try_from(format.components()).unwrap_or(u32::MAX);
+    let selects = [word3 & 7, word3 >> 3 & 7, word3 >> 6 & 7, word3 >> 9 & 7];
+    if selects
+        .iter()
+        .take(channels as usize)
+        .any(|&select| !matches!(select, 0 | 1) && !(4..4 + components).contains(&select))
+    {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format load selects a component its format does not have, or a reserved select",
+        });
+    }
+    // The element's bits: whole words for a plain format, the packed width otherwise.
+    let total_bits = if format.is_plain_words() {
+        components * 32
+    } else {
+        packed_format_admitted(instruction, format, true)?
+    };
+    Ok((format, selects, total_bits))
 }
 
 /// One narrow integer component pulled out of a packed word, sign-extended when `signed`.

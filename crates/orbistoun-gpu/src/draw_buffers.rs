@@ -126,7 +126,7 @@ impl BufferCache {
 }
 
 /// The value one descriptor word or address half has for a draw with these user-data words.
-fn resolve_word(
+pub(crate) fn resolve_word(
     word: DescriptorWord,
     user_data: &[u32; USER_DATA_WORDS],
     memory: &impl GuestMemory,
