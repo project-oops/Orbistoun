@@ -22,6 +22,9 @@ v_add_nc_u16 v4, v2, 1
 v_add_nc_u16 v4, v5, v2
 v_pack_b32_f16 v1, v2, v3
 
+// ---- A texel's bytes rearranged: one format's bytes into another's ----------------
+v_perm_b32 v1, v2, v3, s4
+
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

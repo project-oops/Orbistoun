@@ -136,6 +136,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_lshrrev_b32_e32",
     "v_lshl_add_u32",
     "v_lshl_or_b32",
+    "v_perm_b32",
     "v_add_nc_u16",
     "v_lshlrev_b16",
     "v_pack_b32_f16",
@@ -1908,6 +1909,7 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
+        "v_perm_b32" => byte_permute(model, instruction),
 
         // Sixteen-bit arithmetic on register halves, as ACO forms an image copy's coordinates.
         "v_add_nc_u16" | "v_lshlrev_b16" => half_arithmetic(model, instruction, name),
@@ -5193,6 +5195,95 @@ fn shift_or<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// `v_perm_b32`: each byte of the result chosen by the matching byte of the third source, from the
+/// eight bytes of the first two - the second's low, the first's high - or a constant.
+///
+/// Mesa's `byte_perm_amd` (`nir_opcodes.py:1551-1568`), which ACO emits as this instruction with
+/// its sources in order (`aco_select_nir_alu.cpp:3355-3357`): a selector below 8 picks that byte of
+/// `first:second`; 8 to 11 repeat a sign bit - bit 15 or 31 of the second, then of the first - as
+/// a byte of ones or zeros; 12 is zero; 13 and above are `0xff`.
+fn byte_permute<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 3)?;
+    let [destination, first, second, selectors] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_perm_b32 does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_perm_b32 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let first = model.read_source(instruction, first, lane)?;
+        let second = model.read_source(instruction, second, lane)?;
+        let selectors = model.read_source(instruction, selectors, lane)?;
+        let mut result = model.constant(0);
+        for byte in 0..4 {
+            let shift = model.constant(byte * 8);
+            let chosen = permuted_byte(model, (first, second), selectors, shift);
+            let placed = model.binary(op::SHIFT_LEFT_LOGICAL, chosen, shift);
+            result = model.binary(op::BITWISE_OR, result, placed);
+        }
+        model.write_vector_lane(register, lane, result);
+    }
+    model.count();
+    Ok(())
+}
+
+/// One byte of [`byte_permute`]'s result: the one its selector, at `shift` in `selectors`, names.
+fn permuted_byte<M: Model + ?Sized>(
+    model: &mut M,
+    (first, second): (Id, Id),
+    selectors: Id,
+    shift: Id,
+) -> Id {
+    let byte_mask = model.constant(0xff);
+    let three = model.constant(3);
+    let (one, two, four, eight, twelve) = (
+        model.constant(1),
+        model.constant(2),
+        model.constant(4),
+        model.constant(8),
+        model.constant(12),
+    );
+    let selector = model.binary(op::SHIFT_RIGHT_LOGICAL, selectors, shift);
+    let selector = model.binary(op::BITWISE_AND, selector, byte_mask);
+    // 0-7: byte `selector & 3` of the second source below 4, of the first from 4.
+    let in_second = model.compare(op::ULESS_THAN, selector, four);
+    let word = model.select(in_second, second, first);
+    let index = model.binary(op::BITWISE_AND, selector, three);
+    let bits = model.binary(op::SHIFT_LEFT_LOGICAL, index, three);
+    let picked = model.binary(op::SHIFT_RIGHT_LOGICAL, word, bits);
+    let picked = model.binary(op::BITWISE_AND, picked, byte_mask);
+    // 8-11: bit 15 (even) or 31 (odd) of the second (8, 9) or the first (10, 11), as a byte.
+    let zero = model.constant(0);
+    let of_first = model.binary(op::BITWISE_AND, selector, two);
+    let of_first = model.compare(op::INOT_EQUAL, of_first, zero);
+    let word = model.select(of_first, first, second);
+    let odd = model.binary(op::BITWISE_AND, selector, one);
+    let fifteen = model.constant(15);
+    let sixteen = model.constant(16);
+    let odd_shift = model.binary(op::IMUL, odd, sixteen);
+    let bit = model.binary(op::IADD, fifteen, odd_shift);
+    let sign = model.binary(op::SHIFT_RIGHT_LOGICAL, word, bit);
+    let sign = model.binary(op::BITWISE_AND, sign, one);
+    let sign = model.binary(op::IMUL, sign, byte_mask);
+    // 12 is zero; 13 and above all ones.
+    let is_twelve = model.compare(op::IEQUAL, selector, twelve);
+    let constant = model.select(is_twelve, zero, byte_mask);
+    let below_twelve = model.compare(op::ULESS_THAN, selector, twelve);
+    let high = model.select(below_twelve, sign, constant);
+    let below_eight = model.compare(op::ULESS_THAN, selector, eight);
+    model.select(below_eight, picked, high)
 }
 
 /// `S_BFE_U32`'s field: `(value >> control[4:0]) & ((1 << control[22:16]) - 1)` (AMD's published

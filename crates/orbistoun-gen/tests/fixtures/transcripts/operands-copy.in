@@ -45,3 +45,10 @@ v_pk_mad_u16 v200, v5, v9, v190
 v_pk_mad_u16 v255, v12, s30, v44
 v_pk_mad_u16 v9, -1, v77, s101
 v_pk_mad_u16 v130, v88, 4, v240
+
+// ---- v_perm_b32: VOP3, two sources whose bytes are picked by a third --------------------
+v_perm_b32 v1, v2, v3, s4
+v_perm_b32 v200, s5, v9, v190
+v_perm_b32 v255, v12, s30, 64
+v_perm_b32 v9, -1, v77, v3
+v_perm_b32 v130, v88, 4, s101

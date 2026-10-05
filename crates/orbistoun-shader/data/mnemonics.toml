@@ -559,6 +559,11 @@ name = "v_lshlrev_b16"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 836
+name = "v_perm_b32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 879
 name = "v_lshl_or_b32"
 

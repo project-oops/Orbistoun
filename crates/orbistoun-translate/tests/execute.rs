@@ -5448,6 +5448,48 @@ fn a_packed_shift_moves_each_half_by_its_own_amount() {
     );
 }
 
+/// `v_perm_b32` picks each result byte by the matching selector byte, as Mesa's `byte_perm_amd`
+/// defines it: below 8 a byte of `first:second` (the second's low), 8 to 11 a sign bit of the
+/// second or first as a byte, 12 zero, above it `0xff`.
+#[test]
+fn a_byte_permute_picks_each_byte_by_its_selector() {
+    if !device_or_skip("a_byte_permute_picks_each_byte_by_its_selector") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x4433_2211)); // first: bits 15 and 31 clear
+    program.extend(v_mov_literal(1, 0x8877_9955)); // second: bits 15 and 31 set
+    program.extend(v_mov_literal(2, 0x0702_0500)); // bytes 0, 5, 2, 7
+    program.extend(v_mov_literal(3, 0x0d0a_0908)); // signs: second 15, second 31, first 15; 0xff
+    program.extend(v_mov_literal(4, 0x0c0b_0e01)); // byte 1, 0xff, first's bit 31, zero
+    for (dst, selectors) in [(5, 2), (6, 3), (7, 4)] {
+        program.extend(vop3(
+            "v_perm_b32",
+            dst,
+            [VGPR_0, VGPR_0 + 1, VGPR_0 + selectors],
+            0,
+            0,
+        ));
+    }
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 5),
+        0x4477_2255,
+        "bytes picked from both sources"
+    );
+    assert_eq!(
+        vector(&registers, 6),
+        0xff00_ffff,
+        "sign bits as bytes, then 0xff"
+    );
+    assert_eq!(
+        vector(&registers, 7),
+        0x0000_ff99,
+        "a byte, 0xff, a clear sign, zero"
+    );
+}
+
 /// The primitive export word: vertex indices packed ten bits apart, by `v_lshl_or_b32` and
 /// `v_or_b32`.
 #[test]
