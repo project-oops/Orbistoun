@@ -499,6 +499,11 @@ name = "v_or_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 29
+name = "v_xor_b32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 40
 name = "v_add_co_ci_u32_e32"
 

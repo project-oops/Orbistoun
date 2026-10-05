@@ -30,6 +30,8 @@ s_load_dwordx16 s[16:31], s[2:3], 0x0
 v_pk_sub_u16 v0, v1, v2
 v_pk_add_u16 v0, v1, v2
 v_pk_lshlrev_b16 v0, 0x20001, v0
+v_xor_b32_e32 v8, v1, v6
+v_xor_b32_e32 v250, s3, v9
 v_min3_i16 v3, v4, v5, v6
 v_cmpx_le_i16_e32 0, v2
 

@@ -5242,6 +5242,42 @@ const SEL_WORD_0: u32 = 4;
 const SEL_WORD_1: u32 = 5;
 const SEL_DWORD: u32 = 6;
 
+/// `v_xor_b32` exclusive-ors its sources, whole and in its SDWA form - SuperTuxKart's format copy
+/// takes the first source's high word: 0x1234 ^ 0x0f0f_0f0f.
+#[test]
+fn an_exclusive_or_works_whole_and_on_a_selected_word() {
+    if !device_or_skip("an_exclusive_or_works_whole_and_on_a_selected_word") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x1234_ffff));
+    program.extend(v_mov_literal(1, 0x0f0f_0f0f));
+    program.push(vop2_vv("v_xor_b32_e32", 2, 0, 1));
+    program.extend(vop2_sdwa(
+        "v_xor_b32_e32",
+        3,
+        1,
+        Sdwa {
+            src0: 0,
+            src0_scalar: false,
+            src0_sel: SEL_WORD_1,
+            src0_sext: false,
+            src1_sel: SEL_DWORD,
+            src1_sext: false,
+            dst_sel: SEL_DWORD,
+            dst_unused: 0,
+        },
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 0x1d3b_f0f0, "whole");
+    assert_eq!(
+        vector(&registers, 3),
+        0x0f0f_1d3b,
+        "the first source's high word"
+    );
+}
+
 /// radeonsi's index packing, as its blit primitive shader writes it: `v_lshlrev_b32_sdwa v2, 10,
 /// v0 src1_sel:WORD_1` then `v_or_b32_sdwa v0, v0, v2 src0_sel:WORD_0`, turning two 16-bit
 /// indices into ten-bit fields. Then a byte into a preserved destination, and a sign-extended
@@ -5472,6 +5508,26 @@ fn a_packed_shift_moves_each_half_by_its_own_amount() {
         vector(&registers, 6),
         0x000c_0280,
         "each half shifted by its own amount: 5 << 7 low, 3 << 2 high"
+    );
+}
+
+/// A packed instruction's literal is two halves: `v_pk_lshlrev_b16 v1, 0x20001, v0` shifts the low
+/// half by one and the high half by two, as SuperTuxKart's format copy does.
+#[test]
+fn a_packed_literal_gives_each_half_its_own_value() {
+    if !device_or_skip("a_packed_literal_gives_each_half_its_own_value") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0003_0005));
+    let [first, second] = vop3p("v_pk_lshlrev_b16", 1, [LITERAL_CODE, VGPR_0, 0], 0, 0b011);
+    program.extend([first, second, 0x0002_0001]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 1),
+        0x000c_000a,
+        "5 << 1 low, 3 << 2 high"
     );
 }
 
