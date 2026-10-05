@@ -655,6 +655,43 @@ pub fn last_dispatch_refusal() -> Option<String> {
         .clone()
 }
 
+/// What a dispatch's stored image writes back, in order: under cleared keys the whole chain they
+/// cover as the zeros they mean, then the stored level's texels over what it held - only the bytes
+/// that changed, so the rest of its blocks, a mip tail's other levels among them, are untouched -
+/// then the cleared keys marked uncompressed, now every texel is what it says.
+///
+/// # Errors
+///
+/// When the device answered no texels for a stored image, or ones that do not fit it.
+fn stored_image_writes(
+    images: &crate::pipeline::DispatchImages,
+    stored: Option<Vec<u32>>,
+) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    let mut writes = Vec::new();
+    if let Some(expand) = images.stored_keys_to_expand {
+        let (base, bytes) = expand.surface;
+        writes.push((base, vec![0; bytes]));
+    }
+    if let Some((surface, spanned_before)) = &images.stored_surface {
+        let texels = stored.ok_or("the device did not answer the stored image")?;
+        let mut spanned = spanned_before.clone();
+        surface
+            .tile(&texels, &mut spanned)
+            .map_err(|e| format!("the stored image could not be tiled back: {e}"))?;
+        for (first, bytes) in changed_runs(spanned_before, &spanned) {
+            writes.push((
+                surface.base() + first as u64,
+                spanned[first..first + bytes].to_vec(),
+            ));
+        }
+    }
+    if let Some(expand) = images.stored_keys_to_expand {
+        let (keys, bytes) = expand.keys;
+        writes.push((keys, vec![crate::dcc::KEY_UNCOMPRESSED; bytes]));
+    }
+    Ok(writes)
+}
+
 /// The runs of words that differ between `before` and `after`, as `(first word, words)`.
 fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
@@ -739,27 +776,7 @@ impl GuestCp<'_> {
                 writes.push((base + first as u64 * 4, bytes));
             }
         }
-        // The stored image's texels, placed back over what it held, and only the bytes that
-        // changed written - the rest of its blocks, a mip tail's other levels among them, are
-        // untouched.
-        if let Some((surface, spanned_before)) = &prepared.images.stored_surface {
-            let texels = stored.ok_or("the device did not answer the stored image")?;
-            let mut spanned = spanned_before.clone();
-            surface
-                .tile(&texels, &mut spanned)
-                .map_err(|e| format!("the stored image could not be tiled back: {e}"))?;
-            for (first, bytes) in changed_runs(spanned_before, &spanned) {
-                writes.push((
-                    surface.base() + first as u64,
-                    spanned[first..first + bytes].to_vec(),
-                ));
-            }
-        }
-        // Cleared keys the stored image was read through, marked uncompressed now that every texel
-        // of it is written back as stored.
-        if let Some((keys, bytes)) = prepared.images.stored_keys_to_expand {
-            writes.push((keys, vec![crate::dcc::KEY_UNCOMPRESSED; bytes]));
-        }
+        writes.extend(stored_image_writes(&prepared.images, stored)?);
         let writable = write_lookup().get();
         if !writes
             .iter()
@@ -2829,6 +2846,47 @@ mod tests {
             TargetRead::of_pattern(0x7777_7777, target, ComponentSwap::Standard),
             TargetRead::Uniform(0xff00_0077)
         ));
+    }
+
+    /// A stored image read through cleared keys writes back its whole chain as zeros first, then
+    /// its level's non-zero texels over them, then its keys as uncompressed: the chain's other
+    /// levels read the zeros their cleared keys meant, not what memory held under them.
+    #[test]
+    fn a_cleared_chain_expands_whole_before_its_level_is_written() {
+        use crate::pipeline::{DispatchImages, DispatchSurface, KeysToExpand};
+        let level = super::ColourTarget {
+            base: BASE + 0x2_0000,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64KbBpp1,
+            place: crate::registers::Place::Whole,
+        };
+        let surface = DispatchSurface::Tiled(level);
+        let images = DispatchImages {
+            stored_surface: Some((surface, vec![0; surface.bytes()])),
+            stored_keys_to_expand: Some(KeysToExpand {
+                keys: (0x9000, 3),
+                surface: (BASE, 0x3_0000),
+            }),
+            ..DispatchImages::default()
+        };
+        let mut texels = vec![0u32; 16 * 8];
+        texels[5] = 0x42;
+        let writes = super::stored_image_writes(&images, Some(texels)).expect("writes");
+        assert_eq!(
+            writes[0],
+            (BASE, vec![0; 0x3_0000]),
+            "the chain zeroed first"
+        );
+        let at = crate::tiling::tiled_byte_offset_64kb_rx_bpp1_surface(5, 0, 16) as u64;
+        assert_eq!(
+            writes[1],
+            (BASE + 0x2_0000 + at, vec![0x42]),
+            "then the one texel"
+        );
+        assert_eq!(writes[2], (0x9000, vec![crate::dcc::KEY_UNCOMPRESSED; 3]));
+        assert_eq!(writes.len(), 3);
     }
 
     /// A uniform target is handed over exactly as detiling the same memory would hand it.
