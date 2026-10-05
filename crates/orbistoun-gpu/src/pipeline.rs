@@ -1888,7 +1888,7 @@ impl Pipeline {
         } else {
             64
         };
-        let sampled_through_samplers = self.samples_through_samplers();
+        let mut sampled_through_samplers = self.samples_through_samplers();
         for draw in draws {
             let mut written: Vec<Option<u32>> = shader_registers
                 .iter()
@@ -1949,9 +1949,13 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            by_geometry.flat_twins = self.draw_flat_twins(&draw_candidates);
-            by_geometry.saturated =
-                self.draw_saturated(&draw_candidates, (&fragment_words, memory), &by_geometry);
+            // A pixel shader first prepared here may be the first to sample through a sampler.
+            sampled_through_samplers |= self.inputs_for_draw(
+                &draw_candidates,
+                (&fragment_words, memory),
+                &mut by_geometry,
+                submission,
+            );
             for candidate in draw_candidates {
                 let stage = candidate.stage;
                 let resource = self.bind_chunked(
@@ -2043,20 +2047,44 @@ impl Pipeline {
             .any(|source| source.sampler_offset.is_some())
     }
 
-    /// The coordinates a draw's pixel shader saturates for each texture slot (D743): those the
-    /// sampler the draw binds there clamps to half a border, read where the pixel shader prepared
-    /// for no particular draw loads it from. None where that shader samples through no sampler.
-    fn draw_saturated(
-        &self,
+    /// Records in `by_geometry` what a draw gives its pixel shader beside its programs: the flat
+    /// twins of its attributes (D742) and the coordinates it saturates (D743). Whether any module
+    /// now samples through a sampler.
+    fn inputs_for_draw(
+        &mut self,
         candidates: &[Candidate],
         (words, memory): (&[u32; USER_DATA_WORDS], &impl GuestMemory),
-        by_geometry: &ByGeometry,
+        by_geometry: &mut ByGeometry,
+        submission: &mut Submission,
+    ) -> bool {
+        by_geometry.flat_twins = self.draw_flat_twins(candidates);
+        by_geometry.saturated =
+            self.draw_saturated(candidates, (words, memory), by_geometry, submission);
+        self.samples_through_samplers()
+    }
+
+    /// The coordinates a draw's pixel shader saturates for each texture slot (D743): those the
+    /// sampler the draw binds there clamps to half a border, read where the pixel shader prepared
+    /// for no particular draw loads it from - prepared here first when no earlier draw did. None
+    /// where that shader samples through no sampler.
+    fn draw_saturated(
+        &mut self,
+        candidates: &[Candidate],
+        (words, memory): (&[u32; USER_DATA_WORDS], &impl GuestMemory),
+        by_geometry: &mut ByGeometry,
+        submission: &mut Submission,
     ) -> [[bool; 2]; 2] {
         let mut saturated = UNSATURATED;
-        let Some(fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
+        let Some(&fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
             return saturated;
         };
         let plain = (ShaderStage::Fragment as u32, fragment.address, false);
+        if let std::collections::btree_map::Entry::Vacant(entry) = by_geometry.plain.entry(plain) {
+            entry.insert(
+                self.prepare_candidate(fragment, (memory, ForDraw::default()), submission)
+                    .ok(),
+            );
+        }
         let Some(sources) = by_geometry
             .plain
             .get(&plain)
@@ -4319,6 +4347,78 @@ mod tests {
             (0, Some([TextureWrap::ClampHalfBorder; 2])),
             "saturated: bound as the sampler says"
         );
+    }
+
+    /// A draw whose pixel shader no earlier draw prepared still has its half-border samplers read
+    /// (D743): the shader is prepared for no particular draw first, which names where its sampler
+    /// comes from, and the draw's sampler then says which coordinates to saturate.
+    #[test]
+    fn a_pixel_shader_first_met_at_a_draw_saturates_for_its_sampler() {
+        use super::{ByGeometry, Candidate, Pipeline, ShaderStage, Submission};
+        use orbistoun_shader::EncodingTable;
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        const PROGRAM: u64 = 0x1_0000;
+        const TABLE: u64 = 0x2_0000;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(PROGRAM)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let s_load = |name: &str, destination: u32, offset: u32| {
+            let (family, opcode) = encodings.find_by_name(name).expect("the target has it");
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|e| e.name == family)
+                .expect("its family");
+            [
+                encoding.value | (opcode << encoding.opcode.shift) | (destination << 6),
+                offset,
+            ]
+        };
+        // The coordinate interpolated into v0 and v1; the image from the table at s[0:1] into
+        // s[4:11] and its sampler from 0x20 into s[12:15]; `image_sample_lz v[4:7], v[0:1]`; end.
+        let mut program: Vec<u32> = vec![0xc800_0000, 0xc804_0100];
+        program.extend(s_load("s_load_dwordx8", 4, 0));
+        program.extend(s_load("s_load_dwordx4", 12, 0x20));
+        program.extend([
+            0xf000_0000 | 39 << 18 | 0xf << 8 | 1 << 3,
+            4 << 8 | 1 << 16 | 3 << 21,
+            0xbf81_0000,
+        ]);
+        let mut bytes = vec![0u8; usize::try_from(TABLE - PROGRAM).expect("small") + 0x40];
+        for (i, word) in program.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // `GL_CLAMP` across only, both filters linear.
+        let sampler_at = usize::try_from(TABLE - PROGRAM).expect("small") + 0x20;
+        bytes[sampler_at..sampler_at + 4].copy_from_slice(&4u32.to_le_bytes());
+        bytes[sampler_at + 8..sampler_at + 12]
+            .copy_from_slice(&(1u32 << 20 | 1 << 22).to_le_bytes());
+        let memory = Memory(bytes);
+
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Lane,
+            width: Width::default(),
+        })
+        .expect("a pipeline");
+        let mut words = [0u32; super::USER_DATA_WORDS];
+        words[0] = TABLE as u32;
+        let fragment = Candidate {
+            address: PROGRAM,
+            stage: ShaderStage::Fragment,
+        };
+        let mut by_geometry = ByGeometry::default();
+        let saturated = pipeline.draw_saturated(
+            &[fragment],
+            (&words, &memory),
+            &mut by_geometry,
+            &mut Submission::default(),
+        );
+        assert_eq!(saturated, [[true, false], [false, false]]);
     }
 
     /// A one-byte linear texture with no pitch of its own is read at 256 texels a row, as
