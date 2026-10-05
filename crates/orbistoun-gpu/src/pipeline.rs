@@ -23,7 +23,7 @@ use orbistoun_translate::wavefront::{
 };
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
 
-use crate::backend::{Rect, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS};
+use crate::backend::{IndexBuffer, Rect, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS};
 use crate::packet::{PacketWalk, walk};
 use crate::registers::{
     BlendControl, ColourTarget, ColourTargetExtent, ColourTargetFormat, DepthControl, DrawCall,
@@ -534,13 +534,12 @@ const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
 /// index, so the vertex ids of a draw that sets it are not its indices.
 const GE_INDX_OFFSET: u32 = 0xC24A;
 
-/// The geometry-engine inputs a draw hands its primitive shader, when one subgroup of `lanes`
-/// threads holds it whole (D730), or why not: a non-indexed draw of one instance over a list of
-/// three-vertex primitives, with no index offset and no passthrough.
+/// The geometry-engine inputs a draw hands its primitive shader whole (D730), or why it cannot: a
+/// draw of one instance over a list or strip of triangles, with no index offset and no
+/// passthrough. One wave may not hold them; [`chunk_plans`] splits those that it does not.
 fn draw_geometry(
     draw: &DrawCall,
     mut latest: impl FnMut(u32) -> Option<u32>,
-    lanes: u32,
 ) -> Result<GeometryInputs, String> {
     let (vertices, indices) = match draw.kind {
         DrawKind::Auto { vertices } => (vertices, None),
@@ -584,17 +583,109 @@ fn draw_geometry(
     if latest(GE_INDX_OFFSET).is_some_and(|value| value != 0) {
         return Err("a draw with an index offset's vertex ids are not seeded".to_owned());
     }
-    let geometry = GeometryInputs {
+    Ok(GeometryInputs {
         first_vertex: 0,
         vertices,
         primitives,
         assembly,
         indices,
-    };
-    match geometry.refusal(lanes) {
-        Some(why) => Err(why.to_owned()),
-        None => Ok(geometry),
+    })
+}
+
+/// One subgroup's share of a draw too large for one wave (D741): its own geometry, and where its
+/// vertex threads find their ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChunkPlan {
+    geometry: GeometryInputs,
+    index_buffer: IndexBuffer,
+}
+
+/// A draw split into subgroups of at most `lanes` vertex and primitive threads, as the geometry
+/// engine splits one into primitive-shader subgroups (D741); empty for a draw one subgroup holds
+/// whole.
+///
+/// A list's chunk takes whole triangles; a strip's an even count of them, so each chunk's first
+/// triangle has the strip's even winding, and its vertices overlap the next chunk's by two. Each
+/// chunk reads its vertex ids as indices: an indexed draw's own from where its first primitive's
+/// begin (`index_address`, the draw's), a non-indexed draw's counting up from that position.
+fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) -> Vec<ChunkPlan> {
+    if whole.vertices <= lanes && whole.primitives <= lanes {
+        return Vec::new();
     }
+    let per_chunk = match whole.assembly {
+        Assembly::List => lanes / 3,
+        Assembly::Strip { .. } => lanes.saturating_sub(2) & !1,
+    };
+    if per_chunk == 0 {
+        return Vec::new();
+    }
+    let width = whole
+        .indices
+        .unwrap_or(orbistoun_translate::wavefront::IndexWidth::Bits32);
+    (0..whole.primitives)
+        .step_by(per_chunk as usize)
+        .map(|start| {
+            let primitives = per_chunk.min(whole.primitives - start);
+            let first_index = match whole.assembly {
+                Assembly::List => start * 3,
+                Assembly::Strip { .. } => start,
+            };
+            let index_buffer = match (whole.indices, index_address) {
+                (Some(width), Some(address)) => IndexBuffer::Guest {
+                    address: address + u64::from(first_index) * u64::from(width.bytes()),
+                    bytes: width.bytes(),
+                },
+                _ => IndexBuffer::Counting {
+                    first: whole.first_vertex + first_index,
+                },
+            };
+            ChunkPlan {
+                geometry: GeometryInputs {
+                    first_vertex: 0,
+                    vertices: whole.assembly.vertices_for(primitives),
+                    primitives,
+                    assembly: whole.assembly,
+                    indices: Some(width),
+                },
+                index_buffer,
+            }
+        })
+        .collect()
+}
+
+/// [`chunk_plans`] for `draw`, whose indices, if it has them, are where it names: a draw one wave
+/// does not hold is drawn in chunks that it does (D741).
+fn draw_chunks(draw: &DrawCall, whole: GeometryInputs, lanes: u32) -> Vec<ChunkPlan> {
+    let address = match draw.kind {
+        DrawKind::Indexed { address, .. } => Some(address),
+        DrawKind::Auto { .. } => None,
+    };
+    chunk_plans(whole, address, lanes)
+}
+
+/// Each chunk's module beside its plan (D741); empty where the draw is drawn whole.
+fn chunks_of(modules: &[ResourceId], plans: &[ChunkPlan]) -> Vec<Chunk> {
+    if modules.len() != plans.len() {
+        return Vec::new();
+    }
+    modules
+        .iter()
+        .zip(plans)
+        .map(|(&vertex, plan)| Chunk {
+            vertex,
+            indices: plan.geometry.vertices,
+            index_buffer: plan.index_buffer,
+        })
+        .collect()
+}
+
+/// A chunk of a draw as bound (D741): the primitive shader for its geometry, its index count and
+/// where its indices are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Chunk {
+    vertex: ResourceId,
+    indices: u32,
+    index_buffer: IndexBuffer,
 }
 
 /// A translated shader, with enough of its bytes to notice if the key stops identifying it.
@@ -1066,7 +1157,7 @@ impl Pipeline {
         submission.guest_memory_base = self.window.address();
         submission.report.shaders_found = candidates.len();
 
-        let per_draw = span(Span::PrepareShaders, || {
+        let (per_draw, chunks) = span(Span::PrepareShaders, || {
             self.bind_shaders(
                 &candidates,
                 (queue, registered),
@@ -1095,7 +1186,7 @@ impl Pipeline {
                 &mut submission.commands,
                 (&walked, stream, &draws),
                 &writes,
-                (&per_draw, depth_target.map(|(id, _, _)| id)),
+                (&per_draw, &chunks, depth_target.map(|(id, _, _)| id)),
                 (
                     &mut submission.report.unmodelled_viewports,
                     &mut submission.report.unmasked_one_byte_draws,
@@ -1617,7 +1708,8 @@ impl Pipeline {
     /// Prepares the reconciled candidates and binds them, then finds the shader each draw ran: the
     /// program addresses in force at its packet, translated where the first pass did not, so a
     /// stream that swaps a stage's program between draws binds each draw's own. A registered stage
-    /// keeps its registration. Returns each draw's shaders, in draw order.
+    /// keeps its registration. Returns each draw's shaders, in draw order, and the chunks of each
+    /// draw too large for one wave (D741), empty for one drawn whole.
     fn bind_shaders(
         &mut self,
         candidates: &[Candidate],
@@ -1625,11 +1717,8 @@ impl Pipeline {
         (draws, writes): (&[DrawCall], &[RegisterWrite]),
         memory: &impl GuestMemory,
         submission: &mut Submission,
-    ) -> Vec<Vec<(ShaderStage, ResourceId)>> {
-        // Every (stage, address) prepared so far and what it became; `None` for a failure, so it is
-        // tried and reported once however many draws name it. A primitive shader that needs a
-        // draw's geometry is prepared per geometry instead (D730).
-        let mut by_geometry = ByGeometry::default();
+    ) -> (Vec<DrawShaders>, Vec<Vec<Chunk>>) {
+        let mut by_geometry = self.bind_up_front(candidates, memory, submission);
         let registered_stages: Vec<ShaderStage> = candidates
             .iter()
             .filter(|c| {
@@ -1639,28 +1728,9 @@ impl Pipeline {
             })
             .map(|c| c.stage)
             .collect();
-        for &candidate in candidates {
-            let key = (candidate.stage as u32, candidate.address);
-            let plain = (key.0, key.1, false);
-            match self.prepare_candidate(candidate, (memory, ForDraw::default()), submission) {
-                Ok(resource) => {
-                    by_geometry.plain.insert(plain, Some(resource));
-                    submission.commands.push(RenderCommand::BindShader {
-                        stage: candidate.stage,
-                        shader: resource,
-                    });
-                }
-                Err(Unprepared::Failed) => {
-                    by_geometry.plain.insert(plain, None);
-                }
-                // Bound per draw, with each draw's geometry.
-                Err(Unprepared::NeedsGeometry(reason)) => {
-                    by_geometry.needs.insert(key, reason);
-                }
-            }
-        }
 
         let mut per_draw = Vec::new();
+        let mut per_draw_chunks = Vec::new();
         // One pass over the stream's writes for all its draws.
         let mut sweep = crate::registers::RegisterSweep::new(writes);
         let shader_registers: Vec<u32> = self.vocabulary.shader_register_ids().collect();
@@ -1668,6 +1738,7 @@ impl Pipeline {
         // frame rewrites the same addresses before each of many draws.
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
+        let mut previous_chunks: Vec<ResourceId> = Vec::new();
         let lanes = if submission.report.wave_widths.primitive_w32 {
             32
         } else {
@@ -1680,11 +1751,8 @@ impl Pipeline {
                 .collect();
             // A primitive shader prepared per geometry runs another module for other geometry, so
             // the geometry is part of what must repeat.
-            let geometry = draw_geometry(
-                draw,
-                |register| sweep.latest(draw.packet_offset, register),
-                lanes,
-            );
+            let geometry =
+                draw_geometry(draw, |register| sweep.latest(draw.packet_offset, register));
             if !by_geometry.needs.is_empty()
                 && let Ok(geometry) = geometry
             {
@@ -1705,10 +1773,16 @@ impl Pipeline {
             if !by_geometry.needs.is_empty() {
                 written.extend(vertex_words.iter().map(|&word| Some(word)));
             }
+            let plans = geometry
+                .as_ref()
+                .map_or_else(|_| Vec::new(), |&whole| draw_chunks(draw, whole, lanes));
             if previous_writes.as_ref() == Some(&written) {
                 per_draw.push(Vec::clone(&previous_shaders));
+                // The same modules; an indexed draw's chunks read its own indices.
+                per_draw_chunks.push(chunks_of(&previous_chunks, &plans));
                 continue;
             }
+            let mut chunked = Vec::new();
             let mut shaders = Vec::new();
             let latest =
                 sweep.before_among(draw.packet_offset, self.vocabulary.shader_register_ids());
@@ -1723,10 +1797,10 @@ impl Pipeline {
                     address: inferred.address,
                     stage,
                 };
-                let resource = self.bind_for_draw(
+                let resource = self.bind_chunked(
                     candidate,
-                    (memory, &geometry, window_space, &vertex_words),
-                    &mut by_geometry,
+                    (memory, &geometry, &plans, window_space, &vertex_words),
+                    (&mut by_geometry, &mut chunked),
                     submission,
                 );
                 if let Some(resource) = resource {
@@ -1734,10 +1808,95 @@ impl Pipeline {
                 }
             }
             per_draw.push(shaders.clone());
+            per_draw_chunks.push(chunks_of(&chunked, &plans));
             previous_writes = Some(written);
             previous_shaders = shaders;
+            previous_chunks = chunked;
         }
-        per_draw
+        (per_draw, per_draw_chunks)
+    }
+
+    /// Prepares and binds the reconciled candidates before any draw. Returns every (stage, address)
+    /// prepared and what it became, `None` for a failure, so it is tried and reported once however
+    /// many draws name it; a primitive shader that needs a draw's geometry is prepared per geometry
+    /// instead (D730).
+    fn bind_up_front(
+        &mut self,
+        candidates: &[Candidate],
+        memory: &impl GuestMemory,
+        submission: &mut Submission,
+    ) -> ByGeometry {
+        let mut by_geometry = ByGeometry::default();
+        for &candidate in candidates {
+            let key = (candidate.stage as u32, candidate.address);
+            let plain = (key.0, key.1, false);
+            match self.prepare_candidate(candidate, (memory, ForDraw::default()), submission) {
+                Ok(resource) => {
+                    by_geometry.plain.insert(plain, Some(resource));
+                    submission.commands.push(RenderCommand::BindShader {
+                        stage: candidate.stage,
+                        shader: resource,
+                    });
+                }
+                Err(Unprepared::Failed) => {
+                    by_geometry.plain.insert(plain, None);
+                }
+                // Bound per draw, with each draw's geometry.
+                Err(Unprepared::NeedsGeometry(reason)) => {
+                    by_geometry.needs.insert(key, reason);
+                }
+            }
+        }
+        by_geometry
+    }
+
+    /// [`Self::bind_for_draw`] for a draw that may be split into chunks (D741): a primitive shader
+    /// seeded with the geometry runs one module per chunk, each listed in `chunked`, and the draw is
+    /// unshaded if any chunk's cannot be prepared; one that is not seeded runs the draw whole.
+    fn bind_chunked(
+        &mut self,
+        candidate: Candidate,
+        (memory, geometry, plans, window_space, words): (
+            &impl GuestMemory,
+            &Result<GeometryInputs, String>,
+            &[ChunkPlan],
+            bool,
+            &[u32; USER_DATA_WORDS],
+        ),
+        (by_geometry, chunked): (&mut ByGeometry, &mut Vec<ResourceId>),
+        submission: &mut Submission,
+    ) -> Option<ResourceId> {
+        let first = plans
+            .first()
+            .map_or_else(|| geometry.clone(), |plan| Ok(plan.geometry));
+        let resource = self.bind_for_draw(
+            candidate,
+            (memory, &first, window_space, words),
+            by_geometry,
+            submission,
+        );
+        if candidate.stage != ShaderStage::Vertex
+            || resource.is_none()
+            || plans.is_empty()
+            || !by_geometry
+                .needs
+                .contains_key(&(candidate.stage as u32, candidate.address))
+        {
+            return resource;
+        }
+        let modules: Option<Vec<ResourceId>> = plans
+            .iter()
+            .map(|plan| {
+                self.bind_for_draw(
+                    candidate,
+                    (memory, &Ok(plan.geometry), window_space, words),
+                    by_geometry,
+                    submission,
+                )
+            })
+            .collect();
+        *chunked = modules.unwrap_or_default();
+        chunked.first().copied()
     }
 
     /// Binds what each draw's shaders read beside their user data, for a backend that supplies it:
@@ -2457,7 +2616,7 @@ fn push_geometry_commands(
     commands: &mut Vec<RenderCommand>,
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
     writes: &[RegisterWrite],
-    (shaders, depth_target): (&[DrawShaders], Option<ResourceId>),
+    (shaders, chunks, depth_target): (&[DrawShaders], &[Vec<Chunk>], Option<ResourceId>),
     (unmodelled_viewports, unmasked_one_byte_draws): (&mut usize, &mut usize),
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
@@ -2550,27 +2709,64 @@ fn push_geometry_commands(
                 sent[slot] = Some(words);
             }
         }
-        let command = match draw.kind {
-            DrawKind::Auto { vertices } => RenderCommand::Draw {
-                vertices,
-                instances: draw.instances,
-                first_vertex: 0,
-            },
-            DrawKind::Indexed { indices, address } => RenderCommand::DrawIndexed {
-                indices,
-                instances: draw.instances,
-                first_index: 0,
-                index_buffer: index_width(sweep.latest(at, VGT_INDEX_TYPE))
-                    .map(|width| (address, width.bytes())),
-            },
-        };
-        commands.push(command);
+        if let Some(chunks) = chunks.get(index).filter(|chunks| !chunks.is_empty()) {
+            push_chunks(commands, chunks, draw.instances, &mut bound);
+            continue;
+        }
+        commands.push(draw_command(draw, sweep.latest(at, VGT_INDEX_TYPE)));
     }
     for dispatch in dispatch_calls(walked, stream) {
         commands.push(RenderCommand::Dispatch {
             x: dispatch.groups[0],
             y: dispatch.groups[1],
             z: dispatch.groups[2],
+        });
+    }
+}
+
+/// The command that draws `draw` whole; an indexed one's indices are as wide as its
+/// `VGT_INDEX_TYPE` says.
+fn draw_command(draw: &DrawCall, index_type: Option<u32>) -> RenderCommand {
+    match draw.kind {
+        DrawKind::Auto { vertices } => RenderCommand::Draw {
+            vertices,
+            instances: draw.instances,
+            first_vertex: 0,
+        },
+        DrawKind::Indexed { indices, address } => RenderCommand::DrawIndexed {
+            indices,
+            instances: draw.instances,
+            first_index: 0,
+            index_buffer: index_width(index_type).map(|width| IndexBuffer::Guest {
+                address,
+                bytes: width.bytes(),
+            }),
+        },
+    }
+}
+
+/// A chunked draw's chunks (D741), each binding its own primitive shader and drawing its indices.
+fn push_chunks(
+    commands: &mut Vec<RenderCommand>,
+    chunks: &[Chunk],
+    instances: u32,
+    bound: &mut Vec<(ShaderStage, ResourceId)>,
+) {
+    for chunk in chunks {
+        let shader = (ShaderStage::Vertex, chunk.vertex);
+        if !bound.contains(&shader) {
+            bound.retain(|(stage, _)| *stage != ShaderStage::Vertex);
+            bound.push(shader);
+            commands.push(RenderCommand::BindShader {
+                stage: shader.0,
+                shader: shader.1,
+            });
+        }
+        commands.push(RenderCommand::DrawIndexed {
+            indices: chunk.indices,
+            instances,
+            first_index: 0,
+            index_buffer: Some(chunk.index_buffer),
         });
     }
 }
@@ -4527,10 +4723,9 @@ mod tests {
     }
 
     /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list or strip
-    /// of triangles that one wave holds, without passthrough or an index offset (D730);
-    /// anything else says why not.
+    /// of triangles, without passthrough or an index offset (D730); anything else says why not.
     #[test]
-    fn a_draw_s_geometry_is_seeded_only_where_one_subgroup_holds_it() {
+    fn a_draw_s_geometry_is_seeded_only_for_one_instance_of_triangles() {
         use super::{
             DI_PT_RECTLIST, DI_PT_TRILIST, GE_INDX_OFFSET, GeometryInputs, PRIMGEN_PASSTHRU_EN,
             VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN, draw_geometry,
@@ -4550,7 +4745,7 @@ mod tests {
             }
         };
         assert_eq!(
-            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0x0041_2010, 0), 32),
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0x0041_2010, 0)),
             Ok(GeometryInputs {
                 first_vertex: 0,
                 vertices: 3,
@@ -4570,7 +4765,7 @@ mod tests {
         };
         for (mode, provoking_last) in [(super::PROVOKING_VTX_LAST, true), (0, false)] {
             assert_eq!(
-                draw_geometry(&draw(6, 1), strip(mode), 64),
+                draw_geometry(&draw(6, 1), strip(mode)),
                 Ok(GeometryInputs {
                     first_vertex: 0,
                     vertices: 6,
@@ -4581,22 +4776,22 @@ mod tests {
             );
         }
         assert_eq!(
-            draw_geometry(&draw(30, 1), registers(DI_PT_TRILIST, 0, 0), 64).map(|g| g.primitives),
+            draw_geometry(&draw(30, 1), registers(DI_PT_TRILIST, 0, 0)).map(|g| g.primitives),
             Ok(10)
         );
         for refused in [
-            draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0), 64),
-            draw_geometry(&draw(3, 1), registers(5, 0, 0), 64),
+            draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0)),
+            draw_geometry(&draw(3, 1), registers(5, 0, 0)),
             draw_geometry(
                 &draw(3, 1),
                 registers(DI_PT_RECTLIST, PRIMGEN_PASSTHRU_EN, 0),
-                64,
             ),
-            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 4), 64),
-            draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0), 64),
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 4)),
         ] {
             assert!(refused.is_err(), "{refused:?}");
         }
+        // Larger than a wave is not refused: it is drawn in chunks (D741).
+        assert!(draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0)).is_ok());
         // An indexed draw takes its index size from `VGT_INDEX_TYPE` (D740): sixteen and
         // thirty-two bits are read, eight and an unwritten type are not, nor is primitive restart.
         let indexed = DrawCall {
@@ -4619,18 +4814,79 @@ mod tests {
             (0, orbistoun_translate::wavefront::IndexWidth::Bits16),
             (1, orbistoun_translate::wavefront::IndexWidth::Bits32),
         ] {
-            let geometry = draw_geometry(&indexed, with_index(Some(kind), 0), 64);
+            let geometry = draw_geometry(&indexed, with_index(Some(kind), 0));
             assert_eq!(
                 geometry.map(|g| (g.vertices, g.primitives, g.indices)),
                 Ok((6, 2, Some(width)))
             );
         }
         for refused in [
-            draw_geometry(&indexed, with_index(Some(2), 0), 64),
-            draw_geometry(&indexed, with_index(None, 0), 64),
-            draw_geometry(&indexed, with_index(Some(0), 1), 64),
+            draw_geometry(&indexed, with_index(Some(2), 0)),
+            draw_geometry(&indexed, with_index(None, 0)),
+            draw_geometry(&indexed, with_index(Some(0), 1)),
         ] {
             assert!(refused.is_err(), "{refused:?}");
         }
+    }
+
+    /// A draw one wave does not hold is split as the geometry engine splits it into subgroups
+    /// (D741): a list into whole triangles, a strip into an even count of them overlapping by two
+    /// vertices, each chunk reading its vertex ids from where its first primitive's begin.
+    #[test]
+    fn a_draw_larger_than_a_wave_is_split_into_chunks_it_holds() {
+        use super::{Assembly, ChunkPlan, GeometryInputs, IndexBuffer, chunk_plans};
+        use orbistoun_translate::wavefront::IndexWidth;
+        let whole = |vertices, primitives, assembly, indices| GeometryInputs {
+            first_vertex: 0,
+            vertices,
+            primitives,
+            assembly,
+            indices,
+        };
+        assert!(chunk_plans(whole(63, 21, Assembly::List, None), None, 64).is_empty());
+        // 96 vertices of a list at 64 lanes: 21 triangles, then 11.
+        let list = chunk_plans(whole(96, 32, Assembly::List, None), None, 64);
+        assert_eq!(
+            list,
+            [
+                ChunkPlan {
+                    geometry: whole(63, 21, Assembly::List, Some(IndexWidth::Bits32)),
+                    index_buffer: IndexBuffer::Counting { first: 0 },
+                },
+                ChunkPlan {
+                    geometry: whole(33, 11, Assembly::List, Some(IndexWidth::Bits32)),
+                    index_buffer: IndexBuffer::Counting { first: 63 },
+                },
+            ]
+        );
+        // An indexed strip of 70 vertices (68 triangles) at 32 lanes: 30, 30, then 8 triangles,
+        // each starting 30 indices on.
+        let strip = Assembly::Strip {
+            provoking_last: true,
+        };
+        let plans = chunk_plans(
+            whole(70, 68, strip, Some(IndexWidth::Bits16)),
+            Some(0x1000),
+            32,
+        );
+        let got: Vec<_> = plans
+            .iter()
+            .map(|plan| {
+                (
+                    plan.geometry.vertices,
+                    plan.geometry.primitives,
+                    plan.index_buffer,
+                )
+            })
+            .collect();
+        let guest = |address| IndexBuffer::Guest { address, bytes: 2 };
+        assert_eq!(
+            got,
+            [
+                (32, 30, guest(0x1000)),
+                (32, 30, guest(0x1000 + 60)),
+                (10, 8, guest(0x1000 + 120)),
+            ]
+        );
     }
 }

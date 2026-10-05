@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 use orbistoun_translate::draw_buffers::{BufferSource, DescriptorReads, DescriptorWord};
 use orbistoun_translate::wavefront::{TableBase, TableWord};
 
-use crate::backend::{DrawBuffer, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS};
+use crate::backend::{
+    DrawBuffer, IndexBuffer, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS,
+};
 use crate::pipeline::GuestMemory;
 use crate::registers::decode_buffer_descriptor;
 
@@ -196,6 +198,24 @@ fn resolve_range(
     Ok((address, length))
 }
 
+/// The vertex ids a chunk of a non-indexed draw reads in place of indices (D741): `count`
+/// thirty-two-bit ids counting up from its first; empty for anything else.
+fn counting_indices(indices: Option<Result<(IndexBuffer, u32), &'static str>>) -> DrawBuffer {
+    let ids: Vec<u32> = match indices {
+        Some(Ok((IndexBuffer::Counting { first }, count))) => {
+            (0..count).map(|id| first.wrapping_add(id)).collect()
+        }
+        _ => Vec::new(),
+    };
+    let bytes: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+    let mut hasher = crate::ContentHasher::new(ids.len());
+    hasher.bytes(&bytes);
+    DrawBuffer {
+        hash: hasher.finish(),
+        bytes: bytes.into(),
+    }
+}
+
 /// Inserts a [`RenderCommand::BindDrawBuffers`] before each draw whose shaders read through
 /// buffers, for each stage whose buffers differ from the ones last bound, so every draw reads the
 /// ranges its own user data names. A draw whose buffers cannot all be bound is counted in
@@ -244,9 +264,7 @@ pub fn bind_draw_buffers(
                             ..
                         } if module.is_some_and(|m| index_readers.contains(&m)) => Some(
                             index_buffer
-                                .map(|(address, bytes)| {
-                                    (address, u64::from(*indices) * u64::from(bytes))
-                                })
+                                .map(|buffer| (buffer, *indices))
                                 .ok_or("an indexed draw whose index size is not read (D740)"),
                         ),
                         _ => None,
@@ -256,11 +274,20 @@ pub fn bind_draw_buffers(
                     }
                     let ranges = list
                         .iter()
-                        .map(|source| resolve_range(source, &words[at], memory))
-                        .chain(indices);
+                        .map(|source| resolve_range(source, &words[at], memory).map(Some))
+                        .chain(indices.map(|found| {
+                            found.map(|(buffer, count)| match buffer {
+                                IndexBuffer::Guest { address, bytes } => {
+                                    Some((address, u64::from(count) * u64::from(bytes)))
+                                }
+                                IndexBuffer::Counting { .. } => None,
+                            })
+                        }));
                     let resolved: Result<Vec<DrawBuffer>, &'static str> = ranges
                         .map(|range| {
-                            let range = range?;
+                            let Some(range) = range? else {
+                                return Ok(counting_indices(indices));
+                            };
                             read.entry(range)
                                 .or_insert_with(|| {
                                     let length = usize::try_from(range.1)
@@ -390,7 +417,7 @@ mod tests {
     /// that does not read them binds nothing (D740).
     #[test]
     fn an_index_reading_draw_binds_its_index_buffer() {
-        use crate::backend::{RenderCommand, ResourceId, ShaderStage};
+        use crate::backend::{IndexBuffer, RenderCommand, ResourceId, ShaderStage};
         let (reader, other) = (ResourceId(3), ResourceId(4));
         let indices: Vec<u8> = [5u16, 9, 7].iter().flat_map(|i| i.to_le_bytes()).collect();
         let memory = At(0x2000, indices.clone());
@@ -404,7 +431,10 @@ mod tests {
                     indices: 3,
                     instances: 1,
                     first_index: 0,
-                    index_buffer: Some((0x2000, 2)),
+                    index_buffer: Some(IndexBuffer::Guest {
+                        address: 0x2000,
+                        bytes: 2,
+                    }),
                 },
             ];
             super::bind_draw_buffers(
@@ -434,6 +464,44 @@ mod tests {
             bind(other).is_empty(),
             "a module that does not read indices binds none"
         );
+    }
+
+    /// A chunk of a non-indexed draw binds its own run of vertex ids, counting up from its first,
+    /// as thirty-two-bit indices (D741).
+    #[test]
+    fn a_counting_chunk_binds_its_run_of_vertex_ids() {
+        use crate::backend::{IndexBuffer, RenderCommand, ResourceId, ShaderStage};
+        let reader = ResourceId(3);
+        let mut commands = vec![
+            RenderCommand::BindShader {
+                stage: ShaderStage::Vertex,
+                shader: reader,
+            },
+            RenderCommand::DrawIndexed {
+                indices: 3,
+                instances: 1,
+                first_index: 0,
+                index_buffer: Some(IndexBuffer::Counting { first: 63 }),
+            },
+        ];
+        super::bind_draw_buffers(
+            &mut commands,
+            (
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeSet::from([reader]),
+                &mut super::BufferCache::default(),
+            ),
+            &At(0, Vec::new()),
+            &mut (0, None),
+        );
+        let RenderCommand::BindDrawBuffers { buffers, .. } = &commands[1] else {
+            panic!("no buffers bound: {commands:?}");
+        };
+        let expected: Vec<u8> = [63u32, 64, 65]
+            .iter()
+            .flat_map(|i| i.to_le_bytes())
+            .collect();
+        assert_eq!(buffers[0].bytes[..], expected[..]);
     }
 
     /// Each clear draw binds the sixteen bytes its user-data word 2 names, once while they are the

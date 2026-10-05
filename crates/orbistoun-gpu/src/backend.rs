@@ -26,6 +26,24 @@ pub enum ShaderStage {
     Compute,
 }
 
+/// The index buffer an indexed draw's primitive shader reads its vertex ids from (D740).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBuffer {
+    /// The guest's indices: their address and bytes per index.
+    Guest {
+        /// The first index's address.
+        address: u64,
+        /// Bytes one index takes: two or four.
+        bytes: u32,
+    },
+    /// Thirty-two-bit ids counting up from `first`: a non-indexed draw split into chunks (D741),
+    /// each chunk's vertex ids its own run of the draw's.
+    Counting {
+        /// The first vertex id.
+        first: u32,
+    },
+}
+
 /// A rectangle in render-target space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -189,10 +207,9 @@ pub enum RenderCommand {
         instances: u32,
         /// First index.
         first_index: u32,
-        /// The index buffer's address and bytes per index, for a primitive shader that reads its
-        /// vertex ids from it (D740); `None` where the stream names an index size this does not
-        /// read.
-        index_buffer: Option<(u64, u32)>,
+        /// Where a primitive shader that reads its vertex ids from an index buffer finds them
+        /// (D740); `None` where the stream names an index size this does not read.
+        index_buffer: Option<IndexBuffer>,
     },
     /// Run a compute workload.
     Dispatch {
