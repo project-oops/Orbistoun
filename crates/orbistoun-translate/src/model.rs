@@ -1315,9 +1315,13 @@ fn resolve<M: Model + ?Sized>(
         .mnemonic_for(&family, instruction.opcode)
         .map(str::to_owned)
         // Nothing has observed this opcode on this target, so there is no name to dispatch on, and
-        // a bare number is not acted on.
-        .ok_or(TranslateError::Unsupported {
+        // a bare number is not acted on. The refusal says which, so it can be recorded.
+        .ok_or_else(|| TranslateError::NotTranslated {
             offset: instruction.offset,
+            mnemonic: format!(
+                "{family} opcode {}, first word {:#010x}",
+                instruction.opcode, instruction.word
+            ),
             detail: concat!(
                 "this target has no recorded name for that opcode, so there is ",
                 "nothing to translate it as"

@@ -313,10 +313,42 @@ impl Translated {
 }
 
 /// The refusal for a program with instructions whose operand layout is unknown: the first, and the
-/// others by name, each once. `None` when every instruction has one.
+/// others by name, each once. Failing that, the one for instructions whose opcode this target has
+/// no name for, listed the same way. `None` when every instruction has both.
 fn unlaid_instructions(decode: &Decode, encodings: &EncodingTable) -> Option<TranslateError> {
+    let named = |instruction: &&orbistoun_shader::Instruction| {
+        instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .is_none_or(|e| {
+                encodings
+                    .mnemonic_for(&e.name, instruction.opcode)
+                    .is_some()
+            })
+    };
     let mut unlaid = decode.instructions.iter().filter(|i| !i.operands_decoded);
-    let first = unlaid.next()?;
+    let Some(first) = unlaid.next() else {
+        let mut unnamed = decode.instructions.iter().filter(|i| !named(i));
+        let first = unnamed.next()?;
+        let mut listed = vec![instruction_name(first, encodings)];
+        for other in unnamed.map(|i| instruction_name(i, encodings)) {
+            if !listed.contains(&other) {
+                listed.push(other);
+            }
+        }
+        return Some(TranslateError::NotTranslated {
+            offset: first.offset,
+            mnemonic: format!(
+                "{}, first word {:#010x}",
+                listed.join("; also "),
+                first.word
+            ),
+            detail: concat!(
+                "this target has no recorded name for that opcode, so there is ",
+                "nothing to translate it as"
+            ),
+        });
+    };
     let name = instruction_name(first, encodings);
     let mut others: Vec<String> = Vec::new();
     for other in unlaid.map(|i| instruction_name(i, encodings)) {
