@@ -5910,3 +5910,46 @@ fn the_short_form_ordered_compares_take_equal_sides() {
     assert_eq!(vector(&registers, 2), 0xaaaa, "2 >= 2");
     assert_eq!(vector(&registers, 3), 0xaaaa, "1 <= 2");
 }
+
+/// `v_cmpx_neq_f32_e32 v0, v1` narrows the execution mask to the lanes whose index, as a float, is
+/// unequal to `v1` or unordered with it: 3.0 drops lane 3 alone, and a NaN drops none.
+#[test]
+fn a_float_cmpx_keeps_the_unequal_and_unordered_lanes() {
+    if !device_or_skip("a_float_cmpx_keeps_the_unequal_and_unordered_lanes") {
+        return;
+    }
+    for (threshold, dropped) in [(3.0f32.to_bits(), Some(3usize)), (f32::NAN.to_bits(), None)] {
+        let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
+        mask_program.push(vop1_vv("v_cvt_f32_u32_e32", 2, 0));
+        mask_program.extend(v_mov_literal(1, threshold));
+        mask_program.push(head("v_cmpx_neq_f32_e32") | (1 << 9) | vgpr_code(2));
+        let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+        for (lane, stored) in memory.iter().take(64).enumerate() {
+            let expected = if dropped == Some(lane) {
+                0
+            } else {
+                lane as u32
+            };
+            assert_eq!(*stored, expected, "{threshold:#x}, lane {lane}");
+        }
+    }
+}
+
+/// `s_cmp_lg_u32` sets the condition code where its sources differ, as the signed form does.
+#[test]
+fn an_unsigned_scalar_inequality_sets_the_condition_code() {
+    if !device_or_skip("an_unsigned_scalar_inequality_sets_the_condition_code") {
+        return;
+    }
+    let minus_one = 193;
+    let program = [
+        s_cmp_i32("s_cmp_lg_u32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", 2, minus_one, 128),
+        s_cmp_i32("s_cmp_lg_u32", 128 + 1, minus_one),
+        sop2("s_cselect_b64", 4, minus_one, 128),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 2), 0, "1 == 1");
+    assert_eq!(scalar(&registers, 4), u32::MAX, "1 != 0xffffffff");
+}

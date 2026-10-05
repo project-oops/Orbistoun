@@ -469,6 +469,13 @@ samples = 5
 operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
+family = "SOPC"
+opcode = 7
+mnemonic = "s_cmp_lg_u32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
 family = "SOPK"
 opcode = 0
 mnemonic = "s_movk_i32"
@@ -999,6 +1006,13 @@ opcode = 13
 mnemonic = "v_cmp_neq_f32_e32"
 samples = 4
 operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
+opcode = 29
+mnemonic = "v_cmpx_neq_f32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
 
 [[opcode_operands]]
 family = "VOPC"

@@ -60,6 +60,10 @@ v_cvt_f32_i32_e32 v16, v1
 // constant K is a literal word after the instruction.
 v_madak_f32 v17, v1, v2, 0xbdf0555d
 v_madmk_f32 v18, v1, 0x3e800000, v2
+// An unsigned scalar compare and a compare into the execution mask, as a pixel shader's discard
+// test is written.
+s_cmp_lg_u32 s2, 0
+v_cmpx_neq_f32_e32 v1, v2
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

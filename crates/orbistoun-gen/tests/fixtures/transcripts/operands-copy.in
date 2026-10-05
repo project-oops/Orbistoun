@@ -202,3 +202,15 @@ v_cmp_le_f32_e32 vcc, s5, v190
 v_cmp_le_f32_e32 vcc, -1, v255
 v_cmp_le_f32_e32 vcc, 4, v77
 v_cmp_le_f32_e32 vcc, v130, v12
+
+// ---- s_cmp_lg_u32: SOPC; v_cmpx_neq_f32_e32: VOPC into exec ------------------------------
+s_cmp_lg_u32 s2, 0
+s_cmp_lg_u32 s101, s5
+s_cmp_lg_u32 -1, s90
+s_cmp_lg_u32 s0, 64
+s_cmp_lg_u32 s60, s100
+v_cmpx_neq_f32_e32 v4, v5
+v_cmpx_neq_f32_e32 s5, v190
+v_cmpx_neq_f32_e32 -1, v255
+v_cmpx_neq_f32_e32 4, v77
+v_cmpx_neq_f32_e32 v130, v12

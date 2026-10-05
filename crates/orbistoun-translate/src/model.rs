@@ -82,6 +82,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_cmp_gt_i32",
     "s_cmp_le_i32",
     "s_cmp_lg_i32",
+    "s_cmp_lg_u32",
     "s_cmp_lt_i32",
     "s_cmpk_eq_i32",
     "s_cmpk_lg_i32",
@@ -134,6 +135,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ge_f32_e64",
     "v_bfi_b32",
     "v_cmpx_le_i16_e32",
+    "v_cmpx_neq_f32_e32",
     "v_cndmask_b32_e32",
     "v_cndmask_b32_e64",
     "v_cos_f32_e32",
@@ -432,6 +434,7 @@ pub fn writes_condition_code(name: &str) -> bool {
         // The comparisons exist to write it.
         "s_cmp_eq_i32"
             | "s_cmp_lg_i32"
+            | "s_cmp_lg_u32"
             | "s_cmp_gt_i32"
             | "s_cmp_ge_i32"
             | "s_cmp_lt_i32"
@@ -1951,8 +1954,8 @@ fn scalar_instruction<M: Model + ?Sized>(
 
         // The scalar compares, which write the condition code the `scc` branches read and have no
         // destination operand.
-        "s_cmp_eq_i32" | "s_cmp_lg_i32" | "s_cmp_gt_i32" | "s_cmp_ge_i32" | "s_cmp_lt_i32"
-        | "s_cmp_le_i32" => scalar_compare(model, instruction, name),
+        "s_cmp_eq_i32" | "s_cmp_lg_i32" | "s_cmp_lg_u32" | "s_cmp_gt_i32" | "s_cmp_ge_i32"
+        | "s_cmp_lt_i32" | "s_cmp_le_i32" => scalar_compare(model, instruction, name),
 
         _ => vector_instruction(model, instruction, name),
     }
@@ -1975,7 +1978,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64" => {
             compare_long(model, instruction, name)
         }
-        "v_cmpx_le_i16_e32" => compare_into_exec(model, instruction),
+        "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" => compare_into_exec(model, instruction, name),
 
         // The short-form select, whose mask is always the condition mask.
         "v_cndmask_b32_e32" => {
@@ -3525,7 +3528,8 @@ fn scalar_compare<M: Model + ?Sized>(
 fn op_for_scalar_compare(instruction: &Instruction, name: &str) -> Result<u16, TranslateError> {
     match name {
         "s_cmp_eq_i32" => Ok(op::IEQUAL),
-        "s_cmp_lg_i32" => Ok(op::INOT_EQUAL),
+        // Equality does not depend on sign: the unsigned and signed forms agree.
+        "s_cmp_lg_i32" | "s_cmp_lg_u32" => Ok(op::INOT_EQUAL),
         "s_cmp_gt_i32" => Ok(op::SGREATER_THAN),
         "s_cmp_ge_i32" => Ok(op::SGREATER_THAN_EQUAL),
         "s_cmp_lt_i32" => Ok(op::SLESS_THAN),
@@ -3580,18 +3584,20 @@ fn compare<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `v_cmpx_le_i16_e32 a, b`: the execution mask becomes, for each lane, whether `a`'s low sixteen
-/// bits are at most `b`'s as signed integers. A lane that was not running answers zero, so the mask
-/// only narrows. On this generation a `v_cmpx` writes the execution mask alone (ACO:
+/// A compare into the execution mask: `v_cmpx_le_i16_e32 a, b`, whether `a`'s low sixteen bits are
+/// at most `b`'s as signed integers, and `v_cmpx_neq_f32_e32 a, b`, whether the floats are unequal
+/// or unordered. A lane that was not running answers zero, so the mask only narrows. On this
+/// generation a `v_cmpx` writes the execution mask alone (ACO:
 /// `definitions = dst(EXEC if cmpx else VCC)`, `aco_opcodes.py:1203-1205`).
 fn compare_into_exec<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    name: &str,
 ) -> Result<(), TranslateError> {
     let [first, second] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "v_cmpx_le_i16_e32 does not have two sources",
+            detail: "a compare into the execution mask does not have two sources",
         });
     };
     let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
@@ -3599,14 +3605,25 @@ fn compare_into_exec<M: Model + ?Sized>(
     let sixteen = model.constant(16);
     let mut halves = (zero, zero);
     // Every lane: the answer is a mask (see `carry_arithmetic`).
+    let floats = name == "v_cmpx_neq_f32_e32";
     for lane in 0..model.lanes() {
-        let mut signed = [zero; 2];
-        for (slot, source) in signed.iter_mut().zip([first, second]) {
+        let mut sides = [zero; 2];
+        for (slot, source) in sides.iter_mut().zip([first, second]) {
             let value = model.read_source(instruction, source, lane)?;
-            let raised = model.binary(op::SHIFT_LEFT_LOGICAL, value, sixteen);
-            *slot = model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, sixteen);
+            *slot = if floats {
+                model.as_float(value)
+            } else {
+                let raised = model.binary(op::SHIFT_LEFT_LOGICAL, value, sixteen);
+                model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, sixteen)
+            };
         }
-        let condition = model.compare(op::SLESS_THAN_EQUAL, signed[0], signed[1]);
+        // Not equal or unordered: true for a NaN, as `v_cmp_neq_f32` is.
+        let opcode = if floats {
+            op::FUNORD_NOT_EQUAL
+        } else {
+            op::SLESS_THAN_EQUAL
+        };
+        let condition = model.compare(opcode, sides[0], sides[1]);
         halves = model.set_lane_bit(halves, lane, condition);
     }
     let low = model.binary(op::BITWISE_AND, halves.0, running_low);

@@ -308,6 +308,11 @@ opcode = 4
 name = "s_cmp_lt_i32"
 
 [[mnemonic]]
+family = "SOPC"
+opcode = 7
+name = "s_cmp_lg_u32"
+
+[[mnemonic]]
 family = "SOPK"
 opcode = 0
 name = "s_movk_i32"
@@ -716,6 +721,11 @@ name = "v_cmp_ge_f32_e32"
 family = "VOPC"
 opcode = 13
 name = "v_cmp_neq_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 29
+name = "v_cmpx_neq_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
