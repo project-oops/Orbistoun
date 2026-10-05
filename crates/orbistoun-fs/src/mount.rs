@@ -395,6 +395,38 @@ fn resolve_inner(guest_path: &str, writable_fallback: bool) -> Option<PathBuf> {
     None
 }
 
+/// Every layer's host directory at `guest_path`, top layer first: a directory a layered mount
+/// holds is the union of them, so a listing reads them all. Empty where no layer has a directory
+/// there, or the path is not inside a mount.
+pub fn existing_directories(guest_path: &str) -> Vec<PathBuf> {
+    if names_file_as_directory(guest_path) {
+        return Vec::new();
+    }
+    let guest_path = guest_path.replace('\\', "/");
+    let Ok(mounts) = mounts().lock() else {
+        return Vec::new();
+    };
+    for (prefix, roots) in mounts.iter().rev() {
+        let Some(rest) = guest_path.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.starts_with('/') {
+            continue;
+        }
+        let rest = without_current_dir(rest.trim_start_matches('/'));
+        if !rest.is_empty() && !is_contained(&rest) {
+            return Vec::new();
+        }
+        return roots
+            .iter()
+            .filter(|root| rest.is_empty() || exists_case_sensitive(root, &rest))
+            .map(|root| root.join(&rest))
+            .filter(|path| path.is_dir())
+            .collect();
+    }
+    Vec::new()
+}
+
 /// Names that exist at `guest_path` only because a mount lies below it.
 ///
 /// `/app0` and `/data` are directories a guest can enter that no host directory holds, so
@@ -464,6 +496,34 @@ mod tests {
             "and a relative path is not either - nothing here has a working directory"
         );
         assert!(!super::is_directory("app0"));
+    }
+
+    /// A staged title's `/app0` lists every layer: the library copy's files under the writable
+    /// top layer's, a name in both once (D722). Ship of Harkinian scans `/app0` for the ROM a
+    /// player copied beside `eboot.bin`, which lies in the lower layer.
+    #[test]
+    fn a_layered_directory_lists_every_layer() {
+        let _guard = crate::exclusively();
+        clear();
+        let root = std::env::temp_dir().join(format!("orbistoun-layers-{}", std::process::id()));
+        let (library, top) = (root.join("library"), root.join("top"));
+        std::fs::create_dir_all(&library).expect("library");
+        std::fs::create_dir_all(&top).expect("top");
+        std::fs::write(library.join("game.n64"), b"rom").expect("rom");
+        std::fs::write(library.join("both"), b"lower").expect("lower");
+        std::fs::write(top.join("both"), b"upper").expect("upper");
+        std::fs::write(top.join("save.dat"), b"save").expect("save");
+        super::layer("/app0", library);
+        super::layer("/app0", top);
+        let mut names: Vec<String> = crate::metadata::listing("/app0")
+            .expect("a directory")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(names, [".", "..", "both", "game.n64", "save.dat"]);
+        clear();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// An intermediate directory exists because a mount is below it, and holds only the

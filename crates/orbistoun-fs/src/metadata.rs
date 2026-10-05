@@ -409,8 +409,10 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
         // `/dev` exists because a device is in it, which nothing else knows.
         below.push(crate::device::DIRECTORY.trim_start_matches('/').to_owned());
     }
-    let host = crate::mount::resolve_existing(guest).filter(|path| path.is_dir());
-    if below.is_empty() && host.is_none() {
+    // Every layer's directory: a staged title's `/app0` is its library copy under a writable
+    // top layer, and its files are in the lower one (D722).
+    let hosts = crate::mount::existing_directories(guest);
+    if below.is_empty() && hosts.is_empty() {
         return None;
     }
 
@@ -421,12 +423,14 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
     for name in below {
         entries.push((name, true));
     }
-    if let Some(host) = host
-        && let Ok(reading) = std::fs::read_dir(&host)
-    {
+    for host in hosts {
+        let Ok(reading) = std::fs::read_dir(&host) else {
+            continue;
+        };
         for found in reading.flatten() {
             let name = found.file_name().to_string_lossy().into_owned();
-            // A mount point already listed wins: it is what the guest can enter.
+            // A mount point already listed wins: it is what the guest can enter; and a higher
+            // layer's entry shadows a lower one's of the same name.
             if entries.iter().any(|(held, _)| *held == name) {
                 continue;
             }
