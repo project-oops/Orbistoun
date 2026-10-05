@@ -28,6 +28,8 @@ v_perm_b32 v1, v2, v3, s4
 // ---- A copy between formats: a whole descriptor pair, and clamped halves ----------
 s_load_dwordx16 s[16:31], s[2:3], 0x0
 v_pk_sub_u16 v0, v1, v2
+v_pk_add_u16 v0, v1, v2
+v_pk_lshlrev_b16 v0, 0x20001, v0
 v_min3_i16 v3, v4, v5, v6
 v_cmpx_le_i16_e32 0, v2
 

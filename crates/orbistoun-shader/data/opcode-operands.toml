@@ -827,6 +827,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "VOP3P"
+opcode = 10
+mnemonic = "v_pk_add_u16"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3P"
 opcode = 11
 mnemonic = "v_pk_sub_u16"
 samples = 5

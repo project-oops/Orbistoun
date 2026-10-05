@@ -11,8 +11,10 @@
 0x000034 8 v_perm_b32 v1, v2, v3, s4
 0x00003c 8 s_load_dwordx16 s[16:31], s[2:3], null
 0x000044 8 v_pk_sub_u16 v0, v1, v2
-0x00004c 8 v_min3_i16 v3, v4, v5, v6
-0x000054 4 v_cmpx_le_i16_e32 0, v2
-0x000058 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x000060 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x000068 4 s_endpgm
+0x00004c 8 v_pk_add_u16 v0, v1, v2
+0x000054 12 v_pk_lshlrev_b16 v0, 0x20001, v0
+0x000060 8 v_min3_i16 v3, v4, v5, v6
+0x000068 4 v_cmpx_le_i16_e32 0, v2
+0x00006c 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x000074 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x00007c 4 s_endpgm

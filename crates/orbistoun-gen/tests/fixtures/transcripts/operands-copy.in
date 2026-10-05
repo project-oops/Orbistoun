@@ -81,3 +81,10 @@ v_cmpx_le_i16_e32 v200, v130
 v_cmpx_le_i16_e32 s101, v9
 v_cmpx_le_i16_e32 -1, v255
 v_cmpx_le_i16_e32 4, v77
+
+// ---- v_pk_add_u16: VOP3P, two sources --------------------------------------------------
+v_pk_add_u16 v0, v1, v2
+v_pk_add_u16 v200, v5, v9
+v_pk_add_u16 v255, v12, s30
+v_pk_add_u16 v9, s101, v77
+v_pk_add_u16 v130, v88, 4

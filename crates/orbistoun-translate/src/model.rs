@@ -145,6 +145,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_pk_mad_u16",
     "v_pk_lshlrev_b16",
     "v_pk_sub_u16",
+    "v_pk_add_u16",
     "v_min3_i16",
     "v_lshrrev_b64",
     "v_max_f32_e32",
@@ -1929,7 +1930,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_pack_b32_f16" => pack_half_words(model, instruction),
         "v_pk_mad_u16" => packed_multiply_add(model, instruction),
         "v_pk_lshlrev_b16" => packed_shift_left(model, instruction),
-        "v_pk_sub_u16" => packed_subtract(model, instruction),
+        "v_pk_sub_u16" | "v_pk_add_u16" => packed_add_or_subtract(model, instruction, name),
         "v_min3_i16" => half_minimum_of_three(model, instruction),
 
         // A lane learns its own index by counting the mask bits below itself; no instruction hands
@@ -5215,19 +5216,26 @@ fn packed_shift_left<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `v_pk_sub_u16 d, a, b`: in each half of the result, `a`'s selected half less `b`'s, wrapping at
-/// sixteen bits (AMD's published RDNA instruction set). The low result takes the halves `op_sel`
-/// picks and the high one those `op_sel_hi` picks; clamp, which saturates, is refused.
-fn packed_subtract<M: Model + ?Sized>(
+/// `v_pk_add_u16 d, a, b` and `v_pk_sub_u16 d, a, b`: in each half of the result, `a`'s selected
+/// half plus or less `b`'s, wrapping at sixteen bits (AMD's published RDNA instruction set). The low
+/// result takes the halves `op_sel` picks and the high one those `op_sel_hi` picks; clamp, which
+/// saturates, is refused.
+fn packed_add_or_subtract<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    name: &str,
 ) -> Result<(), TranslateError> {
+    let combine = if name == "v_pk_add_u16" {
+        op::IADD
+    } else {
+        op::ISUB
+    };
     let selects = packed_selects(instruction)?;
     let (destination, minuend, subtrahend) = three_operands(instruction)?;
     let Operand::Vector(register) = destination else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "v_pk_sub_u16 destination is not a vector register",
+            detail: "a packed sum's or difference's destination is not a vector register",
         });
     };
     let register = u32::from(*register);
@@ -5238,8 +5246,8 @@ fn packed_subtract<M: Model + ?Sized>(
         for select in selects {
             let left = read_half(model, instruction, minuend, lane, select[0])?;
             let right = read_half(model, instruction, subtrahend, lane, select[1])?;
-            let difference = model.binary(op::ISUB, left, right);
-            halves.push(model.binary(op::BITWISE_AND, difference, low));
+            let combined = model.binary(combine, left, right);
+            halves.push(model.binary(op::BITWISE_AND, combined, low));
         }
         let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);
         let packed = model.binary(op::BITWISE_OR, halves[0], high);

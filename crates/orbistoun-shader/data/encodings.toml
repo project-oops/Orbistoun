@@ -368,3 +368,12 @@ mask = "0xfc000000"
 value = "0xcc000000"
 opcode = { shift = 16, width = 7 }
 width_bytes = 8
+# The three sources sit in the second word as VOP3's do, and any reading 255 adds a
+# trailing literal: LLVM 18.1.8 assembles `v_pk_lshlrev_b16 v0, 0x20001, v0` for gfx1030 as
+# twelve bytes, the literal last. Without this a packed instruction's literal was read as the
+# next instruction - SuperTuxKart's `0x00020001`, a shift of one and two, as "VOP2 opcode 0".
+literal_operands = [
+  { shift = 0, width = 9, word = 1 },
+  { shift = 9, width = 9, word = 1 },
+  { shift = 18, width = 9, word = 1 },
+]

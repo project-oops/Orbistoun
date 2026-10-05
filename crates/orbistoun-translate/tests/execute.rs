@@ -5475,19 +5475,30 @@ fn a_packed_shift_moves_each_half_by_its_own_amount() {
     );
 }
 
-/// `v_pk_sub_u16` subtracts each half, wrapping at sixteen bits: 3 - 1 low, 5 - 7 high.
+/// `v_pk_sub_u16` and `v_pk_add_u16` combine each half, wrapping at sixteen bits: 3 - 1 low and
+/// 5 - 7 high; 0xfffd + 4 low and 0x8000 + 0x8000 high.
 #[test]
-fn a_packed_subtract_wraps_each_half() {
-    if !device_or_skip("a_packed_subtract_wraps_each_half") {
+fn a_packed_add_or_subtract_wraps_each_half() {
+    if !device_or_skip("a_packed_add_or_subtract_wraps_each_half") {
         return;
     }
     let mut program = Vec::new();
     program.extend(v_mov_literal(0, 0x0005_0003));
     program.extend(v_mov_literal(1, 0x0007_0001));
     program.extend(vop3p("v_pk_sub_u16", 2, [VGPR_0, VGPR_0 + 1, 0], 0, 0b011));
+    program.extend(v_mov_literal(3, 0x8000_fffd));
+    program.extend(v_mov_literal(4, 0x8000_0004));
+    program.extend(vop3p(
+        "v_pk_add_u16",
+        5,
+        [VGPR_0 + 3, VGPR_0 + 4, 0],
+        0,
+        0b011,
+    ));
     program.push(s_endpgm());
     let registers = run(&program);
     assert_eq!(vector(&registers, 2), 0xfffe_0002, "2 low, -2 wrapped high");
+    assert_eq!(vector(&registers, 5), 0x0000_0001, "both halves wrapped");
 }
 
 /// `v_min3_i16` takes the signed least of three halves and writes the half its destination select

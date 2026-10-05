@@ -589,6 +589,11 @@ name = "v_pk_mad_u16"
 
 [[mnemonic]]
 family = "VOP3P"
+opcode = 10
+name = "v_pk_add_u16"
+
+[[mnemonic]]
+family = "VOP3P"
 opcode = 11
 name = "v_pk_sub_u16"
 

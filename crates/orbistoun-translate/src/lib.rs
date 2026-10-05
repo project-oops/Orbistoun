@@ -330,6 +330,21 @@ fn unlaid_instructions(decode: &Decode, encodings: &EncodingTable) -> Option<Tra
     let Some(first) = unlaid.next() else {
         let mut unnamed = decode.instructions.iter().filter(|i| !named(i));
         let first = unnamed.next()?;
+        // What came before it, and how long it was read as: a word mistaken for an instruction
+        // follows one whose length was misread.
+        let before = decode
+            .instructions
+            .iter()
+            .take_while(|i| i.offset < first.offset)
+            .last()
+            .map_or_else(String::new, |i| {
+                format!(
+                    ", after {} at {:#x} read as {} bytes",
+                    instruction_name(i, encodings),
+                    i.offset,
+                    i.length
+                )
+            });
         let mut listed = vec![instruction_name(first, encodings)];
         for other in unnamed.map(|i| instruction_name(i, encodings)) {
             if !listed.contains(&other) {
@@ -339,7 +354,7 @@ fn unlaid_instructions(decode: &Decode, encodings: &EncodingTable) -> Option<Tra
         return Some(TranslateError::NotTranslated {
             offset: first.offset,
             mnemonic: format!(
-                "{}, first word {:#010x}",
+                "{}, first word {:#010x}{before}",
                 listed.join("; also "),
                 first.word
             ),
