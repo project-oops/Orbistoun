@@ -214,7 +214,7 @@ pub enum TranslateError {
 
     /// An instruction with no known operand layout was reached.
     #[error(
-        "instruction at {offset:#x} ({name}, first word {word:#010x}) has no operand layout; cannot translate what it operates on{}",
+        "instruction at {offset:#x} ({name}, first word {word:#010x}{before}) has no operand layout; cannot translate what it operates on{}",
         if others.is_empty() { String::new() } else { format!(" - nor can the program's other instructions without one: {}", others.join(", ")) }
     )]
     OperandsUnknown {
@@ -225,6 +225,9 @@ pub enum TranslateError {
         name: String,
         /// Its first word, as decoded.
         word: u32,
+        /// What came before it and how long that was read as, for telling a missing layout from a
+        /// word mistaken for an instruction after a misread length; empty at the program's start.
+        before: String,
         /// Every other instruction of the program with no layout, by name, each once: what to
         /// record alongside it.
         others: Vec<String>,
@@ -337,21 +340,7 @@ fn unlaid_instructions(decode: &Decode, encodings: &EncodingTable) -> Option<Tra
     let Some(first) = unlaid.next() else {
         let mut unnamed = decode.instructions.iter().filter(|i| !named(i));
         let first = unnamed.next()?;
-        // What came before it, and how long it was read as: a word mistaken for an instruction
-        // follows one whose length was misread.
-        let before = decode
-            .instructions
-            .iter()
-            .take_while(|i| i.offset < first.offset)
-            .last()
-            .map_or_else(String::new, |i| {
-                format!(
-                    ", after {} at {:#x} read as {} bytes",
-                    instruction_name(i, encodings),
-                    i.offset,
-                    i.length
-                )
-            });
+        let before = preceding(decode, first, encodings);
         let mut listed = vec![instruction_name(first, encodings)];
         for other in unnamed.map(|i| instruction_name(i, encodings)) {
             if !listed.contains(&other) {
@@ -382,8 +371,31 @@ fn unlaid_instructions(decode: &Decode, encodings: &EncodingTable) -> Option<Tra
         offset: first.offset,
         name,
         word: first.word,
+        before: preceding(decode, first, encodings),
         others,
     })
+}
+
+/// What came before `first`, and how long it was read as: a word mistaken for an instruction
+/// follows one whose length was misread. Empty at the program's start.
+fn preceding(
+    decode: &Decode,
+    first: &orbistoun_shader::Instruction,
+    encodings: &EncodingTable,
+) -> String {
+    decode
+        .instructions
+        .iter()
+        .take_while(|i| i.offset < first.offset)
+        .last()
+        .map_or_else(String::new, |i| {
+            format!(
+                ", after {} at {:#x} read as {} bytes",
+                instruction_name(i, encodings),
+                i.offset,
+                i.length
+            )
+        })
 }
 
 /// An instruction's mnemonic, or its encoding and opcode where the table names none.
@@ -1271,5 +1283,19 @@ mod tests {
         let said = refused.expect_err("refused").to_string();
         assert!(said.contains("first word 0x"), "{said}");
         assert!(!said.contains("(, "), "a name: {said}");
+        // And what came before it, so a word mistaken for an instruction after a misread length
+        // shows as one.
+        let decoded = decode(
+            &stream(&[0xBF80_0000, 0xE0C0_0000, 0x0000_0000]),
+            &table,
+            &operands,
+        );
+        let said = translate(&decoded, &table, Strategy::default())
+            .expect_err("refused")
+            .to_string();
+        assert!(
+            said.contains("after s_nop at 0x0 read as 4 bytes"),
+            "{said}"
+        );
     }
 }
