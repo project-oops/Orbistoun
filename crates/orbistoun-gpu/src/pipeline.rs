@@ -111,6 +111,8 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             }
             ^ match g.assembly {
                 Assembly::List => 0,
+                Assembly::LineList => 0x4c4c_0000_0000_0000,
+                Assembly::LineStrip => 0x4c53_0000_0000_0000,
                 Assembly::Strip { provoking_last } => {
                     0x5354_0000_0000_0000 ^ u64::from(provoking_last)
                 }
@@ -536,6 +538,11 @@ fn index_width(value: Option<u32>) -> Option<orbistoun_translate::wavefront::Ind
     }
 }
 
+/// `DI_PT_LINELIST` and `DI_PT_LINESTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json:689-690`): lines
+/// of two vertices each, and lines sharing vertices in a strip.
+const DI_PT_LINELIST: u32 = 2;
+/// See [`DI_PT_LINELIST`].
+const DI_PT_LINESTRIP: u32 = 3;
 /// `DI_PT_TRISTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json`): triangles sharing vertices in a strip.
 const DI_PT_TRISTRIP: u32 = 6;
 /// `PA_SU_SC_MODE_CNTL` (`gfx103.json`, context dword `0x205`) and its `PROVOKING_VTX_LAST`, bit 19.
@@ -584,6 +591,8 @@ fn draw_geometry(
     let topology = latest(VGT_PRIMITIVE_TYPE).map(|value| value & 0x3F);
     let (assembly, primitives) = match topology {
         Some(DI_PT_TRILIST | DI_PT_RECTLIST) => (Assembly::List, vertices / 3),
+        Some(DI_PT_LINELIST) => (Assembly::LineList, vertices / 2),
+        Some(DI_PT_LINESTRIP) => (Assembly::LineStrip, vertices.saturating_sub(1)),
         Some(DI_PT_TRISTRIP) => (
             Assembly::Strip {
                 provoking_last: latest(PA_SU_SC_MODE_CNTL)
@@ -593,7 +602,7 @@ fn draw_geometry(
         ),
         _ => {
             return Err(format!(
-                "the draw's input primitive {topology:?} is not a list or strip of triangles, whose geometry-engine inputs are the ones seeded"
+                "the draw's input primitive {topology:?} is not a list or strip of triangles or lines, whose geometry-engine inputs are the ones seeded"
             ));
         }
     };
@@ -635,6 +644,8 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
     let per_chunk = match whole.assembly {
         Assembly::List => lanes / 3,
         Assembly::Strip { .. } => lanes.saturating_sub(2) & !1,
+        Assembly::LineList => lanes / 2,
+        Assembly::LineStrip => lanes.saturating_sub(1),
     };
     if per_chunk == 0 {
         return Vec::new();
@@ -648,7 +659,8 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
             let primitives = per_chunk.min(whole.primitives - start);
             let first_index = match whole.assembly {
                 Assembly::List => start * 3,
-                Assembly::Strip { .. } => start,
+                Assembly::LineList => start * 2,
+                Assembly::Strip { .. } | Assembly::LineStrip => start,
             };
             let index_buffer = match (whole.indices, index_address) {
                 (Some(width), Some(address)) => IndexBuffer::Guest {
@@ -4977,6 +4989,29 @@ mod tests {
         }
     }
 
+    /// Lines are seeded as triangles are, two vertices each (`ac_nir_lower_ngg.c:130`): a line list
+    /// of six vertices is three lines, a line strip of four three too.
+    #[test]
+    fn a_line_list_and_strip_are_seeded() {
+        use super::{Assembly, DI_PT_LINELIST, DI_PT_LINESTRIP, VGT_PRIMITIVE_TYPE, draw_geometry};
+        use crate::registers::{DrawCall, DrawKind};
+        for (topology, vertices, assembly) in [
+            (DI_PT_LINELIST, 6, Assembly::LineList),
+            (DI_PT_LINESTRIP, 4, Assembly::LineStrip),
+        ] {
+            let draw = DrawCall {
+                packet_offset: 0,
+                instances: 1,
+                kind: DrawKind::Auto { vertices },
+            };
+            let latest = |register| (register == VGT_PRIMITIVE_TYPE).then_some(topology);
+            assert_eq!(
+                draw_geometry(&draw, latest).map(|g| (g.primitives, g.assembly)),
+                Ok((3, assembly))
+            );
+        }
+    }
+
     /// A draw one wave does not hold is split as the geometry engine splits it into subgroups
     /// (D741): a list into whole triangles, a strip into an even count of them overlapping by two
     /// vertices, each chunk reading its vertex ids from where its first primitive's begin.
@@ -5028,6 +5063,18 @@ mod tests {
             })
             .collect();
         let guest = |address| IndexBuffer::Guest { address, bytes: 2 };
+        // 100 vertices of a line list at 64 lanes: 32 lines, then 18, the second from index 64.
+        let lines = chunk_plans(whole(100, 50, Assembly::LineList, None), None, 64);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|plan| (plan.geometry.vertices, plan.index_buffer))
+                .collect::<Vec<_>>(),
+            [
+                (64, IndexBuffer::Counting { first: 0 }),
+                (36, IndexBuffer::Counting { first: 64 }),
+            ]
+        );
         assert_eq!(
             got,
             [

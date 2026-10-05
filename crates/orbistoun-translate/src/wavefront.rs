@@ -592,6 +592,12 @@ pub enum Assembly {
         /// Whether the last vertex is the provoking one.
         provoking_last: bool,
     },
+    /// A list of lines: primitive `i` is vertices `2i`, `2i + 1`. A line's two indices are packed
+    /// in the first input register as a triangle's first two are; the third is not read
+    /// (`ac_nir_lower_ngg.c:130`, two vertices per primitive).
+    LineList,
+    /// A strip of lines: primitive `i` is vertices `i`, `i + 1`.
+    LineStrip,
 }
 
 impl Assembly {
@@ -608,6 +614,9 @@ impl Assembly {
             Self::Strip {
                 provoking_last: false,
             } => [i, i + 2, i + 1],
+            // A line has two vertices; the third index is not read.
+            Self::LineList => [2 * i, 2 * i + 1, 0],
+            Self::LineStrip => [i, i + 1, 0],
         }
     }
 
@@ -616,8 +625,10 @@ impl Assembly {
     pub const fn vertices_for(self, primitives: u32) -> u32 {
         match self {
             Self::List => primitives * 3,
-            Self::Strip { .. } if primitives == 0 => 0,
+            Self::Strip { .. } | Self::LineStrip if primitives == 0 => 0,
             Self::Strip { .. } => primitives + 2,
+            Self::LineList => primitives * 2,
+            Self::LineStrip => primitives + 1,
         }
     }
 }
@@ -3769,6 +3780,11 @@ mod assembly_tests {
             provoking_last: false,
         };
         assert_eq!(Assembly::List.vertices_of(2), [6, 7, 8]);
+        // A line takes two vertices; the third index is not read.
+        assert_eq!(Assembly::LineList.vertices_of(2), [4, 5, 0]);
+        assert_eq!(Assembly::LineStrip.vertices_of(2), [2, 3, 0]);
+        assert_eq!(Assembly::LineList.vertices_for(3), 6);
+        assert_eq!(Assembly::LineStrip.vertices_for(3), 4);
         assert_eq!(last.vertices_of(0), [0, 1, 2]);
         assert_eq!(last.vertices_of(1), [2, 1, 3], "reversed, 3 last");
         assert_eq!(first.vertices_of(1), [1, 3, 2], "reversed, 1 first");
