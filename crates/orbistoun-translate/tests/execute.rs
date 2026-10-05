@@ -942,6 +942,24 @@ fn a_scalar_buffer_load_past_its_records_reads_zero() {
     );
 }
 
+/// A sixteen-word scalar buffer load fills sixteen registers, each word past the record count
+/// zero: Craft reads a constant block this way.
+#[test]
+fn a_sixteen_word_scalar_buffer_load_fills_sixteen_registers() {
+    if !device_or_skip("a_sixteen_word_scalar_buffer_load_fills_sixteen_registers") {
+        return;
+    }
+    let mut program = seeded_buffer([11, 22, 33, 44], 16);
+    program.extend(s_buffer_load("s_buffer_load_dwordx16", 0, 4, 0));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    // The harness observes the first eight scalar registers.
+    assert_eq!(
+        [0, 1, 2, 3, 4, 5, 6, 7].map(|n| scalar(&registers, n)),
+        [11, 22, 33, 44, 0, 0, 0, 0]
+    );
+}
+
 /// A scalar buffer load adding a scalar offset register is refused by name: the solved layout
 /// has no field for it, so its value would be dropped.
 #[test]

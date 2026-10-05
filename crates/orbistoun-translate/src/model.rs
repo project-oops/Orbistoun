@@ -67,6 +67,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_buffer_load_dwordx2",
     "s_buffer_load_dwordx4",
     "s_buffer_load_dwordx8",
+    "s_buffer_load_dwordx16",
     "s_branch",
     "s_cbranch_execnz",
     "s_cbranch_execz",
@@ -2099,6 +2100,7 @@ fn memory_instruction<M: Model + ?Sized>(
         | "s_buffer_load_dwordx2"
         | "s_buffer_load_dwordx4"
         | "s_buffer_load_dwordx8"
+        | "s_buffer_load_dwordx16"
         | "global_load_dword"
         | "global_load_dwordx2"
         | "global_load_dwordx4"
@@ -6816,7 +6818,8 @@ fn memory<M: Model + ?Sized>(
         "s_buffer_load_dword"
         | "s_buffer_load_dwordx2"
         | "s_buffer_load_dwordx4"
-        | "s_buffer_load_dwordx8" => scalar_buffer_load(model, instruction, name),
+        | "s_buffer_load_dwordx8"
+        | "s_buffer_load_dwordx16" => scalar_buffer_load(model, instruction, name),
 
         // Flat memory: a per-lane address rather than a uniform one.
         "global_load_dword"
