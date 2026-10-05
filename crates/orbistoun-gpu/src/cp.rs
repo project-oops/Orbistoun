@@ -226,6 +226,10 @@ pub enum Stopped {
     OutOfBounds {
         /// Byte offset of the packet in the stream.
         offset: u32,
+        /// Its opcode.
+        opcode: u8,
+        /// The guest address it named.
+        address: u64,
     },
     /// A `WAIT_REG_MEM` whose condition does not hold. Nothing else runs concurrently here, so it
     /// never will: the command processor would wait forever, and so nothing after it retires.
@@ -352,7 +356,11 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         if let Err(stop) = step {
             result.stopped = match stop {
                 Stop::NeedsGpu => Stopped::NeedsGpu { offset, opcode },
-                Stop::OutOfBounds => Stopped::OutOfBounds { offset },
+                Stop::OutOfBounds(address) => Stopped::OutOfBounds {
+                    offset,
+                    opcode,
+                    address,
+                },
                 Stop::Wait => Stopped::WaitNeverSatisfied { offset },
                 Stop::Malformed => Stopped::Malformed { offset },
             };
@@ -398,7 +406,8 @@ fn draw_segments<'a>(stream: &'a [u8], packets: &[packet::Packet]) -> Vec<DrawSe
 
 enum Stop {
     NeedsGpu,
-    OutOfBounds,
+    /// The address a packet named that is not the guest's.
+    OutOfBounds(u64),
     Wait,
     Malformed,
 }
@@ -476,11 +485,12 @@ fn dma_prefetch(body: &[u32], memory: &dyn CpMemory) -> Option<Result<(), Stop>>
         return Some(Err(Stop::NeedsGpu));
     }
     let count = (command & BYTE_COUNT_MASK) as usize;
-    let readable = count == 0 || memory.read(address(src_low, src_high), count).is_some();
+    let source = address(src_low, src_high);
+    let readable = count == 0 || memory.read(source, count).is_some();
     Some(if readable {
         Ok(())
     } else {
-        Err(Stop::OutOfBounds)
+        Err(Stop::OutOfBounds(source))
     })
 }
 
@@ -510,7 +520,15 @@ fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -
         return Err(Stop::NeedsGpu);
     };
     if !done {
-        return Err(Stop::OutOfBounds);
+        // The copy's source where it was the one not there, else its destination.
+        let source = address(src_low, src_high);
+        let missing = if SRC_SEL_ADDRESS.contains(&src_sel) && memory.read(source, count).is_none()
+        {
+            source
+        } else {
+            destination
+        };
+        return Err(Stop::OutOfBounds(missing));
     }
     if src_sel == SRC_SEL_DATA {
         result.fills += 1;
@@ -548,7 +566,7 @@ fn release_mem(
         _ => return Err(Stop::NeedsGpu),
     };
     if !written.is_empty() && !memory.write(destination, &written) {
-        return Err(Stop::OutOfBounds);
+        return Err(Stop::OutOfBounds(destination));
     }
     // The last body dword is the interrupt's context id (`INT_CTXID`).
     memory.released(destination, body.get(6).copied().unwrap_or(0));
@@ -600,7 +618,7 @@ fn write_data(
     };
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     if !bytes.is_empty() && !memory.write(destination, &bytes) {
-        return Err(Stop::OutOfBounds);
+        return Err(Stop::OutOfBounds(destination));
     }
     result.bytes_written += bytes.len() as u64;
     Ok(())
@@ -619,9 +637,8 @@ fn wait_reg_mem(
     if function & WAIT_MEM_SPACE == 0 {
         return Err(Stop::NeedsGpu);
     }
-    let word = memory
-        .read(address(addr_low & !0x3, addr_high), 4)
-        .ok_or(Stop::OutOfBounds)?;
+    let polled = address(addr_low & !0x3, addr_high);
+    let word = memory.read(polled, 4).ok_or(Stop::OutOfBounds(polled))?;
     let value = u32::from_le_bytes([word[0], word[1], word[2], word[3]]) & mask;
     let holds = match function & 0x7 {
         WAIT_EQUAL => value == reference,
@@ -661,9 +678,8 @@ fn wait_reg_mem64(
         return Err(Stop::NeedsGpu);
     }
     // `MEM_POLL_ADDR_LO` is bits 31:3: the low three bits are not address (`:1806`).
-    let bytes = memory
-        .read(address(addr_low & !0x7, addr_high), 8)
-        .ok_or(Stop::OutOfBounds)?;
+    let polled = address(addr_low & !0x7, addr_high);
+    let bytes = memory.read(polled, 8).ok_or(Stop::OutOfBounds(polled))?;
     let mut word = [0_u8; 8];
     word.copy_from_slice(&bytes);
     let mask = u64::from(mask_high) << 32 | u64::from(mask_low);
@@ -1201,7 +1217,15 @@ mod tests {
         let mut unmapped = prefetch;
         unmapped[2] = 0xdead_0000;
         let done = execute(&bytes(&unmapped), &mut Fake::default());
-        assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
+        // The stop names the packet and the address it could not reach.
+        assert_eq!(
+            done.stopped,
+            Stopped::OutOfBounds {
+                offset: 0,
+                opcode: measured::DMA_DATA,
+                address: 0xdead_0000,
+            }
+        );
     }
 
     /// A `CONTEXT_CONTROL` enabling any shadow writes register state to memory, which is not
@@ -1318,7 +1342,14 @@ mod tests {
         );
         let stream = write_data(5 << 8, 0xdead_0000, &[1]);
         let done = execute(&bytes(&stream), &mut Fake::default());
-        assert_eq!(done.stopped, Stopped::OutOfBounds { offset: 0 });
+        assert_eq!(
+            done.stopped,
+            Stopped::OutOfBounds {
+                offset: 0,
+                opcode: super::WRITE_DATA,
+                address: 0xdead_0000,
+            }
+        );
     }
 
     /// Memory whose dispatches the executor carries out by writing where they were asked for, or

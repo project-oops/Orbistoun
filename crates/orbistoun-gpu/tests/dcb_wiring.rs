@@ -211,6 +211,32 @@ fn release_mem_and_dma_data_write_their_arguments() {
     assert_eq!(words, [0xc005_5000, 0x4000_0001, 0, 0, 0xabcd_0000, 0, 0]);
 }
 
+/// The DmaData address patches write into the packet `sceAgcDcbDmaData` returned: the
+/// destination into dw4 and dw5, the source into dw2 and dw3, leaving the rest (obSCEne
+/// `166-agc/patch-dma-data-*`). PPSA03416 builds a fill with a zero destination and patches it.
+#[test]
+fn the_dma_data_patches_write_the_address_into_the_packet() {
+    let w = Writer::new(0x400);
+    let packet = call("sceAgcDcbDmaData", [w.handle(), 1, 0, 0, 0, 2]);
+    let dword = |i: usize| u32::from_le_bytes(w.bytes()[i * 4..i * 4 + 4].try_into().unwrap());
+    let mut patch = [0u64; GUEST_ARG_REGISTERS];
+    patch[0] = packet;
+    patch[1] = 0x0000_7400_01e4_1e38;
+    assert_eq!(call("sceAgcDmaDataPatchSetDstAddressOrOffset", patch), 0);
+    assert_eq!((dword(4), dword(5)), (0x01e4_1e38, 0x7400));
+    patch[1] = 0x0000_0002_3000_0000;
+    assert_eq!(
+        call("sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate", patch),
+        0
+    );
+    assert_eq!((dword(2), dword(3)), (0x3000_0000, 2));
+    assert_eq!(
+        (dword(0), dword(1), dword(6)),
+        (0xc005_5000, 0x4000_0001, 0)
+    );
+    assert_eq!(w.written(), 28, "the patches amend in place");
+}
+
 /// The skeleton measured by header and extent reserves its measured length with the measured
 /// header and a zero body (D696). The argument in `arg1` must not leak into the body.
 #[test]
@@ -378,8 +404,6 @@ fn every_patch_answers_the_measured_success_not_a_placeholder() {
         "sceAgcSetShRegIndirectPatchSetAddress",
         "sceAgcSetUcRegIndirectPatchAddRegisters",
         "sceAgcSetUcRegIndirectPatchSetAddress",
-        "sceAgcDmaDataPatchSetDstAddressOrOffset",
-        "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
         "sceAgcWaitRegMemPatchAddress",
         "sceAgcQueueEndOfPipeActionPatchAddress",
     ] {

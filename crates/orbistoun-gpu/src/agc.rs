@@ -531,15 +531,51 @@ fn cx_indirect_patch_set_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Offset of a `DMA_DATA` packet's source address, dw2 and dw3, as `sceAgcDcbDmaData` places its
+/// `a7` ([`packet::build::dma_data`]).
+const DMA_DATA_SOURCE_AT: u64 = 8;
+/// Offset of a `DMA_DATA` packet's destination address, dw4 and dw5, as it places its `a4`.
+const DMA_DATA_DESTINATION_AT: u64 = 16;
+
+/// Writes a 64-bit address into the two dwords at `packet + at`, low first.
+fn patch_address(packet: u64, at: u64, address: u64) {
+    if packet == 0 {
+        return;
+    }
+    let at = packet.wrapping_add(at);
+    // SAFETY: two dwords of the packet the producer reserved and the guest passes back, in its own
+    // command buffer.
+    unsafe { guest::write_u32(at, address as u32) };
+    // SAFETY: as above, the next dword.
+    unsafe { guest::write_u32(at.wrapping_add(4), (address >> 32) as u32) };
+}
+
+/// `sceAgcDmaDataPatchSetDstAddressOrOffset(packet, address)`: writes the destination into dw4 and
+/// dw5 and answers `0x0`. Measured: `0x3000_0000` and `0x5000_0000` came back as dw4, nothing
+/// else changed (`166-agc/patch-dma-data-dst`, sweep 20260915-203058); the high half into dw5, as
+/// the builder places a destination's and the Cx address patch its own, is assumed. PPSA03416 fills
+/// a `CP_SYNC` fill's destination this way after building it with zero.
+fn dma_data_patch_destination(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    patch_address(args[0], DMA_DATA_DESTINATION_AT, args[1]);
+    OK
+}
+
+/// `sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(packet, source)`: writes the source into
+/// dw2 and dw3 and answers `0x0`. Measured: `0x4000_0000` and `0x6000_0000` came back as dw2
+/// (`166-agc/patch-dma-data-src`); the high half into dw3 is assumed, as for the destination.
+fn dma_data_patch_source(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    patch_address(args[0], DMA_DATA_SOURCE_AT, args[1]);
+    OK
+}
+
 /// The `sceAgc*Patch*` family - amend an already-written packet in place, and return the measured
 /// `0x0`.
 ///
 /// obSCEne measures every patch in the family returning `0x0` across two argument passes
-/// (`166-agc/patch-*`): the Cx/Sh/Uc register patches (`AddRegisters` and `SetAddress`), the two
-/// DmaData address patches, and the wait-reg-mem and end-of-pipe address patches. The field each
-/// amends is a GPU-submission detail the CPU-side flow does not read, and a guest that needs the
-/// bytes writes them itself, so the one handler writes nothing. `packet` is not dereferenced, so a
-/// null needs no guard.
+/// (`166-agc/patch-*`): the Sh/Uc register patches (`AddRegisters` and `SetAddress`), and the
+/// wait-reg-mem and end-of-pipe address patches answer it here and write nothing, their amendment
+/// not yet pinned to the arguments a title passes; the Cx and DmaData patches write theirs.
+/// `packet` is not dereferenced, so a null needs no guard.
 fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
@@ -1056,11 +1092,11 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ),
     (
         "sceAgcDmaDataPatchSetDstAddressOrOffset",
-        agc_patch_returns_ok,
+        dma_data_patch_destination,
     ),
     (
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
-        agc_patch_returns_ok,
+        dma_data_patch_source,
     ),
     ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
     (

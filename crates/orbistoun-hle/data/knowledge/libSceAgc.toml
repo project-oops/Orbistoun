@@ -642,17 +642,17 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcDmaDataPatchSetDstAddressOrOffset"
 purpose = "Writes the destination address (or offset) into a DMA_DATA packet a DmaData builder reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-dst, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the DMA_DATA (0xc0055000) packet's destination field in place. Measured return, writes nothing, per the family - and one of the placeholders PPSA02664's memcpy loop reached (commit a8b2d74)."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-dst, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the packet's dw4: 0x30000000 / 0x50000000 came back at byte 16 and nothing else changed (patch-diff-pass-a/b, extent 20). The high half into dw5 is assumed, where the builder puts a destination's. PPSA03416 and PPSA02664 build a fill with a zero destination and patch it before submitting."]
 known_by = "measured"
-cites = "obSCEne 166-agc/patch-dma-data-dst, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+cites = "obSCEne 166-agc/patch-dma-data-dst, sweep 20260915-203058 (patch-rc-pass-a/b 0x0, patch-diff-pass-a/b at byte 16)."
 found_on = "2026-09-15"
 
 [[function]]
 name = "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate"
 purpose = "Writes the source address, offset or immediate into a DMA_DATA packet a DmaData builder reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-src, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the DMA_DATA (0xc0055000) packet's source field in place. Measured return, writes nothing, per the family."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-src, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the packet's dw2: 0x40000000 / 0x60000000 came back at byte 8 (patch-diff-pass-a/b). The high half into dw3 is assumed, as for the destination."]
 known_by = "measured"
-cites = "obSCEne 166-agc/patch-dma-data-src, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+cites = "obSCEne 166-agc/patch-dma-data-src, sweep 20260915-203058 (patch-rc-pass-a/b 0x0, patch-diff-pass-a/b at byte 8)."
 found_on = "2026-09-15"
 
 [[function]]
