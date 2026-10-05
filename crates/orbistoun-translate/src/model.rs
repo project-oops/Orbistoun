@@ -163,6 +163,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_mul_f32_e32",
     "v_mul_f32_e64",
     "v_or_b32_e32",
+    "v_and_b32_e32",
     "v_xor_b32_e32",
     "v_rcp_f32_e32",
     "v_rsq_f32_e32",
@@ -2032,9 +2033,8 @@ fn vector_instruction<M: Model + ?Sized>(
         // The short-form vector ALU: integer address arithmetic and float arithmetic.
         "v_add_f32_e32" | "v_sub_f32_e32" | "v_subrev_f32_e32" | "v_mul_f32_e32"
         | "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" | "v_add_nc_u32_e32" | "v_fmac_f32_e32"
-        | "v_or_b32_e32" | "v_xor_b32_e32" | "v_mac_f32_e32" | "v_mul_u32_u24_e32" => {
-            short_form_arithmetic(model, instruction, name)
-        }
+        | "v_or_b32_e32" | "v_xor_b32_e32" | "v_and_b32_e32" | "v_mac_f32_e32"
+        | "v_mul_u32_u24_e32" => short_form_arithmetic(model, instruction, name),
 
         // Float minimum and maximum, emitted as `GLSL.std.450` FMax/FMin because the core opcode
         // set has none.
@@ -2212,6 +2212,7 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             "v_add_nc_u32_e32" => model.binary(op::IADD, lhs, rhs),
             "v_or_b32_e32" => model.binary(op::BITWISE_OR, lhs, rhs),
             "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, lhs, rhs),
+            "v_and_b32_e32" => model.binary(op::BITWISE_AND, lhs, rhs),
             "v_lshlrev_b32_e32" => model.binary(op::SHIFT_LEFT_LOGICAL, rhs, lhs),
             // Logical, not arithmetic: the guest has a separate `v_ashrrev_i32` for the
             // sign-propagating shift.
@@ -4950,6 +4951,7 @@ pub const SDWA_INTEGER: &[&str] = &[
     "v_lshrrev_b32_e32",
     "v_or_b32_e32",
     "v_xor_b32_e32",
+    "v_and_b32_e32",
 ];
 
 /// Whether an instruction's modifier - `marker`, from its first source - is one translated: SDWA
@@ -5178,6 +5180,7 @@ fn sdwa_integer<M: Model + ?Sized>(
             "v_add_nc_u32_e32" => model.binary(op::IADD, a, b),
             "v_or_b32_e32" => model.binary(op::BITWISE_OR, a, b),
             "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, a, b),
+            "v_and_b32_e32" => model.binary(op::BITWISE_AND, a, b),
             // The reversed shifts: the amount is the first source.
             "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" => {
                 let amount = model.binary(op::BITWISE_AND, a, low_five);

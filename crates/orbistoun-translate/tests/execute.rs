@@ -5253,6 +5253,7 @@ fn an_exclusive_or_works_whole_and_on_a_selected_word() {
     program.extend(v_mov_literal(0, 0x1234_ffff));
     program.extend(v_mov_literal(1, 0x0f0f_0f0f));
     program.push(vop2_vv("v_xor_b32_e32", 2, 0, 1));
+    program.push(vop2_vv("v_and_b32_e32", 5, 0, 1));
     program.extend(vop2_sdwa(
         "v_xor_b32_e32",
         3,
@@ -5271,6 +5272,7 @@ fn an_exclusive_or_works_whole_and_on_a_selected_word() {
     program.push(s_endpgm());
     let registers = run(&program);
     assert_eq!(vector(&registers, 2), 0x1d3b_f0f0, "whole");
+    assert_eq!(vector(&registers, 5), 0x0204_0f0f, "and their and");
     assert_eq!(
         vector(&registers, 3),
         0x0f0f_1d3b,
