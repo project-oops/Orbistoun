@@ -876,11 +876,8 @@ fn declare_colour_output(
 /// refused.
 fn declare_mesh_outputs(
     b: &mut Builder,
-    f32_type: Id,
-    u32_type: Id,
-    vec4: Id,
-    stage: Stage,
-    primitive: MeshPrimitive,
+    (f32_type, u32_type, vec4): (Id, Id, Id),
+    (stage, primitive): (Stage, MeshPrimitive),
     reserved: &MeshReserved,
 ) -> Option<MeshOutputs> {
     if stage != Stage::Mesh {
@@ -1222,6 +1219,10 @@ pub struct Wavefront<'a> {
     /// Each attribute's second, flat location (D742): where a pixel shader's flat reads of an
     /// attribute it also interpolates go, and where a primitive shader exports the parameter again.
     flat_twins: Option<FlatTwins>,
+    /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
+    integer_images: [bool; 2],
+    /// The four-component unsigned vector an integer image's texel is, declared on first use.
+    uvec4: Option<Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
     mesh: Option<MeshOutputs>,
     /// A rectangle-list mesh module's copies of what it emitted, or [`None`] for any other.
@@ -1692,15 +1693,8 @@ impl<'a> Wavefront<'a> {
         let output = declare_colour_output(&mut b, (f32_type, vec4), output_ptr, (output, stage));
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
         system.declare(&mut b, vec4, bool_type);
-        let mesh = declare_mesh_outputs(
-            &mut b,
-            f32_type,
-            u32_type,
-            vec4,
-            stage,
-            primitive,
-            &mesh_reserved,
-        );
+        let types = (f32_type, u32_type, vec4);
+        let mesh = declare_mesh_outputs(&mut b, types, (stage, primitive), &mesh_reserved);
         let (files, observation, guest_memory) = declare_state(&mut b, &ids, stage, width, window);
         let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
         let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
@@ -1734,6 +1728,8 @@ impl<'a> Wavefront<'a> {
             output,
             inputs,
             flat_twins: user_data.flat_twins,
+            integer_images: user_data.compute.unwrap_or_default().integer_images,
+            uvec4: None,
             mesh,
             rectangles,
             window_space: user_data.window_space,
@@ -1774,7 +1770,7 @@ impl<'a> Wavefront<'a> {
             translated: 0,
             dispatch,
             memory_high: u32::try_from(window.address() >> 32).unwrap_or(u32::MAX),
-            unwritten_user_data: user_data.compute.map_or(0, |c| c.unwritten_user_data),
+            unwritten_user_data: user_data.compute.unwrap_or_default().unwritten_user_data,
             reads_unwritten: false,
             written: (0, [0; 4]),
             reads_geometry_input: false,
@@ -2019,6 +2015,18 @@ impl<'a> Wavefront<'a> {
     fn lane_known(&self, lane: u32) -> Option<bool> {
         let (half, bit) = if lane < 32 { (0, lane) } else { (1, lane - 32) };
         self.known_exec[half].map(|mask| mask >> bit & 1 != 0)
+    }
+
+    /// The four-component unsigned vector type, declared once on first use.
+    fn unsigned_vec4(&mut self) -> Id {
+        if let Some(id) = self.uvec4 {
+            return id;
+        }
+        let id = self.builder.id();
+        self.builder
+            .declare(op::TYPE_VECTOR, &[id.0, self.u32_type.0, 4]);
+        self.uvec4 = Some(id);
+        id
     }
 
     fn lane_pointer(&mut self, register: u32, lane: u32) -> Id {
@@ -2811,10 +2819,14 @@ impl Model for Wavefront<'_> {
         // The seven operands a sampled image takes, with `Sampled` at 2 (written through an image
         // instruction, not read through a sampler) and the format `Unknown`, which the capability
         // above permits.
-        self.builder.declare(
-            op::TYPE_IMAGE,
-            &[image.0, self.f32_type.0, 1, 0, 0, 0, 2, 0],
-        );
+        let integer = self.stage == Stage::Compute && self.integer_images[1];
+        let (element, value) = if integer {
+            (self.u32_type, self.unsigned_vec4())
+        } else {
+            (self.f32_type, self.vec4)
+        };
+        self.builder
+            .declare(op::TYPE_IMAGE, &[image.0, element.0, 1, 0, 0, 0, 2, 0]);
         self.builder
             .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, image.0]);
         self.builder
@@ -2826,7 +2838,8 @@ impl Model for Wavefront<'_> {
             variable,
             image,
             texel,
-            value: self.vec4,
+            value,
+            integer,
         };
         self.images.stored = Some((stored, descriptor));
         Ok(stored)
@@ -2909,10 +2922,15 @@ impl Model for Wavefront<'_> {
 
         // Element type, then: two-dimensional, not depth, not arrayed, single-sampled, used with a
         // sampler, and no declared format - the same seven values the hand-written oracle declares.
-        self.builder.declare(
-            op::TYPE_IMAGE,
-            &[image.0, self.f32_type.0, 1, 0, 0, 0, 1, 0],
-        );
+        // A compute dispatch's fetched image may be an unsigned integer one, declared as such.
+        let integer = self.stage == Stage::Compute && self.integer_images[0];
+        let (element, result) = if integer {
+            (self.u32_type, self.unsigned_vec4())
+        } else {
+            (self.f32_type, self.vec4)
+        };
+        self.builder
+            .declare(op::TYPE_IMAGE, &[image.0, element.0, 1, 0, 0, 0, 1, 0]);
         self.builder
             .declare(op::TYPE_SAMPLED_IMAGE, &[combined.0, image.0]);
         self.builder
@@ -2933,7 +2951,8 @@ impl Model for Wavefront<'_> {
             image,
             coordinate,
             texel,
-            result: self.vec4,
+            result,
+            integer,
         };
         self.textures.push(BoundTexture {
             texture,

@@ -906,21 +906,73 @@ impl Pipeline {
         .map_err(str::to_owned)?;
         let window_or_none = placed;
         let placed = placed.unwrap_or_default();
+        // The images' numeric types come from the descriptors the translation names, so a module
+        // translated for float images whose images are integer ones is translated again for them.
+        let mut integer_images = state.inputs.integer_images;
+        let (module, images) = loop {
+            let (module, sources) =
+                self.dispatch_module((&decoded, program, address), state, placed, integer_images)?;
+            let images = dispatch_images(state, &sources, memory)?;
+            let wanted = [
+                images
+                    .fetched
+                    .as_ref()
+                    .is_some_and(|t| t.format.is_integer()),
+                images
+                    .stored
+                    .as_ref()
+                    .is_some_and(|t| t.format.is_integer()),
+            ];
+            if wanted == integer_images {
+                break (module, images);
+            }
+            integer_images = wanted;
+        };
+        Ok(PreparedDispatch {
+            module,
+            window: window_or_none,
+            images,
+            // The whole block the module declares; a word the stream never wrote, which the
+            // translation refused a program for reading, and the rest of the block are zero.
+            push: {
+                let mut block: Vec<u32> = state.user_data.iter().map(|w| w.unwrap_or(0)).collect();
+                block.resize(
+                    orbistoun_translate::wavefront::USER_DATA_BLOCK_WORDS as usize,
+                    0,
+                );
+                block
+            },
+            groups: state.groups,
+        })
+    }
+
+    /// A dispatch's program translated for its entry state, its window and its images' numeric
+    /// types, from the cache where it was translated before, with where its images come from.
+    fn dispatch_module(
+        &mut self,
+        (decoded, program, address): (&orbistoun_shader::Decode, &[u8], u64),
+        state: &crate::dispatch::DispatchState,
+        placed: Window,
+        integer_images: [bool; 2],
+    ) -> Result<(Vec<u32>, orbistoun_translate::wavefront::ImageSources), String> {
         let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
+        let inputs = orbistoun_translate::wavefront::ComputeInputs {
+            integer_images,
+            ..state.inputs
+        };
         let user_data = UserData {
             first_register: 0,
             count,
             block_offset: 0,
             dx10_clamp: state.dx10_clamp,
             pixel_inputs: None,
-            compute: Some(state.inputs),
+            compute: Some(inputs),
             geometry: None,
             window_space: false,
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
         };
-        let inputs = state.inputs;
         let key = content_hash(program)
             ^ window_salt(placed)
             ^ (u64::from(count) << 56)
@@ -947,8 +999,10 @@ impl Pipeline {
             ^ inputs.partial.map_or(0, |partial| {
                 let shape = [partial.last, partial.threads];
                 content_hash(zerocopy::IntoBytes::as_bytes(shape.as_flattened())) | 1
-            });
-        let (module, sources) = if let Some(cached) = self.dispatch_modules.get(&key) {
+            })
+            ^ u64::from(integer_images[0]) << 62
+            ^ u64::from(integer_images[1]) << 63;
+        Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()
         } else {
             let strategy = Strategy::Predicated {
@@ -956,7 +1010,7 @@ impl Pipeline {
                 width: state.width,
             };
             let translated = translate_with_user_data(
-                &decoded,
+                decoded,
                 &self.encodings,
                 strategy,
                 (Stage::Compute, MeshPrimitive::default()),
@@ -970,23 +1024,6 @@ impl Pipeline {
             self.dispatch_modules
                 .insert(key, (translated.module.clone(), sources.clone()));
             (translated.module, sources)
-        };
-        let images = dispatch_images(state, &sources, memory)?;
-        Ok(PreparedDispatch {
-            module,
-            window: window_or_none,
-            images,
-            // The whole block the module declares; a word the stream never wrote, which the
-            // translation refused a program for reading, and the rest of the block are zero.
-            push: {
-                let mut block: Vec<u32> = state.user_data.iter().map(|w| w.unwrap_or(0)).collect();
-                block.resize(
-                    orbistoun_translate::wavefront::USER_DATA_BLOCK_WORDS as usize,
-                    0,
-                );
-                block
-            },
-            groups: state.groups,
         })
     }
 
@@ -1286,13 +1323,16 @@ pub struct KeysToExpand {
     pub surface: (u64, usize),
 }
 
-/// A dispatch image's texel format: the guest's `8_8_8_8_UNORM`, or its single-channel `8_UNORM`.
+/// A dispatch image's texel format: the guest's `8_8_8_8_UNORM`, its single-channel `8_UNORM`, or
+/// `32_32_32_32_UINT`, as which radeonsi copies a block-compressed image's blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexelFormat {
     /// Four eight-bit normalised channels, a texel a word.
     Rgba8,
     /// One eight-bit normalised channel, a texel a byte.
     R8,
+    /// Four thirty-two-bit unsigned channels, a texel four words.
+    Rgba32Uint,
 }
 
 impl TexelFormat {
@@ -1302,7 +1342,20 @@ impl TexelFormat {
         match self {
             Self::Rgba8 => 4,
             Self::R8 => 1,
+            Self::Rgba32Uint => 16,
         }
+    }
+
+    /// Words one texel takes among a dispatch image's texels: one for a texel of a word or less.
+    #[must_use]
+    pub const fn words(self) -> u32 {
+        self.bytes().div_ceil(4)
+    }
+
+    /// Whether the format's channels are unsigned integers, which a shader declares as such.
+    #[must_use]
+    pub const fn is_integer(self) -> bool {
+        matches!(self, Self::Rgba32Uint)
     }
 }
 
@@ -1378,11 +1431,13 @@ impl DispatchSurface {
                 ..
             } => {
                 let size = *bytes_per_texel as usize;
+                // A texel wider than a word is its words in order.
+                let word = size.min(4);
                 (0..*height as usize)
                     .flat_map(|row| {
                         let start = row * *pitch as usize * size;
                         spanned[start..start + *width as usize * size]
-                            .chunks_exact(size)
+                            .chunks_exact(word)
                             .map(|texel| {
                                 texel
                                     .iter()
@@ -1402,7 +1457,14 @@ impl DispatchSurface {
     /// When the texels or the bytes do not match its extent.
     pub fn tile(&self, texels: &[u32], spanned: &mut [u8]) -> Result<(), String> {
         let (width, height) = self.extent();
-        if texels.len() != width as usize * height as usize || spanned.len() < self.bytes() {
+        let words = match self {
+            Self::Linear {
+                bytes_per_texel, ..
+            } => bytes_per_texel.div_ceil(4) as usize,
+            Self::Tiled(_) => 1,
+        };
+        if texels.len() != width as usize * height as usize * words || spanned.len() < self.bytes()
+        {
             return Err("a dispatch image's texels do not match its extent".to_owned());
         }
         match self {
@@ -1422,10 +1484,11 @@ impl DispatchSurface {
                 ..
             } => {
                 let size = *bytes_per_texel as usize;
-                for (row, texels) in texels.chunks(width as usize).enumerate() {
+                let word = size.min(4);
+                for (row, texels) in texels.chunks(width as usize * words).enumerate() {
                     let start = row * *pitch as usize * size;
-                    for (bytes, texel) in spanned[start..].chunks_exact_mut(size).zip(texels) {
-                        bytes.copy_from_slice(&texel.to_le_bytes()[..size]);
+                    for (bytes, texel) in spanned[start..].chunks_exact_mut(word).zip(texels) {
+                        bytes.copy_from_slice(&texel.to_le_bytes()[..word]);
                     }
                 }
                 Ok(())
@@ -1477,7 +1540,9 @@ fn dispatch_images(
         let (width, height) = surface.extent();
         let texels = match surface_keys(&descriptor, format, memory)? {
             crate::dcc::Keys::Uncompressed => surface.detile(&read_spanned(&surface, memory)?),
-            crate::dcc::Keys::Clear0000 => vec![0; width as usize * height as usize],
+            crate::dcc::Keys::Clear0000 => {
+                vec![0; width as usize * height as usize * format.words() as usize]
+            }
             crate::dcc::Keys::Other => {
                 return Err(concat!(
                     "the fetched image's compression keys need per-block addressing, which is ",
@@ -1516,7 +1581,7 @@ fn dispatch_images(
                         keys: (crate::dcc::meta_start(dcc), bytes),
                         surface: (descriptor.base, chain),
                     });
-                vec![0; width as usize * height as usize]
+                vec![0; width as usize * height as usize * format.words() as usize]
             }
             crate::dcc::Keys::Other => {
                 return Err(concat!(
@@ -1582,7 +1647,21 @@ fn dispatch_image_surface(
     let format = match descriptor.format {
         FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
         FORMAT_8_UNORM => TexelFormat::R8,
-        _ => None.ok_or_else(|| format!("a dispatch image of format {}", descriptor.format))?,
+        // A sixteen-byte texel is placed linearly here; its tiled layouts are not modelled.
+        FORMAT_32_32_32_32_UINT if descriptor.tiling == SwizzleMode::Linear => {
+            TexelFormat::Rgba32Uint
+        }
+        _ => None.ok_or_else(|| {
+            format!(
+                "a dispatch image of format {} ({:?}, {}x{}, levels {}..={})",
+                descriptor.format,
+                descriptor.tiling,
+                descriptor.width,
+                descriptor.height,
+                descriptor.base_level,
+                descriptor.last_level
+            )
+        })?,
     };
     if words[3] >> 28 != IMAGE_TYPE_2D {
         return Err(format!(
@@ -2919,6 +2998,8 @@ const IMAGE_TYPE_2D: u32 = 9;
 const FORMAT_8_8_8_8_UNORM: u32 = 56;
 /// `GFX10_FORMAT_8_UNORM` (`gfx10-rsrc.json:6`): one eight-bit normalised channel.
 const FORMAT_8_UNORM: u32 = 1;
+/// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
+const FORMAT_32_32_32_32_UINT: u32 = 75;
 
 /// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
 /// table names a texture read exactly, so the draws that follow sample the guest's own texels.
@@ -3213,7 +3294,9 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         .iter()
         .map(|&texel| {
             let channels = match format {
-                TexelFormat::Rgba8 => texel.to_le_bytes(),
+                // A draw's texture is never a sixteen-byte one: `sampled_format` reads no such
+                // format, so its arm is the four-byte one's.
+                TexelFormat::Rgba8 | TexelFormat::Rgba32Uint => texel.to_le_bytes(),
                 TexelFormat::R8 => [texel.to_le_bytes()[0], 0, 0, 0xFF],
             };
             u32::from_le_bytes(selects.map(|select| pick(channels, select)))
@@ -5083,5 +5166,33 @@ mod tests {
                 (10, 8, guest(0x1000 + 120)),
             ]
         );
+    }
+
+    /// A linear image of sixteen-byte texels reads as each texel's four words in order, row by row
+    /// at its pitch, and writes back to the same bytes, leaving a row's padding alone.
+    #[test]
+    fn a_linear_image_of_sixteen_byte_texels_reads_and_writes_by_words() {
+        let surface = super::DispatchSurface::Linear {
+            base: 0,
+            width: 2,
+            height: 2,
+            pitch: 3,
+            bytes_per_texel: 16,
+        };
+        let mut spanned: Vec<u8> = (0..2 * 3 * 16).map(|i| i as u8).collect();
+        let texels = surface.detile(&spanned);
+        let word = |byte: usize| u32::from_le_bytes(spanned[byte..byte + 4].try_into().unwrap());
+        let expected: Vec<u32> = [0, 16, 48, 64]
+            .iter()
+            .flat_map(|&texel| (0..4).map(move |w| texel + w * 4))
+            .map(word)
+            .collect();
+        assert_eq!(texels, expected);
+        let written: Vec<u32> = (0..16).map(|i| 0xa0a0_0000 | i).collect();
+        surface
+            .tile(&written, &mut spanned)
+            .expect("the extent matches");
+        assert_eq!(surface.detile(&spanned), written);
+        assert_eq!(spanned[32], 32, "a row's padding texel is left alone");
     }
 }

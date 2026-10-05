@@ -37,6 +37,11 @@ pub struct ComputeInputs {
     /// A dispatch whose last group along a dimension runs fewer threads (`PARTIAL_TG_EN`).
     #[serde(default)]
     pub partial: Option<PartialGroups>,
+    /// Whether the image a dispatch fetches from and the image it stores to have an unsigned
+    /// integer format, which their declarations must say: a Vulkan view's numeric type and the
+    /// shader's sampled type agree. Raw words move through them unconverted.
+    #[serde(default)]
+    pub integer_images: [bool; 2],
 }
 
 /// The last group along each dimension of a dispatch with partial groups, and how many threads it
@@ -330,6 +335,7 @@ mod tests {
             threads,
             unwritten_user_data: 0,
             partial: None,
+            integer_images: [false; 2],
         }
     }
 

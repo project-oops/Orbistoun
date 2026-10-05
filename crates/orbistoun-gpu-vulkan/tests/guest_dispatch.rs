@@ -94,6 +94,7 @@ fn translated_with(
                 threads: [64, 1, 1],
                 unwritten_user_data: unwritten,
                 partial,
+                integer_images: [false; 2],
             }),
             ..UserData::default()
         },

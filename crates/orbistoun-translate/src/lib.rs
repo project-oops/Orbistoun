@@ -1177,6 +1177,7 @@ mod tests {
                         threads: [8, 8, 1],
                         unwritten_user_data: 0,
                         partial: None,
+                        integer_images: [false; 2],
                     }),
                     ..UserData::default()
                 },

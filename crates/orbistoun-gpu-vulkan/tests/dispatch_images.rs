@@ -63,6 +63,11 @@ const COPY_A16_D16: [u32; 9] = [
 const SIDE: u32 = 8;
 
 fn translated(program: &[u32]) -> Vec<u32> {
+    translated_for(program, [false; 2])
+}
+
+/// The program translated for images whose numeric types are these: fetched, stored.
+fn translated_for(program: &[u32], integer_images: [bool; 2]) -> Vec<u32> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -81,6 +86,7 @@ fn translated(program: &[u32]) -> Vec<u32> {
                 threads: [SIDE, SIDE, 1],
                 unwritten_user_data: 0,
                 partial: None,
+                integer_images,
             }),
             ..UserData::default()
         },
@@ -126,6 +132,63 @@ fn a_dispatch_copies_one_image_into_another() {
         assert!(!done.escaped, "{form}");
         assert_eq!(done.stored.as_deref(), Some(source.as_slice()), "{form}");
     }
+}
+
+/// A copy between `32_32_32_32_UINT` images - radeonsi's view of a block-compressed image's
+/// sixteen-byte blocks - moves every word exactly, a NaN's bits and all: the images are declared
+/// unsigned, as their views are, so nothing passes through a float.
+#[test]
+fn a_dispatch_copies_an_unsigned_image_word_for_word() {
+    if !device_or_skip("unsigned image copy") {
+        return;
+    }
+    let source: Vec<u32> = (0..SIDE * SIDE * 4)
+        .map(|i| match i % 4 {
+            0 => 0x7fc0_1234,
+            1 => 0xffff_ffff,
+            _ => 0x0102_0304_u32.wrapping_mul(i + 1),
+        })
+        .collect();
+    let destination = vec![0_u32; (SIDE * SIDE * 4) as usize];
+    let image = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba32Uint,
+        width: SIDE,
+        height: SIDE,
+    };
+    // Both images are declared with the unsigned 32-bit element: `OpTypeImage` (25) whose sampled
+    // type is the `OpTypeInt 32 0` (21). A driver may move a float image's bits unchanged too, so
+    // the declaration, which Vulkan requires to match the view, is checked itself.
+    let module = translated_for(&COPY, [true, true]);
+    let mut unsigned = None;
+    let mut images = Vec::new();
+    let mut at = 5;
+    while at < module.len() {
+        let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
+        match opcode {
+            21 if module[at + 2..at + 4] == [32, 0] => unsigned = Some(module[at + 1]),
+            25 => images.push(module[at + 2]),
+            _ => {}
+        }
+        at += count.max(1);
+    }
+    assert_eq!(images.len(), 2, "a fetched and a stored image");
+    assert!(
+        images.iter().all(|element| Some(*element) == unsigned),
+        "{images:?} against {unsigned:?}"
+    );
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 16], [1, 1, 1]),
+        &DispatchImages {
+            fetched: Some(image(&source)),
+            stored: Some(image(&destination)),
+        },
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
 }
 
 /// One component a texel, `dmask:0x1`: `image_load v2, v[0:1], s[0:7]` then the same store.
@@ -209,6 +272,7 @@ fn a_sixteen_word_load_names_two_images_of_its_table() {
                 threads: [SIDE, SIDE, 1],
                 unwritten_user_data: 0,
                 partial: None,
+                integer_images: [false; 2],
             }),
             ..UserData::default()
         },

@@ -321,8 +321,11 @@ pub struct Texture {
     /// A different type from [`coordinate`](Self::coordinate): a sample takes a normalised
     /// position, a fetch the texel's own index.
     pub texel: Id,
-    /// The four-component float vector a sample or a fetch answers with.
+    /// The four-component vector a sample or a fetch answers with: float, or unsigned for an
+    /// integer image.
     pub result: Id,
+    /// Whether the image has an unsigned integer format, whose texels are raw words.
+    pub integer: bool,
 }
 
 /// What a translated texture store needs from the model.
@@ -337,8 +340,10 @@ pub struct Stored {
     pub image: Id,
     /// The two-component unsigned vector a texel coordinate is.
     pub texel: Id,
-    /// The four-component float vector a texel's value is.
+    /// The four-component vector a texel's value is: float, or unsigned for an integer image.
     pub value: Id,
+    /// Whether the image has an unsigned integer format, whose texels are raw words.
+    pub integer: bool,
 }
 
 /// How the execution mask's low half arrives from the decoder.
@@ -7209,10 +7214,16 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
 fn write_components<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    texel: Id,
+    (texel, integer): (Id, bool),
     (mask, destination, d16): (u32, u32, bool),
     lane: u32,
 ) -> Result<(), TranslateError> {
+    if integer && d16 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a sixteen-bit fetch from an integer image is not translated",
+        });
+    }
     let f32_type = model.f32_type();
     let u32_type = model.u32_type();
     let mut returned = Vec::new();
@@ -7222,10 +7233,16 @@ fn write_components<M: Model + ?Sized>(
         }
         let builder = model.builder();
         let extracted = builder.id();
+        // An integer image's components are the words themselves.
+        let element = if integer { u32_type } else { f32_type };
         builder.function(
             op::COMPOSITE_EXTRACT,
-            &[f32_type.0, extracted.0, texel.0, component],
+            &[element.0, extracted.0, texel.0, component],
         );
+        if integer {
+            returned.push(extracted);
+            continue;
+        }
         let bits = builder.id();
         builder.function(op::BITCAST, &[u32_type.0, bits.0, extracted.0]);
         returned.push(bits);
@@ -7362,7 +7379,7 @@ fn image_sample<M: Model + ?Sized>(
         write_components(
             model,
             instruction,
-            texel,
+            (texel, texture.integer),
             (mask, destination, halves.data),
             lane,
         )?;
@@ -7402,6 +7419,11 @@ fn image_store<M: Model + ?Sized>(
     } = halves;
 
     let stored = model.storage_image(descriptor).map_err(refuse)?;
+    if stored.integer && d16 {
+        return Err(refuse(
+            "a sixteen-bit store to an integer image is not translated",
+        ));
+    }
     let zero = model.constant(0);
 
     for lane in running_lanes(model) {
@@ -7411,7 +7433,12 @@ fn image_store<M: Model + ?Sized>(
         // The texel's components, taken in mask order from consecutive registers, so a hole in the
         // mask reads no register for that component. Under `D16` two halves share a register, the
         // first in the low half, each widened back to a float.
-        let mut components = [model.as_float(zero); IMAGE_COMPONENTS as usize];
+        let zero_component = if stored.integer {
+            zero
+        } else {
+            model.as_float(zero)
+        };
+        let mut components = [zero_component; IMAGE_COMPONENTS as usize];
         let mut read = 0;
         for (component, slot) in components.iter_mut().enumerate() {
             let selected = u32::try_from(component).unwrap_or(IMAGE_COMPONENTS);
@@ -7428,7 +7455,11 @@ fn image_store<M: Model + ?Sized>(
                 let half = model.binary(op::BITWISE_AND, shifted, low);
                 bits = model.half_to_float_bits(half);
             }
-            *slot = model.as_float(bits);
+            *slot = if stored.integer {
+                bits
+            } else {
+                model.as_float(bits)
+            };
             read += 1;
         }
 

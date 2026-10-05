@@ -17,6 +17,8 @@ pub enum DispatchFormat {
     Rgba8,
     /// One eight-bit normalised channel, the guest's `8_UNORM`.
     R8,
+    /// Four thirty-two-bit unsigned channels, the guest's `32_32_32_32_UINT`: four words a texel.
+    Rgba32Uint,
 }
 
 impl DispatchFormat {
@@ -24,6 +26,7 @@ impl DispatchFormat {
         match self {
             Self::Rgba8 => vk::Format::R8G8B8A8_UNORM,
             Self::R8 => vk::Format::R8_UNORM,
+            Self::Rgba32Uint => vk::Format::R32G32B32A32_UINT,
         }
     }
 
@@ -32,6 +35,17 @@ impl DispatchFormat {
         match self {
             Self::Rgba8 => 4,
             Self::R8 => 1,
+            Self::Rgba32Uint => 16,
+        }
+    }
+
+    /// Words one texel takes in a dispatch image's texels, and bytes of each word that are its own.
+    const fn words(self) -> (usize, usize) {
+        let bytes = self.bytes();
+        if bytes <= 4 {
+            (1, bytes)
+        } else {
+            (bytes / 4, 4)
         }
     }
 }
@@ -299,8 +313,9 @@ impl BoundImages {
         // SAFETY: the mapping covers `bytes` bytes and nothing writes it while it is read.
         let raw =
             unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().cast_const(), texels * size) };
+        // A texel of more than a word comes back as its words, in order.
         let texels = raw
-            .chunks_exact(size)
+            .chunks_exact(image.format.words().1)
             .map(|texel| {
                 texel
                     .iter()
@@ -411,7 +426,7 @@ fn create_image(
     texels: DispatchImage<'_>,
     stored: bool,
 ) -> Result<Created, DispatchError> {
-    let words = texels.width as usize * texels.height as usize;
+    let words = texels.width as usize * texels.height as usize * texels.format.words().0;
     if texels.texels.len() != words || words == 0 {
         return Err(DispatchError::Unsupported(
             "a dispatch image's texels are not its extent".to_owned(),
@@ -518,11 +533,11 @@ fn staging_buffer(
     (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
     image: DispatchImage<'_>,
 ) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
-    let size = image.format.bytes();
+    let (_, size) = image.format.words();
     let packed: Vec<u8> = image
         .texels
         .iter()
-        .flat_map(|texel| texel.to_le_bytes().into_iter().take(size))
+        .flat_map(|word| word.to_le_bytes().into_iter().take(size))
         .collect();
     let bytes = packed.len() as vk::DeviceSize;
     let info = vk::BufferCreateInfo::default()
