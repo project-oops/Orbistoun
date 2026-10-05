@@ -139,14 +139,30 @@ fn lock() -> std::sync::MutexGuard<'static, Lifecycle> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Serialises the tests that move the process-wide session: this module's own, and the worker
+/// loop's that send a `Run` (which calls [`begin`] and [`end`]) or a `Shell` (which calls
+/// [`apply`]).
+///
+/// Tests run in parallel in one process, so another test's `end` or `ToShell` could land between
+/// a `begin` and its assertion. Poison is recovered so a panicking holder does not fail the others.
+#[cfg(test)]
+pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use orbistoun_shell::{Lifecycle, Request};
 
     /// A shell request moves the session, and a refused request is an error, not dropped. One
-    /// test, because the state is process-wide and two tests would race on it.
+    /// test, and every other test that moves the session holds [`super::serial`], because the
+    /// state is process-wide.
     #[test]
     fn a_request_moves_the_session_and_a_refusal_is_not_dropped() {
+        let _serial = super::serial();
         super::begin();
         assert_eq!(super::state(), Lifecycle::Foreground);
 
