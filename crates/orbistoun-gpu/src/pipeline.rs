@@ -3556,21 +3556,57 @@ fn reaches_guest_memory(
         .collect();
     // Every scalar register something other than an image instruction reads: its sources, and the
     // first operand of a compare, which writes nothing.
-    let mut read = std::collections::BTreeSet::new();
-    for &(instruction, name) in &named {
+    let reads = |instruction: &orbistoun_shader::Instruction, name: &str| {
+        let mut read = Vec::new();
         if name.starts_with("image_") {
-            continue;
+            return read;
         }
-        let first = usize::from(!(name.starts_with("s_cmp") || name.starts_with("s_bitcmp")));
+        let first = usize::from(!is_scalar_compare(name));
         for operand in instruction.operands.iter().skip(first) {
             if let Operand::Scalar(register) = operand {
                 read.extend([*register, register.saturating_add(1)]);
             }
         }
-    }
+        read
+    };
+    let anywhere: std::collections::BTreeSet<u16> = named
+        .iter()
+        .flat_map(|&(instruction, name)| reads(instruction, name))
+        .collect();
+    // In a program with no loop, a load's registers are read only by what follows it until they
+    // are written again; in one with a loop, anything may follow, so a read anywhere counts.
+    let looped = named.iter().any(|&(instruction, name)| {
+        (name == "s_branch" || name.starts_with("s_cbranch_"))
+            && orbistoun_translate::blocks::branch_target(instruction)
+                .is_ok_and(|target| target <= instruction.offset)
+    });
+    let read_after = |at: usize, first: u16, span: u16| {
+        if looped {
+            return (first..first.saturating_add(span)).any(|r| anywhere.contains(&r));
+        }
+        let mut live: std::collections::BTreeSet<u16> =
+            (first..first.saturating_add(span)).collect();
+        for &(instruction, name) in &named[at + 1..] {
+            if reads(instruction, name).iter().any(|r| live.contains(r)) {
+                return true;
+            }
+            if !is_scalar_compare(name)
+                && let Some(Operand::Scalar(written)) = instruction.operands.first()
+            {
+                for register in *written..written.saturating_add(scalar_destination_span(name)) {
+                    live.remove(&register);
+                }
+            }
+            if live.is_empty() {
+                return false;
+            }
+        }
+        false
+    };
     named
         .iter()
-        .find(|&&(instruction, name)| {
+        .enumerate()
+        .find(|&(at, &(instruction, name))| {
             if served.contains_key(&instruction.offset) {
                 return false;
             }
@@ -3583,10 +3619,9 @@ fn reaches_guest_memory(
             let Some(Operand::Scalar(first)) = instruction.operands.first() else {
                 return true;
             };
-            let span = scalar_destination_span(name);
-            (*first..first.saturating_add(span)).any(|register| read.contains(&register))
+            read_after(at, *first, scalar_destination_span(name))
         })
-        .map(|(instruction, name)| {
+        .map(|(_, (instruction, name))| {
             let second = instruction
                 .second_word
                 .map_or_else(String::new, |word| format!(" {word:#010x}"));
@@ -3602,6 +3637,12 @@ fn reaches_guest_memory(
                     .join(", ")
             )
         })
+}
+
+/// Whether a scalar instruction is a compare, which writes only the condition code: its first
+/// operand is a source.
+fn is_scalar_compare(name: &str) -> bool {
+    name.starts_with("s_cmp") || name.starts_with("s_bitcmp")
 }
 
 /// The 64-bit address a shader forms from two constant scalar registers as the base of its memory
@@ -4655,6 +4696,15 @@ mod tests {
             )
         };
         assert_eq!(reaches(&only_image), None);
+        // Its registers read before the load, or after they are written again, are another
+        // value's: ACO reuses a texture's registers for a constant buffer's descriptor.
+        // s_mov_b64 s[9:10], 0: a read counts its register and the next, as a pair source might.
+        let write_s9 = 0xbe89_0480;
+        let read_before = words(&[read_s9, load[0], load[1], image[0], image[1], end]);
+        let read_after_rewrite =
+            words(&[load[0], load[1], image[0], image[1], write_s9, read_s9, end]);
+        assert_eq!(reaches(&read_before), None);
+        assert_eq!(reaches(&read_after_rewrite), None);
         // The access is named, so a refused draw says which instruction to bind or trace.
         assert_eq!(
             reaches(&also_read).as_deref(),

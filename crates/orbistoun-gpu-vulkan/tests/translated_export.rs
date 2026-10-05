@@ -189,6 +189,53 @@ fn an_inactive_pixel_at_the_final_export_is_discarded() {
     }
 }
 
+/// ACO's early exit from a pixel shader - every lane's execution bit cleared by a `discard`, then
+/// `exp null off, off, off, off done vm` (`aco_lower_to_hw_instr.cpp:2471`) - writes nothing and
+/// discards the pixel: the red clear survives.
+#[test]
+fn a_null_export_discards_an_inactive_pixel() {
+    if !device_or_skip("a_null_export_discards_an_inactive_pixel") {
+        return;
+    }
+    let (width, height) = (8, 5);
+    // `s_mov_b64 exec, 0`, then `exp null` (target 9 at bit 4) with no channels, `done` and `vm`.
+    let mut bytes = (0xBE80_0000u32 | (126 << 16) | (4 << 8) | 128)
+        .to_le_bytes()
+        .to_vec();
+    bytes.extend((0xF800_0000u32 | (9 << 4) | (1 << 11) | (1 << 12)).to_le_bytes());
+    bytes.extend(0u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _) = translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .expect("the null export translated");
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let drawn = draw_with(
+        &fullscreen_triangle_vertex_module(),
+        &module,
+        red,
+        width,
+        height,
+    )
+    .expect("the draw ran");
+    for y in 0..height {
+        for x in 0..width {
+            assert_eq!(
+                drawn.at(x, y),
+                Some([255, 0, 0, 255]),
+                "({x}, {y}) discarded"
+            );
+        }
+    }
+}
+
 /// An export that enables some channels writes those and keeps the others as the output held them:
 /// blue exported whole, then red alone, leaves red over the blue's green, blue and alpha. Mesa
 /// exports a one-byte red target's colour this way (`SPI_SHADER_32_R`, `ac_shader_util.c`), and the

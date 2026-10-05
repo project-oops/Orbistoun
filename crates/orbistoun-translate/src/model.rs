@@ -1501,6 +1501,9 @@ const EXPORT_PARAMETER: i64 = 32;
 const EXPORT_PARAMETERS: i64 = 32;
 /// The primitive export: the triangle's vertex indices, packed into one register.
 const EXPORT_PRIMITIVE: i64 = 20;
+/// `SQ_EXP_NULL` (`gfx10-rsrc.json`): an export that writes nothing, which ACO's early exit from a
+/// pixel shader makes with no channels, `done` and `vm` (`aco_lower_to_hw_instr.cpp:2471`).
+const EXPORT_NULL: i64 = 9;
 
 /// Which parameter location an export target names, if it names one.
 ///
@@ -1662,6 +1665,23 @@ const EXPORT_ENABLE_MASK: u32 = 0xf;
 /// before it (`aco_select_nir_intrinsics.cpp:4676`).
 const EXPORT_VALID_MASK: u32 = 1 << 12;
 
+/// A valid-mask export (`vm`) discards the pixel when its lane is inactive. A model with no
+/// execution mask has no inactive lane to discard.
+fn discard_inactive<M: Model + ?Sized>(model: &mut M, instruction: &Instruction) {
+    if instruction.word & EXPORT_VALID_MASK != 0
+        && let Ok((low, high)) = model.read_lane_mask(EXEC_LOW_HALF)
+    {
+        let active = model.lane_bit(low, high, 0);
+        let b = model.builder();
+        let (discard, kept) = (b.id(), b.id());
+        b.function(op::SELECTION_MERGE, &[kept.0, 0]);
+        b.function(op::BRANCH_CONDITIONAL, &[active.0, kept.0, discard.0]);
+        b.function(op::LABEL, &[discard.0]);
+        b.function(op::KILL, &[]);
+        b.function(op::LABEL, &[kept.0]);
+    }
+}
+
 /// `exp`: hands four registers to a render target.
 ///
 /// The sources are read for lane zero, reinterpreted as floats (not converted), assembled into a
@@ -1720,6 +1740,19 @@ fn export<M: Model + ?Sized>(
                      is a compute dispatch and has neither",
         });
     };
+    // The null target writes nothing; with `vm` it still discards the pixels whose lanes are
+    // inactive, which is what ACO's early exit is for.
+    if *target == EXPORT_NULL {
+        if instruction.word & EXPORT_ENABLE_MASK != 0 {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a null export that enables channels, which it would write nowhere",
+            });
+        }
+        discard_inactive(model, instruction);
+        model.count();
+        return Ok(());
+    }
     if *target != MRT0 {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -1743,20 +1776,7 @@ fn export<M: Model + ?Sized>(
         });
     }
 
-    // A valid-mask export discards the pixel when its lane is inactive. A model with no execution
-    // mask has no inactive lane to discard.
-    if instruction.word & EXPORT_VALID_MASK != 0
-        && let Ok((low, high)) = model.read_lane_mask(EXEC_LOW_HALF)
-    {
-        let active = model.lane_bit(low, high, 0);
-        let b = model.builder();
-        let (discard, kept) = (b.id(), b.id());
-        b.function(op::SELECTION_MERGE, &[kept.0, 0]);
-        b.function(op::BRANCH_CONDITIONAL, &[active.0, kept.0, discard.0]);
-        b.function(op::LABEL, &[discard.0]);
-        b.function(op::KILL, &[]);
-        b.function(op::LABEL, &[kept.0]);
-    }
+    discard_inactive(model, instruction);
 
     let mut components = Vec::with_capacity(4);
     if instruction.word & EXPORT_COMPRESSED != 0 {
