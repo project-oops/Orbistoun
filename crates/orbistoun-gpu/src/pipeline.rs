@@ -520,13 +520,16 @@ enum Unprepared {
     NeedsGeometry(String),
 }
 
+/// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
+type PlainKey = (u32, u64, bool, u32);
+
 /// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
 /// the reason they gave; what each geometry made; and the refusals already recorded.
 #[derive(Default)]
 struct ByGeometry {
     /// Candidates prepared without geometry, by whether their positions are in window space (D731),
     /// and what they became; `None` for a failure.
-    plain: BTreeMap<(u32, u64, bool), Option<ResourceId>>,
+    plain: BTreeMap<PlainKey, Option<ResourceId>>,
     needs: BTreeMap<(u32, u64), String>,
     prepared: BTreeMap<(u32, u64, ForDraw), Option<ResourceId>>,
     refused: std::collections::BTreeSet<(u64, String)>,
@@ -1943,11 +1946,8 @@ impl Pipeline {
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
         let mut previous_chunks: Vec<ResourceId> = Vec::new();
-        let lanes = if submission.report.wave_widths.primitive_w32 {
-            32
-        } else {
-            64
-        };
+        // A primitive shader's threads: a 64-lane wave, or half of one under wave32.
+        let lanes = 64 >> u32::from(submission.report.wave_widths.primitive_w32);
         let mut sampled_through_samplers = self.samples_through_samplers();
         for draw in draws {
             let mut written: Vec<Option<u32>> = shader_registers
@@ -1980,10 +1980,11 @@ impl Pipeline {
             }
             // The pixel stage's, which name the samplers whose half-border clamps its samples
             // saturate for (D743).
-            let fragment_words = stage_user_data(&mut sweep, draw.packet_offset, 1);
-            if sampled_through_samplers {
-                written.extend(fragment_words.iter().map(|&word| Some(word)));
-            }
+            let fragment_words = self.draw_user_data(
+                (&mut sweep, draw.packet_offset),
+                sampled_through_samplers,
+                &mut written,
+            );
             let plans = geometry
                 .as_ref()
                 .map_or_else(|_| Vec::new(), |&whole| draw_chunks(draw, whole, lanes));
@@ -2050,7 +2051,7 @@ impl Pipeline {
         let mut by_geometry = ByGeometry::default();
         for &candidate in candidates {
             let key = (candidate.stage as u32, candidate.address);
-            let plain = (key.0, key.1, false);
+            let plain = self.plain_key(candidate.stage, candidate.address, false);
             match self.prepare_candidate(candidate, (memory, ForDraw::default()), submission) {
                 Ok(resource) => {
                     by_geometry.plain.insert(plain, Some(resource));
@@ -2098,6 +2099,45 @@ impl Pipeline {
         FlatTwins::from_first(&mixed, first)
     }
 
+    /// Sets each stage's user-data count and `DX10_CLAMP` to what the registers say at the draw at
+    /// `at`, which the draw's modules are translated for and repeat only with, and answers the pixel
+    /// stage's words - also part of what must repeat where `with_words` (D743).
+    fn draw_user_data(
+        &mut self,
+        (sweep, at): (&mut crate::registers::RegisterSweep<'_>, u32),
+        with_words: bool,
+        written: &mut Vec<Option<u32>>,
+    ) -> [u32; USER_DATA_WORDS] {
+        if self.feeds_user_data {
+            for (held, at_draw) in self
+                .user_data
+                .iter_mut()
+                .zip(user_data_layouts_at(sweep, at))
+            {
+                held.count = at_draw.count;
+                held.dx10_clamp = at_draw.dx10_clamp;
+            }
+            written.extend(self.user_data.iter().map(|layout| Some(layout.count)));
+        }
+        let words = stage_user_data(sweep, at, 1);
+        if with_words {
+            written.extend(words.iter().map(|&word| Some(word)));
+        }
+        words
+    }
+
+    /// The key a module prepared for no particular draw is held under in a submission: its stage,
+    /// address and position space, and the user-data count it was translated for, since a stream
+    /// can give one program two counts.
+    fn plain_key(&self, stage: ShaderStage, address: u64, window_space: bool) -> PlainKey {
+        let count = match stage {
+            ShaderStage::Vertex => self.user_data[0].count,
+            ShaderStage::Fragment => self.user_data[1].count,
+            ShaderStage::Compute => 0,
+        };
+        (stage as u32, address, window_space, count)
+    }
+
     /// Whether any module translated so far samples through a sampler it loaded, so a draw's pixel
     /// user data can change what its pixel shader saturates (D743).
     fn samples_through_samplers(&self) -> bool {
@@ -2138,7 +2178,7 @@ impl Pipeline {
         let Some(&fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
             return saturated;
         };
-        let plain = (ShaderStage::Fragment as u32, fragment.address, false);
+        let plain = self.plain_key(ShaderStage::Fragment, fragment.address, false);
         if let std::collections::btree_map::Entry::Vacant(entry) = by_geometry.plain.entry(plain) {
             entry.insert(
                 self.prepare_candidate(fragment, (memory, ForDraw::default()), submission)
@@ -2363,7 +2403,7 @@ impl Pipeline {
         let saturates =
             candidate.stage == ShaderStage::Fragment && by_geometry.saturated != UNSATURATED;
         if !by_geometry.needs.contains_key(&key) && by_geometry.flat_twins.is_none() && !saturates {
-            let plain = (key.0, key.1, window_space);
+            let plain = self.plain_key(candidate.stage, candidate.address, window_space);
             if let Some(known) = by_geometry.plain.get(&plain) {
                 return *known;
             }
@@ -3711,27 +3751,42 @@ const DX10_CLAMP_BIT: u32 = 1 << 21;
 /// before it are the wave's own, and a vertex program reads its per-draw word from `s8`) and `s0`
 /// for the pixel shader; the vertex stage's words first in the block, the fragment stage's after.
 fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
-    let last = |register: u32| {
+    user_data_layouts_by(|register| {
         writes
             .iter()
             .rev()
             .find(|write| write.register == register)
             .map(|write| write.value)
-    };
+    })
+}
+
+/// [`user_data_layouts`] as the registers stand at the draw at byte `at`: a stream that switches
+/// shaders switches their counts, and each draw's module reads the words its own `RSRC2` loads.
+fn user_data_layouts_at(sweep: &mut crate::registers::RegisterSweep<'_>, at: u32) -> [UserData; 2] {
+    user_data_layouts_by(|register| sweep.latest(at, register))
+}
+
+/// The two stages' layouts from `last`, which answers a register's value where it is read.
+fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 2] {
     // `USER_SGPR`, bits 5:1, and its sixth bit `USER_SGPR_MSB`, bit 27 of both stages' `RSRC2`
     // (`gfx103.json`): thirty-two registers set the MSB and leave the low five zero.
-    let count = |register: u32| {
+    let mut count = |register: u32| {
         last(register).map_or(0, |value| (value >> 1) & 0x1f | (value >> 27 & 1) << 5)
     };
+    let counts = [count(RSRC2_REGISTERS[0]), count(RSRC2_REGISTERS[1])];
     // `DX10_CLAMP`, bit 21 of the stage's `RSRC1` (Mesa `S_00B848_DX10_CLAMP`): what an output
     // clamp does with a NaN. `None` when the stream set no `RSRC1`.
-    let dx10_clamp = |register: u32| last(register).map(|value| value & DX10_CLAMP_BIT != 0);
+    let mut dx10_clamp = |register: u32| last(register).map(|value| value & DX10_CLAMP_BIT != 0);
+    let clamps = [
+        dx10_clamp(RSRC1_REGISTERS[0]),
+        dx10_clamp(RSRC1_REGISTERS[1]),
+    ];
     [
         UserData {
             first_register: 8,
-            count: count(RSRC2_REGISTERS[0]),
+            count: counts[0],
             block_offset: 0,
-            dx10_clamp: dx10_clamp(RSRC1_REGISTERS[0]),
+            dx10_clamp: clamps[0],
             pixel_inputs: None,
             compute: None,
             geometry: None,
@@ -3743,9 +3798,9 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
         },
         UserData {
             first_register: 0,
-            count: count(RSRC2_REGISTERS[1]),
+            count: counts[1],
             block_offset: USER_DATA_STAGE_WORDS,
-            dx10_clamp: dx10_clamp(RSRC1_REGISTERS[1]),
+            dx10_clamp: clamps[1],
             // Set by `set_environment` for every backend.
             pixel_inputs: None,
             compute: None,
@@ -4577,6 +4632,39 @@ mod tests {
             .prepare_dispatch(&state(SOURCE + 16), &memory)
             .expect_err("two copies of one byte");
         assert!(overlapping.contains("overlap"), "{overlapping}");
+    }
+
+    /// Each draw's user-data count is the one its `RSRC2` loads at that draw, not the stream's last:
+    /// STKT00001 sets a primitive shader taking twenty words, draws, then one taking sixteen, and
+    /// the first draw's vertex buffer descriptors in words 16-19 were left untraced (D733).
+    #[test]
+    fn a_draws_user_data_count_is_the_one_in_force_at_it() {
+        use super::{RSRC2_REGISTERS, user_data_layouts_at};
+        use crate::registers::{RegisterSweep, RegisterWrite};
+        let rsrc2 = |words: u32| words << 1;
+        let writes = [
+            RegisterWrite {
+                packet_offset: 0x10,
+                register: RSRC2_REGISTERS[0],
+                value: rsrc2(20),
+            },
+            RegisterWrite {
+                packet_offset: 0x100,
+                register: RSRC2_REGISTERS[0],
+                value: rsrc2(16),
+            },
+        ];
+        let mut sweep = RegisterSweep::new(&writes);
+        assert_eq!(
+            user_data_layouts_at(&mut sweep, 0x50)[0].count,
+            20,
+            "the first draw's"
+        );
+        assert_eq!(
+            user_data_layouts_at(&mut sweep, 0x200)[0].count,
+            16,
+            "the second's"
+        );
     }
 
     /// A one-byte linear texture with no pitch of its own is read at 256 texels a row, as
