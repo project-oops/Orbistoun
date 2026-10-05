@@ -2785,6 +2785,12 @@ impl Model for Wavefront<'_> {
     }
 
     fn write_scalar(&mut self, register: u32, value: Id) {
+        // A user-data word the stream never wrote is unknown only until the program writes its
+        // register: a read after that reads the program's own value. In program order, as the
+        // translation emits it.
+        if register < u32::BITS {
+            self.unwritten_user_data &= !(1 << register);
+        }
         if register < u128::BITS {
             self.images.written_scalars |= 1 << register;
             self.images.opaque_scalars &= !(1 << register);
@@ -3981,6 +3987,49 @@ pub fn translate_with_user_data(
     let sources = module.image_sources();
     let (words, translated) = module.finish()?;
     Ok((words, translated, sources))
+}
+
+#[cfg(test)]
+mod unwritten_user_data_tests {
+    /// An unwritten user-data word is refused only when the program reads it before writing its
+    /// register: radeonsi's buffer copy saves the execution mask into `s[0:1]` and reads it back,
+    /// and STKT00001's stream never wrote word one.
+    #[test]
+    fn a_word_the_program_writes_first_is_not_unwritten() {
+        use super::{
+            ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let translate = |words: &[u32]| {
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let decoded = decode(&bytes, &encodings, &operands);
+            translate_with_user_data(
+                &decoded,
+                &encodings,
+                Width::Wave64,
+                (Stage::Compute, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    first_register: 0,
+                    count: 4,
+                    compute: Some(ComputeInputs {
+                        threads: [64, 1, 1],
+                        thread_id_components: 1,
+                        unwritten_user_data: 1 << 1,
+                        ..ComputeInputs::default()
+                    }),
+                    ..UserData::default()
+                },
+            )
+        };
+        // s_mov_b32 s1, 0; v_mov_b32 v0, s1; s_endpgm.
+        assert!(translate(&[0xbe81_0380, 0x7e00_0201, 0xbf81_0000]).is_ok());
+        // v_mov_b32 v0, s1; s_endpgm: the word as the stream left it.
+        assert!(translate(&[0x7e00_0201, 0xbf81_0000]).is_err());
+    }
 }
 
 #[cfg(test)]
