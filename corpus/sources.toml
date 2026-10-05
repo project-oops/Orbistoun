@@ -206,7 +206,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "extreme-tux-racer-title-prospero.zip"
-sha256 = "5b5a4f8dd604bfe57854717c56607d8ce3b85b6f1299c793a11379c99b69a05d"
+sha256 = "e6610c91edcb5f2cef53d3816bc1b0a52a9b4d45a2c3a3d78afa06a11d800f34"
 
 [[source]]
 name = "MDEM00001"
@@ -238,7 +238,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "neverball-title-prospero.zip"
-sha256 = "981bd65ad8d588e516a7d2e9fe9683ecc0127edf66d0b82e112d741d8c588df6"
+sha256 = "469fb7174020b2d65efa375efb6e7dd329f341688b20bc4c1f24de06d57f772d"
 
 [[source]]
 name = "NVPT00001"
@@ -254,7 +254,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "neverputt-title-prospero.zip"
-sha256 = "7ac23e31bc9402e1adc51528d29964a4252a16f3d1ed836deb3275628b74d45c"
+sha256 = "f4422feb8e6d10717735dd138bc316565eb320c87c92eabe333aae76c966bb0c"
 
 [[source]]
 name = "CRFT00001"
@@ -270,7 +270,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "craft-title-prospero.zip"
-sha256 = "9d43d90e9f0c2ba7c43f294c3d897a8b5773b27ff50b20c600cc8a02a7e65a85"
+sha256 = "d3ab78127bdf60ab2737557bc7be6e3f21aa14387f78b7a93fb34993f9fb7591"
 
 [[source]]
 name = "OPSY00001"
@@ -302,7 +302,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "bugdom-title-prospero.zip"
-sha256 = "d74436e90171926effd7d2b134312c47065bd394a01e56ffa437cf0ad4e0ea34"
+sha256 = "8e967ba41e80ce2e00636b74367dbe8e78d9faa8c0fa5b8cc1e7366839795e7e"
 
 [[source]]
 name = "BGII00001"
@@ -318,7 +318,7 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "bugdom2-title-prospero.zip"
-sha256 = "9054f7a70ac4c7d52406c13e6df1984918b6c787bf911b6f81739cad67545ccd"
+sha256 = "a54d18c0261cbc2728513eae30e7d6cfd173c153af8980fe385695129b148824"
 
 [[source]]
 name = "RTRA00001"
@@ -360,7 +360,39 @@ cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
 file = "supertuxkart-title-prospero.zip"
-sha256 = "6fd49d5dcc60a6ab50117655f6f990892e503b02384853f9c9cca750242e94ae"
+sha256 = "474ea1b123a36ae858f5a6fb7e6473d5b4092ac1cd49a2ba270e0c2c3ef8d86e"
+
+[[source]]
+name = "SOHK00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/ship-of-harkinian/dist/ship-of-harkinian-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/ship-of-harkinian-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the engine is its upstream's, under its own licence; the game data is the player's own copy and is never fetched"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "ship-of-harkinian-title-prospero.zip"
+sha256 = "d822c119d93b929c6b2efbd85f22646f0b3934acf4a2264cc61549cbaa6da413"
+
+[[source]]
+name = "TSHP00001"
+target = "staged"
+kind = "local"
+sources = [
+    "../oops-apps/src/oops-titles/2-ship-2-harkinian/dist/2-ship-2-harkinian-title-prospero.zip",
+    "https://github.com/project-oops/oops-apps/releases/download/latest-main/2-ship-2-harkinian-title-prospero.zip",
+]
+archive = true
+licence = "the port is ours (same suite, D043); the engine is its upstream's, under its own licence; the game data is the player's own copy and is never fetched"
+cite = "https://github.com/project-oops/oops-apps"
+
+[[source.asset]]
+file = "2-ship-2-harkinian-title-prospero.zip"
+sha256 = "43cbdba71a8817fe00ae5baa79354dc3f8e8a9ca3f4374a6afd8c5d84e658c94"
 
 [[source]]
 name = "CXTH00001"
