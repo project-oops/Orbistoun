@@ -46,6 +46,17 @@ v_mad_f32 v12, v1, v2, v3
 v_mac_f32_e32 v13, v1, v2
 v_mul_u32_u24_e32 v14, 0x1234, v2
 
+// ---- What ACO writes for a vertex shader's and a fragment shader's comparisons, selects and
+// bitfields: float compares into a lane mask, a scalar select of one, a bitfield mask and insert,
+// and an integer conversion -------------------------------------------------------------
+v_cmp_eq_f32_e64 s[2:3], |v1|, v2
+v_cmp_le_f32_e64 s[4:5], v1, s9
+v_cmp_ge_f32_e64 s[6:7], -v3, 1.0
+s_cselect_b64 s[8:9], -1, 0
+s_bfm_b32 s4, 8, 23
+v_bfi_b32 v15, v1, v2, v3
+v_cvt_f32_i32_e32 v16, v1
+
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

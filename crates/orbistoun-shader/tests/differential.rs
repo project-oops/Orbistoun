@@ -427,11 +427,16 @@ fn normalise(reference: &str) -> Vec<String> {
         for token in piece.split_whitespace() {
             // A leading sign on a register is a source modifier, a separate field; the
             // operand field holds the plain register. Stripped only before a register
-            // letter, so `-1.0` never matches `1.0`.
+            // letter or an absolute value's bar, so `-1.0` never matches `1.0`. The bars
+            // around `|v1|` are the absolute-value modifier, likewise a separate field.
             let token = match token.strip_prefix('-') {
-                Some(rest) if rest.starts_with('v') || rest.starts_with('s') => rest,
+                Some(rest) if rest.starts_with(['v', 's', '|']) => rest,
                 _ => token,
             };
+            let token = token
+                .strip_prefix('|')
+                .and_then(|inner| inner.strip_suffix('|'))
+                .unwrap_or(token);
             // `off` is the reference's spelling of a flat access with no scalar base; the
             // field holds the code our operand table names `null`. Offered alongside, and
             // the token is dropped as a modifier.

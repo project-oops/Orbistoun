@@ -5758,3 +5758,106 @@ fn not_equal_is_true_for_a_nan() {
         "NaN != NaN"
     );
 }
+
+/// The long-form float compares take each source's absolute and negate flags: `|-2| == 2`,
+/// `-2 <= 2`, `-(-2) >= 2`, and `-2 >= 2` is false. In a thirty-two-lane wave the mask is one
+/// register, and the next is left as it was.
+#[test]
+fn a_long_form_float_compare_takes_its_source_modifiers() {
+    if !device_or_skip("a_long_form_float_compare_takes_its_source_modifiers") {
+        return;
+    }
+    // Inline -2.0 and 2.0.
+    let (minus_two, two) = (245, 244);
+    let mut program = vec![v_mov_inline(0, 0)];
+    program.extend(v_mov_literal(1, (-2.0f32).to_bits()));
+    program.extend(v_mov_literal(2, 2.0f32.to_bits()));
+    // v_cmp_eq_f32_e64 s[2:3], |v1|, v2
+    program.extend(vop3(
+        "v_cmp_eq_f32_e64",
+        2,
+        [VGPR_0 + 1, VGPR_0 + 2, 0],
+        1,
+        0,
+    ));
+    // v_cmp_le_f32_e64 s[4:5], -2.0, v2
+    program.extend(vop3(
+        "v_cmp_le_f32_e64",
+        4,
+        [minus_two, VGPR_0 + 2, 0],
+        0,
+        0,
+    ));
+    // v_cmp_ge_f32_e64 s[6:7], -v1, 2.0
+    program.extend(vop3("v_cmp_ge_f32_e64", 6, [VGPR_0 + 1, two, 0], 0, 1));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(scalar(&registers, 2) & 1, 1, "|-2| == 2");
+    assert_eq!(scalar(&registers, 4) & 1, 1, "-2 <= 2");
+    assert_eq!(scalar(&registers, 6) & 1, 1, "-(-2) >= 2");
+
+    let mut narrow = vec![s_mov_literal(3, 0x1234)[0], 0x1234];
+    narrow.extend(v_mov_literal(1, (-2.0f32).to_bits()));
+    // v_cmp_ge_f32_e64 s2, v1, 2.0: false, and s3 untouched.
+    narrow.extend(vop3("v_cmp_ge_f32_e64", 2, [VGPR_0 + 1, two, 0], 0, 0));
+    narrow.push(s_endpgm());
+    let registers = run_at_width(Width::Wave32, &narrow);
+    assert_eq!(scalar(&registers, 2) & 1, 0, "-2 >= 2");
+    assert_eq!(
+        scalar(&registers, 3),
+        0x1234,
+        "a 32-lane mask is one register"
+    );
+}
+
+/// `s_cselect_b64` takes its first pair where the condition code is set and its second where it is
+/// clear, an inline -1 reading as all ones across the pair; `s_bfm_b32` makes
+/// `((1 << S0[4:0]) - 1) << S1[4:0]`.
+#[test]
+fn a_scalar_select_follows_the_condition_code_and_a_bit_mask_its_fields() {
+    if !device_or_skip("a_scalar_select_follows_the_condition_code_and_a_bit_mask_its_fields") {
+        return;
+    }
+    let minus_one = 193;
+    let program = [
+        s_cmp_i32("s_cmp_eq_i32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", 2, minus_one, 128),
+        s_cmp_i32("s_cmp_lg_i32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", 4, minus_one, 128 + 5),
+        sop2("s_bfm_b32", 6, 128 + 8, 128 + 23),
+        // Width 40 reads as 8.
+        sop2("s_bfm_b32", 7, 128 + 40, 128 + 4),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(
+        (scalar(&registers, 2), scalar(&registers, 3)),
+        (u32::MAX, u32::MAX)
+    );
+    assert_eq!((scalar(&registers, 4), scalar(&registers, 5)), (5, 0));
+    assert_eq!(scalar(&registers, 6), 0x7f80_0000);
+    assert_eq!(scalar(&registers, 7), 0xff0);
+}
+
+/// `v_bfi_b32` takes the mask's set bits from its second source and the rest from its third;
+/// `v_cvt_f32_i32` converts signed, rounding to nearest.
+#[test]
+fn a_bitfield_insert_and_a_signed_conversion() {
+    if !device_or_skip("a_bitfield_insert_and_a_signed_conversion") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0xff00_ff00));
+    program.extend(v_mov_literal(1, 0x1234_5678));
+    program.extend(v_mov_literal(2, 0x9abc_def0));
+    program.extend(vop3("v_bfi_b32", 3, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
+    program.extend(v_mov_literal(4, (-3i32).cast_unsigned()));
+    program.push(vop1_vv("v_cvt_f32_i32_e32", 5, 4));
+    program.extend(v_mov_literal(6, 0x7fff_ffff));
+    program.push(vop1_vv("v_cvt_f32_i32_e32", 7, 6));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 0x12bc_56f0);
+    assert_eq!(vector(&registers, 5), (-3.0f32).to_bits());
+    assert_eq!(vector(&registers, 7), 2_147_483_648.0f32.to_bits());
+}

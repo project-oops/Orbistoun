@@ -137,3 +137,44 @@ v_mul_u32_u24_e32 v200, s5, v9
 v_mul_u32_u24_e32 v255, -1, v130
 v_mul_u32_u24_e32 v9, 4, v77
 v_mul_u32_u24_e32 v130, v88, v255
+
+// ---- v_cmp_eq/le/ge_f32_e64: VOP3-encoded compares into a lane mask, at the extremes ---------
+v_cmp_eq_f32_e64 s[2:3], v4, v5
+v_cmp_eq_f32_e64 s[100:101], s5, v190
+v_cmp_eq_f32_e64 s[40:41], v255, -1
+v_cmp_eq_f32_e64 vcc, 4, v77
+v_cmp_eq_f32_e64 s[70:71], v130, s101
+v_cmp_le_f32_e64 s[2:3], v4, v5
+v_cmp_le_f32_e64 s[100:101], s5, v190
+v_cmp_le_f32_e64 s[40:41], v255, -1
+v_cmp_le_f32_e64 vcc, 4, v77
+v_cmp_le_f32_e64 s[70:71], v130, s101
+v_cmp_ge_f32_e64 s[2:3], v4, v5
+v_cmp_ge_f32_e64 s[100:101], s5, v190
+v_cmp_ge_f32_e64 s[40:41], v255, -1
+v_cmp_ge_f32_e64 vcc, 4, v77
+v_cmp_ge_f32_e64 s[70:71], v130, s101
+
+// ---- s_cselect_b64 and s_bfm_b32: SOP2 --------------------------------------------------
+s_cselect_b64 s[8:9], -1, 0
+s_cselect_b64 s[100:101], s[2:3], s[40:41]
+s_cselect_b64 s[0:1], 4, s[70:71]
+s_cselect_b64 s[62:63], s[96:97], -16
+s_bfm_b32 s4, 8, 23
+s_bfm_b32 s101, s5, s90
+s_bfm_b32 s0, -1, s33
+s_bfm_b32 s60, s100, 4
+
+// ---- v_bfi_b32: VOP3, three sources ----------------------------------------------------
+v_bfi_b32 v3, v4, v5, v6
+v_bfi_b32 v200, s5, v9, v190
+v_bfi_b32 v255, v12, s30, 64
+v_bfi_b32 v9, -1, v77, v3
+v_bfi_b32 v130, v88, 4, s101
+
+// ---- v_cvt_f32_i32: VOP1 ---------------------------------------------------------------
+v_cvt_f32_i32_e32 v3, v4
+v_cvt_f32_i32_e32 v200, s5
+v_cvt_f32_i32_e32 v255, -1
+v_cvt_f32_i32_e32 v9, 4
+v_cvt_f32_i32_e32 v130, v255

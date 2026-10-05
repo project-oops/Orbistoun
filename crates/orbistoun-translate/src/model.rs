@@ -62,6 +62,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_andn2_b64",
     "s_barrier",
     "s_bfe_u32",
+    "s_bfm_b32",
     "s_bfm_b64",
     "s_buffer_load_dword",
     "s_buffer_load_dwordx2",
@@ -84,6 +85,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_cmp_lt_i32",
     "s_cmpk_eq_i32",
     "s_cmpk_lg_i32",
+    "s_cselect_b64",
     "s_endpgm",
     "s_load_dword",
     "s_load_dwordx2",
@@ -125,12 +127,17 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ge_u32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_ne_i32_e64",
+    "v_cmp_eq_f32_e64",
+    "v_cmp_le_f32_e64",
+    "v_cmp_ge_f32_e64",
+    "v_bfi_b32",
     "v_cmpx_le_i16_e32",
     "v_cndmask_b32_e32",
     "v_cndmask_b32_e64",
     "v_cos_f32_e32",
     "v_cvt_pkrtz_f16_f32_e32",
     "v_cvt_f32_u32_e32",
+    "v_cvt_f32_i32_e32",
     "v_cvt_i32_f32_e32",
     "v_div_fixup_f32",
     "v_fmac_f32_e32",
@@ -1904,6 +1911,8 @@ fn scalar_instruction<M: Model + ?Sized>(
         // run of ones into a register pair.
         "s_pack_ll_b32_b16" | "s_pack_hh_b32_b16" => scalar_pack(model, instruction, name),
         "s_bfm_b64" => scalar_bit_mask_64(model, instruction),
+        "s_bfm_b32" => scalar_bit_mask(model, instruction),
+        "s_cselect_b64" => scalar_select_64(model, instruction),
 
         // The compact scalar form: a destination and a sixteen-bit immediate.
         "s_movk_i32" | "s_cmpk_eq_i32" | "s_cmpk_lg_i32" | "s_addk_i32" | "s_mulk_i32" => {
@@ -1934,7 +1943,9 @@ fn vector_instruction<M: Model + ?Sized>(
         }
 
         // The long-form integer compare, into a register pair or a named mask.
-        "v_cmp_ne_i32_e64" => compare_long(model, instruction, name),
+        "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64" => {
+            compare_long(model, instruction, name)
+        }
         "v_cmpx_le_i16_e32" => compare_into_exec(model, instruction),
 
         // The short-form select, whose mask is always the condition mask.
@@ -1956,10 +1967,13 @@ fn vector_instruction<M: Model + ?Sized>(
         }
 
         // Integer conversions.
-        "v_cvt_f32_u32_e32" | "v_cvt_i32_f32_e32" => integer_conversion(model, instruction, name),
+        "v_cvt_f32_u32_e32" | "v_cvt_f32_i32_e32" | "v_cvt_i32_f32_e32" => {
+            integer_conversion(model, instruction, name)
+        }
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
+        "v_bfi_b32" => bitfield_insert(model, instruction),
         "v_perm_b32" => byte_permute(model, instruction),
 
         // Sixteen-bit arithmetic on register halves, as ACO forms an image copy's coordinates.
@@ -3577,13 +3591,15 @@ fn compare_into_exec<M: Model + ?Sized>(
 fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), TranslateError> {
     match name {
         "v_cmp_lt_f32_e32" => Ok((op::FORD_LESS_THAN, true)),
-        "v_cmp_eq_f32_e32" => Ok((op::FORD_EQUAL, true)),
+        "v_cmp_eq_f32_e32" | "v_cmp_eq_f32_e64" => Ok((op::FORD_EQUAL, true)),
         "v_cmp_gt_f32_e32" => Ok((op::FORD_GREATER_THAN, true)),
         // Not equal or unordered: true for a NaN, where `v_cmp_lg_f32` is the ordered form.
         "v_cmp_neq_f32_e32" => Ok((op::FUNORD_NOT_EQUAL, true)),
         "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
         "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
         "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),
+        "v_cmp_le_f32_e64" => Ok((op::FORD_LESS_THAN_EQUAL, true)),
+        "v_cmp_ge_f32_e64" => Ok((op::FORD_GREATER_THAN_EQUAL, true)),
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "no translation for this comparison",
@@ -5788,6 +5804,87 @@ fn scalar_bit_mask_64<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `s_bfm_b32`: `((1 << S0[4:0]) - 1) << S1[4:0]` (AMD's published RDNA instruction set,
+/// `S_BFM_B32`), the ones past bit thirty-one dropped. No condition code.
+fn scalar_bit_mask<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, width, offset) = three_operands(instruction)?;
+    let register = scalar_destination(instruction, destination)?;
+    let width = model.read_source(instruction, width, 0)?;
+    let offset = model.read_source(instruction, offset, 0)?;
+    let five_bits = model.constant(31);
+    let width = model.binary(op::BITWISE_AND, width, five_bits);
+    let offset = model.binary(op::BITWISE_AND, offset, five_bits);
+    let one = model.constant(1);
+    let bit = model.binary(op::SHIFT_LEFT_LOGICAL, one, width);
+    let ones = model.binary(op::ISUB, bit, one);
+    let mask = model.binary(op::SHIFT_LEFT_LOGICAL, ones, offset);
+    model.write_scalar(register, mask);
+    model.count();
+    Ok(())
+}
+
+/// `s_cselect_b64 d, a, b`: the pair `a` where the condition code is set, else `b` (AMD's published
+/// RDNA instruction set, `S_CSELECT_B64`). It reads the condition code and writes none.
+fn scalar_select_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, first, second) = three_operands(instruction)?;
+    let register = scalar_destination(instruction, destination)?;
+    if register + 2 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_cselect_b64 runs past the end of the register file",
+        });
+    }
+    let (first_low, first_high) = pair_source(model, instruction, first, 0)?;
+    let (second_low, second_high) = pair_source(model, instruction, second, 0)?;
+    let condition = crate::control::read_condition_code(model, true);
+    let low = model.select(condition, first_low, second_low);
+    let high = model.select(condition, first_high, second_high);
+    model.write_scalar(register, low);
+    model.write_scalar(register + 1, high);
+    model.count();
+    Ok(())
+}
+
+/// `v_bfi_b32 d, mask, a, b`: `(mask & a) | (!mask & b)` per lane (AMD's published RDNA instruction
+/// set, `V_BFI_B32`; NIR's `bitfield_select`).
+fn bitfield_insert<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 3)?;
+    let [destination, mask, inserted, base] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_bfi_b32 does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_bfi_b32 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let mask = model.read_source(instruction, mask, lane)?;
+        let inserted = model.read_source(instruction, inserted, lane)?;
+        let base = model.read_source(instruction, base, lane)?;
+        let kept = model.binary(op::BITWISE_AND, mask, inserted);
+        let inverse = model.not(mask);
+        let rest = model.binary(op::BITWISE_AND, inverse, base);
+        let value = model.binary(op::BITWISE_OR, kept, rest);
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
 /// The two halves of a 64-bit mask with bits `offset..offset + width` set (both below sixty-four),
 /// the ones past bit sixty-three dropped: each half is the ones below its end minus the ones below
 /// its start, clamped to the half.
@@ -5819,7 +5916,7 @@ fn ones_between<M: Model + ?Sized>(model: &mut M, offset: Id, width: Id) -> (Id,
         let to_end = ones(model, to_end);
         let to_start = below(model, offset);
         let to_start = ones(model, to_start);
-        let inverse = model.binary(op::NOT, to_start, to_start);
+        let inverse = model.not(to_start);
         model.binary(op::BITWISE_AND, to_end, inverse)
     };
     let low = half(model, 0);
@@ -5827,9 +5924,9 @@ fn ones_between<M: Model + ?Sized>(model: &mut M, offset: Id, width: Id) -> (Id,
     (low, high)
 }
 
-/// `v_cvt_f32_u32` and `v_cvt_i32_f32`, per lane.
+/// `v_cvt_f32_u32`, `v_cvt_f32_i32` and `v_cvt_i32_f32`, per lane.
 ///
-/// Unsigned to float rounds to nearest, as SPIR-V's conversion does. Float to signed truncates
+/// Unsigned or signed to float rounds to nearest, as SPIR-V's conversion does. Float to signed truncates
 /// toward zero and saturates: below `-2^31` (and `-inf`) reads `0x80000000`, `2^31` and above (and
 /// `+inf`) `0x7fffffff`, and a NaN zero - the published instruction set's conversion rules, which
 /// SPIR-V leaves undefined out of range, so the edges are selected rather than converted.
@@ -5848,12 +5945,17 @@ fn integer_conversion<M: Model + ?Sized>(
     let register = u32::from(*register);
     for lane in running_lanes(model) {
         let bits = model.read_source(instruction, source, lane)?;
-        let value = if name == "v_cvt_f32_u32_e32" {
+        let value = if name == "v_cvt_f32_u32_e32" || name == "v_cvt_f32_i32_e32" {
+            let conversion = if name == "v_cvt_f32_u32_e32" {
+                op::CONVERT_U_TO_F
+            } else {
+                op::CONVERT_S_TO_F
+            };
             let f32_type = model.f32_type();
             let u32_type = model.u32_type();
             let b = model.builder();
             let float = b.id();
-            b.function(op::CONVERT_U_TO_F, &[f32_type.0, float.0, bits.0]);
+            b.function(conversion, &[f32_type.0, float.0, bits.0]);
             let out = b.id();
             b.function(op::BITCAST, &[u32_type.0, out.0, float.0]);
             out
@@ -5900,22 +6002,33 @@ fn float_to_signed_saturated<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id {
     model.select(nan, zero_bits, converted)
 }
 
-/// A long-form integer compare: every lane's answer into a register pair, or into a named mask.
-/// Source modifiers are refused; the compare's third source field is unused.
+/// A long-form compare: every lane's answer into the destination's lane mask - a register pair, or
+/// in a thirty-two-lane wave one register - or into a named mask. A float compare takes each
+/// source's absolute and negate flags; an integer compare refuses them. The third source field is
+/// unused.
 fn compare_long<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    no_integer_modifiers(instruction, 2)?;
-    let (opcode, _) = op_for_compare(instruction, name)?;
+    let (opcode, floats) = op_for_compare(instruction, name)?;
+    let modifiers = if floats {
+        Modifiers::read(instruction, false)?
+    } else {
+        no_integer_modifiers(instruction, 2)?;
+        Modifiers::default()
+    };
     let (destination, first, second) = three_operands(instruction)?;
     let zero = model.constant(0);
     let mut halves = (zero, zero);
     for lane in 0..model.lanes() {
-        let left = model.read_source(instruction, first, lane)?;
-        let right = model.read_source(instruction, second, lane)?;
-        let condition = model.compare(opcode, left, right);
+        let mut sides = [zero, zero];
+        for (source, (side, operand)) in sides.iter_mut().zip([first, second]).enumerate() {
+            let value = model.read_source(instruction, operand, lane)?;
+            let value = apply_modifiers(model, value, modifiers, source);
+            *side = if floats { model.as_float(value) } else { value };
+        }
+        let condition = model.compare(opcode, sides[0], sides[1]);
         halves = model.set_lane_bit(halves, lane, condition);
     }
     match destination {
@@ -5925,14 +6038,19 @@ fn compare_long<M: Model + ?Sized>(
         }
         Operand::Scalar(register) => {
             let register = u32::from(*register);
-            if register + 2 > SCALAR_REGISTERS {
+            // A thirty-two-lane wave's mask is one register (the 32-bit scalar forms ACO uses
+            // there); the next is not written.
+            let words = if model.lanes() > 32 { 2 } else { 1 };
+            if register + words > SCALAR_REGISTERS {
                 return Err(TranslateError::Unsupported {
                     offset: instruction.offset,
                     detail: "a compare's register pair runs past the end of the register file",
                 });
             }
             model.write_scalar(register, halves.0);
-            model.write_scalar(register + 1, halves.1);
+            if words == 2 {
+                model.write_scalar(register + 1, halves.1);
+            }
         }
         _ => {
             return Err(TranslateError::Unsupported {

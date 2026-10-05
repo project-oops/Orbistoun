@@ -25,6 +25,13 @@
 0x00009c 8 v_mad_f32 v12, v1, v2, v3
 0x0000a4 4 v_mac_f32_e32 v13, v1, v2
 0x0000a8 8 v_mul_u32_u24_e32 v14, 0x1234, v2
-0x0000b0 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0000b8 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0000c0 4 s_endpgm
+0x0000b0 8 v_cmp_eq_f32_e64 s[2:3], |v1|, v2
+0x0000b8 8 v_cmp_le_f32_e64 s[4:5], v1, s9
+0x0000c0 8 v_cmp_ge_f32_e64 s[6:7], -v3, 1.0
+0x0000c8 4 s_cselect_b64 s[8:9], -1, 0
+0x0000cc 4 s_bfm_b32 s4, 8, 23
+0x0000d0 8 v_bfi_b32 v15, v1, v2, v3
+0x0000d8 4 v_cvt_f32_i32_e32 v16, v1
+0x0000dc 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0000e4 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0000ec 4 s_endpgm

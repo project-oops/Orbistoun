@@ -261,7 +261,7 @@ fn branch_condition_value<M: Model + ?Sized>(
 }
 
 /// Whether the scalar condition code is set, or clear.
-fn read_condition_code<M: Model + ?Sized>(model: &mut M, want_set: bool) -> Id {
+pub(crate) fn read_condition_code<M: Model + ?Sized>(model: &mut M, want_set: bool) -> Id {
     let (pointer, u32_type, bool_type) =
         (model.condition_code(), model.u32_type(), model.bool_type());
     let zero = model.constant(0);
