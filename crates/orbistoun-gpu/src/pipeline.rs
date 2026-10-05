@@ -87,15 +87,20 @@ const fn stage_salt(stage: Stage) -> u64 {
 }
 
 /// What one draw adds to its primitive shader's translation: the geometry-engine inputs it seeds
-/// (D730), whether its position export is in window space (D731), and the formats its buffers'
-/// descriptors name for a format load (D738).
+/// (D730), whether its position export is in window space (D731), the formats its buffers'
+/// descriptors name for a format load (D738), and the coordinates its pixel shader's samples
+/// saturate (D743).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct ForDraw {
     geometry: Option<GeometryInputs>,
     window_space: bool,
     buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
     flat_twins: Option<FlatTwins>,
+    saturated: [[bool; 2]; 2],
 }
+
+/// No texture slot's coordinates saturated.
+const UNSATURATED: [[bool; 2]; 2] = [[false; 2]; 2];
 
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
 /// position space (D731), in the cache key.
@@ -135,9 +140,21 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             .collect();
         0x5457_494e_0000_0000 ^ crate::content_hash(&words)
     });
+    let saturated = for_draw
+        .saturated
+        .as_flattened()
+        .iter()
+        .enumerate()
+        .fold(0, |bits, (at, &on)| bits | u64::from(on) << at);
+    let saturated = if saturated == 0 {
+        0
+    } else {
+        0x5341_5455_0000_0000 ^ saturated
+    };
     geometry
         ^ formats
         ^ twins
+        ^ saturated
         ^ if for_draw.window_space {
             0x5749_4e44_5350_4345
         } else {
@@ -515,6 +532,8 @@ struct ByGeometry {
     refused: std::collections::BTreeSet<(u64, String)>,
     /// The flat twins the draw being bound gives its attributes (D742).
     flat_twins: Option<FlatTwins>,
+    /// The coordinates the draw being bound has its pixel shader's samples saturate (D743).
+    saturated: [[bool; 2]; 2],
 }
 
 /// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
@@ -972,6 +991,7 @@ impl Pipeline {
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
+            saturated: UNSATURATED,
         };
         let key = content_hash(program)
             ^ window_salt(placed)
@@ -1868,6 +1888,7 @@ impl Pipeline {
         } else {
             64
         };
+        let sampled_through_samplers = self.samples_through_samplers();
         for draw in draws {
             let mut written: Vec<Option<u32>> = shader_registers
                 .iter()
@@ -1897,6 +1918,12 @@ impl Pipeline {
             if !by_geometry.needs.is_empty() {
                 written.extend(vertex_words.iter().map(|&word| Some(word)));
             }
+            // The pixel stage's, which name the samplers whose half-border clamps its samples
+            // saturate for (D743).
+            let fragment_words = stage_user_data(&mut sweep, draw.packet_offset, 1);
+            if sampled_through_samplers {
+                written.extend(fragment_words.iter().map(|&word| Some(word)));
+            }
             let plans = geometry
                 .as_ref()
                 .map_or_else(|_| Vec::new(), |&whole| draw_chunks(draw, whole, lanes));
@@ -1923,6 +1950,8 @@ impl Pipeline {
                 })
                 .collect();
             by_geometry.flat_twins = self.draw_flat_twins(&draw_candidates);
+            by_geometry.saturated =
+                self.draw_saturated(&draw_candidates, (&fragment_words, memory), &by_geometry);
             for candidate in draw_candidates {
                 let stage = candidate.stage;
                 let resource = self.bind_chunked(
@@ -2003,6 +2032,53 @@ impl Pipeline {
             .max()
             .map_or(0, |highest| highest + 1);
         FlatTwins::from_first(&mixed, first)
+    }
+
+    /// Whether any module translated so far samples through a sampler it loaded, so a draw's pixel
+    /// user data can change what its pixel shader saturates (D743).
+    fn samples_through_samplers(&self) -> bool {
+        self.texture_sources
+            .values()
+            .flatten()
+            .any(|source| source.sampler_offset.is_some())
+    }
+
+    /// The coordinates a draw's pixel shader saturates for each texture slot (D743): those the
+    /// sampler the draw binds there clamps to half a border, read where the pixel shader prepared
+    /// for no particular draw loads it from. None where that shader samples through no sampler.
+    fn draw_saturated(
+        &self,
+        candidates: &[Candidate],
+        (words, memory): (&[u32; USER_DATA_WORDS], &impl GuestMemory),
+        by_geometry: &ByGeometry,
+    ) -> [[bool; 2]; 2] {
+        let mut saturated = UNSATURATED;
+        let Some(fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
+            return saturated;
+        };
+        let plain = (ShaderStage::Fragment as u32, fragment.address, false);
+        let Some(sources) = by_geometry
+            .plain
+            .get(&plain)
+            .copied()
+            .flatten()
+            .and_then(|resource| self.texture_sources.get(&resource))
+        else {
+            return saturated;
+        };
+        for source in sources {
+            let (Some(slot), Some(offset)) = (
+                saturated.get_mut(source.slot as usize),
+                source.sampler_offset,
+            ) else {
+                continue;
+            };
+            let at = table_address(source.table, words) + u64::from(offset);
+            if let Some(sampling) = read_sampler(at, memory) {
+                *slot = sampling.saturated();
+            }
+        }
+        saturated
     }
 
     /// [`Self::bind_for_draw`] for a draw that may be split into chunks (D741): a primitive shader
@@ -2194,8 +2270,11 @@ impl Pipeline {
         // Only the primitive shader writes a position.
         let window_space = window_space && candidate.stage == ShaderStage::Vertex;
         let key = (candidate.stage as u32, candidate.address);
-        // A draw that gives attributes flat twins prepares both stages for them (D742).
-        if !by_geometry.needs.contains_key(&key) && by_geometry.flat_twins.is_none() {
+        // A draw that gives attributes flat twins prepares both stages for them (D742), and one
+        // whose samplers clamp to half a border its pixel shader (D743).
+        let saturates =
+            candidate.stage == ShaderStage::Fragment && by_geometry.saturated != UNSATURATED;
+        if !by_geometry.needs.contains_key(&key) && by_geometry.flat_twins.is_none() && !saturates {
             let plain = (key.0, key.1, window_space);
             if let Some(known) = by_geometry.plain.get(&plain) {
                 return *known;
@@ -2205,6 +2284,7 @@ impl Pipeline {
                 window_space,
                 buffer_formats: None,
                 flat_twins: None,
+                saturated: UNSATURATED,
             };
             match self.prepare_candidate(candidate, (memory, for_draw), submission) {
                 Ok(resource) => {
@@ -2318,11 +2398,17 @@ impl Pipeline {
             }
             None => return None,
         };
+        let saturated = if candidate.stage == ShaderStage::Fragment {
+            by_geometry.saturated
+        } else {
+            UNSATURATED
+        };
         let for_draw = ForDraw {
             geometry,
             window_space,
             buffer_formats,
             flat_twins,
+            saturated,
         };
         let key = (candidate.stage as u32, candidate.address, for_draw);
         if let Some(known) = by_geometry.prepared.get(&key) {
@@ -2593,6 +2679,7 @@ impl Pipeline {
             },
             ShaderStage::Fragment => UserData {
                 flat_twins: for_draw.flat_twins,
+                saturated: for_draw.saturated,
                 ..self.user_data[1]
             },
             ShaderStage::Compute => UserData::default(),
@@ -2991,6 +3078,19 @@ fn texture_census(commands: &[RenderCommand], memory: &impl GuestMemory) -> Vec<
     textures
 }
 
+/// The address of a descriptor table as the program formed it: from the stage's user-data `words`
+/// or constants, a missing word reading zero.
+fn table_address(table: TableBase, words: &[u32]) -> u64 {
+    let half = |word: TableWord| match word {
+        TableWord::UserData(index) => usize::try_from(index)
+            .ok()
+            .and_then(|index| words.get(index).copied())
+            .unwrap_or(0),
+        TableWord::Constant(value) => value,
+    };
+    u64::from(half(table.low)) | u64::from(half(table.high)) << 32
+}
+
 /// The sampler descriptor at `at`, decoded, or `None` when it is not readable or asks for sampling
 /// no host sampler reproduces exactly ([`crate::registers::decode_sampler_descriptor`]).
 fn read_sampler(at: u64, memory: &impl GuestMemory) -> Option<crate::registers::TextureSampling> {
@@ -3013,6 +3113,10 @@ const FORMAT_8_UNORM: u32 = 1;
 /// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
 const FORMAT_32_32_32_32_UINT: u32 = 75;
 
+/// What each texture a submission binds became, by its descriptor's address, slot, sampler address
+/// and the coordinates the module saturates: read once per submission.
+type TexturesRead = BTreeMap<(u64, u32, Option<u64>, [bool; 2]), Option<RenderCommand>>;
+
 /// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
 /// table names a texture read exactly, so the draws that follow sample the guest's own texels.
 fn bind_textures(
@@ -3027,7 +3131,7 @@ fn bind_textures(
     // changed.
     let mut out = Vec::with_capacity(commands.len());
     let (mut words, mut fragment, mut stale) = (None, None, false);
-    let mut read: BTreeMap<(u64, u32, Option<u64>), Option<RenderCommand>> = BTreeMap::new();
+    let mut read: TexturesRead = BTreeMap::new();
     for command in commands.drain(..) {
         match &command {
             RenderCommand::SetUserData {
@@ -3056,6 +3160,7 @@ fn bind_textures(
                     table: TableBase::default(),
                     sampler_offset: None,
                     user_data: None,
+                    saturated: [false; 2],
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
                     &default[..]
@@ -3065,14 +3170,8 @@ fn bind_textures(
                 for source in slots {
                     // The table where the program formed its address: user-data words or
                     // constants.
-                    let half = |word: TableWord| match word {
-                        TableWord::UserData(index) => words
-                            .and_then(|w| w.get(usize::try_from(index).ok()?).copied())
-                            .unwrap_or(0),
-                        TableWord::Constant(value) => value,
-                    };
-                    let table = u64::from(half(source.table.low))
-                        | u64::from(half(source.table.high)) << 32;
+                    let table =
+                        table_address(source.table, words.as_ref().map_or(&[][..], |w| &w[..]));
                     let at = table + u64::from(source.table_offset.unwrap_or(0));
                     // Read once per descriptor per submission: guest memory does not change while a
                     // submission is prepared, and a frame binds the same few textures many times.
@@ -3080,7 +3179,7 @@ fn bind_textures(
                         .sampler_offset
                         .map(|offset| table + u64::from(offset));
                     let bound = read
-                        .entry((at, source.slot, sampler_at))
+                        .entry((at, source.slot, sampler_at, source.saturated))
                         .or_insert_with(|| {
                             let mut bound = read_texture(at, source.slot, memory, texels)?;
                             // A sampler the module named is read and honoured; one that cannot be
@@ -3088,6 +3187,11 @@ fn bind_textures(
                             // rather than sampled some other way.
                             if let Some(sampler_at) = sampler_at {
                                 let decoded = read_sampler(sampler_at, memory)?;
+                                // A half-border clamp is honoured only by a module that saturates
+                                // the coordinates it names (D743).
+                                if decoded.saturated() != source.saturated {
+                                    return None;
+                                }
                                 if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
                                     *sampling = decoded;
                                 }
@@ -3529,6 +3633,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
+            saturated: UNSATURATED,
         },
         UserData {
             first_register: 0,
@@ -3543,6 +3648,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
+            saturated: UNSATURATED,
         },
     ]
 }
@@ -4130,6 +4236,89 @@ mod tests {
             "27 as alpha over white"
         );
         assert!(read(5 | 1 << 9).is_none(), "a one-byte texel has no Y");
+    }
+
+    /// A sampler clamping to half a border binds its texture only for a pixel shader translated to
+    /// saturate the coordinates it names (D743); for any other the texture is left unbound, so the
+    /// draw is refused rather than sampled past the edge as a plain border clamp would.
+    #[test]
+    fn a_half_border_sampler_binds_only_for_a_saturating_module() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        use crate::registers::TextureWrap;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (table, texels, width, height) = (0x1000_u64, 0x1_0000_u64, 8u32, 4u32);
+        let mut bytes = vec![0u8; 0xF000 + 0x1_0000];
+        let image = [
+            (texels >> 8) as u32,
+            (1 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            (9 << 28) | (27 << 20) | 4 | 1 << 9,
+            0,
+            0,
+            0,
+            0,
+        ];
+        // `GL_CLAMP` across and down, both filters linear, transparent black.
+        let sampler = [4 | 4 << 3, 0, 1 << 20 | 1 << 22, 0];
+        for (i, word) in image.iter().chain(&sampler).enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let memory = Memory(bytes);
+        let shader = ResourceId(7);
+        let mut words = [0u32; super::USER_DATA_WORDS];
+        words[0] = table as u32;
+        let bind = |saturated: [bool; 2]| {
+            let sources = std::collections::BTreeMap::from([(
+                shader,
+                vec![TextureSource {
+                    slot: 0,
+                    table_offset: Some(0),
+                    table: TableBase::default(),
+                    sampler_offset: Some(0x20),
+                    user_data: None,
+                    saturated,
+                }],
+            )]);
+            let mut commands = vec![
+                RenderCommand::SetUserData {
+                    stage: ShaderStage::Fragment,
+                    words,
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader,
+                },
+                RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                },
+            ];
+            let mut unbound = 0;
+            bind_textures(
+                &mut commands,
+                (&sources, &mut super::TexelCache::new()),
+                &memory,
+                &mut unbound,
+            );
+            let sampling = commands.iter().find_map(|command| match command {
+                RenderCommand::BindTexture { sampling, .. } => Some(*sampling),
+                _ => None,
+            });
+            (unbound, sampling.map(|s| s.wrap))
+        };
+        assert_eq!(bind([false; 2]), (1, None), "not saturated: refused");
+        assert_eq!(
+            bind([true; 2]),
+            (0, Some([TextureWrap::ClampHalfBorder; 2])),
+            "saturated: bound as the sampler says"
+        );
     }
 
     /// A one-byte linear texture with no pitch of its own is read at 256 texels a row, as

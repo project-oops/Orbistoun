@@ -326,6 +326,9 @@ pub struct Texture {
     pub result: Id,
     /// Whether the image has an unsigned integer format, whose texels are raw words.
     pub integer: bool,
+    /// Which coordinates, across then down, a sample saturates first: those its sampler clamps to
+    /// half a border (D743).
+    pub saturate: [bool; 2],
 }
 
 /// What a translated texture store needs from the model.
@@ -7328,6 +7331,16 @@ fn image_sample<M: Model + ?Sized>(
         let (u, v, kind) = if fetches {
             (u, v, texture.texel)
         } else {
+            // A half-border clamp samples the coordinate saturated, a NaN to zero as Mesa's
+            // `fsat` (D743).
+            let [u, v] =
+                [(u, texture.saturate[0]), (v, texture.saturate[1])].map(|(at, saturated)| {
+                    if saturated {
+                        clamp_unit(model, at, true)
+                    } else {
+                        at
+                    }
+                });
             (model.as_float(u), model.as_float(v), texture.coordinate)
         };
 

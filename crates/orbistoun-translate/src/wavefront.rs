@@ -419,6 +419,10 @@ pub struct UserData {
     /// a pixel shader that reads an attribute both ways is refused.
     #[serde(default)]
     pub flat_twins: Option<FlatTwins>,
+    /// For each texture slot a pixel shader samples, which coordinates, across then down, it
+    /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
+    #[serde(default)]
+    pub saturated: [[bool; 2]; 2],
 }
 
 /// Each attribute a pixel shader reads both interpolated and flat, with the flat location the draw
@@ -1221,6 +1225,8 @@ pub struct Wavefront<'a> {
     flat_twins: Option<FlatTwins>,
     /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
     integer_images: [bool; 2],
+    /// The coordinates each texture slot's samples saturate (D743).
+    saturated: [[bool; 2]; 2],
     /// The four-component unsigned vector an integer image's texel is, declared on first use.
     uvec4: Option<Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
@@ -1339,6 +1345,7 @@ impl Wavefront<'_> {
                 sampler_offset: bound
                     .sampler
                     .and_then(|sampler| self.sampler_offset(sampler, bound.source.table)),
+                saturated: bound.texture.saturate,
                 ..bound.source
             })
             .collect()
@@ -1408,6 +1415,7 @@ impl Wavefront<'_> {
             table_offset,
             table,
             sampler_offset: None,
+            saturated: [false; 2],
             user_data,
         })
     }
@@ -1729,6 +1737,7 @@ impl<'a> Wavefront<'a> {
             inputs,
             flat_twins: user_data.flat_twins,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
+            saturated: user_data.saturated,
             uvec4: None,
             mesh,
             rectangles,
@@ -2953,6 +2962,11 @@ impl Model for Wavefront<'_> {
             texel,
             result,
             integer,
+            saturate: self
+                .saturated
+                .get(source.slot as usize)
+                .copied()
+                .unwrap_or_default(),
         };
         self.textures.push(BoundTexture {
             texture,
@@ -3224,6 +3238,10 @@ pub struct TextureSource {
     /// dispatch's descriptors arrive this way. `None` for a descriptor from a table.
     #[serde(default)]
     pub user_data: Option<u32>,
+    /// The coordinates, across then down, the module's samples of this texture saturate (D743): a
+    /// sampler clamping to half a border is honoured only by a module translated to.
+    #[serde(default)]
+    pub saturated: [bool; 2],
 }
 
 /// One half of a descriptor table's 64-bit address, as the program formed it before loading from

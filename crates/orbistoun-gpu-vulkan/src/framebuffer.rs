@@ -1317,10 +1317,28 @@ fn sampler_info(
     sampling: orbistoun_gpu::TextureSampling,
     levels: u32,
 ) -> vk::SamplerCreateInfo<'static> {
+    // A half-border clamp is sampled at a coordinate the shader saturated (D743), through the
+    // border when both filters are linear and the edge otherwise, as Mesa lowers `GL_CLAMP`
+    // (`samplerobj.h:158-183`).
+    let linear = (sampling.magnify, sampling.minify)
+        == (
+            orbistoun_gpu::TextureFilter::Linear,
+            orbistoun_gpu::TextureFilter::Linear,
+        );
     let address = |wrap: orbistoun_gpu::TextureWrap| match wrap {
         orbistoun_gpu::TextureWrap::Repeat => vk::SamplerAddressMode::REPEAT,
         orbistoun_gpu::TextureWrap::Mirror => vk::SamplerAddressMode::MIRRORED_REPEAT,
-        orbistoun_gpu::TextureWrap::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        orbistoun_gpu::TextureWrap::ClampHalfBorder if linear => {
+            vk::SamplerAddressMode::CLAMP_TO_BORDER
+        }
+        orbistoun_gpu::TextureWrap::ClampToEdge | orbistoun_gpu::TextureWrap::ClampHalfBorder => {
+            vk::SamplerAddressMode::CLAMP_TO_EDGE
+        }
+    };
+    let border = match sampling.border {
+        orbistoun_gpu::BorderColour::TransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+        orbistoun_gpu::BorderColour::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
+        orbistoun_gpu::BorderColour::OpaqueWhite => vk::BorderColor::FLOAT_OPAQUE_WHITE,
     };
     let filter = |filter: orbistoun_gpu::TextureFilter| match filter {
         orbistoun_gpu::TextureFilter::Nearest => vk::Filter::NEAREST,
@@ -1341,6 +1359,7 @@ fn sampler_info(
         .address_mode_u(address(sampling.wrap[0]))
         .address_mode_v(address(sampling.wrap[1]))
         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .border_color(border)
         .max_lod(max_lod)
 }
 
@@ -4568,6 +4587,37 @@ pub fn draw_with_texture(
                 ..NO_TEXTURES
             },
             coarse_level: true,
+            ..Bound::default()
+        },
+    )
+}
+
+/// [`draw_with_texture`], the texture read through the sampler `sampling` describes rather than an
+/// unfiltered one.
+///
+/// # Errors
+///
+/// When no device is available, or any Vulkan call fails.
+pub fn draw_with_sampled_texture(
+    (vertex_words, fragment_words): (&[u32], &[u32]),
+    clear: [f32; 4],
+    size: (u32, u32),
+    texture: (&[u32], u32),
+    sampling: orbistoun_gpu::TextureSampling,
+) -> Result<Pixels, DispatchError> {
+    let (width, height) = size;
+    render(
+        clear,
+        width,
+        height,
+        Some((vertex_words, fragment_words)),
+        Geometry::Vertex(VertexDraw::TRIANGLE),
+        Bound {
+            textures: &TexturesBound {
+                first: texture,
+                sampling: [sampling, orbistoun_gpu::TextureSampling::CLAMPED_POINT],
+                ..NO_TEXTURES
+            },
             ..Bound::default()
         },
     )

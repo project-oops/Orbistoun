@@ -2233,6 +2233,22 @@ pub enum TextureWrap {
     Mirror,
     /// `SQ_TEX_CLAMP_LAST_TEXEL` (2): clamp to the edge texel.
     ClampToEdge,
+    /// `SQ_TEX_CLAMP_HALF_BORDER` (4, `gfx6.json:621`): GL's `GL_CLAMP`. The coordinate is clamped
+    /// to `[0, 1]`, so a linear filter at the edge takes half the border colour (D743).
+    ClampHalfBorder,
+}
+
+/// A sampler's built-in border colour: `SQ_IMG_SAMP_WORD3.BORDER_COLOR_TYPE`
+/// (`gfx10-rsrc.json:502`), values `SQ_TEX_BORDER_COLOR` (`gfx6.json:607-613`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BorderColour {
+    /// `TRANS_BLACK` (0): `(0, 0, 0, 0)`.
+    #[default]
+    TransparentBlack,
+    /// `OPAQUE_BLACK` (1): `(0, 0, 0, 1)`.
+    OpaqueBlack,
+    /// `OPAQUE_WHITE` (2): `(1, 1, 1, 1)`.
+    OpaqueWhite,
 }
 
 /// A texture filter: `SQ_IMG_SAMP_WORD2.XY_MAG_FILTER` / `XY_MIN_FILTER` (`gfx10-rsrc.json:490-491`),
@@ -2268,6 +2284,8 @@ pub struct TextureSampling {
     pub minify: TextureFilter,
     /// Between levels.
     pub mip: MipFilter,
+    /// The colour a border clamp reads.
+    pub border: BorderColour,
 }
 
 impl TextureSampling {
@@ -2278,7 +2296,15 @@ impl TextureSampling {
         magnify: TextureFilter::Nearest,
         minify: TextureFilter::Nearest,
         mip: MipFilter::Nearest,
+        border: BorderColour::TransparentBlack,
     };
+
+    /// Which coordinates, across then down, the shader saturates before sampling: those a
+    /// half-border clamp names (D743).
+    #[must_use]
+    pub fn saturated(&self) -> [bool; 2] {
+        self.wrap.map(|wrap| wrap == TextureWrap::ClampHalfBorder)
+    }
 }
 
 impl Default for TextureSampling {
@@ -2289,14 +2315,15 @@ impl Default for TextureSampling {
 }
 
 /// Decodes a sampler descriptor's four words into how it samples, or names the field it cannot
-/// honour exactly: a border or half-border clamp (which needs the border colour), a mirror-once
-/// mode, an anisotropic filter, or a reserved value. Only the wrap across and down and the three
-/// filters are read; a 2D texture has no third coordinate.
+/// honour exactly: a border clamp, a mirror-once mode, a half-border clamp whose border colour is
+/// the table's, an anisotropic filter, or a reserved value. Only the wrap across and down, the
+/// three filters and the built-in border colour are read; a 2D texture has no third coordinate.
 pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
     let wrap = |value: u32| match value {
         0 => Ok(TextureWrap::Repeat),
         1 => Ok(TextureWrap::Mirror),
         2 => Ok(TextureWrap::ClampToEdge),
+        4 => Ok(TextureWrap::ClampHalfBorder),
         _ => Err(concat!(
             "the sampler clamps to a border or mirrors once, which needs its border colour ",
             "or a mode with no exact host form"
@@ -2313,11 +2340,26 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         2 => MipFilter::Linear,
         _ => return Err("the sampler's mip filter is a reserved value"),
     };
+    let wrap = [wrap(words[0] & 0x7)?, wrap((words[0] >> 3) & 0x7)?];
+    let border = match words[3] >> 30 {
+        0 => BorderColour::TransparentBlack,
+        1 => BorderColour::OpaqueBlack,
+        2 => BorderColour::OpaqueWhite,
+        // The table's colour, which only a clamp that reads the border needs.
+        _ if wrap.contains(&TextureWrap::ClampHalfBorder) => {
+            return Err(concat!(
+                "the sampler clamps to half a border whose colour is in the border colour ",
+                "table, which is not read"
+            ));
+        }
+        _ => BorderColour::TransparentBlack,
+    };
     Ok(TextureSampling {
-        wrap: [wrap(words[0] & 0x7)?, wrap((words[0] >> 3) & 0x7)?],
+        wrap,
         magnify: filter((words[2] >> 20) & 0x3)?,
         minify: filter((words[2] >> 22) & 0x3)?,
         mip,
+        border,
     })
 }
 
@@ -2452,7 +2494,9 @@ mod tests {
     /// border clamp and an anisotropic filter are refused rather than approximated.
     #[test]
     fn a_sampler_descriptor_decodes_to_its_wrap_and_filters() {
-        use super::{MipFilter, TextureFilter, TextureWrap, decode_sampler_descriptor};
+        use super::{
+            BorderColour, MipFilter, TextureFilter, TextureWrap, decode_sampler_descriptor,
+        };
         let words = |cx: u32, cy: u32, mag: u32, min: u32, mip: u32| {
             [
                 cx | (cy << 3),
@@ -2485,9 +2529,27 @@ mod tests {
             decode_sampler_descriptor(words(6, 0, 0, 0, 0)).is_err(),
             "border"
         );
+        let half = decode_sampler_descriptor(words(0, 4, 1, 1, 0)).expect("GL_CLAMP decodes");
+        assert_eq!(
+            half.wrap,
+            [TextureWrap::Repeat, TextureWrap::ClampHalfBorder]
+        );
+        assert_eq!(half.saturated(), [false, true]);
+        assert_eq!(half.border, BorderColour::TransparentBlack);
+        let mut white = words(4, 4, 1, 1, 0);
+        white[3] = 2 << 30;
+        assert_eq!(
+            decode_sampler_descriptor(white).map(|s| s.border),
+            Ok(BorderColour::OpaqueWhite)
+        );
+        white[3] = 3 << 30;
         assert!(
-            decode_sampler_descriptor(words(0, 4, 0, 0, 0)).is_err(),
-            "half border"
+            decode_sampler_descriptor(white).is_err(),
+            "a half border from the colour table"
+        );
+        assert!(
+            decode_sampler_descriptor(words(0, 5, 0, 0, 0)).is_err(),
+            "mirror once to half a border"
         );
         assert!(
             decode_sampler_descriptor(words(0, 0, 2, 0, 0)).is_err(),

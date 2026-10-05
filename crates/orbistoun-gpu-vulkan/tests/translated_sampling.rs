@@ -7,11 +7,16 @@
 //! image stands behind, so every sample reads the one texture the pipeline bound, and a module
 //! naming a second is refused.
 
+use orbistoun_gpu::{BorderColour, MipFilter, TextureFilter, TextureSampling, TextureWrap};
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
-use orbistoun_gpu_vulkan::framebuffer::{COARSE_TEXEL, draw_with_texture};
+use orbistoun_gpu_vulkan::framebuffer::{
+    COARSE_TEXEL, draw_with_sampled_texture, draw_with_texture,
+};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_spirv::{Lod, interpolated_vertex_module, sampling_fragment_module};
-use orbistoun_translate::wavefront::{Stage, Window, translate_for};
+use orbistoun_translate::wavefront::{
+    MeshPrimitive, Stage, UserData, Window, translate_for, translate_with_user_data,
+};
 use orbistoun_translate::{TranslateError, Width};
 
 fn device_or_skip(what: &str) -> bool {
@@ -596,6 +601,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 table: TableBase::default(),
                 sampler_offset: None,
                 user_data: None,
+                saturated: [false; 2],
             },
             TextureSource {
                 slot: 1,
@@ -603,6 +609,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 table: TableBase::default(),
                 sampler_offset: None,
                 user_data: None,
+                saturated: [false; 2],
             },
         ]
     );
@@ -787,6 +794,70 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             table: TableBase::default(),
             sampler_offset: Some(0x20),
             user_data: None,
+            saturated: [false; 2],
         }]
+    );
+}
+
+/// A half-border clamp (`GL_CLAMP`) holds a coordinate past the edge at the edge, where a linear
+/// filter takes half the edge texel and half the border colour (D743). A white texture under a
+/// transparent black border reads half grey with half alpha there: a border sampler alone fades to
+/// the border, zero, and an edge clamp reads white.
+#[test]
+fn a_half_border_clamp_holds_a_coordinate_past_the_edge_at_half_the_border() {
+    if !device_or_skip("a_half_border_clamp_holds_a_coordinate_past_the_edge_at_half_the_border") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(&sampling_shader(39), &encodings, &operands);
+    let (module, _, (sources, _)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            saturated: [[true; 2], [false; 2]],
+            ..UserData::default()
+        },
+    )
+    .expect("the saturating sample translated");
+    assert_eq!(
+        sources[0].saturated, [true; 2],
+        "the source says it saturates"
+    );
+    // The coordinate runs from zero to two across the frame, so its right half is past the edge.
+    let vertex = interpolated_vertex_module([
+        [0.0, 0.0, 0.0, 1.0],
+        [4.0, 0.0, 0.0, 1.0],
+        [0.0, 4.0, 0.0, 1.0],
+    ]);
+    let sampling = TextureSampling {
+        wrap: [TextureWrap::ClampHalfBorder; 2],
+        magnify: TextureFilter::Linear,
+        minify: TextureFilter::Linear,
+        mip: MipFilter::None,
+        border: BorderColour::TransparentBlack,
+    };
+    let white = [u32::MAX; 4];
+    let drawn = draw_with_sampled_texture(
+        (&vertex, &module),
+        [1.0, 0.0, 1.0, 1.0],
+        (8, 8),
+        (&white, 2),
+        sampling,
+    )
+    .expect("the draw ran");
+    // Pixel (6, 1): across at 1.625, held at 1; down at 0.375, between the two white rows.
+    let pixel = drawn.at(6, 1).expect("in the frame");
+    assert!(
+        pixel.iter().all(|channel| (127..=128).contains(channel)),
+        "past the edge reads half the border, not {pixel:?}"
+    );
+    assert_eq!(
+        drawn.at(1, 1),
+        Some([255; 4]),
+        "inside the edge reads white"
     );
 }
