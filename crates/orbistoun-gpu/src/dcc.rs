@@ -116,12 +116,32 @@ pub const fn texel_meta_bytes(
 /// level is [`meta_bytes`].
 #[must_use]
 pub const fn chain_meta_bytes(width: u32, height: u32, levels: u32, pipe_aligned: bool) -> u64 {
+    texel_chain_meta_bytes(
+        width,
+        height,
+        levels,
+        crate::tiling::SurfaceLayout::Rx64Kb,
+        pipe_aligned,
+    )
+}
+
+/// [`chain_meta_bytes`] for a chain laid out as `layout` lays one out, at its texels' size: at one
+/// byte a texel, SuperTuxKart's ten-level 512 x 512 glyph page has a tail block and one block for
+/// each of its two levels above, 12 KiB (addrlib's `dccRamSize`).
+#[must_use]
+pub const fn texel_chain_meta_bytes(
+    width: u32,
+    height: u32,
+    levels: u32,
+    layout: crate::tiling::SurfaceLayout,
+    pipe_aligned: bool,
+) -> u64 {
+    let element_log2 = layout.texel_log2();
     if levels <= 1 {
-        return meta_bytes(width, height, pipe_aligned);
+        return texel_meta_bytes(width, height, element_log2, pipe_aligned);
     }
-    let block = meta_block(2, pipe_aligned);
-    let first_in_tail =
-        crate::tiling::SurfaceLayout::Rx64Kb.first_level_in_tail(width, height, levels);
+    let block = meta_block(element_log2, pipe_aligned);
+    let first_in_tail = layout.first_level_in_tail(width, height, levels);
     let mut bytes = if first_in_tail < levels {
         1 << block.bytes_log2
     } else {
@@ -217,6 +237,18 @@ mod tests {
         assert_eq!(meta_bytes(512, 512, true), 0x1000);
         assert_eq!(meta_bytes(1024, 1024, true), 0x4000);
         assert_eq!(meta_bytes(1920, 1080, true), 4 * 3 * 0x1000);
+    }
+
+    /// A ten-level 512 x 512 chain at one byte a texel: addrlib's `dccRamSize` 12288.
+    #[test]
+    fn a_one_byte_chain_takes_addrlibs_key_bytes() {
+        use super::texel_chain_meta_bytes;
+        use crate::tiling::SurfaceLayout::Rx64KbBpp1;
+        assert_eq!(
+            texel_chain_meta_bytes(512, 512, 10, Rx64KbBpp1, true),
+            12288
+        );
+        assert_eq!(texel_chain_meta_bytes(512, 512, 1, Rx64KbBpp1, true), 4096);
     }
 
     /// At one byte a texel a metadata block covers 1024 x 1024 texels: addrlib's `dccRamSize` for

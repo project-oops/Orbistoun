@@ -255,6 +255,9 @@ pub struct VulkanBackend {
     /// Colour target zero's blend state for the next draw: the latest `SetBlend`; `None` draws
     /// opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// The channels colour target zero's next draw writes: the latest `SetWriteMask`; `None`
+    /// writes every one.
+    write_mask: Option<u8>,
     /// The depth target a `SetRenderTargets` bound beside the colour target, that a following draw
     /// tests against.
     current_depth: Option<ResourceId>,
@@ -322,6 +325,7 @@ impl VulkanBackend {
             second_texture: None,
             draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
+            write_mask: None,
             current_depth: None,
             depth_stencil: None,
             cull: None,
@@ -534,7 +538,8 @@ impl VulkanBackend {
             .or_insert(clear);
     }
 
-    /// Records the fixed-function state a following draw runs under - set now, applied at the draw.
+    /// Records the fixed-function state a following draw runs under - set now, applied at the draw:
+    /// the commands [`is_draw_state`] names.
     fn set_draw_state(&mut self, command: &RenderCommand) {
         match command {
             // The rectangle a following draw is restricted to. Not validated here: a scissor
@@ -546,6 +551,8 @@ impl VulkanBackend {
             }
             // The blend state.
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
+            // The channels written.
+            RenderCommand::SetWriteMask(mask) => self.write_mask = Some(*mask),
             // The depth and stencil tests, applied when a depth target is bound.
             RenderCommand::SetDepthStencil(state) => self.depth_stencil = Some(*state),
             RenderCommand::SetCull(cull) => self.cull = Some(*cull),
@@ -845,6 +852,7 @@ impl VulkanBackend {
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
+        self.write_mask.hash(&mut hasher);
         self.current_depth.is_some().hash(&mut hasher);
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
@@ -1037,7 +1045,7 @@ impl VulkanBackend {
         let target = self.current_target;
         // A blend state with no exact Vulkan equivalent refuses the draw by name rather than
         // drawing it opaque or approximately.
-        if let Err(what) = framebuffer::blend_attachment(self.blend) {
+        if let Err(what) = framebuffer::blend_attachment(self.blend, self.write_mask) {
             self.refused += 1;
             return Err(BackendError::Unsupported { command: what });
         }
@@ -1058,6 +1066,7 @@ impl VulkanBackend {
             user_data: &block,
             texture: texture.as_ref().map(|t| (&t.texels[..], t.width)),
             blend: self.blend,
+            write_mask: self.write_mask,
             viewport: self.viewport_transform,
             second_texture: second_texture.as_ref().map(|t| (&t.texels[..], t.width)),
             sampling: [
@@ -1178,6 +1187,20 @@ impl VulkanBackend {
     }
 }
 
+/// Whether a command sets fixed-function state a following draw runs under, which
+/// [`VulkanBackend::set_draw_state`] records.
+const fn is_draw_state(command: &RenderCommand) -> bool {
+    matches!(
+        command,
+        RenderCommand::SetViewport(_)
+            | RenderCommand::SetViewportTransform(_)
+            | RenderCommand::SetBlend(_)
+            | RenderCommand::SetWriteMask(_)
+            | RenderCommand::SetDepthStencil(_)
+            | RenderCommand::SetCull(_)
+    )
+}
+
 /// Name of the command variant, for the honest-refusal error.
 const fn command_name(command: &RenderCommand) -> &'static str {
     match command {
@@ -1190,6 +1213,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::BindTexture { .. } => "BindTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
+        RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
         RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
@@ -1273,11 +1297,7 @@ impl RenderBackend for VulkanBackend {
                 self.current_depth = *depth;
                 self.select_target(colour.first().copied())
             }
-            RenderCommand::SetViewport(_)
-            | RenderCommand::SetViewportTransform(_)
-            | RenderCommand::SetBlend(_)
-            | RenderCommand::SetDepthStencil(_)
-            | RenderCommand::SetCull(_) => {
+            command if is_draw_state(command) => {
                 self.set_draw_state(command);
                 Ok(())
             }
@@ -2262,6 +2282,62 @@ mod tests {
             frame.at(half + half / 2, mid_y),
             Some([0, 0, 0, 255]),
             "outside the viewport keeps the clear the draw never reached"
+        );
+    }
+
+    /// A write mask leaves the channels it masks off as the earlier draws left them: red alone,
+    /// as a one-byte target's draws are drawn, writes red and keeps green and alpha.
+    #[test]
+    fn a_write_mask_keeps_the_channels_it_masks_off() {
+        use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
+
+        if !super::probe().is_available() {
+            return;
+        }
+        let vertex = orbistoun_spirv::fullscreen_triangle_vertex_module();
+        let green = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+        let red = orbistoun_spirv::constant_colour_fragment_module([1.0, 0.0, 0.0, 0.0]);
+        let mut backend = VulkanBackend::new();
+        for (id, module) in [(95, &vertex), (96, &green), (97, &red)] {
+            backend
+                .ensure_resident(ResourceId(id), Resource::Shader(module))
+                .expect("resident");
+        }
+        backend
+            .execute(&RenderCommand::BindShader {
+                stage: ShaderStage::Vertex,
+                shader: ResourceId(95),
+            })
+            .expect("bind vertex");
+        for fragment in [96, 97] {
+            if fragment == 97 {
+                backend
+                    .execute(&RenderCommand::SetWriteMask(0x1))
+                    .expect("set write mask");
+            }
+            backend
+                .execute(&RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader: ResourceId(fragment),
+                })
+                .expect("bind fragment");
+            backend
+                .execute(&RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                })
+                .expect("the draw runs");
+        }
+        let centre = backend
+            .last_frame()
+            .expect("a frame")
+            .at(super::RENDER_WIDTH / 2, super::RENDER_HEIGHT / 2)
+            .expect("the centre");
+        assert_eq!(
+            centre,
+            [255, 255, 0, 255],
+            "red written; green and alpha kept from the draw before"
         );
     }
 

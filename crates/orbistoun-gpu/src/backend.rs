@@ -108,6 +108,11 @@ pub enum RenderCommand {
     /// Emitted before a draw whenever the value in force changed: blend is per-draw state, not
     /// frame state.
     SetBlend(crate::registers::BlendControl),
+    /// Which channels of colour target zero the draws that follow write, red in bit 0 to alpha in
+    /// bit 3: `CB_TARGET_MASK` as it stands at them, limited to the channels the target's format
+    /// holds ([`crate::registers::colour_write_mask`]). Emitted before a draw whenever it changed;
+    /// without one every channel is written.
+    SetWriteMask(u8),
     /// The depth and stencil tests the draws that follow run under, as the stream's
     /// `DB_DEPTH_CONTROL`, `DB_STENCIL_CONTROL` and `DB_STENCILREFMASK` pair stand at them.
     ///

@@ -247,9 +247,9 @@ pub fn install_draw_executor(executor: DrawExecutor) {
 }
 
 /// The one colour target a submission's draws can be carried out into and written back to exactly:
-/// a single base, a single resident target of the same extent, `64KB_R_X` tiling with its measured
-/// whole-surface layout, and an `8_8_8_8` `UNORM` element in an order `CB_COLOR0_INFO` names.
-/// Anything else is `None`, and the draws stay unexecuted.
+/// a single base, a single resident target of the same extent, a modelled layout for its tiling at
+/// its element's size, and either an `8_8_8_8` `UNORM` element in an order `CB_COLOR0_INFO` names
+/// or an `8` `UNORM` one holding red. Anything else is `None`, and the draws stay unexecuted.
 fn writable_target(submission: &Submission) -> Option<(ColourTarget, ComponentSwap)> {
     let target = submission.colour_target?;
     let format = submission.colour_target_format?;
@@ -259,14 +259,42 @@ fn writable_target(submission: &Submission) -> Option<(ColourTarget, ComponentSw
             .targets
             .values()
             .all(|extent| (extent.width, extent.height) == (target.width, target.height));
+    let bytes_per_texel = format.written_back_bytes()?;
     (one_target
         && submission
             .colour_target_tiling
             .and_then(tiling::SurfaceLayout::of)
+            .and_then(|layout| layout.at_bytes_per_texel(bytes_per_texel))
             == Some(target.layout)
-        && target.layout.models(target.pipe_bank_xor)
-        && format.is_rgba8_class())
+        && target.layout.models(target.pipe_bank_xor))
     .then_some((target, format.swap))
+}
+
+/// Whether `target` holds one byte a texel - an `8` `UNORM` target holding red, the only one-byte
+/// class [`writable_target`] accepts.
+fn one_byte_texels(target: ColourTarget) -> bool {
+    target.layout == tiling::SurfaceLayout::Rx64KbBpp1
+}
+
+/// A texel as `target` holds it in memory - a word in its byte order, or a byte - as the linear
+/// `Rgba8` word a drawer works in. A one-byte texel is red, with green and blue zero and alpha
+/// one: the drawer writes red alone ([`crate::RenderCommand::SetWriteMask`]), so alpha stays one,
+/// which is what blending reads as a one-channel target's destination alpha.
+const fn loaded(texel: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
+    if matches!(target.layout, tiling::SurfaceLayout::Rx64KbBpp1) {
+        0xFF00_0000 | (texel & 0xFF)
+    } else {
+        swapped(texel, swap)
+    }
+}
+
+/// [`loaded`]'s inverse: a drawer's linear `Rgba8` word as `target` holds it in memory.
+const fn stored(word: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
+    if matches!(target.layout, tiling::SurfaceLayout::Rx64KbBpp1) {
+        word & 0xFF
+    } else {
+        swapped(word, swap)
+    }
 }
 
 /// Moves a word between the target's memory order and `Rgba8` order - its own inverse, since
@@ -341,6 +369,24 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
                 "clip space are not modelled"
             ),
             report.unmodelled_viewports
+        ));
+    }
+    if report.unmasked_one_byte_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) into a one-byte colour target set no CB_TARGET_MASK, so which ",
+                "channels they write is not known"
+            ),
+            report.unmasked_one_byte_draws
+        ));
+    }
+    if report.unexported_channel_draws > 0 {
+        return Some(format!(
+            concat!(
+                "{} draw(s) write a colour channel their pixel shader does not export, which ",
+                "would hold whatever its output held"
+            ),
+            report.unexported_channel_draws
         ));
     }
     if report.unwindowed_draws > 0 {
@@ -438,8 +484,13 @@ impl GuestCp<'_> {
     /// the surface is filled with zeros and its keys marked uncompressed, which is exactly what
     /// expanding them leaves. Any other key state needs per-block key addressing and is refused,
     /// with nothing written. A mip chain's keys and blocks are taken whole, every level's
-    /// together, so the level drawn needs no per-level key addressing either.
-    fn expand_dcc(&mut self, target: crate::registers::ColourTargetDcc) -> Result<(), String> {
+    /// together, so the level drawn needs no per-level key addressing either. `layout` is the
+    /// target's, which sizes its keys and blocks by its texels.
+    fn expand_dcc(
+        &mut self,
+        target: crate::registers::ColourTargetDcc,
+        layout: tiling::SurfaceLayout,
+    ) -> Result<(), String> {
         let crate::registers::ColourTargetDcc {
             dcc,
             surface,
@@ -448,8 +499,13 @@ impl GuestCp<'_> {
             ..
         } = target;
         let start = crate::dcc::meta_start(dcc);
-        let length =
-            crate::dcc::chain_meta_bytes(extent.width, extent.height, levels, dcc.pipe_aligned);
+        let length = crate::dcc::texel_chain_meta_bytes(
+            extent.width,
+            extent.height,
+            levels,
+            layout,
+            dcc.pipe_aligned,
+        );
         let keys = usize::try_from(length)
             .ok()
             .and_then(|length| cp::CpMemory::read(self, start, length))
@@ -457,12 +513,8 @@ impl GuestCp<'_> {
         match crate::dcc::classify(&keys) {
             crate::dcc::Keys::Uncompressed => Ok(()),
             crate::dcc::Keys::Clear0000 => {
-                let span = usize::try_from(tiling::SurfaceLayout::Rx64Kb.chain_bytes(
-                    extent.width,
-                    extent.height,
-                    levels,
-                ))
-                .map_err(|_| "its surface is larger than this host addresses".to_owned())?;
+                let span = usize::try_from(layout.chain_bytes(extent.width, extent.height, levels))
+                    .map_err(|_| "its surface is larger than this host addresses".to_owned())?;
                 let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
                 if cp::CpMemory::fill(self, surface, 0, span)
                     && cp::CpMemory::fill(self, start, keys_uncompressed, keys.len())
@@ -524,7 +576,7 @@ impl GuestCp<'_> {
             );
         }
         if let Some(dcc) = submission.colour_target_dcc {
-            self.expand_dcc(dcc)?;
+            self.expand_dcc(dcc, target.layout)?;
         }
         if !write_back_at_flip() {
             return draw_over(self, target, swap, |before| {
@@ -1044,7 +1096,7 @@ fn read_target(
         return Some(if unchanged {
             TargetRead::Unchanged
         } else {
-            TargetRead::Uniform(swapped(word, swap))
+            TargetRead::of_pattern(word, target, swap)
         });
     }
     let was_protected = protected_unwritten(target);
@@ -1079,8 +1131,10 @@ fn read_target(
             .all(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]) == word)
     });
     let before = match uniform {
-        Some(word) => TargetRead::Uniform(swapped(word, swap)),
-        None => TargetRead::Changed(target.detile_mapped(&words_of(&bytes), |w| swapped(w, swap))),
+        Some(word) => TargetRead::of_pattern(word, target, swap),
+        None => TargetRead::Changed(
+            target.detile_mapped(&words_of(&bytes), |w| loaded(w, target, swap)),
+        ),
     };
     // What the drawer is handed is what memory holds now: with the frame kept on the device until
     // the flip, memory still holding these bytes means nothing else has written the target since
@@ -1108,6 +1162,19 @@ enum TargetRead {
 }
 
 impl TargetRead {
+    /// A target whose memory is `word` throughout: every texel that word, or - one byte a texel,
+    /// the word's bytes not all alike - the texels its bytes make where the layout puts them.
+    fn of_pattern(word: u32, target: ColourTarget, swap: ComponentSwap) -> Self {
+        let bytes = word.to_le_bytes();
+        if !one_byte_texels(target) || bytes.iter().all(|&b| b == bytes[0]) {
+            Self::Uniform(loaded(word, target, swap))
+        } else {
+            Self::Changed(
+                target.detile_mapped(&vec![word; target.words()], |w| loaded(w, target, swap)),
+            )
+        }
+    }
+
     /// What a drawer is handed of it.
     fn before(&self) -> Before<'_> {
         match self {
@@ -1144,7 +1211,7 @@ fn write_target(
         let mut written = Vec::new();
         let edited = memory.edit_words(target.base, words, &mut |tiled| {
             tiled_ok = target
-                .tile_mapped(after, tiled, |w| swapped(w, swap))
+                .tile_mapped(after, tiled, |w| stored(w, target, swap))
                 .is_ok();
             // What memory holds now, for the next submission's unchanged check.
             written = zerocopy::IntoBytes::as_bytes(&*tiled).to_vec();
@@ -1654,7 +1721,7 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
             height,
             target.pipe_bank_xor,
             &mut tiled,
-            |w| swapped(w, swap),
+            |w| stored(w, target, swap),
         )
         .is_err()
     {
@@ -2672,6 +2739,96 @@ mod tests {
             None
         });
         assert!(handed.is_some(), "changed by the guest, so read again");
+    }
+
+    /// A one-byte target is handed to the drawer as red with alpha one, and only each texel's red
+    /// comes back: every other byte of its block - padding past the extent - stays as it was.
+    #[test]
+    fn a_one_byte_target_draws_through_red_alone() {
+        use super::{ColourTarget, ComponentSwap, draw_over};
+        use crate::tiling::tiled_byte_offset_64kb_rx_bpp1_xor as at;
+        let _guard = serial();
+        super::forget_written();
+        let (width, height, xor) = (16u32, 8u32, 0x2u8);
+        let mut memory = Block(vec![0x5a; 65536]);
+        for y in 0..height {
+            for x in 0..width {
+                memory.0[at(x, y, width, xor)] = u8::try_from(y * width + x).expect("small");
+            }
+        }
+        let target = ColourTarget {
+            base: BASE,
+            width,
+            height,
+            pipe_bank_xor: xor,
+            layout: crate::tiling::SurfaceLayout::Rx64KbBpp1,
+            place: crate::registers::Place::Whole,
+        };
+        let mut handed = None;
+        let wrote = draw_over(&mut memory, target, ComponentSwap::Standard, |before| {
+            handed = before.to_words(128);
+            // A drawer that wrote green, blue and alpha too: none of it reaches memory.
+            handed.as_ref().map(|words| {
+                words
+                    .iter()
+                    .map(|w| 0x1234_5600 | ((w + 1) & 0xFF))
+                    .collect()
+            })
+        });
+        assert!(wrote);
+        let handed = handed.expect("read");
+        assert_eq!(handed[0], 0xff00_0000, "red 0, alpha one");
+        assert_eq!(handed[5 * 16 + 3], 0xff00_0000 | (5 * 16 + 3));
+        assert_eq!(
+            u32::from(memory.0[at(3, 5, width, xor)]),
+            5 * 16 + 3 + 1,
+            "red written back as the texel's byte"
+        );
+        let texels: Vec<usize> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| at(x, y, width, xor)))
+            .collect();
+        assert!(
+            memory
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !texels.contains(i))
+                .all(|(_, &b)| b == 0x5a),
+            "no byte outside the texels moved"
+        );
+    }
+
+    /// A one-byte target under a fill whose bytes differ is not uniform: each texel is the byte
+    /// the layout puts there.
+    #[test]
+    fn a_one_byte_target_under_a_mixed_fill_reads_texel_by_texel() {
+        use super::{ColourTarget, ComponentSwap, TargetRead};
+        use crate::tiling::tiled_byte_offset_64kb_rx_bpp1_xor as at;
+        let target = ColourTarget {
+            base: BASE,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64KbBpp1,
+            place: crate::registers::Place::Whole,
+        };
+        let TargetRead::Changed(texels) =
+            TargetRead::of_pattern(0x4433_2211, target, ComponentSwap::Standard)
+        else {
+            panic!("a mixed fill is not uniform");
+        };
+        for (x, y) in [(0, 0), (1, 0), (3, 5), (15, 7)] {
+            let byte = [0x11, 0x22, 0x33, 0x44][at(x, y, 16, 0) % 4];
+            assert_eq!(
+                texels[(y * 16 + x) as usize],
+                0xff00_0000 | byte,
+                "({x},{y})"
+            );
+        }
+        assert!(matches!(
+            TargetRead::of_pattern(0x7777_7777, target, ComponentSwap::Standard),
+            TargetRead::Uniform(0xff00_0077)
+        ));
     }
 
     /// A uniform target is handed over exactly as detiling the same memory would hand it.
@@ -3735,7 +3892,10 @@ mod tests {
 
             buffer[..span + 0x10].fill(0xAB);
             buffer[at(meta)..at(meta) + keys].fill(0x00);
-            assert_eq!(cp.expand_dcc(target), Ok(()));
+            assert_eq!(
+                cp.expand_dcc(target, crate::tiling::SurfaceLayout::Rx64Kb),
+                Ok(())
+            );
             assert!(
                 buffer[..span].iter().all(|&b| b == 0),
                 "the cleared blocks' zeros, {width}x{height}"
@@ -3747,11 +3907,17 @@ mod tests {
             );
 
             buffer[..span].fill(0x5A);
-            assert_eq!(cp.expand_dcc(target), Ok(()));
+            assert_eq!(
+                cp.expand_dcc(target, crate::tiling::SurfaceLayout::Rx64Kb),
+                Ok(())
+            );
             assert!(buffer[..span].iter().all(|&b| b == 0x5A), "left as it is");
 
             buffer[at(meta) + keys - 1] = 0x20;
-            assert!(cp.expand_dcc(target).is_err());
+            assert!(
+                cp.expand_dcc(target, crate::tiling::SurfaceLayout::Rx64Kb)
+                    .is_err()
+            );
             assert!(buffer[..span].iter().all(|&b| b == 0x5A), "nothing written");
             assert_eq!(buffer[at(meta) + keys - 1], 0x20);
             super::forget_written();

@@ -1602,10 +1602,13 @@ const EXPORT_VALID_MASK: u32 = 1 << 12;
 /// - A module with no colour output: a compute dispatch has nowhere to export to
 ///   ([`Model::colour_output`]).
 /// - Any target but `mrt0`; see [`MRT0`].
-/// - A write mask other than all or none of the four channels. The mask and the compressed bit are
-///   read from the instruction's first word. A compressed export is unpacked from its two
-///   half-packed sources. With `vm` set a pixel whose lane is inactive is discarded
-///   ([`EXPORT_VALID_MASK`]); `done` changes nothing a single-export translation does.
+/// - A compressed export that enables fewer than all four channels. The mask and the compressed
+///   bit are read from the instruction's first word. A compressed export is unpacked from its two
+///   half-packed sources. An uncompressed one that enables some channels stores those, and keeps
+///   the others as the output held them: the colour target takes only the channels its format
+///   holds, and a draw that writes one the shader did not export is refused where the draw is
+///   prepared. With `vm` set a pixel whose lane is inactive is discarded ([`EXPORT_VALID_MASK`]);
+///   `done` changes nothing a single-export translation does.
 fn export<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -1658,17 +1661,17 @@ fn export<M: Model + ?Sized>(
         });
     }
 
-    // Every channel, no channel, or refused (`EN`, bits 0-3, `aco_assembler.cpp:1005`). No channel
-    // is an export that writes nothing, such as one raised only to end the wave, so nothing is
-    // stored. A partial mask keeps channels a whole `vec4` store would overwrite.
+    // The channels written (`EN`, bits 0-3, `aco_assembler.cpp:1005`). No channel is an export that
+    // writes nothing, such as one raised only to end the wave, so nothing is stored. A compressed
+    // export's channels come in pairs from its two sources, so only all of them is translated.
     let enabled = instruction.word & EXPORT_ENABLE_MASK;
     if enabled == 0 {
         return Ok(());
     }
-    if enabled != EXPORT_ENABLE_MASK {
+    if enabled != EXPORT_ENABLE_MASK && instruction.word & EXPORT_COMPRESSED != 0 {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a colour export that enables fewer than all four channels is not translated",
+            detail: "a compressed colour export that enables fewer than all four channels is not translated",
         });
     }
 
@@ -1716,8 +1719,35 @@ fn export<M: Model + ?Sized>(
     let mut construct = vec![vec4.0, value.0];
     construct.extend(components);
     builder.function(op::COMPOSITE_CONSTRUCT, &construct);
+    let value = only_enabled(builder, (vec4, colour), value, enabled);
     builder.function(op::STORE, &[colour.0, value.0]);
     Ok(())
+}
+
+/// `value` with only the `enabled` channels taken from it, the rest as the output `colour` held
+/// them; `value` itself when every channel is enabled.
+fn only_enabled(
+    builder: &mut Builder,
+    (vec4, colour): (Id, Id),
+    value: Id,
+    enabled: u32,
+) -> Id {
+    if enabled == EXPORT_ENABLE_MASK {
+        return value;
+    }
+    let held = builder.id();
+    builder.function(op::LOAD, &[vec4.0, held.0, colour.0]);
+    let merged = builder.id();
+    let mut shuffle = vec![vec4.0, merged.0, held.0, value.0];
+    shuffle.extend((0..4).map(|channel| {
+        if enabled >> channel & 1 == 1 {
+            4 + channel
+        } else {
+            channel
+        }
+    }));
+    builder.function(op::VECTOR_SHUFFLE, &shuffle);
+    merged
 }
 
 /// The lanes a masked-write-only instruction emits code for: every lane but those the model knows

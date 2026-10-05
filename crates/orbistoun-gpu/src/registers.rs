@@ -1068,6 +1068,12 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         None if levels == 1 => crate::tiling::SurfaceLayout::default(),
         None => return None,
     };
+    // A one-byte `COLOR_8` element lies by its own layout, where one is modelled; any other format
+    // keeps the 32-bpp one, and is written back only if it is a four-byte one.
+    let layout = match last(CB_COLOR0_INFO).map(decode_colour_target_format) {
+        Some(format) if format.format == COLOR_8 => layout.at_bytes_per_texel(1).unwrap_or(layout),
+        _ => layout,
+    };
     chain_level(
         (u64::from(base) << 8, pipe_bank_xor),
         (extent.width, extent.height),
@@ -1164,7 +1170,7 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
 /// `CB_TARGET_MASK`, a context register at index `0xA08E`: `src/amd/registers/gfx103.json` in
 /// oops-mesa maps it at byte `164408` = `0x28238`, context dword `0x8E`, with eight four-bit fields
 /// `TARGET0_ENABLE`..`TARGET7_ENABLE` at bits `[0,3]`..`[28,31]`.
-const CB_TARGET_MASK: u32 = 0xA08E;
+pub(crate) const CB_TARGET_MASK: u32 = 0xA08E;
 
 /// Which of the eight colour targets a submission writes, and on which channels.
 ///
@@ -1852,10 +1858,12 @@ pub fn viewport_transform_from(
 }
 
 /// `CB_COLOR0_INFO`, a context register: `gfx103.json` maps it at byte `167024`, dword `0xA31C`.
-const CB_COLOR0_INFO: u32 = 0xA31C;
+pub(crate) const CB_COLOR0_INFO: u32 = 0xA31C;
 
 /// `ColorFormat` `COLOR_8_8_8_8` (`gfx103.json`, enum `ColorFormat`).
 pub const COLOR_8_8_8_8: u32 = 10;
+/// `ColorFormat`'s one-byte `COLOR_8` (`gfx103.json`).
+pub const COLOR_8: u32 = 1;
 /// `SurfaceNumber` `NUMBER_UNORM` (`gfx103.json`, enum `SurfaceNumber`).
 pub const NUMBER_UNORM: u32 = 0;
 
@@ -1900,6 +1908,48 @@ impl ColourTargetFormat {
                 ComponentSwap::Standard | ComponentSwap::Alternate
             )
     }
+
+    /// Whether this is a one-byte `8` `UNORM` target holding red - `SWAP_STD` on a one-channel
+    /// format, `X___` (`ac_formats.c` `ac_translate_colorswap`).
+    #[must_use]
+    pub const fn is_r8_class(&self) -> bool {
+        self.format == COLOR_8
+            && self.number_type == NUMBER_UNORM
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
+    /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
+    /// [`Self::is_rgba8_class`], one for [`Self::is_r8_class`].
+    #[must_use]
+    pub const fn written_back_bytes(&self) -> Option<u32> {
+        if self.is_rgba8_class() {
+            Some(4)
+        } else if self.is_r8_class() {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
+/// The channels of colour target zero a draw writes, as a `Rgba8` drawer's red-green-blue-alpha
+/// mask (bit 0 red): `CB_TARGET_MASK`'s `TARGET0_ENABLE`, limited to the channels the target's
+/// format holds. A one-channel `8` target holds red under `SWAP_STD` and alpha under
+/// `SWAP_ALT_REV` (`ac_formats.c` `ac_translate_colorswap`); a drawer standing in a four-channel
+/// frame for it must leave the others alone. Any other format keeps the mask as it is.
+#[must_use]
+pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
+    let format = decode_colour_target_format(info);
+    let held = if format.format == COLOR_8 {
+        match format.swap {
+            ComponentSwap::Standard => 0x1,
+            ComponentSwap::Other(3) => 0x8,
+            _ => 0xF,
+        }
+    } else {
+        0xF
+    };
+    (target_mask & held & 0xF) as u8
 }
 
 /// Decodes a `CB_COLOR0_INFO` value. The SDK's measured primitive-draw value `0x000180a8` decodes
@@ -3286,6 +3336,82 @@ mod tests {
         assert_eq!(
             colour_target_at(&linear).map(|t| (t.base, t.pipe_bank_xor)),
             Some((0x4_0286_c000, 0))
+        );
+    }
+
+    /// A `COLOR_8` target - SuperTuxKart's 512 x 512 glyph page - lies by the 8-bpp `64KB_R_X`
+    /// layout, a chain's level where that layout's chain puts it. Any other format keeps the 32-bpp
+    /// layout.
+    #[test]
+    fn a_one_byte_target_lies_by_the_one_byte_layout() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let page = [
+            write(0xA318, 0x0404_c000),
+            write(0xA31C, 1 << 2),
+            write(0xA3B0, 0x007f_c1ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_at(&page),
+            Some(ColourTarget {
+                base: 0x4_04c0_0000,
+                width: 512,
+                height: 512,
+                pipe_bank_xor: 0,
+                layout: crate::tiling::SurfaceLayout::Rx64KbBpp1,
+                place: Place::Whole,
+            })
+        );
+        // Ten levels, level 7 viewed: in the tail's block, at (16, 32).
+        let mut chain = page.to_vec();
+        chain.extend([write(0xA3B0, 0x907f_c1ff), write(0xA31B, 7 << 26)]);
+        assert_eq!(
+            colour_target_at(&chain),
+            Some(ColourTarget {
+                base: 0x4_04c0_0000,
+                width: 4,
+                height: 4,
+                pipe_bank_xor: 0,
+                layout: crate::tiling::SurfaceLayout::Rx64KbBpp1,
+                place: Place::Within {
+                    span: (256, 256),
+                    origin: (16, 32),
+                },
+            })
+        );
+        let mut rgba = page.to_vec();
+        rgba.push(write(0xA31C, 10 << 2));
+        assert_eq!(
+            colour_target_at(&rgba).map(|t| t.layout),
+            Some(crate::tiling::SurfaceLayout::Rx64Kb)
+        );
+    }
+
+    /// A one-byte target's draws write the one channel its format holds - red under `SWAP_STD`,
+    /// alpha under `SWAP_ALT_REV` - of the mask's target zero; a four-byte target's, the mask's.
+    #[test]
+    fn the_write_mask_is_the_target_mask_within_the_format_s_channels() {
+        use super::colour_write_mask;
+        let r8 = 1 << 2;
+        let a8 = 1 << 2 | 3 << 11;
+        let rgba8 = 10 << 2;
+        assert_eq!(colour_write_mask(0xF, r8), 0x1);
+        assert_eq!(
+            colour_write_mask(0xE, r8),
+            0x0,
+            "red masked off writes nothing"
+        );
+        assert_eq!(colour_write_mask(0xF, a8), 0x8);
+        assert_eq!(colour_write_mask(0xF, rgba8), 0xF);
+        assert_eq!(colour_write_mask(0x7, rgba8), 0x7);
+        assert_eq!(
+            colour_write_mask(0xF0, rgba8),
+            0x0,
+            "target one's mask is not target zero's"
         );
     }
 

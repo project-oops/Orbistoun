@@ -188,3 +188,69 @@ fn an_inactive_pixel_at_the_final_export_is_discarded() {
         }
     }
 }
+
+/// An export that enables some channels writes those and keeps the others as the output held them:
+/// blue exported whole, then red alone, leaves red over the blue's green, blue and alpha. Mesa
+/// exports a one-byte red target's colour this way (`SPI_SHADER_32_R`, `ac_shader_util.c`), and the
+/// target takes only red.
+#[test]
+fn a_partial_export_writes_only_its_channels() {
+    if !device_or_skip("a_partial_export_writes_only_its_channels") {
+        return;
+    }
+    let (width, height) = (8, 5);
+    let mut bytes = Vec::new();
+    for (register, component) in [0.0f32, 0.0, 1.0, 1.0].iter().enumerate() {
+        let word = 0x7E00_0000u32 | ((register as u32) << 17) | (1 << 9) | 0xFF;
+        bytes.extend(word.to_le_bytes());
+        bytes.extend(component.to_bits().to_le_bytes());
+    }
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
+    bytes.extend(0x0302_0100u32.to_le_bytes());
+    // `v_mov_b32 v0, 1.0`, then `exp mrt0 v0, off, off, off`: `EN` 0x1, red alone.
+    bytes.extend(0x7E00_02FFu32.to_le_bytes());
+    bytes.extend(1.0f32.to_bits().to_le_bytes());
+    bytes.extend(0xF800_0001u32.to_le_bytes());
+    bytes.extend(0x0000_0000u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _) = translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .expect("a partial export translates");
+    let vertex = fullscreen_triangle_vertex_module();
+    let drawn = draw_with(&vertex, &module, [0.0, 1.0, 0.0, 1.0], width, height).expect("drawn");
+    for (x, y) in [(0, 0), (7, 4), (3, 2)] {
+        assert_eq!(drawn.at(x, y), Some([255, 0, 255, 255]), "({x}, {y})");
+    }
+}
+
+/// The channels a pixel shader exports are its `mrt0` exports' `EN` fields together: red alone for
+/// an `exp mrt0 v0, off, off, off`, all four for a whole export.
+#[test]
+fn a_shader_s_exported_channels_are_its_exports_enables() {
+    use orbistoun_translate::wavefront::exported_colour_channels;
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let mut red = 0x7E00_02FFu32.to_le_bytes().to_vec();
+    red.extend(1.0f32.to_bits().to_le_bytes());
+    red.extend(0xF800_0001u32.to_le_bytes());
+    red.extend(0x0000_0000u32.to_le_bytes());
+    red.extend(0xBF81_0000u32.to_le_bytes());
+    assert_eq!(
+        exported_colour_channels(&decode(&red, &encodings, &operands), &encodings),
+        0x1
+    );
+    let whole = export_shader([0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(
+        exported_colour_channels(&decode(&whole, &encodings, &operands), &encodings),
+        0xF
+    );
+}

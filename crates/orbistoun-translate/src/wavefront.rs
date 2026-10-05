@@ -3122,6 +3122,26 @@ fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
     locations
 }
 
+/// The channels of colour attachment zero a pixel shader's exports write, red in bit 0 to alpha in
+/// bit 3: the union of every `exp mrt0`'s `EN` field (`aco_assembler.cpp:1005`). A channel outside
+/// it holds whatever the output held, so a draw that writes it to its target is not the guest's.
+#[must_use]
+pub fn exported_colour_channels(decode: &Decode, encodings: &EncodingTable) -> u8 {
+    let mut channels = 0;
+    for instruction in &decode.instructions {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        if named == Some("exp")
+            && let Some(Operand::Immediate(0)) = instruction.operands.first()
+        {
+            channels |= (instruction.word & 0xF) as u8;
+        }
+    }
+    channels
+}
+
 /// The buffers a draw binds for this module (D733): traced for a draw's stage when the caller binds
 /// them, and none otherwise.
 ///

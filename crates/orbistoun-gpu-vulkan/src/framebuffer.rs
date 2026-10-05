@@ -1704,6 +1704,7 @@ pub(crate) fn draw_vertices(
                 sampling: start.sampling,
             },
             blend: start.blend,
+            write_mask: start.write_mask,
             viewport: start.viewport,
             cull: start.cull,
             draw_buffers: &DrawBuffersBound {
@@ -1729,6 +1730,8 @@ pub(crate) struct Start<'a> {
     pub(crate) texture: Option<(&'a [u32], u32)>,
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
+    /// The channels colour target zero's draws write; `None` writes every one.
+    pub(crate) write_mask: Option<u8>,
     /// The guest's clip-to-pixel transform; `None` maps clip space over the whole attachment, `+y`
     /// down.
     pub(crate) viewport: Option<orbistoun_gpu::ViewportTransform>,
@@ -1851,15 +1854,22 @@ fn viewport_within_limits(
 /// not decoded), the dual-source ones, the two `BOTH_*` forms and any reserved code. With
 /// `SEPARATE_ALPHA_BLEND` off, alpha is blended with the colour factors, as the hardware does.
 ///
+/// `write_mask` is the channels written, red in bit 0 to alpha in bit 3 - Vulkan's own
+/// `ColorComponentFlags` bits - or every channel when the guest set none.
+///
 /// # Errors
 ///
 /// The name of the first part of the state with no exact Vulkan equivalent.
 pub(crate) fn blend_attachment(
     blend: Option<orbistoun_gpu::BlendControl>,
+    write_mask: Option<u8>,
 ) -> Result<vk::PipelineColorBlendAttachmentState, &'static str> {
     use orbistoun_gpu::{BlendFactor as F, CombineFunc as C};
+    let channels = write_mask.map_or(vk::ColorComponentFlags::RGBA, |mask| {
+        vk::ColorComponentFlags::from_raw(u32::from(mask & 0xF))
+    });
     let opaque = vk::PipelineColorBlendAttachmentState::default()
-        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .color_write_mask(channels)
         .blend_enable(false);
     let Some(blend) = blend.filter(|b| b.enable) else {
         return Ok(opaque);
@@ -3866,7 +3876,7 @@ fn create_graphics_pipeline(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     // The guest's blend state, or opaque with every channel written when it set none. A state that
     // does not map is refused before a draw reaches here (`VulkanBackend`).
-    let blend_attachments = [blend_attachment(bound.blend)
+    let blend_attachments = [blend_attachment(bound.blend, bound.write_mask)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
 
@@ -4110,6 +4120,7 @@ pub(crate) fn draw_resident(
                 sampling: start.sampling,
             },
             blend: start.blend,
+            write_mask: start.write_mask,
             viewport: start.viewport,
             resident: Some(resident),
             pipeline_key: start.pipeline_key,
@@ -4215,6 +4226,8 @@ struct Bound<'a> {
     user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
     /// Colour target zero's blend state; `None` draws opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// The channels colour target zero's draws write; `None` writes every one.
+    write_mask: Option<u8>,
     /// Whether the texture gets the harness's sentinel second level ([`COARSE_TEXEL`]), for a test
     /// that tells level one from level zero. A guest's texture never gets it.
     coarse_level: bool,
@@ -4288,6 +4301,7 @@ impl Default for Bound<'_> {
             initial: None,
             user_data: &NO_USER_DATA,
             blend: None,
+            write_mask: None,
             coarse_level: false,
             viewport: None,
             resident: None,

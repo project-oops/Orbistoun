@@ -286,6 +286,12 @@ pub struct SubmissionReport {
     /// Draws whose viewport transform the stream turned off (`PA_CL_VTE_CNTL`), so their positions
     /// are not the clip space the backend draws.
     pub unmodelled_viewports: usize,
+    /// Draws into a one-byte colour target with no `CB_TARGET_MASK` in the stream, so which of a
+    /// four-channel drawer's channels stand for its one is not known.
+    pub unmasked_one_byte_draws: usize,
+    /// Draws that write a colour channel their pixel shader never exports, which would hold
+    /// whatever the shader's output held.
+    pub unexported_channel_draws: usize,
     /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
     /// module would read zeros where the guest's data is.
     pub unwindowed_draws: usize,
@@ -609,6 +615,8 @@ pub struct Pipeline {
     /// The translated modules whose shaders read or write guest memory, which reach it only
     /// through the window.
     memory_readers: std::collections::BTreeSet<ResourceId>,
+    /// The colour channels each translated pixel shader exports, by its resource.
+    colour_channels: BTreeMap<ResourceId, u8>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
     /// Each translated module's draw buffers, in slot order (D733).
@@ -666,6 +674,7 @@ impl Pipeline {
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
             memory_readers: std::collections::BTreeSet::new(),
+            colour_channels: BTreeMap::new(),
             texels: TexelCache::new(),
             buffer_sources: BTreeMap::new(),
             buffers: crate::draw_buffers::BufferCache::default(),
@@ -998,6 +1007,8 @@ impl Pipeline {
         });
         submission.report.unwindowed_draws =
             self.unwindowed_draws(&per_draw, &submission.guest_memory);
+        submission.report.unexported_channel_draws =
+            self.unexported_channel_draws(&per_draw, &draws, &writes);
         submission.report.unshaded_draws = unshaded_draws(&per_draw, queue, registered);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
@@ -1015,7 +1026,10 @@ impl Pipeline {
                 (&walked, stream, &draws),
                 &writes,
                 (&per_draw, depth_target.map(|(id, _, _)| id)),
-                &mut submission.report.unmodelled_viewports,
+                (
+                    &mut submission.report.unmodelled_viewports,
+                    &mut submission.report.unmasked_one_byte_draws,
+                ),
             );
         });
         span(Span::PrepareTextures, || {
@@ -1174,7 +1188,16 @@ impl DispatchSurface {
                 ..
             } => (0..*height)
                 .flat_map(|y| (0..*width).map(move |x| (x, y)))
-                .map(|(x, y)| u32::from(spanned[byte_at_rx_bpp1(x, y, *width, *pipe_bank_xor)]))
+                .map(|(x, y)| {
+                    u32::from(
+                        spanned[crate::tiling::tiled_byte_offset_64kb_rx_bpp1_xor(
+                            x,
+                            y,
+                            *width,
+                            *pipe_bank_xor,
+                        )],
+                    )
+                })
                 .collect(),
             Self::Linear {
                 width,
@@ -1225,7 +1248,12 @@ impl DispatchSurface {
             Self::TiledBytes { pipe_bank_xor, .. } => {
                 for (index, &texel) in texels.iter().enumerate() {
                     let (x, y) = (index as u32 % width, index as u32 / width);
-                    spanned[byte_at_rx_bpp1(x, y, width, *pipe_bank_xor)] = texel.to_le_bytes()[0];
+                    spanned[crate::tiling::tiled_byte_offset_64kb_rx_bpp1_xor(
+                        x,
+                        y,
+                        width,
+                        *pipe_bank_xor,
+                    )] = texel.to_le_bytes()[0];
                 }
                 Ok(())
             }
@@ -1245,14 +1273,6 @@ impl DispatchSurface {
             }
         }
     }
-}
-
-/// Where texel `(x, y)` of an 8-bpp `64KB_R_X` surface `width` wide lies, its pipe-bank XOR
-/// applied: the 256-byte runs within each block move by it, `blkOffset ^ (pipeBankXor << 8)`
-/// (`gfx10addrlib.cpp:4786-4849`), as at four bytes a texel.
-fn byte_at_rx_bpp1(x: u32, y: u32, width: u32, pipe_bank_xor: u8) -> usize {
-    crate::tiling::tiled_byte_offset_64kb_rx_bpp1_surface(x, y, width)
-        ^ (usize::from(pipe_bank_xor) << 8)
 }
 
 /// Little-endian words from bytes, a trailing partial word dropped.
@@ -1684,7 +1704,8 @@ impl Pipeline {
     }
 
     /// Records how a translated module reaches guest memory: the buffers a draw binds for it
-    /// (D733), and whether anything else it reads goes through the window.
+    /// (D733), and whether anything else it reads goes through the window. A pixel shader's
+    /// exported colour channels are recorded with them, from the same decode.
     fn note_memory(
         &mut self,
         resource: ResourceId,
@@ -1710,6 +1731,12 @@ impl Pipeline {
         if reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
             self.memory_readers.insert(resource);
         }
+        if stage == Stage::Fragment {
+            self.colour_channels.insert(
+                resource,
+                orbistoun_translate::wavefront::exported_colour_channels(decoded, &self.encodings),
+            );
+        }
         if !buffers.sources.is_empty() {
             self.buffer_sources.insert(resource, buffers.sources);
         }
@@ -1728,6 +1755,40 @@ impl Pipeline {
                 shaders
                     .iter()
                     .any(|(_, resource)| self.memory_readers.contains(resource))
+            })
+            .count()
+    }
+
+    /// How many draws write a colour channel their pixel shader never exports: the channels
+    /// `CB_TARGET_MASK` and the target's format let through ([`crate::registers::colour_write_mask`],
+    /// every one where the stream set no mask) beyond those the shader's exports write. Such a
+    /// channel would hold whatever the output held, so the draw is counted and refused.
+    fn unexported_channel_draws(
+        &self,
+        per_draw: &[DrawShaders],
+        draws: &[DrawCall],
+        writes: &[RegisterWrite],
+    ) -> usize {
+        let mut sweep = crate::registers::RegisterSweep::new(writes);
+        draws
+            .iter()
+            .zip(per_draw)
+            .filter(|(draw, shaders)| {
+                let Some(exported) = shaders.iter().find_map(|(stage, resource)| {
+                    (*stage == ShaderStage::Fragment)
+                        .then(|| self.colour_channels.get(resource))
+                        .flatten()
+                }) else {
+                    return false;
+                };
+                let at = draw.packet_offset;
+                let mask = sweep
+                    .latest(at, crate::registers::CB_TARGET_MASK)
+                    .unwrap_or(0xF);
+                let info = sweep
+                    .latest(at, crate::registers::CB_COLOR0_INFO)
+                    .unwrap_or(0);
+                crate::registers::colour_write_mask(mask, info) & !exported != 0
             })
             .count()
     }
@@ -2195,6 +2256,41 @@ impl Pipeline {
     }
 }
 
+/// Colour target zero's output state in force at a draw, as commands where it changed since
+/// `sent`: the blend state, when the stream set one, as `SetBlend`, and the channels the draw
+/// writes, when it set a target mask, as `SetWriteMask`. A one-byte target with no target mask is
+/// counted: a drawer would write every channel of the frame standing in for it.
+fn push_colour_output(
+    commands: &mut Vec<RenderCommand>,
+    mut latest: impl FnMut(u32) -> Option<u32>,
+    (blend_sent, sent): (&mut Option<u32>, &mut Option<u8>),
+    unmasked_one_byte_draws: &mut usize,
+) {
+    if let Some(value) = latest(crate::registers::CB_BLEND0_CONTROL)
+        && *blend_sent != Some(value)
+    {
+        commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
+        *blend_sent = Some(value);
+    }
+    let info = latest(crate::registers::CB_COLOR0_INFO);
+    match latest(crate::registers::CB_TARGET_MASK) {
+        Some(mask) => {
+            let channels = crate::registers::colour_write_mask(mask, info.unwrap_or(0));
+            if *sent != Some(channels) {
+                commands.push(RenderCommand::SetWriteMask(channels));
+                *sent = Some(channels);
+            }
+        }
+        None if info.is_some_and(|info| {
+            crate::registers::decode_colour_target_format(info).format == crate::registers::COLOR_8
+        }) =>
+        {
+            *unmasked_one_byte_draws += 1;
+        }
+        None => {}
+    }
+}
+
 /// Appends a submission's draws and dispatches to its command list, in the stream's order.
 ///
 /// An auto draw becomes a [`RenderCommand::Draw`] and an indexed one a
@@ -2206,10 +2302,11 @@ fn push_geometry_commands(
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
     writes: &[RegisterWrite],
     (shaders, depth_target): (&[DrawShaders], Option<ResourceId>),
-    unmodelled_viewports: &mut usize,
+    (unmodelled_viewports, unmasked_one_byte_draws): (&mut usize, &mut usize),
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
     let mut blend_sent = None;
+    let mut mask_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
     let mut scissor_sent = None;
@@ -2234,13 +2331,13 @@ fn push_geometry_commands(
                 commands.push(RenderCommand::BindShader { stage, shader });
             }
         }
-        // The blend state in force at this draw, when the stream set one and it changed.
-        if let Some(value) = sweep.latest(at, crate::registers::CB_BLEND0_CONTROL)
-            && blend_sent != Some(value)
-        {
-            commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
-            blend_sent = Some(value);
-        }
+        // The blend state and write mask in force at this draw.
+        push_colour_output(
+            commands,
+            |register| sweep.latest(at, register),
+            (&mut blend_sent, &mut mask_sent),
+            unmasked_one_byte_draws,
+        );
         // The depth, stencil and cull state in force at this draw, and a clear it asks for.
         depth_sent.push(&mut sweep, at, depth_target, commands);
         // The clip-to-pixel transform in force at this draw, when the stream set one and it
@@ -2649,6 +2746,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::Rx64Kb => 0,
         crate::tiling::SurfaceLayout::Dx4Kb => 1 << 31,
         crate::tiling::SurfaceLayout::Linear => 1 << 27,
+        crate::tiling::SurfaceLayout::Rx64KbBpp1 => 1 << 26,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,

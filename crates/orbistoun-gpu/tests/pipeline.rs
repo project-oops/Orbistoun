@@ -462,6 +462,50 @@ fn a_depth_state_stream_reaches_the_backend_as_depth_commands() {
     );
 }
 
+/// A draw into a one-byte target writes its target mask's red alone, as `SetWriteMask` before the
+/// draw; with no `CB_TARGET_MASK` in the stream its channels are not known, and it is counted.
+///
+/// Register indices are `gfx103.json`'s: `CB_TARGET_MASK` context dword `0x08E`, `CB_COLOR0_INFO`
+/// `0x31C` (`COLOR_8` is format 1, bits 6:2).
+#[test]
+fn a_one_byte_target_s_draws_write_red_alone() {
+    let header = (3u32 << 30) | ((2 - 1) << 16) | (0x69 << 8);
+    let draw = [(3u32 << 30) | ((2 - 1) << 16) | (0x2D << 8), 3, 0];
+    let stream = |masked: bool| -> Vec<u8> {
+        let mut words = vec![header, 0x31c, 1 << 2];
+        if masked {
+            words.extend([header, 0x08e, 0xF]);
+        }
+        words.extend(draw);
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    };
+
+    let masked = pipeline().submit(&stream(true), Queue::Draw, &[], &memory());
+    let mask = masked
+        .commands
+        .iter()
+        .position(|c| matches!(c, RenderCommand::SetWriteMask(0x1)));
+    let drawn = masked
+        .commands
+        .iter()
+        .position(|c| matches!(c, RenderCommand::Draw { vertices: 3, .. }));
+    assert!(
+        mask.zip(drawn).is_some_and(|(mask, drawn)| mask < drawn),
+        "red alone, before the draw: {:?}",
+        masked.commands
+    );
+    assert_eq!(masked.report.unmasked_one_byte_draws, 0);
+
+    let unmasked = pipeline().submit(&stream(false), Queue::Draw, &[], &memory());
+    assert!(
+        !unmasked
+            .commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::SetWriteMask(_)))
+    );
+    assert_eq!(unmasked.report.unmasked_one_byte_draws, 1);
+}
+
 /// The guest-memory window is read out of guest memory and carried on the submission.
 ///
 /// The frontend reads exactly the window's span - the length the module masks against - so a
