@@ -3823,6 +3823,65 @@ pub fn translate_with_user_data(
 }
 
 #[cfg(test)]
+mod wave32_mask_tests {
+    /// In a thirty-two-lane wave a lane mask is one scalar register: `v_cndmask_b32_e64`'s mask
+    /// `s[6:7]` reads `s6` alone, as the compare that wrote it wrote `s6` alone. Reading `s7` too
+    /// took it for one of the geometry engine's system registers read before it was written, and
+    /// refused CRFT00001's primitive shader (its instruction at 392, as ACO compiled it).
+    #[test]
+    fn a_wave32_lane_mask_is_one_register() {
+        use super::{
+            Assembly, GeometryInputs, MeshPrimitive, Stage, UserData, Window,
+            translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // v_cmp_ne_i32_e64 s6, v0, v1; v_cndmask_b32_e64 v11, v11, 1.0, s[6:7]; s_endpgm.
+        let words: [u32; 5] = [
+            0xd485_0006,
+            0x0002_0300,
+            0xd501_000b,
+            0x0019_e50b,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let names: Vec<String> = decoded
+            .instructions
+            .iter()
+            .map(|i| crate::instruction_name(i, &encodings))
+            .collect();
+        assert_eq!(
+            names,
+            ["v_cmp_ne_i32_e64", "v_cndmask_b32_e64", "s_endpgm"],
+            "the hand-assembled words"
+        );
+        let user_data = UserData {
+            first_register: 8,
+            geometry: Some(GeometryInputs {
+                first_vertex: 0,
+                vertices: 3,
+                primitives: 1,
+                assembly: Assembly::List,
+                indices: None,
+            }),
+            ..UserData::default()
+        };
+        let translated = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave32,
+            (Stage::Mesh, MeshPrimitive::default()),
+            Window::default(),
+            user_data,
+        );
+        assert!(translated.is_ok(), "{:?}", translated.err());
+    }
+}
+
+#[cfg(test)]
 mod assembly_tests {
     /// A strip's triangles take overlapping vertices, each odd one reversed in the rotation that
     /// keeps the provoking vertex where the convention looks: `i + 2` last, or `i` first.

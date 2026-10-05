@@ -463,6 +463,24 @@ fn sixty_four_bit_source<M: Model + ?Sized>(
     }
 }
 
+/// A per-lane mask a vector instruction reads - `v_cndmask_b32`'s selector, a carry-in - as two
+/// halves. In a thirty-two-lane wave a register mask is that one register and the high half is
+/// zero: the 32-bit scalar forms ACO uses there, as [`compare_long`] writes it. A named mask, an
+/// inline constant, and every mask of a sixty-four-lane wave read as [`sixty_four_bit_source`].
+fn lane_mask_source<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    source: &Operand,
+) -> Result<(Id, Id), TranslateError> {
+    match source {
+        Operand::Scalar(from) if model.lanes() <= 32 => {
+            let low = model.read_scalar(u32::from(*from));
+            Ok((low, model.constant(0)))
+        }
+        _ => sixty_four_bit_source(model, instruction, source),
+    }
+}
+
 /// Whether an instruction writes the scalar condition code.
 ///
 /// A side effect on hidden state is invisible in the encoding and operand layout, so this list is
@@ -2668,7 +2686,7 @@ fn carry_arithmetic<M: Model + ?Sized>(
     );
 
     let carry_in = match carry_in {
-        Some(operand) => Some(sixty_four_bit_source(model, instruction, operand)?),
+        Some(operand) => Some(lane_mask_source(model, instruction, operand)?),
         None => None,
     };
 
@@ -3333,7 +3351,7 @@ fn select_per_lane<M: Model + ?Sized>(
             detail: "v_cndmask_b32 does not have three sources",
         });
     };
-    let (low, high) = sixty_four_bit_source(model, instruction, mask)?;
+    let (low, high) = lane_mask_source(model, instruction, mask)?;
 
     for lane in running_lanes(model) {
         let clear = model.read_source(instruction, when_clear, lane)?;
