@@ -655,9 +655,8 @@ pub fn surface_words_4kb_dx_bpp4(width: u32, height: u32) -> usize {
         * (DX_BLOCK_BYTES / 4)
 }
 
-/// Texels per side of a 32-bpp 256-byte micro block (`Block256_2d`), the unit a mip tail places
-/// its levels in.
-const MICRO_EXTENT: u32 = 8;
+/// `log2` of a micro block's 256 bytes (`Block256_2d`), the unit a mip tail places its levels in.
+const MICRO_BYTES_LOG2: u32 = 8;
 
 /// Level `level`'s extent as a chain's layout counts it, level 0 `width` x `height`: each side
 /// halved per level, rounding up, never below one (`Gfx10Lib::GetMipSize`, `ShiftCeil`,
@@ -948,8 +947,9 @@ impl SurfaceLayout {
             y |= (offset >> (8 + bit)) & (1 << bit);
             bit += 1;
         }
-        // The micro block's side: its 256 bytes' texels, square.
-        let micro = MICRO_EXTENT << ((2 - self.texel_log2()) / 2);
+        // The micro block's side: its 256 bytes' texels, square - 16 at one byte a texel, 8 at
+        // four, 4 at sixteen.
+        let micro = 1 << ((MICRO_BYTES_LOG2 - self.texel_log2()) / 2);
         Some((x * micro, y * micro))
     }
 
@@ -2138,5 +2138,50 @@ mod tests {
             layout.detile_mapped(&tiled, width, height, 5, |w| w),
             linear
         );
+    }
+
+    /// A 128 x 128, ten-level chain of sixteen-byte `64KB_D_X` texels lies as addrlib lays it out
+    /// for this console (`ComputeSurfaceInfo`, `ComputeSurfaceAddrFromCoord` per level): level 0
+    /// at 128 KiB and level 1 at 64 KiB, and levels 2 on in the tail's block at offset 0, each at
+    /// the texel addrlib's level `(0, 0)` lands on.
+    #[test]
+    fn a_sixteen_byte_64kb_d_x_chain_lies_as_addrlib_places_it() {
+        use super::SurfaceLayout;
+        let layout = SurfaceLayout::Dx64KbBpp16;
+        assert_eq!(layout.first_level_in_tail(128, 128, 10), 2);
+        assert_eq!(layout.level_offset(128, 128, 10, 0), Some(131_072));
+        assert_eq!(layout.level_offset(128, 128, 10, 1), Some(65_536));
+        for (level, origin) in [
+            (2, (32, 0)),
+            (3, (0, 32)),
+            (4, (16, 0)),
+            (5, (0, 16)),
+            (6, (8, 0)),
+            (7, (4, 8)),
+        ] {
+            assert_eq!(
+                layout.tail_origin(128, 128, 10, level),
+                Some(origin),
+                "level {level}"
+            );
+        }
+
+        // Level 2, 32 x 32, read and written in the tail's block: its texel (0, 0) is the block's
+        // (32, 0), four words each, and the tail's other bytes are left as they were.
+        let level =
+            crate::registers::chain_level((0, 0), (128, 128), (10, 2), layout).expect("placed");
+        assert_eq!((level.base, level.width, level.height), (0, 32, 32));
+        let mut tiled = vec![0xffff_ffff_u32; level.words()];
+        let linear: Vec<u32> = (0..32 * 32 * 4).collect();
+        level
+            .tile_mapped(&linear, &mut tiled, |w| w)
+            .expect("the level is covered");
+        let first = super::tiled_byte_offset_64kb_dx_bpp16_xor(32, 0, 64, 0) / 4;
+        assert_eq!(tiled[first..first + 4], [0, 1, 2, 3]);
+        assert_eq!(
+            tiled[0], 0xffff_ffff,
+            "the tail's level at (0, 0) is not this one"
+        );
+        assert_eq!(level.detile_mapped(&tiled, |w| w), linear);
     }
 }

@@ -964,15 +964,24 @@ impl ColourTarget {
         let whole =
             self.layout
                 .detile_mapped(tiled, span_width, span_height, self.pipe_bank_xor, map);
+        // A texel wider than a word is that many words of the linear image.
+        let words = self.texel_words();
         match self.place {
             Place::Whole => whole,
             Place::Within { origin: (x, y), .. } => (y..y + self.height)
                 .flat_map(|row| {
-                    let start = (row * span_width + x) as usize;
-                    whole[start..start + self.width as usize].iter().copied()
+                    let start = (row * span_width + x) as usize * words;
+                    whole[start..start + self.width as usize * words]
+                        .iter()
+                        .copied()
                 })
                 .collect(),
         }
+    }
+
+    /// Words one texel takes in a linear image of it: one, or four at sixteen bytes a texel.
+    const fn texel_words(&self) -> usize {
+        (1_usize << self.layout.texel_log2()).div_ceil(4)
     }
 
     /// Tiles a linear, row-major image of its own extent into it, each texel through `map`,
@@ -1000,7 +1009,8 @@ impl ColourTarget {
             );
         };
         let (span_width, span_height) = self.span_extent();
-        let texels = self.width as usize * self.height as usize;
+        let words = self.texel_words();
+        let texels = self.width as usize * self.height as usize * words;
         if tiled.len() < self.words() || linear.len() != texels {
             return Err(crate::tiling::DetileError::TiledDataTooShort {
                 needed_words: self.words().max(texels),
@@ -1010,8 +1020,8 @@ impl ColourTarget {
         let mut whole =
             self.layout
                 .detile_mapped(tiled, span_width, span_height, self.pipe_bank_xor, |w| w);
-        for (row, texels) in linear.chunks(self.width as usize).enumerate() {
-            let start = ((y + row as u32) * span_width + x) as usize;
+        for (row, texels) in linear.chunks(self.width as usize * words).enumerate() {
+            let start = ((y + row as u32) * span_width + x) as usize * words;
             for (slot, &texel) in whole[start..start + texels.len()].iter_mut().zip(texels) {
                 *slot = map(texel);
             }

@@ -428,9 +428,13 @@ fn create_image(
 ) -> Result<Created, DispatchError> {
     let words = texels.width as usize * texels.height as usize * texels.format.words().0;
     if texels.texels.len() != words || words == 0 {
-        return Err(DispatchError::Unsupported(
-            "a dispatch image's texels are not its extent".to_owned(),
-        ));
+        return Err(DispatchError::Unsupported(format!(
+            "a dispatch image's texels are not its extent: {} words for {}x{} {:?}",
+            texels.texels.len(),
+            texels.width,
+            texels.height,
+            texels.format
+        )));
     }
     let usage = if stored {
         vk::ImageUsageFlags::STORAGE
