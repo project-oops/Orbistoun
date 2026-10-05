@@ -1641,6 +1641,8 @@ const ADDR_SW_64KB_R_X: u32 = 27;
 /// `COLOR_SW_MODE` value for `ADDR_SW_4KB_D_X` (`src/amd/addrlib/inc/addrtypes.h` in oops-mesa,
 /// `AddrSwizzleMode`).
 const ADDR_SW_4KB_D_X: u32 = 22;
+/// `ADDR_SW_64KB_D_X` (`addrtypes.h:253`), the mode radeonsi gives a block-compressed texture.
+const ADDR_SW_64KB_D_X: u32 = 26;
 
 /// The tiling (swizzle) mode of a surface - a colour target or a texture.
 ///
@@ -1656,6 +1658,9 @@ pub enum SwizzleMode {
     Tiled64KbRX,
     /// 4KB_D_X (`ADDR_SW_4KB_D_X`), which radeonsi gives a small colour surface.
     Tiled4KbDX,
+    /// 64KB_D_X (`ADDR_SW_64KB_D_X`), which radeonsi gives a block-compressed texture; modelled at
+    /// sixteen bytes a texel, the blocks a compute copy moves.
+    Tiled64KbDX,
     /// A mode orbistoun does not model, carried by its raw five-bit swizzle-mode value.
     Other(u32),
 }
@@ -1671,6 +1676,7 @@ pub fn decode_swizzle_mode(field: u32) -> SwizzleMode {
         ADDR_SW_LINEAR => SwizzleMode::Linear,
         ADDR_SW_64KB_R_X => SwizzleMode::Tiled64KbRX,
         ADDR_SW_4KB_D_X => SwizzleMode::Tiled4KbDX,
+        ADDR_SW_64KB_D_X => SwizzleMode::Tiled64KbDX,
         other => SwizzleMode::Other(other),
     }
 }

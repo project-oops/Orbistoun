@@ -1461,7 +1461,8 @@ impl DispatchSurface {
             Self::Linear {
                 bytes_per_texel, ..
             } => bytes_per_texel.div_ceil(4) as usize,
-            Self::Tiled(_) => 1,
+            // A sixteen-byte tiled texel is four words, as a linear one is.
+            Self::Tiled(target) => (1_usize << target.layout.texel_log2()).div_ceil(4),
         };
         if texels.len() != width as usize * height as usize * words || spanned.len() < self.bytes()
         {
@@ -1644,25 +1645,7 @@ fn dispatch_image_surface(
         }
     }
     let descriptor = decode_image_descriptor(words);
-    let format = match descriptor.format {
-        FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
-        FORMAT_8_UNORM => TexelFormat::R8,
-        // A sixteen-byte texel is placed linearly here; its tiled layouts are not modelled.
-        FORMAT_32_32_32_32_UINT if descriptor.tiling == SwizzleMode::Linear => {
-            TexelFormat::Rgba32Uint
-        }
-        _ => None.ok_or_else(|| {
-            format!(
-                "a dispatch image of format {} ({:?}, {}x{}, levels {}..={})",
-                descriptor.format,
-                descriptor.tiling,
-                descriptor.width,
-                descriptor.height,
-                descriptor.base_level,
-                descriptor.last_level
-            )
-        })?,
-    };
+    let format = dispatch_format(&descriptor)?;
     if words[3] >> 28 != IMAGE_TYPE_2D {
         return Err(format!(
             "a dispatch image of type {}, not 2D",
@@ -1713,6 +1696,35 @@ fn dispatch_image_surface(
             )
         })?;
     Ok((DispatchSurface::Tiled(surface), descriptor, format))
+}
+
+/// The texel format a dispatch image's descriptor names, where it is one bound here.
+fn dispatch_format(descriptor: &ImageDescriptor) -> Result<TexelFormat, String> {
+    match descriptor.format {
+        FORMAT_8_8_8_8_UNORM => Ok(TexelFormat::Rgba8),
+        FORMAT_8_UNORM => Ok(TexelFormat::R8),
+        // A sixteen-byte texel is placed linearly, or in `64KB_D_X`; its other layouts are not
+        // modelled.
+        FORMAT_32_32_32_32_UINT
+            if matches!(
+                descriptor.tiling,
+                SwizzleMode::Linear | SwizzleMode::Tiled64KbDX
+            ) =>
+        {
+            Ok(TexelFormat::Rgba32Uint)
+        }
+        _ => Err({
+            format!(
+                "a dispatch image of format {} ({:?}, {}x{}, levels {}..={})",
+                descriptor.format,
+                descriptor.tiling,
+                descriptor.width,
+                descriptor.height,
+                descriptor.base_level,
+                descriptor.last_level
+            )
+        }),
+    }
 }
 
 /// What an image's compression keys say about all its blocks: uncompressed for an image without
@@ -3368,6 +3380,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::Linear => 1 << 27,
         crate::tiling::SurfaceLayout::Rx64KbBpp1 => 1 << 26,
         crate::tiling::SurfaceLayout::LinearBpp1 => 1 << 25,
+        crate::tiling::SurfaceLayout::Dx64KbBpp16 => 1 << 24,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
