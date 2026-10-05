@@ -202,7 +202,11 @@ fn resolve_range(
 /// `refused`, with the first reason, and binds none for that stage.
 pub fn bind_draw_buffers(
     commands: &mut Vec<RenderCommand>,
-    (sources, cache): (&BTreeMap<ResourceId, Vec<BufferSource>>, &mut BufferCache),
+    (sources, index_readers, cache): (
+        &BTreeMap<ResourceId, Vec<BufferSource>>,
+        &std::collections::BTreeSet<ResourceId>,
+        &mut BufferCache,
+    ),
     memory: &impl GuestMemory,
     refused: &mut (usize, Option<&'static str>),
 ) {
@@ -228,16 +232,35 @@ pub fn bind_draw_buffers(
             }
             RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } => {
                 for (at, stage) in STAGES.into_iter().enumerate() {
-                    let Some(list) = modules[at].and_then(|module| sources.get(&module)) else {
-                        continue;
+                    let empty = Vec::new();
+                    let module = modules[at];
+                    let list = module.and_then(|m| sources.get(&m)).unwrap_or(&empty);
+                    // An indexed primitive shader reads its index buffer after its traced buffers
+                    // (D740).
+                    let indices = match &command {
+                        RenderCommand::DrawIndexed {
+                            indices,
+                            index_buffer,
+                            ..
+                        } if module.is_some_and(|m| index_readers.contains(&m)) => Some(
+                            index_buffer
+                                .map(|(address, bytes)| {
+                                    (address, u64::from(*indices) * u64::from(bytes))
+                                })
+                                .ok_or("an indexed draw whose index size is not read (D740)"),
+                        ),
+                        _ => None,
                     };
-                    if list.is_empty() {
+                    if list.is_empty() && indices.is_none() {
                         continue;
                     }
-                    let resolved: Result<Vec<DrawBuffer>, &'static str> = list
+                    let ranges = list
                         .iter()
-                        .map(|source| {
-                            let range = resolve_range(source, &words[at], memory)?;
+                        .map(|source| resolve_range(source, &words[at], memory))
+                        .chain(indices);
+                    let resolved: Result<Vec<DrawBuffer>, &'static str> = ranges
+                        .map(|range| {
+                            let range = range?;
                             read.entry(range)
                                 .or_insert_with(|| {
                                     let length = usize::try_from(range.1)
@@ -362,6 +385,57 @@ mod tests {
         }
     }
 
+    /// An indexed draw of a primitive shader that reads its vertex ids from its index buffer binds
+    /// that buffer's indices after the module's traced buffers - here it has none - and a module
+    /// that does not read them binds nothing (D740).
+    #[test]
+    fn an_index_reading_draw_binds_its_index_buffer() {
+        use crate::backend::{RenderCommand, ResourceId, ShaderStage};
+        let (reader, other) = (ResourceId(3), ResourceId(4));
+        let indices: Vec<u8> = [5u16, 9, 7].iter().flat_map(|i| i.to_le_bytes()).collect();
+        let memory = At(0x2000, indices.clone());
+        let bind = |module| {
+            let mut commands = vec![
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Vertex,
+                    shader: module,
+                },
+                RenderCommand::DrawIndexed {
+                    indices: 3,
+                    instances: 1,
+                    first_index: 0,
+                    index_buffer: Some((0x2000, 2)),
+                },
+            ];
+            super::bind_draw_buffers(
+                &mut commands,
+                (
+                    &std::collections::BTreeMap::new(),
+                    &std::collections::BTreeSet::from([reader]),
+                    &mut super::BufferCache::default(),
+                ),
+                &memory,
+                &mut (0, None),
+            );
+            commands
+                .into_iter()
+                .filter_map(|command| match command {
+                    RenderCommand::BindDrawBuffers { stage, buffers } => Some((stage, buffers)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let bound = bind(reader);
+        assert_eq!(bound.len(), 1);
+        assert_eq!(bound[0].0, ShaderStage::Vertex);
+        // Six bytes, padded to whole words.
+        assert_eq!(bound[0].1[0].bytes[..6], indices[..]);
+        assert!(
+            bind(other).is_empty(),
+            "a module that does not read indices binds none"
+        );
+    }
+
     /// Each clear draw binds the sixteen bytes its user-data word 2 names, once while they are the
     /// same bytes and again when a draw names others; a draw naming unmapped memory binds nothing
     /// and is counted.
@@ -411,7 +485,11 @@ mod tests {
         let mut refused = (0, None);
         super::bind_draw_buffers(
             &mut commands,
-            (&sources, &mut super::BufferCache::default()),
+            (
+                &sources,
+                &std::collections::BTreeSet::new(),
+                &mut super::BufferCache::default(),
+            ),
             &memory,
             &mut refused,
         );

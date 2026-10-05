@@ -478,7 +478,39 @@ pub struct GeometryInputs {
     /// How the primitives take their vertices.
     #[serde(default)]
     pub assembly: Assembly,
+    /// For an indexed draw, how wide its indices are: each vertex thread's id is then the index at
+    /// its position in the draw's index buffer, which the draw binds after the traced buffers
+    /// (D740). `None` for a draw whose vertex ids count up from [`Self::first_vertex`].
+    #[serde(default)]
+    pub indices: Option<IndexWidth>,
 }
+
+/// How wide an indexed draw's indices are: `VGT_INDEX_TYPE`'s `VGT_INDEX_16` and `VGT_INDEX_32`
+/// (`gfx103.json`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum IndexWidth {
+    /// Sixteen bits, two to a word.
+    Bits16,
+    /// Thirty-two bits.
+    Bits32,
+}
+
+impl IndexWidth {
+    /// Bytes one index takes.
+    #[must_use]
+    pub const fn bytes(self) -> u32 {
+        match self {
+            Self::Bits16 => 2,
+            Self::Bits32 => 4,
+        }
+    }
+}
+
+/// The input register a primitive shader's vertex thread finds its vertex id in: `v5`, after the
+/// vertex indices, primitive id and invocation id (GFX10's non-passthrough primitive shader).
+const VERTEX_ID_REGISTER: u32 = 5;
 
 /// How a draw's primitives take their three vertices each.
 #[derive(
@@ -1482,11 +1514,12 @@ fn mesh_interface(
 fn declare_draw_buffers(
     b: &mut Builder,
     u32_type: Id,
-    stage: Stage,
+    (stage, indexed): (Stage, bool),
     buffers: &crate::draw_buffers::DrawBuffers,
 ) -> Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)> {
     let binding = match stage {
-        _ if buffers.served.is_empty() => return None,
+        // An indexed primitive shader reads its index buffer through them (D740).
+        _ if buffers.served.is_empty() && !indexed => return None,
         Stage::Mesh => orbistoun_spirv::GEOMETRY_BUFFERS_BINDING,
         Stage::Fragment => orbistoun_spirv::PIXEL_BUFFERS_BINDING,
         Stage::Compute => return None,
@@ -1595,7 +1628,8 @@ impl<'a> Wavefront<'a> {
         let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
         let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
-        let draw_buffers = declare_draw_buffers(&mut b, u32_type, stage, buffers);
+        let indexed = user_data.geometry.is_some_and(|g| g.indices.is_some());
+        let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
@@ -1711,7 +1745,12 @@ impl<'a> Wavefront<'a> {
             vertices,
             primitives,
             assembly,
+            indices,
         } = geometry;
+        // An indexed draw's index buffer is bound after the buffers the program reads through.
+        let index_slot = self.draw_buffers.as_ref().map_or(0, |(_, served)| {
+            served.values().max().map_or(0, |&slot| slot + 1)
+        });
         let tg_info = self.constant((vertices << 12) | (primitives << 22));
         self.store_scalar(2, tg_info);
         let wave_info = self.constant(vertices | (primitives << 8) | (1 << 28));
@@ -1731,8 +1770,9 @@ impl<'a> Wavefront<'a> {
                 if is_primitive { lane } else { 0 },
                 0,
                 0,
-                // v5: the vertex id; v6, v7: user VGPRs; v8: the instance id.
-                if lane < vertices {
+                // v5: the vertex id, unless an index buffer gives it; v6, v7: user VGPRs; v8: the
+                // instance id.
+                if lane < vertices && indices.is_none() {
                     first_vertex + lane
                 } else {
                     0
@@ -1744,6 +1784,31 @@ impl<'a> Wavefront<'a> {
             for (register, word) in (0..).zip(words) {
                 let value = self.constant(word);
                 self.store_lane_masked(register, lane, value);
+            }
+            if let (Some(width), true) = (indices, lane < vertices) {
+                let id = self.index_at(index_slot, width, lane);
+                self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
+            }
+        }
+    }
+
+    /// Index `position` of the draw's index buffer at `slot`, `width` wide.
+    ///
+    /// Whole words of the bound buffer, so an index's word is read and its half taken.
+    fn index_at(&mut self, slot: u32, width: IndexWidth, position: u32) -> Id {
+        let bit = position * width.bytes() * 8;
+        let word_index = self.constant(bit / 32);
+        // A module declares the draw buffers it reads, and an indexed one always declares them.
+        let Ok(word) = self.read_draw_buffer(slot, word_index) else {
+            return self.constant(0);
+        };
+        match width {
+            IndexWidth::Bits32 => word,
+            IndexWidth::Bits16 => {
+                let shift = self.constant(bit % 32);
+                let shifted = self.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+                let low = self.constant(0xFFFF);
+                self.binary(op::BITWISE_AND, shifted, low)
             }
         }
     }

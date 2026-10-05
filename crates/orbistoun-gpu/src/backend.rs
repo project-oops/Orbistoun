@@ -189,6 +189,10 @@ pub enum RenderCommand {
         instances: u32,
         /// First index.
         first_index: u32,
+        /// The index buffer's address and bytes per index, for a primitive shader that reads its
+        /// vertex ids from it (D740); `None` where the stream names an index size this does not
+        /// read.
+        index_buffer: Option<(u64, u32)>,
     },
     /// Run a compute workload.
     Dispatch {

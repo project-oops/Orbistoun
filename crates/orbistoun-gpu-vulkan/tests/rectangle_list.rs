@@ -190,6 +190,7 @@ fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
         vertices: 3,
         primitives: 1,
         assembly: orbistoun_translate::wavefront::Assembly::List,
+        indices: None,
     }))
     .expect("translates with its geometry")
     .module;

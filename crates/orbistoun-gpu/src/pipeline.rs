@@ -498,6 +498,24 @@ struct ByGeometry {
 /// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
 /// primitive, `PRIM_TYPE` in bits 5:0.
 const VGT_PRIMITIVE_TYPE: u32 = 0xC242;
+/// `VGT_INDEX_TYPE` (`gfx103.json`, uconfig `0x3090C`), which radeonsi writes before an indexed draw
+/// (`si_state_draw.cpp:1517`): `INDEX_TYPE` in bits 1:0.
+const VGT_INDEX_TYPE: u32 = 0xC243;
+/// `GE_MULTI_PRIM_IB_RESET_EN` (uconfig `0x3092C`), where GFX10 radeonsi enables primitive restart
+/// (`si_state_draw.cpp:1314`): `RESET_EN` in bit 0.
+const GE_MULTI_PRIM_IB_RESET_EN: u32 = 0xC24B;
+
+/// An indexed draw's index width from `VGT_INDEX_TYPE`: `VGT_INDEX_16` (0) and `VGT_INDEX_32` (1);
+/// `VGT_INDEX_8` and an unwritten register are `None`.
+fn index_width(value: Option<u32>) -> Option<orbistoun_translate::wavefront::IndexWidth> {
+    use orbistoun_translate::wavefront::IndexWidth;
+    match value.map(|value| value & 3) {
+        Some(0) => Some(IndexWidth::Bits16),
+        Some(1) => Some(IndexWidth::Bits32),
+        _ => None,
+    }
+}
+
 /// `DI_PT_TRISTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json`): triangles sharing vertices in a strip.
 const DI_PT_TRISTRIP: u32 = 6;
 /// `PA_SU_SC_MODE_CNTL` (`gfx103.json`, context dword `0x205`) and its `PROVOKING_VTX_LAST`, bit 19.
@@ -524,8 +542,20 @@ fn draw_geometry(
     mut latest: impl FnMut(u32) -> Option<u32>,
     lanes: u32,
 ) -> Result<GeometryInputs, String> {
-    let DrawKind::Auto { vertices } = draw.kind else {
-        return Err("an indexed draw's geometry-engine inputs are not seeded".to_owned());
+    let (vertices, indices) = match draw.kind {
+        DrawKind::Auto { vertices } => (vertices, None),
+        DrawKind::Indexed { indices, .. } => {
+            if latest(GE_MULTI_PRIM_IB_RESET_EN).is_some_and(|value| value & 1 != 0) {
+                return Err(
+                    "an indexed draw with primitive restart's geometry-engine inputs are not seeded"
+                        .to_owned(),
+                );
+            }
+            let width = index_width(latest(VGT_INDEX_TYPE)).ok_or(
+                "an indexed draw whose index size is not sixteen or thirty-two bits is not seeded",
+            )?;
+            (indices, Some(width))
+        }
     };
     if draw.instances != 1 {
         return Err(
@@ -559,6 +589,7 @@ fn draw_geometry(
         vertices,
         primitives,
         assembly,
+        indices,
     };
     match geometry.refusal(lanes) {
         Some(why) => Err(why.to_owned()),
@@ -649,6 +680,9 @@ pub struct Pipeline {
     /// The translated modules whose shaders read or write guest memory, which reach it only
     /// through the window.
     memory_readers: std::collections::BTreeSet<ResourceId>,
+    /// The translated primitive shaders that read their vertex ids from the draw's index buffer
+    /// (D740), which a draw binds after their traced buffers.
+    index_readers: std::collections::BTreeSet<ResourceId>,
     /// The colour channels each translated pixel shader exports, by its resource.
     colour_channels: BTreeMap<ResourceId, u8>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
@@ -708,6 +742,7 @@ impl Pipeline {
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
             memory_readers: std::collections::BTreeSet::new(),
+            index_readers: std::collections::BTreeSet::new(),
             colour_channels: BTreeMap::new(),
             texels: TexelCache::new(),
             buffer_sources: BTreeMap::new(),
@@ -1720,7 +1755,7 @@ impl Pipeline {
         );
         crate::draw_buffers::bind_draw_buffers(
             &mut submission.commands,
-            (&self.buffer_sources, &mut self.buffers),
+            (&self.buffer_sources, &self.index_readers, &mut self.buffers),
             memory,
             &mut submission.report.unbound_buffers,
         );
@@ -2008,6 +2043,7 @@ impl Pipeline {
                 // The address resolved, whatever happened to the shader after that.
                 submission.report.addresses_resolved += 1;
                 submission.report.shaders_translated += 1;
+                let indexed = for_draw.geometry.is_some_and(|g| g.indices.is_some());
                 Ok(match prepared {
                     // Only a module the backend has not seen travels with the submission.
                     Prepared::Fresh {
@@ -2017,10 +2053,16 @@ impl Pipeline {
                     } => {
                         submission.report.warnings.extend(warnings);
                         submission.modules.insert(resource, module);
+                        if indexed {
+                            self.index_readers.insert(resource);
+                        }
                         resource
                     }
                     Prepared::Cached { resource } => {
                         submission.report.cache_hits += 1;
+                        if indexed {
+                            self.index_readers.insert(resource);
+                        }
                         resource
                     }
                 })
@@ -2514,10 +2556,12 @@ fn push_geometry_commands(
                 instances: draw.instances,
                 first_vertex: 0,
             },
-            DrawKind::Indexed { indices, .. } => RenderCommand::DrawIndexed {
+            DrawKind::Indexed { indices, address } => RenderCommand::DrawIndexed {
                 indices,
                 instances: draw.instances,
                 first_index: 0,
+                index_buffer: index_width(sweep.latest(at, VGT_INDEX_TYPE))
+                    .map(|width| (address, width.bytes())),
             },
         };
         commands.push(command);
@@ -4512,6 +4556,7 @@ mod tests {
                 vertices: 3,
                 primitives: 1,
                 assembly: super::Assembly::List,
+                indices: None,
             })
         );
         // A strip of six vertices is four triangles, its provoking convention from
@@ -4531,6 +4576,7 @@ mod tests {
                     vertices: 6,
                     primitives: 4,
                     assembly: super::Assembly::Strip { provoking_last },
+                    indices: None,
                 })
             );
         }
@@ -4551,14 +4597,40 @@ mod tests {
         ] {
             assert!(refused.is_err(), "{refused:?}");
         }
+        // An indexed draw takes its index size from `VGT_INDEX_TYPE` (D740): sixteen and
+        // thirty-two bits are read, eight and an unwritten type are not, nor is primitive restart.
         let indexed = DrawCall {
             packet_offset: 0,
             instances: 1,
             kind: DrawKind::Indexed {
-                indices: 3,
+                indices: 6,
                 address: 0,
             },
         };
-        assert!(draw_geometry(&indexed, registers(DI_PT_TRILIST, 0, 0), 64).is_err());
+        let with_index = |kind: Option<u32>, restart: u32| {
+            move |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(DI_PT_TRILIST),
+                super::VGT_INDEX_TYPE => kind,
+                super::GE_MULTI_PRIM_IB_RESET_EN => Some(restart),
+                _ => None,
+            }
+        };
+        for (kind, width) in [
+            (0, orbistoun_translate::wavefront::IndexWidth::Bits16),
+            (1, orbistoun_translate::wavefront::IndexWidth::Bits32),
+        ] {
+            let geometry = draw_geometry(&indexed, with_index(Some(kind), 0), 64);
+            assert_eq!(
+                geometry.map(|g| (g.vertices, g.primitives, g.indices)),
+                Ok((6, 2, Some(width)))
+            );
+        }
+        for refused in [
+            draw_geometry(&indexed, with_index(Some(2), 0), 64),
+            draw_geometry(&indexed, with_index(None, 0), 64),
+            draw_geometry(&indexed, with_index(Some(0), 1), 64),
+        ] {
+            assert!(refused.is_err(), "{refused:?}");
+        }
     }
 }

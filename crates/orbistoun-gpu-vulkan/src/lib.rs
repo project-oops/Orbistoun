@@ -1391,6 +1391,7 @@ impl RenderBackend for VulkanBackend {
                 indices,
                 instances,
                 first_index,
+                ..
             } => self.draw_graphics(
                 framebuffer::VertexDraw {
                     vertices: *indices,
@@ -2100,6 +2101,7 @@ mod tests {
                 indices: 36,
                 instances: 1,
                 first_index: 0,
+                index_buffer: None,
             })
             .expect_err("nothing is bound");
         assert_eq!(
@@ -2150,6 +2152,7 @@ mod tests {
                 indices: 3,
                 instances: 1,
                 first_index: 0,
+                index_buffer: None,
             })
             .expect("the indexed mesh draw runs");
 
@@ -2202,6 +2205,7 @@ mod tests {
                 indices: 3,
                 instances: 1,
                 first_index: 0,
+                index_buffer: None,
             })
             .expect_err("a vertex pipeline has no index buffer bound");
         assert_eq!(
