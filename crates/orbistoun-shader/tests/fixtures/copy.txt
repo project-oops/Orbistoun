@@ -36,6 +36,23 @@
 0x0000e4 8 v_madmk_f32 v18, v1, 0x3e800000, v2
 0x0000ec 4 s_cmp_lg_u32 s2, 0
 0x0000f0 4 v_cmpx_neq_f32_e32 v1, v2
-0x0000f4 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0000fc 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x000104 4 s_endpgm
+0x0000f4 8 ds_write2_b32 v1, v2, v3 offset0:4 offset1:9
+0x0000fc 8 ds_write_b8 v1, v2 offset:4
+0x000104 8 ds_read2_b32 v[5:6], v1 offset0:4 offset1:9
+0x00010c 8 ds_or_b32 v1, v2 offset:4
+0x000114 8 ds_read_u8 v5, v1 offset:4
+0x00011c 8 v_mad_u32_u16 v3, v4, v5, v6
+0x000124 8 v_max3_f32 v3, v4, v5, v6
+0x00012c 8 v_min3_f32 v3, v4, v5, v6
+0x000134 8 v_cmp_lt_f32_e64 s[2:3], v4, v5
+0x00013c 8 v_cmp_gt_f32_e64 s[2:3], v4, v5
+0x000144 8 v_cmp_neq_f32_e64 s[2:3], v4, v5
+0x00014c 8 v_mad_i32_i24 v3, v4, v5, v6
+0x000154 8 v_permlane16_b32 v3, v4, s5, s6
+0x00015c 8 v_msad_u8 v3, v4, v5, v6
+0x000164 8 v_readlane_b32 s3, v4, s5
+0x00016c 8 v_mul_lo_u32 v3, v4, v5
+0x000174 8 v_and_or_b32 v3, v4, v5, v6
+0x00017c 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x000184 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x00018c 4 s_endpgm

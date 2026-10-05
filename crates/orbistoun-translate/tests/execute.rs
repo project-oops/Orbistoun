@@ -5953,3 +5953,150 @@ fn an_unsigned_scalar_inequality_sets_the_condition_code() {
     assert_eq!(scalar(&registers, 2), 0, "1 == 1");
     assert_eq!(scalar(&registers, 4), u32::MAX, "1 != 0xffffffff");
 }
+
+/// A DS instruction: `offset0`/`offset` in the first word's low bits, `offset1` above, then the
+/// address, two data registers and the destination in the second word.
+fn ds(name: &str, offsets: [u32; 2], [address, data0, data1, destination]: [u32; 4]) -> [u32; 2] {
+    [
+        head(name) | offsets[0] | (offsets[1] << 8),
+        address | (data0 << 8) | (data1 << 16) | (destination << 24),
+    ]
+}
+
+/// The local data share's pair and merging accesses, as a culling primitive shader compacts
+/// through them: a pair written at word offsets 1 and 3 reads back as a pair, a byte stored at byte
+/// 5 lands in word 1's second byte and reads back alone, and an or merges into a word.
+#[test]
+fn the_local_share_takes_pairs_bytes_and_ors() {
+    if !device_or_skip("the_local_share_takes_pairs_bytes_and_ors") {
+        return;
+    }
+    let mut program = vec![v_mov_inline(0, 0)];
+    program.extend(v_mov_literal(1, 0x11));
+    program.extend(v_mov_literal(2, 0x22));
+    program.extend(v_mov_literal(5, 0x1ab));
+    program.extend(v_mov_literal(7, 0x100));
+    program.extend(ds("ds_write2_b32", [1, 3], [0, 1, 2, 0]));
+    program.extend(ds("ds_write_b8", [5, 0], [0, 5, 0, 0]));
+    program.extend(ds("ds_or_b32", [12, 0], [0, 7, 0, 0]));
+    program.extend(ds("ds_read2_b32", [1, 3], [0, 0, 0, 3]));
+    program.extend(ds("ds_read_u8", [5, 0], [0, 0, 0, 6]));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(
+        vector(&registers, 3),
+        0xab11,
+        "word 1 with byte 5 stored over it"
+    );
+    assert_eq!(vector(&registers, 4), 0x122, "word 3 with 0x100 ored in");
+    assert_eq!(vector(&registers, 6), 0xab, "byte 5 alone");
+}
+
+/// The culling shader's integer and float arithmetic: a sixteen-bit multiply-add of the low halves,
+/// a 24-bit signed one, the low product word, and-or, NIR's masked byte sum, and three-way
+/// min and max.
+#[test]
+fn the_culling_arithmetic_computes_as_published() {
+    if !device_or_skip("the_culling_arithmetic_computes_as_published") {
+        return;
+    }
+    // The register window holds v0 to v7, so each run keeps its answers there.
+    let integers = || {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, 0xffff_0003));
+        program.extend(v_mov_literal(1, 0x0001_0005));
+        program.extend(v_mov_literal(2, 7));
+        program.extend(v_mov_literal(4, 0x00ff_fffe)); // -2 in 24 bits
+        program.extend(vop3(
+            "v_mad_u32_u16",
+            3,
+            [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+            0,
+            0,
+        ));
+        program.extend(vop3(
+            "v_mad_i32_i24",
+            5,
+            [VGPR_0 + 4, VGPR_0 + 2, VGPR_0 + 2],
+            0,
+            0,
+        ));
+        program.extend(vop3("v_mul_lo_u32", 6, [VGPR_0, VGPR_0 + 1, 0], 0, 0));
+        program.extend(vop3(
+            "v_and_or_b32",
+            7,
+            [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+            0,
+            0,
+        ));
+        program.push(s_endpgm());
+        run(&program)
+    };
+    let registers = integers();
+    assert_eq!(vector(&registers, 3), 3 * 5 + 7, "the low halves");
+    assert_eq!(vector(&registers, 5), (-2i32 * 7 + 7).cast_unsigned());
+    assert_eq!(
+        vector(&registers, 6),
+        0xffff_0003u32.wrapping_mul(0x0001_0005)
+    );
+    assert_eq!(vector(&registers, 7), (0xffff_0003 & 0x0001_0005) | 7);
+
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0003_0510)); // reference: bytes 0x10, 0x05, 0x03, 0
+    program.extend(v_mov_literal(1, 0x0901_0718)); // source: 0x18, 0x07, 0x01, 0x09
+    program.extend(v_mov_literal(2, 7));
+    program.extend(vop3("v_msad_u8", 3, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
+    program.extend(v_mov_literal(4, 1.5f32.to_bits()));
+    program.extend(v_mov_literal(5, (-4.0f32).to_bits()));
+    program.extend(v_mov_literal(6, 2.5f32.to_bits()));
+    program.extend(vop3(
+        "v_max3_f32",
+        7,
+        [VGPR_0 + 4, VGPR_0 + 5, VGPR_0 + 6],
+        0,
+        0,
+    ));
+    program.extend(vop3(
+        "v_min3_f32",
+        0,
+        [VGPR_0 + 4, VGPR_0 + 5, VGPR_0 + 6],
+        0,
+        0,
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        7 + 8 + 2 + 2,
+        "the zero byte is masked"
+    );
+    assert_eq!(vector(&registers, 7), 2.5f32.to_bits());
+    assert_eq!(vector(&registers, 0), (-4.0f32).to_bits());
+}
+
+/// `v_readlane_b32` reads one lane into a scalar, and `v_permlane16_b32` gives each lane of a row
+/// the row's lane its selector names: here each row reversed.
+#[test]
+fn the_cross_lane_reads_take_the_lanes_they_name() {
+    if !device_or_skip("the_cross_lane_reads_take_the_lanes_they_name") {
+        return;
+    }
+    let mut lane = lane_index_into(0).to_vec();
+    lane.extend(vop3("v_readlane_b32", 2, [VGPR_0, 128 + 37, 0], 0, 0));
+    lane.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &lane);
+    assert_eq!(scalar(&registers, 2), 37);
+
+    let mut program = lane_index_into(0).to_vec();
+    program.extend(s_mov_literal(4, 0x89ab_cdef));
+    program.extend(s_mov_literal(5, 0x0123_4567));
+    program.extend(vop3("v_permlane16_b32", 2, [VGPR_0, 4, 5], 0, 0));
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let lane = lane as u32;
+        assert_eq!(*stored, (lane & !15) + 15 - (lane & 15), "lane {lane}");
+    }
+}

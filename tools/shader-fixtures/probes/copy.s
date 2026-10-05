@@ -214,3 +214,91 @@ v_cmpx_neq_f32_e32 s5, v190
 v_cmpx_neq_f32_e32 -1, v255
 v_cmpx_neq_f32_e32 4, v77
 v_cmpx_neq_f32_e32 v130, v12
+
+// ---- The culling primitive shader's instructions, at the extremes. A pair access prints an offset
+// at zero not at all, so each prints both, or the second takes the first's place ---------------------------
+ds_write2_b32 v1, v2, v3 offset0:4 offset1:9
+ds_write2_b32 v200, v9, v255 offset0:1 offset1:255
+ds_write2_b32 v0, v130, v77 offset0:255 offset1:2
+ds_write2_b32 v77, v1, v2 offset0:128 offset1:64
+ds_write2_b32 v255, v0, v200 offset0:12 offset1:200
+ds_write_b8 v1, v2 offset:4
+ds_write_b8 v200, v9
+ds_write_b8 v0, v255 offset:65535
+ds_write_b8 v77, v130 offset:257
+ds_write_b8 v255, v0 offset:12
+ds_read2_b32 v[5:6], v1 offset0:4 offset1:9
+ds_read2_b32 v[200:201], v9 offset0:1 offset1:255
+ds_read2_b32 v[0:1], v130 offset0:255 offset1:2
+ds_read2_b32 v[254:255], v77 offset0:128 offset1:64
+ds_read2_b32 v[77:78], v255 offset0:12 offset1:200
+ds_or_b32 v1, v2 offset:4
+ds_or_b32 v200, v9
+ds_or_b32 v0, v255 offset:65535
+ds_or_b32 v77, v130 offset:257
+ds_or_b32 v255, v0 offset:12
+ds_read_u8 v5, v1 offset:4
+ds_read_u8 v200, v9
+ds_read_u8 v0, v130 offset:65535
+ds_read_u8 v255, v77 offset:257
+ds_read_u8 v77, v255 offset:12
+v_mad_u32_u16 v3, v4, v5, v6
+v_mad_u32_u16 v200, s5, v9, v190
+v_mad_u32_u16 v255, v12, s30, 64
+v_mad_u32_u16 v9, -1, v77, v3
+v_mad_u32_u16 v130, v88, 4, s101
+v_max3_f32 v3, v4, v5, v6
+v_max3_f32 v200, s5, v9, v190
+v_max3_f32 v255, v12, s30, 64
+v_max3_f32 v9, -1, v77, v3
+v_max3_f32 v130, v88, 4, s101
+v_min3_f32 v3, v4, v5, v6
+v_min3_f32 v200, s5, v9, v190
+v_min3_f32 v255, v12, s30, 64
+v_min3_f32 v9, -1, v77, v3
+v_min3_f32 v130, v88, 4, s101
+v_cmp_lt_f32_e64 s[2:3], v4, v5
+v_cmp_lt_f32_e64 s[100:101], s5, v190
+v_cmp_lt_f32_e64 s[40:41], v255, -1
+v_cmp_lt_f32_e64 vcc, 4, v77
+v_cmp_lt_f32_e64 s[70:71], v130, s101
+v_cmp_gt_f32_e64 s[2:3], v4, v5
+v_cmp_gt_f32_e64 s[100:101], s5, v190
+v_cmp_gt_f32_e64 s[40:41], v255, -1
+v_cmp_gt_f32_e64 vcc, 4, v77
+v_cmp_gt_f32_e64 s[70:71], v130, s101
+v_cmp_neq_f32_e64 s[2:3], v4, v5
+v_cmp_neq_f32_e64 s[100:101], s5, v190
+v_cmp_neq_f32_e64 s[40:41], v255, -1
+v_cmp_neq_f32_e64 vcc, 4, v77
+v_cmp_neq_f32_e64 s[70:71], v130, s101
+v_mad_i32_i24 v3, v4, v5, v6
+v_mad_i32_i24 v200, s5, v9, v190
+v_mad_i32_i24 v255, v12, s30, 64
+v_mad_i32_i24 v9, -1, v77, v3
+v_mad_i32_i24 v130, v88, 4, s101
+v_permlane16_b32 v3, v4, s5, s6
+v_permlane16_b32 v200, v9, s100, s101
+v_permlane16_b32 v255, v130, s0, s33
+v_permlane16_b32 v9, v77, s60, s2
+v_permlane16_b32 v130, v255, s7, s90
+v_msad_u8 v3, v4, v5, v6
+v_msad_u8 v200, s5, v9, v190
+v_msad_u8 v255, v12, s30, 64
+v_msad_u8 v9, -1, v77, v3
+v_msad_u8 v130, v88, 4, s101
+v_readlane_b32 s3, v4, s5
+v_readlane_b32 s100, v9, 63
+v_readlane_b32 s0, v255, s33
+v_readlane_b32 s60, v130, 4
+v_readlane_b32 s7, v77, s90
+v_mul_lo_u32 v3, v4, v5
+v_mul_lo_u32 v200, s5, v9
+v_mul_lo_u32 v255, v12, s30
+v_mul_lo_u32 v9, -1, v77
+v_mul_lo_u32 v130, v88, 4
+v_and_or_b32 v3, v4, v5, v6
+v_and_or_b32 v200, s5, v9, v190
+v_and_or_b32 v255, v12, s30, 64
+v_and_or_b32 v9, -1, v77, v3
+v_and_or_b32 v130, v88, 4, s101

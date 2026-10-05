@@ -19,8 +19,33 @@ target = "gfx1013"
 
 [[mnemonic]]
 family = "DS"
+opcode = 10
+name = "ds_or_b32"
+
+[[mnemonic]]
+family = "DS"
 opcode = 13
 name = "ds_write_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 14
+name = "ds_write2_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 30
+name = "ds_write_b8"
+
+[[mnemonic]]
+family = "DS"
+opcode = 55
+name = "ds_read2_b32"
+
+[[mnemonic]]
+family = "DS"
+opcode = 58
+name = "ds_read_u8"
 
 [[mnemonic]]
 family = "EXP"
@@ -584,6 +609,11 @@ name = "v_cvt_pkrtz_f16_f32_e32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 1
+name = "v_cmp_lt_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 2
 name = "v_cmp_eq_f32_e64"
 
@@ -594,8 +624,18 @@ name = "v_cmp_le_f32_e64"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 4
+name = "v_cmp_gt_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 6
 name = "v_cmp_ge_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 13
+name = "v_cmp_neq_f32_e64"
 
 [[mnemonic]]
 family = "VOP3"
@@ -619,6 +659,11 @@ name = "v_mad_f32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 322
+name = "v_mad_i32_i24"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 330
 name = "v_bfi_b32"
 
@@ -629,8 +674,23 @@ name = "v_fma_f32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 337
+name = "v_min3_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 340
+name = "v_max3_f32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 351
 name = "v_div_fixup_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 361
+name = "v_mul_lo_u32"
 
 [[mnemonic]]
 family = "VOP3"
@@ -641,6 +701,11 @@ name = "v_div_scale_f32"
 family = "VOP3"
 opcode = 367
 name = "v_div_fmas_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 369
+name = "v_msad_u8"
 
 [[mnemonic]]
 family = "VOP3"
@@ -669,8 +734,28 @@ name = "v_min3_i16"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 864
+name = "v_readlane_b32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 879
 name = "v_lshl_or_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 881
+name = "v_and_or_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 883
+name = "v_mad_u32_u16"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 887
+name = "v_permlane16_b32"
 
 [[mnemonic]]
 family = "VOP3P"

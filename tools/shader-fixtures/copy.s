@@ -65,6 +65,27 @@ v_madmk_f32 v18, v1, 0x3e800000, v2
 s_cmp_lg_u32 s2, 0
 v_cmpx_neq_f32_e32 v1, v2
 
+// ---- What ACO's culling primitive shader runs (ac_nir_lower_ngg.c): the vertices' and
+// primitives' compaction through the local data share, bounding-box and facing tests, and the
+// cross-lane reads of a wave's counts --------------------------------------------------------
+ds_write2_b32 v1, v2, v3 offset0:4 offset1:9
+ds_write_b8 v1, v2 offset:4
+ds_read2_b32 v[5:6], v1 offset0:4 offset1:9
+ds_or_b32 v1, v2 offset:4
+ds_read_u8 v5, v1 offset:4
+v_mad_u32_u16 v3, v4, v5, v6
+v_max3_f32 v3, v4, v5, v6
+v_min3_f32 v3, v4, v5, v6
+v_cmp_lt_f32_e64 s[2:3], v4, v5
+v_cmp_gt_f32_e64 s[2:3], v4, v5
+v_cmp_neq_f32_e64 s[2:3], v4, v5
+v_mad_i32_i24 v3, v4, v5, v6
+v_permlane16_b32 v3, v4, s5, s6
+v_msad_u8 v3, v4, v5, v6
+v_readlane_b32 s3, v4, s5
+v_mul_lo_u32 v3, v4, v5
+v_and_or_b32 v3, v4, v5, v6
+
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

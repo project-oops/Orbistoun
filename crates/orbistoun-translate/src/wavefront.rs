@@ -2533,6 +2533,25 @@ impl Model for Wavefront<'_> {
         self.primitive
     }
 
+    fn read_vector_at(&mut self, register: u32, lane: Id) -> Option<Id> {
+        let register_index = self.constant(register);
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[
+                self.lane_ptr.0,
+                pointer.0,
+                self.vectors.0,
+                register_index.0,
+                lane.0,
+            ],
+        );
+        let loaded = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[self.u32_type.0, loaded.0, pointer.0]);
+        Some(loaded)
+    }
+
     fn attribute_input(&self, attribute: u32, flat: bool) -> Option<(Id, Id)> {
         let (vec4, _) = self.output?;
         let location = flat

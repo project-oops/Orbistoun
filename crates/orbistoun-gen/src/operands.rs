@@ -370,6 +370,7 @@ pub(crate) fn solve(
         // descriptor quad in a field of pairs). Every legal encoding decodes alike either way,
         // so the lower scale, spanning the whole field, is kept.
         keep_lowest_equivalent_scale(&mut found);
+        keep_source_over_its_vgpr_bits(&mut found);
 
         // What remains must agree on how the bits are read: 242 is vector register 242 under
         // one reading and the constant 1.0 under another. A disagreement is unsolved and
@@ -387,6 +388,28 @@ pub(crate) fn solve(
         solved.push(found.remove(0));
     }
     Some(solved)
+}
+
+/// Drops each vector-register reading that is a source field's low bits: a source an instruction
+/// takes only from a vector register (`v_readlane_b32`'s, `v_permlane16_b32`'s) holds `256 + n` in
+/// every legal encoding, so its nine-bit source field's top bit is always set and its low eight
+/// read `n` too. The source field is the operand's; a probe cannot vary it into a scalar to tell
+/// them apart. Only when every vector reading is such a field's low bits.
+fn keep_source_over_its_vgpr_bits(found: &mut Vec<Field>) {
+    let sources: Vec<Field> = found
+        .iter()
+        .filter(|f| f.kind == Kind::Source && f.scale == 1)
+        .cloned()
+        .collect();
+    let covered = |vgpr: &Field| {
+        sources.iter().any(|source| {
+            source.word == vgpr.word && source.shift == vgpr.shift && source.width == vgpr.width + 1
+        })
+    };
+    let vgprs: Vec<&Field> = found.iter().filter(|f| f.kind == Kind::Vgpr).collect();
+    if !vgprs.is_empty() && vgprs.iter().all(|vgpr| covered(vgpr)) {
+        found.retain(|f| f.kind != Kind::Vgpr);
+    }
 }
 
 /// Drops each scaled reading that is a lower-scale one's field shifted up: a field at scale
@@ -510,13 +533,28 @@ pub(crate) fn reconcile_widths(solved: &mut BTreeMap<(String, u32), Solved>) -> 
 
     let mut adopted = Vec::new();
     for ((family, _), entry) in solved.iter_mut() {
+        // Each field's bits, so a widening never runs into another field of the same instruction:
+        // `ds_write2_b32`'s eight-bit `offset0` sits where its family's sixteen-bit `offset`
+        // does, below its own `offset1`.
+        let occupied: Vec<(usize, u32, u32)> = entry
+            .fields
+            .iter()
+            .filter(|f| f.kind != Kind::Implicit)
+            .map(|f| (f.word, f.shift, f.width))
+            .collect();
         for field in &mut entry.fields {
             if field.kind == Kind::Implicit {
                 continue;
             }
             let key = (family.clone(), field.word, field.shift, field.scale);
             let best = widest.get(&key).copied().unwrap_or(field.width);
-            if field.width < best {
+            let collides = occupied.iter().any(|&(word, shift, width)| {
+                word == field.word
+                    && shift != field.shift
+                    && shift < field.shift + best
+                    && field.shift < shift + width
+            });
+            if field.width < best && !collides {
                 adopted.push(format!(
                     "  adopted: {} {family} word {} bit {} widened {} -> {best}",
                     entry.mnemonic, field.word, field.shift, field.width
@@ -870,6 +908,30 @@ opcode_extension = { shift = 21, width = 1, word = 1 }
         );
     }
 
+    /// A source only a vector register may fill reads as both its nine-bit source field and that
+    /// field's low eight bits; the source field is kept (`v_readlane_b32 s3, v4, s5`).
+    #[test]
+    fn a_vector_only_source_solves_as_its_source_field() {
+        let samples = [
+            sample("v_readlane_b32", "v4", &[0x104]),
+            sample("v_readlane_b32", "v9", &[0x109]),
+            sample("v_readlane_b32", "v255", &[0x1ff]),
+            sample("v_readlane_b32", "v130", &[0x182]),
+        ];
+        let fields = solve(
+            &samples,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &Refuses,
+        )
+        .expect("solvable");
+        assert_eq!(
+            (fields[0].kind, fields[0].shift, fields[0].width),
+            (Kind::Source, 0, 9)
+        );
+    }
+
     /// Substitution keeps the modifiers, because for some families they make it legal.
     #[test]
     fn substitution_keeps_the_modifiers() {
@@ -916,6 +978,40 @@ opcode_extension = { shift = 21, width = 1, word = 1 }
         assert_eq!(adopted.len(), 1, "one widening, reported");
         assert!(adopted[0].contains("narrow"), "{adopted:?}");
         assert_eq!(solved[&("VOP3".to_owned(), 1)].fields[0].width, 9);
+    }
+
+    /// A widening that would run into another field of the same instruction is not adopted: a pair
+    /// access's eight-bit first offset stays eight bits under its second.
+    #[test]
+    fn reconciliation_stops_at_another_field() {
+        let field = |shift, width| Field {
+            word: 0,
+            shift,
+            width,
+            kind: Kind::Immediate,
+            scale: 1,
+            implicit: None,
+        };
+        let mut solved = BTreeMap::new();
+        solved.insert(
+            ("DS".to_owned(), 13),
+            Solved {
+                mnemonic: "ds_write_b32".to_owned(),
+                fields: vec![field(0, 16)],
+                samples: 5,
+            },
+        );
+        solved.insert(
+            ("DS".to_owned(), 14),
+            Solved {
+                mnemonic: "ds_write2_b32".to_owned(),
+                fields: vec![field(0, 8), field(8, 8)],
+                samples: 5,
+            },
+        );
+        let adopted = reconcile_widths(&mut solved);
+        assert!(adopted.is_empty(), "{adopted:?}");
+        assert_eq!(solved[&("DS".to_owned(), 14)].fields[0].width, 8);
     }
 
     /// A disagreement is named, and an implicit slot never causes a false one.

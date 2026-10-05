@@ -43,6 +43,11 @@ pub const SUPPORTED: &[&str] = &[
     "tbuffer_store_format_xyzw",
     "ds_read_b32",
     "ds_write_b32",
+    "ds_write2_b32",
+    "ds_read2_b32",
+    "ds_write_b8",
+    "ds_read_u8",
+    "ds_or_b32",
     "image_load",
     "image_load_mip",
     "image_sample",
@@ -154,6 +159,18 @@ pub const SUPPORTED: &[&str] = &[
     "v_madak_f32",
     "v_madmk_f32",
     "v_mul_u32_u24_e32",
+    "v_mad_u32_u16",
+    "v_mad_i32_i24",
+    "v_mul_lo_u32",
+    "v_and_or_b32",
+    "v_max3_f32",
+    "v_min3_f32",
+    "v_msad_u8",
+    "v_readlane_b32",
+    "v_permlane16_b32",
+    "v_cmp_lt_f32_e64",
+    "v_cmp_gt_f32_e64",
+    "v_cmp_neq_f32_e64",
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
@@ -572,6 +589,13 @@ pub trait Model {
     /// [`None`] for a compute module, and for a fragment module not told that the shader
     /// interpolates that attribute: inputs are declared in the header, before any instruction is
     /// seen.
+    /// Vector register `register` at a lane known only when the program runs, or `None` in a model
+    /// that does not hold every lane.
+    fn read_vector_at(&mut self, register: u32, lane: Id) -> Option<Id> {
+        let _ = (register, lane);
+        None
+    }
+
     /// A flat read takes the attribute's flat twin where the draw gave it one (D742).
     fn attribute_input(&self, _attribute: u32, _flat: bool) -> Option<(Id, Id)> {
         None
@@ -1975,7 +1999,8 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_cmp_ne_i32_e32" => compare(model, instruction, name),
 
         // The long-form integer compare, into a register pair or a named mask.
-        "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64" => {
+        "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64"
+        | "v_cmp_lt_f32_e64" | "v_cmp_gt_f32_e64" | "v_cmp_neq_f32_e64" => {
             compare_long(model, instruction, name)
         }
         "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" => compare_into_exec(model, instruction, name),
@@ -2007,6 +2032,12 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_lshl_or_b32" => shift_or(model, instruction),
         "v_madak_f32" | "v_madmk_f32" => multiply_add_constant(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
+        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_msad_u8" => {
+            integer_long_form(model, instruction, name)
+        }
+        "v_max3_f32" | "v_min3_f32" => float_min_max_of_three(model, instruction, name),
+        "v_readlane_b32" => read_lane(model, instruction),
+        "v_permlane16_b32" => permute_lanes_16(model, instruction),
         "v_perm_b32" => byte_permute(model, instruction),
 
         // Sixteen-bit arithmetic on register halves, as ACO forms an image copy's coordinates.
@@ -2120,13 +2151,11 @@ fn memory_instruction<M: Model + ?Sized>(
         return Ok(());
     }
     // An image a dispatch fetches from or stores to is bound whole and written back exactly, so
-    // its accesses need no window.
+    // its accesses need no window; the local data share is not guest memory.
     if model.exact_memory()
         && !name.starts_with("buffer_")
-        && !matches!(
-            name,
-            "ds_write_b32" | "ds_read_b32" | "image_load" | "image_load_mip" | "image_store"
-        )
+        && !name.starts_with("ds_")
+        && !matches!(name, "image_load" | "image_load_mip" | "image_store")
     {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -2164,6 +2193,8 @@ fn memory_instruction<M: Model + ?Sized>(
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
         "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
+        "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
+        "ds_write_b8" | "ds_read_u8" | "ds_or_b32" => local_share_merge(model, instruction, name),
 
         // A texture sample or fetch; the descriptor rules are D690's.
         "image_sample_lz" | "image_sample" | "image_sample_l" | "image_load" | "image_load_mip" => {
@@ -3637,11 +3668,11 @@ fn compare_into_exec<M: Model + ?Sized>(
 /// together because reading a register as the wrong type is silent.
 fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), TranslateError> {
     match name {
-        "v_cmp_lt_f32_e32" => Ok((op::FORD_LESS_THAN, true)),
+        "v_cmp_lt_f32_e32" | "v_cmp_lt_f32_e64" => Ok((op::FORD_LESS_THAN, true)),
         "v_cmp_eq_f32_e32" | "v_cmp_eq_f32_e64" => Ok((op::FORD_EQUAL, true)),
-        "v_cmp_gt_f32_e32" => Ok((op::FORD_GREATER_THAN, true)),
+        "v_cmp_gt_f32_e32" | "v_cmp_gt_f32_e64" => Ok((op::FORD_GREATER_THAN, true)),
         // Not equal or unordered: true for a NaN, where `v_cmp_lg_f32` is the ordered form.
-        "v_cmp_neq_f32_e32" => Ok((op::FUNORD_NOT_EQUAL, true)),
+        "v_cmp_neq_f32_e32" | "v_cmp_neq_f32_e64" => Ok((op::FUNORD_NOT_EQUAL, true)),
         "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
         "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
         "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),
@@ -3886,6 +3917,142 @@ fn local_share<M: Model + ?Sized>(
 
 /// `ds_read_b32`.
 const DS_READ: &str = "ds_read_b32";
+
+/// `ds_write2_b32 address, a, b offset0 offset1` and `ds_read2_b32 d, address offset0 offset1`: two
+/// words at the address plus each eight-bit offset in words (AMD's published RDNA instruction set,
+/// `DS_WRITE2_B32`, `DS_READ2_B32`); a read fills `d` and the register after it.
+fn local_share_pair<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let word_offsets = |first: &Operand, second: &Operand| match (first, second) {
+        (Operand::Immediate(a), Operand::Immediate(b)) => u32::try_from(*a)
+            .ok()
+            .zip(u32::try_from(*b).ok())
+            .map(|(a, b)| [a * 4, b * 4]),
+        _ => None,
+    };
+    let reading = name == "ds_read2_b32";
+    let (address, offsets, registers) = match instruction.operands.as_slice() {
+        [Operand::Vector(destination), address, first, second] if reading => (
+            address,
+            word_offsets(first, second),
+            [u32::from(*destination), u32::from(*destination) + 1],
+        ),
+        [
+            address,
+            Operand::Vector(a),
+            Operand::Vector(b),
+            first,
+            second,
+        ] if !reading => (
+            address,
+            word_offsets(first, second),
+            [u32::from(*a), u32::from(*b)],
+        ),
+        _ => {
+            return Err(refuse(
+                "a pair local-data-share access did not decode to its layout",
+            ));
+        }
+    };
+    let offsets = offsets.ok_or_else(|| refuse("a pair access's offsets are not immediates"))?;
+    for lane in running_lanes(model) {
+        let base = model.read_source(instruction, address, lane)?;
+        for (offset, register) in offsets.into_iter().zip(registers) {
+            let offset = model.constant(offset);
+            let byte_address = model.add(base, offset);
+            let index = model.word_index(byte_address);
+            if reading {
+                let value = model.read_local(index)?;
+                model.write_vector_lane(register, lane, value);
+            } else {
+                let value =
+                    model.read_source(instruction, &Operand::Vector(register as u16), lane)?;
+                model.write_local(index, value, lane)?;
+            }
+        }
+    }
+    model.count();
+    Ok(())
+}
+
+/// The local-data-share accesses that merge into a word: `ds_write_b8 address, data offset` stores
+/// the data's low byte at its byte, `ds_read_u8 d, address offset` reads one byte zero-extended,
+/// and `ds_or_b32 address, data offset` ors the data into the word (AMD's published RDNA
+/// instruction set). A wave's lanes run in order here, so a lane's merge sees the ones before it,
+/// as the share serialises them.
+fn local_share_merge<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let (first, second, offset) = three_operands(instruction)?;
+    let Operand::Immediate(offset) = offset else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a local-data-share access carries no byte offset",
+        });
+    };
+    let offset = u32::try_from(*offset).map_err(|_| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "a negative local-data-share offset",
+    })?;
+    let reading = name == "ds_read_u8";
+    let (destination, address) = if reading {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a local-data-share operand is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let byte = model.constant(0xff);
+    let three = model.constant(3);
+    let eight = model.constant(8);
+    for lane in running_lanes(model) {
+        let base = model.read_source(instruction, address, lane)?;
+        let offset = model.constant(offset);
+        let byte_address = model.add(base, offset);
+        let index = model.word_index(byte_address);
+        let word = model.read_local(index)?;
+        let within = model.binary(op::BITWISE_AND, byte_address, three);
+        let shift = model.binary(op::IMUL, within, eight);
+        match name {
+            "ds_read_u8" => {
+                let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+                let value = model.binary(op::BITWISE_AND, shifted, byte);
+                model.write_vector_lane(register, lane, value);
+            }
+            "ds_write_b8" => {
+                let data = model.read_source(instruction, destination, lane)?;
+                let data = model.binary(op::BITWISE_AND, data, byte);
+                let placed = model.binary(op::SHIFT_LEFT_LOGICAL, data, shift);
+                let hole = model.binary(op::SHIFT_LEFT_LOGICAL, byte, shift);
+                let hole = model.not(hole);
+                let kept = model.binary(op::BITWISE_AND, word, hole);
+                let merged = model.binary(op::BITWISE_OR, kept, placed);
+                model.write_local(index, merged, lane)?;
+            }
+            _ => {
+                let data = model.read_source(instruction, destination, lane)?;
+                let merged = model.binary(op::BITWISE_OR, word, data);
+                model.write_local(index, merged, lane)?;
+            }
+        }
+    }
+    model.count();
+    Ok(())
+}
 
 /// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
 /// offset register. The code the operand numbering gives `null`, and the one LLVM encodes when a
@@ -5942,6 +6109,245 @@ fn multiply_add_constant<M: Model + ?Sized>(
         } else {
             legacy_multiply_add(model, a, constant, other)
         };
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// The long-form integer arithmetic of a culling primitive shader (AMD's published RDNA instruction
+/// set), per lane, wrapping:
+///
+/// - `v_mad_u32_u16 d, a, b, c`: `a[15:0] * b[15:0] + c`. `op_sel`, which picks high halves, is
+///   refused.
+/// - `v_mad_i32_i24 d, a, b, c`: the sign-extended low 24 bits multiplied, plus `c`.
+/// - `v_mul_lo_u32 d, a, b`: the product's low 32 bits.
+/// - `v_and_or_b32 d, a, b, c`: `(a & b) | c`.
+/// - `v_msad_u8 d, a, b, c`: `c` plus, for each byte of `a` that is not zero, its absolute
+///   difference from `b`'s (NIR's `msad_4x8`, `nir_constant_expressions.py:413`).
+fn integer_long_form<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let sources = if name == "v_mul_lo_u32" { 2 } else { 3 };
+    no_integer_modifiers(instruction, sources)?;
+    if name == "v_mad_u32_u16" && (instruction.word >> 11) & 0xf != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_mad_u32_u16 with op_sel picking a high half is not translated",
+        });
+    }
+    let Some((Operand::Vector(register), operands)) = instruction.operands.split_first() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a long-form integer destination is not a vector register",
+        });
+    };
+    if operands.len() < sources {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a long-form integer instruction has fewer sources than it takes",
+        });
+    }
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let mut read = [None; 3];
+        for (slot, operand) in read.iter_mut().zip(&operands[..sources]) {
+            *slot = Some(model.read_source(instruction, operand, lane)?);
+        }
+        let zero = model.constant(0);
+        let [a, b, c] = read.map(|value| value.unwrap_or(zero));
+        let value = match name {
+            "v_mad_u32_u16" => {
+                let low = model.constant(0xffff);
+                let a = model.binary(op::BITWISE_AND, a, low);
+                let b = model.binary(op::BITWISE_AND, b, low);
+                let product = model.binary(op::IMUL, a, b);
+                model.add(product, c)
+            }
+            "v_mad_i32_i24" => {
+                let eight = model.constant(8);
+                let extend = |model: &mut M, value| {
+                    let raised = model.binary(op::SHIFT_LEFT_LOGICAL, value, eight);
+                    model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, eight)
+                };
+                let a = extend(model, a);
+                let b = extend(model, b);
+                let product = model.binary(op::IMUL, a, b);
+                model.add(product, c)
+            }
+            "v_mul_lo_u32" => model.binary(op::IMUL, a, b),
+            "v_and_or_b32" => {
+                let both = model.binary(op::BITWISE_AND, a, b);
+                model.binary(op::BITWISE_OR, both, c)
+            }
+            _ => masked_sum_of_differences(model, a, b, c),
+        };
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// NIR's `msad`: `accumulator` plus `|reference.byte - source.byte|` over the bytes where the
+/// reference's is not zero.
+fn masked_sum_of_differences<M: Model + ?Sized>(
+    model: &mut M,
+    reference: Id,
+    source: Id,
+    accumulator: Id,
+) -> Id {
+    let byte = model.constant(0xff);
+    let zero = model.constant(0);
+    let mut sum = accumulator;
+    for shift in [0, 8, 16, 24] {
+        let shift = model.constant(shift);
+        let r = model.binary(op::SHIFT_RIGHT_LOGICAL, reference, shift);
+        let r = model.binary(op::BITWISE_AND, r, byte);
+        let s = model.binary(op::SHIFT_RIGHT_LOGICAL, source, shift);
+        let s = model.binary(op::BITWISE_AND, s, byte);
+        let above = model.compare(op::UGREATER_THAN, r, s);
+        let forward = model.binary(op::ISUB, r, s);
+        let backward = model.binary(op::ISUB, s, r);
+        let difference = model.select(above, forward, backward);
+        let counted = model.compare(op::INOT_EQUAL, r, zero);
+        let difference = model.select(counted, difference, zero);
+        sum = model.add(sum, difference);
+    }
+    sum
+}
+
+/// `v_max3_f32` and `v_min3_f32`: the larger or smaller of three floats, each source with its
+/// absolute and negate flags, as two of `v_max_f32`'s or `v_min_f32`'s steps.
+fn float_min_max_of_three<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let modifiers = Modifiers::read(instruction, false)?;
+    let [Operand::Vector(register), first, second, third] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a three-way min/max does not have a vector destination and three sources",
+        });
+    };
+    let register = u32::from(*register);
+    let extended = if name == "v_max3_f32" {
+        GLSL_FMAX
+    } else {
+        GLSL_FMIN
+    };
+    for lane in running_lanes(model) {
+        let mut values = [Id(0); 3];
+        for (source, (slot, operand)) in values.iter_mut().zip([first, second, third]).enumerate() {
+            let value = model.read_source(instruction, operand, lane)?;
+            *slot = apply_modifiers(model, value, modifiers, source);
+        }
+        let pair = model.f32_ext_binary(extended, values[0], values[1]);
+        let value = model.f32_ext_binary(extended, pair, values[2]);
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_readlane_b32 s, v, lane`: the scalar takes `v` at the lane the second source names, its low
+/// six bits in a wave of sixty-four and five in one of thirty-two (AMD's published RDNA instruction
+/// set), whether that lane runs or not.
+fn read_lane<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [Operand::Scalar(destination), Operand::Vector(source), lane] =
+        instruction.operands.as_slice()
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_readlane_b32 does not name a scalar, a vector register and a lane",
+        });
+    };
+    let lane = model.read_source(instruction, lane, 0)?;
+    let low_bits = model.constant(model.lanes() - 1);
+    let lane = model.binary(op::BITWISE_AND, lane, low_bits);
+    let value =
+        model
+            .read_vector_at(u32::from(*source), lane)
+            .ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a lane read at a lane known only when the program runs needs every lane",
+            })?;
+    model.write_scalar(u32::from(*destination), value);
+    model.count();
+    Ok(())
+}
+
+/// `v_permlane16_b32 d, v, select_low, select_high`: within each row of sixteen lanes, lane `i`
+/// takes `v` at the row's lane named by the four-bit selector `i` - lanes 0 to 7 from the first
+/// scalar's nibbles, 8 to 15 from the second's (AMD's published RDNA instruction set; ACO's
+/// `lane_permute_16_amd`). Without `FETCH_INACTIVE` an inactive source lane is not read; without
+/// `BOUND_CTRL` the destination lane then keeps its value. Either flag set (`op_sel`) is refused.
+fn permute_lanes_16<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [
+        Operand::Vector(register),
+        Operand::Vector(source),
+        low,
+        high,
+    ] = instruction.operands.as_slice()
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_permlane16_b32 does not name a vector destination, a vector and two selects",
+        });
+    };
+    if (instruction.word >> 11) & 0xf != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_permlane16_b32 with FETCH_INACTIVE or BOUND_CTRL is not translated",
+        });
+    }
+    let (register, source) = (u32::from(*register), u32::from(*source));
+    let selects = [
+        model.read_source(instruction, low, 0)?,
+        model.read_source(instruction, high, 0)?,
+    ];
+    let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+    let nibble = model.constant(0xf);
+    // Every lane's value first: each reads the source before any lane writes the destination.
+    let mut values = Vec::new();
+    for lane in running_lanes(model) {
+        let within = lane % 16;
+        let shift = model.constant(4 * (within % 8));
+        let select = model.binary(
+            op::SHIFT_RIGHT_LOGICAL,
+            selects[usize::from(within >= 8)],
+            shift,
+        );
+        let select = model.binary(op::BITWISE_AND, select, nibble);
+        let row = model.constant(lane - within);
+        let from = model.add(row, select);
+        let fetched = model
+            .read_vector_at(source, from)
+            .ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a lane permute needs every lane",
+            })?;
+        // The source lane's execution bit: rows below thirty-two in the low half.
+        let half = if lane < 32 { running_low } else { running_high };
+        let thirty_one = model.constant(31);
+        let bit = model.binary(op::BITWISE_AND, from, thirty_one);
+        let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, half, bit);
+        let one = model.constant(1);
+        let active = model.binary(op::BITWISE_AND, shifted, one);
+        let zero = model.constant(0);
+        let active = model.compare(op::INOT_EQUAL, active, zero);
+        let kept = model.read_source(instruction, &instruction.operands[0], lane)?;
+        values.push((lane, model.select(active, fetched, kept)));
+    }
+    for (lane, value) in values {
         model.write_vector_lane(register, lane, value);
     }
     model.count();
