@@ -2598,16 +2598,15 @@ fn read_texture(
         *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     let descriptor = decode_image_descriptor(words);
-    if words[3] >> 28 != IMAGE_TYPE_2D || descriptor.format != FORMAT_8_8_8_8_UNORM {
-        return None;
-    }
-    match descriptor.tiling {
-        SwizzleMode::Linear => {}
+    let (format, selects) = sampled_format(&descriptor, words[3])?;
+    match (descriptor.tiling, format) {
+        (SwizzleMode::Linear, TexelFormat::Rgba8) => {}
         // The tiled layouts modelled, each sampled as it is rendered (crate::tiling).
-        SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled4KbDX => {
-            return read_tiled_texture(&descriptor, slot, memory, texels);
+        (SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled4KbDX, _) => {
+            return read_tiled_texture(&descriptor, format, slot, memory, texels)
+                .map(|bound| swizzled_texture(bound, format, selects));
         }
-        SwizzleMode::Other(_) => return None,
+        _ => return None,
     }
     let Some(DispatchSurface::Linear {
         base,
@@ -2636,14 +2635,18 @@ fn read_texture(
             orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
         }) == Some(false)
     {
-        return Some(RenderCommand::BindTexture {
-            slot,
-            hash: cached.hash,
-            texels: cached.texels.clone(),
-            width: descriptor.width,
-            height: descriptor.height,
-            sampling: crate::registers::TextureSampling::default(),
-        });
+        return Some(swizzled_texture(
+            RenderCommand::BindTexture {
+                slot,
+                hash: cached.hash,
+                texels: cached.texels.clone(),
+                width: descriptor.width,
+                height: descriptor.height,
+                sampling: crate::registers::TextureSampling::default(),
+            },
+            format,
+            selects,
+        ));
     }
     // Marked before the bytes are hashed, so a write racing the hash is seen next time.
     let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
@@ -2678,14 +2681,116 @@ fn read_texture(
             texels: std::sync::Arc::clone(&shared),
         },
     );
-    Some(RenderCommand::BindTexture {
+    Some(swizzled_texture(
+        RenderCommand::BindTexture {
+            slot,
+            hash,
+            texels: shared,
+            width: descriptor.width,
+            height: descriptor.height,
+            sampling: crate::registers::TextureSampling::default(),
+        },
+        format,
+        selects,
+    ))
+}
+
+/// A 2D texture's texel format and selects, when both are ones this samples exactly
+/// ([`selects_exactly`]): `8_8_8_8_UNORM` or `8_UNORM`.
+fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelFormat, [u32; 4])> {
+    let format = match descriptor.format {
+        FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
+        FORMAT_8_UNORM => TexelFormat::R8,
+        _ => return None,
+    };
+    let selects = destination_selects(word3);
+    (word3 >> 28 == IMAGE_TYPE_2D && selects_exactly(format, selects)).then_some((format, selects))
+}
+
+/// `SQ_IMG_RSRC_WORD3`'s `DST_SEL_X` .. `DST_SEL_W` (bits 0-2, 3-5, 6-8, 9-11, `gfx10-rsrc.json`):
+/// what each channel a sample returns is, as `SQ_SEL_XYZW01` names it - 0 and 1 the constants, 4
+/// to 7 the texel's X to W (`gfx6.json`; radeonsi writes them through `ac_map_swizzle`).
+const fn destination_selects(word3: u32) -> [u32; 4] {
+    [
+        word3 & 7,
+        (word3 >> 3) & 7,
+        (word3 >> 6) & 7,
+        (word3 >> 9) & 7,
+    ]
+}
+
+/// `SQ_SEL_X`: the texel's first channel.
+const SELECT_X: u32 = 4;
+/// The selects that return a texel as it is.
+const IDENTITY_SELECTS: [u32; 4] = [SELECT_X, SELECT_X + 1, SELECT_X + 2, SELECT_X + 3];
+
+/// Whether every select is one this reads exactly for `format`: a constant, or a channel the format
+/// holds. A one-byte texel holds X alone; what a select of its Y, Z or W returns is not taken on
+/// trust, and the reserved codes are refused.
+fn selects_exactly(format: TexelFormat, selects: [u32; 4]) -> bool {
+    selects.iter().all(|&select| match select {
+        0 | 1 | SELECT_X => true,
+        5..=7 => format == TexelFormat::Rgba8,
+        _ => false,
+    })
+}
+
+/// A bound texture's texels as its selects return them, as linear `Rgba8` words: a one-byte texel
+/// is its X and the constants, a four-byte one its channels rearranged. A four-byte texture under
+/// the identity selects is returned as it is; any other's hash is moved by its selects, so the
+/// same bytes read another way are never taken for each other.
+fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]) -> RenderCommand {
+    let RenderCommand::BindTexture {
         slot,
         hash,
-        texels: shared,
-        width: descriptor.width,
-        height: descriptor.height,
-        sampling: crate::registers::TextureSampling::default(),
-    })
+        texels,
+        width,
+        height,
+        sampling,
+    } = bound
+    else {
+        return bound;
+    };
+    if format == TexelFormat::Rgba8 && selects == IDENTITY_SELECTS {
+        return RenderCommand::BindTexture {
+            slot,
+            hash,
+            texels,
+            width,
+            height,
+            sampling,
+        };
+    }
+    let pick = |channels: [u8; 4], select: u32| match select {
+        1 => 0xFF,
+        4..=7 => channels[(select - SELECT_X) as usize],
+        _ => 0,
+    };
+    let swizzled: Vec<u32> = texels
+        .iter()
+        .map(|&texel| {
+            let channels = match format {
+                TexelFormat::Rgba8 => texel.to_le_bytes(),
+                TexelFormat::R8 => [texel.to_le_bytes()[0], 0, 0, 0xFF],
+            };
+            u32::from_le_bytes(selects.map(|select| pick(channels, select)))
+        })
+        .collect();
+    let moved = crate::content_hash(&[
+        selects[0],
+        selects[1],
+        selects[2],
+        selects[3],
+        format.bytes(),
+    ]);
+    RenderCommand::BindTexture {
+        slot,
+        hash: hash ^ moved.rotate_left(17),
+        texels: swizzled.into(),
+        width,
+        height,
+        sampling,
+    }
 }
 
 /// A texture's texels as last read, with their content hash and the host's mark of when.
@@ -2699,8 +2804,8 @@ struct CachedTexels {
 /// Texels read from guest memory, by where they lie and their shape.
 type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
 
-/// A tiled 32-bpp texture's first viewed level, read whole, detiled into row-major texels and
-/// bound.
+/// A tiled texture's first viewed level, read whole, detiled into row-major texels and bound: a
+/// four-byte texel a word, a one-byte texel its byte in the low eight bits.
 ///
 /// The level is where its chain places it, a mip-tail level at its origin in the tail's block,
 /// read through the same tiling a colour target of that shape is drawn through. A compressed
@@ -2712,34 +2817,23 @@ type TexelCache = std::collections::HashMap<(u64, u32, u32, u32), CachedTexels>;
 /// and whether the keys cleared it - so the same memory read another way never shares texels.
 fn read_tiled_texture(
     descriptor: &ImageDescriptor,
+    format: TexelFormat,
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    let surface = descriptor.base_level_surface()?;
+    let layout =
+        crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(format.bytes())?;
+    let surface = crate::registers::chain_level(
+        (descriptor.base, descriptor.pipe_bank_xor),
+        (descriptor.width, descriptor.height),
+        (descriptor.levels, descriptor.base_level),
+        layout,
+    )?;
     if !surface.layout.models(surface.pipe_bank_xor) {
         return None;
     }
-    let cleared = match descriptor.compression {
-        None => false,
-        Some(dcc) => {
-            if surface.layout != crate::tiling::SurfaceLayout::Rx64Kb {
-                return None;
-            }
-            let bytes = crate::dcc::chain_meta_bytes(
-                descriptor.width,
-                descriptor.height,
-                descriptor.levels,
-                dcc.pipe_aligned,
-            );
-            let keys = memory.read(crate::dcc::meta_start(dcc), usize::try_from(bytes).ok()?)?;
-            match crate::dcc::classify(keys) {
-                crate::dcc::Keys::Uncompressed => false,
-                crate::dcc::Keys::Clear0000 => true,
-                crate::dcc::Keys::Other => return None,
-            }
-        }
-    };
+    let cleared = texture_keys_cleared(descriptor, surface.layout, memory)?;
     let (width, height) = (surface.width, surface.height);
     let span = surface.words() * 4;
     let layout_tag = match surface.layout {
@@ -2811,6 +2905,38 @@ fn read_tiled_texture(
         height,
         sampling: crate::registers::TextureSampling::default(),
     })
+}
+
+/// Whether a texture's compression keys say every block is cleared to zero: `Some(false)` for an
+/// uncompressed texture or keys all uncompressed, `None` for keys that need per-block addressing or
+/// a compressed layout whose keys are not modelled.
+fn texture_keys_cleared(
+    descriptor: &ImageDescriptor,
+    layout: crate::tiling::SurfaceLayout,
+    memory: &impl GuestMemory,
+) -> Option<bool> {
+    let Some(dcc) = descriptor.compression else {
+        return Some(false);
+    };
+    if !matches!(
+        layout,
+        crate::tiling::SurfaceLayout::Rx64Kb | crate::tiling::SurfaceLayout::Rx64KbBpp1
+    ) {
+        return None;
+    }
+    let bytes = crate::dcc::texel_chain_meta_bytes(
+        descriptor.width,
+        descriptor.height,
+        descriptor.levels,
+        layout,
+        dcc.pipe_aligned,
+    );
+    let keys = memory.read(crate::dcc::meta_start(dcc), usize::try_from(bytes).ok()?)?;
+    match crate::dcc::classify(keys) {
+        crate::dcc::Keys::Uncompressed => Some(false),
+        crate::dcc::Keys::Clear0000 => Some(true),
+        crate::dcc::Keys::Other => None,
+    }
 }
 
 /// How many textures the cache holds before it restarts: enough for a frame's set, and a bound for
@@ -3336,6 +3462,66 @@ mod tests {
             .map(|word| u32::from_str_radix(word, 16).expect("a hex word"))
             .flat_map(u32::to_le_bytes)
             .collect()
+    }
+
+    /// A one-byte `8_UNORM` texture is read through the 8-bpp `64KB_R_X` layout and returned as its
+    /// selects make it: radeonsi's `R8_UNORM` view, `(X, 0, 0, 1)`, is red over opaque black, and
+    /// SuperTuxKart's glyph swizzle, `(1, 1, 1, X)`, white with the byte as alpha. A select of a
+    /// channel one byte does not hold binds nothing.
+    #[test]
+    fn a_one_byte_texture_is_read_through_its_selects() {
+        use super::{RenderCommand, read_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (table, texels, width, height) = (0x1000_u64, 0x1_0000_u64, 8u32, 4u32);
+        let read = |selects: u32| {
+            let mut bytes = vec![0u8; 0xF000 + 0x1_0000];
+            let descriptor = [
+                (texels >> 8) as u32,
+                ((texels >> 40) as u32 & 0xff) | (1 << 20) | (((width - 1) & 3) << 30),
+                ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+                (9 << 28) | (27 << 20) | selects,
+                0,
+                0,
+                0,
+                0,
+            ];
+            for (i, word) in descriptor.iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            for y in 0..height {
+                for x in 0..width {
+                    let at = (texels - table) as usize
+                        + crate::tiling::tiled_byte_offset_64kb_rx_bpp1_surface(x, y, width);
+                    bytes[at] = u8::try_from(y * 10 + x).expect("small");
+                }
+            }
+            read_texture(table, 0, &Memory(bytes), &mut super::TexelCache::new())
+        };
+        let texels_of = |bound: Option<RenderCommand>| match bound {
+            Some(RenderCommand::BindTexture { texels, .. }) => texels.to_vec(),
+            other => panic!("a one-byte texture binds: {other:?}"),
+        };
+        // `SQ_SEL_XYZW01`: 0 and 1 the constants, 4 to 7 X to W; three bits a channel.
+        let opaque = texels_of(read(4 | 1 << 9));
+        assert_eq!(opaque[0], 0xff00_0000);
+        assert_eq!(
+            opaque[(3 * width + 5) as usize],
+            0xff00_0023,
+            "35, the byte at (5, 3)"
+        );
+        let glyph = texels_of(read(1 | 1 << 3 | 1 << 6 | 4 << 9));
+        assert_eq!(
+            glyph[(2 * width + 7) as usize],
+            0x1bff_ffff,
+            "27 as alpha over white"
+        );
+        assert!(read(5 | 1 << 9).is_none(), "a one-byte texel has no Y");
     }
 
     /// A linear texture is read at its descriptor's pitch, not its width, and a descriptor that is
