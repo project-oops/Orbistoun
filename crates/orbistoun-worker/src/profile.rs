@@ -61,22 +61,27 @@ const MOST_THREADS: usize = 8;
 #[cfg(windows)]
 fn symbol_of(address: u64) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{GetLastError, STATUS_INFO_LENGTH_MISMATCH};
     use windows_sys::Win32::System::Diagnostics::Debug::{
-        SYMBOL_INFO, SYMOPT_DEFERRED_LOADS, SYMOPT_UNDNAME, SymFromAddr, SymInitializeW,
-        SymSetOptions,
+        SYMBOL_INFO, SYMOPT_DEFERRED_LOADS, SYMOPT_UNDNAME, SymCleanup, SymFromAddr,
+        SymInitializeW, SymSetOptions,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     /// The longest name kept, in bytes.
     const NAME_BYTES: usize = 512;
     /// The furthest past a symbol an address is still taken to be inside it, in bytes.
     const NEAREST_EXPORT_REACH: u64 = 0x4000;
-    static HANDLER: Mutex<Option<bool>> = Mutex::new(None);
-    let mut ready = HANDLER
+    /// How many times one report asks the handler to list the modules while they keep changing.
+    const INIT_ATTEMPTS: usize = 8;
+    // Only success is kept: a failed start is asked again at the next report rather than
+    // leaving every report of the run without names.
+    static HANDLER: Mutex<bool> = Mutex::new(false);
+    let mut initialised = HANDLER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // SAFETY: answers this process's pseudo-handle; takes nothing and cannot fail.
     let process = unsafe { GetCurrentProcess() };
-    let initialised = *ready.get_or_insert_with(|| {
+    if !*initialised {
         // SAFETY: sets the handler's options before it is initialised; takes a plain flag word.
         unsafe { SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS) };
         // The executable's own directory is searched for its symbols: the handler's default search
@@ -91,11 +96,28 @@ fn symbol_of(address: u64) -> Option<String> {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        // SAFETY: initialises the handler for this process once, listing every loaded module;
-        // `search` is a NUL-terminated path that outlives the call.
-        unsafe { SymInitializeW(process, search.as_ptr(), 1) != 0 }
-    });
-    if !initialised {
+        // Listing the modules fails with `STATUS_INFO_LENGTH_MISMATCH` when another thread loads
+        // or unloads one while the list is read; that status means the list changed, so it is
+        // read again.
+        for _ in 0..INIT_ATTEMPTS {
+            // SAFETY: initialises the handler for this process, listing every loaded module;
+            // `search` is a NUL-terminated path that outlives the call.
+            if unsafe { SymInitializeW(process, search.as_ptr(), 1) } != 0 {
+                *initialised = true;
+                break;
+            }
+            // SAFETY: reads this thread's last error; takes nothing.
+            let error = unsafe { GetLastError() };
+            // SAFETY: releases whatever the failed start left for this process, so the next
+            // start begins clean; the handler lock is held, so no other call is using it.
+            unsafe { SymCleanup(process) };
+            // The handler reports the status as its last error, bit for bit.
+            if error != u32::from_ne_bytes(STATUS_INFO_LENGTH_MISMATCH.to_ne_bytes()) {
+                break;
+            }
+        }
+    }
+    if !*initialised {
         return None;
     }
     // A `SYMBOL_INFO` followed by room for its name, in eight-byte words for its alignment.
