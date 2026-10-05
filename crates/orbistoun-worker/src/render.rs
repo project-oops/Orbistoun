@@ -476,16 +476,22 @@ pub fn execute_dispatch(
     module: &[u32],
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
-    images: &orbistoun_gpu::pipeline::DispatchImages,
+    (images, buffers): (&orbistoun_gpu::pipeline::DispatchImages, &[Vec<u32>]),
 ) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
     let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
         fetched: images.fetched.as_ref().map(dispatch_image),
         stored: images.stored.as_ref().map(dispatch_image),
     };
     on_device(|| {
-        orbistoun_gpu_vulkan::dispatch_guest(module, memory, (push, groups), &bound)
-            .map(|done| (done.memory, done.escaped, done.stored))
-            .map_err(|e| format!("the device refused it: {e:?}"))
+        orbistoun_gpu_vulkan::dispatch_guest_with_buffers(
+            module,
+            memory,
+            (push, groups),
+            &bound,
+            buffers,
+        )
+        .map(|done| (done.memory, done.escaped, done.stored, done.buffers))
+        .map_err(|e| format!("the device refused it: {e:?}"))
     })
     .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))
 }

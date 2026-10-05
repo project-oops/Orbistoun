@@ -166,7 +166,7 @@ fn table_address(table: TableBase, user_data: &[u32; USER_DATA_WORDS]) -> u64 {
 /// # Errors
 ///
 /// A refusal naming why the range cannot be bound exactly.
-fn resolve_range(
+pub(crate) fn resolve_range(
     source: &BufferSource,
     user_data: &[u32; USER_DATA_WORDS],
     memory: &impl GuestMemory,

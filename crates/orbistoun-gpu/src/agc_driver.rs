@@ -610,21 +610,22 @@ impl GuestCp<'_> {
     }
 }
 
-/// Runs a guest compute dispatch's module over its window and images: the module, the window's
-/// words before, the push-constant block and the grid, and the images it fetches from and stores
-/// to. Answers the window's words after, whether any access escaped the window, and the stored
-/// image's texels after, or why the device could not run it. Installed by the worker, which owns
-/// the graphics device.
+/// Runs a guest compute dispatch's module over its window, images and buffers: the module, the
+/// window's words before, the push-constant block and the grid, the images it fetches from and
+/// stores to, and each of its own buffers' words before (D746). Answers the window's words after,
+/// whether any access escaped the window, the stored image's texels after, and each buffer's words
+/// after, or why the device could not run it. Installed by the worker, which owns the graphics
+/// device.
 pub type DispatchExecutor = fn(
     &[u32],
     &[u32],
     (&[u32], [u32; 3]),
-    &crate::pipeline::DispatchImages,
+    (&crate::pipeline::DispatchImages, &[Vec<u32>]),
 ) -> Result<DispatchDone, String>;
 
-/// What a dispatch left: the window's words, whether an access escaped it, and the stored image's
-/// texels when it bound one.
-pub type DispatchDone = (Vec<u32>, bool, Option<Vec<u32>>);
+/// What a dispatch left: the window's words, whether an access escaped it, the stored image's
+/// texels when it bound one, and its own buffers' words (D746).
+pub type DispatchDone = (Vec<u32>, bool, Option<Vec<u32>>, Vec<Vec<u32>>);
 
 fn dispatch_executor() -> &'static OnceLock<DispatchExecutor> {
     static EXECUTOR: OnceLock<DispatchExecutor> = OnceLock::new();
@@ -715,7 +716,57 @@ fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> 
     runs
 }
 
+/// What a dispatch's own buffers write back (D746): each one's changed words, at its guest range,
+/// the last cut where the range ends inside it.
+///
+/// # Errors
+///
+/// When the device answered another number of buffers, or one of another size.
+fn buffer_writes(
+    ranges: &[(u64, u64)],
+    before: &[Vec<u32>],
+    after: &[Vec<u32>],
+) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    if after.len() != before.len() {
+        return Err("the device answered another number of buffers".to_owned());
+    }
+    let mut writes = Vec::new();
+    for ((&(address, bytes), before), after) in ranges.iter().zip(before).zip(after) {
+        if after.len() != before.len() {
+            return Err("the device answered a buffer of another size".to_owned());
+        }
+        for (first, words) in changed_runs(before, after) {
+            let mut changed: Vec<u8> = after[first..first + words]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect();
+            // The last word may run past the range's last byte, which is not the buffer's.
+            let start = first as u64 * 4;
+            changed.truncate(usize::try_from(bytes.saturating_sub(start)).unwrap_or(0));
+            writes.push((address + start, changed));
+        }
+    }
+    Ok(writes)
+}
+
 impl GuestCp<'_> {
+    /// Each of a dispatch's own buffers as guest memory holds it now, in whole words (D746).
+    fn read_buffers(&self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u32>>, String> {
+        ranges
+            .iter()
+            .map(|&(address, bytes)| {
+                let span = usize::try_from(bytes.next_multiple_of(4))
+                    .map_err(|_| "a buffer larger than this host addresses")?;
+                let read = cp::CpMemory::read(self, address, span)
+                    .ok_or("a buffer it binds is not readable guest memory")?;
+                Ok(read
+                    .chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                    .collect())
+            })
+            .collect()
+    }
+
     /// Carries out a compute dispatch: reads its state from the stream, prepares its program, runs
     /// it over its window as guest memory holds it now, and writes back exactly the words it
     /// changed. Nothing is written unless the whole dispatch ran exactly.
@@ -753,11 +804,12 @@ impl GuestCp<'_> {
             }
             None => (None, vec![0]),
         };
-        let (after, escaped, stored) = execute(
+        let buffers_before = self.read_buffers(&prepared.buffers)?;
+        let (after, escaped, stored, buffers_after) = execute(
             &prepared.module,
             &before,
             (&prepared.push, prepared.groups),
-            &prepared.images,
+            (&prepared.images, &buffers_before),
         )?;
         if escaped {
             return Err(concat!(
@@ -779,6 +831,11 @@ impl GuestCp<'_> {
                 writes.push((base + first as u64 * 4, bytes));
             }
         }
+        writes.extend(buffer_writes(
+            &prepared.buffers,
+            &buffers_before,
+            &buffers_after,
+        )?);
         writes.extend(stored_image_writes(&prepared.images, stored)?);
         let writable = write_lookup().get();
         if !writes

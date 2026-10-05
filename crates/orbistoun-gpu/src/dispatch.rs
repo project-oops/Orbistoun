@@ -11,6 +11,7 @@
 use orbistoun_shader::{Decode, EncodingTable, Operand};
 use orbistoun_translate::Width;
 use orbistoun_translate::wavefront::{ComputeInputs, PartialGroups, Window};
+use std::collections::BTreeMap;
 
 use crate::registers::RegisterWrite;
 
@@ -272,9 +273,27 @@ pub fn place_window(
     encodings: &EncodingTable,
     readable: impl Fn(u64, u64) -> bool,
 ) -> Result<Option<Window>, &'static str> {
+    place_window_except(state, (decode, encodings), &BTreeMap::new(), readable)
+}
+
+/// [`place_window`] over the accesses `served` does not name: those a bound buffer of the
+/// dispatch's own takes (D746), keyed by the instruction's byte offset.
+///
+/// # Errors
+///
+/// As [`place_window`].
+pub fn place_window_except(
+    state: &DispatchState,
+    (decode, encodings): (&Decode, &EncodingTable),
+    served: &BTreeMap<u32, u32>,
+    readable: impl Fn(u64, u64) -> bool,
+) -> Result<Option<Window>, &'static str> {
     let families = encodings.encodings();
     let mut span: Option<(u64, u64)> = None;
     for instruction in &decode.instructions {
+        if served.contains_key(&instruction.offset) {
+            continue;
+        }
         let is_buffer = instruction
             .encoding
             .and_then(|e| families.get(usize::from(e)))

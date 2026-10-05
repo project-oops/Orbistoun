@@ -858,6 +858,8 @@ pub struct PreparedDispatch {
     pub push: Vec<u32>,
     /// How many groups run.
     pub groups: [u32; 3],
+    /// The guest range each of its own buffers binds, by slot, as `(address, bytes)` (D746).
+    pub buffers: Vec<(u64, u64)>,
 }
 
 impl Pipeline {
@@ -919,10 +921,26 @@ impl Pipeline {
             ));
         }
         let program = &window[..decoded.consumed];
-        let placed = crate::dispatch::place_window(state, &decoded, &self.encodings, |at, len| {
-            usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some())
-        })
+        // Each buffer a load or store reaches through a traced descriptor is bound on its own
+        // (D746); the window covers the rest.
+        let (served, buffers) = self.dispatch_buffers(state, &decoded, memory)?;
+        let placed = crate::dispatch::place_window_except(
+            state,
+            (&decoded, &self.encodings),
+            &served,
+            |at, len| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some()),
+        )
         .map_err(str::to_owned)?;
+        if let Some(window) = placed {
+            let span = (window.address(), u64::from(window.words()) * 4);
+            if buffers.iter().any(|&range| overlaps(range, span)) {
+                return Err(concat!(
+                    "a buffer the dispatch binds overlaps its window, and two copies of one ",
+                    "byte would disagree (D746)"
+                )
+                .to_owned());
+            }
+        }
         let window_or_none = placed;
         let placed = placed.unwrap_or_default();
         // The images' numeric types come from the descriptors the translation names, so a module
@@ -962,7 +980,48 @@ impl Pipeline {
                 block
             },
             groups: state.groups,
+            buffers,
         })
+    }
+
+    /// The accesses a dispatch's own buffers take, by instruction offset, and the guest range each
+    /// binds (D746): traced from the program as a draw's are, stores included, and resolved
+    /// against the dispatch's user data. Ranges that overlap are refused.
+    fn dispatch_buffers(
+        &self,
+        state: &crate::dispatch::DispatchState,
+        decoded: &orbistoun_shader::Decode,
+        memory: &impl GuestMemory,
+    ) -> Result<DispatchBuffers, String> {
+        let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
+        let traced = orbistoun_translate::wavefront::draw_buffers_for(
+            decoded,
+            &self.encodings,
+            Stage::Compute,
+            UserData {
+                count,
+                draw_buffers: true,
+                ..UserData::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        let mut words = [0u32; USER_DATA_WORDS];
+        for (word, value) in words.iter_mut().zip(&state.user_data) {
+            *word = value.unwrap_or(0);
+        }
+        let mut ranges = Vec::with_capacity(traced.sources.len());
+        for source in &traced.sources {
+            let range = crate::draw_buffers::resolve_range(source, &words, memory)?;
+            if ranges.iter().any(|&held| overlaps(held, range)) {
+                return Err(concat!(
+                    "two buffers the dispatch binds overlap, and two copies of one byte would ",
+                    "disagree (D746)"
+                )
+                .to_owned());
+            }
+            ranges.push(range);
+        }
+        Ok((traced.served, ranges))
     }
 
     /// A dispatch's program translated for its entry state, its window and its images' numeric
@@ -988,7 +1047,8 @@ impl Pipeline {
             compute: Some(inputs),
             geometry: None,
             window_space: false,
-            draw_buffers: false,
+            // Its buffers are bound on their own where traced (D746).
+            draw_buffers: true,
             buffer_formats: None,
             flat_twins: None,
             saturated: UNSATURATED,
@@ -3139,6 +3199,15 @@ fn read_sampler(at: u64, memory: &impl GuestMemory) -> Option<crate::registers::
     crate::registers::decode_sampler_descriptor(words).ok()
 }
 
+/// The accesses a dispatch's own buffers take, by instruction offset, and each buffer's guest range
+/// as `(address, bytes)`, by slot (D746).
+type DispatchBuffers = (BTreeMap<u32, u32>, Vec<(u64, u64)>);
+
+/// Whether two `(address, bytes)` ranges share a byte.
+fn overlaps((a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {
+    a < b.saturating_add(b_bytes) && b < a.saturating_add(a_bytes)
+}
+
 /// `SQ_IMG_RSRC_WORD3.TYPE` for a 2D image: 9 (Mesa `ac_descriptors.c:372`, as the SDK's
 /// `gl_pack_descriptors` cites it).
 const IMAGE_TYPE_2D: u32 = 9;
@@ -4428,6 +4497,86 @@ mod tests {
             &mut Submission::default(),
         );
         assert_eq!(saturated, [[true, false], [false, false]]);
+    }
+
+    /// A dispatch whose buffers no window spans binds each on its own (D746): STKT00001's copy,
+    /// from one buffer to another 128 MiB away, prepares with both ranges bound and no window,
+    /// and two ranges that share a byte are refused.
+    #[test]
+    fn a_dispatch_binds_buffers_no_window_spans() {
+        use super::Pipeline;
+        use crate::dispatch::DispatchState;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        const PROGRAM: u64 = 0x1_0000;
+        const SOURCE: u64 = 0x4_0a60_0000;
+        const DESTINATION: u64 = 0x4_1260_0000;
+        struct Memory(Vec<(u64, Vec<u8>)>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                self.0.iter().find_map(|(base, bytes)| {
+                    let start = usize::try_from(address.checked_sub(*base)?).ok()?;
+                    bytes.get(start..start.checked_add(length)?)
+                })
+            }
+        }
+        // v_lshlrev_b32 v0, 2, v0; buffer_load_dword v1, v0, s[8:11], 0 offen; s_waitcnt;
+        // buffer_store_dword v1, v0, s[12:15], 0 offen; s_endpgm.
+        let program: Vec<u8> = [
+            0x3400_0082_u32,
+            0xe030_1000,
+            0x8002_0100,
+            0xbf8c_3f70,
+            0xe070_1000,
+            0x8003_0100,
+            0xbf81_0000,
+            0xbf9f_0000,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let mut program_bytes = program;
+        program_bytes.resize(super::MAX_SHADER_BYTES, 0);
+        let state = |destination: u64| {
+            let mut user_data = vec![Some(0); 16];
+            for (at, base) in [(8, SOURCE), (12, destination)] {
+                user_data[at] = Some(base as u32);
+                user_data[at + 1] = Some((base >> 32) as u32 & 0xffff);
+                user_data[at + 2] = Some(64 * 4);
+                user_data[at + 3] = Some(0x3101_6fac);
+            }
+            DispatchState {
+                program: PROGRAM,
+                user_data,
+                inputs: ComputeInputs {
+                    thread_id_components: 1,
+                    threads: [64, 1, 1],
+                    ..ComputeInputs::default()
+                },
+                width: Width::Wave64,
+                dx10_clamp: None,
+                groups: [1, 1, 1],
+            }
+        };
+        let memory = Memory(vec![
+            (PROGRAM, program_bytes),
+            (SOURCE, vec![0x11; 0x400]),
+            (DESTINATION, vec![0x22; 0x400]),
+        ]);
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        let prepared = pipeline
+            .prepare_dispatch(&state(DESTINATION), &memory)
+            .expect("the copy prepares");
+        assert_eq!(prepared.buffers, [(SOURCE, 256), (DESTINATION, 256)]);
+        assert!(prepared.window.is_none(), "nothing is left to a window");
+        let overlapping = pipeline
+            .prepare_dispatch(&state(SOURCE + 16), &memory)
+            .expect_err("two copies of one byte");
+        assert!(overlapping.contains("overlap"), "{overlapping}");
     }
 
     /// A one-byte linear texture with no pitch of its own is read at 256 texels a row, as
