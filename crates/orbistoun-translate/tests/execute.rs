@@ -6100,3 +6100,197 @@ fn the_cross_lane_reads_take_the_lanes_they_name() {
         assert_eq!(*stored, (lane & !15) + 15 - (lane & 15), "lane {lane}");
     }
 }
+
+/// A SOP1 instruction: `name sD, <source code>`.
+fn sop1(name: &str, dst: u32, source: u32) -> u32 {
+    head(name) | (dst << 16) | source
+}
+
+/// The culling shader's 64-bit scalar logic and bit-field extract, each writing the condition code
+/// a select then reads: xor, nor and or-not across a pair, and a field of a pair.
+#[test]
+fn the_sixty_four_bit_scalar_logic_and_extract_compute_as_published() {
+    if !device_or_skip("the_sixty_four_bit_scalar_logic_and_extract_compute_as_published") {
+        return;
+    }
+    let minus_one = 193;
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(0, 0x0f0f_0f0f));
+    program.extend(s_mov_literal(1, 0x8000_0001));
+    program.push(sop2("s_xor_b64", 2, minus_one, 0)); // s[2:3] = ~s[0:1]
+    program.push(sop2("s_nor_b64", 4, 0, 0)); // s[4:5] = ~(s[0:1] | s[0:1])
+    program.push(sop2("s_orn2_b64", 6, 128, 0)); // s[6:7] = 0 | ~s[0:1]
+    program.push(s_endpgm());
+    let registers = run(&program);
+    for at in [2, 4, 6] {
+        assert_eq!(
+            (scalar(&registers, at), scalar(&registers, at + 1)),
+            (0xf0f0_f0f0, 0x7fff_fffe),
+            "s[{at}:{}]",
+            at + 1
+        );
+    }
+
+    // s_bfe_u64 s[2:3], s[0:1], (width 8 << 16) | offset 28: bits 28..36 of 0x80000001_0f0f0f0f,
+    // which straddle the halves: 0x0 then 0x1 above it, 0x10.
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(0, 0x0f0f_0f0f));
+    program.extend(s_mov_literal(1, 0x8000_0001));
+    program.extend(s_mov_literal(4, (8 << 16) | 0x1c));
+    program.push(sop2("s_bfe_u64", 2, 0, 4));
+    // A width of sixty-four keeps every bit shifted down: from bit 32, the high half alone.
+    program.extend(s_mov_literal(4, (64 << 16) | 0x20));
+    program.push(sop2("s_bfe_u64", 6, 0, 4));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!((scalar(&registers, 2), scalar(&registers, 3)), (0x10, 0));
+    assert_eq!(
+        (scalar(&registers, 6), scalar(&registers, 7)),
+        (0x8000_0001, 0)
+    );
+}
+
+/// The 32-bit scalar arithmetic: a logical right shift, an unsigned add whose condition code is
+/// the carry, a select on it, a bit test, and a pair's population count.
+#[test]
+fn the_scalar_shift_add_select_test_and_count_compute_as_published() {
+    if !device_or_skip("the_scalar_shift_add_select_test_and_count_compute_as_published") {
+        return;
+    }
+    let minus_one = 193;
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(0, 0x8000_0000));
+    program.push(sop2("s_lshr_b32", 1, 0, 128 + 4)); // 0x0800_0000
+    program.push(sop2("s_add_u32", 2, minus_one, 128 + 2)); // 0xffffffff + 2 = 1, carry
+    program.push(sop2("s_cselect_b32", 3, 128 + 9, 128 + 4)); // carry set: 9
+    program.push(sop2("s_add_u32", 4, 128 + 1, 128 + 2)); // 3, no carry
+    program.push(sop2("s_cselect_b32", 5, 128 + 9, 128 + 4)); // carry clear: 4
+    program.push(s_cmp_i32("s_bitcmp1_b32", 0, 128 + 31)); // bit 31 of s0 is set
+    program.push(sop2("s_cselect_b32", 6, 128 + 9, 128 + 4)); // set: 9
+    program.extend(s_mov_literal(0, 0x8000_0001));
+    program.push(sop1("s_bcnt1_i32_b64", 7, minus_one)); // all 64 bits
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 1), 0x0800_0000);
+    assert_eq!(scalar(&registers, 2), 1);
+    assert_eq!(scalar(&registers, 3), 9, "the carry");
+    assert_eq!(scalar(&registers, 5), 4, "no carry");
+    assert_eq!(scalar(&registers, 6), 9, "the bit");
+    assert_eq!(
+        scalar(&registers, 7),
+        64,
+        "every bit of an inline -1 across a pair"
+    );
+}
+
+/// `s_and_saveexec_b64` keeps the execution mask it narrows: lanes 0 to 3 of an all-lane mask kept,
+/// the old mask saved, and only those lanes store.
+#[test]
+fn and_save_exec_narrows_the_mask_and_keeps_the_old_one() {
+    if !device_or_skip("and_save_exec_narrows_the_mask_and_keeps_the_old_one") {
+        return;
+    }
+    let mut mask_program = Vec::new();
+    mask_program.extend(s_mov_literal(4, 0xf));
+    mask_program.push(sop1("s_mov_b32", 5, 128));
+    mask_program.push(sop1("s_and_saveexec_b64", 6, 4));
+    let (registers, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+    assert_eq!(
+        (scalar(&registers, 6), scalar(&registers, 7)),
+        (u32::MAX, u32::MAX),
+        "the old mask"
+    );
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane < 4 { lane as u32 } else { 0 };
+        assert_eq!(*stored, expected, "lane {lane}");
+    }
+}
+
+/// `v_rndne_f32` rounds a tie to the even integer, `v_bfrev_b32` reverses the bits, and the integer
+/// and float compares into the execution mask keep the lanes that pass.
+#[test]
+fn rounding_reversal_and_more_compares_into_exec() {
+    if !device_or_skip("rounding_reversal_and_more_compares_into_exec") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 2.5f32.to_bits()));
+    program.push(vop1_vv("v_rndne_f32_e32", 1, 0));
+    program.extend(v_mov_literal(2, 3.5f32.to_bits()));
+    program.push(vop1_vv("v_rndne_f32_e32", 3, 2));
+    program.extend(v_mov_literal(4, 0x0000_0001));
+    program.push(vop1_vv("v_bfrev_b32_e32", 5, 4));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 2.0f32.to_bits(), "2.5 to the even 2");
+    assert_eq!(vector(&registers, 3), 4.0f32.to_bits(), "3.5 to the even 4");
+    assert_eq!(vector(&registers, 5), 0x8000_0000);
+
+    // Each lane's index against 5: equal keeps lane 5, greater keeps lanes 6 up, and the float
+    // compare of 5.0 against the index as a float keeps lanes 0 to 4.
+    for (name, float, kept) in [
+        ("v_cmpx_eq_i32_e32", false, 5..6),
+        ("v_cmpx_gt_i32_e32", false, 0..5),
+        ("v_cmpx_gt_f32_e32", true, 0..5),
+    ] {
+        let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
+        mask_program.push(vop1_vv("v_cvt_f32_u32_e32", 2, 0));
+        let five = if float { 5.0f32.to_bits() } else { 5 };
+        mask_program.extend(v_mov_literal(1, five));
+        // `v_cmpx a, b` compares `a` op `b`: five against the lane.
+        let lane_register = if float { 2 } else { 0 };
+        mask_program.push(head(name) | (lane_register << 9) | vgpr_code(1));
+        let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+        for (lane, stored) in memory.iter().take(64).enumerate() {
+            let expected = if kept.contains(&lane) { lane as u32 } else { 0 };
+            assert_eq!(*stored, expected, "{name}, lane {lane}");
+        }
+    }
+}
+
+/// `s_bfe_u64 exec, -1, count` keeps a wave's first `count` lanes, as ACO's culling shader makes
+/// its mask: five lanes, so lanes 0 to 4 store.
+#[test]
+fn a_bit_field_into_exec_keeps_the_first_lanes() {
+    if !device_or_skip("a_bit_field_into_exec_keeps_the_first_lanes") {
+        return;
+    }
+    let mut mask_program = Vec::new();
+    mask_program.extend(s_mov_literal(4, 5 << 16));
+    // EXEC_LO is code 126.
+    mask_program.push(sop2("s_bfe_u64", 126, 193, 4));
+    let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane < 5 { lane as u32 } else { 0 };
+        assert_eq!(*stored, expected, "lane {lane}");
+    }
+}
+
+/// `v_mad_u32_u16` with `op_sel` multiplies the high halves it picks: `a`'s high 0xffff and `b`'s
+/// low 5, plus 7.
+#[test]
+fn a_sixteen_bit_multiply_add_takes_the_halves_op_sel_picks() {
+    if !device_or_skip("a_sixteen_bit_multiply_add_takes_the_halves_op_sel_picks") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0xffff_0003));
+    program.extend(v_mov_literal(1, 0x0001_0005));
+    program.extend(v_mov_literal(2, 7));
+    program.extend(vop3_op_sel(
+        "v_mad_u32_u16",
+        3,
+        [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+        0b01,
+    ));
+    program.extend(vop3_op_sel(
+        "v_mad_u32_u16",
+        4,
+        [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+        0b10,
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 0xffff * 5 + 7, "a's high half");
+    assert_eq!(vector(&registers, 4), 3 + 7, "b's high half");
+}

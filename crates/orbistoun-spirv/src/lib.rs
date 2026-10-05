@@ -236,6 +236,8 @@ pub mod op {
     pub const NOT: u16 = 200;
     /// Counts the set bits of an integer.
     pub const BIT_COUNT: u16 = 205;
+    /// Reverses the bits of an integer.
+    pub const BIT_REVERSE: u16 = 204;
     /// Integer inequality, producing a boolean.
     pub const INOT_EQUAL: u16 = 171;
     /// Ordered float equality.
@@ -2027,6 +2029,7 @@ static SHAPES: &[ShapeEntry] = &[
     (op::LOGICAL_OR, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::NOT, Some(1), &[0, 2], None, RestStride::Every),
     (op::BIT_COUNT, Some(1), &[0, 2], None, RestStride::Every),
+    (op::BIT_REVERSE, Some(1), &[0, 2], None, RestStride::Every),
     (op::INOT_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::FORD_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (

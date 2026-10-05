@@ -85,6 +85,21 @@ v_msad_u8 v3, v4, v5, v6
 v_readlane_b32 s3, v4, s5
 v_mul_lo_u32 v3, v4, v5
 v_and_or_b32 v3, v4, v5, v6
+s_bfe_u64 s[4:5], s[6:7], s2
+s_xor_b64 s[4:5], s[6:7], s[2:3]
+s_nor_b64 s[4:5], s[6:7], s[2:3]
+s_orn2_b64 s[4:5], s[6:7], s[2:3]
+s_lshr_b32 s4, s6, s2
+s_add_u32 s4, s6, s2
+s_cselect_b32 s4, s6, s2
+s_bitcmp1_b32 s6, s2
+s_and_saveexec_b64 s[4:5], s[6:7]
+s_bcnt1_i32_b64 s4, s[6:7]
+v_rndne_f32_e32 v3, v1
+v_bfrev_b32_e32 v3, v1
+v_cmpx_gt_f32_e32 v1, v2
+v_cmpx_eq_i32_e32 v1, v2
+v_cmpx_gt_i32_e32 v1, v2
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

@@ -53,6 +53,21 @@
 0x000164 8 v_readlane_b32 s3, v4, s5
 0x00016c 8 v_mul_lo_u32 v3, v4, v5
 0x000174 8 v_and_or_b32 v3, v4, v5, v6
-0x00017c 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x000184 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x00018c 4 s_endpgm
+0x00017c 4 s_bfe_u64 s[4:5], s[6:7], s2
+0x000180 4 s_xor_b64 s[4:5], s[6:7], s[2:3]
+0x000184 4 s_nor_b64 s[4:5], s[6:7], s[2:3]
+0x000188 4 s_orn2_b64 s[4:5], s[6:7], s[2:3]
+0x00018c 4 s_lshr_b32 s4, s6, s2
+0x000190 4 s_add_u32 s4, s6, s2
+0x000194 4 s_cselect_b32 s4, s6, s2
+0x000198 4 s_bitcmp1_b32 s6, s2
+0x00019c 4 s_and_saveexec_b64 s[4:5], s[6:7]
+0x0001a0 4 s_bcnt1_i32_b64 s4, s[6:7]
+0x0001a4 4 v_rndne_f32_e32 v3, v1
+0x0001a8 4 v_bfrev_b32_e32 v3, v1
+0x0001ac 4 v_cmpx_gt_f32_e32 v1, v2
+0x0001b0 4 v_cmpx_eq_i32_e32 v1, v2
+0x0001b4 4 v_cmpx_gt_i32_e32 v1, v2
+0x0001b8 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0001c0 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0001c8 4 s_endpgm

@@ -263,9 +263,29 @@ opcode = 10
 name = "s_wqm_b64"
 
 [[mnemonic]]
+family = "SOP1"
+opcode = 16
+name = "s_bcnt1_i32_b64"
+
+[[mnemonic]]
+family = "SOP1"
+opcode = 36
+name = "s_and_saveexec_b64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 0
+name = "s_add_u32"
+
+[[mnemonic]]
 family = "SOP2"
 opcode = 2
 name = "s_add_i32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 10
+name = "s_cselect_b32"
 
 [[mnemonic]]
 family = "SOP2"
@@ -289,13 +309,33 @@ name = "s_xor_b32"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 19
+name = "s_xor_b64"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 21
 name = "s_andn2_b64"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 23
+name = "s_orn2_b64"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 27
+name = "s_nor_b64"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 30
 name = "s_lshl_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 32
+name = "s_lshr_b32"
 
 [[mnemonic]]
 family = "SOP2"
@@ -319,6 +359,11 @@ name = "s_bfe_u32"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 41
+name = "s_bfe_u64"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 50
 name = "s_pack_ll_b32_b16"
 
@@ -336,6 +381,11 @@ name = "s_cmp_lt_i32"
 family = "SOPC"
 opcode = 7
 name = "s_cmp_lg_u32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 13
+name = "s_bitcmp1_b32"
 
 [[mnemonic]]
 family = "SOPK"
@@ -479,6 +529,11 @@ name = "v_cvt_i32_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 35
+name = "v_rndne_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 37
 name = "v_exp_f32_e32"
 
@@ -511,6 +566,11 @@ name = "v_sin_f32_e32"
 family = "VOP1"
 opcode = 54
 name = "v_cos_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 56
+name = "v_bfrev_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
@@ -809,6 +869,11 @@ name = "v_cmp_neq_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 20
+name = "v_cmpx_gt_f32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 29
 name = "v_cmpx_neq_f32_e32"
 
@@ -816,6 +881,16 @@ name = "v_cmpx_neq_f32_e32"
 family = "VOPC"
 opcode = 133
 name = "v_cmp_ne_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 146
+name = "v_cmpx_eq_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 148
+name = "v_cmpx_gt_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"

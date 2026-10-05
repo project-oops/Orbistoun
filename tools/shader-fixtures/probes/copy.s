@@ -302,3 +302,81 @@ v_and_or_b32 v200, s5, v9, v190
 v_and_or_b32 v255, v12, s30, 64
 v_and_or_b32 v9, -1, v77, v3
 v_and_or_b32 v130, v88, 4, s101
+
+// ---- The culling primitive shader's scalar mask and count arithmetic, and its rounding,
+// bit reversal and compares into the execution mask ------------------------------------------
+s_bfe_u64 s[4:5], s[6:7], s2
+s_bfe_u64 s[100:101], s[40:41], s90
+s_bfe_u64 s[0:1], s[96:97], s7
+s_bfe_u64 s[62:63], -1, s33
+s_bfe_u64 s[8:9], s[2:3], 64
+s_xor_b64 s[4:5], s[6:7], s[2:3]
+s_xor_b64 s[100:101], s[40:41], s[90:91]
+s_xor_b64 s[0:1], -1, s[96:97]
+s_xor_b64 s[62:63], s[2:3], 64
+s_xor_b64 s[8:9], 4, s[32:33]
+s_nor_b64 s[4:5], s[6:7], s[2:3]
+s_nor_b64 s[100:101], s[40:41], s[90:91]
+s_nor_b64 s[0:1], -1, s[96:97]
+s_nor_b64 s[62:63], s[2:3], 64
+s_nor_b64 s[8:9], 4, s[32:33]
+s_orn2_b64 s[4:5], s[6:7], s[2:3]
+s_orn2_b64 s[100:101], s[40:41], s[90:91]
+s_orn2_b64 s[0:1], -1, s[96:97]
+s_orn2_b64 s[62:63], s[2:3], 64
+s_orn2_b64 s[8:9], 4, s[32:33]
+s_lshr_b32 s4, s6, s2
+s_lshr_b32 s101, s40, s90
+s_lshr_b32 s0, -1, s97
+s_lshr_b32 s63, s2, 31
+s_lshr_b32 s8, 4, s33
+s_add_u32 s4, s6, s2
+s_add_u32 s101, s40, s90
+s_add_u32 s0, -1, s97
+s_add_u32 s63, s2, 64
+s_add_u32 s8, 4, s33
+s_cselect_b32 s4, s6, s2
+s_cselect_b32 s101, s40, s90
+s_cselect_b32 s0, -1, s97
+s_cselect_b32 s63, s2, 64
+s_cselect_b32 s8, 4, s33
+s_bitcmp1_b32 s6, s2
+s_bitcmp1_b32 s40, s90
+s_bitcmp1_b32 -1, s97
+s_bitcmp1_b32 s2, 31
+s_bitcmp1_b32 s101, 4
+s_and_saveexec_b64 s[4:5], s[6:7]
+s_and_saveexec_b64 s[100:101], s[40:41]
+s_and_saveexec_b64 s[0:1], -1
+s_and_saveexec_b64 s[62:63], vcc
+s_and_saveexec_b64 s[8:9], 64
+s_bcnt1_i32_b64 s4, s[6:7]
+s_bcnt1_i32_b64 s101, s[40:41]
+s_bcnt1_i32_b64 s0, -1
+s_bcnt1_i32_b64 s63, vcc
+s_bcnt1_i32_b64 s8, 64
+v_rndne_f32_e32 v3, v1
+v_rndne_f32_e32 v200, s5
+v_rndne_f32_e32 v255, -1
+v_rndne_f32_e32 v9, 4
+v_rndne_f32_e32 v130, v255
+v_bfrev_b32_e32 v3, v1
+v_bfrev_b32_e32 v200, s5
+v_bfrev_b32_e32 v255, -1
+v_bfrev_b32_e32 v9, 4
+v_bfrev_b32_e32 v130, v255
+v_cmpx_gt_f32_e32 v4, v5
+v_cmpx_gt_f32_e32 s5, v190
+v_cmpx_gt_f32_e32 -1, v255
+v_cmpx_gt_f32_e32 4, v77
+v_cmpx_gt_f32_e32 v130, v12
+v_cmpx_eq_i32_e32 v4, v5
+v_cmpx_eq_i32_e32 s5, v190
+v_cmpx_eq_i32_e32 -1, v255
+v_cmpx_eq_i32_e32 4, v77
+v_cmpx_eq_i32_e32 v130, v12
+v_cmpx_gt_i32_e32 v4, v5
+v_cmpx_gt_i32_e32 s5, v190
+v_cmpx_gt_i32_e32 -1, v255
+v_cmpx_gt_i32_e32 4, v77
+v_cmpx_gt_i32_e32 v130, v12
