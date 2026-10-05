@@ -1741,6 +1741,8 @@ pub(crate) fn draw_vertices(
 pub(crate) struct Start<'a> {
     /// What the attachment clears to when it has no starting pixels.
     pub(crate) clear: [f32; 4],
+    /// A mesh draw's vertex count, which its words carry (D745).
+    pub(crate) mesh_vertices: u32,
     /// The attachment's starting pixels.
     pub(crate) initial: Option<&'a [u8]>,
     /// The user-data block.
@@ -2348,7 +2350,7 @@ fn user_data_stages(geometry: Geometry) -> vk::ShaderStageFlags {
     vk::ShaderStageFlags::FRAGMENT
         | match geometry {
             Geometry::Vertex(_) => vk::ShaderStageFlags::VERTEX,
-            Geometry::Mesh => vk::ShaderStageFlags::MESH_EXT,
+            Geometry::Mesh { .. } => vk::ShaderStageFlags::MESH_EXT,
         }
 }
 
@@ -2457,13 +2459,18 @@ pub(crate) struct BatchKey {
     fragment: DrawWords,
 }
 
-/// The geometry stage's share of a user-data block, and the fragment stage's.
-pub(crate) fn split_user_data(block: &[u32; USER_DATA_BLOCK_WORDS]) -> (DrawWords, DrawWords) {
+/// The geometry stage's share of a user-data block, and the fragment stage's, each as a draw's
+/// words; the geometry stage's carry the draw's vertex count after them (D745).
+pub(crate) fn split_user_data(
+    block: &[u32; USER_DATA_BLOCK_WORDS],
+    vertices: u32,
+) -> (DrawWords, DrawWords) {
     let mut geometry = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
     let mut fragment = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
-    let stride = DRAW_DATA_STRIDE_WORDS as usize;
-    geometry.copy_from_slice(&block[..stride]);
-    fragment.copy_from_slice(&block[stride..stride * 2]);
+    let share = USER_DATA_BLOCK_WORDS / 2;
+    geometry[..share].copy_from_slice(&block[..share]);
+    fragment[..share].copy_from_slice(&block[share..]);
+    geometry[DRAW_DATA_VERTICES_WORD as usize] = vertices;
     (geometry, fragment)
 }
 
@@ -3176,10 +3183,11 @@ fn render_resident_with(
             flush_batch(session)?;
             crate::depth::record_clear(device, command, pass.extent, clear);
         }
-        let (geometry_words, fragment) = split_user_data(&built.user_data);
+        let (geometry_words, fragment) =
+            split_user_data(&built.user_data, built.geometry.mesh_vertices());
         // A cached mesh pipeline's draw joins a batch (D718), recorded when a differing draw or
         // anything else arrives.
-        if let (Geometry::Mesh, Some(key)) = (built.geometry, key) {
+        if let (Geometry::Mesh { .. }, Some(key)) = (built.geometry, key) {
             batch_draw(
                 session,
                 BatchKey {
@@ -3250,7 +3258,7 @@ fn issue_draw(
         // many workgroups, each reading its own draw's words (D718); a lower workgroup's primitives
         // reach the rasteriser first (Vulkan's mesh shader primitive ordering), so a batch blends
         // as its draws would one by one.
-        Geometry::Mesh => {
+        Geometry::Mesh { .. } => {
             // The extension's entry points, looked up once for the process's one device.
             static MESH: std::sync::OnceLock<ash::ext::mesh_shader::Device> =
                 std::sync::OnceLock::new();
@@ -3371,7 +3379,7 @@ fn record(
     // attachment.
     unsafe { device.cmd_begin_render_pass(command, &pass_begin, vk::SubpassContents::INLINE) };
     if let Some(built) = pipeline {
-        let (geometry_words, _) = split_user_data(&built.user_data);
+        let (geometry_words, _) = split_user_data(&built.user_data, built.geometry.mesh_vertices());
         let offset = write_one_draw_waiting(device, geometry_words)?;
         bind_for_draw(device, command, &built.bind_state(), offset);
         issue_draw(instance, device, command, built.geometry, 1);
@@ -3823,7 +3831,7 @@ fn create_graphics_pipeline(
         vk::PipelineShaderStageCreateInfo::default()
             .stage(match geometry {
                 Geometry::Vertex(_) => vk::ShaderStageFlags::VERTEX,
-                Geometry::Mesh => vk::ShaderStageFlags::MESH_EXT,
+                Geometry::Mesh { .. } => vk::ShaderStageFlags::MESH_EXT,
             })
             .module(vertex)
             .name(ENTRY),
@@ -3971,7 +3979,7 @@ pub fn draw_mesh_with(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh,
+        Geometry::Mesh { vertices: 0 },
         Bound::default(),
     )
 }
@@ -4024,11 +4032,38 @@ pub fn draw_mesh_over_viewport(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh,
+        Geometry::Mesh { vertices: 0 },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
             viewport: Some(viewport),
+            ..Bound::default()
+        },
+    )
+    .map(|drawn| (drawn.pixels, drawn.memory))
+}
+
+/// [`draw_mesh_over`] for a guest draw of `vertices` vertices: the count its words carry, which a
+/// primitive shader seeded with its geometry reads (D745).
+///
+/// # Errors
+///
+/// When no device is available, when it has no mesh stage, or when any Vulkan call fails.
+pub fn draw_mesh_of_vertices_over(
+    (mesh_words, fragment_words): (&[u32], &[u32]),
+    vertices: u32,
+    (width, height): (u32, u32),
+    memory: &[u32],
+) -> Result<(Pixels, Vec<u32>), DispatchError> {
+    render_over(
+        [0.0; 4],
+        width,
+        height,
+        Some((mesh_words, fragment_words)),
+        Geometry::Mesh { vertices },
+        Bound {
+            windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
+            memory,
             ..Bound::default()
         },
     )
@@ -4057,7 +4092,7 @@ pub(crate) fn draw_mesh_over_clipped(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh,
+        Geometry::Mesh { vertices: 0 },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
@@ -4104,7 +4139,7 @@ pub(crate) fn draw_resident(
         .pipeline_key
         .filter(|_| vertices.is_none())
         .map(|pipeline| {
-            let (_, fragment) = split_user_data(start.user_data);
+            let (_, fragment) = split_user_data(start.user_data, start.mesh_vertices);
             BatchKey {
                 pipeline: pipeline.get(),
                 framebuffer: pass.framebuffer,
@@ -4117,7 +4152,7 @@ pub(crate) fn draw_resident(
             }
         });
     if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
-        let (words, _) = split_user_data(start.user_data);
+        let (words, _) = split_user_data(start.user_data, start.mesh_vertices);
         if join_open_batch(&key, words) {
             return Ok(Some(key));
         }
@@ -4128,7 +4163,12 @@ pub(crate) fn draw_resident(
         width,
         height,
         Some((geometry_words, fragment_words)),
-        vertices.map_or(Geometry::Mesh, Geometry::Vertex),
+        vertices.map_or(
+            Geometry::Mesh {
+                vertices: start.mesh_vertices,
+            },
+            Geometry::Vertex,
+        ),
         Bound {
             windows: [DEFAULT_WINDOWS[0], guest_buffer.words],
             guest_buffer: Some(guest_buffer),
@@ -4181,7 +4221,7 @@ pub fn draw_mesh_over_texture(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh,
+        Geometry::Mesh { vertices: 0 },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
@@ -4385,8 +4425,20 @@ impl VertexDraw {
 enum Geometry {
     /// A vertex shader over the vertices the draw supplies.
     Vertex(VertexDraw),
-    /// A mesh shader, one workgroup, which supplies its own.
-    Mesh,
+    /// A mesh shader, one workgroup, which supplies its own; `vertices` is the guest draw's vertex
+    /// count, which a primitive shader seeded with its geometry reads (D745).
+    Mesh { vertices: u32 },
+}
+
+impl Geometry {
+    /// The vertex count a mesh draw's words carry (D745); zero for a vertex draw, whose words are
+    /// not a mesh module's.
+    fn mesh_vertices(self) -> u32 {
+        match self {
+            Self::Mesh { vertices } => vertices,
+            Self::Vertex(_) => 0,
+        }
+    }
 }
 
 /// Which binding a sampled image is bound at.
@@ -4407,11 +4459,14 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 /// `DRAW_DATA_BINDING`, `DRAW_DATA_STRIDE_WORDS` and `DRAW_DATA_MOST_DRAWS`.
 pub const DRAW_DATA_BINDING: u32 = 5;
 /// See [`DRAW_DATA_BINDING`].
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 32;
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 36;
+/// Where a draw's vertex count is in its stride (D745). Mirrors `orbistoun_spirv`'s
+/// `DRAW_DATA_VERTICES_WORD`.
+pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
 /// See [`DRAW_DATA_BINDING`].
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 
-/// One draw's user data in the draw-data buffer.
+/// One draw's words in the draw-data buffer: its user data, then its vertex count (D745).
 pub(crate) type DrawWords = [u32; DRAW_DATA_STRIDE_WORDS as usize];
 
 /// Bytes one dispatch's draw data may span: what the binding's range covers.

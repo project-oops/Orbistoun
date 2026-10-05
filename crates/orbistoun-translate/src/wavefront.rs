@@ -1318,6 +1318,9 @@ pub struct Wavefront<'a> {
     written: (u128, [u64; 4]),
     /// Whether a mesh module read a geometry-engine input it was not given.
     reads_geometry_input: bool,
+    /// A mesh module's draw-data buffer and the first word of this workgroup's stride in it (D718),
+    /// where its draw's vertex count is read from (D745).
+    draw_data: Option<(buffer::StorageBuffer, Id)>,
     /// The draw's bound buffers, and the slot each traced access reads, by the access's offset
     /// (D733). `None` for a module that reads through none.
     draw_buffers: Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)>,
@@ -1627,8 +1630,10 @@ fn declare_user_data_source(
     //
     // A mesh module reads its words per draw (D718): one host dispatch carries a run of guest
     // draws, one workgroup each, so the words come from the draw-data buffer at the workgroup's
-    // stride.
-    (user_data.count > 0).then(|| {
+    // stride. One seeded with its geometry reads its draw's vertex count there too (D745), user
+    // data or none.
+    let seeded = stage == Stage::Mesh && user_data.geometry.is_some();
+    (user_data.count > 0 || seeded).then(|| {
         if stage == Stage::Mesh {
             let words = b.id();
             b.declare(
@@ -1783,6 +1788,7 @@ impl<'a> Wavefront<'a> {
             reads_unwritten: false,
             written: (0, [0; 4]),
             reads_geometry_input: false,
+            draw_data: None,
             draw_buffers,
         };
 
@@ -1821,74 +1827,147 @@ impl<'a> Wavefront<'a> {
     }
 
     /// Seeds the geometry-engine inputs [`GeometryInputs`] describes, every input register in
-    /// every lane: a lane that is no vertex or primitive thread reads zero.
+    /// every lane: a lane that is no vertex or primitive thread reads zero. The counts are the
+    /// draw's, read from its words at run time (D745): its vertex count, and the primitive count
+    /// the assembly makes of it.
     fn seed_geometry(&mut self, geometry: GeometryInputs) {
         let GeometryInputs {
             first_vertex,
-            vertices,
-            primitives,
+            vertices: whole,
             assembly,
             indices,
+            ..
         } = geometry;
         // An indexed draw's index buffer is bound after the buffers the program reads through.
         let index_slot = self.draw_buffers.as_ref().map_or(0, |(_, served)| {
             served.values().max().map_or(0, |&slot| slot + 1)
         });
-        let tg_info = self.constant((vertices << 12) | (primitives << 22));
+        let vertices = self
+            .draw_word(orbistoun_spirv::DRAW_DATA_VERTICES_WORD)
+            .unwrap_or_else(|| self.constant(whole));
+        let primitives = self.primitives_of(assembly, vertices);
+        let (twelve, twenty_two, eight) = (self.constant(12), self.constant(22), self.constant(8));
+        let shifted_vertices = self.binary(op::SHIFT_LEFT_LOGICAL, vertices, twelve);
+        let shifted_primitives = self.binary(op::SHIFT_LEFT_LOGICAL, primitives, twenty_two);
+        let tg_info = self.binary(op::BITWISE_OR, shifted_vertices, shifted_primitives);
         self.store_scalar(2, tg_info);
-        let wave_info = self.constant(vertices | (primitives << 8) | (1 << 28));
+        let primitives_at_eight = self.binary(op::SHIFT_LEFT_LOGICAL, primitives, eight);
+        let one_wave = self.constant(1 << 28);
+        let counts = self.binary(op::BITWISE_OR, vertices, primitives_at_eight);
+        let wave_info = self.binary(op::BITWISE_OR, counts, one_wave);
         self.store_scalar(3, wave_info);
+        let zero = self.constant(0);
         for lane in 0..self.lanes {
-            let is_primitive = lane < primitives;
+            let at = self.constant(lane);
+            let is_primitive = self.compare(op::ULESS_THAN, at, primitives);
+            let is_vertex = self.compare(op::ULESS_THAN, at, vertices);
             let [first, second, third] = assembly.vertices_of(lane);
-            let words = [
-                // v0: the first two vertex indices; v1: the third.
-                if is_primitive {
-                    first | (second << 16)
-                } else {
-                    0
-                },
-                if is_primitive { third } else { 0 },
-                // v2: the primitive id; v3: the invocation id; v4: the fifth and sixth indices.
-                if is_primitive { lane } else { 0 },
-                0,
-                0,
-                // v5: the vertex id, unless an index buffer gives it; v6, v7: user VGPRs; v8: the
-                // instance id.
-                if lane < vertices && indices.is_none() {
-                    first_vertex + lane
-                } else {
-                    0
-                },
-                0,
-                0,
-                0,
+            // v0: the first two vertex indices; v1: the third; v2: the primitive id; v3: the
+            // invocation id; v4: the fifth and sixth indices; v5: the vertex id, unless an index
+            // buffer gives it; v6, v7: user VGPRs; v8: the instance id.
+            let words: [(Option<Id>, u32); 9] = [
+                (Some(is_primitive), first | (second << 16)),
+                (Some(is_primitive), third),
+                (Some(is_primitive), lane),
+                (None, 0),
+                (None, 0),
+                (indices.is_none().then_some(is_vertex), first_vertex + lane),
+                (None, 0),
+                (None, 0),
+                (None, 0),
             ];
-            for (register, word) in (0..).zip(words) {
-                let value = self.constant(word);
+            for (register, (when, word)) in (0..).zip(words) {
+                let value = match when {
+                    Some(condition) => {
+                        let word = self.constant(word);
+                        self.select(condition, word, zero)
+                    }
+                    None => zero,
+                };
                 self.store_lane_masked(register, lane, value);
             }
-            if let (Some(width), true) = (indices, lane < vertices) {
-                let id = self.index_at(index_slot, width, lane);
+            if let Some(width) = indices {
+                // A lane past the draw's vertices reads the first index and keeps zero.
+                let position = self.select(is_vertex, at, zero);
+                let id = self.index_at(index_slot, width, position);
+                let id = self.select(is_vertex, id, zero);
                 self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
             }
         }
     }
 
-    /// Index `position` of the draw's index buffer at `slot`, `width` wide.
+    /// Word `word` of this workgroup's stride of the draw-data buffer (D718), or `None` for a module
+    /// that reads none.
+    fn draw_word(&mut self, word: u32) -> Option<Id> {
+        let (block, first) = self.draw_data?;
+        let u32_type = self.u32_type;
+        let within = self.constant(word);
+        let index = self.builder.id();
+        self.builder
+            .function(op::IADD, &[u32_type.0, index.0, first.0, within.0]);
+        let member = self.constant(0);
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[
+                block.element_ptr.0,
+                pointer.0,
+                block.buffer.0,
+                member.0,
+                index.0,
+            ],
+        );
+        let value = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        Some(value)
+    }
+
+    /// The primitive count `assembly` makes of `vertices`, at run time: a list's whole triangles
+    /// or lines, a strip's vertices past its first two or one.
+    fn primitives_of(&mut self, assembly: Assembly, vertices: Id) -> Id {
+        let saturating_less = |model: &mut Self, by: u32| {
+            let by = model.constant(by);
+            let short = model.compare(op::ULESS_THAN, vertices, by);
+            let less = model.binary(op::ISUB, vertices, by);
+            let zero = model.constant(0);
+            model.select(short, zero, less)
+        };
+        match assembly {
+            Assembly::List => {
+                let three = self.constant(3);
+                self.binary(op::UDIV, vertices, three)
+            }
+            Assembly::LineList => {
+                let two = self.constant(2);
+                self.binary(op::UDIV, vertices, two)
+            }
+            Assembly::Strip { .. } => saturating_less(self, 2),
+            Assembly::LineStrip => saturating_less(self, 1),
+        }
+    }
+
+    /// The index at `position` of the draw's index buffer at `slot`, `width` wide.
     ///
     /// Whole words of the bound buffer, so an index's word is read and its half taken.
-    fn index_at(&mut self, slot: u32, width: IndexWidth, position: u32) -> Id {
-        let bit = position * width.bytes() * 8;
-        let word_index = self.constant(bit / 32);
+    fn index_at(&mut self, slot: u32, width: IndexWidth, position: Id) -> Id {
+        let (word_index, shift) = match width {
+            IndexWidth::Bits32 => (position, None),
+            IndexWidth::Bits16 => {
+                let one = self.constant(1);
+                let word = self.binary(op::SHIFT_RIGHT_LOGICAL, position, one);
+                let odd = self.binary(op::BITWISE_AND, position, one);
+                let four = self.constant(4);
+                (word, Some(self.binary(op::SHIFT_LEFT_LOGICAL, odd, four)))
+            }
+        };
         // A module declares the draw buffers it reads, and an indexed one always declares them.
         let Ok(word) = self.read_draw_buffer(slot, word_index) else {
             return self.constant(0);
         };
-        match width {
-            IndexWidth::Bits32 => word,
-            IndexWidth::Bits16 => {
-                let shift = self.constant(bit % 32);
+        match shift {
+            None => word,
+            Some(shift) => {
                 let shifted = self.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
                 let low = self.constant(0xFFFF);
                 self.binary(op::BITWISE_AND, shifted, low)
@@ -1915,6 +1994,7 @@ impl<'a> Wavefront<'a> {
                 let first = self.builder.id();
                 self.builder
                     .function(op::IMUL, &[u32_type.0, first.0, x.0, stride.0]);
+                self.draw_data = Some((buffer, first));
                 (buffer, Some(first))
             }
         };

@@ -8,7 +8,7 @@
 //! rectangle.
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
-use orbistoun_gpu_vulkan::framebuffer::draw_mesh_over;
+use orbistoun_gpu_vulkan::framebuffer::{draw_mesh_of_vertices_over, draw_mesh_over};
 use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
 use orbistoun_translate::wavefront::{MeshPrimitive, Stage, Window};
 use orbistoun_translate::{Fidelity, Strategy, Width, translate_windowed_primitive};
@@ -153,7 +153,9 @@ fn storing_inputs_shader() -> Vec<u8> {
 /// `s2` and merged_wave_info `3 | 1 << 8 | 1 << 28` in `s3`; primitive thread zero has vertices
 /// 0 and 1 in `v0` and 2 in `v1` and its id in `v2`; each vertex thread its id in `v5`; any other
 /// thread zeros. Without the geometry the same shader is refused, since it reads what nothing
-/// seeded.
+/// seeded. The counts are the draw's, from its words (D745): the module is translated with none,
+/// as the pipeline translates it, and a second draw of six vertices through the same module
+/// finds two primitives.
 #[test]
 fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
     use orbistoun_translate::wavefront::{GeometryInputs, UserData};
@@ -187,16 +189,25 @@ fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
     ));
     let module = with(Some(GeometryInputs {
         first_vertex: 0,
-        vertices: 3,
-        primitives: 1,
+        vertices: 0,
+        primitives: 0,
         assembly: orbistoun_translate::wavefront::Assembly::List,
         indices: None,
     }))
     .expect("translates with its geometry")
     .module;
     let fragment = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
-    let (_, memory) = draw_mesh_over(&module, &fragment, [0.0; 4], 4, 4, &vec![0u32; 1024])
-        .expect("the draw ran");
+    let (_, six) = draw_mesh_of_vertices_over((&module, &fragment), 6, (4, 4), &vec![0u32; 1024])
+        .expect("the six-vertex draw ran");
+    assert_eq!(
+        &six[0x800 / 4..0x800 / 4 + 2],
+        [6 << 12 | 2 << 22, 6 | 2 << 8 | 1 << 28],
+        "the second draw's counts, through the same module"
+    );
+    assert_eq!(&six[4..8], [3 | 4 << 16, 5, 1, 1], "primitive thread one");
+    let (_, memory) =
+        draw_mesh_of_vertices_over((&module, &fragment), 3, (4, 4), &vec![0u32; 1024])
+            .expect("the draw ran");
     let lane = |n: usize| &memory[n * 4..n * 4 + 4];
     assert_eq!(lane(0), [1 << 16, 2, 0, 0], "v0, v1, v5, v2 of thread zero");
     assert_eq!(lane(1), [0, 0, 1, 0], "a vertex thread only");

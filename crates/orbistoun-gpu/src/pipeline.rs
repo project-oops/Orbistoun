@@ -2412,7 +2412,16 @@ impl Pipeline {
         let (geometry, unseeded) = match geometry {
             // Only the primitive shader is seeded with the geometry.
             Some(_) if candidate.stage != ShaderStage::Vertex => (None, None),
-            Some(Ok(geometry)) => (Some(geometry), None),
+            // The draw's counts travel in its words, not the module (D745): one module serves every
+            // draw that assembles and indexes the same way.
+            Some(Ok(geometry)) => (
+                Some(GeometryInputs {
+                    vertices: 0,
+                    primitives: 0,
+                    ..geometry
+                }),
+                None,
+            ),
             // A shader prepared per draw for its buffers' formats (D738) or its flat twins (D742) is
             // tried without the geometry; one that also reads the geometry is then refused, saying
             // why.

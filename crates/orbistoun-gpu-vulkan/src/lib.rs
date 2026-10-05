@@ -889,14 +889,14 @@ impl VulkanBackend {
 
     /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so this
     /// draw joins the batch if it is still open; `false` when it cannot.
-    fn join_unchanged_batch(&mut self) -> bool {
+    fn join_unchanged_batch(&mut self, vertices: u32) -> bool {
         let Some((generation, key)) = self.batched else {
             return false;
         };
         if generation != self.state_generation {
             return false;
         }
-        let (words, _) = framebuffer::split_user_data(&self.user_data);
+        let (words, _) = framebuffer::split_user_data(&self.user_data, vertices);
         if !framebuffer::join_open_batch(&key, words) {
             return false;
         }
@@ -983,7 +983,7 @@ impl VulkanBackend {
         indexed: bool,
     ) -> Result<(), BackendError> {
         if orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawJoined, || {
-            self.join_unchanged_batch()
+            self.join_unchanged_batch(draw.vertices)
         }) {
             return Ok(());
         }
@@ -1071,6 +1071,7 @@ impl VulkanBackend {
         let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
         let start = framebuffer::Start {
             clear: CLEAR_COLOUR,
+            mesh_vertices: draw.vertices,
             initial: None,
             user_data: &block,
             texture: texture.as_ref().map(|t| (&t.texels[..], t.width)),

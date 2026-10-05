@@ -175,6 +175,8 @@ pub mod op {
     pub const IADD: u16 = 128;
     /// Integer subtraction.
     pub const ISUB: u16 = 130;
+    /// `OpUDiv`.
+    pub const UDIV: u16 = 134;
     /// Integer multiplication.
     pub const IMUL: u16 = 132;
     /// Floating-point addition.
@@ -1442,8 +1444,13 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 /// [`DRAW_DATA_STRIDE_WORDS`] words at `workgroup * stride`.
 pub const DRAW_DATA_BINDING: u32 = 5;
 
-/// Words of user data each draw has in the draw-data buffer: one stage's share of the block.
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 32;
+/// Words each draw has in the draw-data buffer: one stage's share of the user-data block, then
+/// the draw's vertex count at [`DRAW_DATA_VERTICES_WORD`] (D745), padded to a multiple of four.
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 36;
+
+/// Where in a draw's stride of the draw-data buffer its vertex count is: after the thirty-two
+/// user-data words (D745).
+pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
 
 /// The most draws one dispatch carries, and so how many strides the draw-data binding spans.
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
@@ -1962,6 +1969,7 @@ static SHAPES: &[ShapeEntry] = &[
     (op::FCONVERT, Some(1), &[0, 2], None, RestStride::Every),
     (op::IADD, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::ISUB, Some(1), &[0, 2, 3], None, RestStride::Every),
+    (op::UDIV, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::IMUL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::FADD, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::FSUB, Some(1), &[0, 2, 3], None, RestStride::Every),
