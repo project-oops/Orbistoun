@@ -310,8 +310,9 @@ pub struct SubmissionReport {
     /// whatever the shader's output held.
     pub unexported_channel_draws: usize,
     /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
-    /// module would read zeros where the guest's data is.
-    pub unwindowed_draws: usize,
+    /// module would read zeros where the guest's data is, and the first such access, by name and
+    /// offset.
+    pub unwindowed_draws: (usize, Option<String>),
     /// Draws whose shaders read through a buffer the draw could not bind exactly (D733), and why the
     /// first was refused.
     pub unbound_buffers: (usize, Option<&'static str>),
@@ -770,7 +771,7 @@ pub struct Pipeline {
     texture_sources: BTreeMap<ResourceId, Vec<TextureSource>>,
     /// The translated modules whose shaders read or write guest memory, which reach it only
     /// through the window.
-    memory_readers: std::collections::BTreeSet<ResourceId>,
+    memory_readers: BTreeMap<ResourceId, String>,
     /// The translated primitive shaders that read their vertex ids from the draw's index buffer
     /// (D740), which a draw binds after their traced buffers.
     index_readers: std::collections::BTreeSet<ResourceId>,
@@ -832,7 +833,7 @@ impl Pipeline {
             decoded: BTreeMap::new(),
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
-            memory_readers: std::collections::BTreeSet::new(),
+            memory_readers: BTreeMap::new(),
             index_readers: std::collections::BTreeSet::new(),
             colour_channels: BTreeMap::new(),
             texels: TexelCache::new(),
@@ -1945,8 +1946,8 @@ impl Pipeline {
             user_data,
         )
         .unwrap_or_default();
-        if reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
-            self.memory_readers.insert(resource);
+        if let Some(access) = reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
+            self.memory_readers.insert(resource, access);
         }
         if stage == Stage::Fragment {
             self.colour_channels.insert(
@@ -1959,21 +1960,31 @@ impl Pipeline {
         }
     }
 
-    /// How many draws run a module that reaches guest memory while `window` is empty. A module
-    /// reaches guest memory only through the window; with none mapped it reads zeros, so such a
-    /// draw is counted and refused rather than drawn from them.
-    fn unwindowed_draws(&self, per_draw: &[DrawShaders], window: &[u32]) -> usize {
+    /// How many draws run a module that reaches guest memory while `window` is empty, and the
+    /// first one's access. A module reaches guest memory only through the window; with none mapped
+    /// it reads zeros, so such a draw is counted and refused rather than drawn from them.
+    fn unwindowed_draws(
+        &self,
+        per_draw: &[DrawShaders],
+        window: &[u32],
+    ) -> (usize, Option<String>) {
         if !window.is_empty() {
-            return 0;
+            return (0, None);
         }
-        per_draw
+        let mut first = None;
+        let count = per_draw
             .iter()
             .filter(|shaders| {
-                shaders
+                let access = shaders
                     .iter()
-                    .any(|(_, resource)| self.memory_readers.contains(resource))
+                    .find_map(|(_, resource)| self.memory_readers.get(resource));
+                if first.is_none() {
+                    first = access.cloned();
+                }
+                access.is_some()
             })
-            .count()
+            .count();
+        (count, first)
     }
 
     /// How many draws write a colour channel their pixel shader never exports: the channels
@@ -3456,7 +3467,7 @@ fn reaches_guest_memory(
     decoded: &orbistoun_shader::Decode,
     encodings: &EncodingTable,
     served: &BTreeMap<u32, u32>,
-) -> bool {
+) -> Option<String> {
     const ACCESSES: [&str; 6] = [
         "s_buffer_load",
         "global_",
@@ -3492,22 +3503,40 @@ fn reaches_guest_memory(
             }
         }
     }
-    named.iter().any(|&(instruction, name)| {
-        if served.contains_key(&instruction.offset) {
-            return false;
-        }
-        if ACCESSES.iter().any(|prefix| name.starts_with(prefix)) {
-            return true;
-        }
-        if !name.starts_with("s_load") {
-            return false;
-        }
-        let Some(Operand::Scalar(first)) = instruction.operands.first() else {
-            return true;
-        };
-        let span = scalar_destination_span(name);
-        (*first..first.saturating_add(span)).any(|register| read.contains(&register))
-    })
+    named
+        .iter()
+        .find(|&&(instruction, name)| {
+            if served.contains_key(&instruction.offset) {
+                return false;
+            }
+            if ACCESSES.iter().any(|prefix| name.starts_with(prefix)) {
+                return true;
+            }
+            if !name.starts_with("s_load") {
+                return false;
+            }
+            let Some(Operand::Scalar(first)) = instruction.operands.first() else {
+                return true;
+            };
+            let span = scalar_destination_span(name);
+            (*first..first.saturating_add(span)).any(|register| read.contains(&register))
+        })
+        .map(|(instruction, name)| {
+            let second = instruction
+                .second_word
+                .map_or_else(String::new, |word| format!(" {word:#010x}"));
+            format!(
+                "{name} at {:#x} ({:#010x}{second}) {}",
+                instruction.offset,
+                instruction.word,
+                instruction
+                    .operands
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
 }
 
 /// The 64-bit address a shader forms from two constant scalar registers as the base of its memory
@@ -4531,8 +4560,8 @@ mod tests {
         };
         let reading = prepare(&console_vertex_program());
         let silent = prepare(&0xbf81_0000_u32.to_le_bytes());
-        assert!(pipeline.memory_readers.contains(&reading));
-        assert!(!pipeline.memory_readers.contains(&silent));
+        assert!(pipeline.memory_readers.contains_key(&reading));
+        assert!(!pipeline.memory_readers.contains_key(&silent));
     }
 
     /// A scalar load that only fills an image's descriptor registers - radeonsi's blit pixel
@@ -4560,8 +4589,12 @@ mod tests {
                 &std::collections::BTreeMap::new(),
             )
         };
-        assert!(!reaches(&only_image));
-        assert!(reaches(&also_read));
+        assert_eq!(reaches(&only_image), None);
+        // The access is named, so a refused draw says which instruction to bind or trace.
+        assert_eq!(
+            reaches(&also_read).as_deref(),
+            Some("s_load_dwordx8 at 0x0 (0xf40c0200 0xfa000400) s8, s0, 0x400")
+        );
     }
 
     /// The window a vertex program places follows its bytes, not its address.

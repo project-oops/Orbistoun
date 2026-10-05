@@ -389,13 +389,16 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
             report.unexported_channel_draws
         ));
     }
-    if report.unwindowed_draws > 0 {
+    if let (count @ 1.., access) = &report.unwindowed_draws {
         return Some(format!(
             concat!(
                 "{} draw(s) run a shader that reads guest memory, and no window is mapped ",
-                "for it to read through"
+                "for it to read through{}"
             ),
-            report.unwindowed_draws
+            count,
+            access
+                .as_ref()
+                .map_or_else(String::new, |access| format!(": {access}"))
         ));
     }
     if report.unbound_textures > 0 {

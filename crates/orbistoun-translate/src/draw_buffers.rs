@@ -469,6 +469,18 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
                 *slot = value;
             }
         }
+        // The compact move of a sixteen-bit immediate, sign-extended, as ACO writes a small
+        // constant such as a built descriptor's size.
+        ("s_movk_i32", [Operand::Scalar(destination), Operand::Immediate(raw)]) => {
+            let value = u16::try_from(*raw).ok().map(|raw| {
+                DescriptorWord::Constant(u32::from_ne_bytes(
+                    i32::from(i16::from_ne_bytes(raw.to_ne_bytes())).to_ne_bytes(),
+                ))
+            });
+            if let Some(slot) = held.get_mut(usize::from(*destination)) {
+                *slot = value;
+            }
+        }
         ("s_mov_b64", [Operand::Scalar(destination), Operand::Scalar(source)]) => {
             let pair = [
                 held.get(usize::from(*source)).copied().flatten(),
@@ -588,6 +600,27 @@ mod tests {
         );
         assert_eq!(buffers.served.get(&0x14), Some(&0));
         assert_eq!(buffers.served.len(), 1);
+    }
+
+    /// A descriptor word moved in with `s_movk_i32` is its sixteen-bit immediate sign-extended, as
+    /// for the clear shader's `s_mov_b32`.
+    #[test]
+    fn a_compact_move_is_a_sign_extended_constant() {
+        let mut program = CLEAR;
+        program[1] = 0xb001_8000; // s_movk_i32 s1, 0x8000
+        program[2] = 0xb002_0100; // s_movk_i32 s2, 0x100
+        let buffers = traced(&program, 4);
+        let [BufferSource::Descriptor { words, .. }] = buffers.sources.as_slice() else {
+            panic!("one traced descriptor: {:?}", buffers.sources);
+        };
+        assert_eq!(
+            words[..3],
+            [
+                DescriptorWord::UserData(2),
+                DescriptorWord::Constant(0xffff_8000),
+                DescriptorWord::Constant(0x100),
+            ]
+        );
     }
 
     /// A descriptor loaded from a table is traced to the table's words, and the load that read it
