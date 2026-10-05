@@ -772,6 +772,25 @@ pub trait Model {
     ///
     /// # Errors
     ///
+    /// Stores `value` at word `word_index` of the draw buffer at `slot`, in `lane` (D746).
+    ///
+    /// # Errors
+    ///
+    /// In a model that binds no draw buffers, where [`Self::draw_buffer_slot`] never names one.
+    fn write_draw_buffer(
+        &mut self,
+        slot: u32,
+        word_index: Id,
+        value: Id,
+        lane: u32,
+    ) -> Result<(), TranslateError> {
+        let _ = (slot, word_index, value, lane);
+        Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: "a store through a bound buffer in a model that binds none (D746)",
+        })
+    }
+
     /// In a model that binds no draw buffers, where [`Self::draw_buffer_slot`] never names one.
     fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {
         let _ = (slot, word_index);
@@ -4539,24 +4558,52 @@ fn buffer_address<M: Model + ?Sized>(
 ///
 /// A draw buffer starts at the descriptor's base, so an access through one is addressed from zero:
 /// the descriptor's base is where the bound buffer begins, and the rest of the equation is the
-/// offset into it. A store through one is refused, since nothing writes it back.
+/// offset into it. A store through one is admitted where `stores` - an untyped store, whose
+/// dispatch's buffer is written back (D746) - and refused otherwise.
 fn buffer_reach<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    loading: bool,
+    (loading, stores): (bool, bool),
     resource: BufferResource,
 ) -> Result<(Option<u32>, BufferResource), TranslateError> {
     let Some(slot) = model.draw_buffer_slot(instruction) else {
         return Ok((None, resource));
     };
-    if !loading {
+    if !loading && !stores {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a store through a draw's bound buffer, which nothing writes back (D733)",
+            detail: "a typed store through a bound buffer, which is not written back (D746)",
         });
     }
     let base = model.constant(0);
     Ok((Some(slot), BufferResource { base, ..resource }))
+}
+
+/// Stores `value` at `address` in `lane` unless `outside`: through the window, or at `address / 4`
+/// of the bound buffer at `slot` (D746). Out of range keeps what was there, in either.
+fn store_reached<M: Model + ?Sized>(
+    model: &mut M,
+    slot: Option<u32>,
+    (address, outside): (Id, Id),
+    value: Id,
+    lane: u32,
+) -> Result<(), TranslateError> {
+    match slot {
+        None => {
+            let word = model.word_index(address);
+            let previous = model.read_memory(word);
+            let kept = pick(model, outside, previous, value);
+            write_guarded(model, address, kept, lane);
+        }
+        Some(slot) => {
+            let two = model.constant(2);
+            let word = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+            let previous = model.read_draw_buffer(slot, word)?;
+            let kept = pick(model, outside, previous, value);
+            model.write_draw_buffer(slot, word, kept, lane)?;
+        }
+    }
+    Ok(())
 }
 
 /// Reads the word at `address`: through the window, or at `address / 4` of the draw buffer at
@@ -4830,7 +4877,7 @@ fn format_buffer_load<M: Model + ?Sized>(
         });
     }
     let resource = read_buffer_resource(model, resource_base);
-    let (slot, addressed) = buffer_reach(model, instruction, true, resource)?;
+    let (slot, addressed) = buffer_reach(model, instruction, (true, false), resource)?;
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
     let element_bytes = total_bits.div_ceil(8);
@@ -5154,7 +5201,7 @@ fn packed_buffer_memory<M: Model + ?Sized>(
     let idxen = word & (1 << 13) != 0;
 
     let resource = read_buffer_resource(model, resource_base);
-    let (slot, addressed) = buffer_reach(model, instruction, loading, resource)?;
+    let (slot, addressed) = buffer_reach(model, instruction, (loading, false), resource)?;
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
@@ -5350,7 +5397,7 @@ fn buffer_access<M: Model + ?Sized>(
     let idxen = word & (1 << 13) != 0;
 
     let resource = read_buffer_resource(model, resource_base);
-    let (slot, addressed) = buffer_reach(model, instruction, loading, resource)?;
+    let (slot, addressed) = buffer_reach(model, instruction, (loading, true), resource)?;
     let flags = model.read_scalar(resource_base + 3);
     let instruction_offset = model.constant(literal_offset);
 
@@ -5405,7 +5452,9 @@ fn buffer_access<M: Model + ?Sized>(
             // can satisfy one and not the other.
             let outside = buffer_out_of_bounds(model, &resource, flags, offset, index, 4);
             let register = register + component;
-            if model.exact_memory() {
+            // A bound buffer holds every word its descriptor admits; only the window can be
+            // escaped.
+            if model.exact_memory() && slot.is_none() {
                 let escaped = buffer_escape(model, &resource, address, outside);
                 model.note_escape(escaped, Some(lane));
             }
@@ -5418,10 +5467,7 @@ fn buffer_access<M: Model + ?Sized>(
             } else {
                 let source = step_operand(data, component)?;
                 let value = model.read_source(instruction, &source, lane)?;
-                let word = model.word_index(address);
-                let previous = model.read_memory(word);
-                let kept = pick(model, outside, previous, value);
-                write_guarded(model, address, kept, lane);
+                store_reached(model, slot, (address, outside), value, lane)?;
             }
         }
     }

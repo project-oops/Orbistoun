@@ -1465,6 +1465,10 @@ pub const GEOMETRY_BUFFERS_BINDING: u32 = 0;
 /// Which binding of [`DRAW_BUFFERS_SET`] a pixel shader's buffers are at.
 pub const PIXEL_BUFFERS_BINDING: u32 = 1;
 
+/// Where a compute dispatch's traced buffers are bound in the draw-buffer set: two, after the two
+/// draw stages', and writable, since a dispatch's stores through them are written back (D746).
+pub const COMPUTE_BUFFERS_BINDING: u32 = 2;
+
 /// How many buffers one stage of a draw binds: the length of each binding's array.
 pub const DRAW_BUFFERS_PER_STAGE: u32 = 8;
 

@@ -102,12 +102,17 @@ pub(crate) struct DrawBufferArray {
     pub(crate) element_ptr: Id,
 }
 
-/// Declares a stage's draw buffers at `binding` of the draw-buffer set, read-only.
+/// Declares a stage's draw buffers at `binding` of the draw-buffer set: read-only for a draw's, and
+/// writable for a dispatch's, whose stores are written back (D746).
 ///
 /// The array always has [`orbistoun_spirv::DRAW_BUFFERS_PER_STAGE`] elements, so every module that
 /// binds any shares one layout; a word is reached with three indices: the buffer, the member, the
 /// word.
-pub(crate) fn declare_draw_buffers(b: &mut Builder, u32_type: Id, binding: u32) -> DrawBufferArray {
+pub(crate) fn declare_draw_buffers(
+    b: &mut Builder,
+    u32_type: Id,
+    (binding, writable): (u32, bool),
+) -> DrawBufferArray {
     let runtime = b.id();
     let block = b.id();
     let count = b.id();
@@ -120,7 +125,9 @@ pub(crate) fn declare_draw_buffers(b: &mut Builder, u32_type: Id, binding: u32) 
     b.annotate(op::DECORATE, &[runtime.0, decoration::ARRAY_STRIDE, 4]);
     b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
     b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
-    b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::NON_WRITABLE]);
+    if !writable {
+        b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::NON_WRITABLE]);
+    }
     b.annotate(
         op::DECORATE,
         &[

@@ -1609,9 +1609,10 @@ fn declare_draw_buffers(
     let binding = match stage {
         // An indexed primitive shader reads its index buffer through them (D740).
         _ if buffers.served.is_empty() && !indexed => return None,
-        Stage::Mesh => orbistoun_spirv::GEOMETRY_BUFFERS_BINDING,
-        Stage::Fragment => orbistoun_spirv::PIXEL_BUFFERS_BINDING,
-        Stage::Compute => return None,
+        Stage::Mesh => (orbistoun_spirv::GEOMETRY_BUFFERS_BINDING, false),
+        Stage::Fragment => (orbistoun_spirv::PIXEL_BUFFERS_BINDING, false),
+        // A dispatch stores through its buffers, which are written back (D746).
+        Stage::Compute => (orbistoun_spirv::COMPUTE_BUFFERS_BINDING, true),
     };
     Some((
         buffer::declare_draw_buffers(b, u32_type, binding),
@@ -3163,6 +3164,80 @@ impl Model for Wavefront<'_> {
             .flatten()
     }
 
+    fn write_draw_buffer(
+        &mut self,
+        slot: u32,
+        word_index: Id,
+        value: Id,
+        lane: u32,
+    ) -> Result<(), TranslateError> {
+        let known = self.lane_known(lane);
+        if known == Some(false) {
+            return Ok(());
+        }
+        let Some((array, _)) = self.draw_buffers else {
+            return Err(TranslateError::Unsupported {
+                offset: 0,
+                detail: "a draw buffer store in a module that declares none (D746)",
+            });
+        };
+        let u32_type = self.u32_type;
+        let buffer = Self::constant(self, slot);
+        let member = Self::constant(self, 0);
+        let zero = member;
+        let bool_type = self.bool_type;
+        let active = match known {
+            Some(true) => None,
+            _ => Some(self.lane_active(lane)),
+        };
+        let b = &mut self.builder;
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[array.block_ptr.0, block.0, array.variable.0, buffer.0],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        // Past the bound words the store lands on word zero with word zero's own value: defined,
+        // and no change, since the host binds every word the descriptor admits.
+        let inside = b.id();
+        b.function(
+            op::ULESS_THAN,
+            &[bool_type.0, inside.0, word_index.0, length.0],
+        );
+        let index = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, index.0, inside.0, word_index.0, zero.0],
+        );
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                array.element_ptr.0,
+                pointer.0,
+                array.variable.0,
+                buffer.0,
+                member.0,
+                index.0,
+            ],
+        );
+        let old = b.id();
+        b.function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
+        let kept = b.id();
+        b.function(op::SELECT, &[u32_type.0, kept.0, inside.0, value.0, old.0]);
+        let chosen = match active {
+            None => kept,
+            Some(active) => {
+                let chosen = b.id();
+                b.function(op::SELECT, &[u32_type.0, chosen.0, active.0, kept.0, old.0]);
+                chosen
+            }
+        };
+        b.function(op::STORE, &[pointer.0, chosen.0]);
+        Ok(())
+    }
+
     fn read_draw_buffer(&mut self, slot: u32, word_index: Id) -> Result<Id, TranslateError> {
         let Some((array, _)) = self.draw_buffers else {
             return Err(TranslateError::Unsupported {
@@ -3771,11 +3846,17 @@ pub fn draw_buffers_for(
     stage: Stage,
     user_data: UserData,
 ) -> Result<crate::draw_buffers::DrawBuffers, TranslateError> {
-    if !user_data.draw_buffers || stage == Stage::Compute {
+    if !user_data.draw_buffers {
         return Ok(crate::draw_buffers::DrawBuffers::default());
     }
-    let buffers =
-        crate::draw_buffers::trace(decode, encodings, user_data.first_register, user_data.count);
+    // A dispatch's buffers are bound writable and written back, so its stores are traced too
+    // (D746); a draw's are snapshots.
+    let buffers = crate::draw_buffers::trace(
+        decode,
+        encodings,
+        (user_data.first_register, user_data.count),
+        stage == Stage::Compute,
+    );
     if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
         return Err(TranslateError::Unsupported {
             offset: 0,

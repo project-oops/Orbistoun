@@ -9,13 +9,15 @@
 //! lazily, through the session [`compute`] and [`framebuffer`] share.
 
 pub mod compute;
+mod compute_buffers;
 pub mod compute_images;
 mod depth;
 mod draw_buffers;
 pub mod framebuffer;
 pub mod pipeline_cache;
 pub use compute::{
-    Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest, probe,
+    Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest,
+    dispatch_guest_with_buffers, probe,
 };
 
 use std::collections::BTreeMap;

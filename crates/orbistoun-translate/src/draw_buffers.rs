@@ -106,13 +106,14 @@ pub struct DrawBuffers {
 /// the scalar registers from `first_register`.
 ///
 /// Nothing is traced in a program that writes memory, which a snapshot bound for the draw would
-/// not see.
+/// not see - unless `stores` (a dispatch, whose buffers are written back, D746) and every write is
+/// an untyped buffer store, which is traced like a load.
 #[must_use]
 pub fn trace(
     decode: &Decode,
     encodings: &EncodingTable,
-    first_register: u32,
-    count: u32,
+    (first_register, count): (u32, u32),
+    stores: bool,
 ) -> DrawBuffers {
     let named: Vec<Option<(&str, &str)>> = decode
         .instructions
@@ -127,7 +128,11 @@ pub fn trace(
             ))
         })
         .collect();
-    if named.iter().flatten().any(|&(_, name)| writes_memory(name)) {
+    if named
+        .iter()
+        .flatten()
+        .any(|&(_, name)| writes_memory(name) && !(stores && untyped_buffer_store(name)))
+    {
         return DrawBuffers::default();
     }
     let Ok(blocks) = crate::blocks::split(decode, |instruction| {
@@ -311,6 +316,11 @@ fn meet(known: &mut Held, other: &Held) -> bool {
 /// the wavefront's own.
 fn writes_memory(name: &str) -> bool {
     (name.contains("store") || name.contains("atomic")) && !name.starts_with("ds_")
+}
+
+/// Whether an instruction is an untyped buffer store, which a dispatch's bound buffer takes (D746).
+fn untyped_buffer_store(name: &str) -> bool {
+    name.starts_with("buffer_store_dword")
 }
 
 /// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
@@ -556,7 +566,67 @@ mod tests {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let decoded = decode_program(&bytes, &encodings, &operands);
         assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
-        trace(&decoded, &encodings, 0, count)
+        trace(&decoded, &encodings, (0, count), false)
+    }
+
+    /// radeonsi's buffer copy as STKT00001 dispatches it, in its least: one dword loaded through
+    /// the descriptor in `s[8:11]` and stored through the one in `s[12:15]`, both from user data.
+    const COPY: [u32; 6] = [
+        0xe030_1000, // buffer_load_dword v1, v0, s[8:11], 0 offen
+        0x8002_0100,
+        0xbf8c_3f70, // s_waitcnt vmcnt(0)
+        0xe070_1000, // buffer_store_dword v1, v0, s[12:15], 0 offen
+        0x8003_0100,
+        END,
+    ];
+
+    /// A dispatch's buffer store is traced like its load (D746): the copy reads one buffer and
+    /// writes another, each through its own slot. A draw's, a snapshot, traces nothing, as does a
+    /// dispatch that writes any other way.
+    #[test]
+    fn a_dispatch_traces_its_buffer_stores() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let decode = |words: &[u32]| {
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            decode_program(&bytes, &encodings, &operands)
+        };
+        let copy = decode(&COPY);
+        let names: Vec<String> = copy
+            .instructions
+            .iter()
+            .map(|i| crate::instruction_name(i, &encodings))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "buffer_load_dword",
+                "s_waitcnt",
+                "buffer_store_dword",
+                "s_endpgm"
+            ],
+            "the hand-assembled copy"
+        );
+        let dispatch = trace(&copy, &encodings, (0, 16), true);
+        assert_eq!(dispatch.sources.len(), 2, "a buffer for each descriptor");
+        assert_eq!(
+            dispatch.served,
+            std::collections::BTreeMap::from([(0, 0), (12, 1)]),
+            "the load through slot 0, the store through slot 1"
+        );
+        assert!(
+            trace(&copy, &encodings, (0, 16), false).sources.is_empty(),
+            "a draw's store is not traced"
+        );
+        let mut global = COPY[..3].to_vec();
+        // global_store_dword v[0:1], v2, off
+        global.extend([0xdc70_8000, 0x007d_0200, END]);
+        assert!(
+            trace(&decode(&global), &encodings, (0, 16), true)
+                .sources
+                .is_empty(),
+            "a dispatch that stores another way traces nothing"
+        );
     }
 
     const END: u32 = 0xbf81_0000;

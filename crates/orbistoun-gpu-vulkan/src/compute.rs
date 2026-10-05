@@ -227,14 +227,19 @@ pub(crate) fn for_this_device(words: &[u32]) -> std::borrow::Cow<'_, [u32]> {
     }
 }
 
-/// Builds a compute pipeline bound to one storage buffer at set 0, binding 0.
+/// Builds a compute pipeline bound to one storage buffer at set 0, binding 0, with `buffers` - a
+/// dispatch's traced buffers (D746) - as set 1 where it has any.
 fn build_pipeline(
     device: &ash::Device,
     module: &[u32],
     buffer: vk::Buffer,
     size: vk::DeviceSize,
     (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
-    (push_bytes, images): (u32, &crate::compute_images::BoundImages),
+    (push_bytes, images, buffers): (
+        u32,
+        &crate::compute_images::BoundImages,
+        Option<vk::DescriptorSetLayout>,
+    ),
 ) -> Result<BoundPipeline, DispatchError> {
     let module = for_this_device(module);
     let shader_info = vk::ShaderModuleCreateInfo::default().code(&module);
@@ -263,6 +268,9 @@ fn build_pipeline(
         .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
 
     let set_layouts = [set_layout];
+    // The pipeline's layout has the dispatch's buffers as set 1; the set allocated here is set 0's.
+    let pipeline_set_layouts: Vec<vk::DescriptorSetLayout> =
+        std::iter::once(set_layout).chain(buffers).collect();
     // A module reading user data declares the push-constant block; one that reads none declares
     // none and gets no range.
     let push_ranges = [vk::PushConstantRange::default()
@@ -270,7 +278,7 @@ fn build_pipeline(
         .offset(0)
         .size(push_bytes)];
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(&set_layouts)
+        .set_layouts(&pipeline_set_layouts)
         .push_constant_ranges(if push_bytes == 0 { &[] } else { &push_ranges });
     // SAFETY: the create info outlives the call.
     let layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
@@ -643,7 +651,12 @@ fn dispatch_core(
     module: &[u32],
     binding0: &DispatchBuffer,
     binding1: &DispatchBuffer,
-    (groups, push, images): ([u32; 3], &[u32], &crate::compute_images::BoundImages),
+    (groups, push, images, buffers): (
+        [u32; 3],
+        &[u32],
+        &crate::compute_images::BoundImages,
+        Option<&crate::compute_buffers::BoundBuffers>,
+    ),
 ) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
     let push_bytes = u32::try_from(push.len() * 4)
         .map_err(|_| DispatchError::Vulkan("push constants", vk::Result::ERROR_UNKNOWN))?;
@@ -653,7 +666,7 @@ fn dispatch_core(
         binding0.buffer,
         binding0.size,
         (binding1.buffer, binding1.offset, binding1.size),
-        (push_bytes, images),
+        (push_bytes, images, buffers.map(|b| b.layout)),
     )?;
     let pipeline = bound.pipeline;
     let pipeline_layout = bound.layout;
@@ -693,6 +706,19 @@ fn dispatch_core(
             &sets,
             &[],
         );
+    }
+    if let Some(buffers) = buffers {
+        // SAFETY: recording is open; set 1 of the layout is this set's layout.
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                command,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout,
+                1,
+                &[buffers.set],
+                &[],
+            );
+        }
     }
     if !push.is_empty() {
         // SAFETY: recording is open, and the range is the one the pipeline layout declares.
@@ -803,7 +829,12 @@ pub fn dispatch(
         module,
         &binding0,
         &binding1,
-        (groups, &[], &crate::compute_images::BoundImages::none()),
+        (
+            groups,
+            &[],
+            &crate::compute_images::BoundImages::none(),
+            None,
+        ),
     )?;
 
     // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
@@ -851,7 +882,12 @@ pub(crate) fn dispatch_bound(
         module,
         observation,
         window,
-        (groups, &[], &crate::compute_images::BoundImages::none()),
+        (
+            groups,
+            &[],
+            &crate::compute_images::BoundImages::none(),
+            None,
+        ),
     )
 }
 
@@ -897,7 +933,12 @@ pub(crate) fn dispatch_reading_window(
         module,
         &observation,
         window,
-        (groups, &[], &crate::compute_images::BoundImages::none()),
+        (
+            groups,
+            &[],
+            &crate::compute_images::BoundImages::none(),
+            None,
+        ),
     );
 
     // The throwaway observation is destroyed whether or not the dispatch succeeded.
@@ -921,6 +962,8 @@ pub struct GuestDispatch {
     pub escaped: bool,
     /// The stored image's texels after the dispatch, when it bound one.
     pub stored: Option<Vec<u32>>,
+    /// Each traced buffer's words after the dispatch, by slot (D746); empty when it bound none.
+    pub buffers: Vec<Vec<u32>>,
 }
 
 /// Words of the observation a guest dispatch module declares: the register-observation layout,
@@ -938,6 +981,23 @@ pub fn dispatch_guest(
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
     images: &crate::compute_images::DispatchImages<'_>,
+) -> Result<GuestDispatch, DispatchError> {
+    dispatch_guest_with_buffers(module, memory, (push, groups), images, &[])
+}
+
+/// [`dispatch_guest`], with the dispatch's traced buffers (D746): `buffers` holds each slot's words
+/// before, bound writable at the compute binding of the draw-buffer set, and the result holds them
+/// after.
+///
+/// # Errors
+///
+/// No device, more buffers than a module declares, or a device that refused a step.
+pub fn dispatch_guest_with_buffers(
+    module: &[u32],
+    memory: &[u32],
+    (push, groups): (&[u32], [u32; 3]),
+    images: &crate::compute_images::DispatchImages<'_>,
+    buffers: &[Vec<u32>],
 ) -> Result<GuestDispatch, DispatchError> {
     // Draws already queued finish first: the window was read from guest memory they write.
     crate::framebuffer::settle_session()?;
@@ -992,6 +1052,8 @@ pub fn dispatch_guest(
         offset: 0,
     };
     let bound = crate::compute_images::BoundImages::create((instance, physical, device), images)?;
+    let traced =
+        crate::compute_buffers::BoundBuffers::create((instance, physical, device), buffers)?;
     let dispatched = dispatch_core(
         device,
         queue,
@@ -999,7 +1061,7 @@ pub fn dispatch_guest(
         module,
         &observation,
         &window,
-        (groups, push, &bound),
+        (groups, push, &bound, traced.as_ref()),
     );
     let stored = dispatched
         .as_ref()
@@ -1007,6 +1069,13 @@ pub fn dispatch_guest(
         .map(|_| bound.read_stored(device))
         .transpose();
     bound.destroy(device);
+    let buffers_after = match (&dispatched, &traced) {
+        (Ok(_), Some(traced)) => traced.read(device),
+        _ => Ok(Vec::new()),
+    };
+    if let Some(traced) = traced {
+        traced.destroy(device);
+    }
     let (observed, after) = dispatched?;
     let stored = stored?.flatten();
 
@@ -1023,6 +1092,7 @@ pub fn dispatch_guest(
         memory: after,
         escaped: observed.first().is_some_and(|&flag| flag != 0),
         stored,
+        buffers: buffers_after?,
     })
 }
 
