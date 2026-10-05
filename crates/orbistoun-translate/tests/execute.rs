@@ -5448,6 +5448,46 @@ fn a_packed_shift_moves_each_half_by_its_own_amount() {
     );
 }
 
+/// `v_pk_sub_u16` subtracts each half, wrapping at sixteen bits: 3 - 1 low, 5 - 7 high.
+#[test]
+fn a_packed_subtract_wraps_each_half() {
+    if !device_or_skip("a_packed_subtract_wraps_each_half") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x0005_0003));
+    program.extend(v_mov_literal(1, 0x0007_0001));
+    program.extend(vop3p("v_pk_sub_u16", 2, [VGPR_0, VGPR_0 + 1, 0], 0, 0b011));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 0xfffe_0002, "2 low, -2 wrapped high");
+}
+
+/// `v_min3_i16` takes the signed least of three halves and writes the half its destination select
+/// names, keeping the other: -32768 beats 5 and 32767, and with the first source's high half
+/// (0x1234) in play, 5 is least.
+#[test]
+fn a_three_way_signed_half_minimum_keeps_the_other_half() {
+    if !device_or_skip("a_three_way_signed_half_minimum_keeps_the_other_half") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0x1234_8000));
+    program.extend(v_mov_literal(1, 0x0000_0005));
+    program.extend(v_mov_literal(2, 0xaaaa_7fff));
+    program.extend(v_mov_literal(5, 0xbeef_1111));
+    program.extend(v_mov_literal(6, 0xcafe_2222));
+    let sources = [VGPR_0, VGPR_0 + 1, VGPR_0 + 2];
+    // Low halves throughout, into v5's high half.
+    program.extend(vop3_op_sel("v_min3_i16", 5, sources, 0b1000));
+    // The first source's high half, into v6's low half.
+    program.extend(vop3_op_sel("v_min3_i16", 6, sources, 0b0001));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 5), 0x8000_1111, "-32768, high; low kept");
+    assert_eq!(vector(&registers, 6), 0xcafe_0005, "5, low; high kept");
+}
+
 /// `v_perm_b32` picks each result byte by the matching selector byte, as Mesa's `byte_perm_amd`
 /// defines it: below 8 a byte of `first:second` (the second's low), 8 to 11 a sign bit of the
 /// second or first as a byte, 12 zero, above it `0xff`.

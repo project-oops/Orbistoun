@@ -169,6 +169,11 @@ name = "s_load_dwordx4"
 
 [[mnemonic]]
 family = "SMEM"
+opcode = 4
+name = "s_load_dwordx16"
+
+[[mnemonic]]
+family = "SMEM"
 opcode = 8
 name = "s_buffer_load_dword"
 
@@ -564,6 +569,11 @@ name = "v_perm_b32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 850
+name = "v_min3_i16"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 879
 name = "v_lshl_or_b32"
 
@@ -576,6 +586,11 @@ name = "v_pk_lshlrev_b16"
 family = "VOP3P"
 opcode = 9
 name = "v_pk_mad_u16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 11
+name = "v_pk_sub_u16"
 
 [[mnemonic]]
 family = "VOPC"

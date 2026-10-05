@@ -2307,8 +2307,12 @@ impl Model for Wavefront<'_> {
     }
 
     fn load_descriptor_opaquely(&mut self, first: u32, registers: u32) -> bool {
-        let traced = self.descriptor_loads.0.contains_key(&first);
-        if !self.exact_memory() || !traced || registers != model::IMAGE_DESCRIPTOR_REGISTERS {
+        // One image descriptor, or two side by side - each half traced as one.
+        let traced = registers % model::IMAGE_DESCRIPTOR_REGISTERS == 0
+            && (first..first + registers)
+                .step_by(model::IMAGE_DESCRIPTOR_REGISTERS as usize)
+                .all(|half| self.descriptor_loads.0.contains_key(&half));
+        if !self.exact_memory() || !traced || registers > 2 * model::IMAGE_DESCRIPTOR_REGISTERS {
             return false;
         }
         for register in first..first + registers {
@@ -2988,7 +2992,8 @@ fn descriptor_table_loads(
                 }
             }
             (
-                "s_load_dword" | "s_load_dwordx2" | "s_load_dwordx4" | "s_load_dwordx8",
+                "s_load_dword" | "s_load_dwordx2" | "s_load_dwordx4" | "s_load_dwordx8"
+                | "s_load_dwordx16",
                 [
                     Operand::Scalar(destination),
                     Operand::Scalar(base),
@@ -2996,11 +3001,13 @@ fn descriptor_table_loads(
                 ],
             ) => {
                 // Eight words is an image descriptor, four a sampler descriptor, kept apart so a
-                // sampler's load is never taken for an image's.
-                let into = match name {
-                    "s_load_dwordx8" => Some(&mut loads),
-                    "s_load_dwordx4" => Some(&mut sampler_loads),
-                    _ => None,
+                // sampler's load is never taken for an image's. Sixteen are two image descriptors
+                // side by side, as a compiler merges two adjacent eight-word loads.
+                let (into, descriptors) = match name {
+                    "s_load_dwordx8" => (Some(&mut loads), 1),
+                    "s_load_dwordx16" => (Some(&mut loads), 2),
+                    "s_load_dwordx4" => (Some(&mut sampler_loads), 1),
+                    _ => (None, 0),
                 };
                 if let Some(into) = into
                     && let Ok(offset) = u32::try_from(*offset)
@@ -3009,9 +3016,11 @@ fn descriptor_table_loads(
                     let table = at(*base)
                         .zip(at(base + 1))
                         .map(|(low, high)| TableBase { low, high });
-                    into.entry(u32::from(*destination))
-                        .or_default()
-                        .insert((table, offset));
+                    for descriptor in 0..descriptors {
+                        into.entry(u32::from(*destination) + descriptor * 8)
+                            .or_default()
+                            .insert((table, offset + descriptor * 32));
+                    }
                 }
                 let width = match name {
                     "s_load_dword" => 1,

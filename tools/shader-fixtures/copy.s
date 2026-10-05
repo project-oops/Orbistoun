@@ -25,6 +25,11 @@ v_pack_b32_f16 v1, v2, v3
 // ---- A texel's bytes rearranged: one format's bytes into another's ----------------
 v_perm_b32 v1, v2, v3, s4
 
+// ---- A copy between formats: a whole descriptor pair, and clamped halves ----------
+s_load_dwordx16 s[16:31], s[2:3], 0x0
+v_pk_sub_u16 v0, v1, v2
+v_min3_i16 v3, v4, v5, v6
+
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

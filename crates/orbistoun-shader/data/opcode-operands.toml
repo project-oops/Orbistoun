@@ -260,6 +260,13 @@ operands = [{ word = 0, shift = 6, width = 7, kind = "source", scale = 1 }, { wo
 
 [[opcode_operands]]
 family = "SMEM"
+opcode = 4
+mnemonic = "s_load_dwordx16"
+samples = 5
+operands = [{ word = 0, shift = 6, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 6, kind = "source", scale = 2 }, { word = 1, shift = 0, width = 16, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "SMEM"
 opcode = 8
 mnemonic = "s_buffer_load_dword"
 samples = 5
@@ -778,6 +785,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word
 
 [[opcode_operands]]
 family = "VOP3"
+opcode = 850
+mnemonic = "v_min3_i16"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 18, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3"
 opcode = 869
 mnemonic = "v_mbcnt_lo_u32_b32"
 samples = 5
@@ -810,6 +824,13 @@ opcode = 9
 mnemonic = "v_pk_mad_u16"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 18, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP3P"
+opcode = 11
+mnemonic = "v_pk_sub_u16"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 1, shift = 9, width = 9, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
 family = "VOPC"

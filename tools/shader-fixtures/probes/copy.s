@@ -52,3 +52,25 @@ v_perm_b32 v200, s5, v9, v190
 v_perm_b32 v255, v12, s30, 64
 v_perm_b32 v9, -1, v77, v3
 v_perm_b32 v130, v88, 4, s101
+
+// ---- v_pk_sub_u16: VOP3P, two sources --------------------------------------------------
+v_pk_sub_u16 v0, v1, v2
+v_pk_sub_u16 v200, v5, v9
+v_pk_sub_u16 v255, v12, s30
+v_pk_sub_u16 v9, s101, v77
+v_pk_sub_u16 v130, v88, 4
+
+// ---- v_min3_i16: VOP3, three sources ----------------------------------------------------
+v_min3_i16 v3, v4, v5, v6
+v_min3_i16 v200, s5, v9, v190
+v_min3_i16 v255, v12, s30, 64
+v_min3_i16 v9, -1, v77, v3
+v_min3_i16 v130, v88, 4, s101
+
+// ---- s_load_dwordx16: SMEM, sixteen words. Destinations to the top of the file, bases past
+// one hundred and offsets to the top of the field, as `memory.s` learned to.
+s_load_dwordx16 s[16:31], s[2:3], 0x0
+s_load_dwordx16 s[88:103], s[100:101], 0xfff0
+s_load_dwordx16 s[48:63], s[86:87], 0x8000
+s_load_dwordx16 s[0:15], s[70:71], 0x1234
+s_load_dwordx16 s[64:79], s[36:37], 0x7ffc

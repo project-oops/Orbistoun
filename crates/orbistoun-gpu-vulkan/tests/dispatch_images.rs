@@ -166,3 +166,59 @@ fn a_dispatch_copies_a_single_channel_image() {
     .expect("dispatched");
     assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
 }
+
+/// Both descriptors loaded from the table at `s[0:1]` by one `s_load_dwordx16 s[16:31], s[0:1], 0`
+/// (its encoding as LLVM 18.1.8 assembles it), then `image_load` through `s[16:23]` and
+/// `image_store` through `s[24:31]`.
+const COPY_FROM_TABLE: [u32; 10] = [
+    0xf410_0400,
+    0xfa00_0000,
+    0xbf8c_0000,
+    0xf000_1f08,
+    0x0004_0200,
+    0xbf8c_0000,
+    0xf020_1f08,
+    0x0006_0200,
+    0xbf81_0000,
+    0xbf9f_0000,
+];
+
+/// Two image descriptors loaded together are two images of the table: the fetched one at its first
+/// byte and the stored one thirty-two bytes on, as a compiler merges two adjacent eight-word loads.
+#[test]
+fn a_sixteen_word_load_names_two_images_of_its_table() {
+    use orbistoun_translate::wavefront::TableWord;
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = COPY_FROM_TABLE
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (_, _, (textures, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 2,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                unwritten_user_data: 0,
+                partial: None,
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the copy translates");
+    let fetched = textures.first().expect("a fetched image");
+    let stored = storage.expect("a stored image");
+    for (source, offset) in [(fetched, 0), (&stored, 32)] {
+        assert_eq!(source.table_offset, Some(offset));
+        assert_eq!(source.table.low, TableWord::UserData(0));
+        assert_eq!(source.table.high, TableWord::UserData(1));
+    }
+}

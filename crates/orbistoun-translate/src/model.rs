@@ -84,6 +84,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_load_dwordx2",
     "s_load_dwordx4",
     "s_load_dwordx8",
+    "s_load_dwordx16",
     "s_lshl_b32",
     "s_mov_b32",
     "s_nop",
@@ -142,6 +143,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_pack_b32_f16",
     "v_pk_mad_u16",
     "v_pk_lshlrev_b16",
+    "v_pk_sub_u16",
+    "v_min3_i16",
     "v_lshrrev_b64",
     "v_max_f32_e32",
     "v_mbcnt_hi_u32_b32",
@@ -1916,6 +1919,8 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_pack_b32_f16" => pack_half_words(model, instruction),
         "v_pk_mad_u16" => packed_multiply_add(model, instruction),
         "v_pk_lshlrev_b16" => packed_shift_left(model, instruction),
+        "v_pk_sub_u16" => packed_subtract(model, instruction),
+        "v_min3_i16" => half_minimum_of_three(model, instruction),
 
         // A lane learns its own index by counting the mask bits below itself; no instruction hands
         // it over.
@@ -2011,9 +2016,9 @@ fn memory_instruction<M: Model + ?Sized>(
     // to fold into it.
     // An image descriptor a dispatch loads from its table names the image the host binds from that
     // table, so the load reads no memory here; its registers are then only an image's name.
-    if name == "s_load_dwordx8"
+    if matches!(name, "s_load_dwordx8" | "s_load_dwordx16")
         && let Some(Operand::Scalar(first)) = instruction.operands.first()
-        && model.load_descriptor_opaquely(u32::from(*first), 8)
+        && model.load_descriptor_opaquely(u32::from(*first), access_words(name))
     {
         model.count();
         return Ok(());
@@ -2041,6 +2046,7 @@ fn memory_instruction<M: Model + ?Sized>(
         | "s_load_dwordx2"
         | "s_load_dwordx4"
         | "s_load_dwordx8"
+        | "s_load_dwordx16"
         | "s_buffer_load_dword"
         | "s_buffer_load_dwordx2"
         | "s_buffer_load_dwordx4"
@@ -5163,6 +5169,93 @@ fn packed_shift_left<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `v_pk_sub_u16 d, a, b`: in each half of the result, `a`'s selected half less `b`'s, wrapping at
+/// sixteen bits (AMD's published RDNA instruction set). The low result takes the halves `op_sel`
+/// picks and the high one those `op_sel_hi` picks; clamp, which saturates, is refused.
+fn packed_subtract<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let selects = packed_selects(instruction)?;
+    let (destination, minuend, subtrahend) = three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_pk_sub_u16 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let low = model.constant(0xFFFF);
+    let sixteen = model.constant(16);
+    for lane in running_lanes(model) {
+        let mut halves = Vec::with_capacity(2);
+        for select in selects {
+            let left = read_half(model, instruction, minuend, lane, select[0])?;
+            let right = read_half(model, instruction, subtrahend, lane, select[1])?;
+            let difference = model.binary(op::ISUB, left, right);
+            halves.push(model.binary(op::BITWISE_AND, difference, low));
+        }
+        let high = model.binary(op::SHIFT_LEFT_LOGICAL, halves[1], sixteen);
+        let packed = model.binary(op::BITWISE_OR, halves[0], high);
+        model.write_vector_lane(register, lane, packed);
+    }
+    model.count();
+    Ok(())
+}
+
+/// `v_min3_i16 d, a, b, c`: the least of three signed sixteen-bit halves, each the one `op_sel`
+/// names, into the half it names for the destination, the other half kept (AMD's published RDNA
+/// instruction set; the sixteen-bit VOP3 forms as `half_arithmetic` writes them).
+fn half_minimum_of_three<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    no_integer_modifiers(instruction, 3)?;
+    let [destination, first, second, third] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_min3_i16 does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_min3_i16 destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    let select = instruction.word >> OP_SEL_SHIFT & 0xF;
+    let sixteen = model.constant(16);
+    let low = model.constant(0xFFFF);
+    for lane in running_lanes(model) {
+        let mut least: Option<Id> = None;
+        for (source, bit) in [(first, 1), (second, 2), (third, 4)] {
+            let half = read_half(model, instruction, source, lane, select & bit != 0)?;
+            // Sign-extended, so the comparison is a signed one.
+            let raised = model.binary(op::SHIFT_LEFT_LOGICAL, half, sixteen);
+            let signed = model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, sixteen);
+            least = Some(match least {
+                None => signed,
+                Some(so_far) => {
+                    let below = model.compare(op::SLESS_THAN, signed, so_far);
+                    model.select(below, signed, so_far)
+                }
+            });
+        }
+        let least = least.expect("three sources");
+        let result = model.binary(op::BITWISE_AND, least, low);
+        write_half(
+            model,
+            instruction,
+            (register, lane),
+            result,
+            select & 8 != 0,
+        )?;
+    }
+    model.count();
+    Ok(())
+}
+
 /// `v_lshl_or_b32 d, a, b, c`: `(a << b[4:0]) | c` per lane (AMD's published RDNA instruction set,
 /// `V_LSHL_OR_B32`).
 fn shift_or<M: Model + ?Sized>(
@@ -6328,7 +6421,8 @@ fn memory<M: Model + ?Sized>(
 ) -> Result<(), TranslateError> {
     match name {
         // The scalar loads, which differ only in how many consecutive registers they fill.
-        "s_load_dword" | "s_load_dwordx2" | "s_load_dwordx4" | "s_load_dwordx8" => {
+        "s_load_dword" | "s_load_dwordx2" | "s_load_dwordx4" | "s_load_dwordx8"
+        | "s_load_dwordx16" => {
             // The suffix says how many consecutive registers are filled; opcodes are consecutive
             // only on the generation they were numbered for.
             let words = access_words(name);
