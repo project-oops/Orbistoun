@@ -569,7 +569,8 @@ pub trait Model {
     /// [`None`] for a compute module, and for a fragment module not told that the shader
     /// interpolates that attribute: inputs are declared in the header, before any instruction is
     /// seen.
-    fn attribute_input(&self, _attribute: u32) -> Option<(Id, Id)> {
+    /// A flat read takes the attribute's flat twin where the draw gave it one (D742).
+    fn attribute_input(&self, _attribute: u32, _flat: bool) -> Option<(Id, Id)> {
         None
     }
 
@@ -1395,6 +1396,7 @@ fn resolve<M: Model + ?Sized>(
 fn interpolate<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    flat: bool,
 ) -> Result<(), TranslateError> {
     let [
         Operand::Vector(destination),
@@ -1412,7 +1414,7 @@ fn interpolate<M: Model + ?Sized>(
         });
     };
     let attribute = u32::try_from(*attribute).unwrap_or(u32::MAX);
-    let Some((vec4, input)) = model.attribute_input(attribute) else {
+    let Some((vec4, input)) = model.attribute_input(attribute, flat) else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: concat!(
@@ -1481,7 +1483,7 @@ fn parameter_move<M: Model + ?Sized>(
                      no way to read the gradient it used",
         });
     }
-    interpolate(model, instruction)
+    interpolate(model, instruction, true)
 }
 
 /// The export targets, as the field encodes them.
@@ -1873,7 +1875,7 @@ pub fn instruction<M: Model + ?Sized>(
         "exp" => export(model, instruction),
 
         // Both halves of the interpolation pair answer the whole value (D555).
-        "v_interp_p1_f32_e32" | "v_interp_p2_f32_e32" => interpolate(model, instruction),
+        "v_interp_p1_f32_e32" | "v_interp_p2_f32_e32" => interpolate(model, instruction, false),
 
         // The same read, from an input the declaration pass decorated `Flat`.
         "v_interp_mov_f32_e32" => parameter_move(model, instruction),

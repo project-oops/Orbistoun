@@ -23,6 +23,8 @@ use orbistoun_translate::wavefront::{
 };
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
 
+use orbistoun_translate::wavefront::FlatTwins;
+
 use crate::backend::{IndexBuffer, Rect, RenderCommand, ResourceId, ShaderStage, USER_DATA_WORDS};
 use crate::packet::{PacketWalk, walk};
 use crate::registers::{
@@ -92,6 +94,7 @@ struct ForDraw {
     geometry: Option<GeometryInputs>,
     window_space: bool,
     buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
+    flat_twins: Option<FlatTwins>,
 }
 
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
@@ -102,6 +105,10 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             ^ (u64::from(g.vertices) << 32)
             ^ (u64::from(g.primitives) << 16)
             ^ u64::from(g.first_vertex)
+            ^ match g.indices {
+                None => 0,
+                Some(width) => 0x4944_5800_0000_0000 ^ u64::from(width.bytes()),
+            }
             ^ match g.assembly {
                 Assembly::List => 0,
                 Assembly::Strip { provoking_last } => {
@@ -117,8 +124,18 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             .collect();
         0x4655_4d54_0000_0000 ^ crate::content_hash(&words)
     });
+    let twins = for_draw.flat_twins.map_or(0, |twins| {
+        let words: Vec<u32> = twins
+            .0
+            .iter()
+            .flatten()
+            .flat_map(|(attribute, location)| [u32::from(*attribute), u32::from(*location)])
+            .collect();
+        0x5457_494e_0000_0000 ^ crate::content_hash(&words)
+    });
     geometry
         ^ formats
+        ^ twins
         ^ if for_draw.window_space {
             0x5749_4e44_5350_4345
         } else {
@@ -494,6 +511,8 @@ struct ByGeometry {
     needs: BTreeMap<(u32, u64), String>,
     prepared: BTreeMap<(u32, u64, ForDraw), Option<ResourceId>>,
     refused: std::collections::BTreeSet<(u64, String)>,
+    /// The flat twins the draw being bound gives its attributes (D742).
+    flat_twins: Option<FlatTwins>,
 }
 
 /// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
@@ -887,6 +906,7 @@ impl Pipeline {
             window_space: false,
             draw_buffers: false,
             buffer_formats: None,
+            flat_twins: None,
         };
         let inputs = state.inputs;
         let key = content_hash(program)
@@ -1787,17 +1807,21 @@ impl Pipeline {
             let mut shaders = Vec::new();
             let latest =
                 sweep.before_among(draw.packet_offset, self.vocabulary.shader_register_ids());
-            for inferred in shader_candidates(&latest, &self.vocabulary) {
-                let Some(stage) = stage_of(&inferred.stage) else {
-                    continue;
-                };
-                if !queue.permits(stage) || registered_stages.contains(&stage) {
-                    continue;
-                }
-                let candidate = Candidate {
-                    address: inferred.address,
-                    stage,
-                };
+            let draw_candidates: Vec<Candidate> = shader_candidates(&latest, &self.vocabulary)
+                .into_iter()
+                .filter_map(|inferred| {
+                    let stage = stage_of(&inferred.stage)?;
+                    (queue.permits(stage) && !registered_stages.contains(&stage)).then_some(
+                        Candidate {
+                            address: inferred.address,
+                            stage,
+                        },
+                    )
+                })
+                .collect();
+            by_geometry.flat_twins = self.draw_flat_twins(&draw_candidates);
+            for candidate in draw_candidates {
+                let stage = candidate.stage;
                 let resource = self.bind_chunked(
                     candidate,
                     (memory, &geometry, &plans, window_space, &vertex_words),
@@ -1849,6 +1873,33 @@ impl Pipeline {
             }
         }
         by_geometry
+    }
+
+    /// The flat twins a draw gives its pixel shader's attributes read both interpolated and flat
+    /// (D742): one location each, from the first above every parameter its primitive shader exports
+    /// and every attribute its pixel shader reads, so neither stage's own locations move. `None`
+    /// where the pixel shader reads no attribute both ways, or either program is not yet decoded.
+    fn draw_flat_twins(&self, candidates: &[Candidate]) -> Option<FlatTwins> {
+        let program = |stage: ShaderStage| {
+            let candidate = candidates.iter().find(|c| c.stage == stage)?;
+            let bytes = self.decoded.get(&candidate.address)?;
+            Some(decode_program(bytes, &self.encodings, &self.operands))
+        };
+        let fragment = program(ShaderStage::Fragment)?;
+        let mixed = orbistoun_translate::wavefront::mixed_attributes(&fragment, &self.encodings);
+        if mixed.is_empty() {
+            return None;
+        }
+        let read = orbistoun_translate::wavefront::read_attributes(&fragment, &self.encodings);
+        let exported = program(ShaderStage::Vertex).map_or_else(Vec::new, |vertex| {
+            orbistoun_translate::wavefront::exported_parameters(&vertex, &self.encodings)
+        });
+        let first = read
+            .iter()
+            .chain(&exported)
+            .max()
+            .map_or(0, |highest| highest + 1);
+        FlatTwins::from_first(&mixed, first)
     }
 
     /// [`Self::bind_for_draw`] for a draw that may be split into chunks (D741): a primitive shader
@@ -2040,7 +2091,8 @@ impl Pipeline {
         // Only the primitive shader writes a position.
         let window_space = window_space && candidate.stage == ShaderStage::Vertex;
         let key = (candidate.stage as u32, candidate.address);
-        if !by_geometry.needs.contains_key(&key) {
+        // A draw that gives attributes flat twins prepares both stages for them (D742).
+        if !by_geometry.needs.contains_key(&key) && by_geometry.flat_twins.is_none() {
             let plain = (key.0, key.1, window_space);
             if let Some(known) = by_geometry.plain.get(&plain) {
                 return *known;
@@ -2049,6 +2101,7 @@ impl Pipeline {
                 geometry: None,
                 window_space,
                 buffer_formats: None,
+                flat_twins: None,
             };
             match self.prepare_candidate(candidate, (memory, for_draw), submission) {
                 Ok(resource) => {
@@ -2144,11 +2197,15 @@ impl Pipeline {
                 });
             }
         };
+        let flat_twins = by_geometry.flat_twins;
         let (geometry, unseeded) = match geometry {
+            // Only the primitive shader is seeded with the geometry.
+            Some(_) if candidate.stage != ShaderStage::Vertex => (None, None),
             Some(Ok(geometry)) => (Some(geometry), None),
-            // A shader prepared per draw for its buffers' formats (D738) is tried without the
-            // geometry; one that also reads the geometry is then refused, saying why.
-            Some(Err(why)) if buffer_formats.is_some() => (None, Some(why)),
+            // A shader prepared per draw for its buffers' formats (D738) or its flat twins (D742) is
+            // tried without the geometry; one that also reads the geometry is then refused, saying
+            // why.
+            Some(Err(why)) if buffer_formats.is_some() || flat_twins.is_some() => (None, Some(why)),
             Some(Err(why)) => {
                 refuse(
                     format!("{needs}; and this draw's cannot be: {why}"),
@@ -2162,6 +2219,7 @@ impl Pipeline {
             geometry,
             window_space,
             buffer_formats,
+            flat_twins,
         };
         let key = (candidate.stage as u32, candidate.address, for_draw);
         if let Some(known) = by_geometry.prepared.get(&key) {
@@ -2427,9 +2485,13 @@ impl Pipeline {
                 geometry: for_draw.geometry,
                 window_space: for_draw.window_space,
                 buffer_formats: for_draw.buffer_formats,
+                flat_twins: for_draw.flat_twins,
                 ..self.user_data[0]
             },
-            ShaderStage::Fragment => self.user_data[1],
+            ShaderStage::Fragment => UserData {
+                flat_twins: for_draw.flat_twins,
+                ..self.user_data[1]
+            },
             ShaderStage::Compute => UserData::default(),
         };
         // A live draw binds the buffers its stages read through (D733).
@@ -2547,6 +2609,7 @@ impl Pipeline {
                 e,
                 orbistoun_translate::TranslateError::ReadsGeometryInputs
                     | orbistoun_translate::TranslateError::NeedsBufferFormats
+                    | orbistoun_translate::TranslateError::NeedsFlatTwins
             ) {
                 PrepareFailure::NeedsGeometry(reason)
             } else {
@@ -3356,6 +3419,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             window_space: false,
             draw_buffers: false,
             buffer_formats: None,
+            flat_twins: None,
         },
         UserData {
             first_register: 0,
@@ -3369,6 +3433,7 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             window_space: false,
             draw_buffers: false,
             buffer_formats: None,
+            flat_twins: None,
         },
     ]
 }

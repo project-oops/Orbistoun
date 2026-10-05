@@ -212,6 +212,13 @@ pub enum TranslateError {
     )]
     NeedsBufferFormats,
 
+    /// A pixel shader reads one attribute both interpolated and flat, which a host input cannot
+    /// be, and the translation was not given the draw's flat twins (D742).
+    #[error(
+        "the shader reads an attribute both interpolated and flat, which takes a flat twin per draw (D742), and no draw's twins are given"
+    )]
+    NeedsFlatTwins,
+
     /// An instruction with no known operand layout was reached.
     #[error(
         "instruction at {offset:#x} ({name}, first word {word:#010x}{before}) has no operand layout; cannot translate what it operates on{}",
@@ -745,6 +752,7 @@ mod tests {
                     window_space: false,
                     draw_buffers: false,
                     buffer_formats: None,
+                    flat_twins: None,
                 },
             )
         };
@@ -1264,6 +1272,81 @@ mod tests {
         }
         let decoded = decode(&stream(&[0x3404_00f9, 0x0586_068a]), &table, &operands);
         assert!(translate(&decoded, &table, Strategy::default()).is_ok());
+    }
+
+    /// A pixel shader reading attribute 0's `x` interpolated and its `y` flat, as Mesa packs a value
+    /// the same at every vertex beside interpolated ones (`nir_opt_varyings.c`), is refused without
+    /// the draw's flat twins, and with them declares attribute 0 smooth and its twin flat (D742).
+    #[test]
+    fn an_attribute_read_both_ways_takes_a_flat_twin() {
+        use crate::wavefront::{FlatTwins, MeshPrimitive, Stage, UserData};
+        use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // VINTRP: v_interp_p1_f32 v2, v0, attr0.x; v_interp_p2_f32 v2, v1, attr0.x;
+        // v_interp_mov_f32 v3, p0, attr0.y; s_endpgm.
+        let words: [u32; 4] = [0xC808_0000, 0xC809_0001, 0xC80E_0102, 0xBF81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert_eq!(
+            crate::wavefront::mixed_attributes(&decode, &encodings),
+            [0],
+            "attribute 0 is read both ways"
+        );
+        let translate = |flat_twins| {
+            super::translate_with_user_data(
+                &decode,
+                &encodings,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData {
+                    flat_twins,
+                    ..UserData::default()
+                },
+            )
+        };
+        assert!(matches!(
+            translate(None),
+            Err(TranslateError::NeedsFlatTwins)
+        ));
+        let module = translate(FlatTwins::from_first(&[0], 1))
+            .expect("translated with a twin")
+            .module;
+        // `OpDecorate` (71): a `Location` (30) of 1, and the same variable `Flat` (14).
+        let decorations: Vec<&[u32]> = {
+            let mut at = 5;
+            let mut found = Vec::new();
+            while at < module.len() {
+                let count = (module[at] >> 16) as usize;
+                if module[at] & 0xffff == 71 {
+                    found.push(&module[at + 1..at + count]);
+                }
+                at += count.max(1);
+            }
+            found
+        };
+        let twin = decorations
+            .iter()
+            .find(|d| d[1..] == [30, 1])
+            .map(|d| d[0])
+            .expect("an input at location 1");
+        assert!(
+            decorations.iter().any(|d| d[..] == [twin, 14]),
+            "it is flat"
+        );
+        let own = decorations
+            .iter()
+            .find(|d| d[1..] == [30, 0])
+            .map(|d| d[0])
+            .expect("an input at location 0");
+        assert!(
+            !decorations.iter().any(|d| d[..] == [own, 14]),
+            "it is smooth"
+        );
     }
 
     /// An instruction with no operand layout is refused, naming the instruction.

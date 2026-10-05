@@ -413,6 +413,59 @@ pub struct UserData {
     /// is translated for no particular draw, and then a format load is refused.
     #[serde(default)]
     pub buffer_formats: Option<BufferFormats>,
+    /// The second, flat location of each attribute a draw's pixel shader reads both interpolated
+    /// and flat (D742): the pixel shader's flat reads take it, and the primitive shader exports the
+    /// parameter there too. `None` when the module is translated for no particular draw, and then
+    /// a pixel shader that reads an attribute both ways is refused.
+    #[serde(default)]
+    pub flat_twins: Option<FlatTwins>,
+}
+
+/// Each attribute a pixel shader reads both interpolated and flat, with the flat location the draw
+/// gives it (D742), as `(attribute, location)`; the unused entries `None`. Bytes, since both are
+/// below the thirty-two parameters and their twins.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct FlatTwins(pub [Option<(u8, u8)>; FLAT_TWINS]);
+
+/// The most attributes a draw gives a flat twin; more is refused.
+pub const FLAT_TWINS: usize = 8;
+
+impl FlatTwins {
+    /// The twins for `mixed`, in order, from location `first` up; `None` for more than
+    /// [`FLAT_TWINS`], or a location past a byte.
+    #[must_use]
+    pub fn from_first(mixed: &[u32], first: u32) -> Option<Self> {
+        if mixed.len() > FLAT_TWINS {
+            return None;
+        }
+        let mut twins = [None; FLAT_TWINS];
+        for ((slot, attribute), location) in twins.iter_mut().zip(mixed).zip(first..) {
+            *slot = Some((u8::try_from(*attribute).ok()?, u8::try_from(location).ok()?));
+        }
+        Some(Self(twins))
+    }
+
+    /// The flat location of `attribute`, if it has one.
+    #[must_use]
+    pub fn location_of(&self, attribute: u32) -> Option<u32> {
+        self.0
+            .iter()
+            .flatten()
+            .find(|(seen, _)| u32::from(*seen) == attribute)
+            .map(|(_, location)| u32::from(*location))
+    }
 }
 
 /// Each draw buffer's descriptor's fourth word at one draw, by slot (D738). `None` for a slot whose
@@ -593,10 +646,10 @@ pub const USER_DATA_STAGE_WORDS: u32 = 32;
 
 /// How a fragment input is read.
 ///
-/// The guest decides per attribute: `v_interp_p1_f32` and its pair interpolate, and
+/// The guest decides per instruction: `v_interp_p1_f32` and its pair interpolate, and
 /// `v_interp_mov_f32` reads a parameter without interpolating. On the host it is a decoration on
 /// the input variable, fixed at declaration, so it is found in the same pass that finds the
-/// attributes.
+/// attributes, and an attribute read both ways takes a second, flat input (D742).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interpolation {
     /// Interpolated across the primitive, which is the default and needs no decoration.
@@ -1155,6 +1208,9 @@ pub struct Wavefront<'a> {
     /// Declared in the header, so the attributes are found by a pass over the decode before any
     /// instruction is translated.
     inputs: BTreeMap<u32, Id>,
+    /// Each attribute's second, flat location (D742): where a pixel shader's flat reads of an
+    /// attribute it also interpolates go, and where a primitive shader exports the parameter again.
+    flat_twins: Option<FlatTwins>,
     /// What a mesh module writes, or [`None`] at any other stage.
     mesh: Option<MeshOutputs>,
     /// A rectangle-list mesh module's copies of what it emitted, or [`None`] for any other.
@@ -1656,6 +1712,7 @@ impl<'a> Wavefront<'a> {
             stage,
             output,
             inputs,
+            flat_twins: user_data.flat_twins,
             mesh,
             rectangles,
             window_space: user_data.window_space,
@@ -2392,6 +2449,14 @@ impl Model for Wavefront<'_> {
         lane: u32,
         components: [Id; 4],
     ) -> Option<()> {
+        // A parameter with a flat twin is exported at its twin's location too (D742).
+        if let Some(twin) = self
+            .flat_twins
+            .and_then(|twins| twins.location_of(location))
+            && twin != location
+        {
+            self.write_mesh_parameter(twin, lane, components)?;
+        }
         let mesh = self.mesh.clone()?;
         let variable = *mesh.parameters.get(&location)?;
         let slot = Self::constant(self, lane);
@@ -2447,9 +2512,16 @@ impl Model for Wavefront<'_> {
         self.primitive
     }
 
-    fn attribute_input(&self, attribute: u32) -> Option<(Id, Id)> {
+    fn attribute_input(&self, attribute: u32, flat: bool) -> Option<(Id, Id)> {
         let (vec4, _) = self.output?;
-        self.inputs.get(&attribute).map(|input| (vec4, *input))
+        let location = flat
+            .then(|| {
+                self.flat_twins
+                    .and_then(|twins| twins.location_of(attribute))
+            })
+            .flatten()
+            .unwrap_or(attribute);
+        self.inputs.get(&location).map(|input| (vec4, *input))
     }
 
     /// The whole wavefront: one invocation stands in for every lane.
@@ -3232,8 +3304,52 @@ type DescriptorLoads = BTreeMap<u32, std::collections::BTreeSet<(Option<TableBas
 fn interpolated_attributes(
     decode: &Decode,
     encodings: &EncodingTable,
+    twins: Option<FlatTwins>,
 ) -> Result<Vec<(u32, Interpolation)>, TranslateError> {
-    let mut attributes: Vec<(u32, Interpolation)> = Vec::new();
+    let read = attribute_reads(decode, encodings);
+    let mut inputs = Vec::new();
+    for (attribute, smooth, flat) in read {
+        match (smooth, flat) {
+            (true, true) => {
+                // Both: the attribute's own location interpolates, and its flat reads take the
+                // twin the draw gives it (D742).
+                let twin = twins
+                    .and_then(|twins| twins.location_of(attribute))
+                    .ok_or(TranslateError::NeedsFlatTwins)?;
+                inputs.push((attribute, Interpolation::Smooth));
+                inputs.push((twin, Interpolation::Flat));
+            }
+            (_, true) => inputs.push((attribute, Interpolation::Flat)),
+            _ => inputs.push((attribute, Interpolation::Smooth)),
+        }
+    }
+    Ok(inputs)
+}
+
+/// The attributes a pixel shader reads both interpolated and flat, which a draw gives a flat twin
+/// (D742), in the order they are first read.
+#[must_use]
+pub fn mixed_attributes(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
+    attribute_reads(decode, encodings)
+        .into_iter()
+        .filter(|(_, smooth, flat)| *smooth && *flat)
+        .map(|(attribute, _, _)| attribute)
+        .collect()
+}
+
+/// Every attribute a pixel shader reads, in the order first read.
+#[must_use]
+pub fn read_attributes(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
+    attribute_reads(decode, encodings)
+        .into_iter()
+        .map(|(attribute, _, _)| attribute)
+        .collect()
+}
+
+/// Every attribute a pixel shader reads, in the order first read, with whether it is interpolated
+/// and whether it is read flat: the hardware chooses per instruction, not per attribute.
+fn attribute_reads(decode: &Decode, encodings: &EncodingTable) -> Vec<(u32, bool, bool)> {
+    let mut attributes: Vec<(u32, bool, bool)> = Vec::new();
     for instruction in &decode.instructions {
         let Some(family) = instruction
             .encoding
@@ -3258,21 +3374,19 @@ fn interpolated_attributes(
         let Ok(attribute) = u32::try_from(*attribute) else {
             continue;
         };
-        match attributes.iter().find(|(seen, _)| *seen == attribute) {
-            Some((_, seen_as)) if *seen_as != how => {
-                return Err(TranslateError::Unsupported {
-                    offset: instruction.offset,
-                    detail: concat!(
-                        "this shader reads one attribute both interpolated and flat, and a host ",
-                        "input is one or the other; refused rather than picking one"
-                    ),
-                });
+        let flat = how == Interpolation::Flat;
+        match attributes
+            .iter_mut()
+            .find(|(seen, _, _)| *seen == attribute)
+        {
+            Some((_, smooth_seen, flat_seen)) => {
+                *smooth_seen |= !flat;
+                *flat_seen |= flat;
             }
-            Some(_) => {}
-            None => attributes.push((attribute, how)),
+            None => attributes.push((attribute, !flat, flat)),
         }
     }
-    Ok(attributes)
+    attributes
 }
 
 /// Which parameter locations a shader exports, in the order a mesh module declares them.
@@ -3280,7 +3394,8 @@ fn interpolated_attributes(
 /// The mesh counterpart of `interpolated_attributes`: output variables are declared in the header.
 /// A guest's `exp param3` becomes location 3. Position, primitive indices and colour attachments
 /// have their own variables and are skipped.
-fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
+#[must_use]
+pub fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u32> {
     let mut locations: Vec<u32> = Vec::new();
     for instruction in &decode.instructions {
         let named = instruction
@@ -3433,8 +3548,21 @@ pub fn translate_with_user_data(
     {
         return Err(TranslateError::Unsupported { offset: 0, detail });
     }
-    let attributes = interpolated_attributes(decode, encodings)?;
-    let parameters = exported_parameters(decode, encodings);
+    let attributes = interpolated_attributes(decode, encodings, user_data.flat_twins)?;
+    let mut parameters = exported_parameters(decode, encodings);
+    // A primitive shader exports each parameter with a flat twin at the twin's location too
+    // (D742).
+    if let (Stage::Mesh, Some(twins)) = (stage, user_data.flat_twins) {
+        let twinned: Vec<u32> = parameters
+            .iter()
+            .filter_map(|location| twins.location_of(*location))
+            .collect();
+        for location in twinned {
+            if !parameters.contains(&location) {
+                parameters.push(location);
+            }
+        }
+    }
     let buffers = draw_buffers_for(decode, encodings, stage, user_data)?;
     let mut module = Wavefront::for_stage(
         encodings,
