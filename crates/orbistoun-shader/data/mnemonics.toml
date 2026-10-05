@@ -629,6 +629,11 @@ name = "v_cmp_ne_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 155
+name = "v_cmpx_le_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 197
 name = "v_cmp_ne_u32_e32"
 

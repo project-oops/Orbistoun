@@ -74,3 +74,10 @@ s_load_dwordx16 s[88:103], s[100:101], 0xfff0
 s_load_dwordx16 s[48:63], s[86:87], 0x8000
 s_load_dwordx16 s[0:15], s[70:71], 0x1234
 s_load_dwordx16 s[64:79], s[36:37], 0x7ffc
+
+// ---- v_cmpx_le_i16: VOPC, the execution mask from two sixteen-bit sources -------------
+v_cmpx_le_i16_e32 0, v2
+v_cmpx_le_i16_e32 v200, v130
+v_cmpx_le_i16_e32 s101, v9
+v_cmpx_le_i16_e32 -1, v255
+v_cmpx_le_i16_e32 4, v77

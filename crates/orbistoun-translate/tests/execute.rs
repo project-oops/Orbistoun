@@ -1703,6 +1703,33 @@ fn a_mask_known_at_translation_emits_only_the_lanes_it_runs() {
     }
 }
 
+/// `v_cmpx_le_i16_e32 v0, v1` narrows the execution mask to the lanes whose index is at most the
+/// low sixteen bits of `v1` as a signed integer: 0x0001_0004 keeps lanes 0 to 4, its high half
+/// ignored, and 0x0000_fffe - minus two - keeps none, where an unsigned reading would keep all.
+#[test]
+fn a_sixteen_bit_cmpx_narrows_the_execution_mask() {
+    if !device_or_skip("a_sixteen_bit_cmpx_narrows_the_execution_mask") {
+        return;
+    }
+    for (threshold, last) in [(0x0001_0004u32, Some(4usize)), (0x0000_fffe, None)] {
+        let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
+        mask_program.extend(v_mov_literal(1, threshold));
+        mask_program.push(head("v_cmpx_le_i16_e32") | (1 << 9) | vgpr_code(0));
+        let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+        for lane in 0..64usize {
+            let expected = if last.is_some_and(|last| lane <= last) {
+                lane as u32
+            } else {
+                0
+            };
+            assert_eq!(
+                memory[lane], expected,
+                "{threshold:#x}, lane {lane}: {memory:?}"
+            );
+        }
+    }
+}
+
 /// A SOPP branch: opcode at bit 16, signed dword offset in the low half.
 fn branch(name: &str, offset: i16) -> u32 {
     head(name) | u32::from(offset as u16)

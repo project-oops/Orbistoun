@@ -29,6 +29,7 @@ v_perm_b32 v1, v2, v3, s4
 s_load_dwordx16 s[16:31], s[2:3], 0x0
 v_pk_sub_u16 v0, v1, v2
 v_min3_i16 v3, v4, v5, v6
+v_cmpx_le_i16_e32 0, v2
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

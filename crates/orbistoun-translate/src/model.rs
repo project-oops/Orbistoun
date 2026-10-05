@@ -120,6 +120,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ge_u32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_ne_i32_e64",
+    "v_cmpx_le_i16_e32",
     "v_cndmask_b32_e32",
     "v_cndmask_b32_e64",
     "v_cos_f32_e32",
@@ -341,10 +342,14 @@ pub fn touches_mask(instruction: &Instruction, name: &str) -> bool {
     // `v_div_fmas_f32` reads the condition mask implicitly, so it is listed rather than detected.
     let selects_per_lane = name == CNDMASK || name == "v_div_fmas_f32";
 
+    // A `v_cmpx` writes the execution mask and names it nowhere in its operands.
+    let writes_exec = name.starts_with("v_cmpx_");
+
     branches_on_a_mask
         || whole_quad
         || shares_between_lanes
         || selects_per_lane
+        || writes_exec
         || instruction.operands.iter().any(
             |operand| matches!(operand, Operand::Named(name) if lane_mask_name(name).is_some()),
         )
@@ -1892,6 +1897,7 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // The long-form integer compare, into a register pair or a named mask.
         "v_cmp_ne_i32_e64" => compare_long(model, instruction, name),
+        "v_cmpx_le_i16_e32" => compare_into_exec(model, instruction),
 
         // The short-form select, whose mask is always the condition mask.
         "v_cndmask_b32_e32" => {
@@ -3468,6 +3474,42 @@ fn compare<M: Model + ?Sized>(
     }
 
     model.write_lane_mask(name, halves.0, halves.1)?;
+    model.count();
+    Ok(())
+}
+
+/// `v_cmpx_le_i16_e32 a, b`: the execution mask becomes, for each lane, whether `a`'s low sixteen
+/// bits are at most `b`'s as signed integers. A lane that was not running answers zero, so the mask
+/// only narrows. On this generation a `v_cmpx` writes the execution mask alone (ACO:
+/// `definitions = dst(EXEC if cmpx else VCC)`, `aco_opcodes.py:1203-1205`).
+fn compare_into_exec<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [first, second] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_cmpx_le_i16_e32 does not have two sources",
+        });
+    };
+    let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+    let zero = model.constant(0);
+    let sixteen = model.constant(16);
+    let mut halves = (zero, zero);
+    // Every lane: the answer is a mask (see `carry_arithmetic`).
+    for lane in 0..model.lanes() {
+        let mut signed = [zero; 2];
+        for (slot, source) in signed.iter_mut().zip([first, second]) {
+            let value = model.read_source(instruction, source, lane)?;
+            let raised = model.binary(op::SHIFT_LEFT_LOGICAL, value, sixteen);
+            *slot = model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, sixteen);
+        }
+        let condition = model.compare(op::SLESS_THAN_EQUAL, signed[0], signed[1]);
+        halves = model.set_lane_bit(halves, lane, condition);
+    }
+    let low = model.binary(op::BITWISE_AND, halves.0, running_low);
+    let high = model.binary(op::BITWISE_AND, halves.1, running_high);
+    model.write_lane_mask(EXEC_LOW_HALF, low, high)?;
     model.count();
     Ok(())
 }
