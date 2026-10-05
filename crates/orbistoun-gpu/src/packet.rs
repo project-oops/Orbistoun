@@ -95,25 +95,6 @@ impl PacketWalk {
         !self.desynchronised && !self.overran && self.trailing_bytes == 0
     }
 
-    /// Whether the command processor can carry the stream out: a trustworthy walk, or one whose
-    /// only fault is a last packet that is a register write cut short by the stream's end.
-    ///
-    /// The command processor reads nothing past the size a submission declares (obSCEne
-    /// `REQ-20260922T2230Z-6e81`, arm 4), so a packet cut short there is never completed, and a
-    /// register write reaches no command. radeonsi submits exactly such a stream: SuperTuxKart's
-    /// preamble ends in an odd run of zero words, each a type-0 write of one register, and it
-    /// retires on hardware - the title plays there (oops-apps, 2026-09-29). A cut-short command
-    /// stays untrusted.
-    pub fn is_executable(&self) -> bool {
-        let tail_is_register_write = matches!(
-            self.packets.last().map(|packet| packet.kind),
-            Some(PacketKind::RegisterWrite { .. })
-        );
-        !self.desynchronised
-            && self.trailing_bytes == 0
-            && (!self.overran || tail_is_register_write)
-    }
-
     /// Packets of a given kind.
     pub fn count_of(&self, kind: PacketKind) -> usize {
         self.packets.iter().filter(|p| p.kind == kind).count()

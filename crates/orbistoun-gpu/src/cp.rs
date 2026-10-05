@@ -289,9 +289,8 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
     let mut result = CpExecution::default();
     let walked = packet::walk(stream);
     // A walk that desynchronised or overran may have read a body as a header: executing any of it
-    // could fill memory from bytes that were never a fill. Nothing runs - unless all that overran
-    // is a last register write, which the stream's end cuts short (`PacketWalk::is_executable`).
-    if !walked.is_executable() {
+    // could fill memory from bytes that were never a fill. Nothing runs.
+    if !walked.is_trustworthy() {
         result.stopped = Stopped::Malformed { offset: 0 };
         return result;
     }
@@ -1419,18 +1418,17 @@ mod tests {
         );
         assert_eq!(memory.word(0x2000), 0, "an untrusted walk executes nothing");
 
-        // SuperTuxKart's preamble stream: its state, then an odd run of zero words, each a type-0
-        // register write of one word, so the last is cut short by the stream's end. The command
-        // processor reads nothing past the stream, and what is cut short is a register write, not
-        // a command, so everything before it runs.
+        // A stream ending in a cut-short register write is no more trusted than any other overrun.
+        // radeonsi never submits one: the only such streams seen were cut mid-packet by a chain
+        // splitter scanning payload words for INDIRECT_BUFFER headers (oops-mesa 626dfd2), and
+        // SuperTuxKart's builds since carry none.
         let mut zero_tail = fill(0x3000, 0x6666_6666, 16);
         zero_tail.extend([0u32; 67]);
         let done = execute(&bytes(&zero_tail), &mut memory);
-        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
-        assert_eq!(
-            memory.word(0x3000),
-            0x6666_6666,
-            "the fill before the tail ran"
+        assert!(
+            matches!(done.stopped, Stopped::Malformed { .. }),
+            "{done:?}"
         );
+        assert_eq!(memory.word(0x3000), 0, "a cut-short tail executes nothing");
     }
 }
