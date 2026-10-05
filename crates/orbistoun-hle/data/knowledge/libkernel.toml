@@ -2188,3 +2188,85 @@ assumptions = [
 ]
 found_on = "2026-08-30"
 note = "Number and call shape read from four running payloads; see D403. Firmware value comes from the configurable Machine.firmware, zero refusing the call."
+
+[[function]]
+name = "scePthreadKeyCreate"
+arity = 2
+purpose = "Allocates a thread-specific-data key: the vendor spelling of POSIX pthread_key_create, on which libc++'s thread-local storage is built."
+returns = "status"
+edge_cases = [
+    "Unimplemented it answered the placeholder, which libc++ read as key allocation failing - `__thread_specific_ptr construction failed` - and terminated (STKT00001).",
+    "The destructor argument is recorded nowhere and never run, as for the POSIX spelling (D453).",
+]
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape: oops-sdk's thread-local storage (src/thread/thread.c) calls it on the console with the POSIX arguments and reads zero as success, which is the whole of what is relied on. The vendor error codes are not modelled; the one refusal answers the placeholder.",
+]
+found_on = "2026-10-05"
+
+[[function.arguments]]
+name = "key"
+kind = "ptr"
+note = "receives the new key, a 32-bit integer"
+
+[[function.arguments]]
+name = "destructor"
+kind = "ptr"
+note = "not stored"
+
+[[function]]
+name = "scePthreadSetspecific"
+arity = 2
+purpose = "Binds a value to a key for the calling thread: the vendor spelling of POSIX pthread_setspecific."
+returns = "status"
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape: oops-sdk's thread-local storage (src/thread/thread.c) calls it on the console with the POSIX arguments and reads zero as success, which is the whole of what is relied on. The vendor error codes are not modelled; the one refusal answers the placeholder.",
+]
+found_on = "2026-10-05"
+
+[[function.arguments]]
+name = "key"
+kind = "u32"
+note = "a key from scePthreadKeyCreate"
+
+[[function.arguments]]
+name = "value"
+kind = "ptr"
+note = "the value bound, never dereferenced"
+
+[[function]]
+name = "scePthreadGetspecific"
+arity = 1
+purpose = "The calling thread's value for a key, null where it never set one: the vendor spelling of POSIX pthread_getspecific."
+returns = "pointer"
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape: oops-sdk's thread-local storage (src/thread/thread.c) calls it on the console with the POSIX arguments and reads zero as success, which is the whole of what is relied on. The vendor error codes are not modelled; the one refusal answers the placeholder.",
+]
+found_on = "2026-10-05"
+
+[[function.arguments]]
+name = "key"
+kind = "u32"
+note = "a key from scePthreadKeyCreate"
+
+[[function]]
+name = "scePthreadKeyDelete"
+arity = 1
+purpose = "Retires a key; a retired id is not reused: the vendor spelling of POSIX pthread_key_delete."
+returns = "status"
+found_by = "generated"
+known_by = "guest-observed"
+assumptions = [
+    "Modelled on the POSIX call of the same shape: oops-sdk's thread-local storage (src/thread/thread.c) calls it on the console with the POSIX arguments and reads zero as success, which is the whole of what is relied on. The vendor error codes are not modelled; the one refusal answers the placeholder.",
+]
+found_on = "2026-10-05"
+
+[[function.arguments]]
+name = "key"
+kind = "u32"
+note = "a key from scePthreadKeyCreate"

@@ -126,6 +126,12 @@ guest_module! {
         "scePthreadEqual" => 2,
         // The calling thread's unique integer id (FreeBSD `pthread_getthreadid_np`) (D452).
         "scePthreadGetthreadid" => 0,
+        // The vendor spellings of the POSIX thread-specific-data keys (D453), which oops-sdk's
+        // thread-local storage calls on the console.
+        "scePthreadKeyCreate" => 2,
+        "scePthreadSetspecific" => 2,
+        "scePthreadGetspecific" => 1,
+        "scePthreadKeyDelete" => 1,
         // Named by guests themselves and confirmed by hash. Titles print diagnostics naming these,
         // with file and line, and an error return from `sceKernelCreateSema` aborts static
         // initialisation.
@@ -5720,12 +5726,16 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("pthread_detach", pthread_detach),
     ("pthread_setcancelstate", posix_pthread_setcancelstate),
     ("pthread_exit", pthread_exit),
-    // POSIX thread-specific-data keys, with no vendor twin, served under their POSIX names via
-    // `orbistoun-posix` (D453).
+    // POSIX thread-specific-data keys, served under their POSIX names via `orbistoun-posix` and
+    // under their vendor twins', which take the same arguments (D453).
     ("pthread_key_create", pthread_key_create),
     ("pthread_setspecific", pthread_setspecific),
     ("pthread_getspecific", pthread_getspecific),
     ("pthread_key_delete", pthread_key_delete),
+    ("scePthreadKeyCreate", pthread_key_create),
+    ("scePthreadSetspecific", pthread_setspecific),
+    ("scePthreadGetspecific", pthread_getspecific),
+    ("scePthreadKeyDelete", pthread_key_delete),
     // The three whose POSIX spelling is one argument shorter than the vendor one.
     ("pthread_create", posix_pthread_create),
     ("pthread_attr_getguardsize", pthread_attr_getguardsize),
@@ -6267,6 +6277,36 @@ mod tests {
             .expect("the other thread answered its handle");
         assert_ne!(equal(&args([this, this, 0, 0])), 0);
         assert_eq!(equal(&args([this, other, 0, 0])), 0);
+    }
+
+    /// The vendor spellings of the thread-specific-data keys, which oops-sdk's thread-local storage
+    /// calls: a created key reads null until set, then the value set, on the thread that set it.
+    /// Unimplemented, the placeholder made libc++ terminate (STKT00001).
+    #[test]
+    fn sce_pthread_keys_bind_a_value_per_thread() {
+        let find = |wanted: &str| {
+            implementations()
+                .iter()
+                .find(|(name, _)| *name == wanted)
+                .unwrap_or_else(|| panic!("{wanted} is implemented"))
+                .1
+        };
+        let mut key = [0_u32; 1];
+        let created = find("scePthreadKeyCreate")(&args([key.as_mut_ptr() as u64, 0, 0, 0]));
+        assert_eq!(created, super::OK);
+        let key = u64::from(key[0]);
+        let get = find("scePthreadGetspecific");
+        assert_eq!(get(&args([key, 0, 0, 0])), 0, "unset reads null");
+        assert_eq!(
+            find("scePthreadSetspecific")(&args([key, 0x1234, 0, 0])),
+            super::OK
+        );
+        assert_eq!(get(&args([key, 0, 0, 0])), 0x1234);
+        assert_eq!(
+            find("scePthreadKeyDelete")(&args([key, 0, 0, 0])),
+            super::OK
+        );
+        assert_eq!(get(&args([key, 0, 0, 0])), 0, "a retired key reads null");
     }
 
     /// `scePthreadGetaffinity` reads back the mask a thread was recorded with; an unknown handle is
