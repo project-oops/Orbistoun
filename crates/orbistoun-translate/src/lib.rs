@@ -207,7 +207,8 @@ pub enum TranslateError {
 
     /// An instruction with no known operand layout was reached.
     #[error(
-        "instruction at {offset:#x} ({name}, first word {word:#010x}) has no operand layout; cannot translate what it operates on"
+        "instruction at {offset:#x} ({name}, first word {word:#010x}) has no operand layout; cannot translate what it operates on{}",
+        if others.is_empty() { String::new() } else { format!(" - nor can the program's other instructions without one: {}", others.join(", ")) }
     )]
     OperandsUnknown {
         /// Byte offset within the shader.
@@ -217,6 +218,9 @@ pub enum TranslateError {
         name: String,
         /// Its first word, as decoded.
         word: u32,
+        /// Every other instruction of the program with no layout, by name, each once: what to
+        /// record alongside it.
+        others: Vec<String>,
     },
 
     /// The module built does not hang together.
@@ -306,6 +310,26 @@ impl Translated {
     pub fn bytes(&self) -> Vec<u8> {
         self.module.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
+}
+
+/// The refusal for a program with instructions whose operand layout is unknown: the first, and the
+/// others by name, each once. `None` when every instruction has one.
+fn unlaid_instructions(decode: &Decode, encodings: &EncodingTable) -> Option<TranslateError> {
+    let mut unlaid = decode.instructions.iter().filter(|i| !i.operands_decoded);
+    let first = unlaid.next()?;
+    let name = instruction_name(first, encodings);
+    let mut others: Vec<String> = Vec::new();
+    for other in unlaid.map(|i| instruction_name(i, encodings)) {
+        if other != name && !others.contains(&other) {
+            others.push(other);
+        }
+    }
+    Some(TranslateError::OperandsUnknown {
+        offset: first.offset,
+        name,
+        word: first.word,
+        others,
+    })
 }
 
 /// An instruction's mnemonic, or its encoding and opcode where the table names none.
@@ -543,14 +567,10 @@ pub fn translate_with_user_data(
         });
     }
 
+    if let Some(refusal) = unlaid_instructions(decode, encodings) {
+        return Err(refusal);
+    }
     for instruction in &decode.instructions {
-        if !instruction.operands_decoded {
-            return Err(TranslateError::OperandsUnknown {
-                offset: instruction.offset,
-                name: instruction_name(instruction, encodings),
-                word: instruction.word,
-            });
-        }
         if let Some(marker) = modifier_of(instruction, encodings)
             && !model::sdwa_translated(marker, instruction, encodings)
         {
