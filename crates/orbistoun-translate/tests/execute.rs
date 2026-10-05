@@ -6294,3 +6294,20 @@ fn a_sixteen_bit_multiply_add_takes_the_halves_op_sel_picks() {
     assert_eq!(vector(&registers, 3), 0xffff * 5 + 7, "a's high half");
     assert_eq!(vector(&registers, 4), 3 + 7, "b's high half");
 }
+
+/// `s_movk_i32 m0, 0x1001` sets `m0`, which a move then reads back: the compact move takes `m0` as
+/// the other scalar writes do.
+#[test]
+fn a_compact_move_sets_m0() {
+    if !device_or_skip("a_compact_move_sets_m0") {
+        return;
+    }
+    // SOPK s_movk_i32: the destination at bit 16; m0 is code 124. SOP1 s_mov_b32 s2, m0.
+    let program = [
+        head("s_movk_i32") | (124 << 16) | 0x1001,
+        sop1("s_mov_b32", 2, 124),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 2), 0x1001);
+}

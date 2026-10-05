@@ -3537,7 +3537,6 @@ fn scalar_immediate<M: Model + ?Sized>(
     name: &str,
 ) -> Result<(), TranslateError> {
     let (destination, immediate) = two_operands(instruction)?;
-    let register = scalar_destination(instruction, destination)?;
     let Operand::Immediate(raw) = immediate else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -3546,6 +3545,14 @@ fn scalar_immediate<M: Model + ?Sized>(
     };
     let value = i64::from(sign_extend_16(*raw));
     let constant = model.constant(value as u32);
+    // `m0` is state outside the register file: `s_movk_i32 m0, n` is how ACO sets it to a small
+    // constant before a local-data-share access or a message.
+    if name == "s_movk_i32" && matches!(destination, Operand::Named(named) if named == "m0") {
+        model.write_m0(constant);
+        model.count();
+        return Ok(());
+    }
+    let register = scalar_destination(instruction, destination)?;
 
     match name {
         // s_movk_i32: a move, and the only one here that leaves the code alone.
