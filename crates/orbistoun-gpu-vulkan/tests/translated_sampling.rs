@@ -608,6 +608,76 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
     );
 }
 
+/// One register group loaded with two descriptors in turn, each sampled after its load, is two
+/// textures, each at the offset of the load that reached its sample: ACO reuses the registers for a
+/// pixel shader's second texture (CRFT00001's `sampler` and `sky_sampler`).
+#[test]
+fn registers_reloaded_between_samples_read_two_textures() {
+    use orbistoun_translate::wavefront::{MeshPrimitive, UserData};
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load_x8 = |dst: u32, offset: u32| {
+        let (family, opcode) = encodings
+            .find_by_name("s_load_dwordx8")
+            .expect("the target has s_load_dwordx8");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    let words = image_sample_words(39);
+    for offset in [0x00, 0x40] {
+        // A scalar compare reading the base before the load writes nothing (`s_cmp_lg_i32 s0, 0`),
+        // and a forward branch over an instruction that leaves the registers alone, as a
+        // `discard` test does, sits between the load and its sample: both paths arrive with the
+        // same load.
+        bytes.extend(0xBF01_8000u32.to_le_bytes());
+        for word in s_load_x8(IMAGE_DESCRIPTOR, offset).into_iter().chain([
+            0xBF84_0001,
+            0xBF80_0000,
+            0xBF8C_C07F,
+            words[0],
+            words[1],
+        ]) {
+            bytes.extend(word.to_le_bytes());
+        }
+    }
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("a register group reloaded for a second texture translates");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| (source.slot, source.table_offset))
+            .collect::<Vec<_>>(),
+        [(0, Some(0x00)), (1, Some(0x40))]
+    );
+}
+
 /// A descriptor rewritten between two samples is refused too.
 ///
 /// A shader can load a second image descriptor into the same eight registers and sample again, so

@@ -585,10 +585,14 @@ pub trait Model {
     ///
     /// The error is a reason rather than a [`TranslateError`], because only the caller knows the
     /// offset.
+    ///
+    /// `at` is the sampling instruction's offset, which says which load reached its descriptor
+    /// registers where the shader reuses them for another texture.
     fn sampled_image(
         &mut self,
         _descriptor: u32,
         _sampler: Option<u32>,
+        _at: u32,
     ) -> Result<Texture, &'static str> {
         Err(concat!(
             "this model has no texture to sample - a sampled image is bound by a graphics ",
@@ -6552,7 +6556,9 @@ fn image_sample<M: Model + ?Sized>(
     } = image_access(instruction, name)?;
     let a16 = halves.address;
 
-    let texture = model.sampled_image(descriptor, sampler).map_err(refuse)?;
+    let texture = model
+        .sampled_image(descriptor, sampler, instruction.offset)
+        .map_err(refuse)?;
 
     // Which sampling instruction this is: `lz` is level zero named, `_l` takes the level from a
     // register, and the plain form lets the implementation choose from derivatives, a different
