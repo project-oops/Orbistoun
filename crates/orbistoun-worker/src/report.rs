@@ -86,6 +86,20 @@ pub fn describe_region(region: Region, base: u64, len: u64) {
     REGION_LEN[region.slot()].store(len, Ordering::Relaxed);
 }
 
+/// Serialises the tests that describe regions: this module's own, and the worker loop's that send
+/// a `Run`, which describes the image, stubs and stack it places.
+///
+/// The table is process-wide and tests run in parallel in one process, so another test's region
+/// could land between a `describe_region` and the lookup that depends on it. Poison is recovered
+/// so a panicking holder does not fail the others.
+#[cfg(test)]
+pub(crate) fn regions_serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Names the region containing `address`, and the offset into it.
 ///
 /// Pure and so testable: the handler that uses it cannot be stepped through.
@@ -3025,16 +3039,18 @@ mod tests {
     /// An address in a registered region is named with its region and offset.
     #[test]
     fn an_address_inside_a_registered_region_is_named_with_its_offset() {
+        let _regions = super::regions_serial();
         describe_region(Region::Image, 0x4000_0000_0000, 0x10_0000);
         assert_eq!(locate(0x4000_0000_1234), Some(("image", 0x1234)));
     }
 
     /// An address outside every region is said to be outside; one merely undeclared is not.
     ///
-    /// The regions are described here because the region table is process-wide and shared with
-    /// every test in this module; only the envelope's extremes matter.
+    /// The regions are described here because the region table is process-wide and keeps what
+    /// earlier tests described; only the envelope's extremes matter.
     #[test]
     fn an_address_beyond_the_envelope_is_distinguished_from_one_merely_undeclared() {
+        let _regions = super::regions_serial();
         describe_region(Region::Image, 0x4000_0000_0000, 0x10_0000);
         describe_region(Region::Stack, 0x6000_0000_0000, 0x10_0000);
         let (low, high) = published_envelope().expect("regions were described");
@@ -3064,6 +3080,7 @@ mod tests {
     #[test]
     fn an_address_outside_every_region_is_left_unnamed_rather_than_guessed() {
         // Attributing an unmapped address to the nearest region would point at unrelated code.
+        let _regions = super::regions_serial();
         describe_region(Region::Stubs, 0x7000_0000_0000, 0x1000);
         assert_eq!(locate(0x1234), None);
     }
@@ -3072,6 +3089,7 @@ mod tests {
     #[test]
     fn the_end_of_a_region_is_outside_it() {
         // Off-by-one here would name the first byte of whatever follows.
+        let _regions = super::regions_serial();
         describe_region(Region::Stack, 0x6000_0000_0000, 0x1000);
         assert_eq!(locate(0x6000_0000_0FFF), Some(("stack", 0xFFF)));
         assert_eq!(locate(0x6000_0000_1000), None);
@@ -3080,6 +3098,7 @@ mod tests {
     /// The mapping arena has a name, so a pointer into it does not read like a count.
     #[test]
     fn an_address_in_the_mapping_arena_is_named() {
+        let _regions = super::regions_serial();
         describe_region(Region::Mappings, 0x7400_0000_0000, 0x100_0000);
         assert_eq!(
             locate(0x7400_0089_D210),

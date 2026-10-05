@@ -3283,7 +3283,7 @@ fn name_guest_functions_from(bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{WORKER_FLAG, serve, session};
+    use super::{WORKER_FLAG, report, serve, session};
     use orbistoun_proto::codec::{read_message, write_message};
     use orbistoun_proto::{Event, PROTOCOL_VERSION, Phase, Request};
     use orbistoun_service::{Service, ServiceConfig};
@@ -3503,6 +3503,7 @@ mod tests {
     fn a_missing_guest_is_a_request_failure_not_a_halted_run() {
         let _capture = capture_lock();
         let _session = session::serial();
+        let _regions = report::regions_serial();
         // `Failed` means the request was wrong; `Terminated` means a guest was loaded and then
         // stopped. The two must stay distinguishable.
         let events = exchange(&[Request::Run {
@@ -3574,6 +3575,7 @@ mod tests {
     fn a_real_container_reaches_placement_and_halts_honestly() {
         let _capture = capture_lock();
         let _session = session::serial();
+        let _regions = report::regions_serial();
         // A run that stops says so, rather than looking like a guest that ran and did nothing
         // (D010).
         let dir = tempfile::tempdir().expect("tempdir");
