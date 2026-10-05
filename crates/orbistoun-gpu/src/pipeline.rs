@@ -1708,7 +1708,7 @@ fn dispatch_format(descriptor: &ImageDescriptor) -> Result<TexelFormat, String> 
         FORMAT_32_32_32_32_UINT
             if matches!(
                 descriptor.tiling,
-                SwizzleMode::Linear | SwizzleMode::Tiled64KbDX
+                SwizzleMode::Linear | SwizzleMode::Tiled64KbDX | SwizzleMode::Tiled4KbDX
             ) =>
         {
             Ok(TexelFormat::Rgba32Uint)
@@ -3381,6 +3381,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::Rx64KbBpp1 => 1 << 26,
         crate::tiling::SurfaceLayout::LinearBpp1 => 1 << 25,
         crate::tiling::SurfaceLayout::Dx64KbBpp16 => 1 << 24,
+        crate::tiling::SurfaceLayout::Dx4KbBpp16 => 1 << 23,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
