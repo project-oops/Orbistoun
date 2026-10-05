@@ -156,14 +156,33 @@ pub fn split(
             continue;
         }
         let target = branch_target(instruction)?;
-        let at = *index_of.get(&target).ok_or(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: concat!(
-                "a branch target is not the start of any instruction - the ",
-                "stream is not what it appears to be, and moving the target to ",
-                "a nearby boundary would run a program the guest did not write"
-            ),
-        })?;
+        let Some(&at) = index_of.get(&target) else {
+            // The instruction the target falls inside, and how long it was read as: a target
+            // inside one names an instruction whose length was misread, or a word taken for one.
+            let inside = instructions
+                .iter()
+                .take_while(|i| i.offset < target)
+                .last()
+                .map_or_else(String::new, |i| {
+                    format!(
+                        ", inside {} opcode {} at {:#x} (first word {:#010x}) read as {} bytes",
+                        family_of(i).unwrap_or_default(),
+                        i.opcode,
+                        i.offset,
+                        i.word,
+                        i.length
+                    )
+                });
+            return Err(TranslateError::NotTranslated {
+                offset: instruction.offset,
+                mnemonic: format!("a branch to {target:#x}{inside}"),
+                detail: concat!(
+                    "the target is not the start of any instruction - the stream is not ",
+                    "what it appears to be, and moving the target to a nearby boundary ",
+                    "would run a program the guest did not write"
+                ),
+            });
+        };
         starts.insert(at);
         // The instruction after a branch begins a block: the not-taken path, or
         // unreachable-but-present code after an unconditional branch.
@@ -332,6 +351,13 @@ mod tests {
                 .to_string()
                 .contains("not the start of any instruction"),
             "the error should say what is wrong, got: {error}"
+        );
+        // And where the target lands: inside the instruction at 0x4, read as eight bytes.
+        assert!(
+            error.to_string().contains("a branch to 0x8, inside ")
+                && error.to_string().contains(" at 0x4 ")
+                && error.to_string().contains("read as 8 bytes"),
+            "the error should name what the target falls inside, got: {error}"
         );
     }
 }

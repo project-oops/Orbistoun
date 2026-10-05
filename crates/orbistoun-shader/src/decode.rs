@@ -150,6 +150,9 @@ fn decode_inner(
     };
 
     let mut offset: usize = 0;
+    // The furthest place a branch decoded so far goes: a program whose branch reaches past an
+    // `s_endpgm` continues there, as ACO places a second exit after the first.
+    let mut furthest_branch: usize = 0;
     while offset + 4 <= bytes.len() {
         // Little-endian, like every other integer in this format.
         let word = u32::from_le_bytes([
@@ -190,6 +193,14 @@ fn decode_inner(
             .and_then(|found| table.mnemonic_for(&found.name, opcode));
         let ends_the_program = named == Some(PROGRAM_END);
         let is_padding = named == Some(PADDING);
+        if named.is_some_and(|name| name == "s_branch" || name.starts_with("s_cbranch_")) {
+            // SOPP's sixteen-bit signed word count from the instruction after the branch.
+            let words = i64::from(i16::from_le_bytes([word as u8, (word >> 8) as u8]));
+            let target = i64::try_from(offset + length as usize).unwrap_or(i64::MAX) + words * 4;
+            if let Ok(target) = usize::try_from(target) {
+                furthest_branch = furthest_branch.max(target);
+            }
+        }
 
         result.instructions.push(Instruction {
             offset: u32::try_from(offset).unwrap_or(u32::MAX),
@@ -216,7 +227,7 @@ fn decode_inner(
 
         if ends_the_program {
             result.terminated = true;
-            if stop_at_end {
+            if stop_at_end && furthest_branch < offset {
                 // Whatever follows is not part of this shader, so trailing bytes are
                 // counted against what was consumed, not the window.
                 result.trailing_bytes = 0;
@@ -545,5 +556,21 @@ mod tests {
             builtin.encodings().len(),
             "every declared family should recognise its own identifying value"
         );
+    }
+
+    /// A program whose branch reaches past an `s_endpgm` continues there - ACO's second exit
+    /// after the first - and one that does not ends at it.
+    #[test]
+    fn a_program_continues_past_an_end_a_branch_jumps_over() {
+        let table = EncodingTable::builtin().expect("table");
+        // s_cbranch_scc0 +1 (to 0x8); s_endpgm; s_endpgm; then a word that is no instruction.
+        let jumped = stream(&[0xBF84_0001, 0xBF81_0000, 0xBF81_0000, 0xFFFF_FFFF]);
+        let decoded = super::decode_program(&jumped, &table, &operands());
+        assert_eq!(decoded.instructions.len(), 3);
+        assert_eq!(decoded.consumed, 12);
+        // s_cbranch_scc0 +0 (to 0x4); s_endpgm: nothing reaches past it.
+        let plain = stream(&[0xBF84_0000, 0xBF81_0000, 0xFFFF_FFFF]);
+        let decoded = super::decode_program(&plain, &table, &operands());
+        assert_eq!(decoded.consumed, 8);
     }
 }
