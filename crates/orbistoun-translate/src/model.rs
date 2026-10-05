@@ -1726,12 +1726,7 @@ fn export<M: Model + ?Sized>(
 
 /// `value` with only the `enabled` channels taken from it, the rest as the output `colour` held
 /// them; `value` itself when every channel is enabled.
-fn only_enabled(
-    builder: &mut Builder,
-    (vec4, colour): (Id, Id),
-    value: Id,
-    enabled: u32,
-) -> Id {
+fn only_enabled(builder: &mut Builder, (vec4, colour): (Id, Id), value: Id, enabled: u32) -> Id {
     if enabled == EXPORT_ENABLE_MASK {
         return value;
     }

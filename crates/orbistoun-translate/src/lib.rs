@@ -207,11 +207,16 @@ pub enum TranslateError {
 
     /// An instruction with no known operand layout was reached.
     #[error(
-        "instruction at {offset:#x} has no operand layout; cannot translate what it operates on"
+        "instruction at {offset:#x} ({name}, first word {word:#010x}) has no operand layout; cannot translate what it operates on"
     )]
     OperandsUnknown {
         /// Byte offset within the shader.
         offset: u32,
+        /// Its mnemonic, or its encoding and opcode where the table names none - what a layout
+        /// would be recorded for.
+        name: String,
+        /// Its first word, as decoded.
+        word: u32,
     },
 
     /// The module built does not hang together.
@@ -301,6 +306,28 @@ impl Translated {
     pub fn bytes(&self) -> Vec<u8> {
         self.module.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
+}
+
+/// An instruction's mnemonic, or its encoding and opcode where the table names none.
+fn instruction_name(
+    instruction: &orbistoun_shader::Instruction,
+    encodings: &EncodingTable,
+) -> String {
+    let encoding = instruction
+        .encoding
+        .and_then(|i| encodings.encodings().get(usize::from(i)));
+    encoding
+        .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode))
+        .map_or_else(
+            || {
+                format!(
+                    "{} opcode {}",
+                    encoding.map_or("an unknown encoding", |e| e.name.as_str()),
+                    instruction.opcode
+                )
+            },
+            str::to_owned,
+        )
 }
 
 /// Picks the cheapest fidelity level valid for a shader.
@@ -520,6 +547,8 @@ pub fn translate_with_user_data(
         if !instruction.operands_decoded {
             return Err(TranslateError::OperandsUnknown {
                 offset: instruction.offset,
+                name: instruction_name(instruction, encodings),
+                word: instruction.word,
             });
         }
         if let Some(marker) = modifier_of(instruction, encodings)
@@ -1150,16 +1179,21 @@ mod tests {
         assert!(translate(&decoded, &table, Strategy::default()).is_ok());
     }
 
-    /// An instruction with no operand layout is refused.
+    /// An instruction with no operand layout is refused, naming the instruction.
     #[test]
     fn an_instruction_with_no_operand_layout_is_refused() {
         let (table, operands) = tables();
         let decoded = decode(&stream(&[0xE000_0000, 0x0000_0000]), &table, &operands);
         let untranslatable = decoded.instructions.iter().any(|i| !i.operands_decoded);
         assert!(untranslatable, "the fixture must include an unknown layout");
+        let refused = translate(&decoded, &table, Strategy::default());
         assert!(matches!(
-            translate(&decoded, &table, Strategy::default()),
+            refused,
             Err(TranslateError::OperandsUnknown { .. })
         ));
+        // The refusal names what it reached, so a run report says which layout to record.
+        let said = refused.expect_err("refused").to_string();
+        assert!(said.contains("first word 0x"), "{said}");
+        assert!(!said.contains("(, "), "a name: {said}");
     }
 }
