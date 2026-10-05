@@ -101,7 +101,7 @@ fn queue_lookup() -> &'static OnceLock<QueueLookup> {
     &LOOKUP
 }
 
-/// Installs the live event-queue check [`add_eq_event`] consults. First install wins.
+/// Installs the live event-queue check `sceAgcDriverAddEqEvent` consults. First install wins.
 pub fn install_queue_lookup(lookup: QueueLookup) {
     let _ = queue_lookup().set(lookup);
 }

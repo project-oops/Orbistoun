@@ -275,9 +275,13 @@ fn reproduce_one(
         && *pinned != found
     {
         anyhow::bail!(
-            "{} is build {found}, and the record was made with {pinned}: this run would not \
-             reproduce it",
-            module.display()
+            concat!(
+                "{} is build {found}, and the record was made with {pinned}: this run would ",
+                "not reproduce it"
+            ),
+            module.display(),
+            found = found,
+            pinned = pinned,
         );
     }
 
