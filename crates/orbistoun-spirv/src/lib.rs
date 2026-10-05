@@ -347,6 +347,9 @@ pub mod decoration {
     pub const DESCRIPTOR_SET: u32 = 34;
     /// Byte offset of a structure member.
     pub const OFFSET: u32 = 35;
+    /// The result is computed by its own operation alone: a driver may not contract it with
+    /// another into one rounding, such as a multiply and an add into a fused multiply-add.
+    pub const NO_CONTRACTION: u32 = 42;
 }
 
 /// Capability values.

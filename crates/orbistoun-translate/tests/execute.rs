@@ -5582,6 +5582,70 @@ fn a_three_way_signed_half_minimum_keeps_the_other_half() {
     assert_eq!(vector(&registers, 6), 0xcafe_0005, "5, low; high kept");
 }
 
+/// `v_mad_f32` and `v_mac_f32` are the legacy multiply-add: rounded after the multiply and again
+/// after the add, with denormals flushed whatever the mode (ACO `aco_ir.h:138-139`). 1.5 * 2 +
+/// 0.25 is 3.25; (1 + 2^-12)^2 - (1 + 2^-11) is 0 when the product is rounded first, where a fused
+/// operation gives 2^-24; the smallest denormal times one is flushed to zero, and a negative
+/// denormal added to -0 is flushed to -0.
+#[test]
+fn the_legacy_multiply_add_rounds_twice_and_flushes() {
+    if !device_or_skip("the_legacy_multiply_add_rounds_twice_and_flushes") {
+        return;
+    }
+    let mad = |a: u32, b: u32, c: u32| {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, a));
+        program.extend(v_mov_literal(1, b));
+        program.extend(v_mov_literal(2, c));
+        program.extend(vop3("v_mad_f32", 3, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
+        program.extend(v_mov_literal(4, c));
+        program.push(vop2_vv("v_mac_f32_e32", 4, 0, 1));
+        program.push(s_endpgm());
+        let registers = run(&program);
+        let (mad, mac) = (vector(&registers, 3), vector(&registers, 4));
+        assert_eq!(mad, mac, "v_mad_f32 and v_mac_f32 agree");
+        mad
+    };
+    assert_eq!(
+        mad(1.5f32.to_bits(), 2.0f32.to_bits(), 0.25f32.to_bits()),
+        3.25f32.to_bits()
+    );
+    assert_eq!(
+        mad(0x3f80_0800, 0x3f80_0800, 0xbf80_1000),
+        0,
+        "unfused: the product rounds first"
+    );
+    assert_eq!(
+        mad(1, 1.0f32.to_bits(), 0),
+        0,
+        "a denormal input is flushed"
+    );
+    assert_eq!(
+        mad(0x8000_0000, 1.0f32.to_bits(), 0x8000_0001),
+        0x8000_0000,
+        "-0 plus a negative denormal flushed to -0 is -0, where unflushed it is the denormal"
+    );
+}
+
+/// `v_mul_u32_u24` multiplies its sources' low 24 bits, keeping the product's low 32: 3 * 5 with
+/// junk above bit 23, and 0xffffff squared, whose product passes 32 bits.
+#[test]
+fn a_24_bit_multiply_keeps_the_low_word() {
+    if !device_or_skip("a_24_bit_multiply_keeps_the_low_word") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0xff00_0003));
+    program.extend(v_mov_literal(1, 0x0100_0005));
+    program.push(vop2_vv("v_mul_u32_u24_e32", 2, 0, 1));
+    program.extend(v_mov_literal(3, 0x00ff_ffff));
+    program.push(vop2_vv("v_mul_u32_u24_e32", 4, 3, 3));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 15);
+    assert_eq!(vector(&registers, 4), 0xfe00_0001);
+}
+
 /// `v_perm_b32` picks each result byte by the matching selector byte, as Mesa's `byte_perm_amd`
 /// defines it: below 8 a byte of `first:second` (the second's low), 8 to 11 a sign bit of the
 /// second or first as a byte, 12 zero, above it `0xff`.

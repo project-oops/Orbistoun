@@ -137,6 +137,9 @@ pub const SUPPORTED: &[&str] = &[
     "v_div_fmas_f32",
     "v_exp_f32_e32",
     "v_fma_f32",
+    "v_mad_f32",
+    "v_mac_f32_e32",
+    "v_mul_u32_u24_e32",
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
@@ -1028,6 +1031,26 @@ pub trait Model {
         let result_f = b.id();
         b.function(operation, &[f32_type.0, result_f.0, lhs_f.0, rhs_f.0]);
 
+        let result = b.id();
+        b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
+        result
+    }
+
+    /// [`Self::f32_binary`] with the float operation decorated `NoContraction`, so a driver may
+    /// not fuse it with another into one rounding.
+    fn f32_binary_uncontracted(&mut self, operation: u16, lhs: Id, rhs: Id) -> Id {
+        let (u32_type, f32_type) = (self.u32_type(), self.f32_type());
+        let b = self.builder();
+        let lhs_f = b.id();
+        b.function(op::BITCAST, &[f32_type.0, lhs_f.0, lhs.0]);
+        let rhs_f = b.id();
+        b.function(op::BITCAST, &[f32_type.0, rhs_f.0, rhs.0]);
+        let result_f = b.id();
+        b.function(operation, &[f32_type.0, result_f.0, lhs_f.0, rhs_f.0]);
+        b.annotate(
+            op::DECORATE,
+            &[result_f.0, orbistoun_spirv::decoration::NO_CONTRACTION],
+        );
         let result = b.id();
         b.function(op::BITCAST, &[u32_type.0, result.0, result_f.0]);
         result
@@ -1953,7 +1976,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // flags, in bits neither the operand layout nor the encoding table describes; read
         // separately and refused where not implemented.
         "v_cndmask_b32_e64" | "v_add_f32_e64" | "v_sub_f32_e64" | "v_subrev_f32_e64"
-        | "v_mul_f32_e64" | "v_fma_f32" | "v_div_fixup_f32" | "v_div_fmas_f32" => {
+        | "v_mul_f32_e64" | "v_fma_f32" | "v_mad_f32" | "v_div_fixup_f32" | "v_div_fmas_f32" => {
             long_form_arithmetic(model, instruction, name)
         }
 
@@ -2009,7 +2032,9 @@ fn vector_instruction<M: Model + ?Sized>(
         // The short-form vector ALU: integer address arithmetic and float arithmetic.
         "v_add_f32_e32" | "v_sub_f32_e32" | "v_subrev_f32_e32" | "v_mul_f32_e32"
         | "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" | "v_add_nc_u32_e32" | "v_fmac_f32_e32"
-        | "v_or_b32_e32" | "v_xor_b32_e32" => short_form_arithmetic(model, instruction, name),
+        | "v_or_b32_e32" | "v_xor_b32_e32" | "v_mac_f32_e32" | "v_mul_u32_u24_e32" => {
+            short_form_arithmetic(model, instruction, name)
+        }
 
         // Float minimum and maximum, emitted as `GLSL.std.450` FMax/FMin because the core opcode
         // set has none.
@@ -2198,6 +2223,18 @@ fn short_form_arithmetic<M: Model + ?Sized>(
                 let previous = model.read_source(instruction, destination, lane)?;
                 let product = model.f32_binary(op::FMUL, lhs, rhs);
                 model.f32_binary(op::FADD, product, previous)
+            }
+            // The legacy multiply-add, accumulating into its destination.
+            "v_mac_f32_e32" => {
+                let previous = model.read_source(instruction, destination, lane)?;
+                legacy_multiply_add(model, lhs, rhs, previous)
+            }
+            // The low 32 bits of the product of each source's low 24 bits.
+            "v_mul_u32_u24_e32" => {
+                let low_24 = model.constant(0x00FF_FFFF);
+                let lhs = model.binary(op::BITWISE_AND, lhs, low_24);
+                let rhs = model.binary(op::BITWISE_AND, rhs, low_24);
+                model.binary(op::IMUL, lhs, rhs)
             }
             "v_add_f32_e32" | "v_sub_f32_e32" | "v_subrev_f32_e32" | "v_mul_f32_e32" => {
                 let reversed = name == "v_subrev_f32_e32";
@@ -3207,6 +3244,7 @@ fn combine<M: Model + ?Sized>(
             let product = model.f32_binary(op::FMUL, *a, *b);
             Ok(model.f32_binary(op::FADD, product, *c))
         }
+        ("v_mad_f32", [a, b, c]) => Ok(legacy_multiply_add(model, *a, *b, *c)),
         ("v_div_fixup_f32", [quotient, denominator, numerator]) => {
             Ok(division_fixup(model, *quotient, *denominator, *numerator))
         }
@@ -5632,6 +5670,38 @@ fn permuted_byte<M: Model + ?Sized>(
     let high = model.select(below_twelve, sign, constant);
     let below_eight = model.compare(op::ULESS_THAN, selector, eight);
     model.select(below_eight, picked, high)
+}
+
+/// `v_mad_f32` and `v_mac_f32`: `a * b + c`, rounded after the multiply and again after the add,
+/// with every input, the product and the result's denormals flushed to a signed zero. These two
+/// always flush, whatever the mode (ACO, `aco_ir.h:138-139`), and are not fused, so each step is
+/// decorated `NoContraction` to keep a driver from fusing them.
+fn legacy_multiply_add<M: Model + ?Sized>(model: &mut M, a: Id, b: Id, c: Id) -> Id {
+    let (a, b, c) = (
+        flush_denormal(model, a),
+        flush_denormal(model, b),
+        flush_denormal(model, c),
+    );
+    let product = model.f32_binary_uncontracted(op::FMUL, a, b);
+    let product = flush_denormal(model, product);
+    let sum = model.f32_binary_uncontracted(op::FADD, product, c);
+    flush_denormal(model, sum)
+}
+
+/// A float's bits with a denormal replaced by the zero of its sign; every other value, zero and the
+/// infinities and NaNs among them, unchanged.
+fn flush_denormal<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id {
+    let magnitude_mask = model.constant(0x7FFF_FFFF);
+    let magnitude = model.binary(op::BITWISE_AND, bits, magnitude_mask);
+    // A denormal's magnitude is 1 to 0x007F_FFFF; less one, it is below 0x007F_FFFF, and a zero
+    // wraps far above it.
+    let one = model.constant(1);
+    let less_one = model.binary(op::ISUB, magnitude, one);
+    let largest = model.constant(0x007F_FFFF);
+    let denormal = model.compare(op::ULESS_THAN, less_one, largest);
+    let sign_mask = model.constant(0x8000_0000);
+    let signed_zero = model.binary(op::BITWISE_AND, bits, sign_mask);
+    model.select(denormal, signed_zero, bits)
 }
 
 /// `S_BFE_U32`'s field: `(value >> control[4:0]) & ((1 << control[22:16]) - 1)` (AMD's published
