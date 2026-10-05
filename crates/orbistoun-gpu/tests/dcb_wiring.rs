@@ -237,6 +237,36 @@ fn the_dma_data_patches_write_the_address_into_the_packet() {
     assert_eq!(w.written(), 28, "the patches amend in place");
 }
 
+/// The end-of-pipe and wait-reg-mem address patches write where obSCEne measured them: the
+/// `RELEASE_MEM`'s dw3 (`166-agc/patch-queue-eop-address`), and bytes 12 and 24 of the
+/// wait-reg-mem compound (`166-agc/patch-wait-reg-mem-address`), the high half after the poll
+/// address's low. PPSA03416 patches both before submitting.
+#[test]
+fn the_eop_and_wait_reg_mem_patches_write_the_address() {
+    let address = 0x0000_7400_020c_1e38_u64;
+    let w = Writer::new(0x400);
+    let packet = call("sceAgcCbReleaseMem", [w.handle(), 0x2b, 0, 1, 3, 0x10]);
+    let mut patch = [0u64; GUEST_ARG_REGISTERS];
+    patch[0] = packet;
+    patch[1] = address;
+    assert_eq!(call("sceAgcQueueEndOfPipeActionPatchAddress", patch), 0);
+    let dword =
+        |w: &Writer, i: usize| u32::from_le_bytes(w.bytes()[i * 4..i * 4 + 4].try_into().unwrap());
+    assert_eq!((dword(&w, 3), dword(&w, 4)), (0x020c_1e38, 0x7400));
+    assert_eq!(dword(&w, 0), 0xc006_4900);
+
+    let w = Writer::new(0x400);
+    patch[0] = call("sceAgcDcbWaitRegMem", [w.handle(), 0, 0, 0, 0, 0]);
+    assert_eq!(call("sceAgcWaitRegMemPatchAddress", patch), 0);
+    assert_eq!(dword(&w, 3), 0x020c_1e38);
+    assert_eq!((dword(&w, 6), dword(&w, 7)), (0x020c_1e38, 0x7400));
+    assert_eq!(
+        (dword(&w, 4), dword(&w, 5), dword(&w, 8)),
+        (0xc005_3c00, 0, 0)
+    );
+    assert_eq!(w.written(), 56, "the patch amends in place");
+}
+
 /// The skeleton measured by header and extent reserves its measured length with the measured
 /// header and a zero body (D696). The argument in `arg1` must not leak into the body.
 #[test]
@@ -404,8 +434,6 @@ fn every_patch_answers_the_measured_success_not_a_placeholder() {
         "sceAgcSetShRegIndirectPatchSetAddress",
         "sceAgcSetUcRegIndirectPatchAddRegisters",
         "sceAgcSetUcRegIndirectPatchSetAddress",
-        "sceAgcWaitRegMemPatchAddress",
-        "sceAgcQueueEndOfPipeActionPatchAddress",
     ] {
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = 0x7400_0224_7d9c; // a real packet address, as the producer skeletons return

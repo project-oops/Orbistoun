@@ -568,13 +568,54 @@ fn dma_data_patch_source(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// Offset of a `RELEASE_MEM` packet's destination address, dw3 and dw4: radeonsi's end-of-pipe
+/// write emits it there (`si_cs_emit_write_event_eop`), and `sceAgcCbReleaseMem` places its `a5`
+/// in dw3 ([`packet::build::release_mem`]).
+const RELEASE_MEM_ADDRESS_AT: u64 = 12;
+
+/// `sceAgcQueueEndOfPipeActionPatchAddress(packet, address)`: writes the end-of-pipe destination
+/// into the `RELEASE_MEM`'s dw3 and dw4 and answers `0x0`. Measured: `0x6000_0000` and
+/// `0x8000_0000` replaced dw3 whole and nothing else changed (`166-agc/patch-queue-eop-address`,
+/// sweep 20260915-203058); the high half into dw4 is assumed, where radeonsi emits it.
+fn queue_eop_patch_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    patch_address(args[0], RELEASE_MEM_ADDRESS_AT, args[1]);
+    OK
+}
+
+/// Offset in `sceAgcDcbWaitRegMem`'s compound ([`packet::build::wait_reg_mem_skeleton`]) of the
+/// leading `SET_UCONFIG_REG`'s second value.
+const WAIT_REG_MEM_UCONFIG_VALUE_AT: u64 = 12;
+/// Offset in the compound of the `WAIT_REG_MEM`'s poll address, its dw2 and dw3 as radeonsi's
+/// `si_cp_wait_mem` emits them.
+const WAIT_REG_MEM_POLL_AT: u64 = 24;
+
+/// `sceAgcWaitRegMemPatchAddress(packet, address)`: writes the polled address into the compound
+/// `sceAgcDcbWaitRegMem` reserved and answers `0x0`. Measured: `0x5000_0000` and `0x7000_0000`
+/// came back at bytes 12 and 24 and nothing else changed (`166-agc/patch-wait-reg-mem-address`);
+/// the high half into the poll address's dw3 is assumed, where radeonsi emits it.
+fn wait_reg_mem_patch_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (packet, address) = (args[0], args[1]);
+    if packet != 0 {
+        // SAFETY: a dword of the compound the producer reserved and the guest passes back, in its
+        // own command buffer.
+        unsafe {
+            guest::write_u32(
+                packet.wrapping_add(WAIT_REG_MEM_UCONFIG_VALUE_AT),
+                address as u32,
+            )
+        };
+    }
+    patch_address(packet, WAIT_REG_MEM_POLL_AT, address);
+    OK
+}
+
 /// The `sceAgc*Patch*` family - amend an already-written packet in place, and return the measured
 /// `0x0`.
 ///
 /// obSCEne measures every patch in the family returning `0x0` across two argument passes
-/// (`166-agc/patch-*`): the Sh/Uc register patches (`AddRegisters` and `SetAddress`), and the
-/// wait-reg-mem and end-of-pipe address patches answer it here and write nothing, their amendment
-/// not yet pinned to the arguments a title passes; the Cx and DmaData patches write theirs.
+/// (`166-agc/patch-*`): the Sh/Uc register patches (`AddRegisters` and `SetAddress`) answer it here
+/// and write nothing, their amendment not yet pinned to the arguments a title passes; the Cx,
+/// DmaData, wait-reg-mem and end-of-pipe patches write theirs.
 /// `packet` is not dereferenced, so a null needs no guard.
 fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
@@ -1098,10 +1139,10 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate",
         dma_data_patch_source,
     ),
-    ("sceAgcWaitRegMemPatchAddress", agc_patch_returns_ok),
+    ("sceAgcWaitRegMemPatchAddress", wait_reg_mem_patch_address),
     (
         "sceAgcQueueEndOfPipeActionPatchAddress",
-        agc_patch_returns_ok,
+        queue_eop_patch_address,
     ),
     (
         "sceAgcCbSetShRegisterRangeDirect",

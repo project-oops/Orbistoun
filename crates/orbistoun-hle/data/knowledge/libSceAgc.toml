@@ -658,17 +658,17 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcWaitRegMemPatchAddress"
 purpose = "Writes the polled address into a WAIT_REG_MEM packet the WaitRegMem builder reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-wait-reg-mem-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the WAIT_REG_MEM (0xc0053c00) packet's address field in place. Measured return, writes nothing, per the family."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-wait-reg-mem-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into two places of the 56-byte compound: 0x50000000 / 0x70000000 came back at byte 12 (the leading SET_UCONFIG_REG's second value) and byte 24 (the WAIT_REG_MEM poll address low), nothing else changed (patch-diff-pass-a/b, extent 28). The high half after the poll address low is assumed, where radeonsi's si_cp_wait_mem emits it. PPSA03416 patches it before submitting."]
 known_by = "measured"
-cites = "obSCEne 166-agc/patch-wait-reg-mem-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+cites = "obSCEne 166-agc/patch-wait-reg-mem-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0, patch-diff-pass-a/b at bytes 12 and 24)."
 found_on = "2026-09-15"
 
 [[function]]
 name = "sceAgcQueueEndOfPipeActionPatchAddress"
 purpose = "Writes the write-back address into an end-of-pipe action packet (RELEASE_MEM) a builder reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-queue-eop-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the end-of-pipe (RELEASE_MEM, 0xc0064900) packet's write-back address field in place. Measured return, writes nothing, per the family."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-queue-eop-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the RELEASE_MEM's dw3: 0x60000000 / 0x80000000 replaced it whole (bytes 12 and 15 changed from the builder's 0x10), nothing else changed (patch-diff-pass-a/b, extent 16). The high half into dw4 is assumed, where radeonsi's end-of-pipe write emits it. PPSA03416 patches it before submitting."]
 known_by = "measured"
-cites = "obSCEne 166-agc/patch-queue-eop-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
+cites = "obSCEne 166-agc/patch-queue-eop-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0, patch-diff-pass-a/b at byte 12)."
 found_on = "2026-09-15"
 
 [[function]]
