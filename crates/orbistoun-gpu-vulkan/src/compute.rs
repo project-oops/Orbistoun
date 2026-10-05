@@ -284,9 +284,10 @@ fn build_pipeline(
         .stage(stage)
         .layout(layout)];
     // SAFETY: the create info outlives the call and names a shader module still alive.
-    let pipelines =
-        unsafe { device.create_compute_pipelines(vk::PipelineCache::null(), &pipeline_info, None) }
-            .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
+    let pipelines = unsafe {
+        device.create_compute_pipelines(crate::pipeline_cache::cache(), &pipeline_info, None)
+    }
+    .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
 
     let mut pool_sizes = vec![
         vk::DescriptorPoolSize::default()
@@ -440,6 +441,7 @@ impl Session {
         // SAFETY: the family index came from this device's own queue properties.
         let queue = unsafe { device.get_device_queue(family, 0) };
         let properties = Self::properties(&instance, physical, &wanted_features, mesh_enabled);
+        crate::pipeline_cache::open(&instance, physical, &device);
 
         Ok(Self {
             instance,

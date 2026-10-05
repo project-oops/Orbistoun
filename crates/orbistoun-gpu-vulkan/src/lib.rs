@@ -13,6 +13,7 @@ pub mod compute_images;
 mod depth;
 mod draw_buffers;
 pub mod framebuffer;
+pub mod pipeline_cache;
 pub use compute::{
     Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest, probe,
 };

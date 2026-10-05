@@ -3916,8 +3916,9 @@ fn create_graphics_pipeline(
     }];
     // SAFETY: every referenced object is live and every slice outlives the call.
     let pipelines =
-        unsafe { device.create_graphics_pipelines(vk::PipelineCache::null(), &infos, None) }
+        unsafe { device.create_graphics_pipelines(crate::pipeline_cache::cache(), &infos, None) }
             .map_err(|(_, e)| DispatchError::Vulkan("create_graphics_pipelines", e))?;
+    crate::pipeline_cache::keep(device);
     Ok(pipelines[0])
 }
 

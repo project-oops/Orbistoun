@@ -323,6 +323,11 @@ impl Paths {
             .join("shader-translations.json")
     }
 
+    /// Where one title's compiled host pipelines are kept, beside its translations (D744).
+    pub fn title_pipelines_file(&self, title: &str) -> PathBuf {
+        self.shared.title_dir(title).join("host-pipelines.bin")
+    }
+
     /// Where one title's save states are kept.
     pub fn title_savestates_dir(&self, title: &str) -> PathBuf {
         // Beside the guest filesystem, under the same title, so everything known about one title is

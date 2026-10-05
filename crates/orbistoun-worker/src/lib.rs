@@ -485,12 +485,14 @@ fn installed_titles(library: &Path) -> Vec<(String, std::path::PathBuf)> {
         .collect()
 }
 
-/// Makes the title's kept shader translations this build's before the guest starts (D113).
+/// Makes the title's kept shader translations this build's before the guest starts (D113), and
+/// keeps the pipelines the host compiles from them beside them (D744).
 fn prepare_translations(service: &Service, module: &str) {
     let Some(paths) = service.paths() else {
         return;
     };
     let title = orbistoun_service::linkplan::title_of(Path::new(module));
+    orbistoun_gpu_vulkan::pipeline_cache::keep_pipelines_at(paths.title_pipelines_file(&title));
     let started = std::time::Instant::now();
     let (refill, kept) = orbistoun_gpu::agc_driver::prepare_translations(
         paths.title_translations_file(&title),
