@@ -3,7 +3,9 @@
 //! serves every draw whatever buffers it binds.
 //!
 //! Buffers and sets are kept by content, and all released together - after every recorded draw has
-//! run - when they pass their limits.
+//! run - when they pass their limits. A buffer is a range of a large mapped arena and a set comes
+//! from a shared pool, so a frame of tens of thousands of draws makes no allocation per draw, and a
+//! release rewinds the arenas and resets the pools rather than freeing them.
 
 use std::collections::HashMap;
 
@@ -20,8 +22,30 @@ type StageKey = Vec<(u64, usize)>;
 /// room for a guest streaming new ones every frame.
 const BYTES_LIMIT: usize = 512 << 20;
 
-/// Sets kept before all are released.
-const SETS_LIMIT: usize = 4096;
+/// Sets kept before all are released: a GL frame binds a set of its own for most of its draws.
+const SETS_LIMIT: usize = 32768;
+
+/// Sets one descriptor pool holds; pools are added as sets are, up to [`SETS_LIMIT`].
+const SETS_PER_POOL: u32 = 4096;
+
+/// Bytes one arena holds; a buffer larger than that gets an arena of its own.
+const ARENA_BYTES: u64 = 32 << 20;
+
+/// Where an uploaded buffer lies: its arena's buffer, and the range of it.
+#[derive(Clone, Copy)]
+struct Placed {
+    buffer: vk::Buffer,
+    offset: vk::DeviceSize,
+    range: vk::DeviceSize,
+}
+
+/// A large host-visible buffer, mapped for its life, that uploaded buffers are ranges of.
+struct Arena {
+    held: DispatchBuffer,
+    /// The mapping's address, kept as an integer so the cache can sit in a `static`.
+    mapped: usize,
+    used: vk::DeviceSize,
+}
 
 /// What the draw buffers hold on the device.
 struct Held {
@@ -29,9 +53,16 @@ struct Held {
     /// One word, bound at every slot a draw leaves empty: a binding a module declares must hold a
     /// valid buffer at every element, and an empty slot is never read.
     placeholder: DispatchBuffer,
-    buffers: HashMap<(u64, usize), DispatchBuffer>,
+    /// `minStorageBufferOffsetAlignment`, which every range's start keeps.
+    alignment: vk::DeviceSize,
+    arenas: Vec<Arena>,
+    buffers: HashMap<(u64, usize), Placed>,
     bytes: usize,
-    sets: HashMap<[StageKey; 2], (vk::DescriptorPool, vk::DescriptorSet)>,
+    pools: Vec<vk::DescriptorPool>,
+    /// Sets allocated from the last pool in use, and which pool that is.
+    pool_sets: u32,
+    pool_index: usize,
+    sets: HashMap<[StageKey; 2], vk::DescriptorSet>,
 }
 
 /// The process's one device's draw buffers.
@@ -63,17 +94,123 @@ fn held_for<'a>(
         let layout = create_layout(session)?;
         let placeholder = crate::upload_host_buffer(session, &[0; 4])
             .map_err(|e| DispatchError::Unsupported(format!("the draw buffer placeholder: {e}")))?;
+        // SAFETY: the physical device belongs to the live instance.
+        let alignment = unsafe {
+            session
+                .instance
+                .get_physical_device_properties(session.physical)
+        }
+        .limits
+        .min_storage_buffer_offset_alignment
+        .max(4);
         *held = Some(Held {
             layout,
             placeholder,
+            alignment,
+            arenas: Vec::new(),
             buffers: HashMap::new(),
             bytes: 0,
+            pools: Vec::new(),
+            pool_sets: 0,
+            pool_index: 0,
             sets: HashMap::new(),
         });
     }
     held.as_mut().ok_or_else(|| {
         DispatchError::Unsupported("the draw buffers were made and are not there".to_owned())
     })
+}
+
+/// Copies `bytes` into the first arena with room, at the device's alignment, padded with zeros to
+/// whole words; an arena is added when none has room, sized for the buffer when it is the larger.
+fn place(session: &Session, held: &mut Held, bytes: &[u8]) -> Result<Placed, DispatchError> {
+    let size = (bytes.len().div_ceil(4).max(1) * 4) as vk::DeviceSize;
+    let alignment = held.alignment;
+    let fits = |arena: &Arena| arena.used.next_multiple_of(alignment) + size <= arena.held.size;
+    let index = if let Some(index) = held.arenas.iter().position(fits) {
+        index
+    } else {
+        {
+            let capacity = ARENA_BYTES.max(size);
+            let words = usize::try_from(capacity / 4).unwrap_or(usize::MAX);
+            let (buffer, memory) = crate::compute::create_host_buffer(
+                &session.instance,
+                session.physical,
+                &session.device,
+                capacity,
+                words,
+            )?;
+            // SAFETY: the memory is host-visible and coherent, just created and not mapped; it stays
+            // mapped until the arena is freed.
+            let mapped = unsafe {
+                session
+                    .device
+                    .map_memory(memory, 0, capacity, vk::MemoryMapFlags::empty())
+            }
+            .map_err(|e| DispatchError::Vulkan("map_memory(draw buffer arena)", e))?;
+            held.arenas.push(Arena {
+                held: DispatchBuffer {
+                    buffer,
+                    memory,
+                    size: capacity,
+                    words,
+                    offset: 0,
+                },
+                mapped: mapped as usize,
+                used: 0,
+            });
+            held.arenas.len() - 1
+        }
+    };
+    let arena = &mut held.arenas[index];
+    let offset = arena.used.next_multiple_of(alignment);
+    let at = usize::try_from(offset).unwrap_or(usize::MAX);
+    let length = usize::try_from(size).unwrap_or(usize::MAX);
+    // SAFETY: the arena is mapped for `held.size` bytes, and `offset` is within it.
+    let start = unsafe { (arena.mapped as *mut u8).add(at) };
+    // SAFETY: `offset + size` fits within the mapping; no recorded draw reads this range, which no
+    // placed buffer covered since the last release.
+    let destination = unsafe { std::slice::from_raw_parts_mut(start, length) };
+    destination[..bytes.len()].copy_from_slice(bytes);
+    destination[bytes.len()..].fill(0);
+    arena.used = offset + size;
+    Ok(Placed {
+        buffer: arena.held.buffer,
+        offset,
+        range: size,
+    })
+}
+
+/// A set from the pools: the current one's next, or a fresh pool's when it is full.
+fn pooled_set(session: &Session, held: &mut Held) -> Result<vk::DescriptorSet, DispatchError> {
+    let device = &session.device;
+    if held.pool_sets == SETS_PER_POOL || held.pools.is_empty() {
+        if held.pool_sets == SETS_PER_POOL {
+            held.pool_index += 1;
+            held.pool_sets = 0;
+        }
+        if held.pool_index == held.pools.len() {
+            let sizes = [vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(2 * DRAW_BUFFERS_PER_STAGE * SETS_PER_POOL)];
+            let pool_info = vk::DescriptorPoolCreateInfo::default()
+                .pool_sizes(&sizes)
+                .max_sets(SETS_PER_POOL);
+            // SAFETY: the create info outlives the call.
+            let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
+                .map_err(|e| DispatchError::Vulkan("create_descriptor_pool(draw buffers)", e))?;
+            held.pools.push(pool);
+        }
+    }
+    let layouts = [held.layout];
+    let allocate = vk::DescriptorSetAllocateInfo::default()
+        .descriptor_pool(held.pools[held.pool_index])
+        .set_layouts(&layouts);
+    // SAFETY: the pool has room for this set: fewer than its `SETS_PER_POOL` came from it.
+    let set = unsafe { device.allocate_descriptor_sets(&allocate) }
+        .map_err(|e| DispatchError::Vulkan("allocate_descriptor_sets(draw buffers)", e))?[0];
+    held.pool_sets += 1;
+    Ok(set)
 }
 
 /// Storage buffers the pipeline's own set gives each stage: the observation window, the
@@ -156,7 +293,7 @@ pub(crate) fn descriptor_set(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let held = held_for(&mut guard, session)?;
-    if let Some(&(_, set)) = held.sets.get(&key) {
+    if let Some(&set) = held.sets.get(&key) {
         return Ok(set);
     }
     let incoming: usize = stages
@@ -171,10 +308,9 @@ pub(crate) fn descriptor_set(
     for buffer in stages.iter().flat_map(|b| b.iter()) {
         let id = (buffer.hash, buffer.bytes.len());
         if !held.buffers.contains_key(&id) {
-            let uploaded = crate::upload_host_buffer(session, &buffer.bytes)
-                .map_err(|e| DispatchError::Unsupported(format!("a draw buffer: {e}")))?;
+            let placed = place(session, held, &buffer.bytes)?;
             held.bytes += buffer.bytes.len();
-            held.buffers.insert(id, uploaded);
+            held.buffers.insert(id, placed);
         }
     }
     let set = allocate(session, held, &key)?;
@@ -188,45 +324,24 @@ fn allocate(
     key: &[StageKey; 2],
 ) -> Result<vk::DescriptorSet, DispatchError> {
     let device = &session.device;
-    let sizes = [vk::DescriptorPoolSize::default()
-        .ty(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(2 * DRAW_BUFFERS_PER_STAGE)];
-    let pool_info = vk::DescriptorPoolCreateInfo::default()
-        .pool_sizes(&sizes)
-        .max_sets(1);
-    // SAFETY: the create info outlives the call.
-    let pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
-        .map_err(|e| DispatchError::Vulkan("create_descriptor_pool(draw buffers)", e))?;
-    let layouts = [held.layout];
-    let allocate = vk::DescriptorSetAllocateInfo::default()
-        .descriptor_pool(pool)
-        .set_layouts(&layouts);
-    // SAFETY: the pool has room for exactly this one set.
-    let set = match unsafe { device.allocate_descriptor_sets(&allocate) } {
-        Ok(sets) => sets[0],
-        Err(e) => {
-            // SAFETY: the pool was created above and holds no set.
-            unsafe { device.destroy_descriptor_pool(pool, None) };
-            return Err(DispatchError::Vulkan(
-                "allocate_descriptor_sets(draw buffers)",
-                e,
-            ));
-        }
-    };
+    let set = pooled_set(session, held)?;
     // Every element of both bindings: a bound buffer where a slot has one, the placeholder
     // elsewhere.
     let infos: Vec<[vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize]> = key
         .iter()
         .map(|stage| {
             std::array::from_fn(|slot| {
-                let buffer = stage
-                    .get(slot)
-                    .and_then(|id| held.buffers.get(id))
-                    .unwrap_or(&held.placeholder);
-                vk::DescriptorBufferInfo::default()
-                    .buffer(buffer.buffer)
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE)
+                let placed = stage.get(slot).and_then(|id| held.buffers.get(id));
+                match placed {
+                    Some(placed) => vk::DescriptorBufferInfo::default()
+                        .buffer(placed.buffer)
+                        .offset(placed.offset)
+                        .range(placed.range),
+                    None => vk::DescriptorBufferInfo::default()
+                        .buffer(held.placeholder.buffer)
+                        .offset(0)
+                        .range(vk::WHOLE_SIZE),
+                }
             })
         })
         .collect();
@@ -243,22 +358,24 @@ fn allocate(
         .collect();
     // SAFETY: the set is new and unused, and every buffer outlives the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
-    held.sets.insert(key.clone(), (pool, set));
+    held.sets.insert(key.clone(), set);
     Ok(set)
 }
 
-/// Releases every set and buffer; the layout and placeholder stay. The caller has waited for every
-/// recorded draw.
+/// Releases every set and buffer: the pools are reset and the arenas rewound, kept for the next
+/// frame's; the layout and placeholder stay. The caller has waited for every recorded draw.
 fn release(device: &ash::Device, held: &mut Held) {
-    for (_, (pool, _)) in held.sets.drain() {
-        // SAFETY: no recorded draw uses the set any more, and the pool is destroyed once.
-        unsafe { device.destroy_descriptor_pool(pool, None) };
+    for &pool in &held.pools {
+        // SAFETY: no recorded draw uses a set from the pool any more.
+        let _ =
+            unsafe { device.reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty()) };
     }
-    for (_, buffer) in held.buffers.drain() {
-        // SAFETY: nothing in flight reads the buffer, and it is destroyed once.
-        unsafe { device.destroy_buffer(buffer.buffer, None) };
-        // SAFETY: the buffer bound to the memory is destroyed above.
-        unsafe { device.free_memory(buffer.memory, None) };
+    held.sets.clear();
+    held.pool_sets = 0;
+    held.pool_index = 0;
+    held.buffers.clear();
+    for arena in &mut held.arenas {
+        arena.used = 0;
     }
     held.bytes = 0;
 }
