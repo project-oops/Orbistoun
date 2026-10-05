@@ -654,6 +654,11 @@ name = "v_madak_f32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 39
+name = "v_subrev_nc_u32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 40
 name = "v_add_co_ci_u32_e32"
 
@@ -879,6 +884,11 @@ name = "v_cmpx_neq_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 130
+name = "v_cmp_eq_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 133
 name = "v_cmp_ne_i32_e32"
 
@@ -886,6 +896,11 @@ name = "v_cmp_ne_i32_e32"
 family = "VOPC"
 opcode = 146
 name = "v_cmpx_eq_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 147
+name = "v_cmpx_le_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"

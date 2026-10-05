@@ -380,3 +380,18 @@ v_cmpx_gt_i32_e32 s5, v190
 v_cmpx_gt_i32_e32 -1, v255
 v_cmpx_gt_i32_e32 4, v77
 v_cmpx_gt_i32_e32 v130, v12
+
+// ---- radeonsi's buffer copy (si_create_dma_compute_shader): the lane's offset from the copy's
+// start, and the compares that mask off a lane past the copy's end ---------------------------
+v_subrev_nc_u32_e32 v0, s4, v0
+v_subrev_nc_u32_e32 v17, v3, v200
+v_subrev_nc_u32_e32 v250, -1, v9
+v_subrev_nc_u32_e32 v1, 64, v130
+v_cmpx_le_i32_e32 0, v0
+v_cmpx_le_i32_e32 s7, v200
+v_cmpx_le_i32_e32 v3, v9
+v_cmpx_le_i32_e32 -1, v130
+v_cmp_eq_i32_e32 vcc, 0, v0
+v_cmp_eq_i32_e32 vcc, s33, v17
+v_cmp_eq_i32_e32 vcc, v250, v1
+v_cmp_eq_i32_e32 vcc, 64, v66

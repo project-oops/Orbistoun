@@ -6231,6 +6231,7 @@ fn rounding_reversal_and_more_compares_into_exec() {
     for (name, float, kept) in [
         ("v_cmpx_eq_i32_e32", false, 5..6),
         ("v_cmpx_gt_i32_e32", false, 0..5),
+        ("v_cmpx_le_i32_e32", false, 5..64),
         ("v_cmpx_gt_f32_e32", true, 0..5),
     ] {
         let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
@@ -6245,6 +6246,37 @@ fn rounding_reversal_and_more_compares_into_exec() {
             let expected = if kept.contains(&lane) { lane as u32 } else { 0 };
             assert_eq!(*stored, expected, "{name}, lane {lane}");
         }
+    }
+}
+
+/// radeonsi's buffer copy masks a lane past the copy's end: `v_subrev_nc_u32` takes the copy's
+/// start from the lane's offset, wrapping (`D = S1 - S0`), and `v_cmp_eq_i32` sets the condition
+/// mask where the two are equal, which `exec` then takes - five against the lane keeps lane 5.
+#[test]
+fn the_buffer_copys_offset_and_equality_compare() {
+    if !device_or_skip("the_buffer_copys_offset_and_equality_compare") {
+        return;
+    }
+    let mut program: Vec<u32> = lane_index_into(0).to_vec();
+    program.extend(v_mov_literal(1, 5));
+    program.push(v_op2("v_subrev_nc_u32_e32", 3, vgpr_code(1), 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        0u32.wrapping_sub(5),
+        "lane 0 less 5, wrapped"
+    );
+
+    let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
+    mask_program.extend(v_mov_literal(1, 5));
+    // `v_cmp_eq_i32 vcc, v1, v0`, then `s_mov_b64 exec, vcc` (126 and 106 the masks' codes).
+    mask_program.push(head("v_cmp_eq_i32_e32") | vgpr_code(1));
+    mask_program.push(sop1("s_mov_b64", 126, 106));
+    let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane == 5 { 5 } else { 0 };
+        assert_eq!(*stored, expected, "lane {lane}");
     }
 }
 

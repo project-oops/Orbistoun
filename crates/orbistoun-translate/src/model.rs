@@ -138,6 +138,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_add_f32_e32",
     "v_add_f32_e64",
     "v_add_nc_u32_e32",
+    "v_subrev_nc_u32_e32",
     "v_add_co_ci_u32_e32",
     "v_add_co_ci_u32_e64",
     "v_cmp_eq_f32_e32",
@@ -149,12 +150,14 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_lt_u32_e32",
     "v_cmp_ge_u32_e32",
     "v_cmp_ne_i32_e32",
+    "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e64",
     "v_cmp_eq_f32_e64",
     "v_cmp_le_f32_e64",
     "v_cmp_ge_f32_e64",
     "v_bfi_b32",
     "v_cmpx_le_i16_e32",
+    "v_cmpx_le_i32_e32",
     "v_cmpx_neq_f32_e32",
     "v_cndmask_b32_e32",
     "v_cndmask_b32_e64",
@@ -2100,7 +2103,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // the shader can and into `exec`.
         "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_neq_f32_e32"
         | "v_cmp_le_f32_e32" | "v_cmp_ge_f32_e32" | "v_cmp_lt_u32_e32" | "v_cmp_ge_u32_e32"
-        | "v_cmp_ne_i32_e32" => compare(model, instruction, name),
+        | "v_cmp_ne_i32_e32" | "v_cmp_eq_i32_e32" => compare(model, instruction, name),
 
         // The long-form integer compare, into a register pair or a named mask.
         "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64"
@@ -2108,7 +2111,7 @@ fn vector_instruction<M: Model + ?Sized>(
             compare_long(model, instruction, name)
         }
         "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_eq_i32_e32"
-        | "v_cmpx_gt_i32_e32" => compare_into_exec(model, instruction, name),
+        | "v_cmpx_gt_i32_e32" | "v_cmpx_le_i32_e32" => compare_into_exec(model, instruction, name),
 
         // The short-form select, whose mask is always the condition mask.
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
@@ -2200,9 +2203,19 @@ fn vector_instruction<M: Model + ?Sized>(
         }
 
         // The short-form vector ALU: integer address arithmetic and float arithmetic.
-        "v_add_f32_e32" | "v_sub_f32_e32" | "v_subrev_f32_e32" | "v_mul_f32_e32"
-        | "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" | "v_add_nc_u32_e32" | "v_fmac_f32_e32"
-        | "v_or_b32_e32" | "v_xor_b32_e32" | "v_and_b32_e32" | "v_mac_f32_e32"
+        "v_add_f32_e32"
+        | "v_sub_f32_e32"
+        | "v_subrev_f32_e32"
+        | "v_mul_f32_e32"
+        | "v_lshlrev_b32_e32"
+        | "v_lshrrev_b32_e32"
+        | "v_add_nc_u32_e32"
+        | "v_subrev_nc_u32_e32"
+        | "v_fmac_f32_e32"
+        | "v_or_b32_e32"
+        | "v_xor_b32_e32"
+        | "v_and_b32_e32"
+        | "v_mac_f32_e32"
         | "v_mul_u32_u24_e32" => short_form_arithmetic(model, instruction, name),
 
         // Float minimum and maximum, emitted as `GLSL.std.450` FMax/FMin because the core opcode
@@ -2383,6 +2396,8 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             // Integer: address arithmetic, and shifts whose amount comes first; read in written
             // order, `v_lshlrev` would compute `2 << index` instead of `index << 2`.
             "v_add_nc_u32_e32" => model.binary(op::IADD, lhs, rhs),
+            // The second source less the first, wrapping: `D = S1 - S0`, as the name's `rev` says.
+            "v_subrev_nc_u32_e32" => model.binary(op::ISUB, rhs, lhs),
             "v_or_b32_e32" => model.binary(op::BITWISE_OR, lhs, rhs),
             "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, lhs, rhs),
             "v_and_b32_e32" => model.binary(op::BITWISE_AND, lhs, rhs),
@@ -3791,6 +3806,7 @@ fn compare_into_exec<M: Model + ?Sized>(
         "v_cmpx_gt_f32_e32" => (op::FORD_GREATER_THAN, 0),
         "v_cmpx_le_i16_e32" => (op::SLESS_THAN_EQUAL, 1),
         "v_cmpx_eq_i32_e32" => (op::IEQUAL, 2),
+        "v_cmpx_le_i32_e32" => (op::SLESS_THAN_EQUAL, 2),
         _ => (op::SGREATER_THAN, 2),
     };
     for lane in 0..model.lanes() {
@@ -3828,6 +3844,7 @@ fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), 
         "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
         "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
         "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),
+        "v_cmp_eq_i32_e32" => Ok((op::IEQUAL, false)),
         "v_cmp_le_f32_e32" | "v_cmp_le_f32_e64" => Ok((op::FORD_LESS_THAN_EQUAL, true)),
         "v_cmp_ge_f32_e32" | "v_cmp_ge_f32_e64" => Ok((op::FORD_GREATER_THAN_EQUAL, true)),
         _ => Err(TranslateError::Unsupported {
