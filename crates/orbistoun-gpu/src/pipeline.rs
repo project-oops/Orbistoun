@@ -1904,23 +1904,28 @@ impl Pipeline {
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
     ) -> Option<ResourceId> {
-        let geometry = match geometry {
-            Some(Ok(geometry)) => Some(geometry),
+        let mut refuse = |reason: String, submission: &mut Submission| {
+            if by_geometry
+                .refused
+                .insert((candidate.address, reason.clone()))
+            {
+                submission.report.failures.push(ShaderFailure {
+                    address: candidate.address,
+                    stage: format!("{:?}", candidate.stage).to_lowercase(),
+                    reason,
+                });
+            }
+        };
+        let (geometry, unseeded) = match geometry {
+            Some(Ok(geometry)) => (Some(geometry), None),
             // A shader prepared per draw for its buffers' formats (D738) is tried without the
-            // geometry; one that also reads the geometry is then refused by its translation.
-            Some(Err(_)) if buffer_formats.is_some() => None,
+            // geometry; one that also reads the geometry is then refused, saying why.
+            Some(Err(why)) if buffer_formats.is_some() => (None, Some(why)),
             Some(Err(why)) => {
-                let reason = format!("{needs}; and this draw's cannot be: {why}");
-                if by_geometry
-                    .refused
-                    .insert((candidate.address, reason.clone()))
-                {
-                    submission.report.failures.push(ShaderFailure {
-                        address: candidate.address,
-                        stage: format!("{:?}", candidate.stage).to_lowercase(),
-                        reason,
-                    });
-                }
+                refuse(
+                    format!("{needs}; and this draw's cannot be: {why}"),
+                    submission,
+                );
                 return None;
             }
             None => return None,
@@ -1934,9 +1939,25 @@ impl Pipeline {
         if let Some(known) = by_geometry.prepared.get(&key) {
             return *known;
         }
-        let made = self
-            .prepare_candidate(candidate, (memory, for_draw), submission)
-            .ok();
+        let made = match self.prepare_candidate(candidate, (memory, for_draw), submission) {
+            Ok(resource) => Some(resource),
+            Err(Unprepared::NeedsGeometry(reason)) => {
+                let why = unseeded.unwrap_or_else(|| "it was not given".to_owned());
+                let reason = format!("{reason}; and this draw's geometry cannot be seeded: {why}");
+                if by_geometry
+                    .refused
+                    .insert((candidate.address, reason.clone()))
+                {
+                    submission.report.failures.push(ShaderFailure {
+                        address: candidate.address,
+                        stage: format!("{:?}", candidate.stage).to_lowercase(),
+                        reason,
+                    });
+                }
+                None
+            }
+            Err(Unprepared::Failed) => None,
+        };
         by_geometry.prepared.insert(key, made);
         made
     }
