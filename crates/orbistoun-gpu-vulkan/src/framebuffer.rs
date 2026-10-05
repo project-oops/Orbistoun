@@ -2321,7 +2321,7 @@ fn copy_in(device: &ash::Device, command: vk::CommandBuffer, target: &Target) {
 pub(crate) const USER_DATA_BLOCK_WORDS: usize = orbistoun_gpu::USER_DATA_BLOCK_WORDS;
 
 /// The block's size in bytes.
-const USER_DATA_BLOCK_BYTES: u32 = (USER_DATA_BLOCK_WORDS * 4) as u32;
+pub(crate) const USER_DATA_BLOCK_BYTES: u32 = (USER_DATA_BLOCK_WORDS * 4) as u32;
 
 /// The stages that may read the user-data block: the fragment stage and the pipeline's geometry
 /// stage, naming the mesh stage only where one is built.
@@ -2932,7 +2932,7 @@ fn flush_batch(session: &crate::compute::Session) -> Result<(), DispatchError> {
 fn batch_draw(
     session: &crate::compute::Session,
     key: BatchKey,
-    state: BindState,
+    state: &BindState,
     draw: DrawWords,
 ) -> Result<(), DispatchError> {
     let mut open = open_pass()
@@ -2955,7 +2955,7 @@ fn batch_draw(
     }
     open.batch = Some(MeshBatch {
         key,
-        state,
+        state: *state,
         draws: vec![draw],
     });
     Ok(())
@@ -3170,7 +3170,7 @@ fn render_resident_with(
                     buffers: built.draw_buffers,
                     fragment,
                 },
-                built.bind_state(),
+                &built.bind_state(),
                 geometry_words,
             )?;
         } else {
@@ -3666,9 +3666,9 @@ fn create_pipeline_layout(
     set_layouts: &[vk::DescriptorSetLayout],
     geometry: Geometry,
 ) -> Result<vk::PipelineLayout, DispatchError> {
-    // The user-data block every stage may read at entry: 128 bytes, the size every device takes,
-    // visible to the pipeline's geometry stage and the fragment stage. A module that declares no
-    // block ignores it.
+    // The user-data block every stage may read at entry: 256 bytes, which the session refused a
+    // device for not taking (`draw_buffers::create_layout`), visible to the pipeline's geometry
+    // stage and the fragment stage. A module that declares no block ignores it.
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(user_data_stages(geometry))
         .offset(0)
@@ -4387,7 +4387,7 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 /// `DRAW_DATA_BINDING`, `DRAW_DATA_STRIDE_WORDS` and `DRAW_DATA_MOST_DRAWS`.
 pub const DRAW_DATA_BINDING: u32 = 5;
 /// See [`DRAW_DATA_BINDING`].
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 16;
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 32;
 /// See [`DRAW_DATA_BINDING`].
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 

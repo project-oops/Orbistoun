@@ -702,7 +702,7 @@ mod tests {
     use crate::wavefront::Window;
 
     /// A module that reads user data declares the push-constant block; one that reads none
-    /// does not and is unchanged; a stage wanting more than its sixteen words is refused
+    /// does not and is unchanged; a stage wanting more than its thirty-two words is refused
     /// rather than truncated.
     #[test]
     fn user_data_declares_the_block_only_when_read_and_refuses_too_much() {
@@ -770,7 +770,7 @@ mod tests {
             plain.module, unchanged.module,
             "and word for word as before"
         );
-        assert!(with(17).is_err(), "more than a stage's share is refused");
+        assert!(with(33).is_err(), "more than a stage's share is refused");
     }
 
     /// A window length that is not a power of two is refused, not rounded.

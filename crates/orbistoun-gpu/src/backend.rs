@@ -43,13 +43,13 @@ pub struct Rect {
 /// (`src/amd/registers/gfx103.json` in the collection's Mesa tree).
 pub const USER_DATA_WORDS: usize = 32;
 
-/// Words in the push-constant block a backend supplies each draw's user data through: sixteen per
-/// stage, vertex first. The translator reads the same layout; a test in `pipeline.rs` pins the two
+/// Words in the push-constant block a backend supplies each draw's user data through: thirty-two
+/// per stage, vertex first. The translator reads the same layout; a test in `pipeline.rs` pins the two
 /// numbers equal, because they live in crates that cannot import each other.
-pub const USER_DATA_BLOCK_WORDS: usize = 32;
+pub const USER_DATA_BLOCK_WORDS: usize = 64;
 
 /// Where a stage's words start in the block, vertex then fragment.
-pub const USER_DATA_BLOCK_OFFSETS: [usize; 2] = [0, 16];
+pub const USER_DATA_BLOCK_OFFSETS: [usize; 2] = [0, 32];
 
 /// One thing the guest asked the GPU to do.
 ///

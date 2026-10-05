@@ -3041,7 +3041,11 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
             .find(|write| write.register == register)
             .map(|write| write.value)
     };
-    let count = |register: u32| last(register).map_or(0, |value| (value >> 1) & 0x1f);
+    // `USER_SGPR`, bits 5:1, and its sixth bit `USER_SGPR_MSB`, bit 27 of both stages' `RSRC2`
+    // (`gfx103.json`): thirty-two registers set the MSB and leave the low five zero.
+    let count = |register: u32| {
+        last(register).map_or(0, |value| (value >> 1) & 0x1f | (value >> 27 & 1) << 5)
+    };
     // `DX10_CLAMP`, bit 21 of the stage's `RSRC1` (Mesa `S_00B848_DX10_CLAMP`): what an output
     // clamp does with a NaN. `None` when the stream set no `RSRC1`.
     let dx10_clamp = |register: u32| last(register).map(|value| value & DX10_CLAMP_BIT != 0);
@@ -3866,6 +3870,24 @@ mod tests {
             spanned[crate::tiling::tiled_byte_offset_64kb_rx_bpp1_surface(300, 7, 512)],
             ((7 * 512 + 300) % 199) as u8
         );
+    }
+
+    /// A stage's user-register count reads `USER_SGPR_MSB`, bit 27 of its `RSRC2`, as the count's
+    /// sixth bit: thirty-two registers set it with the low five bits clear, and read as zero
+    /// without it. Both stages' `RSRC2` carry it there (`gfx103.json`).
+    #[test]
+    fn a_stage_s_user_register_count_reads_its_sixth_bit() {
+        let write = |register, value| crate::registers::RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let layouts = super::user_data_layouts(&[
+            write(super::RSRC2_REGISTERS[0], 1 << 27),
+            write(super::RSRC2_REGISTERS[1], 1 << 27 | 3 << 1),
+        ]);
+        assert_eq!(layouts[0].count, 32);
+        assert_eq!(layouts[1].count, 35, "the low five bits beside it");
     }
 
     /// The backend's user-data block and the translator's share one layout: size and each stage's

@@ -186,7 +186,7 @@ struct DrawnOn(Option<ResourceId>);
 /// Holds the host objects a submission's resources become, keyed by content id; runs compute
 /// dispatches and draws; refuses commands with no execution. [`VulkanBackend::new`] creates no
 /// device: the device is acquired on the first resource made resident.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct VulkanBackend {
     refused: usize,
     /// Shaders made resident, by content id: created once on first sight, reused across frames,
@@ -296,8 +296,16 @@ pub struct VulkanBackend {
     window_unread: bool,
 }
 
+/// The user-data block is past the array length `Default` is derived for, so this is `new`.
+impl Default for VulkanBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VulkanBackend {
     /// Creates a backend holding nothing. The Vulkan device is opened lazily.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             refused: 0,

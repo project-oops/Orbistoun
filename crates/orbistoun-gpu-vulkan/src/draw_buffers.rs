@@ -89,6 +89,15 @@ fn create_layout(session: &Session) -> Result<vk::DescriptorSetLayout, DispatchE
             .get_physical_device_properties(session.physical)
     }
     .limits;
+    // The user-data block is pushed whole to every draw: a device taking fewer bytes cannot run
+    // a stage's thirty-two user registers.
+    if limits.max_push_constants_size < crate::framebuffer::USER_DATA_BLOCK_BYTES {
+        return Err(DispatchError::Unsupported(format!(
+            "the device takes {} push-constant bytes, and a draw's user data is {}",
+            limits.max_push_constants_size,
+            crate::framebuffer::USER_DATA_BLOCK_BYTES
+        )));
+    }
     if limits.max_per_stage_descriptor_storage_buffers
         < DRAW_BUFFERS_PER_STAGE + PIPELINE_STORAGE_BUFFERS
     {

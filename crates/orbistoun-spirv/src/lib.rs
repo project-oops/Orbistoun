@@ -1441,7 +1441,7 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 pub const DRAW_DATA_BINDING: u32 = 5;
 
 /// Words of user data each draw has in the draw-data buffer: one stage's share of the block.
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 16;
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 32;
 
 /// The most draws one dispatch carries, and so how many strides the draw-data binding spans.
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;

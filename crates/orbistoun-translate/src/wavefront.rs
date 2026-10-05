@@ -490,12 +490,14 @@ impl GeometryInputs {
         }
     }
 }
-/// Words in the push-constant block: sixteen per stage, two stages. 128 bytes is the smallest
-/// `maxPushConstantsSize` a Vulkan device may report, so every device takes it.
-pub const USER_DATA_BLOCK_WORDS: u32 = 32;
+/// Words in the push-constant block: thirty-two per stage, two stages - 256 bytes, which a device
+/// is refused for not taking (the backend checks `maxPushConstantsSize`).
+pub const USER_DATA_BLOCK_WORDS: u32 = 64;
 
-/// The most user-data words one stage may take within the block.
-pub const USER_DATA_STAGE_WORDS: u32 = 16;
+/// The most user-data words one stage may take within the block: the hardware's thirty-two user
+/// registers (`USER_SGPR` with its `USER_SGPR_MSB`, `gfx103.json`). radeonsi puts a vertex
+/// shader's buffer descriptors among them.
+pub const USER_DATA_STAGE_WORDS: u32 = 32;
 
 /// How a fragment input is read.
 ///
