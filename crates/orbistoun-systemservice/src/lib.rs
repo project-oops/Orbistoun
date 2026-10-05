@@ -16,6 +16,7 @@ pub mod error_dialog;
 pub mod json2;
 pub mod launch;
 pub mod msg_dialog;
+pub mod random;
 pub mod remoteplay;
 pub mod save_data;
 pub mod web_browser_dialog;

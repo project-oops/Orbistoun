@@ -1,0 +1,16 @@
+library = "libSceRandom"
+
+[[function]]
+name = "sceRandomGetRandomNumber"
+arity = 2
+purpose = "Fills a buffer with random bytes. sceRandomGetRandomNumber(buf, size)."
+edge_cases = [
+    "At most 64 bytes a call: oops-apps' hosted arc4random_buf asks in 64-byte pieces and gets 0 for each on hardware. A larger request is not measured and is refused with the reserved placeholder.",
+    "A null destination is refused with the reserved placeholder; what the console answers is not measured.",
+    "The bytes are a fixed-seed stream, not the host's randomness, for the reason sceKernelUuidCreate is a counter: a progress measure that compares runs needs runs that repeat (D256). That is a choice about this emulator, not a claim about the console.",
+]
+known_by = "measured"
+cites = "oops-apps common/posix/hosted.c (arc4random_buf): bound to libSceRandom, loaded first, 64 bytes a call, answering 0 - SuperTuxKart plays on hardware through it."
+found_by = "static"
+found_in = ["STKT00001"]
+found_on = "2026-10-05"
