@@ -1,5 +1,5 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
 
 	v_interp_p1_f32_e32 v0, v1, attr0.x     ; encoding: [0x01,0x00,0x00,0xc8]
 	v_interp_p1_f32_e32 v100, v37, attr12.y ; encoding: [0x25,0x31,0x90,0xc9]

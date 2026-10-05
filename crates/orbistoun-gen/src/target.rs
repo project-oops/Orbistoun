@@ -5,10 +5,12 @@
 
 /// The architecture revision, as the reference toolchain names it.
 ///
-/// The target hardware's GPU derives from RDNA2, and this is the revision the published
-/// RDNA2 instruction-set reference describes, so an assembled encoding can be looked up.
-/// It stands for the generation's encoding scheme, not the exact part.
-pub(crate) const MCPU: &str = "gfx1030";
+/// The console's own part (D739): oops-mesa's device information reports `GFX1013` inside the
+/// Navi family, and radeonsi's compiler emits that revision's instructions - `v_mac_f32` among
+/// them, which `gfx1030` removed and the reference assembler then refuses. Every name and layout
+/// the two revisions share records the same; the published RDNA2 reference, which describes
+/// `gfx1030`, stays the document an encoding is looked up in.
+pub(crate) const MCPU: &str = "gfx1013";
 
 /// Architecture features the target is assembled with.
 ///

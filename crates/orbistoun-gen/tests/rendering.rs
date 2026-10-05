@@ -125,7 +125,7 @@ fn every_committed_name_reparses_to_its_recorded_meaning() {
         );
         checked += 1;
     }
-    // The row count the sweep solves for `gfx1030`, pinned so the loop above cannot pass by
+    // The row count the sweep solves for the target, pinned so the loop above cannot pass by
     // iterating over nothing, and so a change in the count is noticed.
     assert_eq!(
         checked,

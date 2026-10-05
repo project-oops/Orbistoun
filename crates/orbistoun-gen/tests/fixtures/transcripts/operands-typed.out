@@ -1,5 +1,5 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
 
 	tbuffer_load_format_x v1, v40, s[8:11], s3 format:[BUF_FMT_32_UINT] offen ; encoding: [0x00,0x10,0xa0,0xe8,0x28,0x01,0x02,0x03]
 	tbuffer_load_format_x v37, v202, s[16:19], s93 format:[BUF_FMT_32_FLOAT] offen ; encoding: [0x00,0x10,0xb0,0xe8,0xca,0x25,0x04,0x5d]

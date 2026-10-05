@@ -1,5 +1,5 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
 
 	image_sample_lz v[4:7], v[2:3], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D ; encoding: [0x08,0x0f,0x9c,0xf0,0x02,0x04,0x61,0x00]
 	image_sample_lz v[100:103], v[200:201], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IMG_2D ; encoding: [0x08,0x0f,0x9c,0xf0,0xc8,0x64,0xf4,0x02]

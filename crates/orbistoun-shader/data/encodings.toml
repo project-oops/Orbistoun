@@ -82,7 +82,7 @@
 # because an opcode number for the wrong generation still lands on a real instruction.
 # See D139.
 
-target = "gfx1030"
+target = "gfx1013"
 
 [[encoding]]
 name = "SOP1"
@@ -369,7 +369,7 @@ value = "0xcc000000"
 opcode = { shift = 16, width = 7 }
 width_bytes = 8
 # The three sources sit in the second word as VOP3's do, and any reading 255 adds a
-# trailing literal: LLVM 18.1.8 assembles `v_pk_lshlrev_b16 v0, 0x20001, v0` for gfx1030 as
+# trailing literal: LLVM 18.1.8 assembles `v_pk_lshlrev_b16 v0, 0x20001, v0` for gfx1013 as
 # twelve bytes, the literal last. Without this a packed instruction's literal was read as the
 # next instruction - SuperTuxKart's `0x00020001`, a shift of one and two, as "VOP2 opcode 0".
 literal_operands = [

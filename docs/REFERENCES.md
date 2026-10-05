@@ -34,8 +34,9 @@ file types they arrive in. Name provenance is in [PROVENANCE.md](PROVENANCE.md).
 ## GPU instruction set reference
 
 **Source.** *"RDNA 2" Instruction Set Architecture: Reference Guide*, AMD document 70648,
-from AMD's documentation portal. The hardware's GPU is an RDNA2 derivative, `gfx1030` in
-LLVM's naming; the previous generation is GCN, `gfx900`. The target is defined once, in
+from AMD's documentation portal. The hardware's GPU is an RDNA2 derivative, `gfx1013` in
+LLVM's naming (D739), which the reference describes as `gfx1030` apart from a few instructions
+`gfx1030` removed; the previous generation is GCN, `gfx900`. The target is defined once, in
 [`orbistoun-gen`'s `target` module](../crates/orbistoun-gen/src/target.rs), and every
 generator and probe script reads it from there (D139).
 

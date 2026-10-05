@@ -1,2 +1,2 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"

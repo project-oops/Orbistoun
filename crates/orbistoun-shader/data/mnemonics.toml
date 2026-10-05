@@ -15,7 +15,7 @@
 #
 # The target is declared so the loader can refuse a half-retargeted table set.
 
-target = "gfx1030"
+target = "gfx1013"
 
 [[mnemonic]]
 family = "DS"
@@ -494,6 +494,11 @@ name = "v_mul_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 11
+name = "v_mul_u32_u24_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 15
 name = "v_min_f32_e32"
 
@@ -529,6 +534,11 @@ name = "v_xor_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 31
+name = "v_mac_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 40
 name = "v_add_co_ci_u32_e32"
 
@@ -556,6 +566,11 @@ name = "v_cndmask_b32_e64"
 family = "VOP3"
 opcode = 264
 name = "v_mul_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 321
+name = "v_mad_f32"
 
 [[mnemonic]]
 family = "VOP3"

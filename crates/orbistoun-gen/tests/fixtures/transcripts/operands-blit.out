@@ -1,5 +1,5 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
 
 	s_setprio 0                             ; encoding: [0x00,0x00,0x8f,0xbf]
 	s_setprio 3                             ; encoding: [0x03,0x00,0x8f,0xbf]

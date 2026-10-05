@@ -42,6 +42,9 @@ buffer_load_format_xy v[2:3], v4, s[8:11], 0 idxen
 buffer_load_format_xyz v[5:7], v4, s[12:15], 0 idxen
 buffer_load_format_xyzw v[8:11], v4, s[16:19], 0 idxen
 s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
+v_mad_f32 v12, v1, v2, v3
+v_mac_f32_e32 v13, v1, v2
+v_mul_u32_u24_e32 v14, 0x1234, v2
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

@@ -11,7 +11,7 @@
 # number. Together they say what a format *is*; they say nothing about whether
 # anything can translate it.
 
-target = "gfx1030"
+target = "gfx1013"
 
 [[format]]
 code = 1

@@ -1,5 +1,5 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
 	tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_10_10_10_2_USCALED] idxen ; encoding: [0x00,0x20,0x70,0xe9,0x01,0x00,0x02,0x80]
 	tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_10_10_10_2_SSCALED] idxen ; encoding: [0x00,0x20,0x78,0xe9,0x01,0x00,0x02,0x80]
 	tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_10_10_10_2_UNORM] idxen ; encoding: [0x00,0x20,0x60,0xe9,0x01,0x00,0x02,0x80]

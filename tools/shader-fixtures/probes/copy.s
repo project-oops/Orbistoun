@@ -118,3 +118,22 @@ s_buffer_load_dwordx16 s[88:103], s[100:103], 0xfff0
 s_buffer_load_dwordx16 s[48:63], s[84:87], 0x8000
 s_buffer_load_dwordx16 s[0:15], s[68:71], 0x1234
 s_buffer_load_dwordx16 s[64:79], s[36:39], 0x7ffc
+
+// ---- v_mad_f32: VOP3, three sources, the legacy multiply-add ---------------------------
+v_mad_f32 v3, v4, v5, v6
+v_mad_f32 v200, s5, v9, v190
+v_mad_f32 v255, v12, s30, 64
+v_mad_f32 v9, -1, v77, v3
+v_mad_f32 v130, v88, 4, s101
+
+// ---- v_mac_f32 and v_mul_u32_u24: VOP2, two sources ------------------------------------
+v_mac_f32_e32 v3, v4, v5
+v_mac_f32_e32 v200, s5, v9
+v_mac_f32_e32 v255, -1, v130
+v_mac_f32_e32 v9, 4, v77
+v_mac_f32_e32 v130, v88, v255
+v_mul_u32_u24_e32 v3, v4, v5
+v_mul_u32_u24_e32 v200, s5, v9
+v_mul_u32_u24_e32 v255, -1, v130
+v_mul_u32_u24_e32 v9, 4, v77
+v_mul_u32_u24_e32 v130, v88, v255

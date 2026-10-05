@@ -1,5 +1,5 @@
 	.text
-	.amdgcn_target "amdgcn-amd-amdhsa--gfx1030"
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
 
 	s_nop 0                                 ; encoding: [0x00,0x00,0x80,0xbf]
 	s_nop 7                                 ; encoding: [0x07,0x00,0x80,0xbf]
