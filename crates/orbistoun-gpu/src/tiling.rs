@@ -642,25 +642,40 @@ const fn shift_ceil(side: u32, level: u32) -> u32 {
     if shifted == 0 { 1 } else { shifted }
 }
 
-/// Where level `level` of a `levels`-level linear 2D chain, level 0 `width` x `height`, starts in
-/// bytes from the surface's base, and its row pitch in texels; `None` past the chain.
-///
-/// `Gfx10Lib::HwlComputeSurfaceInfoLinear` (`gfx10addrlib.cpp:5084-5105`): the levels are stored
-/// last first, each its rows at a 256-byte-aligned pitch - 64 texels - its own height apart.
+/// Where level `level` of a `levels`-level linear 2D chain of 32-bit texels, level 0 `width` x
+/// `height`, starts in bytes from the surface's base, and its row pitch in texels; `None` past the
+/// chain. [`linear_level_of`] at four bytes a texel.
 #[must_use]
 pub const fn linear_level(width: u32, height: u32, levels: u32, level: u32) -> Option<(u64, u32)> {
-    if level >= levels {
+    linear_level_of(width, height, (levels, level), 4)
+}
+
+/// [`linear_level`] at `bytes_per_texel`, one, two or four.
+///
+/// `Gfx10Lib::HwlComputeSurfaceInfoLinear` (`gfx10addrlib.cpp:5084-5105`): the levels are stored
+/// last first, each its rows at a 256-byte-aligned pitch - 256 / `bytes_per_texel` texels - its
+/// own height apart. Checked against addrlib at one byte a texel: a ten-level 512 x 512 chain puts
+/// level 0 at 130816 and level 9 first, and 300 x 200's level 4 takes thirteen rows.
+#[must_use]
+pub const fn linear_level_of(
+    width: u32,
+    height: u32,
+    (levels, level): (u32, u32),
+    bytes_per_texel: u32,
+) -> Option<(u64, u32)> {
+    if level >= levels || !matches!(bytes_per_texel, 1 | 2 | 4) {
         return None;
     }
+    let align = 256 / bytes_per_texel;
     let mut offset = 0;
     let mut below = levels;
     while below > level + 1 {
         below -= 1;
         let (w, h) = mip_layout_extent(width, height, below);
-        offset += w.next_multiple_of(64) as u64 * h as u64 * 4;
+        offset += w.next_multiple_of(align) as u64 * h as u64 * bytes_per_texel as u64;
     }
     let (w, _) = mip_layout_extent(width, height, level);
-    Some((offset, w.next_multiple_of(64)))
+    Some((offset, w.next_multiple_of(align)))
 }
 
 /// How a colour target's texels lie in memory, for the swizzle modes modelled: at 32 bpp, and
@@ -1760,6 +1775,29 @@ mod tests {
         assert_eq!(linear_level(65, 7, 4, 2), Some((256, 64)));
         assert_eq!(linear_level(65, 7, 4, 4), None);
         assert_eq!(linear_level(100, 30, 1, 0), Some((0, 128)));
+        // One byte a texel: addrlib's offsets and pitches for a ten-level 512 x 512 chain and a
+        // five-level 300 x 200 one.
+        assert_eq!(
+            super::linear_level_of(512, 512, (10, 0), 1),
+            Some((130_816, 512))
+        );
+        assert_eq!(
+            super::linear_level_of(512, 512, (10, 2), 1),
+            Some((32512, 256))
+        );
+        assert_eq!(
+            super::linear_level_of(512, 512, (10, 8), 1),
+            Some((256, 256))
+        );
+        assert_eq!(super::linear_level_of(512, 512, (10, 9), 1), Some((0, 256)));
+        assert_eq!(
+            super::linear_level_of(300, 200, (5, 0), 1),
+            Some((48128, 512))
+        );
+        assert_eq!(
+            super::linear_level_of(300, 200, (5, 3), 1),
+            Some((3328, 256))
+        );
     }
 
     /// A level stored padded reads at its chain's stride: level 1 of a 129 x 17 `4KB_D_X` chain is

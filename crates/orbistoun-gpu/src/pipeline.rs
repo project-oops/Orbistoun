@@ -1400,8 +1400,22 @@ fn dispatch_image_surface(
         return Err("a dispatch image view of more than one level".to_owned());
     }
     if descriptor.tiling == SwizzleMode::Linear {
-        let surface = linear_surface(&descriptor, words[4], format.bytes())
-            .ok_or("a linear dispatch image whose level is not placed here")?;
+        let surface = linear_surface(&descriptor, words[4], format.bytes()).ok_or_else(|| {
+            format!(
+                "a linear dispatch image whose level is not placed here: {}-byte texels, {}x{}, {} level(s) viewed from {}, pitch field {:#x}{}",
+                format.bytes(),
+                descriptor.width,
+                descriptor.height,
+                descriptor.levels,
+                descriptor.base_level,
+                words[4] & 0x3FFF,
+                if descriptor.compression.is_some() {
+                    ", compressed"
+                } else {
+                    ""
+                }
+            )
+        })?;
         return Ok((surface, descriptor, format));
     }
     let surface = surface_layout(&descriptor, format)
@@ -1489,12 +1503,12 @@ fn linear_surface(
             0,
             crate::registers::linear_pitch(word4, descriptor.width, bytes_per_texel),
         )
-    } else if word4.trailing_zeros() >= 14 && bytes_per_texel == 4 {
-        crate::tiling::linear_level(
+    } else if word4.trailing_zeros() >= 14 {
+        crate::tiling::linear_level_of(
             descriptor.width,
             descriptor.height,
-            descriptor.levels,
-            level,
+            (descriptor.levels, level),
+            bytes_per_texel,
         )?
     } else {
         return None;
