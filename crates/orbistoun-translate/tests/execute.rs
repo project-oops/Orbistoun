@@ -5768,7 +5768,7 @@ fn a_long_form_float_compare_takes_its_source_modifiers() {
         return;
     }
     // Inline -2.0 and 2.0.
-    let (minus_two, two) = (245, 244);
+    let (minus_two, two) = (INLINE_TWO + 1, INLINE_TWO);
     let mut program = vec![v_mov_inline(0, 0)];
     program.extend(v_mov_literal(1, (-2.0f32).to_bits()));
     program.extend(v_mov_literal(2, 2.0f32.to_bits()));
@@ -5860,4 +5860,53 @@ fn a_bitfield_insert_and_a_signed_conversion() {
     assert_eq!(vector(&registers, 3), 0x12bc_56f0);
     assert_eq!(vector(&registers, 5), (-3.0f32).to_bits());
     assert_eq!(vector(&registers, 7), 2_147_483_648.0f32.to_bits());
+}
+
+/// `v_madak_f32` adds its literal constant to the product, `v_madmk_f32` multiplies by it; the
+/// constant is a word of the instruction, so what follows decodes as the next one. Craft's constant
+/// read as an instruction when the length was not known.
+#[test]
+fn a_multiply_add_takes_its_constant_from_the_literal_word() {
+    if !device_or_skip("a_multiply_add_takes_its_constant_from_the_literal_word") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 2.0f32.to_bits()));
+    program.extend(v_mov_literal(2, 3.0f32.to_bits()));
+    // v_madak_f32 v3, v1, v2, 0.5
+    program.extend([
+        head("v_madak_f32") | (3 << 17) | (2 << 9) | (VGPR_0 + 1),
+        0.5f32.to_bits(),
+    ]);
+    // v_madmk_f32 v4, v1, 0.25, v2
+    program.extend([
+        head("v_madmk_f32") | (4 << 17) | (2 << 9) | (VGPR_0 + 1),
+        0.25f32.to_bits(),
+    ]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 6.5f32.to_bits());
+    assert_eq!(vector(&registers, 4), 3.5f32.to_bits());
+}
+
+/// The short-form `v_cmp_le_f32` and `v_cmp_ge_f32` compare into `vcc`, ordered: equal sides pass
+/// both, and the select reads the answer.
+#[test]
+fn the_short_form_ordered_compares_take_equal_sides() {
+    if !device_or_skip("the_short_form_ordered_compares_take_equal_sides") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 2.0f32.to_bits()));
+    program.extend(v_mov_literal(6, 0xaaaa));
+    // v_cmp_ge_f32_e32 vcc, 2.0, v1, then v_cndmask_b32_e32 v2, 3, v6, vcc.
+    program.push(head("v_cmp_ge_f32_e32") | (1 << 9) | INLINE_TWO);
+    program.push(head("v_cndmask_b32_e32") | (2 << 17) | (6 << 9) | (128 + 3));
+    // v_cmp_le_f32_e32 vcc, 1.0, v1 (1 <= 2), then the same select into v3.
+    program.push(head("v_cmp_le_f32_e32") | (1 << 9) | INLINE_ONE);
+    program.push(head("v_cndmask_b32_e32") | (3 << 17) | (6 << 9) | (128 + 3));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(vector(&registers, 2), 0xaaaa, "2 >= 2");
+    assert_eq!(vector(&registers, 3), 0xaaaa, "1 <= 2");
 }

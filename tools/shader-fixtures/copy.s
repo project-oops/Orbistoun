@@ -56,6 +56,10 @@ s_cselect_b64 s[8:9], -1, 0
 s_bfm_b32 s4, 8, 23
 v_bfi_b32 v15, v1, v2, v3
 v_cvt_f32_i32_e32 v16, v1
+// The multiply-adds with a constant ACO folds in (`aco_optimizer.cpp`'s madak/madmk): the
+// constant K is a literal word after the instruction.
+v_madak_f32 v17, v1, v2, 0xbdf0555d
+v_madmk_f32 v18, v1, 0x3e800000, v2
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

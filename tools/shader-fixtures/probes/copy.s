@@ -178,3 +178,27 @@ v_cvt_f32_i32_e32 v200, s5
 v_cvt_f32_i32_e32 v255, -1
 v_cvt_f32_i32_e32 v9, 4
 v_cvt_f32_i32_e32 v130, v255
+
+// ---- v_madak_f32 and v_madmk_f32: VOP2 with a literal K after the instruction --------------
+v_madak_f32 v3, v4, v5, 0xbdf0555d
+v_madak_f32 v200, s5, v9, 0x3e800000
+v_madak_f32 v255, -1, v130, 0x12345678
+v_madak_f32 v9, 4, v77, 0x87654321
+v_madak_f32 v130, v88, v255, 0x7f7fffff
+v_madmk_f32 v3, v4, 0xbdf0555d, v5
+v_madmk_f32 v200, s5, 0x3e800000, v9
+v_madmk_f32 v255, -1, 0x12345678, v130
+v_madmk_f32 v9, 4, 0x87654321, v77
+v_madmk_f32 v130, v88, 0x7f7fffff, v255
+
+// ---- v_cmp_ge/le_f32_e32: VOPC compares into vcc ---------------------------------------
+v_cmp_ge_f32_e32 vcc, v4, v5
+v_cmp_ge_f32_e32 vcc, s5, v190
+v_cmp_ge_f32_e32 vcc, -1, v255
+v_cmp_ge_f32_e32 vcc, 4, v77
+v_cmp_ge_f32_e32 vcc, v130, v12
+v_cmp_le_f32_e32 vcc, v4, v5
+v_cmp_le_f32_e32 vcc, s5, v190
+v_cmp_le_f32_e32 vcc, -1, v255
+v_cmp_le_f32_e32 vcc, 4, v77
+v_cmp_le_f32_e32 vcc, v130, v12

@@ -122,6 +122,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_eq_f32_e32",
     "v_cmp_gt_f32_e32",
     "v_cmp_lt_f32_e32",
+    "v_cmp_le_f32_e32",
+    "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
     "v_cmp_lt_u32_e32",
     "v_cmp_ge_u32_e32",
@@ -147,6 +149,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_fma_f32",
     "v_mad_f32",
     "v_mac_f32_e32",
+    "v_madak_f32",
+    "v_madmk_f32",
     "v_mul_u32_u24_e32",
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
@@ -1938,9 +1942,8 @@ fn vector_instruction<M: Model + ?Sized>(
         // Comparisons, which produce masks: every lane compares, and the answers become one value
         // the shader can and into `exec`.
         "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_neq_f32_e32"
-        | "v_cmp_lt_u32_e32" | "v_cmp_ge_u32_e32" | "v_cmp_ne_i32_e32" => {
-            compare(model, instruction, name)
-        }
+        | "v_cmp_le_f32_e32" | "v_cmp_ge_f32_e32" | "v_cmp_lt_u32_e32" | "v_cmp_ge_u32_e32"
+        | "v_cmp_ne_i32_e32" => compare(model, instruction, name),
 
         // The long-form integer compare, into a register pair or a named mask.
         "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64" => {
@@ -1973,6 +1976,7 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
+        "v_madak_f32" | "v_madmk_f32" => multiply_add_constant(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
         "v_perm_b32" => byte_permute(model, instruction),
 
@@ -3598,8 +3602,8 @@ fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), 
         "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
         "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
         "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),
-        "v_cmp_le_f32_e64" => Ok((op::FORD_LESS_THAN_EQUAL, true)),
-        "v_cmp_ge_f32_e64" => Ok((op::FORD_GREATER_THAN_EQUAL, true)),
+        "v_cmp_le_f32_e32" | "v_cmp_le_f32_e64" => Ok((op::FORD_LESS_THAN_EQUAL, true)),
+        "v_cmp_ge_f32_e32" | "v_cmp_ge_f32_e64" => Ok((op::FORD_GREATER_THAN_EQUAL, true)),
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "no translation for this comparison",
@@ -5847,6 +5851,56 @@ fn scalar_select_64<M: Model + ?Sized>(
     let high = model.select(condition, first_high, second_high);
     model.write_scalar(register, low);
     model.write_scalar(register + 1, high);
+    model.count();
+    Ok(())
+}
+
+/// `v_madak_f32 d, a, b, K` (`a * b + K`) and `v_madmk_f32 d, a, K, b` (`a * K + b`): the legacy
+/// multiply-add of `v_mad_f32` with a constant from the literal word after the instruction (AMD's
+/// published RDNA instruction set, `V_MADAK_F32`, `V_MADMK_F32`). In the order the operands are
+/// written, both are `first * second + third`.
+fn multiply_add_constant<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let [destination, first, second, third] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a multiply-add with a constant does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a multiply-add with a constant's destination is not a vector register",
+        });
+    };
+    // The constant is the third operand of `v_madak_f32` and the second of `v_madmk_f32`: the
+    // instruction's second word, decoded as an immediate.
+    let (constant, sources) = if name == "v_madak_f32" {
+        (third, [first, second])
+    } else {
+        (second, [first, third])
+    };
+    let Operand::Immediate(constant) = constant else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a multiply-add with a constant whose constant is not the instruction's word",
+        });
+    };
+    let constant = model.constant(*constant as u32);
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let a = model.read_source(instruction, sources[0], lane)?;
+        let other = model.read_source(instruction, sources[1], lane)?;
+        let value = if name == "v_madak_f32" {
+            legacy_multiply_add(model, a, other, constant)
+        } else {
+            legacy_multiply_add(model, a, constant, other)
+        };
+        model.write_vector_lane(register, lane, value);
+    }
     model.count();
     Ok(())
 }

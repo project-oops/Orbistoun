@@ -269,7 +269,22 @@ fn recognise(
         // one; reading only the first understates the length by four bytes.
         let second = read_word(bytes, offset + 4);
         let words: Vec<u32> = core::iter::once(word).chain(second).collect();
-        let length = found.length_bytes(&words);
+        // Per-opcode layout first, since most families do not have a fixed shape (D097);
+        // the family layout covers those that do.
+        let slots: Option<&[crate::operand::OperandSlot]> = table
+            .operands_for(&found.name, found.opcode_of(&words))
+            .or(found.operands.as_deref());
+        // A layout reading a word past the encoding's fixed part makes that word the
+        // instruction's own: `v_madak_f32`'s constant follows it whatever its sources select.
+        let laid_out = slots.map_or(0, |slots| {
+            slots
+                .iter()
+                .filter(|slot| slot.kind != SlotKind::Implicit)
+                .map(|slot| (slot.word + 1) * 4)
+                .max()
+                .unwrap_or(0)
+        });
+        let length = found.length_bytes(&words).max(laid_out);
         let modified = found.modifier_selected(&words).is_some();
         // A literal lives in the dword after the instruction's fixed part, which only
         // the encoding knows the end of. A modifier word sits there instead, and is not one.
@@ -278,11 +293,6 @@ fn recognise(
         } else {
             None
         };
-        // Per-opcode layout first, since most families do not have a fixed shape (D097);
-        // the family layout covers those that do.
-        let slots: Option<&[crate::operand::OperandSlot]> = table
-            .operands_for(&found.name, found.opcode_of(&words))
-            .or(found.operands.as_deref());
         let decoded = slots.map_or_else(Vec::new, |slots| {
             slots
                 .iter()
@@ -297,11 +307,11 @@ fn recognise(
                                 Operand::Named(name.clone())
                             });
                     }
-                    // A slot may name a later dword. One beyond the fixed part would be
-                    // a trailing literal or the next instruction, so it yields nothing.
+                    // A slot may name a later dword: within the fixed part, or one the layout
+                    // made the instruction's own above.
                     let source_word = if slot.word == 0 {
                         Some(word)
-                    } else if slot.word * 4 < found.width_bytes {
+                    } else if slot.word * 4 < found.width_bytes.max(laid_out) {
                         read_word(bytes, offset + (slot.word as usize) * 4)
                     } else {
                         None

@@ -554,6 +554,16 @@ name = "v_mac_f32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 32
+name = "v_madmk_f32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 33
+name = "v_madak_f32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 40
 name = "v_add_co_ci_u32_e32"
 
