@@ -520,6 +520,10 @@ enum Unprepared {
     NeedsGeometry(String),
 }
 
+/// Where each of a primitive shader's buffers' fourth descriptor word comes from, by slot: `None`
+/// for a buffer read through a scalar base, which has no format.
+type FormatWords = std::sync::Arc<[Option<orbistoun_translate::draw_buffers::DescriptorWord>]>;
+
 /// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
 type PlainKey = (u32, u64, bool, u32);
 
@@ -843,6 +847,9 @@ pub struct Pipeline {
     depth_fills: crate::depth::PendingFills,
     /// Guest dispatch modules, by the program's bytes, its entry state and its window.
     dispatch_modules: BTreeMap<u64, (Vec<u32>, orbistoun_translate::wavefront::ImageSources)>,
+    /// Each primitive shader's traced format words, by address and user-data count, with the hash
+    /// of the bytes they were traced from ([`Self::format_words`]).
+    format_words: BTreeMap<(u64, u32), (u64, Option<FormatWords>)>,
 }
 
 /// A guest compute dispatch made ready to run: its module, the window it was built against, and the
@@ -898,6 +905,7 @@ impl Pipeline {
             store: None,
             depth_fills: crate::depth::PendingFills::default(),
             dispatch_modules: BTreeMap::new(),
+            format_words: BTreeMap::new(),
         })
     }
 
@@ -2446,38 +2454,69 @@ impl Pipeline {
     /// buffers are not traced. A slot whose descriptor word cannot be resolved stays `None`, and a
     /// format load through it is then refused.
     fn draw_buffer_formats(
-        &self,
+        &mut self,
         address: u64,
         words: &[u32; USER_DATA_WORDS],
         memory: &impl GuestMemory,
     ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
-        let shader = self.decoded.get(&address)?;
-        let decoded = decode_program(shader, &self.encodings, &self.operands);
-        if !orbistoun_translate::wavefront::reads_buffer_formats(&decoded, &self.encodings) {
-            return None;
-        }
-        let user_data = UserData {
-            draw_buffers: true,
-            ..self.user_data[0]
-        };
-        let buffers = orbistoun_translate::wavefront::draw_buffers_for(
-            &decoded,
-            &self.encodings,
-            host_stage(ShaderStage::Vertex),
-            user_data,
-        )
-        .ok()?;
+        let traced = self.format_words(address)?;
         let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-        for (slot, source) in formats.0.iter_mut().zip(&buffers.sources) {
-            if let orbistoun_translate::draw_buffers::BufferSource::Descriptor {
-                words: traced,
-                ..
-            } = source
-            {
-                *slot = crate::draw_buffers::resolve_word(traced[3], words, memory).ok();
+        for (slot, word) in formats.0.iter_mut().zip(traced.iter()) {
+            if let Some(word) = word {
+                *slot = crate::draw_buffers::resolve_word(*word, words, memory).ok();
             }
         }
         Some(formats)
+    }
+
+    /// Where each of a primitive shader's buffers' fourth descriptor word comes from, by slot, for
+    /// the vertex stage's layout now; `None` for a shader that makes no format load, whose formats
+    /// no draw needs. Traced once per program and layout and kept: a draw only resolves the words,
+    /// and a frame draws one program thousands of times. A program rewritten in place is traced
+    /// again.
+    fn format_words(&mut self, address: u64) -> Option<FormatWords> {
+        let shader = self.decoded.get(&address)?;
+        let key = (address, self.user_data[0].count);
+        // The whole program's hash: a rewrite can change one word in the middle.
+        let content = content_hash(shader);
+        if let Some((held, traced)) = self.format_words.get(&key)
+            && *held == content
+        {
+            return traced.clone();
+        }
+        let decoded = decode_program(shader, &self.encodings, &self.operands);
+        let traced =
+            orbistoun_translate::wavefront::reads_buffer_formats(&decoded, &self.encodings)
+                .then(|| {
+                    let user_data = UserData {
+                        draw_buffers: true,
+                        ..self.user_data[0]
+                    };
+                    orbistoun_translate::wavefront::draw_buffers_for(
+                        &decoded,
+                        &self.encodings,
+                        host_stage(ShaderStage::Vertex),
+                        user_data,
+                    )
+                    .ok()
+                })
+                .flatten()
+                .map(|buffers| -> FormatWords {
+                    buffers
+                        .sources
+                        .iter()
+                        .map(|source| match source {
+                            orbistoun_translate::draw_buffers::BufferSource::Descriptor {
+                                words,
+                                ..
+                            } => Some(words[3]),
+                            orbistoun_translate::draw_buffers::BufferSource::Pointer { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .into()
+                });
+        self.format_words.insert(key, (content, traced.clone()));
+        traced
     }
 
     /// Prepares a primitive shader that reads the geometry engine's inputs for one draw's geometry
@@ -4632,6 +4671,61 @@ mod tests {
             .prepare_dispatch(&state(SOURCE + 16), &memory)
             .expect_err("two copies of one byte");
         assert!(overlapping.contains("overlap"), "{overlapping}");
+    }
+
+    /// A primitive shader's format words are traced once and served from then on, and a program
+    /// rewritten at the same address is traced again: the format follows the descriptor the new
+    /// program reads, not the one the old did.
+    #[test]
+    fn a_rewritten_program_is_traced_for_its_formats_again() {
+        use super::{Pipeline, USER_DATA_WORDS};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let program = |descriptor: u32| -> Vec<u8> {
+            // buffer_load_format_xyzw v0, v5, s[descriptor..+3], 0 idxen; s_endpgm.
+            [
+                0xe00c_2000_u32,
+                0x8000_0005 | (descriptor / 4) << 16,
+                0xbf81_0000,
+            ]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect()
+        };
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        pipeline.user_data[0].first_register = 8;
+        pipeline.user_data[0].count = 20;
+        let mut words = [0u32; USER_DATA_WORDS];
+        words[15] = 0x1111_1111;
+        words[19] = 0x2222_2222;
+        let address = 0x40_0000;
+        pipeline.decoded.insert(address, program(20));
+        let first = pipeline.draw_buffer_formats(address, &words, &Nothing);
+        assert_eq!(first.map(|f| f.0[0]), Some(Some(0x1111_1111)));
+        assert_eq!(
+            pipeline
+                .draw_buffer_formats(address, &words, &Nothing)
+                .map(|f| f.0[0]),
+            Some(Some(0x1111_1111)),
+            "served again"
+        );
+        pipeline.decoded.insert(address, program(24));
+        assert_eq!(
+            pipeline
+                .draw_buffer_formats(address, &words, &Nothing)
+                .map(|f| f.0[0]),
+            Some(Some(0x2222_2222)),
+            "the rewritten program's descriptor"
+        );
     }
 
     /// Each draw's user-data count is the one its `RSRC2` loads at that draw, not the stream's last:
