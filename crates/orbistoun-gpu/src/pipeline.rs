@@ -18,7 +18,7 @@ use orbistoun_translate::wavefront::MeshPrimitive;
 use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
 use orbistoun_translate::wavefront::{
-    GeometryInputs, TableBase, TableWord, TextureSource, USER_DATA_STAGE_WORDS, UserData,
+    Assembly, GeometryInputs, TableBase, TableWord, TextureSource, USER_DATA_STAGE_WORDS, UserData,
     WINDOW_SPACE_SCALE,
 };
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
@@ -102,6 +102,12 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             ^ (u64::from(g.vertices) << 32)
             ^ (u64::from(g.primitives) << 16)
             ^ u64::from(g.first_vertex)
+            ^ match g.assembly {
+                Assembly::List => 0,
+                Assembly::Strip { provoking_last } => {
+                    0x5354_0000_0000_0000 ^ u64::from(provoking_last)
+                }
+            }
     });
     let formats = for_draw.buffer_formats.map_or(0, |formats| {
         let words: Vec<u32> = formats
@@ -492,6 +498,12 @@ struct ByGeometry {
 /// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
 /// primitive, `PRIM_TYPE` in bits 5:0.
 const VGT_PRIMITIVE_TYPE: u32 = 0xC242;
+/// `DI_PT_TRISTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json`): triangles sharing vertices in a strip.
+const DI_PT_TRISTRIP: u32 = 6;
+/// `PA_SU_SC_MODE_CNTL` (`gfx103.json`, context dword `0x205`) and its `PROVOKING_VTX_LAST`, bit 19.
+const PA_SU_SC_MODE_CNTL: u32 = 0xA205;
+/// See [`PA_SU_SC_MODE_CNTL`].
+const PROVOKING_VTX_LAST: u32 = 1 << 19;
 /// `DI_PT_TRILIST` and `DI_PT_RECTLIST` (`gfx103.json:691`, `:704`, enum `VGT_DI_PRIM_TYPE`): the
 /// input primitives of three vertices each, the second radeonsi's blits.
 const DI_PT_TRILIST: u32 = 4;
@@ -521,11 +533,21 @@ fn draw_geometry(
         );
     }
     let topology = latest(VGT_PRIMITIVE_TYPE).map(|value| value & 0x3F);
-    if !matches!(topology, Some(DI_PT_TRILIST | DI_PT_RECTLIST)) {
-        return Err(format!(
-            "the draw's input primitive {topology:?} is not a list of three-vertex primitives, whose geometry-engine inputs are the ones seeded"
-        ));
-    }
+    let (assembly, primitives) = match topology {
+        Some(DI_PT_TRILIST | DI_PT_RECTLIST) => (Assembly::List, vertices / 3),
+        Some(DI_PT_TRISTRIP) => (
+            Assembly::Strip {
+                provoking_last: latest(PA_SU_SC_MODE_CNTL)
+                    .is_some_and(|value| value & PROVOKING_VTX_LAST != 0),
+            },
+            vertices.saturating_sub(2),
+        ),
+        _ => {
+            return Err(format!(
+                "the draw's input primitive {topology:?} is not a list or strip of triangles, whose geometry-engine inputs are the ones seeded"
+            ));
+        }
+    };
     if latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0) {
         return Err("a passthrough primitive shader's inputs are not seeded".to_owned());
     }
@@ -535,7 +557,8 @@ fn draw_geometry(
     let geometry = GeometryInputs {
         first_vertex: 0,
         vertices,
-        primitives: vertices / 3,
+        primitives,
+        assembly,
     };
     match geometry.refusal(lanes) {
         Some(why) => Err(why.to_owned()),
@@ -4459,8 +4482,8 @@ mod tests {
         assert!(!entry.matches(&[3, 4]));
     }
 
-    /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list of
-    /// three-vertex primitives that one wave holds, without passthrough or an index offset (D730);
+    /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list or strip
+    /// of triangles that one wave holds, without passthrough or an index offset (D730);
     /// anything else says why not.
     #[test]
     fn a_draw_s_geometry_is_seeded_only_where_one_subgroup_holds_it() {
@@ -4488,15 +4511,36 @@ mod tests {
                 first_vertex: 0,
                 vertices: 3,
                 primitives: 1,
+                assembly: super::Assembly::List,
             })
         );
+        // A strip of six vertices is four triangles, its provoking convention from
+        // `PA_SU_SC_MODE_CNTL`.
+        let strip = |mode: u32| {
+            move |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(super::DI_PT_TRISTRIP),
+                super::PA_SU_SC_MODE_CNTL => Some(mode),
+                _ => None,
+            }
+        };
+        for (mode, provoking_last) in [(super::PROVOKING_VTX_LAST, true), (0, false)] {
+            assert_eq!(
+                draw_geometry(&draw(6, 1), strip(mode), 64),
+                Ok(GeometryInputs {
+                    first_vertex: 0,
+                    vertices: 6,
+                    primitives: 4,
+                    assembly: super::Assembly::Strip { provoking_last },
+                })
+            );
+        }
         assert_eq!(
             draw_geometry(&draw(30, 1), registers(DI_PT_TRILIST, 0, 0), 64).map(|g| g.primitives),
             Ok(10)
         );
         for refused in [
             draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0), 64),
-            draw_geometry(&draw(3, 1), registers(6, 0, 0), 64),
+            draw_geometry(&draw(3, 1), registers(5, 0, 0), 64),
             draw_geometry(
                 &draw(3, 1),
                 registers(DI_PT_RECTLIST, PRIMGEN_PASSTHRU_EN, 0),

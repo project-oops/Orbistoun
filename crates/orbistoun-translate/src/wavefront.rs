@@ -475,6 +475,66 @@ pub struct GeometryInputs {
     pub vertices: u32,
     /// Primitive threads.
     pub primitives: u32,
+    /// How the primitives take their vertices.
+    #[serde(default)]
+    pub assembly: Assembly,
+}
+
+/// How a draw's primitives take their three vertices each.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum Assembly {
+    /// A list: primitive `i` is vertices `3i`, `3i + 1`, `3i + 2`.
+    #[default]
+    List,
+    /// A strip: primitive `i` is vertices `i`, `i + 1`, `i + 2`, an odd one reversed to keep the
+    /// strip's winding, in the rotation that puts its provoking vertex where the draw's convention
+    /// looks: `i + 2` last under the last-vertex convention, `i` first under the first-vertex one
+    /// (the GL triangle-strip rules radeonsi's draws keep; `PROVOKING_VTX_LAST`, bit 19 of
+    /// `PA_SU_SC_MODE_CNTL`, which radeonsi sets to `!flatshade_first`).
+    Strip {
+        /// Whether the last vertex is the provoking one.
+        provoking_last: bool,
+    },
+}
+
+impl Assembly {
+    /// The three vertices primitive `primitive` takes, in order.
+    #[must_use]
+    pub const fn vertices_of(self, primitive: u32) -> [u32; 3] {
+        let i = primitive;
+        match self {
+            Self::List => [3 * i, 3 * i + 1, 3 * i + 2],
+            Self::Strip { .. } if i % 2 == 0 => [i, i + 1, i + 2],
+            Self::Strip {
+                provoking_last: true,
+            } => [i + 1, i, i + 2],
+            Self::Strip {
+                provoking_last: false,
+            } => [i, i + 2, i + 1],
+        }
+    }
+
+    /// How many vertices `primitives` primitives take.
+    #[must_use]
+    pub const fn vertices_for(self, primitives: u32) -> u32 {
+        match self {
+            Self::List => primitives * 3,
+            Self::Strip { .. } if primitives == 0 => 0,
+            Self::Strip { .. } => primitives + 2,
+        }
+    }
 }
 
 impl GeometryInputs {
@@ -483,7 +543,7 @@ impl GeometryInputs {
     pub const fn refusal(self, lanes: u32) -> Option<&'static str> {
         if self.vertices > lanes || self.primitives > lanes {
             Some("the draw has more vertices or primitives than one wave's threads")
-        } else if self.primitives * 3 > self.vertices {
+        } else if self.assembly.vertices_for(self.primitives) > self.vertices {
             Some("the draw's primitives name vertices it does not have")
         } else {
             None
@@ -1650,6 +1710,7 @@ impl<'a> Wavefront<'a> {
             first_vertex,
             vertices,
             primitives,
+            assembly,
         } = geometry;
         let tg_info = self.constant((vertices << 12) | (primitives << 22));
         self.store_scalar(2, tg_info);
@@ -1657,15 +1718,15 @@ impl<'a> Wavefront<'a> {
         self.store_scalar(3, wave_info);
         for lane in 0..self.lanes {
             let is_primitive = lane < primitives;
-            let first = 3 * lane;
+            let [first, second, third] = assembly.vertices_of(lane);
             let words = [
                 // v0: the first two vertex indices; v1: the third.
                 if is_primitive {
-                    first | ((first + 1) << 16)
+                    first | (second << 16)
                 } else {
                     0
                 },
-                if is_primitive { first + 2 } else { 0 },
+                if is_primitive { third } else { 0 },
                 // v2: the primitive id; v3: the invocation id; v4: the fifth and sixth indices.
                 if is_primitive { lane } else { 0 },
                 0,
@@ -3324,4 +3385,30 @@ pub fn translate_with_user_data(
     let sources = module.image_sources();
     let (words, translated) = module.finish()?;
     Ok((words, translated, sources))
+}
+
+#[cfg(test)]
+mod assembly_tests {
+    /// A strip's triangles take overlapping vertices, each odd one reversed in the rotation that
+    /// keeps the provoking vertex where the convention looks: `i + 2` last, or `i` first.
+    #[test]
+    fn a_strip_s_triangles_keep_winding_and_their_provoking_vertex() {
+        use super::Assembly;
+        let last = Assembly::Strip {
+            provoking_last: true,
+        };
+        let first = Assembly::Strip {
+            provoking_last: false,
+        };
+        assert_eq!(Assembly::List.vertices_of(2), [6, 7, 8]);
+        assert_eq!(last.vertices_of(0), [0, 1, 2]);
+        assert_eq!(last.vertices_of(1), [2, 1, 3], "reversed, 3 last");
+        assert_eq!(first.vertices_of(1), [1, 3, 2], "reversed, 1 first");
+        assert_eq!(last.vertices_of(2), [2, 3, 4]);
+        // The two odd orderings are rotations of each other: the same winding.
+        let [a, b, c] = last.vertices_of(5);
+        assert_eq!(first.vertices_of(5), [b, c, a]);
+        assert_eq!(last.vertices_for(4), 6);
+        assert_eq!(Assembly::List.vertices_for(4), 12);
+    }
 }
