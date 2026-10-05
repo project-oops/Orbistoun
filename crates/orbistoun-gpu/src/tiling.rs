@@ -694,6 +694,9 @@ pub enum SurfaceLayout {
     /// `64KB_R_X` at one byte a texel: 256 x 256-texel blocks, row-major, each laid out by
     /// addrlib's 8-bpp equation ([`tiled_byte_offset_64kb_rx_bpp1_surface`]).
     Rx64KbBpp1,
+    /// `LINEAR` at one byte a texel: rows at a 256-byte-aligned pitch, 256 texels
+    /// ([`linear_level_of`]).
+    LinearBpp1,
 }
 
 /// A linear surface's row pitch in texels: its width rounded up to 64, 256 bytes.
@@ -719,6 +722,7 @@ impl SurfaceLayout {
     pub const fn at_bytes_per_texel(self, bytes_per_texel: u32) -> Option<Self> {
         match (self, bytes_per_texel) {
             (Self::Rx64Kb, 1) => Some(Self::Rx64KbBpp1),
+            (Self::Linear, 1) => Some(Self::LinearBpp1),
             (_, 4) => Some(self),
             _ => None,
         }
@@ -728,9 +732,19 @@ impl SurfaceLayout {
     #[must_use]
     pub const fn texel_log2(self) -> u32 {
         match self {
-            Self::Rx64KbBpp1 => 0,
+            Self::Rx64KbBpp1 | Self::LinearBpp1 => 0,
             Self::Rx64Kb | Self::Dx4Kb | Self::Linear => 2,
         }
+    }
+
+    /// Whether this is a linear layout, whose levels each have rows of their own.
+    const fn is_linear(self) -> bool {
+        matches!(self, Self::Linear | Self::LinearBpp1)
+    }
+
+    /// A linear layout's row pitch in texels: 256 bytes' worth, as [`linear_level_of`] aligns it.
+    const fn linear_pitch(self, width: u32) -> u32 {
+        width.next_multiple_of(256 >> self.texel_log2())
     }
 
     /// Words a whole surface of this layout occupies.
@@ -745,6 +759,11 @@ impl SurfaceLayout {
             }
             // Whole 64 KiB blocks, so whole words.
             Self::Rx64KbBpp1 => surface_bytes_64kb_rx_bpp1(width, height) / 4,
+            // Every row's bytes but the last at its pitch; the last ends at its width, and the
+            // words cover the last byte.
+            Self::LinearBpp1 => (self.linear_pitch(width) as usize * (height.max(1) as usize - 1)
+                + width as usize)
+                .div_ceil(4),
         }
     }
 
@@ -754,7 +773,7 @@ impl SurfaceLayout {
             Self::Rx64Kb | Self::Rx64KbBpp1 => 16,
             // A linear surface has no blocks; its "block" is a row's 256 bytes, never a tail's.
             Self::Dx4Kb => 12,
-            Self::Linear => 8,
+            Self::Linear | Self::LinearBpp1 => 8,
         }
     }
 
@@ -774,7 +793,7 @@ impl SurfaceLayout {
     #[must_use]
     pub const fn first_level_in_tail(self, width: u32, height: u32, levels: u32) -> u32 {
         // A linear chain has no tail: every level has rows of its own.
-        if levels <= 1 || matches!(self, Self::Linear) {
+        if levels <= 1 || self.is_linear() {
             return levels;
         }
         let (block_width, block_height) = self.block_extent();
@@ -797,9 +816,9 @@ impl SurfaceLayout {
 
     /// Bytes level `level` of a chain occupies outside the tail: its extent padded to whole blocks.
     const fn level_bytes(self, width: u32, height: u32, level: u32) -> u64 {
-        if matches!(self, Self::Linear) {
+        if self.is_linear() {
             let (w, h) = mip_layout_extent(width, height, level);
-            return linear_row_pitch(w) as u64 * h as u64 * 4;
+            return (self.linear_pitch(w) as u64 * h as u64) << self.texel_log2();
         }
         let (block_width, block_height) = self.block_extent();
         let (w, h) = mip_layout_extent(width, height, level);
@@ -821,8 +840,8 @@ impl SurfaceLayout {
         levels: u32,
         level: u32,
     ) -> Option<u64> {
-        if matches!(self, Self::Linear) {
-            return match linear_level(width, height, levels, level) {
+        if self.is_linear() {
+            return match linear_level_of(width, height, (levels, level), 1 << self.texel_log2()) {
                 Some((offset, _)) => Some(offset),
                 None => None,
             };
@@ -915,7 +934,7 @@ impl SurfaceLayout {
     pub const fn models(self, pipe_bank_xor: u8) -> bool {
         match self {
             Self::Rx64Kb | Self::Rx64KbBpp1 => true,
-            Self::Dx4Kb | Self::Linear => pipe_bank_xor == 0,
+            Self::Dx4Kb | Self::Linear | Self::LinearBpp1 => pipe_bank_xor == 0,
         }
     }
 
@@ -953,6 +972,14 @@ impl SurfaceLayout {
                 (0..height as usize)
                     .flat_map(|row| tiled[row * pitch..][..width as usize].iter().copied())
                     .map(map)
+                    .collect()
+            }
+            // Each texel is one byte of the little-endian words, its rows at the pitch.
+            Self::LinearBpp1 => {
+                let pitch = self.linear_pitch(width) as usize;
+                (0..height as usize)
+                    .flat_map(|row| (0..width as usize).map(move |x| row * pitch + x))
+                    .map(|at| map(tiled[at / 4] >> ((at % 4) * 8) & 0xFF))
                     .collect()
             }
             // Each texel is one byte of the little-endian words.
@@ -1017,6 +1044,25 @@ impl SurfaceLayout {
                     for (slot, &texel) in tiled[y * pitch..][..row.len()].iter_mut().zip(row) {
                         *slot = map(texel);
                     }
+                }
+                Ok(())
+            }
+            // Each texel's low byte, into its byte of the little-endian words.
+            Self::LinearBpp1 => {
+                let needed_words = self.words(width, height);
+                let texels = width as usize * height as usize;
+                if tiled.len() < needed_words || linear.len() != texels {
+                    return Err(DetileError::TiledDataTooShort {
+                        needed_words: needed_words.max(texels),
+                        got_words: tiled.len().min(linear.len()),
+                    });
+                }
+                let pitch = self.linear_pitch(width) as usize;
+                for (index, &texel) in linear.iter().enumerate() {
+                    let at = index / width as usize * pitch + index % width as usize;
+                    let shift = (at % 4) * 8;
+                    let word = &mut tiled[at / 4];
+                    *word = (*word & !(0xFF << shift)) | ((map(texel) & 0xFF) << shift);
                 }
                 Ok(())
             }
@@ -1942,5 +1988,34 @@ mod tests {
                 "level {level}"
             );
         }
+    }
+
+    /// A one-byte linear chain's level lies where addrlib's linear layout puts it, its rows at a
+    /// 256-texel pitch, and tiling it back changes only its own bytes.
+    #[test]
+    fn a_one_byte_linear_level_lies_at_its_pitch() {
+        use super::SurfaceLayout;
+        let layout = SurfaceLayout::LinearBpp1;
+        assert_eq!(SurfaceLayout::Linear.at_bytes_per_texel(1), Some(layout));
+        assert_eq!(layout.level_offset(512, 512, 10, 1), Some(65280));
+        assert_eq!(layout.chain_bytes(512, 512, 10), 392_960);
+        let (width, height) = (300, 3);
+        assert_eq!(layout.words(width, height), (512 * 2 + 300) / 4);
+        let mut tiled = vec![0xA5A5_A5A5u32; layout.words(width, height)];
+        let linear: Vec<u32> = (0..width * height).map(|i| i % 241).collect();
+        layout
+            .tile_mapped(&linear, width, height, 0, &mut tiled, |w| w)
+            .expect("tiles");
+        let bytes: Vec<u8> = tiled.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(
+            u32::from(bytes[512 + 7]),
+            (300 + 7) % 241,
+            "row 1 at the pitch"
+        );
+        assert_eq!(bytes[300], 0xA5, "the pitch's padding is kept");
+        assert_eq!(
+            layout.detile_mapped(&tiled, width, height, 0, |w| w),
+            linear
+        );
     }
 }

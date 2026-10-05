@@ -2583,8 +2583,11 @@ fn read_texture(
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     match (descriptor.tiling, format) {
         (SwizzleMode::Linear, TexelFormat::Rgba8) => {}
-        // The tiled layouts modelled, each sampled as it is rendered (crate::tiling).
-        (SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled4KbDX, _) => {
+        // The tiled layouts modelled, each sampled as it is rendered (crate::tiling); a one-byte
+        // linear image with no pitch of its own lies as its layout's chain places it.
+        (SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled4KbDX | SwizzleMode::Linear, _)
+            if descriptor.tiling != SwizzleMode::Linear || words[4].trailing_zeros() >= 14 =>
+        {
             return read_tiled_texture(&descriptor, format, slot, memory, texels)
                 .map(|bound| swizzled_texture(bound, format, selects));
         }
@@ -2823,6 +2826,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::Dx4Kb => 1 << 31,
         crate::tiling::SurfaceLayout::Linear => 1 << 27,
         crate::tiling::SurfaceLayout::Rx64KbBpp1 => 1 << 26,
+        crate::tiling::SurfaceLayout::LinearBpp1 => 1 << 25,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
@@ -3504,6 +3508,50 @@ mod tests {
             "27 as alpha over white"
         );
         assert!(read(5 | 1 << 9).is_none(), "a one-byte texel has no Y");
+    }
+
+    /// A one-byte linear texture with no pitch of its own is read at 256 texels a row, as
+    /// addrlib's linear layout aligns one; under `(X, 0, 0, 1)` each byte is red.
+    #[test]
+    fn a_one_byte_linear_texture_is_read_at_its_layouts_pitch() {
+        use super::{RenderCommand, read_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (table, texels, width, height) = (0x1000_u64, 0x2000_u64, 8u32, 3u32);
+        let mut bytes = vec![0u8; 0x1000 + 256 * 3];
+        let descriptor = [
+            (texels >> 8) as u32,
+            ((texels >> 40) as u32 & 0xff) | (1 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            (9 << 28) | 4 | 1 << 9,
+            0,
+            0,
+            0,
+            0,
+        ];
+        for (i, word) in descriptor.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        for y in 0..height as usize {
+            for x in 0..width as usize {
+                bytes[0x1000 + y * 256 + x] = u8::try_from(y * 10 + x).expect("small");
+            }
+        }
+        let Some(RenderCommand::BindTexture { texels, .. }) =
+            read_texture(table, 0, &Memory(bytes), &mut super::TexelCache::new())
+        else {
+            panic!("a linear one-byte texture binds");
+        };
+        assert_eq!(
+            texels[(2 * width + 3) as usize],
+            0xff00_0017,
+            "23, at row 2's pitch"
+        );
     }
 
     /// A linear texture is read at its descriptor's pitch, not its width, and a descriptor that is

@@ -273,7 +273,7 @@ fn writable_target(submission: &Submission) -> Option<(ColourTarget, ComponentSw
 /// Whether `target` holds one byte a texel - an `8` `UNORM` target holding red, the only one-byte
 /// class [`writable_target`] accepts.
 fn one_byte_texels(target: ColourTarget) -> bool {
-    target.layout == tiling::SurfaceLayout::Rx64KbBpp1
+    target.layout.texel_log2() == 0
 }
 
 /// A texel as `target` holds it in memory - a word in its byte order, or a byte - as the linear
@@ -281,7 +281,7 @@ fn one_byte_texels(target: ColourTarget) -> bool {
 /// one: the drawer writes red alone ([`crate::RenderCommand::SetWriteMask`]), so alpha stays one,
 /// which is what blending reads as a one-channel target's destination alpha.
 const fn loaded(texel: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
-    if matches!(target.layout, tiling::SurfaceLayout::Rx64KbBpp1) {
+    if target.layout.texel_log2() == 0 {
         0xFF00_0000 | (texel & 0xFF)
     } else {
         swapped(texel, swap)
@@ -290,7 +290,7 @@ const fn loaded(texel: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
 
 /// [`loaded`]'s inverse: a drawer's linear `Rgba8` word as `target` holds it in memory.
 const fn stored(word: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
-    if matches!(target.layout, tiling::SurfaceLayout::Rx64KbBpp1) {
+    if target.layout.texel_log2() == 0 {
         word & 0xFF
     } else {
         swapped(word, swap)
