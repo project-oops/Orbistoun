@@ -214,3 +214,18 @@ edge_cases = [
 known_by = "assumed"
 assumptions = ["That a guest cannot tell a flip that completed on submit from one that completed at a vblank. Nothing observed distinguishes them - but a title that times frames against the flip count, or waits on a flip event expecting a delay, would."]
 found_on = "2026-09-01"
+
+[[function]]
+name = "sceVideoOutGetOutputStatus"
+arity = 2
+purpose = "Fills a status block describing what a video-out port is driving."
+returns = "status"
+edge_cases = [
+    "MEASURED on an open port: 48 bytes written - resolution 1 (1080p), dynamic range 1, refresh rate 3 (60 Hz) as words at 0, 4 and 8, the rest zero - and 0 answered. Runs from 2026-09-28 on, with the console switched to 2160p, write 2 as the first word; orbistoun presents 1080p and answers 1.",
+    "MEASURED refusals: a null status 0x80290002, a bad handle 0x8029000b.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne 130-layout/video-out-output-status (reports/hardware/20260927-084607-eboot.obs.log and later), REQ-20260926T1927Z-335a"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-06"

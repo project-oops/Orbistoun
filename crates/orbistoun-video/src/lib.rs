@@ -29,7 +29,8 @@ guest_module! {
         // Declared at the trampoline's full arity 6 and not implemented, so the stub policy answers
         // them by name rather than as bare hashes.
         "sceVideoOutSetBufferAttribute2" => 6,
-        "sceVideoOutGetOutputStatus" => 6,
+        // Arity 2: the port handle and the status the hardware fills.
+        "sceVideoOutGetOutputStatus" => 2,
     }
 }
 
@@ -52,6 +53,8 @@ mod video_error {
     /// The output is already open, so a second open is refused. Measured: obSCEne's display path
     /// records `sceVideoOutOpen` of the held main output answering `0x8029_0009`.
     pub(super) const ALREADY_OPEN: u64 = 0x8029_0009;
+    /// A null where the call writes. Measured: `130-layout/video-out-output-status` `rc-null`.
+    pub(super) const INVALID_VALUE: u64 = 0x8029_0002;
 }
 
 /// The shape of a registered buffer set, decoded from its attribute block.
@@ -562,6 +565,32 @@ const PRESENTED_WIDTH: u32 = 1920;
 /// Companion to [`PRESENTED_WIDTH`].
 const PRESENTED_HEIGHT: u32 = 1080;
 
+/// The 48 bytes `sceVideoOutGetOutputStatus` writes for a 1080p, 60 Hz output: resolution 1,
+/// dynamic range 1, refresh rate 3, then zero (obSCEne `130-layout/video-out-output-status`, REQ
+/// 335a, every run before 2026-09-28). Later runs, on a console switched to 2160p, write 2 first;
+/// this run presents 1080p ([`PRESENTED_HEIGHT`]).
+const OUTPUT_STATUS_1080P: [u32; 12] = [1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// `sceVideoOutGetOutputStatus(handle, status)`: what the output is driving, as measured for the
+/// size this run presents. A null status and an unopened handle are refused with the measured
+/// codes.
+fn video_out_get_output_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, status) = (args[0], args[1]);
+    if port::with(handle, |_| ()).is_none() {
+        return video_error::INVALID_HANDLE;
+    }
+    if status == 0 {
+        return video_error::INVALID_VALUE;
+    }
+    for (index, word) in OUTPUT_STATUS_1080P.iter().enumerate() {
+        // SAFETY: the guest's status block, 48 bytes by the measured extent.
+        if !unsafe { guest::write_u32(status + 4 * index as u64, *word) } {
+            return video_error::INVALID_VALUE;
+        }
+    }
+    OK
+}
+
 /// `sceVideoOutGetResolutionStatus(handle, status)`.
 ///
 /// Fills the caller's status structure with the resolution this run presents (D425). `width` and
@@ -653,6 +682,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceVideoOutGetResolutionStatus",
             video_out_get_resolution_status,
         ),
+        ("sceVideoOutGetOutputStatus", video_out_get_output_status),
     ]
 }
 
@@ -679,9 +709,10 @@ mod tests {
     }
     use super::{
         BufferShape, GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
-        video_out_get_flip_status, video_out_get_resolution_status, video_out_is_flip_pending,
-        video_out_open, video_out_register_buffers, video_out_register_buffers2,
-        video_out_set_buffer_attribute2, video_out_set_flip_rate, video_out_submit_flip,
+        video_out_get_flip_status, video_out_get_output_status, video_out_get_resolution_status,
+        video_out_is_flip_pending, video_out_open, video_out_register_buffers,
+        video_out_register_buffers2, video_out_set_buffer_attribute2, video_out_set_flip_rate,
+        video_out_submit_flip,
     };
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
@@ -1067,6 +1098,35 @@ mod tests {
             open_on(7),
             video_error::ALREADY_OPEN,
             "the second open of the same output is refused, not handed another handle"
+        );
+    }
+
+    /// The output status is the 48 bytes the hardware writes for a 1080p, 60 Hz output - resolution
+    /// 1, dynamic range 1, refresh 3, the rest zero - with a null status and an unopened handle
+    /// refused by their measured codes (`130-layout/video-out-output-status`, REQ 335a).
+    #[test]
+    fn the_output_status_is_the_measured_1080p_one() {
+        let handle = open_on(13);
+        let mut status = [0xcc_u8; 0x40];
+        let status_ptr = status.as_mut_ptr() as usize as u64;
+        assert_eq!(
+            video_out_get_output_status(&args([handle, status_ptr, 0, 0])),
+            0
+        );
+        let mut expected = [0_u8; 0x30];
+        expected[..12].copy_from_slice(&[1, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0]);
+        assert_eq!(status[..0x30], expected, "the measured 48 bytes");
+        assert!(
+            status[0x30..].iter().all(|&b| b == 0xcc),
+            "nothing past them"
+        );
+        assert_eq!(
+            video_out_get_output_status(&args([handle, 0, 0, 0])),
+            0x8029_0002
+        );
+        assert_eq!(
+            video_out_get_output_status(&args([port::FIRST + 9999, status_ptr, 0, 0])),
+            0x8029_000b
         );
     }
 
