@@ -291,6 +291,7 @@ guest_module! {
         "sceLibcMspaceMemalign" => 3,
         "sceLibcMspaceMallocUsableSize" => 1,
         "sceLibcMspaceMallocStats" => 2,
+        "sceLibcMspaceMallocStatsFast" => 2,
         "malloc_usable_size" => 1,
         "aligned_alloc" => 2,
         "exit" => 1,
@@ -1225,7 +1226,8 @@ fn mspace_malloc_usable_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     header_of(args[0]).map_or(0, |(total, offset)| (total - offset) as u64)
 }
 
-/// `sceLibcMspaceMallocStats(msp, stats)`: the arena's sizes, into a block whose first word the
+/// `sceLibcMspaceMallocStats(msp, stats)` and `sceLibcMspaceMallocStatsFast(msp, stats)`: the
+/// arena's sizes, into a block whose first word the
 /// caller sets to its size and version - `0x10028`, 0x28 bytes, version 1, as PPSA21564 passes it.
 /// Four sizes follow at +0x08, +0x10, +0x18 and +0x20: the most and the current memory the arena
 /// holds, then the most and the current in use. Guest-observed, from PPSA21564's Onion heap, which
@@ -3735,6 +3737,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceLibcMspaceMemalign", mspace_memalign),
         ("sceLibcMspaceMallocUsableSize", mspace_malloc_usable_size),
         ("sceLibcMspaceMallocStats", mspace_malloc_stats),
+        ("sceLibcMspaceMallocStatsFast", mspace_malloc_stats),
         ("malloc_usable_size", mspace_malloc_usable_size),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
@@ -4565,7 +4568,8 @@ mod tests {
         assert_eq!(call("sceLibcMspaceDestroy", [msp, 0, 0, 0, 0, 0]), 0);
     }
 
-    /// `sceLibcMspaceMallocStats(msp, stats)` on an arena created over a base fills the 40-byte block
+    /// `sceLibcMspaceMallocStats(msp, stats)` and its `Fast` form on an arena created over a base fill
+    /// the 40-byte block
     /// PPSA21564's Onion heap passes - first word `0x10028`, its size 0x28 and version 1 - with the
     /// arena's capacity as its system size and the bytes in use, and answers 0. The heap then
     /// allocates only when the size at +0x10 covers the request.
@@ -4575,13 +4579,15 @@ mod tests {
         let base = arena.as_ptr() as u64;
         let msp = call("sceLibcMspaceCreate", [0, base, 0x40_0000, 1, 0, 0]);
         let stats = |msp: u64| {
-            let mut block = [0_u64; 5];
-            block[0] = 0x10028;
-            let rc = call(
-                "sceLibcMspaceMallocStats",
-                [msp, block.as_mut_ptr() as u64, 0, 0, 0, 0],
-            );
-            (rc, block)
+            let read = |name: &str| {
+                let mut block = [0_u64; 5];
+                block[0] = 0x10028;
+                let rc = call(name, [msp, block.as_mut_ptr() as u64, 0, 0, 0, 0]);
+                (rc, block)
+            };
+            let full = read("sceLibcMspaceMallocStats");
+            assert_eq!(full, read("sceLibcMspaceMallocStatsFast"));
+            full
         };
         assert_eq!(stats(msp), (0, [0x10028, 0x40_0000, 0x40_0000, 0, 0]));
         let p = call("sceLibcMspaceMemalign", [msp, 0x40, 0x20_0000, 0, 0, 0]);

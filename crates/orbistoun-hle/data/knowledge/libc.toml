@@ -1862,6 +1862,20 @@ found_in = ["PPSA21564-app0"]
 found_on = "2026-10-06"
 
 [[function]]
+name = "sceLibcMspaceMallocStatsFast"
+found_by = "static"
+arity = 2
+purpose = "Fills a caller's stats block with an mspace's memory and in-use sizes, as sceLibcMspaceMallocStats does."
+returns = "status"
+edge_cases = [
+    "GUEST-OBSERVED: the call PPSA21564's Onion heap makes before every allocation (image+0x45c598, through the PLT stub at image+0x74e7250) is bound to this name, not sceLibcMspaceMallocStats: serving that one moved nothing. It fills and reads the same 0x10028-headed block, so it is answered as sceLibcMspaceMallocStats is.",
+]
+known_by = "guest-observed"
+cites = "PPSA21564 Onion heap allocate method (image+0x45c540), disassembled 2026-10-06; D751"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-06"
+
+[[function]]
 name = "sceLibcMspaceMallocUsableSize"
 found_by = "static"
 arity = 1
