@@ -696,7 +696,7 @@ fn emit_header(
     stage: Stage,
     primitive: MeshPrimitive,
     main: Id,
-    output: Option<Id>,
+    (output, depth): (Option<Id>, Option<Id>),
 ) {
     if stage == Stage::Mesh {
         // `MeshShadingEXT` implies `Shader`, and the extension must be declared with it.
@@ -718,6 +718,10 @@ fn emit_header(
         // Required of every fragment entry point: Vulkan's framebuffer origin is the top left.
         Stage::Fragment => {
             b.header(op::EXECUTION_MODE, &[main.0, mode::ORIGIN_UPPER_LEFT]);
+            // A module that exports depth replaces the rasterised depth with it.
+            if depth.is_some() {
+                b.header(op::EXECUTION_MODE, &[main.0, mode::DEPTH_REPLACING]);
+            }
         }
         // One invocation stands in for the guest's whole wave; the maximum output is the lane
         // count, since the guest arranges one vertex per lane. The actual count is the runtime
@@ -870,6 +874,64 @@ fn declare_colour_output(
     b.declare(op::TYPE_POINTER, &[output_ptr.0, OUTPUT, vec4.0]);
     b.declare(op::VARIABLE, &[output_ptr.0, colour.0, OUTPUT]);
     Some((vec4, colour))
+}
+
+/// Reserves a fragment module's colour output, and its depth output when it exports depth
+/// (`exp mrtz`); neither for any other stage.
+fn reserve_fragment_outputs(
+    b: &mut Builder,
+    stage: Stage,
+    writes_depth: bool,
+) -> (Option<Id>, Option<Id>) {
+    let fragment = stage == Stage::Fragment;
+    let output = fragment.then(|| b.id());
+    (output, (fragment && writes_depth).then(|| b.id()))
+}
+
+/// What a fragment module writes, each variable with its type.
+#[derive(Debug, Clone, Copy)]
+struct FragmentOutputs {
+    /// The `vec4` colour output, declared for every fragment module.
+    colour: Option<(Id, Id)>,
+    /// The `float` `FragDepth` output, declared for one that exports depth.
+    depth: Option<(Id, Id)>,
+}
+
+impl FragmentOutputs {
+    /// Declares the outputs [`reserve_fragment_outputs`] reserved: the colour output
+    /// ([`declare_colour_output`]) and, when reserved, the depth one ([`declare_depth_output`]).
+    fn declare(
+        b: &mut Builder,
+        (f32_type, vec4): (Id, Id),
+        output_ptr: Id,
+        (colour, depth, stage): (Option<Id>, Option<Id>, Stage),
+    ) -> Self {
+        Self {
+            colour: declare_colour_output(b, (f32_type, vec4), output_ptr, (colour, stage)),
+            depth: depth.map(|variable| declare_depth_output(b, f32_type, variable)),
+        }
+    }
+
+    /// The variables the entry point's interface names.
+    fn interface(self) -> impl Iterator<Item = u32> {
+        self.colour
+            .into_iter()
+            .chain(self.depth)
+            .map(|(_, variable)| variable.0)
+    }
+}
+
+/// Declares the `FragDepth` output a fragment module exports depth to, and answers it with its
+/// type.
+fn declare_depth_output(b: &mut Builder, f32_type: Id, variable: Id) -> (Id, Id) {
+    let pointer = b.id();
+    b.annotate(
+        op::DECORATE,
+        &[variable.0, decoration::BUILT_IN, built_in::FRAG_DEPTH],
+    );
+    b.declare(op::TYPE_POINTER, &[pointer.0, OUTPUT, f32_type.0]);
+    b.declare(op::VARIABLE, &[pointer.0, variable.0, OUTPUT]);
+    (f32_type, variable)
 }
 
 /// Declares everything a mesh module writes: the vertices, the indices, and one array per exported
@@ -1213,8 +1275,8 @@ fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
 pub struct Wavefront<'a> {
     /// Which stage this module is for, and - when it is a fragment - where a colour goes.
     stage: Stage,
-    /// The `vec4` output variable and its type, declared only for [`Stage::Fragment`].
-    output: Option<(Id, Id)>,
+    /// The outputs a fragment module writes; none for any other stage.
+    output: FragmentOutputs,
     /// The fragment input for each attribute the shader interpolates, by attribute index.
     ///
     /// Declared in the header, so the attributes are found by a pass over the decode before any
@@ -1659,6 +1721,10 @@ fn declare_user_data_source(
     })
 }
 
+/// What a module is prepared against beside its stage: the guest-memory window, the user data,
+/// the draw buffers it reads, and whether it exports depth ([`exports_depth`]).
+type StageContext<'b> = (Window, UserData, &'b crate::draw_buffers::DrawBuffers, bool);
+
 impl<'a> Wavefront<'a> {
     /// Prepares the module and sets every lane active.
     pub fn new(encodings: &'a EncodingTable, width: Width) -> Self {
@@ -1673,6 +1739,7 @@ impl<'a> Wavefront<'a> {
                 Window::default(),
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
+                false,
             ),
         )
     }
@@ -1685,7 +1752,7 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data, buffers): (Window, UserData, &crate::draw_buffers::DrawBuffers),
+        (window, user_data, buffers, writes_depth): StageContext<'_>,
     ) -> Self {
         let mut b = Builder::new().with_version(module_version(stage));
 
@@ -1693,9 +1760,9 @@ impl<'a> Wavefront<'a> {
         let (void, fn_type, main) = (ids.void, ids.fn_type, ids.main);
         let (u32_type, f32_type, bool_type) = (ids.u32_type, ids.f32_type, ids.bool_type);
 
-        // The colour output of a fragment module, reserved before the entry point because its
-        // interface must name it.
-        let output = (stage == Stage::Fragment).then(|| b.id());
+        // The colour and depth outputs of a fragment module, reserved before the entry point
+        // because its interface must name them.
+        let (output, depth) = reserve_fragment_outputs(&mut b, stage, writes_depth);
         let vec4 = b.id();
         let output_ptr = b.id();
         // Reserved before the header for the same reason: every input the entry point touches must
@@ -1703,9 +1770,10 @@ impl<'a> Wavefront<'a> {
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
         let mesh_reserved = MeshReserved::new(&mut b, stage, primitive, parameters);
-        emit_header(&mut b, stage, primitive, main, output);
+        emit_header(&mut b, stage, primitive, main, (output, depth));
         declare_base_types(&mut b, &ids);
-        let output = declare_colour_output(&mut b, (f32_type, vec4), output_ptr, (output, stage));
+        let output =
+            FragmentOutputs::declare(&mut b, (f32_type, vec4), output_ptr, (output, depth, stage));
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
         system.declare(&mut b, vec4, bool_type);
         let types = (f32_type, u32_type, vec4);
@@ -1723,7 +1791,7 @@ impl<'a> Wavefront<'a> {
         // only the inputs and outputs.
         let mut interface: Vec<u32> = input_ids.iter().map(|(_, _, id)| id.0).collect();
         interface.extend(system.interface());
-        interface.extend(output.map(|(_, colour)| colour.0));
+        interface.extend(output.interface());
         interface.extend(mesh_reserved.interface(stage));
         interface.extend(dispatch.map(compute_inputs::DispatchState::interface));
         if stage == Stage::Mesh {
@@ -2555,7 +2623,11 @@ impl Model for Wavefront<'_> {
     }
 
     fn colour_output(&self) -> Option<(Id, Id)> {
-        self.output
+        self.output.colour
+    }
+
+    fn depth_output(&self) -> Option<(Id, Id)> {
+        self.output.depth
     }
 
     fn set_mesh_outputs(&mut self, vertices: Id, primitives: Id) -> Option<()> {
@@ -2703,7 +2775,7 @@ impl Model for Wavefront<'_> {
     }
 
     fn attribute_input(&self, attribute: u32, flat: bool) -> Option<(Id, Id)> {
-        let (vec4, _) = self.output?;
+        let (vec4, _) = self.output.colour?;
         let location = flat
             .then(|| {
                 self.flat_twins
@@ -3878,6 +3950,20 @@ pub fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u3
     locations
 }
 
+/// Whether a pixel shader exports depth: any `exp mrtz`, which needs a `FragDepth` output declared
+/// before the entry point is.
+#[must_use]
+pub fn exports_depth(decode: &Decode, encodings: &EncodingTable) -> bool {
+    decode.instructions.iter().any(|instruction| {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        named == Some("exp")
+            && instruction.operands.first() == Some(&Operand::Immediate(model::EXPORT_MRTZ))
+    })
+}
+
 /// The channels of colour attachment zero a pixel shader's exports write, red in bit 0 to alpha in
 /// bit 3: the union of every `exp mrt0`'s `EN` field (`aco_assembler.cpp:1005`). A channel outside
 /// it holds whatever the output held, so a draw that writes it to its target is not the guest's.
@@ -4038,7 +4124,12 @@ pub fn translate_with_user_data(
         primitive,
         &attributes,
         &parameters,
-        (window, user_data, &buffers),
+        (
+            window,
+            user_data,
+            &buffers,
+            exports_depth(decode, encodings),
+        ),
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
     crate::control::emit(&mut module, decode, encodings)?;

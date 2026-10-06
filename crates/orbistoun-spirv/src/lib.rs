@@ -417,6 +417,8 @@ pub mod built_in {
     pub const WORKGROUP_ID: u32 = 26;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
+    /// The depth a fragment shader writes in place of the rasterised one (a `float`).
+    pub const FRAG_DEPTH: u32 = 22;
     /// A mesh shader's point index array: one vertex index per primitive (a `uint`).
     pub const PRIMITIVE_POINT_INDICES_EXT: u32 = 5294;
     /// A mesh shader's line index array: two vertex indices per primitive (a `uvec2`).
@@ -468,6 +470,8 @@ pub mod execution {
 pub mod mode {
     /// Fragment shaders declare their origin convention.
     pub const ORIGIN_UPPER_LEFT: u32 = 7;
+    /// A fragment shader that writes `FragDepth` declares it replaces the rasterised depth.
+    pub const DEPTH_REPLACING: u32 = 12;
     /// Compute shaders declare their workgroup size.
     pub const LOCAL_SIZE: u32 = 17;
     /// Subnormal results of the given width are preserved rather than flushed.

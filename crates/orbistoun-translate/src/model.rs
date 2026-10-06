@@ -619,6 +619,12 @@ pub trait Model {
         None
     }
 
+    /// The `float` depth output of a fragment module that exports depth, and its type; [`None`]
+    /// for any other module.
+    fn depth_output(&self) -> Option<(Id, Id)> {
+        None
+    }
+
     /// Declares how many vertices and primitives this workgroup will emit.
     ///
     /// [`None`] at any stage but mesh; the caller turns that into a refusal naming the
@@ -1621,6 +1627,9 @@ const EXPORT_PRIMITIVE: i64 = 20;
 /// `SQ_EXP_NULL` (`gfx10-rsrc.json`): an export that writes nothing, which ACO's early exit from a
 /// pixel shader makes with no channels, `done` and `vm` (`aco_lower_to_hw_instr.cpp:2471`).
 const EXPORT_NULL: i64 = 9;
+/// The depth export target, `MRTZ`: Z in its first channel, then stencil, sample mask and the
+/// `mrt0` alpha (Mesa `ac_get_spi_shader_z_format`).
+pub(crate) const EXPORT_MRTZ: i64 = 8;
 
 /// Which parameter location an export target names, if it names one.
 ///
@@ -1870,6 +1879,9 @@ fn export<M: Model + ?Sized>(
         model.count();
         return Ok(());
     }
+    if *target == EXPORT_MRTZ {
+        return depth_export(model, instruction, a);
+    }
     if *target != MRT0 {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -1926,6 +1938,40 @@ fn export<M: Model + ?Sized>(
     builder.function(op::COMPOSITE_CONSTRUCT, &construct);
     let value = only_enabled(builder, (vec4, colour), value, enabled);
     builder.function(op::STORE, &[colour.0, value.0]);
+    Ok(())
+}
+
+/// `exp mrtz`: the depth a pixel replaces its rasterised one with, from the first source - Z, the
+/// only channel translated. Stencil, sample mask and the `mrt0` alpha (channels 1 to 3) and a
+/// compressed export are refused by name. With `vm` set a pixel whose lane is inactive is
+/// discarded, as for a colour export.
+fn depth_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    source: &Operand,
+) -> Result<(), TranslateError> {
+    let enabled = instruction.word & EXPORT_ENABLE_MASK;
+    if enabled != 1 || instruction.word & EXPORT_COMPRESSED != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a depth export that writes stencil, the sample mask or alpha, or is ",
+                "compressed, is not translated - only Z alone is"
+            ),
+        });
+    }
+    let Some((_, depth)) = model.depth_output() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a depth export from a module with no depth output: only a pixel shader has one",
+        });
+    };
+    discard_inactive(model, instruction);
+    // Lane zero: one fragment is one pixel.
+    let bits = model.read_source(instruction, source, 0)?;
+    let value = model.as_float(bits);
+    model.builder().function(op::STORE, &[depth.0, value.0]);
+    model.count();
     Ok(())
 }
 
