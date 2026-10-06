@@ -411,3 +411,8 @@ v_fract_f32_e32 v0, s7
 v_fract_f32_e32 v255, v1
 v_fract_f32_e32 v3, 0.5
 v_fract_f32_e32 v8, vcc_lo
+s_andn2_b32 s54, s54, exec_lo
+s_andn2_b32 s0, s1, s2
+s_andn2_b32 s105, -1, s104
+s_andn2_b32 s7, s3, 64
+s_andn2_b32 exec_lo, exec_lo, s9

@@ -64,6 +64,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_add_i32",
     "s_addk_i32",
     "s_and_b32",
+    "s_andn2_b32",
     "s_and_b64",
     "s_andn2_b64",
     "s_barrier",
@@ -518,6 +519,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_addk_i32"
             // The logic sets it to whether the result is non-zero, at either width.
             | "s_and_b32"
+            | "s_andn2_b32"
             | "s_or_b32"
             | "s_xor_b32"
             // The shift and the bit-field extract set it to whether the result is non-zero.
@@ -2056,10 +2058,9 @@ fn scalar_instruction<M: Model + ?Sized>(
 
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
         // as its destination.
-        "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_or_b32" | "s_xor_b32" | "s_lshl_b32"
-        | "s_bfe_u32" | "s_mul_i32" | "s_lshr_b32" | "s_add_u32" | "s_cselect_b32" => {
-            scalar_integer(model, instruction, name)
-        }
+        "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_or_b32" | "s_xor_b32"
+        | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_lshr_b32" | "s_add_u32"
+        | "s_cselect_b32" => scalar_integer(model, instruction, name),
 
         // Field assembly that writes no condition code: two 16-bit halves into one word, and a
         // run of ones into a register pair.
@@ -3586,6 +3587,12 @@ fn scalar_integer<M: Model + ?Sized>(
                 _ => op::BITWISE_XOR,
             };
             let result = model.binary(spirv, left, right);
+            (result, Some(model.is_not_zero(result)))
+        }
+        // `S_ANDN2_B32`: `D = S0 & ~S1`, the condition code whether the result is non-zero.
+        "s_andn2_b32" => {
+            let inverted = model.not(right);
+            let result = model.binary(op::BITWISE_AND, left, inverted);
             (result, Some(model.is_not_zero(result)))
         }
         // `S_LSHL_B32`: `D = S0 << S1[4:0]`, the condition code whether the result is non-zero.

@@ -78,6 +78,7 @@
 0x0001d8 4 s_mov_b32 s105, s103
 0x0001dc 4 s_and_saveexec_b32 s54, vcc_lo
 0x0001e0 4 v_fract_f32_e32 v69, v67
-0x0001e4 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0001ec 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0001f4 4 s_endpgm
+0x0001e4 4 s_andn2_b32 s54, s54, exec_lo
+0x0001e8 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0001f0 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x0001f8 4 s_endpgm

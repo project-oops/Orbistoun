@@ -3268,6 +3268,32 @@ fn a_thirty_two_lane_shader_saves_and_narrows_its_mask() {
     assert_eq!(scalar(&registers, 4), 1, "the narrowed mask saved");
 }
 
+/// `s_andn2_b32` is `s0 & !s1` (`S_ANDN2_B32`): a scalar value, and a 32-lane shader's else branch
+/// taking the lanes the then branch did not, as in 2 Ship 2 Harkinian's
+/// `s_andn2_b32 s54, s54, exec_lo`.
+#[test]
+fn a_thirty_two_lane_shader_takes_the_other_lanes_with_andn2() {
+    if !device_or_skip("a_thirty_two_lane_shader_takes_the_other_lanes_with_andn2") {
+        return;
+    }
+    let program = [
+        v_mov_inline(0, 1),
+        s_mov_inline(4, 1),
+        s_mov_inline(5, 7),
+        sop2("s_andn2_b32", 3, 5, 4),
+        sop2("s_andn2_b32", EXEC_LO_CODE, EXEC_LO_CODE, 4),
+        v_mov_inline(0, 5),
+        s_endpgm(),
+    ];
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(scalar(&registers, 3), 6, "7 without 1");
+    assert_eq!(
+        vector(&registers, 0),
+        1,
+        "lane zero left the mask, so its write does not land"
+    );
+}
+
 /// A shader with no mask traffic computes the same registers at either width.
 #[test]
 fn the_two_widths_are_the_same_shader_with_different_lane_counts() {
