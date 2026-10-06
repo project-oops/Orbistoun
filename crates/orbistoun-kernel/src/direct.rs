@@ -208,6 +208,19 @@ impl DirectMemory {
     /// Separate from [`DirectMemory::allocate`] because a stronger alignment changes where a region
     /// can start, not only its size.
     pub fn allocate_aligned(&mut self, len: u64, align: u64, memory_type: u32) -> Option<u64> {
+        self.allocate_aligned_from(0, len, align, memory_type)
+    }
+
+    /// Takes `len` bytes at a caller-chosen alignment, at or past `search_start`: the search
+    /// `sceKernelAllocateDirectMemory` makes. The alignment holds wherever the first free region
+    /// begins, not only at the search start.
+    pub fn allocate_aligned_from(
+        &mut self,
+        search_start: u64,
+        len: u64,
+        align: u64,
+        memory_type: u32,
+    ) -> Option<u64> {
         let align = align.max(DIRECT_ALIGN);
         // Not a power of two is a caller error; rounding would answer a question that was not asked.
         if !align.is_power_of_two() {
@@ -215,7 +228,7 @@ impl DirectMemory {
         }
         // Walks candidate starts rather than adjusting a first fit upward, which could push the end
         // past the region it was chosen from.
-        let mut search = 0;
+        let mut search = search_start;
         loop {
             let region = self
                 .regions
@@ -682,6 +695,24 @@ mod tests {
         assert!(cut.ends_with(&format!(", and {} more", m.regions().len() - 2)));
         assert_eq!(cut.matches("..").count(), 2, "only the two it promised");
         assert!(cut.contains("taken"), "allocation is still distinguished");
+    }
+
+    /// A search from a start honours the caller's alignment where the first free region begins
+    /// short of it: PPSA21564 allocates its Garlic pool from 0x10000, then its 184 MiB Onion pool
+    /// from 0 at 1 MiB alignment, and was answered 0xc8010000 - 64 KiB aligned - where the pool's
+    /// first 1 MiB boundary after Garlic is 0xc8100000.
+    #[test]
+    fn a_search_from_a_start_honours_the_alignment() {
+        let mut m = DirectMemory::new(DIRECT_MEMORY_SIZE);
+        let garlic = m
+            .allocate_aligned_from(0x1_0000, 0xc800_0000, 0x1_0000, 0xb)
+            .expect("garlic");
+        assert_eq!(garlic, 0x1_0000);
+        let onion = m
+            .allocate_aligned_from(0, 0xb80_0000, 0x10_0000, 0xc)
+            .expect("onion");
+        assert_eq!(onion, 0xc810_0000, "the first 1 MiB boundary past Garlic");
+        assert_eq!(onion % 0x10_0000, 0);
     }
 
     /// An alignment nothing can satisfy is distinguishable from a full pool.

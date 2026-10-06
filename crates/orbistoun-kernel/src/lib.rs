@@ -3780,9 +3780,10 @@ fn allocate_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(mut guard) = direct::map().lock() else {
         return u64::from(GuestError::Unimplemented.as_raw());
     };
-    let align = alignment.max(direct::DIRECT_ALIGN);
-    let start = search_start.next_multiple_of(align);
-    let Some(address) = guard.allocate(start, len, memory_type) else {
+    // Aligned wherever the first free region past the search start begins, not only at the start
+    // itself: an allocation after an earlier one starts where that one ended.
+    let Some(address) = guard.allocate_aligned_from(search_start, len, alignment, memory_type)
+    else {
         return u64::from(GuestError::NoMemory.as_raw());
     };
     // Refused after the fact: the pool decides where a request fits, and a range it cannot satisfy
