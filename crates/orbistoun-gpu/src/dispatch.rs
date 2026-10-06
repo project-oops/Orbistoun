@@ -75,7 +75,8 @@ pub struct DispatchState {
     pub groups: [u32; 3],
 }
 
-/// Refuses an initiator asking for what is not modelled, and a start that is not zero.
+/// Refuses an initiator asking for what is not modelled, and a start that is not zero; an
+/// unwritten start is zero (D752).
 fn check_initiator(
     initiator_word: u32,
     latest: &impl Fn(u32) -> Option<u32>,
@@ -98,17 +99,9 @@ fn check_initiator(
         }
     }
     if initiator_word & initiator::FORCE_START_AT_000 == 0 {
-        for register in START_X..START_X + 3 {
-            match latest(register) {
-                Some(0) => {}
-                Some(_) => return Err("a dispatch starting at a non-zero group is not modelled"),
-                None => {
-                    return Err(concat!(
-                        "the start is not forced to zero and COMPUTE_START_X/Y/Z were never ",
-                        "written, so where the grid starts is unknown"
-                    ));
-                }
-            }
+        // A start the queue never wrote is its zero (D752, assumed); one it wrote is read.
+        if (START_X..START_X + 3).any(|register| latest(register).unwrap_or(0) != 0) {
+            return Err("a dispatch starting at a non-zero group is not modelled");
         }
     }
     Ok(())
@@ -420,6 +413,15 @@ mod tests {
         assert_eq!(state.dx10_clamp, Some(true));
     }
 
+    /// The AGC library's dispatch (initiator `0x41`, start not forced) on a queue that never wrote
+    /// `COMPUTE_START_X/Y/Z` starts at group zero (D752), and runs as the forced one does.
+    #[test]
+    fn an_unwritten_start_is_the_queue_s_zero() {
+        let unforced = state_at(&clear_writes(), 0x100, [4, 1, 1], 0x41).expect("runs");
+        let forced = state_at(&clear_writes(), 0x100, [4, 1, 1], 0x45).expect("runs");
+        assert_eq!(unforced, forced);
+    }
+
     /// What is not modelled is refused by name; a write after the dispatch is not its state.
     #[test]
     fn unmodelled_fields_and_missing_registers_are_refused() {
@@ -432,9 +434,11 @@ mod tests {
             state_at(&writes, 0x100, [1, 1, 1], 0x47).is_err(),
             "partial"
         );
+        let mut started = writes.clone();
+        started.push(write(START_X, 2));
         assert!(
-            state_at(&writes, 0x100, [1, 1, 1], 0x41).is_err(),
-            "start unknown"
+            state_at(&started, 0x100, [1, 1, 1], 0x41).is_err(),
+            "a non-zero start"
         );
         let mut scratch = writes.clone();
         scratch.push(write(PGM_RSRC2, 0x99));
