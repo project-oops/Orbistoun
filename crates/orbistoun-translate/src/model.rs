@@ -81,6 +81,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_bcnt1_i32_b64",
     "v_rndne_f32_e32",
     "v_floor_f32_e32",
+    "v_fract_f32_e32",
     "v_bfrev_b32_e32",
     "v_cmpx_gt_f32_e32",
     "v_cmpx_eq_i32_e32",
@@ -2241,9 +2242,8 @@ fn vector_instruction<M: Model + ?Sized>(
         // Unary vector float ALU and transcendentals: square root, reciprocal square root, sin,
         // cos, base-2 exp and base-2 log.
         "v_sqrt_f32_e32" | "v_rsq_f32_e32" | "v_sin_f32_e32" | "v_cos_f32_e32"
-        | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" | "v_floor_f32_e32" => {
-            float_unary(model, instruction, name)
-        }
+        | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" | "v_floor_f32_e32"
+        | "v_fract_f32_e32" => float_unary(model, instruction, name),
         "v_bfrev_b32_e32" => bit_reverse(model, instruction),
 
         _ => memory_instruction(model, instruction, name),
@@ -2599,8 +2599,9 @@ fn float_unary<M: Model + ?Sized>(
         "v_log_f32_e32" => (GLSL_LOG2, false),
         // Round to the nearest integer, a tie to the even one (`V_RNDNE_F32`).
         "v_rndne_f32_e32" => (GLSL_ROUND_EVEN, false),
-        // Round toward negative infinity (`V_FLOOR_F32`).
-        "v_floor_f32_e32" => (GLSL_FLOOR, false),
+        // Round toward negative infinity (`V_FLOOR_F32`); `V_FRACT_F32` subtracts that from its
+        // source, below.
+        "v_floor_f32_e32" | "v_fract_f32_e32" => (GLSL_FLOOR, false),
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
@@ -2617,6 +2618,12 @@ fn float_unary<M: Model + ?Sized>(
             operand
         };
         let value = model.f32_ext_unary(extended, argument);
+        // `x - floor(x)`, as the RDNA ISA's `V_FRACT_F32` and NIR's `ffract` define it.
+        let value = if name == "v_fract_f32_e32" {
+            model.f32_binary(op::FSUB, argument, value)
+        } else {
+            value
+        };
         model.write_vector_lane(register, lane, value);
     }
     model.count();

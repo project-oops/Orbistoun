@@ -544,6 +544,11 @@ name = "v_cvt_i32_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 32
+name = "v_fract_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 35
 name = "v_rndne_f32_e32"
 

@@ -406,3 +406,8 @@ s_and_saveexec_b32 s0, s1
 s_and_saveexec_b32 s100, -1
 s_and_saveexec_b32 s7, 64
 s_and_saveexec_b32 s105, s104
+v_fract_f32_e32 v69, v67
+v_fract_f32_e32 v0, s7
+v_fract_f32_e32 v255, v1
+v_fract_f32_e32 v3, 0.5
+v_fract_f32_e32 v8, vcc_lo

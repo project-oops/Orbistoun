@@ -6329,6 +6329,24 @@ fn and_save_exec_narrows_the_mask_and_keeps_the_old_one() {
     }
 }
 
+/// `v_fract_f32` is `x - floor(x)` (`V_FRACT_F32`, NIR's `ffract`): what is left above the integer
+/// below, so a negative input's fraction counts up from the integer under it.
+#[test]
+fn fract_is_what_lies_above_the_floor() {
+    if !device_or_skip("fract_is_what_lies_above_the_floor") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 2.75f32.to_bits()));
+    program.push(vop1_vv("v_fract_f32_e32", 1, 0));
+    program.extend(v_mov_literal(2, (-2.25f32).to_bits()));
+    program.push(vop1_vv("v_fract_f32_e32", 3, 2));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 0.75f32.to_bits(), "2.75 above 2");
+    assert_eq!(vector(&registers, 3), 0.75f32.to_bits(), "-2.25 above -3");
+}
+
 /// `v_rndne_f32` rounds a tie to the even integer, `v_bfrev_b32` reverses the bits, and the integer
 /// and float compares into the execution mask keep the lanes that pass.
 #[test]
