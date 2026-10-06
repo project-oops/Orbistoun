@@ -97,7 +97,10 @@ found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcCbDispatch"
-edge_cases = ["SIZE ONLY: the builder ran, its GetSize answered 0x14 bytes (5 dwords), and it advanced and wrote exactly that. No packet header or body was reported, so nothing here says what it emits - only how much. Not implementable on a length."]
+edge_cases = [
+    "SIZE: GetSize answers 0x14 bytes (5 dwords), and the builder advances and writes exactly that.",
+    "MEASURED one argument at a time and on PPSA03416's own call (cb, 0xa00, 1, 1, 1, 0xc): DISPATCH_DIRECT, header 0xc0031500, then a1, a2 and a3 as the thread-group counts in DW1-DW3, then the initiator 0x41. a4 and a5 (0x1, 0x2, 0x4, 0x8, 0xc) change nothing. It answers the cursor (obSCEne reports/report-1791286625.txt lines 12105-12185, REQ cd15).",
+]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/*-getsize."
 found_on = "2026-09-14"

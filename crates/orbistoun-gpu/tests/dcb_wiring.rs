@@ -395,8 +395,7 @@ fn dcb_reset_queue_reserves_its_measured_writer_struct_with_a_zero_body() {
 #[test]
 fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
     for (name, extent, header) in [
-        ("sceAgcCbDispatch", 20usize, 0xc003_1500u32),
-        ("sceAgcDcbDispatchIndirect", 12, 0xc001_1600),
+        ("sceAgcDcbDispatchIndirect", 12usize, 0xc001_1600u32),
         ("sceAgcAcbDispatchIndirect", 16, 0xc002_1600),
         ("sceAgcDcbDrawIndirect", 20, 0xc003_2400),
         ("sceAgcDcbDrawIndexIndirect", 20, 0xc003_2500),
@@ -422,6 +421,40 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
             w.bytes()[4..].iter().all(|b| *b == 0),
             "{name} leaves the body zero, not a guessed encoding of the argument"
         );
+    }
+}
+
+/// `sceAgcCbDispatch(cb, x, y, z, ..)` writes the dispatch hardware wrote for the same arguments:
+/// the thread-group counts in DW1-DW3 and the initiator `0x41` whatever `arg4` and `arg5` are
+/// (obSCEne `reports/report-1791286625.txt` 12105-12185, REQ cd15). PPSA03416's own call first.
+#[test]
+fn cb_dispatch_writes_its_dimensions_as_hardware_did() {
+    // Rows `pm4-title`, `pm4-arg1-only` .. `pm4-arg5-only`: the header, DW1-DW3, the initiator.
+    for (arguments, dimensions) in [
+        ([0xa00, 1, 1, 1, 0xc], [0xa00, 1, 1]),
+        ([0x11, 0, 0, 0, 0], [0x11, 0, 0]),
+        ([0, 0x22, 0, 0, 0], [0, 0x22, 0]),
+        ([0, 0, 0x33, 0, 0], [0, 0, 0x33]),
+        ([0, 0, 0, 0x44, 0], [0, 0, 0]),
+        ([0, 0, 0, 0, 0x55], [0, 0, 0]),
+    ] {
+        let w = Writer::new(0x400);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        args[1..].copy_from_slice(&arguments);
+        let at = w.cursor();
+        assert_eq!(call("sceAgcCbDispatch", args), at, "{arguments:x?}");
+        let expected: Vec<u8> = [
+            0xc003_1500_u32,
+            dimensions[0],
+            dimensions[1],
+            dimensions[2],
+            0x41,
+        ]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+        assert_eq!(w.bytes(), &expected[..], "{arguments:x?}");
     }
 }
 

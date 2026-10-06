@@ -249,6 +249,17 @@ pub mod build {
         ]
     }
 
+    /// The `DISPATCH_DIRECT` `sceAgcCbDispatch(cb, x, y, z, ..)` writes: header `0xc0031500` (no
+    /// shader-type bit, unlike [`dispatch_direct`]'s), the three thread-group counts, and the
+    /// initiator `0x41` - `COMPUTE_SHADER_EN` (bit 0) and bit 6 - which no argument measured
+    /// changes (obSCEne `reports/report-1791286625.txt` 12105-12185, REQ cd15).
+    #[must_use]
+    pub fn agc_dispatch_direct(x: u32, y: u32, z: u32) -> [u32; 5] {
+        /// The measured initiator.
+        const INITIATOR: u32 = 0x41;
+        [command_header(DISPATCH_DIRECT, 4), x, y, z, INITIATOR]
+    }
+
     /// Opcodes measured coming out of the hardware's own command builders.
     ///
     /// Every value was read off a packet `libSceAgc` wrote when called with known arguments; the

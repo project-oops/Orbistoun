@@ -890,11 +890,13 @@ fn dcb_reset_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 // the packet it stands for; the body is zero because one argument pass does not pin the mapping.
 use packet::build::measured;
 
-/// `sceAgcCbDispatch(cb, ...)` - a compute dispatch. Header `0xc0031500`, 20 bytes.
+/// `sceAgcCbDispatch(cb, x, y, z, ..)` - a compute dispatch of `x` by `y` by `z` thread groups:
+/// header `0xc0031500`, the three counts, then the initiator `0x41` whatever the fourth and fifth
+/// arguments (obSCEne `reports/report-1791286625.txt` 12105-12185, REQ cd15).
 fn cb_dispatch(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::reservation(packet::build::DISPATCH_DIRECT, 4),
+        &packet::build::agc_dispatch_direct(args[1] as u32, args[2] as u32, args[3] as u32),
     )
 }
 
