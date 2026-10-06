@@ -28,12 +28,15 @@ const OBJECT_HEAD: usize = 24;
 const SIZE_AT: u64 = 12;
 /// Where it writes the bound buffer's address.
 const BUFFER_AT: u64 = 16;
-/// The smallest buffer measured bound (`ampr-cb-set-buffer-1000`).
-const BOUND_SIZE: u64 = 0x1000;
+/// The alignment every bound size measured has: 0x20 to 0x1000, each a multiple of it
+/// (`ampr-sb40-size-*`, `ampr-cb-set-buffer-1000`).
+const BOUND_ALIGNMENT: u64 = 0x20;
 /// The largest buffer measured refused (`ampr-cb-set-buffer-10`).
 const REFUSED_SIZE: u64 = 0x10;
-/// What a refused buffer answers: the kernel's `EINVAL`.
-const INVALID: u64 = 0x8002_0010;
+/// What a buffer too small answers (`ampr-cb-set-buffer-10`).
+const TOO_SMALL: u64 = 0x8002_0010;
+/// What an odd size answers (`ampr-sb40-size-0x401`): the kernel's `EINVAL`.
+const UNALIGNED: u64 = 0x8002_0016;
 
 /// Implementations this module provides for `libSceAmpr`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
@@ -60,16 +63,20 @@ fn command_buffer_constructor(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     object
 }
 
-/// `sceAmprCommandBufferSetBuffer(obj, buffer, size, ...)`: binds `size` bytes at `buffer` - the
-/// size at +12, the address at +16 - and answers 0. A buffer of 0x10 bytes is refused with `EINVAL`
-/// and changes nothing; the threshold between 0x10 and 0x1000 is unmeasured, so a size in it
-/// answers the placeholder rather than a guess.
+/// `sceAmprCommandBufferSetBuffer(obj, buffer, size, ..)`: binds `size` bytes at `buffer` - the
+/// size at +12, the address at +16 - and answers 0, for a size of at least 0x20 and a multiple of
+/// it, whatever the fourth argument. A buffer of 0x10 bytes is refused with `0x80020010` and an odd
+/// size above it with `0x80020016`, each changing nothing (REQ a5b1, sb40). Any other size - an even
+/// one below 0x20 or not a multiple of it - is unmeasured and answers the placeholder.
 fn command_buffer_set_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (object, buffer, size) = (args[0], args[1], args[2] & 0xffff_ffff);
     if size <= REFUSED_SIZE {
-        return INVALID;
+        return TOO_SMALL;
     }
-    if size < BOUND_SIZE {
+    if size % 2 == 1 {
+        return UNALIGNED;
+    }
+    if size % BOUND_ALIGNMENT != 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
     // SAFETY: the guest's own constructed object, at its measured fields.

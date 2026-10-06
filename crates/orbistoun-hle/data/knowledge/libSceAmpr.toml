@@ -19,7 +19,8 @@ purpose = "Binds a memory buffer to a constructed command-buffer object."
 returns = "status"
 edge_cases = [
     "MEASURED (obj, buf, 0x1000, 0, 0, 0) on a constructed object: answers 0, writes the size as a 32-bit word at +12 and the buffer's address at +16, and leaves the buffer untouched.",
-    "MEASURED (obj, buf, 0x10, 0, 0, 0): refused with 0x80020010 (EINVAL), the object and buffer unchanged. Where between 0x10 and 0x1000 the refusal stops is unmeasured; a size in that range answers the placeholder.",
+    "MEASURED (obj, buf, 0x10, 0, 0, 0): refused with 0x80020010, the object and buffer unchanged.",
+    "MEASURED sizes 0x20, 0x40, 0x80, 0x100, 0x200, 0x400 and 0x800 all bind and answer 0, PPSA21564's (obj, buf, 0x400, 0, ptr, 0) among them: a non-zero fourth argument changes nothing and +16 is the buffer. 0x401 is refused with 0x80020016 (EINVAL) and binds nothing. An even size below 0x20 or not a multiple of it is unmeasured and answers the placeholder (obSCEne reports/report-1791286625.txt lines 8770-9240, REQ sb40).",
 ]
 found_by = "generated"
 known_by = "measured"

@@ -72,3 +72,43 @@ fn set_buffer_binds_a_large_buffer_and_refuses_a_small_one() {
     assert_eq!(call("sceAmprCommandBufferReset", [at, 0, 0, 0, 0, 0]), 0);
     assert_eq!(obj[..], expected[..], "a reset keeps the binding");
 }
+
+/// `ampr-sb40-*` (obSCEne `reports/report-1791286625.txt` 8770-9240, REQ sb40): every size from
+/// 0x20 to 0x800 a multiple of 0x20 binds, PPSA21564's 0x400 among them with its non-zero `a4`;
+/// 0x401 is refused with `0x80020016` and binds nothing.
+#[test]
+fn set_buffer_binds_aligned_sizes_and_refuses_an_odd_one() {
+    for (size, a4, rc) in [
+        (0x400, 1, 0),
+        (0x400, 0, 0),
+        (0x20, 0, 0),
+        (0x40, 0, 0),
+        (0x80, 0, 0),
+        (0x100, 0, 0),
+        (0x200, 0, 0),
+        (0x800, 0, 0),
+        (0x401, 0, 0x8002_0016),
+    ] {
+        let mut obj = object();
+        let at = obj.as_mut_ptr() as u64;
+        call("sceAmprCommandBufferConstructor", [at, at, 0, 0, 0, 0x47d]);
+        let buffer = object();
+        let address = buffer.as_ptr() as u64;
+        let a4 = if a4 == 1 { address + 0x100 } else { 0 };
+        assert_eq!(
+            call(
+                "sceAmprCommandBufferSetBuffer",
+                [at, address, size, 0, a4, 0]
+            ),
+            rc,
+            "size {size:#x}"
+        );
+        let mut expected = [0xcc_u8; 0x200];
+        expected[..24].fill(0);
+        if rc == 0 {
+            expected[12..16].copy_from_slice(&(size as u32).to_le_bytes());
+            expected[16..24].copy_from_slice(&address.to_le_bytes());
+        }
+        assert_eq!(obj[..], expected[..], "size {size:#x}");
+    }
+}
