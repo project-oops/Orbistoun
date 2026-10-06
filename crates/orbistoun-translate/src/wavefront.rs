@@ -1623,7 +1623,7 @@ fn declare_draw_buffers(
 /// Declares the block a draw's user data arrives in, when the stage reads any.
 fn declare_user_data_source(
     b: &mut Builder,
-    stage: Stage,
+    (stage, reads_buffers): (Stage, bool),
     u32_type: Id,
     user_data: UserData,
 ) -> Option<UserDataSource> {
@@ -1633,7 +1633,8 @@ fn declare_user_data_source(
     // draws, one workgroup each, so the words come from the draw-data buffer at the workgroup's
     // stride. One seeded with its geometry reads its draw's vertex count there too (D745), user
     // data or none.
-    let seeded = stage == Stage::Mesh && user_data.geometry.is_some();
+    // One that reads buffers finds them there too (D747).
+    let seeded = stage == Stage::Mesh && (user_data.geometry.is_some() || reads_buffers);
     (user_data.count > 0 || seeded).then(|| {
         if stage == Stage::Mesh {
             let words = b.id();
@@ -1711,9 +1712,11 @@ impl<'a> Wavefront<'a> {
         let mesh = declare_mesh_outputs(&mut b, types, (stage, primitive), &mesh_reserved);
         let (files, observation, guest_memory) = declare_state(&mut b, &ids, stage, width, window);
         let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
-        let user_data_source = declare_user_data_source(&mut b, stage, u32_type, user_data);
-        let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
         let indexed = user_data.geometry.is_some_and(|g| g.indices.is_some());
+        let reads_buffers = !buffers.served.is_empty() || indexed;
+        let user_data_source =
+            declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, user_data);
+        let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
         let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
@@ -1895,6 +1898,55 @@ impl<'a> Wavefront<'a> {
                 self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
             }
         }
+    }
+
+    /// Where a primitive shader's buffer at `slot` lies, from its draw's words (D747): the arena, its
+    /// first word there, and how many words it holds. `None` without draw data.
+    fn geometry_buffer_place(&mut self, slot: u32) -> Option<[Id; 3]> {
+        let first = orbistoun_spirv::DRAW_DATA_BUFFERS_WORD + slot * 3;
+        Some([
+            self.draw_word(first)?,
+            self.draw_word(first + 1)?,
+            self.draw_word(first + 2)?,
+        ])
+    }
+
+    /// Word `index` of the range `[arena, first, words]` of the geometry binding's arenas: past its
+    /// words the range's first instead, defined and never the answer, as a bound buffer reads.
+    fn read_arena(
+        &mut self,
+        array: buffer::DrawBufferArray,
+        [arena, first, words]: [Id; 3],
+        index: Id,
+    ) -> Id {
+        let u32_type = self.u32_type;
+        let bool_type = self.bool_type;
+        let zero = Self::constant(self, 0);
+        let b = &mut self.builder;
+        let inside = b.id();
+        b.function(op::ULESS_THAN, &[bool_type.0, inside.0, index.0, words.0]);
+        let within = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, within.0, inside.0, index.0, zero.0],
+        );
+        let at = b.id();
+        b.function(op::IADD, &[u32_type.0, at.0, first.0, within.0]);
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                array.element_ptr.0,
+                pointer.0,
+                array.variable.0,
+                arena.0,
+                zero.0,
+                at.0,
+            ],
+        );
+        let value = b.id();
+        b.function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        value
     }
 
     /// Word `word` of this workgroup's stride of the draw-data buffer (D718), or `None` for a module
@@ -3251,6 +3303,12 @@ impl Model for Wavefront<'_> {
                 detail: "a draw buffer read in a module that declares none (D733)",
             });
         };
+        // A primitive shader's buffer is a range of an arena its draw data names (D747).
+        if self.stage == Stage::Mesh
+            && let Some(place) = self.geometry_buffer_place(slot)
+        {
+            return Ok(self.read_arena(array, place, word_index));
+        }
         let u32_type = self.u32_type;
         let buffer = Self::constant(self, slot);
         let member = Self::constant(self, 0);

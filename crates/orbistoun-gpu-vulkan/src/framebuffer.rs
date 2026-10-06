@@ -1962,6 +1962,24 @@ fn render(
     render_over(colour, width, height, shaders, geometry, bound).map(|drawn| drawn.pixels)
 }
 
+/// The draw's buffers with their set and its layout, and where its geometry buffers lie: the set
+/// already found for them, or theirs from the cache.
+fn with_set<'a>(
+    session: &crate::compute::Session,
+    bound: &DrawBuffersBound<'a>,
+) -> Result<DrawBuffersBound<'a>, DispatchError> {
+    let (set, places) = match bound.set {
+        Some(set) => (set, bound.places),
+        None => crate::draw_buffers::descriptor_set(session, bound.buffers)?,
+    };
+    Ok(DrawBuffersBound {
+        set: Some(set),
+        layout: Some(crate::draw_buffers::set_layout(session)?),
+        places,
+        ..*bound
+    })
+}
+
 /// The shared body, which also returns the guest-memory window the draw left behind: the attachment
 /// shows what a shader drew and the window what it stored.
 fn render_over(
@@ -1983,14 +2001,7 @@ fn render_over(
     let queue = session.queue;
     let family = session.family;
     // The draw's buffers (D733), bound as set one whatever the modules read.
-    let draw_buffers = DrawBuffersBound {
-        set: Some(match bound.draw_buffers.set {
-            Some(set) => set,
-            None => crate::draw_buffers::descriptor_set(&session, bound.draw_buffers.buffers)?,
-        }),
-        layout: Some(crate::draw_buffers::set_layout(&session)?),
-        ..*bound.draw_buffers
-    };
+    let draw_buffers = with_set(&session, bound.draw_buffers)?;
     let bound = Bound {
         draw_buffers: &draw_buffers,
         ..bound
@@ -2460,10 +2471,11 @@ pub(crate) struct BatchKey {
 }
 
 /// The geometry stage's share of a user-data block, and the fragment stage's, each as a draw's
-/// words; the geometry stage's carry the draw's vertex count after them (D745).
+/// words; the geometry stage's carry the draw's vertex count (D745) and where each of its buffers
+/// lies (D747) after them.
 pub(crate) fn split_user_data(
     block: &[u32; USER_DATA_BLOCK_WORDS],
-    vertices: u32,
+    (vertices, places): (u32, &crate::draw_buffers::GeometryPlaces),
 ) -> (DrawWords, DrawWords) {
     let mut geometry = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
     let mut fragment = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
@@ -2471,6 +2483,8 @@ pub(crate) fn split_user_data(
     geometry[..share].copy_from_slice(&block[..share]);
     fragment[..share].copy_from_slice(&block[share..]);
     geometry[DRAW_DATA_VERTICES_WORD as usize] = vertices;
+    let first = DRAW_DATA_BUFFERS_WORD as usize;
+    geometry[first..first + places.len() * 3].copy_from_slice(places.as_flattened());
     (geometry, fragment)
 }
 
@@ -2543,6 +2557,7 @@ fn render_resident(
         built.window_offset = u32::try_from(guest.offset).unwrap_or(0);
         built.geometry = geometry;
         built.user_data = *bound.user_data;
+        built.draw_places = bound.draw_buffers.places;
         // This draw's buffers: a set bound at record time, not a change to the pipeline (D733).
         built.draw_buffers = bound.draw_buffers.set?;
         Some(built)
@@ -2957,7 +2972,7 @@ fn flush_batch(session: &crate::compute::Session) -> Result<(), DispatchError> {
 /// join it (D718). The pass must already be on `framebuffer` ([`pass_on`]).
 fn batch_draw(
     session: &crate::compute::Session,
-    key: BatchKey,
+    key: &BatchKey,
     state: &BindState,
     draw: DrawWords,
 ) -> Result<(), DispatchError> {
@@ -2970,7 +2985,7 @@ fn batch_draw(
         ));
     };
     if let Some(batch) = open.batch.as_mut()
-        && batch.key == key
+        && batch.key == *key
         && batch.draws.len() < DRAW_DATA_MOST_DRAWS as usize
     {
         batch.draws.push(draw);
@@ -2980,7 +2995,7 @@ fn batch_draw(
         record_batch(&session.instance, &session.device, open.command, &batch)?;
     }
     open.batch = Some(MeshBatch {
-        key,
+        key: *key,
         state: *state,
         draws: vec![draw],
     });
@@ -3183,14 +3198,16 @@ fn render_resident_with(
             flush_batch(session)?;
             crate::depth::record_clear(device, command, pass.extent, clear);
         }
-        let (geometry_words, fragment) =
-            split_user_data(&built.user_data, built.geometry.mesh_vertices());
+        let (geometry_words, fragment) = split_user_data(
+            &built.user_data,
+            (built.geometry.mesh_vertices(), &built.draw_places),
+        );
         // A cached mesh pipeline's draw joins a batch (D718), recorded when a differing draw or
         // anything else arrives.
         if let (Geometry::Mesh { .. }, Some(key)) = (built.geometry, key) {
             batch_draw(
                 session,
-                BatchKey {
+                &BatchKey {
                     pipeline: key,
                     framebuffer: pass.framebuffer,
                     window: (built.buffers[1].0, built.window_offset),
@@ -3379,7 +3396,10 @@ fn record(
     // attachment.
     unsafe { device.cmd_begin_render_pass(command, &pass_begin, vk::SubpassContents::INLINE) };
     if let Some(built) = pipeline {
-        let (geometry_words, _) = split_user_data(&built.user_data, built.geometry.mesh_vertices());
+        let (geometry_words, _) = split_user_data(
+            &built.user_data,
+            (built.geometry.mesh_vertices(), &built.draw_places),
+        );
         let offset = write_one_draw_waiting(device, geometry_words)?;
         bind_for_draw(device, command, &built.bind_state(), offset);
         issue_draw(instance, device, command, built.geometry, 1);
@@ -3453,6 +3473,8 @@ struct Pipeline {
     owns_guest_memory: bool,
     /// The draw's user-data block, pushed before it.
     user_data: [u32; USER_DATA_BLOCK_WORDS],
+    /// Where the draw's geometry buffers lie, which its words carry (D747).
+    draw_places: crate::draw_buffers::GeometryPlaces,
     /// Whether [`Self::texture`] and [`Self::second_texture`] already hold their texels on the
     /// device: true once a cached pipeline has drawn, so its reuse copies nothing.
     textures_uploaded: bool,
@@ -3535,6 +3557,7 @@ fn build_pipeline(
         geometry,
         owns_guest_memory: resources.owns_guest_memory,
         user_data: *bound.user_data,
+        draw_places: bound.draw_buffers.places,
         textures_uploaded: false,
         window_offset: bound
             .guest_buffer
@@ -4108,7 +4131,8 @@ pub(crate) fn draw_mesh_over_clipped(
 ///
 /// The guest buffer is uploaded once by its owner (D703) and left intact; the window is read back
 /// after the draw, and its length is the resident buffer's own, the mask a module built against it
-/// applies. The attachment takes no pixels in or out. Returns the batch a mesh draw went into.
+/// applies. The attachment takes no pixels in or out. Returns the batch a mesh draw went into, and
+/// where its geometry buffers lie (D747).
 ///
 /// # Errors
 ///
@@ -4120,12 +4144,12 @@ pub(crate) fn draw_resident(
     start: &Start<'_>,
     resident: &ResidentAttachment,
     (guest_buffer, scissor): (&DispatchBuffer, Option<vk::Rect2D>),
-) -> Result<Option<BatchKey>, DispatchError> {
+) -> Result<Option<(BatchKey, crate::draw_buffers::GeometryPlaces)>, DispatchError> {
     let pass = resident.pass(start.depth.is_some()).ok_or_else(|| {
         DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
     })?;
     // The draw's buffers (D733), in their own set.
-    let buffers_set = {
+    let (buffers_set, places) = {
         let session = crate::compute::session()?;
         let session = session
             .lock()
@@ -4139,7 +4163,7 @@ pub(crate) fn draw_resident(
         .pipeline_key
         .filter(|_| vertices.is_none())
         .map(|pipeline| {
-            let (_, fragment) = split_user_data(start.user_data, start.mesh_vertices);
+            let (_, fragment) = split_user_data(start.user_data, (start.mesh_vertices, &places));
             BatchKey {
                 pipeline: pipeline.get(),
                 framebuffer: pass.framebuffer,
@@ -4152,9 +4176,9 @@ pub(crate) fn draw_resident(
             }
         });
     if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
-        let (words, _) = split_user_data(start.user_data, start.mesh_vertices);
+        let (words, _) = split_user_data(start.user_data, (start.mesh_vertices, &places));
         if join_open_batch(&key, words) {
-            return Ok(Some(key));
+            return Ok(Some((key, places)));
         }
     }
     let (width, height) = resident.extent();
@@ -4191,11 +4215,12 @@ pub(crate) fn draw_resident(
                 buffers: start.buffers,
                 set: Some(buffers_set),
                 layout: None,
+                places,
             },
             ..Bound::default()
         },
     )
-    .map(|_| key)
+    .map(|_| key.map(|key| (key, places)))
 }
 
 /// Draws with a mesh stage over seeded guest memory, and a texture bound.
@@ -4320,6 +4345,8 @@ struct DrawBuffersBound<'a> {
     set: Option<vk::DescriptorSet>,
     /// The set's layout.
     layout: Option<vk::DescriptorSetLayout>,
+    /// Where the primitive shader's buffers lie, which its draw's words carry (D747).
+    places: crate::draw_buffers::GeometryPlaces,
 }
 
 /// The textures a draw samples, each as its texels and row length, and how each is sampled.
@@ -4345,6 +4372,7 @@ static NO_DRAW_BUFFERS: DrawBuffersBound<'static> = DrawBuffersBound {
     buffers: [&[], &[]],
     set: None,
     layout: None,
+    places: [[0; 3]; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize],
 };
 
 /// The block a draw that sets no user data pushes.
@@ -4459,14 +4487,18 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 /// `DRAW_DATA_BINDING`, `DRAW_DATA_STRIDE_WORDS` and `DRAW_DATA_MOST_DRAWS`.
 pub const DRAW_DATA_BINDING: u32 = 5;
 /// See [`DRAW_DATA_BINDING`].
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 36;
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 64;
 /// Where a draw's vertex count is in its stride (D745). Mirrors `orbistoun_spirv`'s
 /// `DRAW_DATA_VERTICES_WORD`.
 pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
+/// Where a draw's geometry buffers' places begin in its stride (D747). Mirrors `orbistoun_spirv`'s
+/// `DRAW_DATA_BUFFERS_WORD`.
+pub const DRAW_DATA_BUFFERS_WORD: u32 = 36;
 /// See [`DRAW_DATA_BINDING`].
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 
-/// One draw's words in the draw-data buffer: its user data, then its vertex count (D745).
+/// One draw's words in the draw-data buffer: its user data, then its vertex count (D745) and its
+/// geometry buffers' places (D747).
 pub(crate) type DrawWords = [u32; DRAW_DATA_STRIDE_WORDS as usize];
 
 /// Bytes one dispatch's draw data may span: what the binding's range covers.

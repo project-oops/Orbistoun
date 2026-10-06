@@ -345,3 +345,161 @@ fn a_format_load_without_a_draws_descriptors_asks_for_them() {
         Err(orbistoun_translate::TranslateError::NeedsBufferFormats)
     ));
 }
+
+/// A primitive shader that reads four words of its bound buffer, as [`pixel_shader`] does, and
+/// carries them to parameter zero of a triangle covering the target: lane `n`'s corner is
+/// `(4 * (n & 1) - 1, 2 * (n & 2) - 1)`, so `(-1, -1)`, `(3, -1)` and `(-1, 3)`.
+fn colour_primitive_shader() -> Vec<u32> {
+    let words: [u32; 36] = [
+        // m0 = three vertices, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+        0xbefc_03ff,
+        0x0000_1003,
+        0xbf90_0009,
+        // v14 = lane
+        0xd765_000e,
+        0x0001_00c1,
+        // v2 = float(((v14 & 1) << 2) - 1)
+        0x360c_1c81,
+        0x340c_0c82,
+        0x4a0c_0cc1,
+        0x7e04_0b06,
+        // v3 = float(((v14 & 2) << 1) - 1)
+        0x360e_1c82,
+        0x340e_0e81,
+        0x4a0e_0ec1,
+        0x7e06_0b07,
+        // v4 = 0, v5 = 1.0
+        0x7e08_0280,
+        0x7e0a_02f2,
+        // a raw descriptor over user-data word 0 with sixteen bytes; four words into s[8:11]
+        0xbe84_0300,
+        0xbe85_0380,
+        0xbe86_0390,
+        0xbe87_03ff,
+        0x3101_6fac,
+        0xf428_0202,
+        0xfa00_0000,
+        0xbf8c_c07f,
+        0x7e10_0208, // v_mov_b32 v8..v11, s8..s11
+        0x7e12_0209,
+        0x7e14_020a,
+        0x7e16_020b,
+        // exp prim v1 = 0 | 1 << 10 | 2 << 20
+        0x7e02_02ff,
+        0x0020_0400,
+        0xf800_0941,
+        0x0000_0001,
+        0xf800_08cf, // exp pos0 v2..v5 done
+        0x0504_0302,
+        0xf800_020f, // exp param0 v8..v11
+        0x0b0a_0908,
+        0xbf81_0000, // s_endpgm
+    ];
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode_program(&bytes, &encodings, &operands);
+    translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Mesh, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 1,
+            draw_buffers: true,
+            ..UserData::default()
+        },
+    )
+    .expect("the primitive shader translates")
+    .module
+}
+
+/// A buffer of the four words `colour`.
+fn colour_buffer(colour: [f32; 4]) -> DrawBuffer {
+    let words = colour.map(f32::to_bits);
+    DrawBuffer {
+        hash: orbistoun_gpu::content_hash(&words),
+        bytes: words
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>()
+            .into(),
+    }
+}
+
+/// Two draws through one primitive shader, each with its own buffer, go into one batch and each
+/// reads its own (D747): its buffer is a range of an arena its draw's words name, not a set of its
+/// own. The second draw covers the first, so the target holds the second's colour; the first,
+/// drawn alone, its own.
+#[test]
+fn batched_primitive_shaders_each_read_their_own_buffer() {
+    if !device_or_skip("batched_primitive_shaders_each_read_their_own_buffer") {
+        return;
+    }
+    let draw = |colours: &[[f32; 4]]| {
+        let mut backend = VulkanBackend::new();
+        let mesh = colour_primitive_shader();
+        let pixel = orbistoun_spirv::passthrough_fragment_module();
+        for (id, words) in [(TRIANGLE, &mesh), (PIXEL, &pixel)] {
+            backend
+                .ensure_resident(id, Resource::Shader(words))
+                .expect("resident");
+        }
+        backend
+            .ensure_resident(
+                TARGET,
+                Resource::RenderTarget {
+                    width: 16,
+                    height: 16,
+                },
+            )
+            .expect("target resident");
+        let mut words = [0u32; orbistoun_gpu::USER_DATA_WORDS];
+        words[0] = 0x0010_0000;
+        let mut commands = vec![
+            RenderCommand::SetRenderTargets {
+                colour: vec![TARGET],
+                depth: None,
+            },
+            RenderCommand::SetUserData {
+                stage: ShaderStage::Vertex,
+                words,
+            },
+            RenderCommand::BindShader {
+                stage: ShaderStage::Vertex,
+                shader: TRIANGLE,
+            },
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader: PIXEL,
+            },
+        ];
+        for &colour in colours {
+            commands.push(RenderCommand::BindDrawBuffers {
+                stage: ShaderStage::Vertex,
+                buffers: vec![colour_buffer(colour)],
+            });
+            commands.push(RenderCommand::Draw {
+                vertices: 3,
+                instances: 1,
+                first_vertex: 0,
+            });
+        }
+        for command in &commands {
+            backend.execute(command).expect("the command runs");
+        }
+        backend
+            .last_frame()
+            .expect("a frame")
+            .at(8, 8)
+            .expect("the centre")
+    };
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let blue = [0.0, 0.0, 1.0, 1.0];
+    assert_eq!(draw(&[red]), [255, 0, 0, 255], "the first alone");
+    assert_eq!(draw(&[red, blue]), [0, 0, 255, 255], "the second over it");
+}

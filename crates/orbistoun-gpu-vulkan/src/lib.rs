@@ -243,7 +243,7 @@ pub struct VulkanBackend {
     /// The batch the last mesh draw went into, and the generation it was drawn at: a draw at the same
     /// generation differs from it only in its geometry words, so it joins without being worked out
     /// again.
-    batched: Option<(u64, framebuffer::BatchKey)>,
+    batched: Option<(u64, framebuffer::BatchKey, draw_buffers::GeometryPlaces)>,
     /// The user-data block the next draw's shaders read at entry, vertex words first, as the latest
     /// `SetUserData` for each stage left it.
     user_data: [u32; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
@@ -892,13 +892,13 @@ impl VulkanBackend {
     /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so this
     /// draw joins the batch if it is still open; `false` when it cannot.
     fn join_unchanged_batch(&mut self, vertices: u32) -> bool {
-        let Some((generation, key)) = self.batched else {
+        let Some((generation, key, places)) = self.batched else {
             return false;
         };
         if generation != self.state_generation {
             return false;
         }
-        let (words, _) = framebuffer::split_user_data(&self.user_data, vertices);
+        let (words, _) = framebuffer::split_user_data(&self.user_data, (vertices, &places));
         if !framebuffer::join_open_batch(&key, words) {
             return false;
         }
@@ -950,7 +950,7 @@ impl VulkanBackend {
         let batched =
             framebuffer::draw_resident(shaders, vertices, start, resident, (&window, scissor))
                 .map_err(|e| device_error("draw (resident)", e))?;
-        self.batched = batched.map(|key| (self.state_generation, key));
+        self.batched = batched.map(|(key, places)| (self.state_generation, key, places));
         self.unread.insert(target);
         self.last_drawn = Some(DrawnOn(target));
         // Read when asked for, not after every draw.

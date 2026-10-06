@@ -31,6 +31,14 @@ const SETS_PER_POOL: u32 = 4096;
 /// Bytes one arena holds; a buffer larger than that gets an arena of its own.
 const ARENA_BYTES: u64 = 32 << 20;
 
+/// The most arenas: the geometry binding holds them all, one element each (D747).
+const ARENAS_MOST: usize = DRAW_BUFFERS_PER_STAGE as usize;
+
+/// Where each of a draw's geometry buffers lies, by slot (D747): the arena at the geometry binding
+/// it is a range of, its first word there, and how many words it holds. Its draw's words carry
+/// them, so draws with different geometry buffers share one set and batch.
+pub(crate) type GeometryPlaces = [[u32; 3]; DRAW_BUFFERS_PER_STAGE as usize];
+
 /// Where an uploaded buffer lies: its arena's buffer, and the range of it.
 #[derive(Clone, Copy)]
 struct Placed {
@@ -123,12 +131,18 @@ fn held_for<'a>(
 
 /// Copies `bytes` into the first arena with room, at the device's alignment, padded with zeros to
 /// whole words; an arena is added when none has room, sized for the buffer when it is the larger.
-fn place(session: &Session, held: &mut Held, bytes: &[u8]) -> Result<Placed, DispatchError> {
+fn place(
+    session: &Session,
+    held: &mut Held,
+    bytes: &[u8],
+) -> Result<Option<Placed>, DispatchError> {
     let size = (bytes.len().div_ceil(4).max(1) * 4) as vk::DeviceSize;
     let alignment = held.alignment;
     let fits = |arena: &Arena| arena.used.next_multiple_of(alignment) + size <= arena.held.size;
     let index = if let Some(index) = held.arenas.iter().position(fits) {
         index
+    } else if held.arenas.len() == ARENAS_MOST {
+        return Ok(None);
     } else {
         {
             let capacity = ARENA_BYTES.max(size);
@@ -174,11 +188,11 @@ fn place(session: &Session, held: &mut Held, bytes: &[u8]) -> Result<Placed, Dis
     destination[..bytes.len()].copy_from_slice(bytes);
     destination[bytes.len()..].fill(0);
     arena.used = offset + size;
-    Ok(Placed {
+    Ok(Some(Placed {
         buffer: arena.held.buffer,
         offset,
         range: size,
-    })
+    }))
 }
 
 /// A set from the pools: the current one's next, or a fresh pool's when it is full.
@@ -274,7 +288,7 @@ fn create_layout(session: &Session) -> Result<vk::DescriptorSetLayout, DispatchE
 pub(crate) fn descriptor_set(
     session: &Session,
     stages: [&[DrawBuffer]; 2],
-) -> Result<vk::DescriptorSet, DispatchError> {
+) -> Result<(vk::DescriptorSet, GeometryPlaces), DispatchError> {
     if stages
         .iter()
         .any(|buffers| buffers.len() > DRAW_BUFFERS_PER_STAGE as usize)
@@ -283,19 +297,16 @@ pub(crate) fn descriptor_set(
             "a stage binds more buffers than its binding holds (D733)".to_owned(),
         ));
     }
-    let key = stages.map(|buffers| {
+    let stage_key = |buffers: &[DrawBuffer]| {
         buffers
             .iter()
             .map(|buffer| (buffer.hash, buffer.bytes.len()))
             .collect::<StageKey>()
-    });
+    };
     let mut guard = held()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let held = held_for(&mut guard, session)?;
-    if let Some(&set) = held.sets.get(&key) {
-        return Ok(set);
-    }
     let incoming: usize = stages
         .iter()
         .flat_map(|b| b.iter())
@@ -305,16 +316,65 @@ pub(crate) fn descriptor_set(
         crate::framebuffer::settle(session)?;
         release(&session.device, held);
     }
+    // Every buffer into the arenas; when they are all taken, the frame so far runs and they are
+    // rewound, once.
+    if !place_all(session, held, stages)? {
+        crate::framebuffer::settle(session)?;
+        release(&session.device, held);
+        if !place_all(session, held, stages)? {
+            return Err(DispatchError::Unsupported(
+                "a draw's buffers fill more arenas than the geometry binding holds (D747)"
+                    .to_owned(),
+            ));
+        }
+    }
+    let mut places: GeometryPlaces = [[0; 3]; DRAW_BUFFERS_PER_STAGE as usize];
+    for (place, buffer) in places.iter_mut().zip(stages[0]) {
+        let Some(range) = held.buffers.get(&(buffer.hash, buffer.bytes.len())) else {
+            continue;
+        };
+        let arena = held
+            .arenas
+            .iter()
+            .position(|arena| arena.held.buffer == range.buffer)
+            .unwrap_or(0);
+        *place = [
+            u32::try_from(arena).unwrap_or(0),
+            u32::try_from(range.offset / 4).unwrap_or(u32::MAX),
+            u32::try_from(range.range / 4).unwrap_or(u32::MAX),
+        ];
+    }
+    // The geometry binding is the arenas, so the set is the pixel stage's buffers' and how many
+    // arenas there are (D747).
+    let key = [
+        vec![(held.arenas.len() as u64, usize::MAX)],
+        stage_key(stages[1]),
+    ];
+    if let Some(&set) = held.sets.get(&key) {
+        return Ok((set, places));
+    }
+    let set = allocate(session, held, &key)?;
+    Ok((set, places))
+}
+
+/// Places every buffer of both stages not already placed; `false` when an arena was needed and the
+/// geometry binding holds no more.
+fn place_all(
+    session: &Session,
+    held: &mut Held,
+    stages: [&[DrawBuffer]; 2],
+) -> Result<bool, DispatchError> {
     for buffer in stages.iter().flat_map(|b| b.iter()) {
         let id = (buffer.hash, buffer.bytes.len());
         if !held.buffers.contains_key(&id) {
-            let placed = place(session, held, &buffer.bytes)?;
+            let Some(placed) = place(session, held, &buffer.bytes)? else {
+                return Ok(false);
+            };
             held.bytes += buffer.bytes.len();
             held.buffers.insert(id, placed);
         }
     }
-    let set = allocate(session, held, &key)?;
-    Ok(set)
+    Ok(true)
 }
 
 /// Allocates and writes the set for `key`, whose buffers are all uploaded.
@@ -325,26 +385,32 @@ fn allocate(
 ) -> Result<vk::DescriptorSet, DispatchError> {
     let device = &session.device;
     let set = pooled_set(session, held)?;
-    // Every element of both bindings: a bound buffer where a slot has one, the placeholder
-    // elsewhere.
-    let infos: Vec<[vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize]> = key
-        .iter()
-        .map(|stage| {
-            std::array::from_fn(|slot| {
-                let placed = stage.get(slot).and_then(|id| held.buffers.get(id));
-                match placed {
-                    Some(placed) => vk::DescriptorBufferInfo::default()
-                        .buffer(placed.buffer)
-                        .offset(placed.offset)
-                        .range(placed.range),
-                    None => vk::DescriptorBufferInfo::default()
-                        .buffer(held.placeholder.buffer)
-                        .offset(0)
-                        .range(vk::WHOLE_SIZE),
-                }
-            })
-        })
-        .collect();
+    // Every element of both bindings: the geometry binding's arenas (D747), and the pixel stage's
+    // buffer where a slot has one; the placeholder elsewhere.
+    let whole = |buffer: vk::Buffer| {
+        vk::DescriptorBufferInfo::default()
+            .buffer(buffer)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)
+    };
+    let geometry: [vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize] =
+        std::array::from_fn(|slot| {
+            whole(
+                held.arenas
+                    .get(slot)
+                    .map_or(held.placeholder.buffer, |arena| arena.held.buffer),
+            )
+        });
+    let pixel: [vk::DescriptorBufferInfo; DRAW_BUFFERS_PER_STAGE as usize] = std::array::from_fn(
+        |slot| match key[1].get(slot).and_then(|id| held.buffers.get(id)) {
+            Some(placed) => vk::DescriptorBufferInfo::default()
+                .buffer(placed.buffer)
+                .offset(placed.offset)
+                .range(placed.range),
+            None => whole(held.placeholder.buffer),
+        },
+    );
+    let infos = [geometry, pixel];
     let writes: Vec<vk::WriteDescriptorSet<'_>> = [GEOMETRY_BUFFERS_BINDING, PIXEL_BUFFERS_BINDING]
         .into_iter()
         .zip(&infos)

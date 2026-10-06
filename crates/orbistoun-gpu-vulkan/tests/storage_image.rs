@@ -192,7 +192,8 @@ fn the_storage_binding_a_module_declares_is_the_one_the_harness_fills() {
 #[test]
 fn the_draw_data_a_module_reads_is_laid_out_as_the_harness_writes_it() {
     use orbistoun_gpu_vulkan::framebuffer::{
-        DRAW_DATA_BINDING, DRAW_DATA_MOST_DRAWS, DRAW_DATA_STRIDE_WORDS,
+        DRAW_DATA_BINDING, DRAW_DATA_BUFFERS_WORD, DRAW_DATA_MOST_DRAWS, DRAW_DATA_STRIDE_WORDS,
+        DRAW_DATA_VERTICES_WORD,
     };
     assert_eq!(DRAW_DATA_BINDING, orbistoun_spirv::DRAW_DATA_BINDING);
     assert_eq!(
@@ -200,4 +201,17 @@ fn the_draw_data_a_module_reads_is_laid_out_as_the_harness_writes_it() {
         orbistoun_spirv::DRAW_DATA_STRIDE_WORDS
     );
     assert_eq!(DRAW_DATA_MOST_DRAWS, orbistoun_spirv::DRAW_DATA_MOST_DRAWS);
+    assert_eq!(
+        DRAW_DATA_VERTICES_WORD,
+        orbistoun_spirv::DRAW_DATA_VERTICES_WORD
+    );
+    assert_eq!(
+        DRAW_DATA_BUFFERS_WORD,
+        orbistoun_spirv::DRAW_DATA_BUFFERS_WORD
+    );
+    let places = DRAW_DATA_BUFFERS_WORD + 3 * orbistoun_spirv::DRAW_BUFFERS_PER_STAGE;
+    assert!(
+        places <= DRAW_DATA_STRIDE_WORDS,
+        "every slot's place fits a draw's stride"
+    );
 }
