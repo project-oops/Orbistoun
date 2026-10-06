@@ -17,6 +17,7 @@ mod cxx;
 mod floats;
 mod locks;
 pub mod math;
+mod mspace;
 pub mod said;
 mod scan;
 pub mod streams;
@@ -962,6 +963,10 @@ pub(crate) fn free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     }
     release_page_block(pointer);
+    // A block from an mspace created over a base carries no header: its arena keeps its length.
+    if mspace::release(pointer) {
+        return 0;
+    }
     if arena::holds(pointer) {
         // Asked before the header is read: a fixed-region block carries the same header as a
         // host-heap one, and `dealloc` on reserved memory is undefined behaviour. The region never
@@ -1087,6 +1092,9 @@ fn reallocalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `mspace_malloc(msp, bytes)` shape the platform names carry. `sceLibcMspaceMalloc`'s two
 /// arguments were confirmed by an argument dump; the siblings follow the same shape.
 fn mspace_malloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Some(block) = mspace::allocate_in(args[0], args[1], mspace::GRANULE) {
+        return block;
+    }
     let Ok(size) = usize::try_from(args[1]) else {
         return 0;
     };
@@ -1096,6 +1104,18 @@ fn mspace_malloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceLibcMspaceCalloc(msp, count, size)` - zeroed, with the same arena handling as
 /// [`mspace_malloc`]. The count and size trail the space, so they are `args[1]` and `args[2]`.
 fn mspace_calloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if let Some(total) = args[1].checked_mul(args[2])
+        && let Some(block) = mspace::allocate_in(args[0], total, mspace::GRANULE)
+    {
+        if block != 0
+            && let Ok(total) = usize::try_from(total)
+        {
+            // SAFETY: the arena just handed out `total` bytes of the guest's own mapped range at
+            // this address, which nothing else holds.
+            unsafe { std::ptr::write_bytes(ptr(block), 0, total) };
+        }
+        return block;
+    }
     let mut request = [0_u64; GUEST_ARG_REGISTERS];
     request[0] = args[1];
     request[1] = args[2];
@@ -1104,6 +1124,26 @@ fn mspace_calloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceLibcMspaceRealloc(msp, ptr, size)` - the pointer and size trail the space.
 fn mspace_realloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, pointer, size) = (args[0], args[1], args[2]);
+    if pointer == 0
+        && let Some(block) = mspace::allocate_in(handle, size, mspace::GRANULE)
+    {
+        return block;
+    }
+    if let Some(old) = mspace::length_of(pointer) {
+        let Some(block) = mspace::allocate_in(handle, size, mspace::GRANULE) else {
+            return 0;
+        };
+        if block != 0 {
+            if let Ok(keep) = usize::try_from(old.min(size)) {
+                // SAFETY: both blocks lie in the arena's guest range, the new one fresh and at
+                // least `keep` bytes, and they do not overlap.
+                unsafe { std::ptr::copy_nonoverlapping(ptr(pointer), ptr(block), keep) };
+            }
+            mspace::release(pointer);
+        }
+        return block;
+    }
     let mut request = [0_u64; GUEST_ARG_REGISTERS];
     request[0] = args[1];
     request[1] = args[2];
@@ -1113,6 +1153,9 @@ fn mspace_realloc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceLibcMspaceFree(msp, ptr)` - frees back to the shared heap; the header carries the size,
 /// so which arena the guest thinks it belongs to does not matter.
 fn mspace_free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if mspace::release(args[1]) {
+        return 0;
+    }
     let mut request = [0_u64; GUEST_ARG_REGISTERS];
     request[0] = args[1];
     free(&request)
@@ -1120,13 +1163,19 @@ fn mspace_free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceLibcMspaceCreate(name, base, capacity, flag)`: an arena handle.
 ///
-/// Every mspace is served from the one host heap and the handle is not consulted (D451), so the
-/// handle only has to be distinct and non-null; it is a small block of this allocator's own, which
-/// `sceLibcMspaceDestroy` frees. Unserved, the call bound to the title's bundled libc.prx, whose
-/// arena the rest of this family never reads - PPSA21564's `sceLibcMspaceMemalign` then faulted on
-/// the null that arena answered.
-fn mspace_create(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    allocate(MSPACE_HANDLE_BYTES, HEAP_HEADER)
+/// The handle is a small block of this allocator's own, distinct and non-null, which
+/// `sceLibcMspaceDestroy` frees. An mspace created over a base and capacity serves from that range
+/// (D751), as dlmalloc's `create_mspace_with_base` does; one without is served from the shared heap
+/// (D451). Unserved, the call bound to the title's bundled libc.prx, whose arena the rest of this
+/// family never reads - PPSA21564's `sceLibcMspaceMemalign` then faulted on the null that arena
+/// answered.
+fn mspace_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let handle = allocate(MSPACE_HANDLE_BYTES, HEAP_HEADER);
+    let (base, capacity) = (args[1], args[2]);
+    if handle != 0 && base != 0 && capacity != 0 {
+        mspace::create(handle, base, capacity);
+    }
+    handle
 }
 
 /// The size of the block an mspace handle is: dlmalloc's `malloc_state` is larger, but nothing
@@ -1137,6 +1186,7 @@ const MSPACE_HANDLE_BYTES: usize = 64;
 /// it released; with every allocation on the shared heap there are none to report beyond the
 /// handle's, so it answers zero.
 fn mspace_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    mspace::destroy(args[0]);
     let mut release = [0_u64; GUEST_ARG_REGISTERS];
     release[0] = args[0];
     free(&release);
@@ -1153,6 +1203,9 @@ fn mspace_memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(align) = align.max(1).checked_next_power_of_two() else {
         return 0;
     };
+    if let Some(block) = mspace::allocate_in(args[0], size as u64, align as u64) {
+        return block;
+    }
     allocate(size, align)
 }
 
@@ -1164,6 +1217,9 @@ fn mspace_memalign(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn mspace_malloc_usable_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return 0;
+    }
+    if let Some(length) = mspace::length_of(args[0]) {
+        return length;
     }
     header_of(args[0]).map_or(0, |(total, offset)| (total - offset) as u64)
 }
@@ -4436,8 +4492,8 @@ mod tests {
         }
     }
 
-    /// An mspace is created, allocated from with an alignment, sized and destroyed through the one
-    /// allocator; the handle is usable and not null.
+    /// An mspace is created, allocated from with an alignment, sized and destroyed; the handle is
+    /// usable and not null. Created over a base, every block lies inside that range (D751).
     #[test]
     fn an_mspace_lives_its_whole_life_on_the_one_allocator() {
         let arena = vec![0_u8; 0x1_0000];
@@ -4451,6 +4507,10 @@ mod tests {
         let p = call("sceLibcMspaceMemalign", [msp, 256, 100, 0, 0, 0]);
         assert_ne!(p, 0);
         assert_eq!(p % 256, 0, "the alignment is honoured");
+        assert!(
+            (base..base + 0x1_0000).contains(&p),
+            "{p:#x} is inside the arena at {base:#x}"
+        );
         assert_eq!(
             call("sceLibcMspaceMallocUsableSize", [p, 0, 0, 0, 0, 0]),
             100
@@ -4460,6 +4520,12 @@ mod tests {
         let q = call("sceLibcMspaceMemalign", [msp, 24, 8, 0, 0, 0]);
         assert_ne!(q, 0);
         assert_eq!(q % 32, 0, "24 rounded up to 32");
+        assert!((base..base + 0x1_0000).contains(&q));
+        assert_eq!(
+            call("sceLibcMspaceMalloc", [msp, 0x2_0000, 0, 0, 0, 0]),
+            0,
+            "more than the arena holds"
+        );
         call("sceLibcMspaceFree", [msp, p, 0, 0, 0, 0]);
         call("sceLibcMspaceFree", [msp, q, 0, 0, 0, 0]);
         assert_eq!(call("sceLibcMspaceDestroy", [msp, 0, 0, 0, 0, 0]), 0);
