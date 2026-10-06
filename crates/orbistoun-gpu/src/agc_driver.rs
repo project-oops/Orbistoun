@@ -749,6 +749,25 @@ fn buffer_writes(
     Ok(writes)
 }
 
+/// Each of a dispatch's own buffers its run left holding one word throughout, as the fill it
+/// amounts to (D750): what a buffer clear leaves, whether or not memory held it already. radeonsi
+/// clears a depth surface's HTILE this way, and the clear is a clear even where the words were
+/// the same before.
+fn uniform_buffers(ranges: &[(u64, u64)], after: &[Vec<u32>]) -> Vec<cp::Fill> {
+    ranges
+        .iter()
+        .zip(after)
+        .filter_map(|(&(destination, count), words)| {
+            let (&first, rest) = words.split_first()?;
+            rest.iter().all(|&word| word == first).then_some(cp::Fill {
+                destination,
+                pattern: first,
+                count,
+            })
+        })
+        .collect()
+}
+
 impl GuestCp<'_> {
     /// Each of a dispatch's own buffers as guest memory holds it now, in whole words (D746).
     fn read_buffers(&self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u32>>, String> {
@@ -848,6 +867,16 @@ impl GuestCp<'_> {
             if !cp::CpMemory::write(self, at, &bytes) {
                 return Err("a write back into guest memory was refused".to_owned());
             }
+        }
+        // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
+        let fills = uniform_buffers(&prepared.buffers, &buffers_after);
+        if !fills.is_empty()
+            && let Some(pipeline) = live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+        {
+            pipeline.note_fills(fills);
         }
         Ok(())
     }
@@ -2586,6 +2615,22 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
     use std::sync::{Mutex, PoisonError};
+
+    /// A dispatch's buffer left holding one word throughout is a fill of it, whatever it held
+    /// before; one with two words in it is not (D750).
+    #[test]
+    fn a_buffer_left_uniform_is_a_fill() {
+        let ranges = [(0x1000, 8), (0x2000, 8), (0x3000, 0)];
+        let after = [vec![0xFFFC_00F0, 0xFFFC_00F0], vec![1, 2], vec![]];
+        assert_eq!(
+            super::uniform_buffers(&ranges, &after),
+            [crate::cp::Fill {
+                destination: 0x1000,
+                pattern: 0xFFFC_00F0,
+                count: 8,
+            }]
+        );
+    }
 
     /// A segment's stream keeps every packet up to its last draw, register writes included, turns
     /// each earlier draw into a `NOP` of the same length, and leaves out everything after (D729).

@@ -26,6 +26,14 @@ const DB_DEPTH_CLEAR: u32 = 0xA00B;
 const DB_Z_INFO: u32 = 0xA010;
 /// `DB_STENCIL_INFO`, byte `163908` (`0x28044`).
 const DB_STENCIL_INFO: u32 = 0xA011;
+/// `DB_HTILE_DATA_BASE`, byte `163860` (`0x28014`): the HTILE metadata's address in 256-byte units.
+const DB_HTILE_DATA_BASE: u32 = 0xA005;
+/// `DB_HTILE_DATA_BASE_HI`, byte `163960` (`0x28078`).
+const DB_HTILE_DATA_BASE_HI: u32 = 0xA01E;
+/// `DB_Z_INFO`'s `TILE_SURFACE_ENABLE`, bit 29: the depth surface has HTILE metadata.
+const TILE_SURFACE_ENABLE: u32 = 1 << 29;
+/// An HTILE word's `ZMASK`, bits 3:0 in every layout: zero is a tile in the cleared state.
+const HTILE_ZMASK: u32 = 0xF;
 /// `DB_Z_WRITE_BASE`, byte `163920` (`0x28050`).
 const DB_Z_WRITE_BASE: u32 = 0xA014;
 /// `DB_STENCIL_WRITE_BASE`, byte `163924` (`0x28054`).
@@ -93,6 +101,10 @@ pub struct DepthTarget {
     pub base: u64,
     /// The stencil surface's byte address (`DB_STENCIL_WRITE_BASE`).
     pub stencil_base: u64,
+    /// Where its HTILE metadata lies, when `DB_Z_INFO` enables it (D750).
+    pub htile: Option<u64>,
+    /// `DB_DEPTH_CLEAR`'s bits: the depth a tile HTILE marks cleared reads (D750).
+    pub depth_clear: u32,
 }
 
 /// The depth target a stream binds, from the latest writes to its registers.
@@ -113,11 +125,14 @@ pub fn depth_target_at(writes: &[RegisterWrite]) -> Option<DepthTarget> {
         return None;
     }
     let at = |register| latest(register).unwrap_or(0);
+    let tiled = at(DB_Z_INFO) & TILE_SURFACE_ENABLE != 0;
     Some(DepthTarget {
         format,
         stencil: decode_stencil_format(at(DB_STENCIL_INFO)),
         base: surface_address(at(DB_Z_WRITE_BASE), at(DB_Z_WRITE_BASE_HI)),
         stencil_base: surface_address(at(DB_STENCIL_WRITE_BASE), at(DB_STENCIL_WRITE_BASE_HI)),
+        htile: tiled.then(|| surface_address(at(DB_HTILE_DATA_BASE), at(DB_HTILE_DATA_BASE_HI))),
+        depth_clear: at(DB_DEPTH_CLEAR),
     })
 }
 
@@ -349,6 +364,20 @@ fn depth_fill_value(fill: &Fill, target: &DepthTarget, pixels: u64) -> Option<f3
     (0.0..=1.0).contains(&value).then_some(value)
 }
 
+/// The depth a fill of `target`'s HTILE leaves every tile reading (D750): `DB_DEPTH_CLEAR`'s, when
+/// the fill covers every 8x8 tile's 32 bits from the metadata's start with tiles in the cleared
+/// state - `ZMASK`, bits 3:0 in every layout, zero (Mesa `ac_descriptors.h`, `HTILE_Z_CLEAR_REG` and
+/// `HTILE_ZS_CLEAR_REG`). Each tile takes 32 bits and the metadata's blocks only pad it
+/// (`gfx10addrlib.cpp` `HwlComputeHtileInfo`), so a fill shorter than that covers part of the
+/// surface and is not this clear.
+fn htile_fill_value(fill: &Fill, target: &DepthTarget, (width, height): (u32, u32)) -> Option<f32> {
+    let htile = target.htile?;
+    let tiles = u64::from(width.div_ceil(8)) * u64::from(height.div_ceil(8));
+    (fill.destination == htile && fill.count >= tiles * 4 && fill.pattern & HTILE_ZMASK == 0)
+        .then(|| decode_depth_clear(target.depth_clear))
+        .filter(|value| (0.0..=1.0).contains(value))
+}
+
 /// The stencil value a fill leaves in every element of `target`'s stencil surface: one byte
 /// repeated through the pattern, over at least one byte a pixel.
 fn stencil_fill_value(fill: &Fill, target: &DepthTarget, pixels: u64) -> Option<u8> {
@@ -419,10 +448,10 @@ impl PendingFills {
                 .map(|(_, fill)| *fill),
         );
         let pixels = u64::from(extent.width) * u64::from(extent.height);
-        let depth = before
-            .iter()
-            .rev()
-            .find_map(|fill| depth_fill_value(fill, target, pixels));
+        let depth = before.iter().rev().find_map(|fill| {
+            depth_fill_value(fill, target, pixels)
+                .or_else(|| htile_fill_value(fill, target, (extent.width, extent.height)))
+        });
         let stencil = before
             .iter()
             .rev()
@@ -432,6 +461,11 @@ impl PendingFills {
             depth,
             stencil,
         })
+    }
+
+    /// Keeps fills made outside a stream's packets for the next submission's draws (D750).
+    pub(crate) fn note(&mut self, fills: Vec<Fill>) {
+        self.keep(fills);
     }
 
     /// Keeps `fills` for the next submission, the most recent [`PENDING_FILLS`].
@@ -511,6 +545,8 @@ mod tests {
                 stencil: true,
                 base: 0x100_0300_0000,
                 stencil_base: 0x400_0000,
+                htile: None,
+                depth_clear: 0,
             })
         );
         assert_eq!(depth_target_at(&[write(0xA010, 0)]), None, "Z_INVALID");
@@ -525,6 +561,8 @@ mod tests {
             stencil: false,
             base: 0x2_000e_0000,
             stencil_base: 0,
+            htile: None,
+            depth_clear: 0,
         };
         assert_eq!(
             depth_target_id(&target),
@@ -607,6 +645,8 @@ mod tests {
             stencil: true,
             base: 0x10_0000,
             stencil_base: 0x20_0000,
+            htile: None,
+            depth_clear: 0,
         }
     }
 
@@ -662,6 +702,76 @@ mod tests {
             None,
             "a fill short of the surface does not clear it"
         );
+    }
+
+    /// A fill of the depth surface's HTILE with tiles in the cleared state clears the attachment to
+    /// `DB_DEPTH_CLEAR` (D750), as radeonsi's fast clear does; a fill short of every tile, one
+    /// leaving a tile compressed, or one with HTILE disabled is not a clear. The registers are
+    /// CRFT00001's: `DB_Z_INFO` `0xaf80_0183` enables HTILE at `0x4018700` in 256-byte units.
+    #[test]
+    fn an_htile_fill_in_the_cleared_state_clears_the_depth() {
+        let writes = [
+            write(0xA010, 0xaf80_0183),
+            write(0xA005, 0x0401_8700),
+            write(0xA014, 0x0401_0000),
+            write(0xA00B, 1.0f32.to_bits()),
+        ];
+        let target = depth_target_at(&writes).expect("a depth target");
+        assert_eq!(target.htile, Some(0x4_0187_0000));
+        let id = ResourceId(7);
+        // 16x8 pixels: two tiles, eight bytes. `HTILE_ZS_CLEAR_REG(1.0)`: ZMASK 0, SR0/SR1 3, ZBASE
+        // 0x3FFF.
+        let cleared = Fill {
+            destination: 0x4_0187_0000,
+            pattern: 0xFFFC_00F0,
+            count: 8,
+        };
+        let extent = ColourTargetExtent {
+            width: 16,
+            height: 8,
+        };
+        let clear = |fill: Fill, target: &DepthTarget| {
+            PendingFills::default().clear_before_draws(
+                &[(0, fill)],
+                Some((4, 4)),
+                Some((id, target, extent)),
+            )
+        };
+        assert_eq!(
+            clear(cleared, &target),
+            Some(RenderCommand::ClearDepthStencil {
+                target: id,
+                depth: Some(1.0),
+                stencil: None,
+            })
+        );
+        assert_eq!(
+            clear(
+                Fill {
+                    count: 4,
+                    ..cleared
+                },
+                &target
+            ),
+            None,
+            "one tile of two"
+        );
+        assert_eq!(
+            clear(
+                Fill {
+                    pattern: 0xFFFC_00FF,
+                    ..cleared
+                },
+                &target
+            ),
+            None,
+            "ZMASK 0xF: uncompressed, not cleared"
+        );
+        let untiled = DepthTarget {
+            htile: None,
+            ..target
+        };
+        assert_eq!(clear(cleared, &untiled), None, "no HTILE");
     }
 
     /// A submission with no draws keeps its fills for the one that has them.

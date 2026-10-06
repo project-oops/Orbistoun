@@ -873,6 +873,12 @@ pub struct PreparedDispatch {
 }
 
 impl Pipeline {
+    /// Fills of guest memory that happened outside a stream's own packets - a dispatch's buffer
+    /// cleared to one word (D750) - kept for the depth surfaces the next draws bind.
+    pub(crate) fn note_fills(&mut self, fills: Vec<crate::cp::Fill>) {
+        self.depth_fills.note(fills);
+    }
+
     /// Builds a pipeline over the built-in tables.
     ///
     /// # Errors
