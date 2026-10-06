@@ -2643,6 +2643,8 @@ edge_cases = [
     "A format needing more is refused entirely rather than assigning the four it can. sscanf's contract is that the count says how many conversions succeeded, so a caller told four believes those four are good - and they might be, or the arguments might have been misaligned from the start.",
     "A conversion it cannot read stops the scan rather than skipping it, because carrying on would assign the next argument from the wrong place.",
     "Whitespace in the format matches any run of it; any other character must match itself; a numeric conversion skips leading whitespace of its own accord.",
+    "The floating-point conversions read the strtod subject sequence into a float, or a double with `l`, and `%n` stores how much input was read without counting. oops-mesa's strtod is `sscanf(text, \"%lf%n\", ...)`, so every GLSL float literal its compiler parses comes through here: without them each read as 0.0, which zeroed every constant in every radeonsi shader (STKT00001's `w = 1.0`, CRFT00001's fog exponent).",
+    "Per ISO C 7.21.6.2p9 the input item is the longest prefix of a matching sequence, so `1e` is a matching failure where strtod would take the `1`. A hexadecimal float is not read; the scan stops there.",
 ]
 known_by = "published"
 cites = "ISO C sscanf; POSIX.1-2008 sscanf(3)."

@@ -45,14 +45,18 @@ enum Wanted {
     String,
     /// Exactly one character.
     Character,
+    /// A floating-point number, the `strtod` subject sequence: `%f %e %g %a` and their capitals.
+    Float,
+    /// `%n`: how much input has been read, stored without counting as an assignment.
+    Count,
 }
 
 impl Wanted {
     /// How many bytes the destination holds, for the numeric kinds.
     const fn width(self, long: bool) -> usize {
         match self {
-            Self::Integer(_) | Self::Unsigned(_) if long => 8,
-            Self::Integer(_) | Self::Unsigned(_) => 4,
+            Self::Integer(_) | Self::Unsigned(_) | Self::Float | Self::Count if long => 8,
+            Self::Integer(_) | Self::Unsigned(_) | Self::Float | Self::Count => 4,
             Self::String | Self::Character => 1,
         }
     }
@@ -60,8 +64,9 @@ impl Wanted {
 
 /// `sscanf(input, format, ...)`.
 ///
-/// Supports `%d`, `%i`, `%u`, `%x`, `%o`, `%s`, `%c`, `%%`, a maximum field width and the
-/// assignment-suppressing `*`. Whitespace in the format matches any run of whitespace; any
+/// Supports `%d`, `%i`, `%u`, `%x`, `%o`, `%s`, `%c`, `%%`, the floating-point conversions
+/// `%f %e %g %a` (and capitals) into a `float` or, with `l`, a `double`, `%n`, a maximum field
+/// width and the assignment-suppressing `*`. Whitespace in the format matches any run of whitespace; any
 /// other character must match itself. Answers how many conversions were assigned, or `EOF`
 /// when the input ran out before the first one.
 ///
@@ -125,16 +130,10 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             continue;
         }
 
-        let wanted = match conversion {
-            b'd' | b'i' => Wanted::Integer(10),
-            b'u' => Wanted::Unsigned(10),
-            b'x' | b'X' => Wanted::Unsigned(16),
-            b'o' => Wanted::Unsigned(8),
-            b's' => Wanted::String,
-            b'c' => Wanted::Character,
-            // A conversion this cannot read stops the scan: carrying on would assign the next
-            // argument from the wrong place.
-            _ => return assigned,
+        // A conversion this cannot read stops the scan: carrying on would assign the next argument
+        // from the wrong place.
+        let Some(wanted) = wanted_for(conversion) else {
+            return assigned;
         };
 
         // A destination past the sixth argument was passed on the stack, which the trampoline does
@@ -152,6 +151,19 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         };
 
         let taken = match wanted {
+            // Reads nothing and is not an assignment (ISO C 7.21.6.2p12).
+            Wanted::Count => {
+                if !suppress {
+                    let count = at as i64;
+                    if long {
+                        write_bytes(destination, &count.to_le_bytes());
+                    } else {
+                        write_bytes(destination, &(count as i32).to_le_bytes());
+                    }
+                }
+                continue;
+            }
+            Wanted::Float => scan_float(input, at, width, destination, suppress, long),
             Wanted::Character => scan_character(input, at, destination, suppress),
             Wanted::String => scan_string(input, at, width, destination, suppress),
             Wanted::Integer(base) | Wanted::Unsigned(base) => scan_number(
@@ -173,6 +185,21 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     }
     assigned
+}
+
+/// What a conversion letter reads, or `None` for one this does not.
+const fn wanted_for(conversion: u8) -> Option<Wanted> {
+    Some(match conversion {
+        b'd' | b'i' => Wanted::Integer(10),
+        b'u' => Wanted::Unsigned(10),
+        b'x' | b'X' => Wanted::Unsigned(16),
+        b'o' => Wanted::Unsigned(8),
+        b's' => Wanted::String,
+        b'c' => Wanted::Character,
+        b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A' => Wanted::Float,
+        b'n' => Wanted::Count,
+        _ => return None,
+    })
 }
 
 /// Reads one character, answering how much input it took.
@@ -246,6 +273,105 @@ fn scan_number(
             write_bytes(destination, &value.to_le_bytes());
         } else {
             write_bytes(destination, &(value as i32).to_le_bytes());
+        }
+    }
+    Some(cursor - at)
+}
+
+/// Reads one floating-point number, answering how much input it took: the `strtod` subject
+/// sequence - a sign, digits with an optional point, an optional exponent; or `inf`, `infinity`,
+/// `nan` - stored as a `float`, or a `double` when `double`.
+///
+/// ISO C 7.21.6.2p9: the input item is the longest run that is a prefix of such a sequence, and an
+/// item that is not one whole is a matching failure, so `1e` fails where `strtod` would take the
+/// `1`. A hexadecimal float is not read; the scan stops there, as for any conversion this cannot
+/// carry out.
+fn scan_float(
+    input: &[u8],
+    at: usize,
+    width: usize,
+    destination: u64,
+    suppress: bool,
+    double: bool,
+) -> Option<usize> {
+    let mut cursor = at;
+    while input.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    let start = cursor;
+    let end = if width > 0 {
+        input.len().min(start.saturating_add(width))
+    } else {
+        input.len()
+    };
+    let byte = |index: usize| (index < end).then(|| input[index].to_ascii_lowercase());
+    if matches!(byte(cursor), Some(b'-' | b'+')) {
+        cursor += 1;
+    }
+    // A word: `inf`, `infinity` or `nan`, matched whole or not at all.
+    let word = |cursor: usize, word: &[u8]| {
+        (0..word.len())
+            .take_while(|&step| byte(cursor + step) == Some(word[step]))
+            .count()
+    };
+    if matches!(byte(cursor), Some(b'i' | b'n')) {
+        let (stem, longer): (&[u8], &[u8]) = if byte(cursor) == Some(b'i') {
+            (b"inf", b"infinity")
+        } else {
+            (b"nan", b"nan")
+        };
+        if word(cursor, stem) != stem.len() {
+            return None;
+        }
+        let matched = word(cursor, longer);
+        let taken = if matched == longer.len() {
+            longer.len()
+        } else if matched == stem.len() {
+            stem.len()
+        } else {
+            return None;
+        };
+        cursor += taken;
+    } else {
+        if byte(cursor) == Some(b'0') && byte(cursor + 1) == Some(b'x') {
+            return None;
+        }
+        let digits = |mut cursor: usize| {
+            while byte(cursor).is_some_and(|b| b.is_ascii_digit()) {
+                cursor += 1;
+            }
+            cursor
+        };
+        let whole = digits(cursor);
+        let mut after = whole;
+        let mut fraction = 0;
+        if byte(after) == Some(b'.') {
+            let past = digits(after + 1);
+            fraction = past - (after + 1);
+            after = past;
+        }
+        if whole == cursor && fraction == 0 {
+            return None;
+        }
+        cursor = after;
+        if byte(cursor) == Some(b'e') {
+            let mut exponent = cursor + 1;
+            if matches!(byte(exponent), Some(b'-' | b'+')) {
+                exponent += 1;
+            }
+            let past = digits(exponent);
+            if past == exponent {
+                return None;
+            }
+            cursor = past;
+        }
+    }
+    let text = std::str::from_utf8(&input[start..cursor]).ok()?;
+    if !suppress {
+        if double {
+            write_bytes(destination, &text.parse::<f64>().ok()?.to_le_bytes());
+        } else {
+            write_bytes(destination, &text.parse::<f32>().ok()?.to_le_bytes());
         }
     }
     Some(cursor - at)
@@ -540,6 +666,74 @@ mod tests {
         );
         assert_eq!(matched, 1);
         assert_eq!(wanted, 77);
+    }
+
+    /// `%lf` and `%n`, as oops-mesa's `strtod` asks for every GLSL float literal it parses
+    /// (`src/runtime/libc_absent.c`): the double, and how much input it took.
+    #[test]
+    fn a_double_and_its_length_come_out_as_strtod_wants_them() {
+        let read = |text: &std::ffi::CStr| {
+            let mut value = -7.0_f64;
+            let mut consumed = -1_i32;
+            let matched = call(
+                "sscanf",
+                [
+                    text.as_ptr() as u64,
+                    c"%lf%n".as_ptr() as u64,
+                    std::ptr::addr_of_mut!(value) as u64,
+                    std::ptr::addr_of_mut!(consumed) as u64,
+                    0,
+                    0,
+                ],
+            );
+            (matched, value, consumed)
+        };
+        assert_eq!(read(c"1."), (1, 1.0, 2), "a GLSL `1.`");
+        assert_eq!(read(c"12.345678;"), (1, 12.345_678, 9));
+        assert_eq!(
+            read(c"  -2.5e3,"),
+            (1, -2500.0, 8),
+            "leading space, sign, exponent"
+        );
+        assert_eq!(read(c".5"), (1, 0.5, 2));
+        assert_eq!(read(c"1e+2x"), (1, 100.0, 4));
+        assert_eq!(read(c"INFINITY"), (1, f64::INFINITY, 8));
+        assert_eq!(read(c"-inf"), (1, f64::NEG_INFINITY, 4));
+        let (matched, value, consumed) = read(c"nan");
+        assert_eq!((matched, consumed), (1, 3));
+        assert!(value.is_nan());
+        assert_eq!(
+            read(c"abc"),
+            (0, -7.0, -1),
+            "nothing converts: nothing is written"
+        );
+        // ISO C 7.21.6.2p9: the input item is the longest prefix of a matching sequence, so `1e`
+        // is an item that is not one, a matching failure - unlike `strtod`, which takes the `1`.
+        assert_eq!(read(c"1e"), (0, -7.0, -1));
+        assert_eq!(read(c"infin"), (0, -7.0, -1));
+        // A hexadecimal float is a conversion this does not read, so the scan stops there.
+        assert_eq!(read(c"0x1p3"), (0, -7.0, -1));
+    }
+
+    /// `%f` stores a `float`, and a field width bounds the item.
+    #[test]
+    fn a_float_takes_its_width() {
+        let mut value = 0.0_f32;
+        let mut rest = 0_i32;
+        let matched = call(
+            "sscanf",
+            [
+                c"1.2345 9".as_ptr() as u64,
+                c"%3f%d".as_ptr() as u64,
+                std::ptr::addr_of_mut!(value) as u64,
+                std::ptr::addr_of_mut!(rest) as u64,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(matched, 2);
+        assert_eq!(value.to_bits(), 1.2_f32.to_bits());
+        assert_eq!(rest, 345, "the digits past the width are the next item's");
     }
 
     /// A `struct tm`, as `include/time.h` lays one out.
