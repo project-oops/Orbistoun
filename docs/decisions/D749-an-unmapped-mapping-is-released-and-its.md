@@ -3,10 +3,12 @@
 **Status:** decided
 **Date:** 2026-10-06
 
-`munmap` of the whole of a mapping `mmap` placed releases its host reservation, and its base is
-held in a quarantine: the bump allocator hands a released base out again only once 65,536 newer
-releases have followed it and the slot is wide enough. Any other unmap - a piece of a mapping, or a
-direct-memory view, whose memory another view may still map - keeps its reservation as before.
+`munmap` of the whole of a mapping a call placed for itself - an `mmap`, or a direct-memory map
+placed fresh rather than into a range the guest reserved first - releases its host reservation once
+no direct-memory view still maps that address, and its base is held in a quarantine: the bump
+allocator hands a released base out again only once 65,536 newer releases have followed it and the
+slot is wide enough. Any other unmap - a piece of a mapping, or a view another view still shares -
+keeps its reservation as before.
 
 **Why:** an unmap released nothing, and every no-preference map took a fresh base, so a guest that
 maps and unmaps as it runs grew the host's committed memory without bound. TSHP00001 maps and

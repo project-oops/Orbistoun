@@ -1249,8 +1249,9 @@ fn released_bases() -> &'static Mutex<quarantine::Quarantine> {
     RELEASED.get_or_init(Mutex::default)
 }
 
-/// The mappings `mmap` reserved itself, by base, with their lengths: what `munmap` may release
-/// whole (D749). A direct-memory view is not one, since another view may still map its memory.
+/// The mappings a call reserved whole for itself - an `mmap`, or a direct-memory map placed fresh -
+/// by base, with their lengths: what `munmap` may release (D749). A direct-memory view is released
+/// only once no other view maps its memory there.
 fn placed_by_mmap() -> &'static Mutex<std::collections::HashMap<u64, u64>> {
     static PLACED: OnceLock<Mutex<std::collections::HashMap<u64, u64>>> = OnceLock::new();
     PLACED.get_or_init(Mutex::default)
@@ -1441,7 +1442,9 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // again would conflict with the reservation and answer `NoMemory`. An address the guest did not
     // pre-reserve is a fresh mapping.
     let mut base = base;
-    let mut placed = if space.owns(base, len) {
+    // A map into a range the guest reserved first is part of that reservation, not one of its own.
+    let reserved_before = space.owns(base, len);
+    let mut placed = if reserved_before {
         space.protect(base, len, protection)
     } else {
         space.reserve(base, len, protection).map(|_| ())
@@ -1466,6 +1469,9 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::NoMemory.as_raw());
     }
     drop(space);
+    if !reserved_before && let Ok(mut whole) = placed_by_mmap().lock() {
+        whole.insert(base, len);
+    }
     mapping_placed(base, len, protection, requested != 0);
     note_requested_protection(base, len, prot);
 
@@ -3826,13 +3832,20 @@ fn munmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Releases the host memory behind a mapping `mmap` placed, when `[address, address + len)` is the
-/// whole of it, and holds its base back for reuse (D749). Anything else keeps its reservation:
-/// releasing a piece would hole an address space the guest believes contiguous.
+/// Releases the host memory behind a mapping a call placed whole, when `[address, address + len)` is
+/// the whole of it and no direct-memory view still maps it there, and holds its base back for reuse
+/// (D749). Anything else keeps its reservation: releasing a piece would hole an address space the
+/// guest believes contiguous.
 fn release_mapping(address: u64, len: u64) {
     let Some(len) = checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE) else {
         return;
     };
+    let still_viewed = physical_mappings().lock().map_or(true, |mapped| {
+        mapped.values().any(|alias| alias.base == address)
+    });
+    if still_viewed {
+        return;
+    }
     let Ok(mut placed) = placed_by_mmap().lock() else {
         return;
     };
@@ -7172,6 +7185,8 @@ mod tests {
         args[0] = cpu;
         args[1] = size;
         assert_eq!(super::munmap(&args), 0, "the CPU view closes");
+        let owned = || super::mappings().lock().expect("mappings").owns(gpu, size);
+        assert!(owned(), "the GPU view still holds the host memory");
 
         let again = map(physical, size, 0);
         assert_eq!(again, gpu, "the GPU view still holds the memory");
@@ -7186,6 +7201,10 @@ mod tests {
         args[1] = size;
         assert_eq!(super::munmap(&args), 0, "the second view closes");
         assert_eq!(super::munmap(&args), 0, "and the GPU one");
+        assert!(
+            !owned(),
+            "with no view left, the host memory is released (D749)"
+        );
         assert_ne!(
             map(physical, size, 0),
             gpu,
