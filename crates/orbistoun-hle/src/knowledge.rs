@@ -69,6 +69,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceAgcDriver.toml"),
     ),
     (
+        "libSceAmpr",
+        include_str!("../data/knowledge/libSceAmpr.toml"),
+    ),
+    (
         "libSceAppContent",
         include_str!("../data/knowledge/libSceAppContent.toml"),
     ),

@@ -118,6 +118,7 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     // `sceAgcCreateShader` fills a guest-adjacent shader object, and the shader-linkage calls
     // (interpolant mapping, prim state, link shaders).
     all.extend_from_slice(orbistoun_gpu::agc::implementations());
+    all.extend_from_slice(orbistoun_gpu::ampr::implementations());
     // libSceAgcDriver: `sceAgcDriverCreateQueue` accepts the Type 0/3 queue and returns success.
     all.extend_from_slice(orbistoun_gpu::agc_driver::implementations());
     all.extend_from_slice(orbistoun_fs::implementations());
@@ -522,10 +523,6 @@ mod knowledge_tests {
         (
             "libSceAudioOut2",
             "declared as 13 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceAmpr",
-            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceIme",

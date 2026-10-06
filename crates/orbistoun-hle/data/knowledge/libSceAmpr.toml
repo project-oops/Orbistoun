@@ -1,0 +1,41 @@
+library = "libSceAmpr"
+
+[[function]]
+name = "sceAmprCommandBufferConstructor"
+purpose = "Constructs a command-buffer object in place."
+returns = "pointer"
+edge_cases = [
+    "MEASURED with PPSA21564's shape (obj, obj, buf, 0, 0, 0x47d), object and buffer 0xcc-filled: the first 24 bytes of the object are zeroed and nothing past them changes; the buffer argument is left untouched. The answer 0x80029dce0 is the object pointer itself, as a C++ constructor returns.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arm ampr-cb-ctor-title (REQ a5b1)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-06"
+
+[[function]]
+name = "sceAmprCommandBufferSetBuffer"
+purpose = "Binds a memory buffer to a constructed command-buffer object."
+returns = "status"
+edge_cases = [
+    "MEASURED (obj, buf, 0x1000, 0, 0, 0) on a constructed object: answers 0, writes the size as a 32-bit word at +12 and the buffer's address at +16, and leaves the buffer untouched.",
+    "MEASURED (obj, buf, 0x10, 0, 0, 0): refused with 0x80020010 (EINVAL), the object and buffer unchanged. Where between 0x10 and 0x1000 the refusal stops is unmeasured; a size in that range answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arms ampr-cb-set-buffer-1000 and ampr-cb-set-buffer-10 (REQ a5b1)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-06"
+
+[[function]]
+name = "sceAmprCommandBufferReset"
+purpose = "Resets a command-buffer object for reuse."
+returns = "status"
+edge_cases = [
+    "MEASURED after a 0x1000-byte SetBuffer: answers 0 and changes no byte of the object - the bound buffer and its size are kept.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arm ampr-cb-reset-after-2 (REQ a5b1)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-06"
