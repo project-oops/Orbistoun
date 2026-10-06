@@ -399,8 +399,6 @@ fn the_a70f_cluster_reserves_its_measured_headers_and_extents() {
         ("sceAgcAcbDispatchIndirect", 16, 0xc002_1600),
         ("sceAgcDcbDrawIndirect", 20, 0xc003_2400),
         ("sceAgcDcbDrawIndexIndirect", 20, 0xc003_2500),
-        ("sceAgcDcbSetShRegistersIndirect", 20, 0xc003_6300),
-        ("sceAgcDcbSetUcRegistersIndirect", 20, 0xc003_6400),
         ("sceAgcDcbStallCommandBufferParser", 8, 0xc000_4200),
         ("sceAgcAcbAcquireMem", 32, 0xc006_5800),
     ] {
@@ -458,25 +456,38 @@ fn cb_dispatch_writes_its_dimensions_as_hardware_did() {
     }
 }
 
-/// The rest of the `sceAgc*Patch*` family answers the measured `0x0`, not a placeholder, and
-/// touches no packet. The two Cx register patches write their measured fields and are replayed in
-/// `the_indirect_register_patches_replay_the_measured_sequence`.
+/// The Sh and Uc indirect producers and patches, as measured (sweep 20260928-230724): the producer
+/// called with `0x1000` writes its header, dw1 `0x1000` and the format word `0x80000000`
+/// (`166-agc/dcb-set-{sh,uc}-registers-indirect` `pm4-pass1`); `AddRegisters(packet, 1)` adds one
+/// to dw4 and `SetAddress(packet, 0x2000_0000)` writes dw1, as the Cx pair does
+/// (`166-agc/patch-{sh,uc}-reg-*`, `diff-pass-a`).
 #[test]
-fn every_patch_answers_the_measured_success_not_a_placeholder() {
-    for name in [
-        "sceAgcSetShRegIndirectPatchAddRegisters",
-        "sceAgcSetShRegIndirectPatchSetAddress",
-        "sceAgcSetUcRegIndirectPatchAddRegisters",
-        "sceAgcSetUcRegIndirectPatchSetAddress",
-    ] {
+fn the_sh_and_uc_indirect_patches_amend_their_packet() {
+    for (family, header) in [("Sh", 0xc003_6300_u32), ("Uc", 0xc003_6400)] {
+        let w = Writer::new(0x400);
         let mut args = [0u64; GUEST_ARG_REGISTERS];
-        args[0] = 0x7400_0224_7d9c; // a real packet address, as the producer skeletons return
-        let rc = call(name, args);
-        assert_eq!(rc, 0, "{name} answers the measured 0x0");
-        assert_ne!(
-            rc, UNIMPLEMENTED,
-            "{name} specifically not the placeholder the guest reads as a pointer"
+        args[0] = w.handle();
+        args[1] = 0x1000;
+        let packet = call(&format!("sceAgcDcbSet{family}RegistersIndirect"), args);
+        let dword = |i: usize| u32::from_le_bytes(w.bytes()[i * 4..i * 4 + 4].try_into().unwrap());
+        assert_eq!(
+            (dword(0), dword(1), dword(2), dword(3), dword(4)),
+            (header, 0x1000, 0, 0x8000_0000, 0),
+            "{family} producer"
         );
+
+        let mut patch = [0u64; GUEST_ARG_REGISTERS];
+        patch[0] = packet;
+        patch[1] = 1;
+        let add = format!("sceAgcSet{family}RegIndirectPatchAddRegisters");
+        assert_eq!(call(&add, patch), 0);
+        assert_eq!(dword(4), 1, "{family} count");
+
+        patch[1] = 0x2000_0000;
+        let set = format!("sceAgcSet{family}RegIndirectPatchSetAddress");
+        assert_eq!(call(&set, patch), 0);
+        assert_eq!((dword(1), dword(2)), (0x2000_0000, 0), "{family} address");
+        assert_eq!(w.written(), 20, "{family}: the patches amend in place");
     }
 }
 

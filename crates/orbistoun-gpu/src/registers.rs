@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::packet::{PacketKind, PacketWalk};
+use crate::packet::{PacketKind, PacketWalk, build::measured};
 
 /// Why a packet vocabulary could not be loaded.
 ///
@@ -183,6 +183,73 @@ pub fn register_writes(
     body: &[u8],
     vocabulary: &Vocabulary,
 ) -> Vec<RegisterWrite> {
+    register_writes_reading(walk, body, vocabulary, None)
+}
+
+/// The indirect register loads and the direct opcode whose base each reaches: `LOAD_CONTEXT_REG_INDEX`
+/// context registers, `LOAD_SH_REG_INDEX` SH ones, `LOAD_UCONFIG_REG_INDEX` user-config ones.
+const INDIRECT_LOADS: [(u8, u8); 3] = [
+    (
+        measured::SET_CONTEXT_REG_INDIRECT,
+        measured::SET_CONTEXT_REG,
+    ),
+    (measured::SET_SH_REG_INDIRECT, measured::SET_SH_REG),
+    (
+        measured::SET_UCONFIG_REG_INDIRECT,
+        measured::SET_UCONFIG_REG,
+    ),
+];
+
+/// `data_format` in an indirect load's dw3: the table is (offset, value) pairs, not values.
+const OFFSET_AND_DATA: u32 = 1 << 31;
+
+/// The registers an indirect load writes from the table it names, or none when the table is not
+/// readable or the packet asks for what is not modelled (an index form other than a direct
+/// address). The body is laid out as Mesa's `cp_pm4_table_data_gfx11.json` gives
+/// `LOAD_SH_REG_INDEX`: dw1 index 1:0 and address 31:2, dw2 the address's high half, dw3 register
+/// offset 15:0 and `data_format` 31, dw4 `num_dwords` 13:0, which counts pairs in offset-and-data
+/// form (the AGC patch adds one for one pair, `166-agc/patch-{cx,sh,uc}-*`).
+fn indirect_load(
+    words: Words<'_>,
+    base: u32,
+    tables: &dyn crate::pipeline::GuestMemory,
+) -> Vec<(u32, u32)> {
+    let (Some(low), Some(high), Some(format), Some(count)) =
+        (words.get(0), words.get(1), words.get(2), words.get(3))
+    else {
+        return Vec::new();
+    };
+    if low & 3 != 0 {
+        return Vec::new();
+    }
+    let address = u64::from(low) | (u64::from(high) << 32);
+    let count = (count & 0x3fff) as usize;
+    let pairs = format & OFFSET_AND_DATA != 0;
+    let length = count * if pairs { 8 } else { 4 };
+    let Some(table) = tables.read(address, length) else {
+        return Vec::new();
+    };
+    let table = Words(table);
+    (0..count)
+        .filter_map(|i| {
+            if pairs {
+                Some((base + (table.get(2 * i)? & 0xffff), table.get(2 * i + 1)?))
+            } else {
+                let register = base + (format & 0xffff) + u32::try_from(i).ok()?;
+                Some((register, table.get(i)?))
+            }
+        })
+        .collect()
+}
+
+/// [`register_writes`], with the tables indirect register loads name read from `tables`: the
+/// command processor writes those registers from guest memory when it reaches the packet.
+pub fn register_writes_reading(
+    walk: &PacketWalk,
+    body: &[u8],
+    vocabulary: &Vocabulary,
+    tables: Option<&dyn crate::pipeline::GuestMemory>,
+) -> Vec<RegisterWrite> {
     let mut writes = Vec::new();
 
     for packet in &walk.packets {
@@ -204,6 +271,19 @@ pub fn register_writes(
                 }
             }
             PacketKind::Command { opcode } => {
+                if let Some(&(_, direct)) = INDIRECT_LOADS.iter().find(|(load, _)| *load == opcode)
+                {
+                    if let (Some(tables), Some(base)) = (tables, vocabulary.register_base(direct)) {
+                        writes.extend(indirect_load(words, base, tables).into_iter().map(
+                            |(register, value)| RegisterWrite {
+                                packet_offset: packet.offset,
+                                register,
+                                value,
+                            },
+                        ));
+                    }
+                    continue;
+                }
                 let Some(base) = vocabulary.register_base(opcode) else {
                     continue;
                 };
@@ -2704,7 +2784,8 @@ mod tests {
         decode_buffer_descriptor, decode_colour_swizzle_mode, decode_colour_target_extent,
         decode_combine_func, decode_depth_control, decode_image_descriptor, decode_scissor,
         decode_stencil_control, decode_target_mask, depth_control_at, dispatch_calls, draw_calls,
-        register_writes, scissor_at, shader_candidates, stencil_control_at, target_mask_at,
+        register_writes, register_writes_reading, scissor_at, shader_candidates,
+        stencil_control_at, target_mask_at,
     };
     use crate::packet::walk;
 
@@ -2765,6 +2846,69 @@ mod tests {
         assert_eq!(writes[0].register, 0x2C0C, "base plus index");
         assert_eq!(writes[0].value, 0x1111);
         assert_eq!(writes[1].register, 0x2C0D);
+    }
+
+    /// A register table in guest memory at one address.
+    struct Table(u64, Vec<u8>);
+
+    impl crate::pipeline::GuestMemory for Table {
+        fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+            let start = usize::try_from(address.checked_sub(self.0)?).ok()?;
+            self.1.get(start..start.checked_add(length)?)
+        }
+    }
+
+    /// `LOAD_SH_REG_INDEX` (`0x63`) loads SH registers from the table its body names (Mesa
+    /// `cp_pm4_table_data_gfx11.json`: dw1 index 1:0 and address 31:2, dw2 the address's high half,
+    /// dw3 the register offset 15:0 and `data_format` 31, dw4 `num_dwords` 13:0). In
+    /// offset-and-data form the table is (offset, value) pairs and the count is pairs, as the AGC
+    /// patch adds one for one pair (`166-agc/patch-sh-reg-add-registers`); in offset-and-size form
+    /// it is consecutive values from the offset.
+    #[test]
+    fn an_indirect_register_load_writes_the_table_it_names() {
+        let at = 0x7400_023c_8d10_u64;
+        let pairs = Table(at, stream(&[0x20C, 0x1234, 0x20D, 0x40, 0x999, 0x999]));
+        let load = |format: u32, count: u32| {
+            stream(&[
+                command(0x63, 4),
+                at as u32,
+                (at >> 32) as u32,
+                format,
+                count,
+            ])
+        };
+        let bytes = load(0x8000_0000, 2);
+        let writes = register_writes_reading(&walk(&bytes), &bytes, &vocabulary(), Some(&pairs));
+        let read: Vec<(u32, u32)> = writes.iter().map(|w| (w.register, w.value)).collect();
+        assert_eq!(
+            read,
+            [(0x2E0C, 0x1234), (0x2E0D, 0x40)],
+            "two pairs, no more"
+        );
+
+        let values = Table(at, stream(&[7, 8, 9]));
+        let bytes = load(0x10, 2);
+        let writes = register_writes_reading(&walk(&bytes), &bytes, &vocabulary(), Some(&values));
+        let read: Vec<(u32, u32)> = writes.iter().map(|w| (w.register, w.value)).collect();
+        assert_eq!(
+            read,
+            [(0x2C10, 7), (0x2C11, 8)],
+            "consecutive from the offset"
+        );
+
+        // Not read: no memory, a table out of reach, and an index form other than a direct address.
+        let bytes = load(0x8000_0000, 2);
+        assert!(register_writes(&walk(&bytes), &bytes, &vocabulary()).is_empty());
+        let short = Table(at, stream(&[0x20C, 0x1234]));
+        assert!(
+            register_writes_reading(&walk(&bytes), &bytes, &vocabulary(), Some(&short)).is_empty()
+        );
+        let mut indexed = load(0x8000_0000, 2);
+        indexed[4] |= 1;
+        assert!(
+            register_writes_reading(&walk(&indexed), &indexed, &vocabulary(), Some(&pairs))
+                .is_empty()
+        );
     }
 
     #[test]

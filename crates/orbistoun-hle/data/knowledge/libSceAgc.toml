@@ -601,7 +601,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcSetShRegIndirectPatchAddRegisters"
 purpose = "Extends the register run of a SET_SH_REG_INDIRECT packet the Sh producer reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-reg-add-registers, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the 0xc0036300 packet in place, grows nothing (extent 17, changed 1). Measured return, writes nothing, per the family - see sceAgcSetCxRegIndirectPatchAddRegisters."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-reg-add-registers, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the 0xc0036300 packet in place, grows nothing (extent 17, changed 1): with a count of 1 (one register pair) dw4's low byte became 0x81, the Cx patch's rule - dw4 += count (sweep 20260928-230724, diff-pass-a/b). Implemented as the Cx patch is; the count is in pairs."]
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-sh-reg-add-registers, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
 found_on = "2026-09-15"
@@ -622,7 +622,7 @@ found_on = "2026-09-17"
 [[function]]
 name = "sceAgcSetShRegIndirectPatchSetAddress"
 purpose = "Writes the target address into a SET_SH_REG_INDIRECT packet the Sh producer reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends one dword of the 0xc0036300 packet in place (0x20 -> 0x40 across passes), grows nothing. Measured return, writes nothing, per the family."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-sh-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends one dword of the 0xc0036300 packet in place, grows nothing: the probe passed 0x20000000 then 0x40000000 and dw1 came back as each (extent 8, changed 1, sweep 20260928-230724), the Cx patch's rule - dw1 the address's low half, dw2 its high half (zero here, so unchanged). Implemented as the Cx patch is."]
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-sh-reg-set-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
 found_on = "2026-09-15"
@@ -630,7 +630,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcSetUcRegIndirectPatchAddRegisters"
 purpose = "Extends the register run of a SET_UCONFIG_REG_INDIRECT packet the Uc producer reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-uc-reg-add-registers, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the 0xc0036400 packet in place, grows nothing (extent 17, changed 1). Measured return, writes nothing, per the family."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-uc-reg-add-registers, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends the 0xc0036400 packet in place, grows nothing (extent 17, changed 1): with a count of 1 (one register pair) dw4's low byte became 0x81, the Cx patch's rule - dw4 += count (sweep 20260928-230724, diff-pass-a/b). Implemented as the Cx patch is; the count is in pairs."]
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-uc-reg-add-registers, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
 found_on = "2026-09-15"
@@ -638,7 +638,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcSetUcRegIndirectPatchSetAddress"
 purpose = "Writes the target address into a SET_UCONFIG_REG_INDIRECT packet the Uc producer reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-uc-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends one dword of the 0xc0036400 packet in place (0x20 -> 0x40 across passes), grows nothing. Measured return, writes nothing, per the family."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-uc-reg-set-address, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Amends one dword of the 0xc0036400 packet in place, grows nothing: the probe passed 0x20000000 then 0x40000000 and dw1 came back as each (extent 8, changed 1, sweep 20260928-230724), the Cx patch's rule - dw1 the address's low half, dw2 its high half (zero here, so unchanged). Implemented as the Cx patch is."]
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-uc-reg-set-address, sweep 20260915-203058 (patch-rc-pass-a/b 0x0)."
 found_on = "2026-09-15"
@@ -686,7 +686,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcDcbSetShRegistersIndirect"
 purpose = "Writes a SET_SH_REG_INDIRECT packet a patch later fills, into a draw command buffer."
-edge_cases = ["MEASURED: 20 bytes, header 0xc0036300 - type 3, opcode 0x63 (SET_SH_REG_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-set-sh-registers-indirect, sweep 20260915-203058). Reservation skeleton, body zeroed; the Sh producer the sceAgcSetShRegIndirectPatch* family amends. On PPSA02664's command-buffer path, where it was answering the placeholder (commit a8b2d74, 618)."]
+edge_cases = ["MEASURED: 20 bytes, header 0xc0036300 - type 3, opcode 0x63 (SET_SH_REG_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-set-sh-registers-indirect, sweep 20260915-203058). The body is the Cx producer's: pass 0 (argument 0) wrote dw1 0, dw3 0x80000000 (offset-and-data), dw4 0; pass 1 (argument 0x1000) wrote dw1 0x1000 (sweep 20260928-230724, pm4-pass0/1). The command processor reads it as LOAD_SH_REG_INDEX (Mesa sid.h 0x63) and loads the (offset, value) pairs at the address into SH registers; PPSA03416 sets its compute program this way. On PPSA02664's command-buffer path, where it was answering the placeholder (commit a8b2d74, 618)."]
 known_by = "measured"
 cites = "obSCEne 166-agc/dcb-set-sh-registers-indirect, sweep 20260915-203058 (header 0xc0036300, extent 20)."
 found_on = "2026-09-15"
@@ -694,7 +694,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcDcbSetUcRegistersIndirect"
 purpose = "Writes a SET_UCONFIG_REG_INDIRECT packet a patch later fills, into a draw command buffer."
-edge_cases = ["MEASURED: 20 bytes, header 0xc0036400 - type 3, opcode 0x64 (SET_UCONFIG_REG_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-set-uc-registers-indirect, sweep 20260915-203058). Reservation skeleton, body zeroed; the Uc producer the sceAgcSetUcRegIndirectPatch* family amends."]
+edge_cases = ["MEASURED: 20 bytes, header 0xc0036400 - type 3, opcode 0x64 (SET_UCONFIG_REG_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-set-uc-registers-indirect, sweep 20260915-203058). The body is the Cx producer's: pass 0 (argument 0) wrote dw1 0, dw3 0x80000000, dw4 0; pass 1 (argument 0x1000) wrote dw1 0x1000 (sweep 20260928-230724, pm4-pass0/1). Read as LOAD_UCONFIG_REG_INDEX, loading user-config registers from the pairs at the address."]
 known_by = "measured"
 cites = "obSCEne 166-agc/dcb-set-uc-registers-indirect, sweep 20260915-203058 (header 0xc0036400, extent 20)."
 found_on = "2026-09-15"

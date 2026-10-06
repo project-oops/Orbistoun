@@ -800,7 +800,8 @@ impl GuestCp<'_> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
             // The registers in force: what earlier submissions left, then the stream's (D737).
-            let (writes, _) = pipeline.writes_in_force(&walked, dispatch.stream);
+            let (writes, _) =
+                pipeline.writes_in_force(&walked, dispatch.stream, Some(&self.memory));
             let state = crate::dispatch::state_at(
                 &writes,
                 dispatch.offset,
@@ -2559,7 +2560,7 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_mut()
     {
-        pipeline.carry(&bytes);
+        pipeline.carry(&bytes, Some(&MappedRegions::current()));
     }
     if executed.draws == 0
         && let Ok(mut pending) = undelivered_modules().lock()

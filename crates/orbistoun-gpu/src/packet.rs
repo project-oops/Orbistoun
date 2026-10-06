@@ -465,8 +465,16 @@ pub mod build {
     /// low bits.
     #[must_use]
     pub fn set_cx_registers_indirect(table: u64, count: u64) -> [u32; 5] {
+        set_registers_indirect(measured::SET_CONTEXT_REG_INDIRECT, table, count)
+    }
+
+    /// The same skeleton for any of the three indirect register opcodes. The Sh (`0x63`) and Uc
+    /// (`0x64`) producers write the Cx one's body: called with `0x1000`, dw1 `0x1000` and dw3
+    /// `0x80000000` (`166-agc/dcb-set-{sh,uc}-registers-indirect`, sweep 20260928-230724).
+    #[must_use]
+    pub fn set_registers_indirect(opcode: u8, table: u64, count: u64) -> [u32; 5] {
         [
-            command_header(measured::SET_CONTEXT_REG_INDIRECT, 4),
+            command_header(opcode, 4),
             (table as u32) & !3,
             (table >> 32) as u32,
             0x8000_0000,

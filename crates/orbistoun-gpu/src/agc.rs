@@ -497,11 +497,12 @@ const INDIRECT_TABLE_AT: u64 = 4;
 /// Offset of an indirect register packet's register count.
 const INDIRECT_COUNT_AT: u64 = 16;
 
-/// `sceAgcSetCxRegIndirectPatchAddRegisters(packet, count, ...)`: adds `count` to the packet's
-/// register count and answers `0x0`. Measured: one call moved dw4 from `0x3880` to `0x3881`, a
-/// second to `0x3882`, and nothing else in the packet or workload changed
-/// (`166-agc/patch-cx-registers-indirect`).
-fn cx_indirect_patch_add_registers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// `sceAgcSet{Cx,Sh,Uc}RegIndirectPatchAddRegisters(packet, count, ...)`: adds `count` to the
+/// packet's register count and answers `0x0`. Measured: one Cx call moved dw4 from `0x3880` to
+/// `0x3881`, a second to `0x3882`, and nothing else in the packet or workload changed
+/// (`166-agc/patch-cx-registers-indirect`); the Sh and Uc ones changed dw4's low byte alone, by
+/// one for a count of one (`166-agc/patch-{sh,uc}-reg-add-registers`).
+fn indirect_patch_add_registers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (packet, count) = (args[0], args[1] as u32);
     if packet != 0 {
         let at = packet.wrapping_add(INDIRECT_COUNT_AT);
@@ -516,10 +517,11 @@ fn cx_indirect_patch_add_registers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceAgcSetCxRegIndirectPatchSetAddress(packet, address)`: writes the table address into dw1
-/// and dw2 and answers `0x0`. Measured: address `0x2_0086_0000` came back as dw1 `0x860000`, dw2
-/// `0x2` (`166-agc/patch-cx-registers-indirect`).
-fn cx_indirect_patch_set_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// `sceAgcSet{Cx,Sh,Uc}RegIndirectPatchSetAddress(packet, address)`: writes the table address
+/// into dw1 and dw2 and answers `0x0`. Measured: Cx address `0x2_0086_0000` came back as dw1
+/// `0x860000`, dw2 `0x2` (`166-agc/patch-cx-registers-indirect`); Sh and Uc `0x2000_0000` and
+/// `0x4000_0000` as dw1, nothing past it changed (`166-agc/patch-{sh,uc}-reg-set-address`).
+fn indirect_patch_set_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (packet, address) = (args[0], args[1]);
     if packet != 0 {
         let at = packet.wrapping_add(INDIRECT_TABLE_AT);
@@ -606,18 +608,6 @@ fn wait_reg_mem_patch_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         };
     }
     patch_address(packet, WAIT_REG_MEM_POLL_AT, address);
-    OK
-}
-
-/// The `sceAgc*Patch*` family - amend an already-written packet in place, and return the measured
-/// `0x0`.
-///
-/// obSCEne measures every patch in the family returning `0x0` across two argument passes
-/// (`166-agc/patch-*`): the Sh/Uc register patches (`AddRegisters` and `SetAddress`) answer it here
-/// and write nothing, their amendment not yet pinned to the arguments a title passes; the Cx,
-/// DmaData, wait-reg-mem and end-of-pipe patches write theirs.
-/// `packet` is not dereferenced, so a null needs no guard.
-fn agc_patch_returns_ok(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
@@ -933,19 +923,25 @@ fn dcb_draw_index_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
-/// `sceAgcDcbSetShRegistersIndirect(dcb, ...)`. Header `0xc0036300`, 20 bytes.
+/// `sceAgcDcbSetShRegistersIndirect(dcb, table, count)`. Header `0xc0036300`, 20 bytes, the body
+/// as the Cx producer fills its own.
 fn dcb_set_sh_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::reservation(measured::SET_SH_REG_INDIRECT, 4),
+        &packet::build::set_registers_indirect(measured::SET_SH_REG_INDIRECT, args[1], args[2]),
     )
 }
 
-/// `sceAgcDcbSetUcRegistersIndirect(dcb, ...)`. Header `0xc0036400`, 20 bytes.
+/// `sceAgcDcbSetUcRegistersIndirect(dcb, table, count)`. Header `0xc0036400`, 20 bytes, the body
+/// as the Cx producer fills its own.
 fn dcb_set_uc_registers_indirect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(
         args[0],
-        &packet::build::reservation(measured::SET_UCONFIG_REG_INDIRECT, 4),
+        &packet::build::set_registers_indirect(
+            measured::SET_UCONFIG_REG_INDIRECT,
+            args[1],
+            args[2],
+        ),
     )
 }
 
@@ -1114,27 +1110,27 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     // The whole `sceAgc*Patch*` family, each measured to return 0x0.
     (
         "sceAgcSetCxRegIndirectPatchAddRegisters",
-        cx_indirect_patch_add_registers,
+        indirect_patch_add_registers,
     ),
     (
         "sceAgcSetCxRegIndirectPatchSetAddress",
-        cx_indirect_patch_set_address,
+        indirect_patch_set_address,
     ),
     (
         "sceAgcSetShRegIndirectPatchAddRegisters",
-        agc_patch_returns_ok,
+        indirect_patch_add_registers,
     ),
     (
         "sceAgcSetShRegIndirectPatchSetAddress",
-        agc_patch_returns_ok,
+        indirect_patch_set_address,
     ),
     (
         "sceAgcSetUcRegIndirectPatchAddRegisters",
-        agc_patch_returns_ok,
+        indirect_patch_add_registers,
     ),
     (
         "sceAgcSetUcRegIndirectPatchSetAddress",
-        agc_patch_returns_ok,
+        indirect_patch_set_address,
     ),
     (
         "sceAgcDmaDataPatchSetDstAddressOrOffset",

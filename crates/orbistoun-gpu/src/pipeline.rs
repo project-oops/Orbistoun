@@ -33,8 +33,8 @@ use crate::registers::{
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
     colour_target_format_at, decode_blend_control, decode_image_descriptor, depth_control_at,
-    dispatch_calls, draw_calls, primitive_topology_at, register_writes, shader_candidates,
-    stencil_control_at, viewport_transform_from,
+    dispatch_calls, draw_calls, primitive_topology_at, register_writes, register_writes_reading,
+    shader_candidates, stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -1170,13 +1170,15 @@ impl Pipeline {
 
     /// The register writes `stream` runs under, and how many are its own: the state earlier
     /// submissions left first, so the stream's own writes win, then the stream's (D737). A stream
-    /// that clears state, or a pipeline that does not carry it, has only its own.
+    /// that clears state, or a pipeline that does not carry it, has only its own. The tables its
+    /// indirect register loads name are read from `tables`.
     pub fn writes_in_force(
         &self,
         walked: &PacketWalk,
         stream: &[u8],
+        tables: Option<&dyn GuestMemory>,
     ) -> (Vec<RegisterWrite>, usize) {
-        let own = register_writes(walked, stream, &self.vocabulary);
+        let own = register_writes_reading(walked, stream, &self.vocabulary, tables);
         let count = own.len();
         if !self.carries_state || last_clear(walked).is_some() {
             return (own, count);
@@ -1195,13 +1197,14 @@ impl Pipeline {
     /// Advances the carried register state past `stream`, once it has been carried out (D737):
     /// every register it wrote now holds its last value there. A stream that clears state
     /// (`CLEAR_STATE`) leaves only what it wrote after its last clear. Nothing, unless
-    /// [`Self::carrying_register_state`].
-    pub fn carry(&mut self, stream: &[u8]) {
+    /// [`Self::carrying_register_state`]. The tables its indirect register loads name are read from
+    /// `tables`.
+    pub fn carry(&mut self, stream: &[u8], tables: Option<&dyn GuestMemory>) {
         if !self.carries_state {
             return;
         }
         let walked = walk(stream);
-        let writes = register_writes(&walked, stream, &self.vocabulary);
+        let writes = register_writes_reading(&walked, stream, &self.vocabulary, tables);
         let cleared = last_clear(&walked);
         if cleared.is_some() {
             self.carried.clear();
@@ -1269,7 +1272,7 @@ impl Pipeline {
         use crate::perf::{Span, span};
         let walked = span(Span::PrepareWalk, || walk(stream));
         let (writes, own_writes) = span(Span::PrepareRegisters, || {
-            self.writes_in_force(&walked, stream)
+            self.writes_in_force(&walked, stream, Some(memory))
         });
         let inferred = shader_candidates(&writes, &self.vocabulary);
 
@@ -5262,7 +5265,7 @@ mod tests {
                 .is_empty(),
             "nothing carried before the first is carried out"
         );
-        live.carry(&sized);
+        live.carry(&sized, None);
         let next = live.submit(&later, super::Queue::Draw, &[], &Nothing);
         assert_eq!(
             next.targets
@@ -5282,7 +5285,7 @@ mod tests {
                 .is_empty(),
             "a clear starts from itself"
         );
-        live.carry(&cleared);
+        live.carry(&cleared, None);
         assert!(
             live.submit(&later, super::Queue::Draw, &[], &Nothing)
                 .targets
@@ -5291,7 +5294,7 @@ mod tests {
         );
 
         let mut whole = pipeline();
-        whole.carry(&sized);
+        whole.carry(&sized, None);
         assert!(
             whole
                 .submit(&later, super::Queue::Draw, &[], &Nothing)
