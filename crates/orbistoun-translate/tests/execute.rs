@@ -4742,6 +4742,35 @@ fn a_wide_flat_load_fills_consecutive_registers() {
     }
 }
 
+/// `global_load_dwordx3` fills three consecutive registers and leaves the fourth alone: 2 Ship 2
+/// Harkinian's vertex shader reads a three-component position this way.
+#[test]
+fn a_three_word_flat_load_fills_three_registers() {
+    if !device_or_skip("a_three_word_flat_load_fills_three_registers") {
+        return;
+    }
+    let mut program = vec![
+        v_mov_inline(0, 16),
+        v_mov_inline(4, 11),
+        v_mov_inline(5, 22),
+        v_mov_inline(6, 33),
+        v_mov_inline(7, 44),
+    ];
+    program.extend(flat_store("global_store_dwordx4", 0, 4));
+    program.push(v_mov_inline(3, 55));
+    // Into v0..v2, overwriting the address register as the four-word test does; v3 is untouched.
+    program.extend(flat_load("global_load_dwordx3", 0, 0));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Lane, &program);
+    for (offset, expected) in [11u32, 22, 33, 55].iter().enumerate() {
+        assert_eq!(
+            vector(&registers, offset),
+            *expected,
+            "v{offset} should hold {expected}; registers were {registers:?}"
+        );
+    }
+}
+
 /// A wide flat load running past the vector register file is refused, not truncated.
 #[test]
 fn a_wide_access_past_the_register_file_is_refused() {
@@ -6220,11 +6249,21 @@ fn rounding_reversal_and_more_compares_into_exec() {
     program.push(vop1_vv("v_rndne_f32_e32", 3, 2));
     program.extend(v_mov_literal(4, 0x0000_0001));
     program.push(vop1_vv("v_bfrev_b32_e32", 5, 4));
+    // `v_floor_f32` rounds toward negative infinity (`V_FLOOR_F32`).
+    program.extend(v_mov_literal(6, (-2.5f32).to_bits()));
+    program.push(vop1_vv("v_floor_f32_e32", 7, 6));
+    program.push(vop1_vv("v_floor_f32_e32", 6, 0));
     program.push(s_endpgm());
     let registers = run(&program);
     assert_eq!(vector(&registers, 1), 2.0f32.to_bits(), "2.5 to the even 2");
     assert_eq!(vector(&registers, 3), 4.0f32.to_bits(), "3.5 to the even 4");
     assert_eq!(vector(&registers, 5), 0x8000_0000);
+    assert_eq!(
+        vector(&registers, 7),
+        (-3.0f32).to_bits(),
+        "-2.5 down to -3"
+    );
+    assert_eq!(vector(&registers, 6), 2.0f32.to_bits(), "2.5 down to 2");
 
     // Each lane's index against 5: equal keeps lane 5, greater keeps lanes 6 up, and the float
     // compare of 5.0 against the index as a float keeps lanes 0 to 4.

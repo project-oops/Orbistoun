@@ -56,6 +56,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_store",
     "global_load_dword",
     "global_load_dwordx2",
+    "global_load_dwordx3",
     "global_load_dwordx4",
     "global_store_dword",
     "global_store_dwordx2",
@@ -78,6 +79,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_and_saveexec_b64",
     "s_bcnt1_i32_b64",
     "v_rndne_f32_e32",
+    "v_floor_f32_e32",
     "v_bfrev_b32_e32",
     "v_cmpx_gt_f32_e32",
     "v_cmpx_eq_i32_e32",
@@ -2229,7 +2231,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // Unary vector float ALU and transcendentals: square root, reciprocal square root, sin,
         // cos, base-2 exp and base-2 log.
         "v_sqrt_f32_e32" | "v_rsq_f32_e32" | "v_sin_f32_e32" | "v_cos_f32_e32"
-        | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" => {
+        | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" | "v_floor_f32_e32" => {
             float_unary(model, instruction, name)
         }
         "v_bfrev_b32_e32" => bit_reverse(model, instruction),
@@ -2285,6 +2287,7 @@ fn memory_instruction<M: Model + ?Sized>(
         | "s_buffer_load_dwordx16"
         | "global_load_dword"
         | "global_load_dwordx2"
+        | "global_load_dwordx3"
         | "global_load_dwordx4"
         | "global_store_dword"
         | "global_store_dwordx2"
@@ -2451,6 +2454,9 @@ fn short_form_arithmetic<M: Model + ?Sized>(
 /// GLSL.std.450 instruction number for `RoundEven`: to the nearest integer, a tie to the even one.
 const GLSL_ROUND_EVEN: u32 = 2;
 
+/// GLSL.std.450 instruction number for `Floor`: the largest integer not above the operand.
+const GLSL_FLOOR: u32 = 8;
+
 /// `v_bfrev_b32 d, s`: `s`'s bits reversed, per lane (`V_BFREV_B32`).
 fn bit_reverse<M: Model + ?Sized>(
     model: &mut M,
@@ -2583,6 +2589,8 @@ fn float_unary<M: Model + ?Sized>(
         "v_log_f32_e32" => (GLSL_LOG2, false),
         // Round to the nearest integer, a tie to the even one (`V_RNDNE_F32`).
         "v_rndne_f32_e32" => (GLSL_ROUND_EVEN, false),
+        // Round toward negative infinity (`V_FLOOR_F32`).
+        "v_floor_f32_e32" => (GLSL_FLOOR, false),
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
@@ -7595,7 +7603,10 @@ fn flat_memory<M: Model + ?Sized>(
     match name {
         // The flat loads, which differ only in how many consecutive registers they fill; each
         // layout is probed rather than assumed shared.
-        "global_load_dword" | "global_load_dwordx2" | "global_load_dwordx4" => {
+        "global_load_dword"
+        | "global_load_dwordx2"
+        | "global_load_dwordx3"
+        | "global_load_dwordx4" => {
             let words = access_words(name);
             let (destination, vaddr, base) = first_three_operands(instruction)?;
             let Operand::Vector(register) = destination else {
@@ -7853,6 +7864,7 @@ fn memory<M: Model + ?Sized>(
         // Flat memory: a per-lane address rather than a uniform one.
         "global_load_dword"
         | "global_load_dwordx2"
+        | "global_load_dwordx3"
         | "global_load_dwordx4"
         | "global_store_dword"
         | "global_store_dwordx2"

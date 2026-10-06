@@ -395,3 +395,6 @@ v_cmp_eq_i32_e32 vcc, 0, v0
 v_cmp_eq_i32_e32 vcc, s33, v17
 v_cmp_eq_i32_e32 vcc, v250, v1
 v_cmp_eq_i32_e32 vcc, 64, v66
+v_floor_f32_e32 v3, v1
+v_floor_f32_e32 v200, s7
+v_floor_f32_e32 v0, v255

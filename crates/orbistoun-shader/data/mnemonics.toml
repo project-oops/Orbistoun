@@ -59,6 +59,11 @@ name = "global_load_dword"
 
 [[mnemonic]]
 family = "FLAT"
+opcode = 15
+name = "global_load_dwordx3"
+
+[[mnemonic]]
+family = "FLAT"
 opcode = 28
 name = "global_store_dword"
 
@@ -531,6 +536,11 @@ name = "v_cvt_i32_f32_e32"
 family = "VOP1"
 opcode = 35
 name = "v_rndne_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 36
+name = "v_floor_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"

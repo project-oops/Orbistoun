@@ -92,6 +92,13 @@ operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { wor
 
 [[opcode_operands]]
 family = "FLAT"
+opcode = 15
+mnemonic = "global_load_dwordx3"
+samples = 3
+operands = [{ word = 1, shift = 24, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 12, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
+family = "FLAT"
 opcode = 28
 mnemonic = "global_store_dword"
 samples = 19
@@ -753,6 +760,13 @@ family = "VOP1"
 opcode = 35
 mnemonic = "v_rndne_f32_e32"
 samples = 5
+operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP1"
+opcode = 36
+mnemonic = "v_floor_f32_e32"
+samples = 3
 operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
