@@ -105,6 +105,9 @@ v_cmpx_le_i32_e32 0, v0
 v_cmp_eq_i32_e32 vcc, 0, v0
 v_floor_f32_e32 v3, v1
 global_load_dwordx3 v[4:6], v8, s[6:7]
+s_cmp_eq_u32 s7, 4
+s_mov_b32 s102, s104
+s_mov_b32 s105, s103
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

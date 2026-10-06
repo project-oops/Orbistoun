@@ -384,6 +384,11 @@ name = "s_cmp_lt_i32"
 
 [[mnemonic]]
 family = "SOPC"
+opcode = 6
+name = "s_cmp_eq_u32"
+
+[[mnemonic]]
+family = "SOPC"
 opcode = 7
 name = "s_cmp_lg_u32"
 

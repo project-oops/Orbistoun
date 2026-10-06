@@ -105,6 +105,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_cmp_le_i32",
     "s_cmp_lg_i32",
     "s_cmp_lg_u32",
+    "s_cmp_eq_u32",
     "s_cmp_lt_i32",
     "s_cmpk_eq_i32",
     "s_cmpk_lg_i32",
@@ -269,12 +270,13 @@ fn discards(operand: &Operand) -> bool {
     matches!(operand, Operand::Named(name) if name == NO_DESTINATION)
 }
 
-/// Scalar registers the guest has.
+/// Scalar registers the guest has: s0 to s105 on GFX10, where Mesa allocates 108 counting the
+/// condition mask as s106-s107 (`ac_gpu_info.c:258-261`).
 ///
 /// The operand numbering continues past this into specials and inline constants, so a scalar
 /// destination at or above it is not a register. A wide load such as `s_load_dwordx8` at s100 would
-/// otherwise write into specials.
-pub const SCALAR_REGISTERS: u32 = 102;
+/// otherwise write into the condition mask.
+pub const SCALAR_REGISTERS: u32 = 106;
 
 /// Scalar registers an image descriptor occupies.
 ///
@@ -499,6 +501,7 @@ pub fn writes_condition_code(name: &str) -> bool {
         "s_cmp_eq_i32"
             | "s_cmp_lg_i32"
             | "s_cmp_lg_u32"
+            | "s_cmp_eq_u32"
             | "s_cmp_gt_i32"
             | "s_cmp_ge_i32"
             | "s_cmp_lt_i32"
@@ -2066,8 +2069,10 @@ fn scalar_instruction<M: Model + ?Sized>(
 
         // The scalar compares, which write the condition code the `scc` branches read and have no
         // destination operand.
-        "s_cmp_eq_i32" | "s_cmp_lg_i32" | "s_cmp_lg_u32" | "s_cmp_gt_i32" | "s_cmp_ge_i32"
-        | "s_cmp_lt_i32" | "s_cmp_le_i32" => scalar_compare(model, instruction, name),
+        "s_cmp_eq_i32" | "s_cmp_lg_i32" | "s_cmp_lg_u32" | "s_cmp_eq_u32" | "s_cmp_gt_i32"
+        | "s_cmp_ge_i32" | "s_cmp_lt_i32" | "s_cmp_le_i32" => {
+            scalar_compare(model, instruction, name)
+        }
 
         _ => vector_instruction(model, instruction, name),
     }
@@ -3725,10 +3730,11 @@ fn scalar_compare<M: Model + ?Sized>(
     Ok(())
 }
 
-/// The SPIR-V opcode a scalar comparison maps to. Every one is signed.
+/// The SPIR-V opcode a scalar comparison maps to. Every ordering is signed.
 fn op_for_scalar_compare(instruction: &Instruction, name: &str) -> Result<u16, TranslateError> {
     match name {
-        "s_cmp_eq_i32" => Ok(op::IEQUAL),
+        // Equality does not depend on sign: the unsigned and signed forms agree.
+        "s_cmp_eq_i32" | "s_cmp_eq_u32" => Ok(op::IEQUAL),
         // Equality does not depend on sign: the unsigned and signed forms agree.
         "s_cmp_lg_i32" | "s_cmp_lg_u32" => Ok(op::INOT_EQUAL),
         "s_cmp_gt_i32" => Ok(op::SGREATER_THAN),

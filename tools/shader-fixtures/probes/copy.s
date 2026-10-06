@@ -398,3 +398,6 @@ v_cmp_eq_i32_e32 vcc, 64, v66
 v_floor_f32_e32 v3, v1
 v_floor_f32_e32 v200, s7
 v_floor_f32_e32 v0, v255
+s_cmp_eq_u32 s7, 4
+s_cmp_eq_u32 s100, s3
+s_cmp_eq_u32 -1, s55

@@ -33,9 +33,13 @@
 
 # ---- Scalar registers -------------------------------------------------------
 
+# s0 to s105 on GFX10: Mesa allocates 108 scalar registers there, counting the condition mask
+# as s106-s107 (`ac_gpu_info.c:258-261`), and LLVM disassembles codes 102-105 as `s102`-`s105`
+# (`tests/fixtures/copy.txt`). GFX9's `flat_scratch` and `xnack_mask` held these codes; this
+# target has neither there.
 [[operand_code]]
 first = 0
-last = 101
+last = 105
 kind = "sgpr"
 
 # ---- Special registers ------------------------------------------------------
@@ -43,18 +47,6 @@ kind = "sgpr"
 # Named rather than numbered because they are not interchangeable with anything: a
 # translator has to recognise the condition mask and the execution mask specifically,
 # and an index would make that a magic number at the point of use.
-
-[[operand_code]]
-first = 102
-last = 102
-kind = "named"
-name = "flat_scratch_lo"
-
-[[operand_code]]
-first = 103
-last = 103
-kind = "named"
-name = "flat_scratch_hi"
 
 [[operand_code]]
 first = 106

@@ -5983,6 +5983,26 @@ fn an_unsigned_scalar_inequality_sets_the_condition_code() {
     assert_eq!(scalar(&registers, 4), u32::MAX, "1 != 0xffffffff");
 }
 
+/// `s_cmp_eq_u32` sets the condition code where its sources are equal, as 2 Ship 2 Harkinian's
+/// vertex shader compares a scalar against an inline constant.
+#[test]
+fn an_unsigned_scalar_equality_sets_the_condition_code() {
+    if !device_or_skip("an_unsigned_scalar_equality_sets_the_condition_code") {
+        return;
+    }
+    let minus_one = 193;
+    let program = [
+        s_cmp_i32("s_cmp_eq_u32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", 2, minus_one, 128),
+        s_cmp_i32("s_cmp_eq_u32", 128 + 1, minus_one),
+        sop2("s_cselect_b64", 4, minus_one, 128),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 2), u32::MAX, "1 == 1");
+    assert_eq!(scalar(&registers, 4), 0, "1 != 0xffffffff");
+}
+
 /// A DS instruction: `offset0`/`offset` in the first word's low bits, `offset1` above, then the
 /// address, two data registers and the destination in the second word.
 fn ds(name: &str, offsets: [u32; 2], [address, data0, data1, destination]: [u32; 4]) -> [u32; 2] {

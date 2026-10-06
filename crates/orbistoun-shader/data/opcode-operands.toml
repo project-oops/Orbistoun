@@ -575,6 +575,13 @@ operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { wo
 
 [[opcode_operands]]
 family = "SOPC"
+opcode = 6
+mnemonic = "s_cmp_eq_u32"
+samples = 3
+operands = [{ word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "SOPC"
 opcode = 7
 mnemonic = "s_cmp_lg_u32"
 samples = 5
