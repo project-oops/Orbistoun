@@ -3236,6 +3236,38 @@ fn a_thirty_two_lane_shader_narrows_its_mask_with_scalar_logic() {
     );
 }
 
+/// `s_and_saveexec_b32` in a 32-lane shader: the destination takes `exec_lo`, the mask narrows to
+/// `s & exec_lo`, and writes stop once it is empty. 2 Ship 2 Harkinian's pixel shader enters a
+/// branch with `s_and_saveexec_b32 s54, vcc_lo` (`0xbeb63c6a`, as LLVM 18.1.8 encodes it).
+#[test]
+fn a_thirty_two_lane_shader_saves_and_narrows_its_mask() {
+    if !device_or_skip("a_thirty_two_lane_shader_saves_and_narrows_its_mask") {
+        return;
+    }
+    let program = [
+        v_mov_inline(0, 1),
+        s_mov_inline(2, 1),
+        s_mov_inline(5, 0),
+        sop1("s_and_saveexec_b32", 3, 2),
+        v_mov_inline(0, 5),
+        sop1("s_and_saveexec_b32", 4, 5),
+        v_mov_inline(0, 9),
+        s_endpgm(),
+    ];
+    let registers = run_at_width(Width::Wave32, &program);
+    assert_eq!(
+        scalar(&registers, 3),
+        u32::MAX,
+        "the whole 32-lane mask saved"
+    );
+    assert_eq!(
+        vector(&registers, 0),
+        5,
+        "lane zero kept, so its write lands"
+    );
+    assert_eq!(scalar(&registers, 4), 1, "the narrowed mask saved");
+}
+
 /// A shader with no mask traffic computes the same registers at either width.
 #[test]
 fn the_two_widths_are_the_same_shader_with_different_lane_counts() {

@@ -108,6 +108,7 @@ global_load_dwordx3 v[4:6], v8, s[6:7]
 s_cmp_eq_u32 s7, 4
 s_mov_b32 s102, s104
 s_mov_b32 s105, s103
+s_and_saveexec_b32 s54, vcc_lo
 
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16

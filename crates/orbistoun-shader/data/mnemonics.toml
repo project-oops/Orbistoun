@@ -278,6 +278,11 @@ opcode = 36
 name = "s_and_saveexec_b64"
 
 [[mnemonic]]
+family = "SOP1"
+opcode = 60
+name = "s_and_saveexec_b32"
+
+[[mnemonic]]
 family = "SOP2"
 opcode = 0
 name = "s_add_u32"

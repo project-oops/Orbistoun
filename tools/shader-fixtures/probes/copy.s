@@ -401,3 +401,8 @@ v_floor_f32_e32 v0, v255
 s_cmp_eq_u32 s7, 4
 s_cmp_eq_u32 s100, s3
 s_cmp_eq_u32 -1, s55
+s_and_saveexec_b32 s54, vcc_lo
+s_and_saveexec_b32 s0, s1
+s_and_saveexec_b32 s100, -1
+s_and_saveexec_b32 s7, 64
+s_and_saveexec_b32 s105, s104

@@ -77,6 +77,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_cselect_b32",
     "s_bitcmp1_b32",
     "s_and_saveexec_b64",
+    "s_and_saveexec_b32",
     "s_bcnt1_i32_b64",
     "v_rndne_f32_e32",
     "v_floor_f32_e32",
@@ -415,7 +416,9 @@ pub fn touches_mask(instruction: &Instruction, name: &str) -> bool {
 
     // A `v_cmpx` and a saving `s_and_saveexec` write the execution mask and name it nowhere in
     // their operands.
-    let writes_exec = name.starts_with("v_cmpx_") || name.ends_with("_saveexec_b64");
+    let writes_exec = name.starts_with("v_cmpx_")
+        || name.ends_with("_saveexec_b64")
+        || name.ends_with("_saveexec_b32");
 
     branches_on_a_mask
         || whole_quad
@@ -532,6 +535,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_add_u32"
             | "s_bitcmp1_b32"
             | "s_and_saveexec_b64"
+            | "s_and_saveexec_b32"
             | "s_bcnt1_i32_b64"
     )
 }
@@ -2046,6 +2050,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
         "s_bitcmp1_b32" => scalar_bit_test(model, instruction),
         "s_and_saveexec_b64" => and_save_exec(model, instruction),
+        "s_and_saveexec_b32" => and_save_exec_32(model, instruction),
         "s_bcnt1_i32_b64" => scalar_bit_count_64(model, instruction),
 
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
@@ -4117,6 +4122,31 @@ fn and_save_exec<M: Model + ?Sized>(
     model.write_lane_mask(EXEC_LOW_HALF, low, high)?;
     let either = model.binary(op::BITWISE_OR, low, high);
     let non_zero = model.is_not_zero(either);
+    model.set_condition_code(non_zero);
+    model.count();
+    Ok(())
+}
+
+/// `s_and_saveexec_b32 d, s`: the 32-lane form of [`and_save_exec`] - `d` takes `exec_lo`, which
+/// becomes `s & exec_lo`, and the condition code says whether any lane remains
+/// (`S_AND_SAVEEXEC_B32`). A 32-lane wave's mask is `exec_lo` alone; `exec_hi` is left as it is.
+fn and_save_exec_32<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [destination, source] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_and_saveexec_b32 does not have a destination and a source",
+        });
+    };
+    let register = scalar_destination(instruction, destination)?;
+    let source = model.read_source(instruction, source, 0)?;
+    let (exec_low, exec_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+    let low = model.binary(op::BITWISE_AND, source, exec_low);
+    model.write_scalar(register, exec_low);
+    model.write_lane_mask(EXEC_LOW_HALF, low, exec_high)?;
+    let non_zero = model.is_not_zero(low);
     model.set_condition_code(non_zero);
     model.count();
     Ok(())
