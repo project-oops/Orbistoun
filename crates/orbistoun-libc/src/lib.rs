@@ -211,6 +211,8 @@ guest_module! {
         "fwrite" => 4,
         "fseek" => 3,
         "ftell" => 1,
+        "fseeko" => 3,
+        "ftello" => 1,
         "rewind" => 1,
         // Reads a line; a read loop ends on its NULL.
         "fgets" => 3,
@@ -3619,6 +3621,10 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("fwrite", fwrite),
         ("fseek", fseek),
         ("ftell", ftell),
+        // POSIX's `off_t` spellings. `off_t` and `long` are both 64 bits on this data model, so they
+        // are the same calls.
+        ("fseeko", fseek),
+        ("ftello", ftell),
         ("rewind", rewind),
         ("fgets", fgets),
         ("feof", feof),

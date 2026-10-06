@@ -346,6 +346,12 @@ fn a_mounted_file_can_be_opened_read_and_positioned() {
     );
     assert_eq!(call("ftell", &[stream]), 8);
 
+    // The `off_t` spellings: the same calls, since `off_t` and `long` are both 64 bits here.
+    assert_eq!(call("fseeko", &[stream, 3, 0]), 0, "seeko from the start");
+    assert_eq!(call("ftello", &[stream]), 3);
+    assert_eq!(call("fseeko", &[stream, 0, 99]), EOF, "an unknown whence");
+    assert_eq!(call("ftello", &[stream]), 3, "leaves the position");
+
     assert_eq!(call("ferror", &[stream]), 0, "nothing went wrong");
     assert_eq!(call("fflush", &[stream]), 0);
 

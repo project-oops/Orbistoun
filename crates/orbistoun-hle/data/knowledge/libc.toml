@@ -1331,6 +1331,28 @@ found_in = ["PPSA28061-app0"]
 found_on = "2026-08-20"
 
 [[function]]
+name = "fseeko"
+arity = 3
+purpose = "`fseek` with an `off_t` offset. `off_t` and `long` are both 64 bits on this data model, so it is the same call."
+returns = "status"
+found_by = "static"
+known_by = "published"
+cites = "POSIX.1-2008 fseeko(3)"
+found_in = ["STKT00001"]
+found_on = "2026-10-06"
+
+[[function]]
+name = "ftello"
+arity = 1
+purpose = "`ftell` answering an `off_t`; the same call on this data model."
+returns = "count"
+found_by = "static"
+known_by = "published"
+cites = "POSIX.1-2008 ftello(3)"
+found_in = ["STKT00001"]
+found_on = "2026-10-06"
+
+[[function]]
 name = "ftruncate"
 purpose = "Sets an open file's size, by descriptor."
 edge_cases = ["A standard stream has no length, so it is refused rather than given one - and a descriptor nobody opened is refused for the same reason read and write refuse it."]
