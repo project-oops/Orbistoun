@@ -3372,6 +3372,9 @@ fn bind_textures(
                     let bound = read
                         .entry((at, source.slot, sampler_at, source.saturated))
                         .or_insert_with(|| {
+                            if is_null_descriptor(at, memory) {
+                                return Some(null_texture(source.slot));
+                            }
                             let mut bound = read_texture(at, source.slot, memory, texels)?;
                             // A sampler the module named is read and honoured; one that cannot be
                             // honoured exactly leaves the texture unbound, so the draw is refused
@@ -3404,6 +3407,28 @@ fn bind_textures(
         out.push(command);
     }
     *commands = out;
+}
+
+/// Whether the image descriptor at `at` is all zero: a texture unit nothing bound, as RADV writes a
+/// null descriptor (`radv_write_image_descriptor`, `memset(dst, 0, size)`).
+fn is_null_descriptor(at: u64, memory: &impl GuestMemory) -> bool {
+    memory
+        .read(at, 32)
+        .is_some_and(|bytes| bytes.iter().all(|&b| b == 0))
+}
+
+/// What an all-zero image descriptor samples as: zero in every channel. Its `DST_SEL_X` .. `_W` are
+/// all `SQ_SEL_0` ([`destination_selects`]), so a sample returns that constant whatever the texel
+/// and whatever its sampler says; one texel of zero carries it.
+fn null_texture(slot: u32) -> RenderCommand {
+    RenderCommand::BindTexture {
+        slot,
+        hash: crate::content_hash(&[0]),
+        texels: std::sync::Arc::from([0_u32]),
+        width: 1,
+        height: 1,
+        sampling: crate::registers::TextureSampling::default(),
+    }
 }
 
 /// The texture a descriptor table's first eight words name, as a [`RenderCommand::BindTexture`], or
@@ -4442,6 +4467,76 @@ mod tests {
             "27 as alpha over white"
         );
         assert!(read(5 | 1 << 9).is_none(), "a one-byte texel has no Y");
+    }
+
+    /// An all-zero image descriptor - a texture unit nothing bound - binds as a texture that reads
+    /// zero in every channel: its `DST_SEL` fields are all `SQ_SEL_0`, so a sample returns the
+    /// constant whatever the texel, and its sampler, also zero, decides nothing. RADV writes exactly
+    /// this for a null descriptor (`radv_write_image_descriptor`, `memset(dst, 0, size)`). 2 Ship 2
+    /// Harkinian's pixel shader samples a second unit the game left unbound, at table + 0x40.
+    #[test]
+    fn an_all_zero_descriptor_reads_zero() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let memory = Memory(vec![0; 0x100]);
+        let shader = ResourceId(7);
+        let mut words = [0u32; super::USER_DATA_WORDS];
+        words[0] = 0x1000;
+        let sources = std::collections::BTreeMap::from([(
+            shader,
+            vec![TextureSource {
+                slot: 1,
+                table_offset: Some(0x40),
+                table: TableBase::default(),
+                sampler_offset: Some(0x60),
+                user_data: None,
+                saturated: [false; 2],
+            }],
+        )]);
+        let mut commands = vec![
+            RenderCommand::SetUserData {
+                stage: ShaderStage::Fragment,
+                words,
+            },
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader,
+            },
+            RenderCommand::Draw {
+                vertices: 3,
+                instances: 1,
+                first_vertex: 0,
+            },
+        ];
+        let mut unbound = 0;
+        bind_textures(
+            &mut commands,
+            (&sources, &mut super::TexelCache::new()),
+            &memory,
+            &mut unbound,
+        );
+        assert_eq!(unbound, 0);
+        let bound = commands.iter().find_map(|command| match command {
+            RenderCommand::BindTexture {
+                slot,
+                texels,
+                width,
+                height,
+                ..
+            } => Some((*slot, texels.to_vec(), *width, *height)),
+            _ => None,
+        });
+        assert_eq!(
+            bound,
+            Some((1, vec![0], 1, 1)),
+            "one texel, every channel zero"
+        );
     }
 
     /// A sampler clamping to half a border binds its texture only for a pixel shader translated to
