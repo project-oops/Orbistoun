@@ -274,6 +274,10 @@ guest_module! {
         // Thread calls with no vendor-named twin, written under their POSIX names in
         // `orbistoun-kernel` beside the thread registry (D367).
         "pthread_detach" => 1,
+        // FreeBSD's spellings of two calls served already: the signal mask's `(how, set, oset)`
+        // and a thread's name, `(thread, name)`.
+        "pthread_sigmask" => 3,
+        "pthread_set_name_np" => 2,
         "pthread_exit" => 1,
         // `fstat` is imported here; `stat`, `lstat` and the directory calls are declared in `libc`,
         // where FreeBSD puts them (D367).
@@ -375,6 +379,11 @@ const DELEGATED: &[(&str, &str)] = &[
     ("_read", "sceKernelRead"),
     ("_fcntl", "fcntl"),
     ("pthread_detach", "pthread_detach"),
+    // `pthread_sigmask` is `sigprocmask` for the calling thread, which on a threaded FreeBSD process
+    // is what `sigprocmask` acts on too; the two differ only in how a refusal is reported.
+    ("pthread_sigmask", "_sigprocmask"),
+    // Answers nothing (`void`), so the vendor call's status is never read.
+    ("pthread_set_name_np", "scePthreadRename"),
     ("pthread_exit", "pthread_exit"),
     ("fstat", "fstat"),
     // Thread-specific-data keys: no vendor twin, POSIX-named implementations in the kernel.
@@ -863,6 +872,33 @@ mod tests {
         let errno =
             unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<i32>(errno_at as usize)) };
         assert_eq!(errno, EBADF);
+    }
+
+    /// FreeBSD's thread spellings a title imports are served by the calls they name: the signal
+    /// mask by `_sigprocmask`, which on a threaded FreeBSD process is the calling thread's mask
+    /// too, and a thread's name by `scePthreadRename`.
+    #[test]
+    fn freebsd_thread_spellings_are_served() {
+        let served = super::implementations();
+        for (posix, vendor) in [
+            ("pthread_sigmask", "_sigprocmask"),
+            ("pthread_set_name_np", "scePthreadRename"),
+        ] {
+            let found = served
+                .iter()
+                .find(|(name, _)| *name == posix)
+                .map(|(_, f)| *f);
+            let delegate = orbistoun_kernel::implementations()
+                .iter()
+                .find(|(name, _)| *name == vendor)
+                .map(|(_, f)| *f);
+            assert!(found.is_some(), "{posix} is served");
+            assert_eq!(
+                found.map(|f| f as usize),
+                delegate.map(|f| f as usize),
+                "{posix} is {vendor}"
+            );
+        }
     }
 
     /// Every served name is also declared, or it can never be reached.

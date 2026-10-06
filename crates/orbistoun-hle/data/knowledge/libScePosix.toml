@@ -2327,6 +2327,32 @@ found_in = ["ftpsrv"]
 found_on = "2026-08-29"
 
 [[function]]
+name = "pthread_sigmask"
+arity = 3
+purpose = "Examines or changes the calling thread's blocked-signal mask: `_sigprocmask`, which on a threaded FreeBSD process acts on the calling thread."
+returns = "status"
+edge_cases = [
+    "`how` is FreeBSD's: SIG_BLOCK 1, SIG_UNBLOCK 2, SIG_SETMASK 3. A null set is a query of the mask, and the old mask is written before the new one applies.",
+]
+known_by = "published"
+cites = "POSIX.1-2008 pthread_sigmask(3); FreeBSD sigprocmask(2)."
+assumptions = [
+    "The mask is one for the process, as `_sigprocmask` keeps it, not one per thread. orbistoun delivers no signals, so no call can tell the two apart.",
+    "A refusal answers a vendor code, as `_sigprocmask` does, where POSIX has this call return the errno number. No guest has been seen passing a bad `how`.",
+]
+found_in = ["STKT00001"]
+found_on = "2026-10-06"
+
+[[function]]
+name = "pthread_set_name_np"
+arity = 2
+purpose = "Names a thread: FreeBSD's spelling of `scePthreadRename`. The name is what a trace shows in place of a handle."
+known_by = "published"
+cites = "FreeBSD pthread_set_name_np(3)."
+found_in = ["STKT00001"]
+found_on = "2026-10-06"
+
+[[function]]
 name = "pthread_equal"
 arity = 2
 purpose = "whether two thread identifiers name the same thread."
