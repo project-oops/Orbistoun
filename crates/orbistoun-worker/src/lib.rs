@@ -536,6 +536,8 @@ fn install_presentation() {
     orbistoun_video::install_flip_observer(render::present_flip);
     // Heap memory the guest re-protects, such as a stack guard page carved from its heap.
     orbistoun_kernel::install_heap_protect(orbistoun_libc::protect_heap_range);
+    // A file-backed `mmap` reads its pages through the descriptor table, which the fs crate owns.
+    orbistoun_kernel::install_file_read(orbistoun_fs::descriptor::read_at);
     // Flips a command buffer carries, queued by their builder and carried out at their release
     // (D728).
     orbistoun_gpu::display::install(orbistoun_gpu::display::Display {

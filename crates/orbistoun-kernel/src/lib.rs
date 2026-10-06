@@ -3891,11 +3891,58 @@ fn release_mapping(address: u64, len: u64) {
     }
 }
 
+/// Reads a file at an offset by descriptor, answering how many bytes it read, or `None` for a
+/// descriptor that is not an open file. Installed by the layer above that owns both this crate and
+/// the descriptor table.
+pub type FileRead = fn(u64, &mut [u8], u64) -> Option<usize>;
+
+static FILE_READ: OnceLock<FileRead> = OnceLock::new();
+
+/// Installs the descriptor read a file-backed `mmap` fills its pages with. First install wins.
+pub fn install_file_read(read: FileRead) {
+    let _ = FILE_READ.set(read);
+}
+
+/// `MAP_ANON` in `mmap`'s flags: memory with no file behind it (FreeBSD `sys/mman.h`, `0x1000`).
+const MAP_ANON: u64 = 0x1000;
+
+/// Fills `len` bytes at `base` with the file at `fd` from `offset`: what a mapping of it holds.
+/// Past the file's end the pages stay zero, as POSIX `mmap(2)` gives them. `false` when the
+/// descriptor cannot be read.
+fn fill_from_file(base: u64, len: u64, fd: u64, offset: u64) -> bool {
+    let Some(read) = FILE_READ.get() else {
+        return false;
+    };
+    let (Ok(length), Ok(at)) = (usize::try_from(len), usize::try_from(base)) else {
+        return false;
+    };
+    // SAFETY: the range was just reserved read-write for this mapping, which nothing else holds
+    // yet, and is `len` bytes long.
+    let pages = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(at), length)
+    };
+    let mut done = 0;
+    while done < length {
+        match read(fd, &mut pages[done..], offset + done as u64) {
+            Some(0) => break,
+            Some(n) => done += n,
+            None => return false,
+        }
+    }
+    true
+}
+
 /// `mmap(addr, len, prot, flags, fd, offset)`: maps pages of memory into guest address space.
+///
+/// Without `MAP_ANON` the mapping holds the file at `fd` from `offset`, read in when it is placed;
+/// writes to a shared mapping are not carried back to the file. A descriptor that cannot be read
+/// fails the map rather than answering zeros.
 ///
 /// Reference: POSIX.1-2008 `mmap(2)`, FreeBSD `SYS_mmap` (477).
 pub fn mmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (addr, len, prot) = (args[0], args[1], args[2]);
+    let (flags, fd, offset) = (args[3], args[4], args[5]);
+    let from_file = flags & MAP_ANON == 0 && i32::try_from(fd as i64).is_ok_and(|fd| fd >= 0);
     if len == 0 {
         return !0; // MAP_FAILED
     }
@@ -3915,8 +3962,24 @@ pub fn mmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(mut space) = mappings().lock() else {
         return !0;
     };
-    if space.reserve(base, len, protection).is_err() {
+    // A file's pages are written before the guest's protection applies, which may forbid writes.
+    let placing = if from_file {
+        orbistoun_mem::Protection::READ_WRITE
+    } else {
+        protection
+    };
+    if space.reserve(base, len, placing).is_err() {
         return !0;
+    }
+    if from_file {
+        if !fill_from_file(base, len, fd, offset) {
+            space.release(base, len);
+            return !0;
+        }
+        if space.protect(base, len, protection).is_err() {
+            space.release(base, len);
+            return !0;
+        }
     }
     drop(space);
     if let Ok(mut placed) = placed_by_mmap().lock() {
