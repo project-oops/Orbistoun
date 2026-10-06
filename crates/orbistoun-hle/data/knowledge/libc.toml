@@ -1847,6 +1847,21 @@ found_in = ["PPSA21564-app0"]
 found_on = "2026-09-27"
 
 [[function]]
+name = "sceLibcMspaceMallocStats"
+found_by = "static"
+arity = 2
+purpose = "Fills a caller's stats block with an mspace's memory and in-use sizes."
+returns = "status"
+edge_cases = [
+    "GUEST-OBSERVED: PPSA21564's Onion heap passes a 40-byte block whose first word is 0x10028 (size 0x28, version 1), allocates only when the answer is 0 and the size at +0x10 is at least size + alignment - 1, and reads its use from +0x20. Unserved, it bound to the bundled libc.prx, which never saw the arena orbistoun created, and every Onion allocation failed: 'Out of graphics memory [Onion]. size = 2097152, used 0/192937984'.",
+    "For an mspace created over a base (D751): +0x08 and +0x10 the capacity, the arena holding its whole range from creation as dlmalloc's create_mspace_with_base does; +0x18 the most bytes ever in use and +0x20 the bytes in use now. Any other handle answers the placeholder: what the shared heap would report is unmeasured.",
+]
+known_by = "guest-observed"
+cites = "PPSA21564 Onion heap allocate and used methods (image+0x45c540, image+0x45c640), disassembled 2026-10-06; Doug Lea dlmalloc 2.8.6 (public domain) create_mspace_with_base; D751"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-06"
+
+[[function]]
 name = "sceLibcMspaceMallocUsableSize"
 found_by = "static"
 arity = 1

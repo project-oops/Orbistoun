@@ -290,6 +290,7 @@ guest_module! {
         "sceLibcMspaceDestroy" => 1,
         "sceLibcMspaceMemalign" => 3,
         "sceLibcMspaceMallocUsableSize" => 1,
+        "sceLibcMspaceMallocStats" => 2,
         "malloc_usable_size" => 1,
         "aligned_alloc" => 2,
         "exit" => 1,
@@ -1222,6 +1223,38 @@ fn mspace_malloc_usable_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return length;
     }
     header_of(args[0]).map_or(0, |(total, offset)| (total - offset) as u64)
+}
+
+/// `sceLibcMspaceMallocStats(msp, stats)`: the arena's sizes, into a block whose first word the
+/// caller sets to its size and version - `0x10028`, 0x28 bytes, version 1, as PPSA21564 passes it.
+/// Four sizes follow at +0x08, +0x10, +0x18 and +0x20: the most and the current memory the arena
+/// holds, then the most and the current in use. Guest-observed, from PPSA21564's Onion heap, which
+/// allocates only when +0x10 covers the request and reads its use from +0x20.
+///
+/// An arena created over a base holds its whole range from the start (dlmalloc's
+/// `create_mspace_with_base` takes the range as one segment), so both memory sizes are its
+/// capacity (D751). For any other handle what the shared heap would report is unmeasured, and the
+/// call answers the placeholder.
+fn mspace_malloc_stats(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, stats) = (args[0], args[1]);
+    let Some(usage) = mspace::usage(handle) else {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    };
+    if stats == 0 {
+        return u64::from(orbistoun_core::GuestError::InvalidArgument.as_raw());
+    }
+    for (at, value) in [
+        (8, usage.capacity),
+        (0x10, usage.capacity),
+        (0x18, usage.peak),
+        (0x20, usage.in_use),
+    ] {
+        // SAFETY: the guest's own stats block, 0x28 bytes by the size its first word gives.
+        if !unsafe { orbistoun_mem::guest::write_u64(stats + at, value) } {
+            return u64::from(orbistoun_core::GuestError::InvalidArgument.as_raw());
+        }
+    }
+    0
 }
 
 /// `aligned_alloc(alignment, size)` (ISO C 7.22.3.1): a block whose address is a multiple of a
@@ -3701,6 +3734,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceLibcMspaceDestroy", mspace_destroy),
         ("sceLibcMspaceMemalign", mspace_memalign),
         ("sceLibcMspaceMallocUsableSize", mspace_malloc_usable_size),
+        ("sceLibcMspaceMallocStats", mspace_malloc_stats),
         ("malloc_usable_size", mspace_malloc_usable_size),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
@@ -4529,6 +4563,39 @@ mod tests {
         call("sceLibcMspaceFree", [msp, p, 0, 0, 0, 0]);
         call("sceLibcMspaceFree", [msp, q, 0, 0, 0, 0]);
         assert_eq!(call("sceLibcMspaceDestroy", [msp, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// `sceLibcMspaceMallocStats(msp, stats)` on an arena created over a base fills the 40-byte block
+    /// PPSA21564's Onion heap passes - first word `0x10028`, its size 0x28 and version 1 - with the
+    /// arena's capacity as its system size and the bytes in use, and answers 0. The heap then
+    /// allocates only when the size at +0x10 covers the request.
+    #[test]
+    fn an_arena_reports_its_size_and_use() {
+        let arena = vec![0_u8; 0x40_0000];
+        let base = arena.as_ptr() as u64;
+        let msp = call("sceLibcMspaceCreate", [0, base, 0x40_0000, 1, 0, 0]);
+        let stats = |msp: u64| {
+            let mut block = [0_u64; 5];
+            block[0] = 0x10028;
+            let rc = call(
+                "sceLibcMspaceMallocStats",
+                [msp, block.as_mut_ptr() as u64, 0, 0, 0, 0],
+            );
+            (rc, block)
+        };
+        assert_eq!(stats(msp), (0, [0x10028, 0x40_0000, 0x40_0000, 0, 0]));
+        let p = call("sceLibcMspaceMemalign", [msp, 0x40, 0x20_0000, 0, 0, 0]);
+        assert_ne!(p, 0);
+        assert_eq!(
+            stats(msp),
+            (0, [0x10028, 0x40_0000, 0x40_0000, 0x20_0000, 0x20_0000])
+        );
+        call("sceLibcMspaceFree", [msp, p, 0, 0, 0, 0]);
+        assert_eq!(
+            stats(msp),
+            (0, [0x10028, 0x40_0000, 0x40_0000, 0x20_0000, 0]),
+            "the peak stays"
+        );
     }
 
     /// `aligned_alloc` honours a power-of-two alignment and refuses any other with null.

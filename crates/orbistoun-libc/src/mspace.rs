@@ -20,6 +20,11 @@ pub(crate) const GRANULE: u64 = 16;
 /// One arena over a guest-supplied range.
 #[derive(Debug)]
 pub(crate) struct BasedSpace {
+    /// The bytes the arena was created over.
+    capacity: u64,
+    /// The bytes live blocks take now, and the most they have taken.
+    in_use: u64,
+    peak: u64,
     /// Free spans, start to length, never adjacent.
     free: BTreeMap<u64, u64>,
     /// Live blocks, start to their length and the size asked for, which is what
@@ -35,6 +40,9 @@ impl BasedSpace {
             free.insert(base, capacity);
         }
         Self {
+            capacity,
+            in_use: 0,
+            peak: 0,
             free,
             live: BTreeMap::new(),
         }
@@ -62,6 +70,8 @@ impl BasedSpace {
             self.free.insert(start + len, tail);
         }
         self.live.insert(start, (len, size));
+        self.in_use += len;
+        self.peak = self.peak.max(self.in_use);
         Some(start)
     }
 
@@ -71,6 +81,7 @@ impl BasedSpace {
         let Some((block, _)) = self.live.remove(&at) else {
             return false;
         };
+        self.in_use -= block;
         let (mut start, mut end) = (at, at + block);
         if let Some(after) = self.free.remove(&end) {
             end += after;
@@ -89,6 +100,27 @@ impl BasedSpace {
     pub(crate) fn length_of(&self, at: u64) -> Option<u64> {
         self.live.get(&at).map(|&(_, asked)| asked)
     }
+}
+
+/// What an arena reports of itself: its capacity, the bytes in use and the most ever in use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Usage {
+    pub(crate) capacity: u64,
+    pub(crate) in_use: u64,
+    pub(crate) peak: u64,
+}
+
+/// The usage of the arena `handle`, when it is one created over a base.
+pub(crate) fn usage(handle: u64) -> Option<Usage> {
+    spaces()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&handle)
+        .map(|space| Usage {
+            capacity: space.capacity,
+            in_use: space.in_use,
+            peak: space.peak,
+        })
 }
 
 /// Every arena created over a base, by the handle the guest was given.
