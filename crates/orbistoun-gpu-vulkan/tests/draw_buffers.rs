@@ -503,3 +503,188 @@ fn batched_primitive_shaders_each_read_their_own_buffer() {
     assert_eq!(draw(&[red]), [255, 0, 0, 255], "the first alone");
     assert_eq!(draw(&[red, blue]), [0, 0, 255, 255], "the second over it");
 }
+
+/// A primitive shader that reads its vertex ids from an index buffer (D740) and carries each
+/// vertex's id, as a float over eight, to parameter zero's red over the covering triangle of
+/// [`colour_primitive_shader`].
+fn vertex_id_primitive_shader() -> Vec<u32> {
+    use orbistoun_translate::wavefront::{Assembly, GeometryInputs, IndexWidth};
+    let words: [u32; 38] = [
+        // A raw descriptor over user-data word 0 with sixteen bytes; four words into s[8:11],
+        // through the bound buffer at slot 0, so the index buffer is slot 1.
+        0xbe84_0300,
+        0xbe85_0380,
+        0xbe86_0390,
+        0xbe87_03ff,
+        0x3101_6fac,
+        0xf428_0202,
+        0xfa00_0000,
+        // m0 = three vertices, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+        0xbefc_03ff,
+        0x0000_1003,
+        0xbf90_0009,
+        // v14 = lane
+        0xd765_000e,
+        0x0001_00c1,
+        // v2 = float(((v14 & 1) << 2) - 1)
+        0x360c_1c81,
+        0x340c_0c82,
+        0x4a0c_0cc1,
+        0x7e04_0b06,
+        // v3 = float(((v14 & 2) << 1) - 1)
+        0x360e_1c82,
+        0x340e_0e81,
+        0x4a0e_0ec1,
+        0x7e06_0b07,
+        // v4 = 0, v5 left alone: the vertex id; v12 = 1.0
+        0x7e08_0280,
+        0x7e18_02f2,
+        // v8 = float(v5) / 8, v9 = the buffer's second word, v10 = 0, v11 = 1.0
+        0x7e10_0d05, // v_cvt_f32_u32 v8, v5
+        0x1010_10f0, // v_mul_f32 v8, 0.5, v8
+        0x1010_10f0,
+        0x1010_10f0,
+        0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+        0x7e12_0209, // v_mov_b32 v9, s9
+        0x7e14_0280,
+        0x7e16_02f2,
+        // exp prim v1 = 0 | 1 << 10 | 2 << 20
+        0x7e02_02ff,
+        0x0020_0400,
+        0xf800_0941,
+        0x0000_0001,
+        0xf800_08cf, // exp pos0 v2, v3, v4, v12 done
+        0x0c04_0302,
+        0xf800_020f, // exp param0 v8..v11
+        0x0b0a_0908,
+    ];
+    let mut program = words.to_vec();
+    program.push(0xbf81_0000); // s_endpgm
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode_program(&bytes, &encodings, &operands);
+    translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Mesh, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 1,
+            draw_buffers: true,
+            geometry: Some(GeometryInputs {
+                first_vertex: 0,
+                vertices: 0,
+                primitives: 0,
+                assembly: Assembly::List,
+                indices: Some(IndexWidth::Bits32),
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the indexed primitive shader translates")
+    .module
+}
+
+/// The vertex ids of a chunk counting up from `first`, as the index buffer the pipeline binds for
+/// it (D741).
+fn counting(first: u32) -> DrawBuffer {
+    let ids = [first, first + 1, first + 2];
+    DrawBuffer {
+        hash: orbistoun_gpu::content_hash(&ids),
+        bytes: ids
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect::<Vec<u8>>()
+            .into(),
+    }
+}
+
+/// Chunks of an indexed draw each read their own vertex ids (D740, D741): a chunk of ids 0 to 2
+/// colours the centre by their weighted mean, and a second chunk of ids 3 to 5 drawn over it, in
+/// the same batch, by its own. At the centre of the covering triangle the weights are a half and
+/// two quarters, so red is (0.5 * a + 0.25 * b + 0.25 * c) / 8. The index buffer is the second
+/// slot, after a buffer the shader reads through a descriptor, whose second word is green.
+#[test]
+fn indexed_chunks_each_read_their_own_vertex_ids() {
+    if !device_or_skip("indexed_chunks_each_read_their_own_vertex_ids") {
+        return;
+    }
+    let draw = |firsts: &[u32]| {
+        let mut backend = VulkanBackend::new();
+        let mesh = vertex_id_primitive_shader();
+        let pixel = orbistoun_spirv::passthrough_fragment_module();
+        for (id, words) in [(TRIANGLE, &mesh), (PIXEL, &pixel)] {
+            backend
+                .ensure_resident(id, Resource::Shader(words))
+                .expect("resident");
+        }
+        backend
+            .ensure_resident(
+                TARGET,
+                Resource::RenderTarget {
+                    width: 16,
+                    height: 16,
+                },
+            )
+            .expect("target resident");
+        let mut words = [0u32; orbistoun_gpu::USER_DATA_WORDS];
+        words[0] = 0x0010_0000;
+        let mut commands = vec![
+            RenderCommand::SetRenderTargets {
+                colour: vec![TARGET],
+                depth: None,
+            },
+            RenderCommand::SetUserData {
+                stage: ShaderStage::Vertex,
+                words,
+            },
+            RenderCommand::BindShader {
+                stage: ShaderStage::Vertex,
+                shader: TRIANGLE,
+            },
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader: PIXEL,
+            },
+        ];
+        for &first in firsts {
+            commands.push(RenderCommand::BindDrawBuffers {
+                stage: ShaderStage::Vertex,
+                buffers: vec![colour_buffer([0.0, 0.5, 0.0, 0.0]), counting(first)],
+            });
+            commands.push(RenderCommand::DrawIndexed {
+                indices: 3,
+                instances: 1,
+                first_index: 0,
+                index_buffer: Some(orbistoun_gpu::IndexBuffer::Counting { first }),
+            });
+        }
+        for command in &commands {
+            backend.execute(command).expect("the command runs");
+        }
+        backend
+            .last_frame()
+            .expect("a frame")
+            .at(8, 8)
+            .expect("the centre")
+    };
+    let red = |ids: [f32; 3]| ((0.5 * ids[0] + 0.25 * ids[1] + 0.25 * ids[2]) / 8.0 * 255.0) as i32;
+    let near = |got: u8, want: i32| (i32::from(got) - want).abs() <= 3;
+    let first = draw(&[0]);
+    assert!(
+        near(first[0], red([0.0, 1.0, 2.0])),
+        "ids 0 to 2: {first:?}"
+    );
+    assert!(near(first[1], 128), "green from slot 0: {first:?}");
+    let second = draw(&[0, 3]);
+    assert!(
+        near(second[0], red([3.0, 4.0, 5.0])),
+        "ids 3 to 5: {second:?}"
+    );
+    assert!(near(second[1], 128), "green from slot 0: {second:?}");
+}
