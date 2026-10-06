@@ -14,6 +14,7 @@ pub mod direct;
 pub mod fiber;
 pub mod interrupt;
 pub mod mapped;
+mod quarantine;
 pub mod sync;
 pub mod thread;
 
@@ -1202,20 +1203,41 @@ fn guest_range_allows(base: u64, len: u64, write: bool) -> bool {
 
 /// The next address to place a mapping at.
 ///
-/// Bump-allocated and never reused, so a guest that unmaps and remaps is never handed an address
-/// it still holds a stale pointer to.
+/// Bump-allocated, and a released base is reused only after [`quarantine::DEPTH`] newer releases
+/// (D749), so a guest that unmaps and remaps is not handed an address it still holds a stale
+/// pointer to.
 fn next_mapping_base(len: u64) -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(MAPPING_BASE);
-    // Stepped by the host's reservation granularity, not the guest page size: Windows rounds a
-    // reservation base down to 64 KiB, so a base must satisfy the host.
-    let unit = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
-    // Padded by one unit so two mappings never share one. Saturating rather than panicking.
-    let step = len
-        .checked_next_multiple_of(unit)
-        .unwrap_or(u64::MAX)
-        .saturating_add(unit);
+    let step = mapping_slot(len);
+    if let Some(base) = released_bases().lock().ok().and_then(|mut q| q.take(step)) {
+        return base;
+    }
     NEXT.fetch_add(step, Ordering::Relaxed)
+}
+
+/// The address space one mapping of `len` bytes takes from the bump allocator: stepped by the
+/// host's reservation granularity, not the guest page size, since Windows rounds a reservation base
+/// down to 64 KiB; and padded by one unit so two mappings never share one. Saturating rather than
+/// panicking.
+fn mapping_slot(len: u64) -> u64 {
+    let unit = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
+    len.checked_next_multiple_of(unit)
+        .unwrap_or(u64::MAX)
+        .saturating_add(unit)
+}
+
+/// Mapping bases `munmap` released, waiting to be reused (D749).
+fn released_bases() -> &'static Mutex<quarantine::Quarantine> {
+    static RELEASED: OnceLock<Mutex<quarantine::Quarantine>> = OnceLock::new();
+    RELEASED.get_or_init(Mutex::default)
+}
+
+/// The mappings `mmap` reserved itself, by base, with their lengths: what `munmap` may release
+/// whole (D749). A direct-memory view is not one, since another view may still map its memory.
+fn placed_by_mmap() -> &'static Mutex<std::collections::HashMap<u64, u64>> {
+    static PLACED: OnceLock<Mutex<std::collections::HashMap<u64, u64>>> = OnceLock::new();
+    PLACED.get_or_init(Mutex::default)
 }
 
 /// Where one physical range is mapped, and by how many of the guest's views.
@@ -3784,10 +3806,38 @@ fn munmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // The vendor `EINVAL` (`0x80020016`) the hardware answers for `sceKernelMunmap(0)`.
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     }
-    // The host reservation stays, since releasing a piece would hole an address space the guest
-    // believes contiguous. The alias goes, so a later map of the same physical memory is new.
+    // The alias goes, so a later map of the same physical memory is new.
     forget_mapped(address, len);
+    release_mapping(address, len);
     OK
+}
+
+/// Releases the host memory behind a mapping `mmap` placed, when `[address, address + len)` is the
+/// whole of it, and holds its base back for reuse (D749). Anything else keeps its reservation:
+/// releasing a piece would hole an address space the guest believes contiguous.
+fn release_mapping(address: u64, len: u64) {
+    let Some(len) = checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE) else {
+        return;
+    };
+    let Ok(mut placed) = placed_by_mmap().lock() else {
+        return;
+    };
+    if placed.get(&address) != Some(&len) {
+        return;
+    }
+    let released = mappings()
+        .lock()
+        .is_ok_and(|mut space| space.release(address, len));
+    if !released {
+        return;
+    }
+    placed.remove(&address);
+    drop(placed);
+    if address >= MAPPING_BASE
+        && let Ok(mut quarantine) = released_bases().lock()
+    {
+        quarantine.release(address, mapping_slot(len));
+    }
 }
 
 /// `mmap(addr, len, prot, flags, fd, offset)`: maps pages of memory into guest address space.
@@ -3818,6 +3868,9 @@ pub fn mmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return !0;
     }
     drop(space);
+    if let Ok(mut placed) = placed_by_mmap().lock() {
+        placed.insert(base, len);
+    }
     mapping_placed(base, len, protection, addr != 0);
     note_requested_protection(base, len, prot);
     base
@@ -7651,6 +7704,43 @@ mod tests {
             "mmap should succeed and return non-MAP_FAILED address"
         );
         assert_ne!(addr, 0, "mmap should return a non-null address");
+    }
+
+    /// Unmapping the whole of an anonymous mapping releases its host memory; unmapping a piece of
+    /// one keeps it (D749). A guest that maps and unmaps every frame otherwise grows without
+    /// bound, until the host has no memory left to commit.
+    #[test]
+    fn unmapping_a_whole_mapping_releases_its_host_memory() {
+        let map = || {
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[1] = 0x8000;
+            args[2] = 3;
+            args[3] = 0x1002;
+            args[4] = !0;
+            let addr = super::mmap(&args);
+            assert_ne!(addr, !0, "mapped");
+            addr
+        };
+        let unmap = |address: u64, len: u64| {
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = address;
+            args[1] = len;
+            assert_eq!(super::munmap(&args), 0);
+        };
+        let owned = |address: u64| {
+            super::mappings()
+                .lock()
+                .expect("mappings")
+                .owns(address, 0x8000)
+        };
+
+        let whole = map();
+        unmap(whole, 0x8000);
+        assert!(!owned(whole), "the whole mapping is released");
+
+        let pieced = map();
+        unmap(pieced, 0x4000);
+        assert!(owned(pieced), "a piece keeps the mapping it is part of");
     }
 
     #[test]

@@ -315,6 +315,23 @@ impl AddressSpace {
         Ok(region)
     }
 
+    /// Releases the region reserved at exactly `base` with exactly `len`, handing its host memory
+    /// back: `false`, and nothing released, for any other range (D749).
+    ///
+    /// Whole regions only: a piece released from the middle of one would hole an address space
+    /// the guest believes contiguous.
+    pub fn release(&mut self, base: u64, len: u64) -> bool {
+        if self.regions.get(&base).is_none_or(|r| r.len != len) {
+            return false;
+        }
+        self.regions.remove(&base);
+        // Dropping the reservation is what returns its host memory.
+        if let Some(index) = self.held.iter().position(|held| held.base() == base) {
+            self.held.swap_remove(index);
+        }
+        true
+    }
+
     /// Whether `[base, base + len)` lies entirely within a single region this space reserved.
     ///
     /// Lets a caller that commits into an existing reservation (reserve with one call, map
@@ -367,6 +384,28 @@ mod tests {
             },
         );
         s
+    }
+
+    /// Releasing a whole region returns its host memory, so the same range can be reserved
+    /// again; any other range is refused and leaves the region as it was (D749).
+    #[test]
+    fn releasing_a_whole_region_returns_its_host_memory() {
+        let base = super::unique_test_base();
+        let len = 4 * GUEST_PAGE_SIZE;
+        let mut space = AddressSpace::new();
+        space
+            .reserve(base, len, Protection::READ_WRITE)
+            .expect("reserved");
+        assert!(!space.release(base, GUEST_PAGE_SIZE), "a piece of it");
+        assert!(!space.release(base + GUEST_PAGE_SIZE, len), "another base");
+        assert!(space.owns(base, len), "still whole");
+        assert!(space.release(base, len), "the whole region");
+        assert!(!space.owns(base, len));
+        // A second, independent space: the host reservation itself must be gone for this to work.
+        let mut other = AddressSpace::new();
+        other
+            .reserve(base, len, Protection::READ_WRITE)
+            .expect("the host range is free again");
     }
 
     #[test]
