@@ -1356,6 +1356,10 @@ fn reservations() -> &'static Mutex<Vec<(u64, u64)>> {
     RESERVED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// `MAP_FIXED` in a map's flags: the named address is the address, not a hint (FreeBSD
+/// `sys/mman.h`, `0x0010`).
+const MAP_FIXED: u64 = 0x10;
+
 /// `sceKernelMapNamedDirectMemory(addr, len, prot, flags, physical, alignment)`: gives the guest a
 /// virtual address for physical memory `sceKernelAllocateMainDirectMemory` reserved. The name is
 /// the seventh argument and the trampoline spills six, so it is not read.
@@ -1383,7 +1387,8 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !direct::configured().map_direct_memory {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
-    let (out, len, prot, physical, alignment) = (args[0], args[1], args[2], args[4], args[5]);
+    let (out, len, prot, flags, physical, alignment) =
+        (args[0], args[1], args[2], args[3], args[4], args[5]);
 
     // Already mapped and covering what is asked for: the guest gets the address it had, with its
     // data. A longer map is a different mapping.
@@ -1452,6 +1457,24 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // Retried past a conflict only when the guest expressed no preference: the arena counter steps
     // an address, not the map, so a base it hands back can already be held. A guest that named an
     // address is refused rather than moved.
+    // A named address without `MAP_FIXED` is a hint, as in FreeBSD's `mmap`: a held one moves up
+    // to the first free range above it that fits (`vm_map_find`). With `MAP_FIXED` it is refused
+    // rather than moved.
+    if placed.is_err() && requested != 0 && flags & MAP_FIXED == 0 {
+        let mut hint = requested;
+        for _ in 0..CONFLICT_RETRIES {
+            let Some(free) = space.first_free_at_or_above(hint, len, align) else {
+                break;
+            };
+            base = free;
+            placed = space.reserve(base, len, protection).map(|_| ());
+            if placed.is_ok() {
+                break;
+            }
+            // Held by the host rather than this address space: try past it.
+            hint = free.saturating_add(len);
+        }
+    }
     if placed.is_err() && requested == 0 {
         for _ in 0..CONFLICT_RETRIES {
             let Some(next) = checked_next_multiple_of(next_mapping_base(len, align), align) else {
@@ -7058,6 +7081,51 @@ mod tests {
         args[0] = std::ptr::addr_of_mut!(second) as usize as u64;
         assert_eq!(super::map_named_direct_memory(&args), 0);
         assert_ne!(first, second, "different memory, different addresses");
+    }
+
+    /// An address named without `MAP_FIXED` (0x10) is a hint, as in FreeBSD's `mmap`: a map onto a
+    /// held range moves up to the first free one above it. With `MAP_FIXED` the same request is
+    /// refused rather than moved. PPSA21564's allocator hints at 0x10_0000_0000, where its own
+    /// Garlic pool already sits, with flags 0.
+    #[test]
+    fn a_hinted_address_that_is_held_moves_up_and_a_fixed_one_is_refused() {
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        // An address no other test or region uses.
+        let hint = 0x0000_3C4A_0000_0000_u64;
+        let (mut first, mut second, mut fixed) = (hint, hint, hint);
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[1] = 0x2_0000;
+        args[2] = 3;
+        args[4] = 0x7_1000_0000;
+        args[0] = std::ptr::addr_of_mut!(first) as usize as u64;
+        assert_eq!(super::map_named_direct_memory(&args), 0);
+        assert_eq!(first, hint, "a free hint is kept");
+
+        // Longer than the held range, as the title's is: not a map into a reservation (D460).
+        args[1] = 0x4_0000;
+        args[4] = 0x7_2000_0000;
+        args[0] = std::ptr::addr_of_mut!(second) as usize as u64;
+        assert_eq!(
+            super::map_named_direct_memory(&args),
+            0,
+            "a held hint moves"
+        );
+        assert!(
+            second >= hint + 0x2_0000,
+            "above the held range: {second:#x}"
+        );
+
+        args[3] = 0x10;
+        args[4] = 0x7_3000_0000;
+        args[0] = std::ptr::addr_of_mut!(fixed) as usize as u64;
+        assert_ne!(
+            super::map_named_direct_memory(&args),
+            0,
+            "MAP_FIXED onto a held range is refused"
+        );
     }
 
     #[test]

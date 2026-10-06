@@ -346,6 +346,33 @@ impl AddressSpace {
             .is_some_and(|(_, r)| end <= r.base.saturating_add(r.len))
     }
 
+    /// The first `align`-aligned start at or above `hint` where `len` bytes overlap no region: where
+    /// FreeBSD's `mmap` places a mapping whose address is a hint rather than `MAP_FIXED`
+    /// (`vm_map_find`, searching upward from the hint). `None` past the end of the address space.
+    #[must_use]
+    pub fn first_free_at_or_above(&self, hint: u64, len: u64, align: u64) -> Option<u64> {
+        let align = align.max(1);
+        let mut start = hint.checked_next_multiple_of(align)?;
+        // A region starting below `start` may still reach into it, so the walk begins at the one
+        // holding `start`, if any.
+        let first = self
+            .regions
+            .range(..=start)
+            .next_back()
+            .map_or(start, |(&base, _)| base);
+        for region in self.regions.range(first..).map(|(_, r)| r) {
+            let end = start.checked_add(len)?;
+            let region_end = region.base.saturating_add(region.len);
+            if region.base >= end {
+                break;
+            }
+            if region_end > start {
+                start = region_end.checked_next_multiple_of(align)?;
+            }
+        }
+        start.checked_add(len).map(|_| start)
+    }
+
     /// Changes the protection of a range already covered by a reservation.
     ///
     /// Refuses a range this address space does not own, so a bad address cannot re-protect host
@@ -384,6 +411,42 @@ mod tests {
             },
         );
         s
+    }
+
+    /// A hint that lands on a region moves to the first aligned gap above it that fits, past every
+    /// region in the way; a free hint stays where it is. PPSA21564's Garlic pool holds
+    /// 0x10_0000_0000 for 0xc800_0000 bytes when its allocator hints there again for 0x1_2000_0000.
+    #[test]
+    fn a_hint_moves_up_to_the_first_gap_that_fits() {
+        let mut space = space_with(0x10_0000_0000, 0xc800_0000);
+        space.regions.insert(
+            0x10_c800_0000,
+            Region {
+                base: 0x10_c800_0000,
+                len: 0x10_0000,
+                protection: Protection::READ_WRITE,
+            },
+        );
+        assert_eq!(
+            space.first_free_at_or_above(0x10_0000_0000, 0x1_2000_0000, 0x1_0000),
+            Some(0x10_c810_0000),
+            "past both regions in the way"
+        );
+        assert_eq!(
+            space.first_free_at_or_above(0x10_0000_0000, 0x1_2000_0000, 0x1000_0000),
+            Some(0x10_d000_0000),
+            "and at the alignment"
+        );
+        assert_eq!(
+            space.first_free_at_or_above(0x20_0000_0000, 0x1000, 0x1000),
+            Some(0x20_0000_0000),
+            "a free hint is kept"
+        );
+        assert_eq!(
+            space.first_free_at_or_above(0x10_0800_0000, 0x1000, 0x1000),
+            Some(0x10_c810_0000),
+            "a hint inside a region moves past it"
+        );
     }
 
     /// Releasing a whole region returns its host memory, so the same range can be reserved
