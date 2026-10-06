@@ -77,6 +77,10 @@ pub(crate) fn cache() -> vk::PipelineCache {
 /// Writes the cache back when it grew since it was last written: after a pipeline was compiled
 /// rather than found. Through a temporary file, so a run stopped mid-write leaves the last whole
 /// one.
+///
+/// Its size is asked first and its data fetched only when that grew: a title's cache runs to tens
+/// of megabytes, and copying it out after every pipeline built - most of them found in it - cost
+/// more than building them (6 ms a draw, STKT00001 generating mipmaps).
 pub(crate) fn keep(device: &ash::Device) {
     let (Some(path), Some(kept)) = (KEEP_AT.get(), KEPT.get()) else {
         return;
@@ -84,13 +88,24 @@ pub(crate) fn keep(device: &ash::Device) {
     let Ok(mut kept) = kept.lock() else {
         return;
     };
+    let mut size = 0;
+    // SAFETY: the cache was created on this device and is live for the process; a null data
+    // pointer asks only for the size, which is written to a live local.
+    let sized = unsafe {
+        (device.fp_v1_0().get_pipeline_cache_data)(
+            device.handle(),
+            kept.cache,
+            &raw mut size,
+            std::ptr::null_mut(),
+        )
+    };
+    if sized != vk::Result::SUCCESS || size <= kept.written {
+        return;
+    }
     // SAFETY: the cache was created on this device and is live for the process.
     let Ok(data) = (unsafe { device.get_pipeline_cache_data(kept.cache) }) else {
         return;
     };
-    if data.len() <= kept.written {
-        return;
-    }
     let partial = path.with_extension("partial");
     if std::fs::write(&partial, &data).is_ok() && std::fs::rename(&partial, path).is_ok() {
         kept.written = data.len();
