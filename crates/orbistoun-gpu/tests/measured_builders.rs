@@ -275,3 +275,113 @@ fn draw_index_2_matches_the_capture_in_full() {
         "every dword is now measured, not three of five"
     );
 }
+
+/// `sceAgcDcbWaitRegMem(dcb, a1, .., a11)` encodes its arguments as hardware did, byte for byte:
+/// obSCEne `reports/report-1791275954.txt` lines 8937-9137 (`166-agc/dcb-wait-reg-mem`, REQ wr3a).
+/// Each pass is `(a1..a8, the rows' bytes)`; `a9..a11` changed nothing and are zero.
+#[test]
+fn wait_reg_mem_encodes_its_arguments_as_hardware_did() {
+    let passes: [([u64; 8], &str); 11] = [
+        // pm4-pass0: every argument zero.
+        (
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0100000000000000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-ppsa03416: PPSA03416's own call, (dcb, 0, 3, 0, 3, 0, ...).
+        (
+            [0, 0x3, 0, 0x3, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0130000060000000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg2: the compare function, bits 2:0.
+        (
+            [0, 0x22, 0, 0, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0120000000000000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-cmp7: the last compare function.
+        (
+            [0, 0x7, 0, 0, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0170000000000000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg3: bits 9:8.
+        (
+            [0, 0, 0x33, 0, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0100300000000000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg4: 0x44 has nothing in bits 1:0, so nothing lands.
+        (
+            [0, 0, 0, 0x44, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0100000000000000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg5: the poll address, whole into register 0x343 and dword-aligned into dw2.
+        (
+            [0, 0, 0, 0, 0x55, 0, 0, 0],
+            concat!(
+                "047902c042030000000001c855000000003c05c0100000005400000000000000",
+                "000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg6: the reference, dw4.
+        (
+            [0, 0, 0, 0, 0, 0x66, 0, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0100000000000000000000000",
+                "660000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg7: the mask, dw5.
+        (
+            [0, 0, 0, 0, 0, 0, 0x77, 0],
+            concat!(
+                "047902c042030000000001c800000000003c05c0100000000000000000000000",
+                "000000007700000000000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-arg8: the poll interval, dw6, in units of 16.
+        (
+            [0, 0, 0, 0, 0, 0, 0, 0x88],
+            concat!(
+                "047902c042030000000001c800000000003c05c0100000000000000000000000",
+                "000000000000000008000000047901c042030000000000c8"
+            ),
+        ),
+        // pm4-ppsa03416-64bit: a1 = 1 selects WAIT_REG_MEM64, 64 bytes.
+        (
+            [0x1, 0x3, 0, 0x3, 0, 0, 0, 0],
+            concat!(
+                "047902c042030000000002c800000000009307c0130000060000000000000000",
+                "0000000000000000000000000000000000000000047901c042030000000000c8"
+            ),
+        ),
+    ];
+    for (arguments, expected) in passes {
+        let mut all = [0_u64; 11];
+        all[..8].copy_from_slice(&arguments);
+        let hex = build::wait_reg_mem(&all)
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .fold(String::new(), |mut hex, b| {
+                use std::fmt::Write;
+                let _ = write!(hex, "{b:02x}");
+                hex
+            });
+        assert_eq!(hex, expected, "{arguments:x?}");
+    }
+}

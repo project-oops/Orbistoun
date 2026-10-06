@@ -343,6 +343,10 @@ pub mod build {
     /// only type, count and opcode.
     const MARKER_HEADER: u32 = 0xc001_7904;
 
+    /// The command-processor marker register the marker and wait builders write, `0x342`, as the
+    /// first body dword of their `SET_UCONFIG_REG` (`166-agc/dcb-wait-reg-mem`).
+    const MARKER_REGISTER: u32 = 0x342;
+
     /// A push/pop debug-marker skeleton: the measured 12-byte header, body zeroed.
     ///
     /// Both markers write the same `0x79` packet to register `0x342`, the value distinguishing push
@@ -353,33 +357,72 @@ pub mod build {
         [MARKER_HEADER, 0, 0]
     }
 
-    /// A `WAIT_REG_MEM` skeleton - the measured 56-byte compound stream, every header kept, body
-    /// zero.
+    /// The compound `sceAgcDcbWaitRegMem(dcb, a[0], .., a[10])` writes: a `SET_UCONFIG_REG` of the
+    /// marker pair `0x342`/`0x343`, the wait, and a `SET_UCONFIG_REG` restoring `0x342`.
     ///
-    /// `sceAgcDcbWaitRegMem` writes three packets (`166-agc/dcb-wait-reg-mem`): a `SET_UCONFIG_REG`
-    /// (`0xc0027904`, four dwords), a `WAIT_REG_MEM` (`0xc0053c00`, seven dwords) and a second
-    /// `SET_UCONFIG_REG` (`MARKER_HEADER`, three dwords). The bodies carry the polled address and
-    /// value, an unpinned argument mapping, so they are zeroed; the headers are kept so the
-    /// reservation walks back to three packets. The two `SET_UCONFIG` headers are raw measured
-    /// values because of their reserved-byte bit.
+    /// Measured one argument at a time (obSCEne `reports/report-1791275954.txt`, check
+    /// `166-agc/dcb-wait-reg-mem`, REQ wr3a), and on PPSA03416's own call:
+    ///
+    /// - `a1` selects the form: 0 is `WAIT_REG_MEM` (56 bytes, marker `0xc801_0000`), 1 is
+    ///   `WAIT_REG_MEM64` (64 bytes, marker `0xc802_0000`).
+    /// - DW1: `MEM_SPACE` (bit 4) always set; `a2 & 7` the compare function; `(a3 & 3) << 8` the
+    ///   engine; `(a4 & 3) << 25` the cache policy - the fields Mesa's `sid.h:90-95` names.
+    /// - The poll address `a5`: whole into register `0x343`, dword-aligned into DW2.
+    /// - DW4 the reference `a6`, DW5 the mask `a7`, DW6 the poll interval `a8 >> 4`.
+    /// - `a9..a11` change nothing.
+    ///
+    /// The address's high half in DW3 is assumed, where radeonsi's `si_cp_wait_mem` puts it and
+    /// [`crate::agc`]'s patch writes it. The 64-bit form was measured with `a5..a8` zero, so its
+    /// non-zero fields follow `amd_cp_packets_gfx11.h`'s order (address, reference, mask, each low
+    /// then high, then the interval) by assumption.
     #[must_use]
-    pub fn wait_reg_mem_skeleton() -> [u32; 14] {
-        [
+    pub fn wait_reg_mem(a: &[u64; 11]) -> Vec<u32> {
+        let [
+            wide,
+            function,
+            engine,
+            cache,
+            poll,
+            reference,
+            mask,
+            interval,
+            ..,
+        ] = *a;
+        let control = (0x10 | (function & 7) | ((engine & 3) << 8) | ((cache & 3) << 25)) as u32;
+        let interval = ((interval >> 4) & 0xffff) as u32;
+        let mut words = vec![
             0xc002_7904,
-            0,
-            0,
-            0,
-            command_header(0x3c, 6),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            MARKER_HEADER,
-            0,
-            0,
-        ]
+            MARKER_REGISTER,
+            if wide == 1 { 0xc802_0000 } else { 0xc801_0000 },
+            poll as u32,
+        ];
+        if wide == 1 {
+            let address = poll & !7;
+            words.extend([
+                command_header(crate::cp::WAIT_REG_MEM64, 8),
+                control,
+                address as u32,
+                (address >> 32) as u32,
+                reference as u32,
+                (reference >> 32) as u32,
+                mask as u32,
+                (mask >> 32) as u32,
+                interval,
+            ]);
+        } else {
+            let address = poll & !3;
+            words.extend([
+                command_header(crate::cp::WAIT_REG_MEM, 6),
+                control,
+                address as u32,
+                (address >> 32) as u32,
+                reference as u32,
+                mask as u32,
+                interval,
+            ]);
+        }
+        words.extend([MARKER_HEADER, MARKER_REGISTER, 0xc800_0000]);
+        words
     }
 
     /// A `sceAgcDcbResetQueue` skeleton - the measured 32-byte stream, every header kept, body

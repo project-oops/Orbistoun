@@ -582,7 +582,7 @@ fn queue_eop_patch_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Offset in `sceAgcDcbWaitRegMem`'s compound ([`packet::build::wait_reg_mem_skeleton`]) of the
+/// Offset in `sceAgcDcbWaitRegMem`'s compound ([`packet::build::wait_reg_mem`]) of the
 /// leading `SET_UCONFIG_REG`'s second value.
 const WAIT_REG_MEM_UCONFIG_VALUE_AT: u64 = 12;
 /// Offset in the compound of the `WAIT_REG_MEM`'s poll address, its dw2 and dw3 as radeonsi's
@@ -973,11 +973,14 @@ fn dcb_pop_marker(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     dcb_append(args[0], &packet::build::marker_skeleton())
 }
 
-/// `sceAgcDcbWaitRegMem(dcb, ...)` - wait on a register or memory word. The measured 56-byte
-/// compound of three packets (`166-agc/dcb-wait-reg-mem`), reserved with its headers and zeroed
-/// bodies.
+/// `sceAgcDcbWaitRegMem(dcb, a1, .., a11)` - wait on a memory word: the measured compound of
+/// three packets, its fields placed as measured one argument at a time (obSCEne REQ wr3a,
+/// [`packet::build::wait_reg_mem`]).
 fn dcb_wait_reg_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    dcb_append(args[0], &packet::build::wait_reg_mem_skeleton())
+    dcb_append(
+        args[0],
+        &packet::build::wait_reg_mem(&builder_arguments(args)),
+    )
 }
 
 /// The largest register run this will read out of guest memory in one call.

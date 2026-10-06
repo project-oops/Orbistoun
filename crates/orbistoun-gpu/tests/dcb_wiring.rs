@@ -262,7 +262,8 @@ fn the_eop_and_wait_reg_mem_patches_write_the_address() {
     assert_eq!((dword(&w, 6), dword(&w, 7)), (0x020c_1e38, 0x7400));
     assert_eq!(
         (dword(&w, 4), dword(&w, 5), dword(&w, 8)),
-        (0xc005_3c00, 0, 0)
+        (0xc005_3c00, 0x10, 0),
+        "the header, dw1 with only MEM_SPACE set (pm4-pass0), the reference"
     );
     assert_eq!(w.written(), 56, "the patch amends in place");
 }
