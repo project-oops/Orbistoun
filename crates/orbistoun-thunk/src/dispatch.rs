@@ -94,18 +94,25 @@ pub fn abi_conformance() -> AbiConformance {
 mod overflow {
     use std::cell::Cell;
 
+    use orbistoun_core::GUEST_FLOAT_REGISTERS;
+
     thread_local! {
         /// The first stack argument of the call this thread is inside.
         static AREA: Cell<u64> = const { Cell::new(0) };
+        /// The vector argument registers the trampoline spilled for that call (D748).
+        static FLOATS: Cell<Option<[u64; GUEST_FLOAT_REGISTERS]>> = const { Cell::new(None) };
     }
 
-    /// Publishes the area for a call, answering what was there before.
+    /// What `begin` replaced, for `end` to put back.
+    pub(super) type Previous = (u64, Option<[u64; GUEST_FLOAT_REGISTERS]>);
+
+    /// Publishes the area and the vector registers for a call, answering what was there before.
     ///
     /// Saved and restored rather than cleared, so an implementation that calls back into another
     /// import does not leave the outer call reading nothing. Neither end is inlined, for the reason
     /// `enter_import` gives: a call can end on another thread than it began (D732).
     #[inline(never)]
-    pub(super) fn begin(entry_rsp: u64) -> u64 {
+    pub(super) fn begin(entry_rsp: u64, floats: [u64; GUEST_FLOAT_REGISTERS]) -> Previous {
         // `[entry_rsp]` is the return address the guest's `call` pushed, so the first argument that
         // did not fit is the word above it.
         let area = if entry_rsp == 0 || entry_rsp % 8 != 0 {
@@ -113,22 +120,32 @@ mod overflow {
         } else {
             entry_rsp.saturating_add(8)
         };
-        AREA.with(|held| held.replace(area))
+        (
+            AREA.with(|held| held.replace(area)),
+            FLOATS.with(|held| held.replace(Some(floats))),
+        )
     }
 
     /// Puts back what `begin` answered, on the thread running now.
     #[inline(never)]
-    pub(super) fn end(previous: u64) {
-        AREA.with(|held| held.set(previous));
+    pub(super) fn end((area, floats): Previous) {
+        AREA.with(|held| held.set(area));
+        FLOATS.with(|held| held.set(floats));
     }
 
     /// Where this thread's current call keeps its stack arguments, or zero.
     pub fn area() -> u64 {
         AREA.with(Cell::get)
     }
+
+    /// The low halves of `xmm0` to `xmm7` as this thread's current call received them, where a
+    /// variadic `double` arrives (D748); `None` outside a guest call.
+    pub fn floats() -> Option<[u64; GUEST_FLOAT_REGISTERS]> {
+        FLOATS.with(Cell::get)
+    }
 }
 
-pub use overflow::area as stack_arguments;
+pub use overflow::{area as stack_arguments, floats as float_arguments};
 
 /// Where a call came from, given the stack pointer as the guest's `call` left it.
 ///
@@ -1609,7 +1626,7 @@ unsafe fn resolve(
         let ints = unsafe { &*args.cast::<[u64; SAVED_ARGUMENT_REGISTERS]>() };
         // SAFETY: the same spill put eight floating-point argument registers below those.
         let float_args = unsafe { &*floats.cast::<[u64; orbistoun_core::GUEST_FLOAT_REGISTERS]>() };
-        let previous = overflow::begin(entry_rsp);
+        let previous = overflow::begin(entry_rsp, *float_args);
         let answer = float_handler(ints, float_args);
         overflow::end(previous);
         // Written where the trampoline loads `xmm0` from.
@@ -1623,9 +1640,12 @@ unsafe fn resolve(
         // SAFETY: the caller guarantees six readable values, which is the array this reborrows. The
         // trampoline spilled them and they outlive this call.
         let args: &[u64; SAVED_ARGUMENT_REGISTERS] = unsafe { &*args.cast() };
+        // SAFETY: the trampoline spilled eight floating-point argument registers below the integer
+        // ones, readable for the length of the call.
+        let float_args = unsafe { *floats.cast::<[u64; orbistoun_core::GUEST_FLOAT_REGISTERS]>() };
         // Published for the length of the call, so a variadic implementation can read the arguments
-        // that did not fit in registers.
-        let previous = overflow::begin(entry_rsp);
+        // that did not fit in integer registers, and the ones in vector registers.
+        let previous = overflow::begin(entry_rsp, float_args);
         let answer = handler(args);
         overflow::end(previous);
         // The implementation still runs; only its answer is replaced, so the rest of the program

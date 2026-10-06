@@ -2564,9 +2564,6 @@ fn describe_format_fault(fault: orbistoun_libc::FormatFault) -> String {
         orbistoun_libc::FormatFault::Unsupported(c) => {
             format!("the %{c} conversion is not implemented")
         }
-        orbistoun_libc::FormatFault::FloatingPoint(c) => format!(
-            "%{c} takes its argument in a vector register, which the trampoline does not capture"
-        ),
         orbistoun_libc::FormatFault::OutOfArguments => {
             "the format needed more arguments than arrive in registers".to_owned()
         }

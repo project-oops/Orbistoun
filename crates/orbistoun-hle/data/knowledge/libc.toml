@@ -2188,7 +2188,7 @@ edge_cases = [
 ]
 known_by = "published"
 cites = "ISO C 7.21.6.3"
-assumptions = ["A floating-point conversion cannot be honoured - the argument arrives in a vector register the trampoline does not capture. No guest has needed one yet."]
+assumptions = ["A floating-point conversion rounds to nearest, ties to even, the default rounding mode: a guest that changed the mode would see other last digits on hardware (D748)."]
 found_in = [
     "PPSA02664-app0",
     "PPSA03416-app0",
@@ -2557,7 +2557,7 @@ returns = "count"
 edge_cases = [
     "Found by hash after the obvious spellings - snprintf, sprintf, vsnprintf - all missed. It is the C11 Annex K bounds-checked variant, which is not a name anybody would reach for first.",
     "Answering zero means the guest gets an empty string where it expected a formatted one. That is wrong, but it is *bounded* wrong - the buffer stays untouched rather than being filled with something invented.",
-    "Implemented as an integer-only renderer. All seventy-six calls in a boot were honoured, so this title's formats need no floating-point conversion and no more than three variadic arguments - which is the whole capacity of the trampoline.",
+    "All seventy-six calls in a boot were honoured. The renderer takes integers from the integer registers and then the stack, and a double from the vector registers the trampoline spills and then the same stack (D748).",
     "A format it cannot honour completely empties the destination rather than rendering part of it. A half-rendered string is invented data shaped like a real answer: the guest opens the wrong file and the failure surfaces somewhere unrelated.",
 ]
 found_by = "affixed"
@@ -2566,7 +2566,7 @@ cites = "ISO C 7.21.6.5 (snprintf); the bounds-checked variant follows Annex K K
 assumptions = [
     "Annex K is optional and implementations differ. Whether the target library follows it at all, and what it returns on truncation, is unverified.",
     "Whether it writes a terminator when the buffer is too small is unverified, and a guest that trusts termination would read past the end if it does not.",
-    "A floating-point conversion cannot be honoured at all - the argument arrives in a vector register the trampoline does not capture. No guest has needed one yet, so whether any does is unmeasured.",
+    "A floating-point conversion rounds to nearest, ties to even, the default rounding mode: a guest that changed the mode would see other last digits on hardware (D748).",
 ]
 found_in = ["PPSA28061-app0"]
 found_on = "2026-08-21"

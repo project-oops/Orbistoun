@@ -14,6 +14,7 @@ mod clock;
 pub mod cstring;
 mod ctype;
 mod cxx;
+mod floats;
 mod locks;
 pub mod math;
 pub mod said;
@@ -1237,17 +1238,11 @@ fn cxa_guard_abort(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Why a formatted write could not be honoured.
 ///
 /// Enumerated, because the kinds need different responses: one is a conversion this could
-/// support, another cannot be supported at this layer at all.
+/// support, the other a format asking for more than the guest passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatFault {
     /// A conversion this does not implement.
     Unsupported(char),
-    /// A floating-point conversion.
-    ///
-    /// Under System V a variadic floating-point argument arrives in an XMM register, and the
-    /// trampoline captures the integer registers only, so the value never reaches this function
-    /// (D183).
-    FloatingPoint(char),
     /// The format called for more arguments than could be read.
     OutOfArguments,
 }
@@ -1313,6 +1308,8 @@ fn note_fault(fault: FormatFault) {
 trait Arguments {
     /// The next integer-class argument, or [`None`] when there is not one.
     fn next_integer(&mut self) -> Option<u64>;
+    /// The next floating-point argument's bits, a `double`, or [`None`] when there is not one.
+    fn next_float(&mut self) -> Option<u64>;
 }
 
 /// The arguments a trampoline caught in registers, and then the guest's stack.
@@ -1320,11 +1317,21 @@ trait Arguments {
 /// System V passes the first six integer arguments in registers and the rest on the stack;
 /// `snprintf` spends three registers on the buffer, size and format, so further conversions
 /// are read from the stack.
+///
+/// A `double` takes the next vector register, `xmm0` to `xmm7`, and past them the stack too: the
+/// psABI puts every argument that missed its class's registers in one stack area, in order, so the
+/// two classes share one stack cursor.
 struct Registers<'a> {
     /// The captured values, in order.
     values: &'a [u64],
     /// How many have been taken.
     taken: usize,
+    /// The captured vector registers' low halves, in order (D748).
+    floats: &'a [u64],
+    /// How many of those have been taken.
+    floats_taken: usize,
+    /// How many stack arguments have been taken, of either class.
+    stacked: usize,
 }
 
 /// How many stack arguments one call may be asked for.
@@ -1339,9 +1346,23 @@ impl Arguments for Registers<'_> {
             self.taken += 1;
             return Some(value);
         }
-        // Past the registers, the rest is where the psABI puts it: on the guest's stack, above the
-        // return address, in order.
-        let index = self.taken - self.values.len();
+        self.next_stacked()
+    }
+
+    fn next_float(&mut self) -> Option<u64> {
+        if let Some(value) = self.floats.get(self.floats_taken).copied() {
+            self.floats_taken += 1;
+            return Some(value);
+        }
+        self.next_stacked()
+    }
+}
+
+impl Registers<'_> {
+    /// The next argument past the registers, where the psABI puts it: on the guest's stack, above
+    /// the return address, in order.
+    fn next_stacked(&mut self) -> Option<u64> {
+        let index = self.stacked;
         if index >= MOST_STACK_ARGUMENTS {
             return None;
         }
@@ -1352,7 +1373,7 @@ impl Arguments for Registers<'_> {
             return None;
         }
         let at = usize::try_from(area.saturating_add((index as u64).saturating_mul(8))).ok()?;
-        self.taken += 1;
+        self.stacked += 1;
         // SAFETY: the guest's own stack under the identity mapping, inside the frame of the call
         // currently running, which the thunk published and has not returned from. Read unaligned,
         // so nothing depends on the slot's alignment.
@@ -1364,21 +1385,64 @@ impl Arguments for varargs::VaList {
     fn next_integer(&mut self) -> Option<u64> {
         Self::next_integer(self)
     }
+
+    fn next_float(&mut self) -> Option<u64> {
+        Self::next_float(self)
+    }
 }
 
 /// Everything between the `%` and the conversion character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Specifier {
-    /// `-`: pad on the right instead of the left.
-    left: bool,
-    /// `0`: pad with zeroes instead of spaces.
-    zero: bool,
+    /// Where the padding goes: the `-` and `0` flags.
+    justify: Justify,
+    /// What a non-negative signed conversion shows: the `+` and space flags.
+    sign: Sign,
+    /// `#`: the alternate form - `0x` before a hexadecimal value, a leading zero for octal, always
+    /// a point for floating point.
+    alternate: bool,
     /// The minimum field width.
-    width: usize,
+    width: Count,
     /// The precision, where one was given. For `%s` it is a maximum length.
-    precision: Option<usize>,
+    precision: Option<Count>,
     /// How many of the argument's bits the conversion actually reads.
     width_bits: u32,
+}
+
+/// Where a conversion's padding goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Justify {
+    /// Spaces on the left: no flag.
+    Right,
+    /// Spaces on the right: `-`, which overrides `0`.
+    Left,
+    /// Zeros between the sign and the digits: `0`.
+    Zero,
+}
+
+/// What a signed conversion shows where its value is not negative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sign {
+    /// Nothing.
+    Negative,
+    /// A space: the ` ` flag.
+    Space,
+    /// A `+`: the `+` flag, which overrides ` `.
+    Plus,
+}
+
+/// A width or precision: written in the format, or `*`, the next argument's (D748).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Count {
+    Given(usize),
+    Argument,
+}
+
+/// A `*` width or precision's value: the next argument, an `int`. ISO C 7.21.6.1p5: a negative
+/// width is the `-` flag and its magnitude, and a negative precision is as if none were given.
+fn count_argument(args: &mut impl Arguments) -> Result<i64, FormatFault> {
+    let value = args.next_integer().ok_or(FormatFault::OutOfArguments)?;
+    Ok(sign_extend(value, 32))
 }
 
 /// Reads one specifier, leaving the iterator on the conversion character.
@@ -1387,9 +1451,10 @@ struct Specifier {
 /// conversion itself is what gets reported.
 fn read_specifier(chars: &mut std::iter::Peekable<impl Iterator<Item = u8>>) -> Specifier {
     let mut found = Specifier {
-        left: false,
-        zero: false,
-        width: 0,
+        justify: Justify::Right,
+        sign: Sign::Negative,
+        alternate: false,
+        width: Count::Given(0),
         precision: None,
         // The default is `int`, as C says, and a modifier widens or narrows it. A stack argument
         // sits in an eight-byte slot whose upper half is unspecified for anything narrower, so
@@ -1399,17 +1464,20 @@ fn read_specifier(chars: &mut std::iter::Peekable<impl Iterator<Item = u8>>) -> 
 
     while let Some(&flag) = chars.peek() {
         match flag {
-            b'-' => found.left = true,
-            b'0' => found.zero = true,
-            b'+' | b' ' | b'#' => {}
+            b'-' => found.justify = Justify::Left,
+            b'0' if found.justify == Justify::Right => found.justify = Justify::Zero,
+            b'+' => found.sign = Sign::Plus,
+            b' ' if found.sign == Sign::Negative => found.sign = Sign::Space,
+            b'#' => found.alternate = true,
+            b'0' | b' ' => {}
             _ => break,
         }
         chars.next();
     }
-    found.width = read_number(chars);
+    found.width = read_count(chars);
     if chars.peek() == Some(&b'.') {
         chars.next();
-        found.precision = Some(read_number(chars));
+        found.precision = Some(read_count(chars));
     }
     loop {
         match chars.peek() {
@@ -1425,6 +1493,15 @@ fn read_specifier(chars: &mut std::iter::Peekable<impl Iterator<Item = u8>>) -> 
         chars.next();
     }
     found
+}
+
+/// A `*`, or a run of decimal digits.
+fn read_count(chars: &mut std::iter::Peekable<impl Iterator<Item = u8>>) -> Count {
+    if chars.peek() == Some(&b'*') {
+        chars.next();
+        return Count::Argument;
+    }
+    Count::Given(read_number(chars))
 }
 
 /// A run of decimal digits, or zero when there are none.
@@ -1468,11 +1545,23 @@ const fn sign_extend(value: u64, bits: u32) -> i64 {
 ///
 /// [`render_with`] is the same renderer over any argument source.
 fn render_format(format: &[u8], args: &[u64]) -> Result<Vec<u8>, FormatFault> {
+    // The vector registers of the guest call running now; none outside one.
+    match orbistoun_thunk::float_arguments() {
+        Some(floats) => render_registers(format, args, &floats),
+        None => render_registers(format, args, &[]),
+    }
+}
+
+/// Renders a format string against integer and vector registers, then the stack.
+fn render_registers(format: &[u8], args: &[u64], floats: &[u64]) -> Result<Vec<u8>, FormatFault> {
     render_with(
         format,
         &mut Registers {
             values: args,
             taken: 0,
+            floats,
+            floats_taken: 0,
+            stacked: 0,
         },
     )
 }
@@ -1493,12 +1582,29 @@ fn render_with(format: &[u8], args: &mut impl Arguments) -> Result<Vec<u8>, Form
             continue;
         }
         let Specifier {
-            left,
-            zero,
+            mut justify,
+            sign,
+            alternate,
             width,
             precision,
             width_bits,
         } = read_specifier(&mut chars);
+        // A `*` takes its argument before the value's, width first (ISO C 7.21.6.1p5).
+        let width = match width {
+            Count::Given(width) => width,
+            Count::Argument => {
+                let given = count_argument(args)?;
+                if given < 0 {
+                    justify = Justify::Left;
+                }
+                usize::try_from(given.unsigned_abs()).unwrap_or(usize::MAX)
+            }
+        };
+        let precision = match precision {
+            None => None,
+            Some(Count::Given(precision)) => Some(precision),
+            Some(Count::Argument) => usize::try_from(count_argument(args)?).ok(),
+        };
 
         let Some(conversion) = chars.next() else {
             // A format ending in a bare `%` is malformed, and is a fault rather than dropped.
@@ -1508,17 +1614,20 @@ fn render_with(format: &[u8], args: &mut impl Arguments) -> Result<Vec<u8>, Form
             out.push(b'%');
             continue;
         }
-        if matches!(
-            conversion,
-            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A'
-        ) {
-            return Err(FormatFault::FloatingPoint(char::from(conversion)));
+        let float = matches!(conversion, b'f' | b'F' | b'e' | b'E' | b'g' | b'G');
+        if matches!(conversion, b'a' | b'A') {
+            return Err(FormatFault::Unsupported(char::from(conversion)));
         }
-        let Some(value) = args.next_integer() else {
+        let value = if float {
+            args.next_float()
+        } else {
+            args.next_integer()
+        };
+        let Some(value) = value else {
             return Err(FormatFault::OutOfArguments);
         };
-        // A pointer is always the whole word, whatever the modifier said.
-        let value = if matches!(conversion, b's' | b'p') {
+        // A pointer is always the whole word, whatever the modifier said, and so is a `double`.
+        let value = if float || matches!(conversion, b's' | b'p') {
             value
         } else {
             narrow(value, width_bits)
@@ -1549,59 +1658,134 @@ fn render_with(format: &[u8], args: &mut impl Arguments) -> Result<Vec<u8>, Form
             b'X' => format!("{value:X}").into_bytes(),
             b'o' => format!("{value:o}").into_bytes(),
             b'p' => format!("{value:#x}").into_bytes(),
+            _ if float => floats::render(f64::from_bits(value), conversion, precision, alternate),
             other => return Err(FormatFault::Unsupported(char::from(other))),
         };
-
-        // Integer and string conversions pad differently. ISO C 7.21.6.1 for `d i o u x X`:
-        // precision is the minimum number of digits, default one, zero-filled on the left, and a
-        // precision of zero with a value of zero renders nothing. A specified precision or the `-`
-        // flag makes the `0` flag ignored, and zero padding goes after the sign.
-        let numeric = matches!(conversion, b'd' | b'i' | b'u' | b'x' | b'X' | b'o');
-        let (sign, digits): (&[u8], &[u8]) = if numeric && rendered.first() == Some(&b'-') {
-            rendered.split_at(1)
-        } else {
-            (&[], &rendered)
-        };
-        let mut body: Vec<u8> = Vec::with_capacity(rendered.len());
-        if numeric {
-            if let Some(least) = precision {
-                if least == 0 && digits == b"0" {
-                    // The one case where a conversion renders no characters at all.
-                } else {
-                    body.extend(std::iter::repeat_n(
-                        b'0',
-                        least.saturating_sub(digits.len()),
-                    ));
-                    body.extend_from_slice(digits);
-                }
-            } else {
-                body.extend_from_slice(digits);
-            }
-        } else {
-            body.extend_from_slice(&rendered);
-        }
-
-        let pad = width.saturating_sub(sign.len() + body.len());
-        let zero_fill = zero && !left && !(numeric && precision.is_some());
-        if left {
-            out.extend_from_slice(sign);
-            out.extend_from_slice(&body);
-            out.extend(std::iter::repeat_n(b' ', pad));
-        } else if zero_fill {
-            // The sign first, then the zeros: `-0042`, never `00-42`.
-            out.extend_from_slice(sign);
-            out.extend(std::iter::repeat_n(b'0', pad));
-            out.extend_from_slice(&body);
-        } else {
-            out.extend(std::iter::repeat_n(b' ', pad));
-            out.extend_from_slice(sign);
-            out.extend_from_slice(&body);
-        }
+        pad_conversion(
+            &mut out,
+            Rendered {
+                character: conversion,
+                value,
+                text: &rendered,
+            },
+            Padding {
+                justify,
+                sign,
+                alternate,
+                width,
+                precision,
+            },
+        );
     }
     // Every renderer reaches here, so a message is recorded whether it was printed, written to a
     // descriptor, or formatted into a buffer the guest keeps.
     said::note(&out);
     Ok(out)
+}
+
+/// One conversion's result, for [`pad_conversion`].
+struct Rendered<'a> {
+    /// The conversion character.
+    character: u8,
+    /// The argument it took, for the alternate form's `0x`, which a zero does not get.
+    value: u64,
+    /// What it rendered, a sign included.
+    text: &'a [u8],
+}
+
+/// The flags, width and precision a conversion is laid out by, the `*`s resolved.
+#[derive(Clone, Copy)]
+struct Padding {
+    justify: Justify,
+    sign: Sign,
+    alternate: bool,
+    width: usize,
+    precision: Option<usize>,
+}
+
+/// Lays out one conversion's rendering into `out` by its flags, width and precision.
+///
+/// Integer and string conversions pad differently. ISO C 7.21.6.1 for `d i o u x X`: precision is
+/// the minimum number of digits, default one, zero-filled on the left, and a precision of zero with
+/// a value of zero renders nothing. A specified precision or the `-` flag makes the `0` flag
+/// ignored, and zero padding goes after the sign; an infinity or not-a-number pads with spaces.
+fn pad_conversion(
+    out: &mut Vec<u8>,
+    Rendered {
+        character: conversion,
+        value,
+        text: rendered,
+    }: Rendered<'_>,
+    Padding {
+        justify,
+        sign: shown,
+        alternate,
+        width,
+        precision,
+    }: Padding,
+) {
+    let float = matches!(conversion, b'f' | b'F' | b'e' | b'E' | b'g' | b'G');
+    let integer = matches!(conversion, b'd' | b'i' | b'u' | b'x' | b'X' | b'o');
+    let signed = float || matches!(conversion, b'd' | b'i');
+    let (sign, digits): (&[u8], &[u8]) = if (integer || float) && rendered.first() == Some(&b'-') {
+        rendered.split_at(1)
+    } else if signed && shown == Sign::Plus {
+        (b"+", rendered)
+    } else if signed && shown == Sign::Space {
+        (b" ", rendered)
+    } else {
+        (&[], rendered)
+    };
+    // `#`: `0x` before a non-zero hexadecimal value, which zero padding goes after too.
+    let sign: &[u8] = match conversion {
+        b'x' if alternate && value != 0 => b"0x",
+        b'X' if alternate && value != 0 => b"0X",
+        _ => sign,
+    };
+    let mut body: Vec<u8> = Vec::with_capacity(rendered.len());
+    if integer {
+        if let Some(least) = precision {
+            if least == 0 && digits == b"0" {
+                // The one case where a conversion renders no characters at all.
+            } else {
+                body.extend(std::iter::repeat_n(
+                    b'0',
+                    least.saturating_sub(digits.len()),
+                ));
+                body.extend_from_slice(digits);
+            }
+        } else {
+            body.extend_from_slice(digits);
+        }
+        // `#o` raises the precision until the first digit is a zero.
+        if conversion == b'o' && alternate && body.first() != Some(&b'0') {
+            body.insert(0, b'0');
+        }
+    } else {
+        body.extend_from_slice(digits);
+    }
+
+    let pad = width.saturating_sub(sign.len() + body.len());
+    // A specified precision makes an integer's `0` flag ignored, and an infinity or not-a-number
+    // pads with spaces.
+    let zero_fill = justify == Justify::Zero
+        && !(integer && precision.is_some())
+        && !(float && floats::is_special(&body));
+    let left = justify == Justify::Left;
+    if left {
+        out.extend_from_slice(sign);
+        out.extend_from_slice(&body);
+        out.extend(std::iter::repeat_n(b' ', pad));
+    } else if zero_fill {
+        // The sign first, then the zeros: `-0042`, never `00-42`.
+        out.extend_from_slice(sign);
+        out.extend(std::iter::repeat_n(b'0', pad));
+        out.extend_from_slice(&body);
+    } else {
+        out.extend(std::iter::repeat_n(b' ', pad));
+        out.extend_from_slice(sign);
+        out.extend_from_slice(&body);
+    }
 }
 
 /// `snprintf_s(dest, size, format, ...)`, the C11 Annex K bounds-checked variant.
@@ -3663,7 +3847,9 @@ mod abi_constant_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{FormatFault, MODULE, implementations, render_format, snprintf_s};
+    use super::{
+        FormatFault, MODULE, implementations, render_format, render_registers, snprintf_s,
+    };
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
     /// Calls one implementation by name, with host buffers standing in for guest memory, which
@@ -4034,31 +4220,87 @@ mod tests {
         assert_eq!(render_format(b"%hhd", &[9]).expect("hhd"), b"9");
     }
 
+    /// A `double` is the next vector register the trampoline spilled, counted apart from the integer
+    /// registers, as the psABI passes them (D748).
     #[test]
-    fn a_floating_point_conversion_is_refused_rather_than_guessed() {
-        // A variadic double arrives in an XMM register, which the trampoline does not capture, so
-        // the value never reaches this function.
+    fn a_floating_point_conversion_reads_the_next_vector_register() {
+        let floats = [1.5_f64.to_bits(), (-0.25_f64).to_bits(), 1e-5_f64.to_bits()];
         assert_eq!(
-            render_format(b"%f", &[1, 2, 3]),
-            Err(FormatFault::FloatingPoint('f'))
+            render_registers(b"%d %f %d %.1e %g", &[7, 8], &floats).expect("mixed"),
+            b"7 1.500000 8 -2.5e-01 1e-05"
         );
-        for spec in [
-            &b"%g"[..],
-            &b"%e"[..],
-            &b"%E"[..],
-            &b"%G"[..],
-            &b"%a"[..],
-            &b"%.2f"[..],
-        ] {
-            assert!(
-                matches!(
-                    render_format(spec, &[1, 2, 3]),
-                    Err(FormatFault::FloatingPoint(_))
-                ),
-                "{:?} must be refused, not rendered",
-                core::str::from_utf8(spec)
-            );
-        }
+        assert_eq!(
+            render_registers(b"%f", &[1, 2, 3], &[]),
+            Err(FormatFault::OutOfArguments),
+            "with no vector register, and no call to read the stack of"
+        );
+        assert_eq!(
+            render_registers(b"%a", &[], &floats),
+            Err(FormatFault::Unsupported('a'))
+        );
+    }
+
+    /// `*` takes the width or precision from the next `int`, before the value: a negative width is
+    /// the `-` flag, and a negative precision none at all (ISO C 7.21.6.1p5, D748).
+    #[test]
+    fn a_star_takes_its_count_from_the_arguments() {
+        let name = b"abcdef\0";
+        let at = name.as_ptr() as usize as u64;
+        assert_eq!(
+            render_format(b"[%*d]", &[5, 42]).expect("width"),
+            b"[   42]"
+        );
+        assert_eq!(
+            render_format(b"[%*d]", &[(-5_i64) as u64, 42]).expect("negative width"),
+            b"[42   ]"
+        );
+        assert_eq!(
+            render_format(b"[%.*s]", &[3, at]).expect("precision"),
+            b"[abc]"
+        );
+        assert_eq!(
+            render_format(b"[%.*s]", &[(-1_i64) as u64, at]).expect("negative precision"),
+            b"[abcdef]"
+        );
+        assert_eq!(
+            render_format(b"[%*.*d]", &[6, 3, 7]).expect("both"),
+            b"[   007]"
+        );
+        assert_eq!(
+            render_format(b"%*d", &[5]),
+            Err(FormatFault::OutOfArguments),
+            "the star spent the only argument"
+        );
+    }
+
+    /// The `+`, space and `#` flags shape the rendering rather than being read and dropped (D748).
+    #[test]
+    fn the_sign_and_alternate_flags_are_honoured() {
+        assert_eq!(render_format(b"%+d", &[5]).expect("plus"), b"+5");
+        assert_eq!(render_format(b"% d", &[5]).expect("space"), b" 5");
+        assert_eq!(
+            render_format(b"%+d", &[(-5_i64) as u64]).expect("negative"),
+            b"-5"
+        );
+        assert_eq!(render_format(b"%+u", &[5]).expect("unsigned"), b"5");
+        assert_eq!(render_format(b"%#x", &[255]).expect("hex"), b"0xff");
+        assert_eq!(
+            render_format(b"%#08X", &[255]).expect("padded"),
+            b"0X0000FF"
+        );
+        assert_eq!(render_format(b"%#x", &[0]).expect("zero"), b"0");
+        assert_eq!(render_format(b"%#o", &[8]).expect("octal"), b"010");
+        let half = [0.5_f64.to_bits()];
+        assert_eq!(
+            render_registers(b"%+08.3f", &[], &half).expect("float"),
+            b"+000.500"
+        );
+        let infinite = [f64::INFINITY.to_bits()];
+        assert_eq!(
+            render_registers(b"%06f", &[], &infinite).expect("infinity"),
+            b"   inf",
+            "an infinity pads with spaces"
+        );
     }
 
     #[test]
@@ -4137,7 +4379,7 @@ mod tests {
     #[test]
     fn a_format_that_cannot_be_honoured_empties_the_destination() {
         // An empty string, not a half-rendered one.
-        let format = b"%f percent\0";
+        let format = b"%a percent\0";
         let mut dest = [0xAA_u8; 32];
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = dest.as_mut_ptr() as usize as u64;
@@ -4153,8 +4395,8 @@ mod tests {
         // Which conversion, asked of the renderer: `first_fault` is one process-wide slot shared by
         // every test, so its value depends on which test ran first.
         assert_eq!(
-            render_format(b"%f percent", &[]),
-            Err(FormatFault::FloatingPoint('f')),
+            render_format(b"%a percent", &[]),
+            Err(FormatFault::Unsupported('a')),
             "and it can say which conversion was responsible"
         );
     }

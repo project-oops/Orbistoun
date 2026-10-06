@@ -21,6 +21,10 @@
 /// Six integer registers at eight bytes each; `gp_offset` switches to the stack at the end.
 const INTEGER_SAVE_AREA: u32 = 48;
 
+/// Where the register save area ends: the eight vector registers follow the integer ones, sixteen
+/// bytes each, and `fp_offset` switches to the stack there.
+const VECTOR_SAVE_AREA_END: u32 = INTEGER_SAVE_AREA + 8 * 16;
+
 /// Whether an area pointer could be one.
 ///
 /// Null and all-ones are what uninitialised or error-returning code leaves, not computed
@@ -36,6 +40,8 @@ fn plausible(area: u64) -> bool {
 pub(crate) struct VaList {
     /// Bytes already taken from the integer register save area.
     gp_offset: u32,
+    /// Where the next vector register is in the save area, past the integer ones.
+    fp_offset: u32,
     /// The next stack argument.
     overflow: u64,
     /// Where the caller spilled its integer registers.
@@ -60,6 +66,11 @@ impl VaList {
         // SAFETY: the caller guarantees 24 readable bytes at `address`, and every field
         // below is read from inside that range at its psABI offset.
         let gp_offset = unsafe { std::ptr::read_unaligned(at.cast::<u32>()) };
+        // SAFETY: `fp_offset` sits at offset 4, inside the same 24 bytes.
+        let fp_offset_at = unsafe { at.add(4) };
+        // SAFETY: `fp_offset_at` is in bounds by the line above, and four bytes there are readable
+        // by the caller's guarantee.
+        let fp_offset = unsafe { std::ptr::read_unaligned(fp_offset_at.cast::<u32>()) };
         // SAFETY: the overflow pointer sits at offset 8, inside the same 24 bytes.
         let overflow_at = unsafe { at.add(8) };
         // SAFETY: `overflow_at` is in bounds by the line above, and eight bytes there are
@@ -72,6 +83,7 @@ impl VaList {
         let save_area = unsafe { std::ptr::read_unaligned(save_area_at.cast::<u64>()) };
         Some(Self {
             gp_offset,
+            fp_offset,
             overflow,
             save_area,
         })
@@ -82,9 +94,16 @@ impl VaList {
     pub(crate) const fn new(gp_offset: u32, overflow: u64, save_area: u64) -> Self {
         Self {
             gp_offset,
+            fp_offset: VECTOR_SAVE_AREA_END,
             overflow,
             save_area,
         }
+    }
+
+    /// The same, with `fp_offset` given too.
+    #[cfg(test)]
+    pub(crate) const fn with_fp_offset(self, fp_offset: u32) -> Self {
+        Self { fp_offset, ..self }
     }
 
     /// The next integer-class argument.
@@ -100,23 +119,55 @@ impl VaList {
             self.gp_offset += 8;
             at
         } else {
-            if !plausible(self.overflow) {
-                return None;
-            }
-            let at = self.overflow;
-            self.overflow = self.overflow.checked_add(8)?;
-            at
+            self.next_overflow()?
         };
         // SAFETY: `from` is inside one of the two areas the guest's own list points at, which hold
         // at least the arguments it passed. A format asking for more reads past them, as it would
         // on hardware.
-        Some(unsafe { std::ptr::read_unaligned(crate::ptr(from).cast_const().cast::<u64>()) })
+        Some(unsafe { read_word(from) })
     }
+
+    /// The next `double`'s bits: from the vector half of the save area while `fp_offset` is inside
+    /// it, sixteen bytes a register, then from the stack (psABI 3.5.7, D748).
+    pub(crate) fn next_float(&mut self) -> Option<u64> {
+        let from = if self.fp_offset < VECTOR_SAVE_AREA_END {
+            if !plausible(self.save_area) {
+                return None;
+            }
+            let at = self.save_area.checked_add(u64::from(self.fp_offset))?;
+            self.fp_offset += 16;
+            at
+        } else {
+            self.next_overflow()?
+        };
+        // SAFETY: as in `next_integer`.
+        Some(unsafe { read_word(from) })
+    }
+
+    /// The next stack argument's address, of either class.
+    fn next_overflow(&mut self) -> Option<u64> {
+        if !plausible(self.overflow) {
+            return None;
+        }
+        let at = self.overflow;
+        self.overflow = self.overflow.checked_add(8)?;
+        Some(at)
+    }
+}
+
+/// The word at `from`.
+///
+/// # Safety
+///
+/// Eight bytes at `from` must be readable.
+unsafe fn read_word(from: u64) -> u64 {
+    // SAFETY: the caller guarantees eight readable bytes.
+    unsafe { std::ptr::read_unaligned(crate::ptr(from).cast_const().cast::<u64>()) }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{INTEGER_SAVE_AREA, VaList};
+    use super::{INTEGER_SAVE_AREA, VECTOR_SAVE_AREA_END, VaList};
 
     /// A register save area holding six known words, and a stack area holding two more, boxed so
     /// the addresses are real and stable.
@@ -212,6 +263,33 @@ mod tests {
         ]);
         // SAFETY: `block` is 24 readable bytes laid out as a `va_list`.
         let list = unsafe { VaList::read(block.as_ptr() as u64) }.expect("non-null");
-        assert_eq!(list, VaList::new(16, 0xDEAD_0000, 0xBEEF_0000));
+        assert_eq!(
+            list,
+            VaList::new(16, 0xDEAD_0000, 0xBEEF_0000).with_fp_offset(48)
+        );
+    }
+
+    /// A `double` comes from the vector half of the save area, sixteen bytes a register from
+    /// `fp_offset`, and past it from the same stack the integers use, in order (D748).
+    #[test]
+    fn a_double_comes_from_the_vector_half_then_the_stack() {
+        // Six integer words, then eight sixteen-byte vector slots, the low half of each the value.
+        let mut save = Box::new([0_u64; 6 + 16]);
+        for register in 0..8 {
+            save[6 + register * 2] = 1000 + register as u64;
+            save[6 + register * 2 + 1] = 0xFFFF;
+        }
+        let overflow = Box::new([100_u64, 101]);
+        let mut list = VaList::new(0, overflow.as_ptr() as u64, save.as_ptr() as u64)
+            .with_fp_offset(INTEGER_SAVE_AREA + 6 * 16);
+        assert_eq!(list.next_float(), Some(1006), "xmm6");
+        assert_eq!(
+            list.next_float(),
+            Some(1007),
+            "xmm7, never a slot's high half"
+        );
+        assert_eq!(list.next_float(), Some(100), "then the stack");
+        list = list.with_fp_offset(VECTOR_SAVE_AREA_END);
+        assert_eq!(list.next_float(), Some(101), "sharing its cursor");
     }
 }
