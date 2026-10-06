@@ -218,7 +218,10 @@ pub struct Region {
 /// exactly as long as the address space that owns it.
 #[derive(Debug, Default)]
 pub struct AddressSpace {
-    regions: Vec<Region>,
+    /// The reserved regions by base. They never overlap, so the one a range could overlap or lie
+    /// inside is the last to start before the range ends: a lookup, not a scan, which a guest
+    /// mapping tens of thousands of ranges needs.
+    regions: std::collections::BTreeMap<u64, Region>,
     held: Vec<Reservation>,
 }
 
@@ -226,14 +229,24 @@ impl AddressSpace {
     /// Creates an empty address space.
     pub const fn new() -> Self {
         Self {
-            regions: Vec::new(),
+            regions: std::collections::BTreeMap::new(),
             held: Vec::new(),
         }
     }
 
     /// Every region reserved so far, in insertion order.
-    pub fn regions(&self) -> &[Region] {
-        &self.regions
+    pub fn regions(&self) -> impl Iterator<Item = &Region> {
+        self.regions.values()
+    }
+
+    /// The region holding `address`, if one does.
+    #[must_use]
+    pub fn region_at(&self, address: u64) -> Option<&Region> {
+        self.regions
+            .range(..=address)
+            .next_back()
+            .map(|(_, r)| r)
+            .filter(|r| address < r.base.saturating_add(r.len))
     }
 
     /// Checks a request against the ABI rules and existing reservations.
@@ -261,11 +274,10 @@ impl AddressSpace {
             });
         }
         let end = base.saturating_add(len);
-        for r in &self.regions {
-            let r_end = r.base.saturating_add(r.len);
-            if base < r_end && r.base < end {
-                return Err(MemError::Conflict { base, len });
-            }
+        if let Some((_, r)) = self.regions.range(..end).next_back()
+            && base < r.base.saturating_add(r.len)
+        {
+            return Err(MemError::Conflict { base, len });
         }
         Ok(())
     }
@@ -298,7 +310,7 @@ impl AddressSpace {
             len,
             protection,
         };
-        self.regions.push(region);
+        self.regions.insert(base, region);
         self.held.push(held);
         Ok(region)
     }
@@ -312,8 +324,9 @@ impl AddressSpace {
     pub fn owns(&self, base: u64, len: u64) -> bool {
         let end = base.saturating_add(len);
         self.regions
-            .iter()
-            .any(|r| r.base <= base && end <= r.base.saturating_add(r.len))
+            .range(..=base)
+            .next_back()
+            .is_some_and(|(_, r)| end <= r.base.saturating_add(r.len))
     }
 
     /// Changes the protection of a range already covered by a reservation.
@@ -345,11 +358,14 @@ mod tests {
 
     fn space_with(base: u64, len: u64) -> AddressSpace {
         let mut s = AddressSpace::new();
-        s.regions.push(Region {
+        s.regions.insert(
             base,
-            len,
-            protection: Protection::READ_WRITE,
-        });
+            Region {
+                base,
+                len,
+                protection: Protection::READ_WRITE,
+            },
+        );
         s
     }
 
@@ -383,6 +399,35 @@ mod tests {
             !AddressSpace::new().owns(0x7200_0000_0000, GUEST_PAGE_SIZE),
             "an empty space owns nothing"
         );
+    }
+
+    /// A range conflicts with a region it shares a page with, and with no other: one ending where
+    /// a region begins, or beginning where one ends, is free, and so is the gap between two.
+    #[test]
+    fn a_range_conflicts_only_where_it_shares_a_page() {
+        let page = GUEST_PAGE_SIZE;
+        let mut s = space_with(0x10 * page, 4 * page);
+        s.regions.insert(
+            0x20 * page,
+            Region {
+                base: 0x20 * page,
+                len: 2 * page,
+                protection: Protection::READ_WRITE,
+            },
+        );
+        let conflicts = |base: u64, len: u64| {
+            matches!(s.validate(base, len, false), Err(MemError::Conflict { .. }))
+        };
+        assert!(
+            !conflicts(0x0c * page, 4 * page),
+            "ends where the first begins"
+        );
+        assert!(conflicts(0x0c * page, 5 * page), "its first page");
+        assert!(conflicts(0x13 * page, page), "its last page");
+        assert!(!conflicts(0x14 * page, 0x0c * page), "the whole gap");
+        assert!(conflicts(0x14 * page, 0x0d * page), "into the second");
+        assert!(conflicts(0x08 * page, 0x30 * page), "around both");
+        assert!(!conflicts(0x22 * page, page), "past the last");
     }
 
     #[test]

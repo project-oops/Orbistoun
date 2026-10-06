@@ -1046,7 +1046,6 @@ pub fn with_guest_mappings<T>(read: impl FnOnce(&[(u64, u64)]) -> T) -> Option<T
     let space = mappings().try_lock().ok()?;
     let ranges: Vec<(u64, u64)> = space
         .regions()
-        .iter()
         .map(|r| (r.base, r.base.saturating_add(r.len)))
         .collect();
     let answer = read(&ranges);
@@ -1117,11 +1116,7 @@ fn region_containing(addr: u64) -> Option<(u64, u64)> {
         (addr >= base && addr < end).then_some((base, end))
     };
     if let Ok(space) = mappings().lock() {
-        if let Some(region) = space
-            .regions()
-            .iter()
-            .find(|r| addr >= r.base && addr < r.base.saturating_add(r.len))
-        {
+        if let Some(region) = space.region_at(addr) {
             return Some((region.base, region.base.saturating_add(region.len)));
         }
     }
@@ -1183,18 +1178,11 @@ fn guest_range_allows(base: u64, len: u64, write: bool) -> bool {
     }
     let end = base.saturating_add(len);
     if let Ok(space) = mappings().lock()
-        && space
-            .regions()
-            .iter()
-            .any(|r| base >= r.base && base < r.base.saturating_add(r.len))
+        && space.region_at(base).is_some()
     {
         let mut cursor = base;
         while cursor < end {
-            let Some(region) = space
-                .regions()
-                .iter()
-                .find(|r| cursor >= r.base && cursor < r.base.saturating_add(r.len))
-            else {
+            let Some(region) = space.region_at(cursor) else {
                 return false;
             };
             let allowed = if write {
@@ -4053,7 +4041,7 @@ const fn query_protection(protection: orbistoun_mem::Protection) -> u32 {
 fn query_region(addr: u64) -> Option<QueryRegion> {
     let within = |base: u64, len: u64| addr >= base && addr < base.saturating_add(len);
     if let Ok(space) = mappings().lock() {
-        if let Some(region) = space.regions().iter().find(|r| within(r.base, r.len)) {
+        if let Some(region) = space.region_at(addr) {
             let (start, end) = (region.base, region.base.saturating_add(region.len));
             // What the guest asked for, where the hardware's answer to that is measured; 0 otherwise, never
             // orbistoun's own grant.

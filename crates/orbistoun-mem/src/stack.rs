@@ -185,7 +185,6 @@ mod tests {
         let span_top = stack
             .space()
             .regions()
-            .iter()
             .map(|r| r.base.saturating_add(r.len))
             .max()
             .expect("a reserved region");
