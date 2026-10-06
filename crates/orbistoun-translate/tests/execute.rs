@@ -2127,7 +2127,8 @@ fn source_modifiers_apply_and_apply_in_order() {
     );
 }
 
-/// The clamp flag and the output multiplier are refused by name at compute defaults.
+/// The clamp flag is refused by name at compute defaults, and the output multiplier on a result
+/// it does not scale.
 #[test]
 fn a_modifier_that_is_not_translated_is_refused() {
     // Both change the result; ignoring either computes something close to right. Needs no
@@ -2135,11 +2136,13 @@ fn a_modifier_that_is_not_translated_is_refused() {
     let table = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
 
-    for (word0_extra, word1_extra, expected) in [
-        (1 << 15, 0, "clamps its result"),
-        (0, 1 << 27, "output multiplier"),
+    for (name, word0_extra, word1_extra, expected) in [
+        ("v_add_f32_e64", 1 << 15, 0, "clamps its result"),
+        // v_cndmask_b32_e64 v1, v0, 1.0, vcc: a select has no float result to scale.
+        ("v_cndmask_b32_e64", 0, 1 << 27, "output multiplier"),
     ] {
-        let mut encoded = vop3("v_add_f32_e64", 1, [vgpr_code(0), F_1, 0], 0, 0);
+        let third = if name == "v_cndmask_b32_e64" { 106 } else { 0 };
+        let mut encoded = vop3(name, 1, [vgpr_code(0), F_1, third], 0, 0);
         encoded[0] |= word0_extra;
         encoded[1] |= word1_extra;
         let program = [encoded[0], encoded[1], s_endpgm()];
@@ -2223,6 +2226,45 @@ fn the_output_clamp_holds_a_float_result_to_the_unit_range() {
         nan & 0x7F80_0000 == 0x7F80_0000 && nan & 0x007F_FFFF != 0,
         "without DX10_CLAMP a NaN passes through, got {nan:#x}"
     );
+}
+
+/// The output multiplier scales a float result by two, four or a half, before the clamp: the RDNA
+/// ISA's `OMOD`, second word bits 28:27. STKT00001's vertex shader at `0x403802000` carries
+/// `v_mul_f32_e64 v6, v6, v10 mul:2` (`d5080006 0a021506`).
+#[test]
+fn the_output_multiplier_scales_a_float_result_before_the_clamp() {
+    const CLAMP: u32 = 1 << 15;
+    if !device_or_skip("the_output_multiplier_scales_a_float_result_before_the_clamp") {
+        return;
+    }
+    let scaled_mul = |dst: u32, omod: u32, clamp: bool| {
+        // v0 * 1.5
+        let mut encoded = vop3("v_mul_f32_e64", dst, [vgpr_code(0), vgpr_code(1), 0], 0, 0);
+        encoded[1] |= omod << 27;
+        if clamp {
+            encoded[0] |= CLAMP;
+        }
+        encoded
+    };
+    let mut program = vec![v_mov_code(0, F_1)];
+    program.extend(v_mov_literal(1, 0x3FC0_0000)); // 1.5
+    program.extend(scaled_mul(4, 1, false)); // 1.5 * 2 = 3
+    program.extend(scaled_mul(5, 2, false)); // 1.5 * 4 = 6
+    program.extend(scaled_mul(6, 3, false)); // 1.5 / 2 = 0.75
+    program.extend(scaled_mul(7, 3, true)); // 0.75, inside the range
+    program.extend(scaled_mul(2, 0, true)); // 1.5 -> 1
+    program.push(s_endpgm());
+
+    let registers = run_with_dx10_clamp(true, &program);
+    assert_eq!(vector(&registers, 4), 0x4040_0000, "mul:2");
+    assert_eq!(vector(&registers, 5), 0x40C0_0000, "mul:4");
+    assert_eq!(vector(&registers, 6), 0x3F40_0000, "div:2");
+    assert_eq!(
+        vector(&registers, 7),
+        0x3F40_0000,
+        "div:2 comes first, so the clamp sees 0.75 and keeps it"
+    );
+    assert_eq!(vector(&registers, 2), BITS_1);
 }
 
 /// A clamp on a result it does not clamp, such as a select, is refused.

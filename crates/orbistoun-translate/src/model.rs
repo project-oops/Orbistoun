@@ -2847,6 +2847,20 @@ fn long_form_arithmetic<M: Model + ?Sized>(
     let register = u32::from(*register);
     let sources: Vec<Operand> = instruction.operands[1..].to_vec();
 
+    // The output multiplier: applied to a 32-bit float result, before the clamp, and refused by
+    // name otherwise.
+    let scale = output_scale(modifiers.output_multiplier);
+    if scale.is_some() && (name == CNDMASK || name == "v_div_fmas_f32" || !result_is_f32(name)) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "this instruction scales a result this translation does not scale by its output ",
+                "multiplier - on a select, a scaled multiply-add or a non-float result it is not ",
+                "translated"
+            ),
+        });
+    }
+
     // The output clamp: applied to a 32-bit float result in a stage whose NaN rule is known, and
     // refused by name otherwise.
     let clamp = if modifiers.clamp {
@@ -2888,6 +2902,13 @@ fn long_form_arithmetic<M: Model + ?Sized>(
             read.push(apply_modifiers(model, raw, modifiers, index));
         }
         let value = combine(model, instruction, name, &read)?;
+        let value = match scale {
+            Some(bits) => {
+                let factor = model.constant(bits);
+                model.f32_binary(op::FMUL, value, factor)
+            }
+            None => value,
+        };
         let value = match clamp {
             Some(nan_to_zero) => clamp_unit(model, value, nan_to_zero),
             None => value,
@@ -2896,6 +2917,17 @@ fn long_form_arithmetic<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// The factor an output multiplier field scales a float result by, as `f32` bits: 1 is two, 2 is
+/// four, 3 is a half (RDNA ISA, `OMOD`); 0 is none.
+const fn output_scale(field: u32) -> Option<u32> {
+    match field {
+        1 => Some(0x4000_0000),
+        2 => Some(0x4080_0000),
+        3 => Some(0x3F00_0000),
+        _ => None,
+    }
 }
 
 /// Whether a long-form vector instruction's result is a 32-bit float, from its name: an `_f32`

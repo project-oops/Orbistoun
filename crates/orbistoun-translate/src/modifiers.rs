@@ -3,10 +3,11 @@
 //! These bits are neither operands nor opcode, so the operand solver and encoding table
 //! ignore them, yet each changes the result: `v_add_f32_e64 v0, v1, -v2` differs from the
 //! unnegated form by one bit. The positions were read from a reference assembler. `neg` and
-//! `abs` are applied. The output multiplier is refused by name. `clamp` is applied only on a
-//! long-form instruction with a 32-bit float result, in a stage whose `DX10_CLAMP` mode is
-//! known, where it clamps to `[0, 1]` (how a compiler folds `clamp(x, 0.0, 1.0)`); on an
-//! integer result the same bit saturates, and everywhere else it is refused.
+//! `abs` are applied. The output multiplier and `clamp` are applied only on a long-form
+//! instruction with a 32-bit float result, and refused by name everywhere else: the multiplier
+//! scales the result by two, four or a half, and `clamp`, in a stage whose `DX10_CLAMP` mode is
+//! known, then holds it to `[0, 1]` (how a compiler folds `clamp(x, 0.0, 1.0)`); on an integer
+//! result the same bit saturates.
 
 use orbistoun_shader::Instruction;
 
@@ -37,6 +38,9 @@ pub struct Modifiers {
     /// The output clamp. Only [`Modifiers::read_allowing_clamp`] reports it; [`Modifiers::read`]
     /// refuses it.
     pub clamp: bool,
+    /// The output multiplier's field: 1 doubles the result, 2 quadruples it, 3 halves it. Only
+    /// [`Modifiers::read_allowing_clamp`] reports it; [`Modifiers::read`] refuses it.
+    pub output_multiplier: u32,
 }
 
 impl Modifiers {
@@ -56,13 +60,13 @@ impl Modifiers {
         Self::read_with(instruction, has_scalar_destination, false)
     }
 
-    /// Reads the modifiers as [`Modifiers::read`] does, but reports the clamp flag in
-    /// [`Modifiers::clamp`] instead of refusing it, for the caller that knows the result type
-    /// and the stage's mode.
+    /// Reads the modifiers as [`Modifiers::read`] does, but reports the clamp flag and the output
+    /// multiplier instead of refusing them, for the caller that knows the result type and the
+    /// stage's mode.
     ///
     /// # Errors
     ///
-    /// A non-zero output multiplier.
+    /// None today; the signature matches [`Modifiers::read`].
     pub fn read_allowing_clamp(
         instruction: &Instruction,
         has_scalar_destination: bool,
@@ -73,7 +77,7 @@ impl Modifiers {
     fn read_with(
         instruction: &Instruction,
         has_scalar_destination: bool,
-        allow_clamp: bool,
+        allow_result: bool,
     ) -> Result<Self, TranslateError> {
         // A short-form instruction has no second word and no modifier flags.
         let Some(second) = instruction.second_word else {
@@ -81,7 +85,7 @@ impl Modifiers {
         };
 
         let clamp = instruction.word & (1 << CLAMP_SHIFT) != 0;
-        if clamp && !allow_clamp {
+        if clamp && !allow_result {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: concat!(
@@ -91,7 +95,8 @@ impl Modifiers {
                 ),
             });
         }
-        if (second >> OMOD_SHIFT) & OMOD_MASK != 0 {
+        let output_multiplier = (second >> OMOD_SHIFT) & OMOD_MASK;
+        if output_multiplier != 0 && !allow_result {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: concat!(
@@ -104,6 +109,7 @@ impl Modifiers {
 
         let mut modifiers = Self {
             clamp,
+            output_multiplier,
             ..Self::default()
         };
         for source in 0..3 {
