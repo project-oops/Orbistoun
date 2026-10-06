@@ -1206,25 +1206,41 @@ fn guest_range_allows(base: u64, len: u64, write: bool) -> bool {
 /// Bump-allocated, and a released base is reused only after [`quarantine::DEPTH`] newer releases
 /// (D749), so a guest that unmaps and remaps is not handed an address it still holds a stale
 /// pointer to.
-fn next_mapping_base(len: u64) -> u64 {
+///
+/// The answer is a multiple of `align`, and `[base, base + len)` lies inside the slot taken for it,
+/// so the next mapping never starts inside this one.
+fn next_mapping_base(len: u64, align: u64) -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(MAPPING_BASE);
-    let step = mapping_slot(len);
-    if let Some(base) = released_bases().lock().ok().and_then(|mut q| q.take(step)) {
-        return base;
-    }
-    NEXT.fetch_add(step, Ordering::Relaxed)
+    let step = mapping_slot(len, align);
+    let start = released_bases()
+        .lock()
+        .ok()
+        .and_then(|mut q| q.take(step))
+        .unwrap_or_else(|| NEXT.fetch_add(step, Ordering::Relaxed));
+    placed_in_slot(start, align)
 }
 
-/// The address space one mapping of `len` bytes takes from the bump allocator: stepped by the
-/// host's reservation granularity, not the guest page size, since Windows rounds a reservation base
-/// down to 64 KiB; and padded by one unit so two mappings never share one. Saturating rather than
-/// panicking.
-fn mapping_slot(len: u64) -> u64 {
-    let unit = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
-    len.checked_next_multiple_of(unit)
+/// The unit mapping slots are stepped by: the host's reservation granularity, not the guest page
+/// size, since Windows rounds a reservation base down to 64 KiB.
+fn slot_unit() -> u64 {
+    orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE)
+}
+
+/// The address space one mapping of `len` bytes aligned to `align` takes from the bump allocator:
+/// room to round its start up to `align` and still hold `len`, in whole units, padded by one unit so
+/// two mappings never share one. Saturating rather than panicking.
+fn mapping_slot(len: u64, align: u64) -> u64 {
+    let unit = slot_unit();
+    len.saturating_add(align.max(unit) - unit)
+        .checked_next_multiple_of(unit)
         .unwrap_or(u64::MAX)
         .saturating_add(unit)
+}
+
+/// Where in a slot starting at `start` a mapping aligned to `align` begins.
+fn placed_in_slot(start: u64, align: u64) -> u64 {
+    start.checked_next_multiple_of(align).unwrap_or(start)
 }
 
 /// Mapping bases `munmap` released, waiting to be reused (D749).
@@ -1400,16 +1416,14 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // asked for corrupts itself.
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let requested = unsafe { guest::read_u64(out) }.unwrap_or(0);
+    let align = alignment.max(slot_unit());
     let base = if requested == 0 {
-        next_mapping_base(len)
+        next_mapping_base(len, align)
     } else {
         requested
     };
     // Checked, because `next_multiple_of` panics on overflow and a guest may pass any value,
     // including the all-ones word some callers use for "no preference" (D156).
-    let align = alignment
-        .max(orbistoun_mem::allocation_granularity())
-        .max(orbistoun_core::GUEST_PAGE_SIZE);
     let (Some(base), Some(len)) = (
         checked_next_multiple_of(base, align),
         checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE),
@@ -1437,7 +1451,7 @@ fn map_named_direct_memory_inner(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // address is refused rather than moved.
     if placed.is_err() && requested == 0 {
         for _ in 0..CONFLICT_RETRIES {
-            let Some(next) = checked_next_multiple_of(next_mapping_base(len), align) else {
+            let Some(next) = checked_next_multiple_of(next_mapping_base(len, align), align) else {
                 break;
             };
             base = next;
@@ -3836,7 +3850,7 @@ fn release_mapping(address: u64, len: u64) {
     if address >= MAPPING_BASE
         && let Ok(mut quarantine) = released_bases().lock()
     {
-        quarantine.release(address, mapping_slot(len));
+        quarantine.release(address, mapping_slot(len, slot_unit()));
     }
 }
 
@@ -3848,12 +3862,12 @@ pub fn mmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if len == 0 {
         return !0; // MAP_FAILED
     }
+    let align = slot_unit();
     let base = if addr == 0 {
-        next_mapping_base(len)
+        next_mapping_base(len, align)
     } else {
         addr
     };
-    let align = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
     let (Some(base), Some(len)) = (
         checked_next_multiple_of(base, align),
         checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE),
@@ -3905,7 +3919,7 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // is unavailable does the arena counter supply one, retried past a conflict.
     let mut reserved = None;
     let first = if hint == 0 {
-        next_mapping_base(len)
+        next_mapping_base(len, align)
     } else {
         hint
     };
@@ -3918,7 +3932,7 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if reserved.is_some() {
             break;
         }
-        if let Some(base) = checked_next_multiple_of(next_mapping_base(len), align) {
+        if let Some(base) = checked_next_multiple_of(next_mapping_base(len, align), align) {
             if space.reserve(base, len, protection).is_ok() {
                 reserved = Some(base);
             }
@@ -7704,6 +7718,32 @@ mod tests {
             "mmap should succeed and return non-MAP_FAILED address"
         );
         assert_ne!(addr, 0, "mmap should return a non-null address");
+    }
+
+    /// A mapping aligned beyond the slot unit still lies inside the slot taken for it, wherever the
+    /// slot starts: rounding its base up to the alignment must not carry it into the next slot,
+    /// where the next mapping would conflict with it. A 2 MiB-aligned 20 MiB direct map overran
+    /// its slot, and TSHP00001's heap ran out of conflict retries (4151 refused) and faulted.
+    #[test]
+    fn an_aligned_mapping_lies_inside_its_slot() {
+        let unit = super::slot_unit();
+        for (len, align) in [
+            (0x0138_4000_u64, 0x20_0000_u64),
+            (0x4000, unit),
+            (0x8000, 0x10_0000),
+            (0x30_0000, 0x40_0000),
+        ] {
+            let step = super::mapping_slot(len, align);
+            for k in 0..64_u64 {
+                let start = super::MAPPING_BASE + k * unit;
+                let base = super::placed_in_slot(start, align);
+                assert_eq!(base % align, 0, "aligned");
+                assert!(
+                    base + len <= start + step,
+                    "{len:#x} at {align:#x} from {start:#x} overruns its {step:#x} slot"
+                );
+            }
+        }
     }
 
     /// Unmapping the whole of an anonymous mapping releases its host memory; unmapping a piece of
