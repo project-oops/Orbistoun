@@ -152,11 +152,16 @@ pub fn hide(host: PathBuf) {
     }
 }
 
-/// Whether `host` is hidden, or lies under something hidden.
-pub fn is_hidden(host: &Path) -> bool {
-    hidden()
-        .lock()
-        .is_ok_and(|hidden| hidden.iter().any(|h| host.starts_with(h)))
+/// Whether `host`, found under the mounted directory `root`, is hidden or lies under something
+/// hidden inside `root`. A hidden entry hides what is inside the directory a guest is looking
+/// through, never the directory itself: a staged title's writable layer lies inside its overlay,
+/// which is hidden from the library copy's `/app0`, and is that title's own (D756).
+pub fn is_hidden(root: &Path, host: &Path) -> bool {
+    hidden().lock().is_ok_and(|hidden| {
+        hidden
+            .iter()
+            .any(|h| h.starts_with(root) && h != root && host.starts_with(h))
+    })
 }
 
 /// Forgets every mount.
@@ -193,7 +198,7 @@ pub fn is_contained(relative: &str) -> bool {
 /// checked. On a case-sensitive host this is a plain `exists`.
 #[cfg(not(windows))]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
-    !is_hidden(&root.join(rest)) && root.join(rest).exists()
+    !is_hidden(root, &root.join(rest)) && root.join(rest).exists()
 }
 
 /// The Windows half: `canonicalize` returns the path's real on-disk case, so a wrong-case
@@ -202,7 +207,7 @@ fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
 /// `\\?\` prefix are not part of the test.
 #[cfg(windows)]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
-    if is_hidden(&root.join(rest)) {
+    if is_hidden(root, &root.join(rest)) {
         return false;
     }
     let Ok(real) = std::fs::canonicalize(root.join(rest)) else {
@@ -541,6 +546,11 @@ mod tests {
         super::layer("/app0", root.clone());
         super::hide(root.join("link-plan.json"));
         super::hide(root.join("savestates"));
+        // A layer that lies inside something hidden is still the guest's own: a staged title's
+        // writable layer is inside its overlay.
+        let inner = root.join("savestates");
+        super::layer("/data/homebrew/x", inner.clone());
+        assert!(super::resolve_existing("/data/homebrew/x/one").is_some());
         assert!(super::resolve_existing("/app0/eboot.bin").is_some());
         assert!(super::resolve_existing("/app0/link-plan.json").is_none());
         assert!(super::resolve_existing("/app0/savestates/one").is_none());

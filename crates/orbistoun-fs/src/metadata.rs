@@ -429,7 +429,7 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
         };
         for found in reading.flatten() {
             // What orbistoun keeps beside a title's files is not the title's (D756).
-            if crate::mount::is_hidden(&found.path()) {
+            if crate::mount::is_hidden(&host, &found.path()) {
                 continue;
             }
             let name = found.file_name().to_string_lossy().into_owned();
