@@ -3333,6 +3333,8 @@ const IMAGE_TYPE_2D: u32 = 9;
 const FORMAT_8_8_8_8_UNORM: u32 = 56;
 /// `GFX10_FORMAT_8_UNORM` (`gfx10-rsrc.json:6`): one eight-bit normalised channel.
 const FORMAT_8_UNORM: u32 = 1;
+/// `GFX10_FORMAT_BC3_UNORM` (`gfx10-rsrc.json:127`): four-by-four texels to a sixteen-byte block.
+const FORMAT_BC3_UNORM: u32 = 173;
 /// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
 const FORMAT_32_32_32_32_UINT: u32 = 75;
 
@@ -3506,6 +3508,7 @@ fn null_texture(slot: u32) -> RenderCommand {
         width: 1,
         height: 1,
         sampling: crate::registers::TextureSampling::default(),
+        encoding: crate::backend::TextureEncoding::Rgba8,
     }
 }
 
@@ -3539,6 +3542,9 @@ fn texture_from_words(
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
     let descriptor = decode_image_descriptor(words);
+    if descriptor.format == FORMAT_BC3_UNORM {
+        return read_bc3_texture(&descriptor, words[3], slot, memory, texels);
+    }
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     match (descriptor.tiling, format) {
         (SwizzleMode::Linear, TexelFormat::Rgba8) => {}
@@ -3587,6 +3593,7 @@ fn texture_from_words(
                 width: descriptor.width,
                 height: descriptor.height,
                 sampling: crate::registers::TextureSampling::default(),
+                encoding: crate::backend::TextureEncoding::Rgba8,
             },
             format,
             selects,
@@ -3633,6 +3640,7 @@ fn texture_from_words(
             width: descriptor.width,
             height: descriptor.height,
             sampling: crate::registers::TextureSampling::default(),
+            encoding: crate::backend::TextureEncoding::Rgba8,
         },
         format,
         selects,
@@ -3691,6 +3699,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         width,
         height,
         sampling,
+        encoding: crate::backend::TextureEncoding::Rgba8,
     } = bound
     else {
         return bound;
@@ -3703,6 +3712,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             width,
             height,
             sampling,
+            encoding: crate::backend::TextureEncoding::Rgba8,
         };
     }
     let pick = |channels: [u8; 4], select: u32| match select {
@@ -3736,6 +3746,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         width,
         height,
         sampling,
+        encoding: crate::backend::TextureEncoding::Rgba8,
     }
 }
 
@@ -3812,6 +3823,7 @@ fn read_tiled_texture(
             width,
             height,
             sampling: crate::registers::TextureSampling::default(),
+            encoding: crate::backend::TextureEncoding::Rgba8,
         });
     }
     let since = orbistoun_mem::watch::mark(surface.base, span as u64);
@@ -3853,7 +3865,93 @@ fn read_tiled_texture(
         width,
         height,
         sampling: crate::registers::TextureSampling::default(),
+        encoding: crate::backend::TextureEncoding::Rgba8,
     })
+}
+
+/// A `BC3_UNORM` texture's blocks, read whole from its `64KB_S` surface and laid out row-major, a
+/// block (four words) for every four-by-four texels, for the host to sample natively. Only a 2D,
+/// single-level, uncompressed image returning its channels as they are is read; any other is `None`,
+/// and the draw is refused rather than sampled some other way.
+fn read_bc3_texture(
+    descriptor: &ImageDescriptor,
+    word3: u32,
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    const WORDS_PER_BLOCK: usize = 4;
+    let single_level = descriptor.levels == 1 && descriptor.base_level == descriptor.last_level;
+    if word3 >> 28 != IMAGE_TYPE_2D
+        || destination_selects(word3) != IDENTITY_SELECTS
+        || descriptor.tiling != SwizzleMode::Tiled64KbS
+        || descriptor.compression.is_some()
+        || !single_level
+    {
+        return None;
+    }
+    let (width, height) = (descriptor.width, descriptor.height);
+    let (across, down) = (width.div_ceil(4), height.div_ceil(4));
+    let span = crate::tiling::surface_bytes_64kb_s_bpp16(across, down);
+    let key = (descriptor.base, width, height, 1 << 22);
+    if let Some(cached) = texels.get(&key)
+        && cached.since.and_then(|since| {
+            orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
+        }) == Some(false)
+    {
+        return Some(bc3_bind(
+            slot,
+            cached.hash,
+            cached.texels.clone(),
+            (width, height),
+        ));
+    }
+    let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
+    let bytes = memory.read(descriptor.base, span)?;
+    let mut blocks = Vec::with_capacity(across as usize * down as usize * WORDS_PER_BLOCK);
+    for y in 0..down {
+        for x in 0..across {
+            let at = crate::tiling::tiled_byte_offset_64kb_s_bpp16(x, y, across);
+            let block = bytes.get(at..at + WORDS_PER_BLOCK * 4)?;
+            blocks.extend(
+                block
+                    .chunks_exact(4)
+                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])),
+            );
+        }
+    }
+    let hash = crate::content_hash(&blocks);
+    let shared: std::sync::Arc<[u32]> = blocks.into();
+    if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
+        texels.clear();
+    }
+    texels.insert(
+        key,
+        CachedTexels {
+            since,
+            hash,
+            texels: std::sync::Arc::clone(&shared),
+        },
+    );
+    Some(bc3_bind(slot, hash, shared, (width, height)))
+}
+
+/// A [`RenderCommand::BindTexture`] of `BC3` blocks.
+fn bc3_bind(
+    slot: u32,
+    hash: u64,
+    texels: std::sync::Arc<[u32]>,
+    (width, height): (u32, u32),
+) -> RenderCommand {
+    RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling: crate::registers::TextureSampling::default(),
+        encoding: crate::backend::TextureEncoding::Bc3,
+    }
 }
 
 /// Whether a texture's compression keys say every block is cleared to zero: `Some(false)` for an
@@ -4710,6 +4808,55 @@ mod tests {
             (0, Some([TextureWrap::ClampHalfBorder; 2])),
             "saturated: bound as the sampler says"
         );
+    }
+
+    /// A `BC3_UNORM` texture in `64KB_S` is bound as its blocks, detiled row-major, for the host to
+    /// sample natively: an 8 x 8 image is two blocks across and two down, each read from where
+    /// addrlib's equation puts it.
+    #[test]
+    fn a_bc3_texture_binds_its_blocks_in_row_order() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; crate::tiling::surface_bytes_64kb_s_bpp16(2, 2)];
+        for (y, x) in [(0u32, 0u32), (0, 1), (1, 0), (1, 1)] {
+            let at = crate::tiling::tiled_byte_offset_64kb_s_bpp16(x, y, 2);
+            for word in 0..4u32 {
+                let value = (y << 12) | (x << 8) | word;
+                bytes[at + 4 * word as usize..][..4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        let (width, height) = (8u32, 8u32);
+        let words = [
+            0x100,
+            (173 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            // 2D, ADDR_SW_64KB_S, the channels as they are.
+            0x9090_0fac,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: 8,
+            height: 8,
+            encoding: crate::backend::TextureEncoding::Bc3,
+            ..
+        }) = bound
+        else {
+            panic!("bound as BC3 blocks: {bound:?}");
+        };
+        let tags: Vec<u32> = texels.chunks(4).map(|block| block[0]).collect();
+        assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
+        assert_eq!(texels[1], 1, "a block's words in order");
     }
 
     /// A pixel shader that samples through a descriptor and sampler still in its user data binds the

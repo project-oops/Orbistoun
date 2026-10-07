@@ -53,24 +53,43 @@ pub enum BufferSource {
     Computed(Box<Computed>),
 }
 
-/// A buffer access whose descriptor the program computes (D753): the program before it, and the
-/// registers that hold the descriptor and the scalar offset when it is reached.
+/// An access whose descriptor or base the program computes (D753): the program before it, and the
+/// registers that hold what it reads through and its scalar offset when it is reached.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Computed {
     /// The program's words before the access.
     pub prefix: Vec<u32>,
     /// The access's byte offset in the program.
     pub at: u32,
-    /// The first scalar register of the four-word descriptor.
-    pub descriptor: u16,
-    /// The scalar offset field's code: a register, or an inline constant.
+    /// What the access reads through.
+    pub through: ComputedAccess,
+    /// The scalar offset field's code: a register, `null`, or an inline constant.
     pub soffset: u8,
     /// The scalar register the stage's first user-data word lands in.
     pub first_register: u32,
     /// How many user-data words the stage has; the registers past them are unknown at entry.
     pub user_data: u32,
-    /// What the access reaches, from the descriptor's base past the scalar offset.
-    pub reads: DescriptorReads,
+}
+
+/// What a computed access reads through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ComputedAccess {
+    /// A buffer descriptor in four scalar registers from `first`, reaching what `reads` says from
+    /// its base past the scalar offset.
+    Descriptor {
+        /// The descriptor's first register.
+        first: u16,
+        /// What the access reaches.
+        reads: DescriptorReads,
+    },
+    /// A scalar load's 64-bit base in the pair from `base`, reaching `end` bytes past the base and
+    /// the scalar offset.
+    Pointer {
+        /// The base's low register.
+        base: u16,
+        /// One past the last byte the load reads.
+        end: u32,
+    },
 }
 
 /// How a program's accesses through one descriptor reach into its buffer: what bounds the bytes a
@@ -229,11 +248,7 @@ fn slots(
     let mut buffers = DrawBuffers::default();
     for (offset, access) in accesses {
         let (key, source) = match access {
-            Access::Computed {
-                descriptor,
-                soffset,
-                reads,
-            } => {
+            Access::Computed { through, soffset } => {
                 let Some(prefix) = prefix_words(decode, offset) else {
                     continue;
                 };
@@ -242,11 +257,10 @@ fn slots(
                     BufferSource::Computed(Box::new(Computed {
                         prefix,
                         at: offset,
-                        descriptor,
+                        through,
                         soffset,
                         first_register,
                         user_data,
-                        reads,
                     })),
                 )
             }
@@ -311,12 +325,10 @@ enum Access {
     Descriptor([DescriptorWord; 4], DescriptorReads),
     /// A scalar load at a base, reaching `end` bytes past it.
     Pointer { base: TableBase, end: u32 },
-    /// Through a descriptor in `descriptor..descriptor + 4`, or with a scalar offset, the program
-    /// computes (D753).
+    /// Through a descriptor or base, or with a scalar offset, the program computes (D753).
     Computed {
-        descriptor: u16,
+        through: ComputedAccess,
         soffset: u8,
-        reads: DescriptorReads,
     },
 }
 
@@ -452,12 +464,21 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
         let [_, Operand::Scalar(base), Operand::Immediate(offset)] = operands else {
             return None;
         };
-        if !plain_scalar_offset(instruction) {
-            return None;
-        }
         let end = u32::try_from(*offset)
             .ok()?
             .checked_add(scalar_words(name) * 4)?;
+        // A load from a base the program computes, or adding a scalar offset, is found per draw
+        // (D753): the offset field is the second word's bits 31:25.
+        let table = table_base(held, *base).filter(|_| plain_scalar_offset(instruction));
+        if name.starts_with("s_load_dword") && table.is_none() {
+            return Some(Access::Computed {
+                through: ComputedAccess::Pointer { base: *base, end },
+                soffset: u8::try_from((instruction.second_word? >> 25) & 0x7f).ok()?,
+            });
+        }
+        if !plain_scalar_offset(instruction) {
+            return None;
+        }
         if name.starts_with("s_buffer_load") {
             let reads = DescriptorReads {
                 scalar_reach: end,
@@ -494,9 +515,11 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
         return match descriptor(held, *first) {
             Some(words) if no_offset => Some(Access::Descriptor(words, reads)),
             _ => Some(Access::Computed {
-                descriptor: *first,
+                through: ComputedAccess::Descriptor {
+                    first: *first,
+                    reads,
+                },
                 soffset: u8::try_from(instruction.second_word? >> 24).ok()?,
-                reads,
             }),
         };
     }
@@ -1044,6 +1067,24 @@ mod tests {
         }
     }
 
+    /// A scalar load adding a scalar offset register is found per draw too (D753), as PPSA28061's
+    /// vertex shader loads its descriptor: the base pair's register, how far the load reaches past
+    /// base and offset, and the offset's code.
+    #[test]
+    fn a_scalar_load_adding_a_scalar_offset_is_computed_per_draw() {
+        // s_load_dwordx4 s[0:3], s[8:9], vcc_hi
+        let program = [0xf408_0004, 0xd600_0000, END];
+        let buffers = traced(&program, 12);
+        let [BufferSource::Computed(computed)] = buffers.sources.as_slice() else {
+            panic!("one computed source: {:?}", buffers.sources);
+        };
+        assert_eq!(
+            (computed.through, computed.soffset),
+            (super::ComputedAccess::Pointer { base: 8, end: 16 }, 0x6b)
+        );
+        assert_eq!(buffers.served.get(&0), Some(&0));
+    }
+
     /// A fetch that adds a scalar offset register is found per draw (D753): the range check does
     /// not see that offset, so the descriptor alone does not bound where it reads. Its source is
     /// the program before it, the descriptor's registers and the offset's code.
@@ -1055,14 +1096,13 @@ mod tests {
         let [BufferSource::Computed(computed)] = buffers.sources.as_slice() else {
             panic!("one computed source: {:?}", buffers.sources);
         };
+        assert!(matches!(
+            computed.through,
+            super::ComputedAccess::Descriptor { first: 0, .. }
+        ));
         assert_eq!(
-            (
-                computed.prefix.as_slice(),
-                computed.at,
-                computed.descriptor,
-                computed.soffset
-            ),
-            (&[0xbf80_0000][..], 4, 0, 5)
+            (computed.prefix.as_slice(), computed.at, computed.soffset),
+            (&[0xbf80_0000][..], 4, 5)
         );
         assert_eq!((computed.first_register, computed.user_data), (0, 6));
         assert_eq!(buffers.served.get(&4), Some(&0));

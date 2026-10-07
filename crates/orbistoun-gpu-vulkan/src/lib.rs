@@ -166,8 +166,22 @@ struct ResidentShader {
 struct BoundTexture {
     texels: std::sync::Arc<[u32]>,
     width: u32,
+    height: u32,
+    encoding: orbistoun_gpu::TextureEncoding,
     hash: u64,
     sampling: orbistoun_gpu::TextureSampling,
+}
+
+impl BoundTexture {
+    /// Its words as a draw binds them.
+    fn words(&self) -> framebuffer::TextureWords<'_> {
+        framebuffer::TextureWords {
+            words: &self.texels,
+            width: self.width,
+            height: Some(self.height),
+            encoding: self.encoding,
+        }
+    }
 }
 
 /// A bound module's words and their content hash.
@@ -443,16 +457,29 @@ impl VulkanBackend {
         );
     }
 
-    /// Binds a texture the following draws sample at `slot`; the second slot is a pixel shader's
-    /// second texture.
-    fn bind_texture(
-        &mut self,
-        slot: u32,
-        (texels, hash): (&std::sync::Arc<[u32]>, u64),
-        (width, height): (u32, u32),
-        sampling: orbistoun_gpu::TextureSampling,
-    ) -> Result<(), BackendError> {
-        if texels.len() != (width as usize) * (height as usize) {
+    /// Binds the texture a [`RenderCommand::BindTexture`] carries, which the following draws sample
+    /// at its slot; the second slot is a pixel shader's second texture.
+    fn bind_texture(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        let &RenderCommand::BindTexture {
+            slot,
+            ref texels,
+            hash,
+            width,
+            height,
+            sampling,
+            encoding,
+        } = command
+        else {
+            return Ok(());
+        };
+        // Texels one word each, or a four-word block for every four-by-four of them.
+        let words = match encoding {
+            orbistoun_gpu::TextureEncoding::Rgba8 => (width as usize) * (height as usize),
+            orbistoun_gpu::TextureEncoding::Bc3 => {
+                width.div_ceil(4) as usize * height.div_ceil(4) as usize * 4
+            }
+        };
+        if texels.len() != words {
             return Err(BackendError::Device(format!(
                 "BindTexture carries {} texels for a {width}x{height} texture",
                 texels.len()
@@ -462,6 +489,8 @@ impl VulkanBackend {
         let bound = Some(BoundTexture {
             texels: std::sync::Arc::clone(texels),
             width,
+            height,
+            encoding,
             hash,
             sampling,
         });
@@ -864,11 +893,11 @@ impl VulkanBackend {
         // The samplers too: each is built with its pipeline's descriptor set.
         self.texture
             .as_ref()
-            .map(|t| (t.hash, t.sampling))
+            .map(|t| (t.hash, t.sampling, t.encoding))
             .hash(&mut hasher);
         self.second_texture
             .as_ref()
-            .map(|t| (t.hash, t.sampling))
+            .map(|t| (t.hash, t.sampling, t.encoding))
             .hash(&mut hasher);
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
@@ -1088,11 +1117,11 @@ impl VulkanBackend {
             mesh_vertices: draw.vertices,
             initial: None,
             user_data: &block,
-            texture: texture.as_ref().map(|t| (&t.texels[..], t.width)),
+            texture: texture.as_ref().map(BoundTexture::words),
             blend: self.blend,
             write_mask: self.write_mask,
             viewport: self.viewport_transform,
-            second_texture: second_texture.as_ref().map(|t| (&t.texels[..], t.width)),
+            second_texture: second_texture.as_ref().map(BoundTexture::words),
             sampling: [
                 texture.as_ref().map(|t| t.sampling).unwrap_or_default(),
                 second_texture
@@ -1346,14 +1375,7 @@ impl RenderBackend for VulkanBackend {
                 Ok(())
             }
             // The guest's own texels, sampled by the draws that follow.
-            RenderCommand::BindTexture {
-                slot,
-                texels,
-                hash,
-                width,
-                height,
-                sampling,
-            } => self.bind_texture(*slot, (texels, *hash), (*width, *height), *sampling),
+            RenderCommand::BindTexture { .. } => self.bind_texture(command),
             RenderCommand::BindDrawBuffers { stage, buffers } => {
                 self.bind_draw_buffers(*stage, buffers)
             }

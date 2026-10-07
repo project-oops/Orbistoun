@@ -1798,6 +1798,8 @@ const ADDR_SW_64KB_R_X: u32 = 27;
 const ADDR_SW_4KB_D_X: u32 = 22;
 /// `ADDR_SW_64KB_D_X` (`addrtypes.h:253`), the mode radeonsi gives a block-compressed texture.
 const ADDR_SW_64KB_D_X: u32 = 26;
+/// `ADDR_SW_64KB_S` (`addrtypes.h:236`): the standard swizzle with no pipe XOR.
+const ADDR_SW_64KB_S: u32 = 9;
 
 /// The tiling (swizzle) mode of a surface - a colour target or a texture.
 ///
@@ -1816,6 +1818,9 @@ pub enum SwizzleMode {
     /// 64KB_D_X (`ADDR_SW_64KB_D_X`), which radeonsi gives a block-compressed texture; modelled at
     /// sixteen bytes a texel, the blocks a compute copy moves.
     Tiled64KbDX,
+    /// 64KB_S (`ADDR_SW_64KB_S`), the standard swizzle with no pipe XOR; modelled at sixteen bytes
+    /// an element, a block-compressed image's blocks.
+    Tiled64KbS,
     /// A mode orbistoun does not model, carried by its raw five-bit swizzle-mode value.
     Other(u32),
 }
@@ -1832,6 +1837,7 @@ pub fn decode_swizzle_mode(field: u32) -> SwizzleMode {
         ADDR_SW_64KB_R_X => SwizzleMode::Tiled64KbRX,
         ADDR_SW_4KB_D_X => SwizzleMode::Tiled4KbDX,
         ADDR_SW_64KB_D_X => SwizzleMode::Tiled64KbDX,
+        ADDR_SW_64KB_S => SwizzleMode::Tiled64KbS,
         other => SwizzleMode::Other(other),
     }
 }
@@ -2392,6 +2398,9 @@ pub enum TextureWrap {
     /// `SQ_TEX_CLAMP_HALF_BORDER` (4, `gfx6.json:621`): GL's `GL_CLAMP`. The coordinate is clamped
     /// to `[0, 1]`, so a linear filter at the edge takes half the border colour (D743).
     ClampHalfBorder,
+    /// `SQ_TEX_CLAMP_BORDER` (6, `gfx6.json:623`): a texel outside the image is the border colour,
+    /// as a host's clamp-to-border is.
+    ClampBorder,
 }
 
 /// A sampler's built-in border colour: `SQ_IMG_SAMP_WORD3.BORDER_COLOR_TYPE`
@@ -2480,9 +2489,10 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         1 => Ok(TextureWrap::Mirror),
         2 => Ok(TextureWrap::ClampToEdge),
         4 => Ok(TextureWrap::ClampHalfBorder),
+        6 => Ok(TextureWrap::ClampBorder),
         _ => Err(concat!(
-            "the sampler clamps to a border or mirrors once, which needs its border colour ",
-            "or a mode with no exact host form"
+            "the sampler mirrors once or clamps to the last texel's mirror, a mode with no ",
+            "exact host form"
         )),
     };
     let filter = |value: u32| match value {
@@ -2502,10 +2512,12 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         1 => BorderColour::OpaqueBlack,
         2 => BorderColour::OpaqueWhite,
         // The table's colour, which only a clamp that reads the border needs.
-        _ if wrap.contains(&TextureWrap::ClampHalfBorder) => {
+        _ if wrap.contains(&TextureWrap::ClampHalfBorder)
+            || wrap.contains(&TextureWrap::ClampBorder) =>
+        {
             return Err(concat!(
-                "the sampler clamps to half a border whose colour is in the border colour ",
-                "table, which is not read"
+                "the sampler clamps to a border whose colour is in the border colour table, ",
+                "which is not read"
             ));
         }
         _ => BorderColour::TransparentBlack,
@@ -2647,7 +2659,7 @@ mod tests {
 
     /// Sampler words as the SDK's GL layer writes them (`gl_state.c`: `cx | cy << 3` in word 0,
     /// `mag << 20 | min << 22 | mip << 26` in word 2) decode to the wrap and filters asked for; a
-    /// border clamp and an anisotropic filter are refused rather than approximated.
+    /// border from the colour table and an anisotropic filter are refused rather than approximated.
     #[test]
     fn a_sampler_descriptor_decodes_to_its_wrap_and_filters() {
         use super::{
@@ -2681,9 +2693,25 @@ mod tests {
         let clamped = decode_sampler_descriptor(words(2, 2, 0, 0, 0)).expect("decodes");
         assert_eq!(clamped.wrap, [TextureWrap::ClampToEdge; 2]);
         assert_eq!(clamped.mip, MipFilter::None);
+        // `CLAMP_BORDER` with a built-in colour, as PPSA28061's pixel shader samples; one whose
+        // colour is in the table, and mirroring once to the border, are refused.
+        let border = decode_sampler_descriptor(words(6, 6, 1, 1, 1)).expect("a border decodes");
+        assert_eq!(
+            (border.wrap, border.border),
+            (
+                [TextureWrap::ClampBorder; 2],
+                BorderColour::TransparentBlack
+            )
+        );
+        let mut table = words(6, 0, 0, 0, 0);
+        table[3] = 3 << 30;
         assert!(
-            decode_sampler_descriptor(words(6, 0, 0, 0, 0)).is_err(),
-            "border"
+            decode_sampler_descriptor(table).is_err(),
+            "a border from the table"
+        );
+        assert!(
+            decode_sampler_descriptor(words(7, 0, 0, 0, 0)).is_err(),
+            "mirror once to the border"
         );
         let half = decode_sampler_descriptor(words(0, 4, 1, 1, 0)).expect("GL_CLAMP decodes");
         assert_eq!(

@@ -8,7 +8,9 @@ data, constants and loads at fixed places is still traced (D733). Its source is 
 the access. For each draw, that prefix runs on the host over the draw's user data and guest memory,
 and the descriptor and offset the scalar registers then hold are what the draw binds: the range from
 the descriptor's base through the offset plus the descriptor's extent, and its fourth word for a
-format load (D738).
+format load (D738). A scalar load from a base the program computes, or adding a scalar offset,
+is found the same way: its range starts at the base plus the offset and runs as far as the load
+reads.
 
 The prefix runs through the translator's own instruction semantics, driven by a model whose values
 are numbers rather than SPIR-V. Nothing about an instruction is written twice. A value the prefix

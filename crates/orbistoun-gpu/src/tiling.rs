@@ -136,6 +136,49 @@ pub fn tiled_byte_offset_64kb_dx_bpp16_xor(x: u32, y: u32, width: u32, pipe_bank
     block * BLOCK_BYTES + (offset ^ (usize::from(pipe_bank_xor) << 8))
 }
 
+/// Where each of the low six bits of `x`, then of `y`, lands in a 128-bpp `64KB_S` block's byte
+/// offset - the standard swizzle, with no pipe XOR: a block-compressed image's elements, sixteen
+/// bytes each.
+///
+/// From addrlib for this console's configuration, read off `Addr2ComputeSurfaceAddrFromCoord` as
+/// [`DX_BPP16_X_BITS`] was, and the whole equation - row-major 64 x 64-element blocks across the
+/// pitch, the XOR of these inside - for every element of a 256 x 256 surface and of a 1019 x 187
+/// one (pitch 1024).
+const S_BPP16_X_BITS: [usize; 6] = [0x40, 0x80, 0x200, 0x800, 0x2000, 0x8000];
+/// The same for `y`.
+const S_BPP16_Y_BITS: [usize; 6] = [0x10, 0x20, 0x100, 0x400, 0x1000, 0x4000];
+
+/// Byte offset of element `(x, y)` in a 128-bpp `64KB_S` surface `width` elements wide: its
+/// 64 x 64 block, row-major across the pitch (the width rounded up to whole blocks), then the XOR of
+/// its coordinate bits' places.
+#[must_use]
+pub fn tiled_byte_offset_64kb_s_bpp16(x: u32, y: u32, width: u32) -> usize {
+    let blocks_per_row = width.div_ceil(DX_BPP16_BLOCK_EXTENT) as usize;
+    let block = (y / DX_BPP16_BLOCK_EXTENT) as usize * blocks_per_row
+        + (x / DX_BPP16_BLOCK_EXTENT) as usize;
+    let mut offset = 0;
+    for (bit, place) in S_BPP16_X_BITS.iter().enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in S_BPP16_Y_BITS.iter().enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    block * BLOCK_BYTES + offset
+}
+
+/// Bytes a whole 128-bpp `64KB_S` surface `width` x `height` elements occupies: every block it
+/// touches, whole.
+#[must_use]
+pub fn surface_bytes_64kb_s_bpp16(width: u32, height: u32) -> usize {
+    width.div_ceil(DX_BPP16_BLOCK_EXTENT) as usize
+        * height.div_ceil(DX_BPP16_BLOCK_EXTENT) as usize
+        * BLOCK_BYTES
+}
+
 /// Bytes a whole 8-bpp `64KB_R_X` surface occupies: every block it touches, whole.
 #[must_use]
 pub fn surface_bytes_64kb_rx_bpp1(width: u32, height: u32) -> usize {
@@ -787,7 +830,9 @@ impl SurfaceLayout {
             // Only its sixteen-byte form is modelled, which `at_bytes_per_texel` keeps to.
             SwizzleMode::Tiled64KbDX => Some(Self::Dx64KbBpp16),
             SwizzleMode::Linear => Some(Self::Linear),
-            SwizzleMode::Other(_) => None,
+            // Modelled only for a block-compressed texture's blocks, which are read apart from
+            // these layouts.
+            SwizzleMode::Tiled64KbS | SwizzleMode::Other(_) => None,
         }
     }
 
@@ -1222,6 +1267,19 @@ impl SurfaceLayout {
 
 #[cfg(test)]
 mod tests {
+    /// `64KB_S` at sixteen bytes an element answers what addrlib answers for this console: the
+    /// addresses `Addr2ComputeSurfaceAddrFromCoord` gave for these elements.
+    #[test]
+    fn the_64kb_s_bpp16_equation_is_addrlibs() {
+        use super::tiled_byte_offset_64kb_s_bpp16 as at;
+        assert_eq!(at(0, 0, 256), 0);
+        assert_eq!(at(129, 3, 256), 131_184);
+        assert_eq!(at(255, 255, 256), 1_048_560);
+        assert_eq!(at(256, 0, 1019), 262_144);
+        assert_eq!(at(300, 77, 1019), 1_347_344);
+        assert_eq!(super::surface_bytes_64kb_s_bpp16(1019, 187), 3_145_728);
+    }
+
     use super::{
         DetileError, SurfaceError, detile_64kb_rx_bpp4, detile_colour_target,
         detile_surface_64kb_rx_bpp4, detile_texture, surface_words_64kb_rx_bpp4,

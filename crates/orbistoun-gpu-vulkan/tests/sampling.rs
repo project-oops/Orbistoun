@@ -7,7 +7,9 @@
 //! in a known pixel, for a translated `image_sample_lz` to be checked against.
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
-use orbistoun_gpu_vulkan::framebuffer::{TEXTURE_BINDING, draw_with_texture};
+use orbistoun_gpu_vulkan::framebuffer::{
+    TEXTURE_BINDING, draw_with_bc3_texture, draw_with_texture,
+};
 use orbistoun_spirv::{Lod, interpolated_vertex_module, sampling_fragment_module};
 
 /// Whether a device is available at all, said aloud when it is not: a missing device is a skip the
@@ -143,5 +145,44 @@ fn the_binding_a_module_declares_is_the_binding_the_harness_fills() {
         TEXTURE_BINDING,
         orbistoun_spirv::TEXTURE_BINDING,
         "a module samples one binding and the harness fills another"
+    );
+}
+
+/// A `BC3_UNORM` texture's blocks are sampled as the host decodes them: an 8 x 4 image of two
+/// blocks, red then green - each a block whose two colour endpoints are the same `RGB565` and whose
+/// two alpha endpoints are opaque - reads red on the left half and green on the right.
+#[test]
+fn a_bc3_texture_is_sampled_as_its_blocks_decode() {
+    if !device_or_skip("a_bc3_texture_is_sampled_as_its_blocks_decode") {
+        return;
+    }
+    // Alpha endpoints 0xff and 0xff with every index 0, then two equal colour endpoints and every
+    // index 0, as little-endian words.
+    let block = |rgb565: u32| [0x0000_ffff, 0, rgb565 | rgb565 << 16, 0];
+    let blocks: Vec<u32> = block(0xf800).into_iter().chain(block(0x07e0)).collect();
+    let corners = [
+        [0.0, 0.0, 0.0, 1.0],
+        [2.0, 0.0, 0.0, 1.0],
+        [0.0, 2.0, 0.0, 1.0],
+    ];
+    let pixels = draw_with_bc3_texture(
+        (
+            &interpolated_vertex_module(corners),
+            &sampling_fragment_module(Lod::Zero),
+        ),
+        [1.0, 0.0, 1.0, 1.0],
+        (8, 8),
+        (&blocks, 8, 4),
+    )
+    .expect("the sampling draw ran");
+    assert_eq!(
+        pixels.at(1, 3),
+        Some([255, 0, 0, 255]),
+        "the first block, red"
+    );
+    assert_eq!(
+        pixels.at(6, 3),
+        Some([0, 255, 0, 255]),
+        "the second block, green"
     );
 }

@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use orbistoun_translate::draw_buffers::{BufferSource, Computed, DescriptorReads, DescriptorWord};
+use orbistoun_translate::draw_buffers::{
+    BufferSource, Computed, ComputedAccess, DescriptorReads, DescriptorWord,
+};
 use orbistoun_translate::wavefront::{TableBase, TableWord};
 
 use crate::backend::{
@@ -151,12 +153,13 @@ pub(crate) fn resolve_word(
     }
 }
 
-/// A computed descriptor's four words and its scalar offset for a draw with these user-data words
-/// (D753): the program before the access, run over them and guest memory.
+/// What a computed access reads through, and its scalar offset, for a draw with these user-data
+/// words (D753): the program before the access, run over them and guest memory. A descriptor's four
+/// words, or a scalar load's base pair in the first two.
 ///
 /// # Errors
 ///
-/// A refusal naming why the prefix leaves the descriptor or the offset unknown.
+/// A refusal naming why the prefix leaves what it reads through or the offset unknown.
 pub(crate) fn evaluate_computed(
     computed: &Computed,
     user_data: &[u32; USER_DATA_WORDS],
@@ -200,9 +203,12 @@ pub(crate) fn evaluate_computed(
             Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         },
     )?;
-    let first = usize::from(computed.descriptor);
+    let (first, count) = match computed.through {
+        ComputedAccess::Descriptor { first, .. } => (usize::from(first), 4),
+        ComputedAccess::Pointer { base, .. } => (usize::from(base), 2),
+    };
     let mut words = [0u32; 4];
-    for (step, word) in words.iter_mut().enumerate() {
+    for (step, word) in words.iter_mut().enumerate().take(count) {
         *word = scalars
             .get(first + step)
             .copied()
@@ -233,10 +239,15 @@ pub(crate) fn resolve_fourth_word(
 ) -> Option<u32> {
     match source {
         BufferSource::Descriptor { words, .. } => resolve_word(words[3], user_data, memory).ok(),
-        BufferSource::Computed(computed) => evaluate_computed(computed, user_data, memory)
-            .ok()
-            .map(|(words, _)| words[3]),
-        BufferSource::Pointer { .. } => None,
+        BufferSource::Computed(computed)
+            if matches!(computed.through, ComputedAccess::Descriptor { .. }) =>
+        {
+            evaluate_computed(computed, user_data, memory)
+                .ok()
+                .map(|(words, _)| words[3])
+        }
+        // A scalar load's base names no format.
+        BufferSource::Computed(_) | BufferSource::Pointer { .. } => None,
     }
 }
 
@@ -270,11 +281,18 @@ pub(crate) fn resolve_range(
         // and the extent the descriptor admits past it.
         BufferSource::Computed(computed) => {
             let (values, soffset) = evaluate_computed(computed, user_data, memory)?;
-            let base = decode_buffer_descriptor(values).base;
-            (
-                crate::pipeline::guest_address_of(base),
-                u64::from(soffset) + descriptor_extent(values, computed.reads)?,
-            )
+            match computed.through {
+                ComputedAccess::Descriptor { reads, .. } => (
+                    crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base),
+                    u64::from(soffset) + descriptor_extent(values, reads)?,
+                ),
+                // A scalar load reads its words from the base plus the scalar offset, which the
+                // translated load does not add: the range starts there.
+                ComputedAccess::Pointer { end, .. } => {
+                    let base = u64::from(values[0]) | u64::from(values[1] & 0xffff) << 32;
+                    (base.wrapping_add(u64::from(soffset)), u64::from(end))
+                }
+            }
         }
         BufferSource::Descriptor { words, reads } => {
             let (words, reads) = (*words, *reads);
@@ -541,12 +559,14 @@ mod tests {
             // s_load_dwordx4 s[0:3], s[4:5], 0x0; s_waitcnt lgkmcnt(0)
             prefix: vec![0xf408_0002, 0xfa00_0000, 0xbf8c_c07f],
             at: 12,
-            descriptor: 0,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Descriptor {
+                first: 0,
+                reads: vector(Some(16), true),
+            },
             // The inline constant 16.
             soffset: 128 + 16,
             first_register: 4,
             user_data: 2,
-            reads: vector(Some(16), true),
         }));
         let mut user_data = [0u32; super::USER_DATA_WORDS];
         user_data[0] = 0x1000;
@@ -558,6 +578,27 @@ mod tests {
         assert_eq!(
             super::resolve_fourth_word(&source, &user_data, &memory),
             Some(STRUCTURED)
+        );
+        // A scalar load's base pair, computed the same way, binds from the base past the offset,
+        // as far as the load reaches.
+        let pointer = BufferSource::Computed(Box::new(Computed {
+            prefix: Vec::new(),
+            at: 0,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Pointer {
+                base: 4,
+                end: 16,
+            },
+            soffset: 128 + 16,
+            first_register: 4,
+            user_data: 2,
+        }));
+        assert_eq!(
+            super::resolve_range(&pointer, &user_data, &memory),
+            Ok((0x1010, 16))
+        );
+        assert_eq!(
+            super::resolve_fourth_word(&pointer, &user_data, &memory),
+            None
         );
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;

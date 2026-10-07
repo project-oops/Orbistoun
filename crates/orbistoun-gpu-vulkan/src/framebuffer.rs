@@ -1304,6 +1304,35 @@ struct Texture {
 /// legal image, since a descriptor must be filled.
 static NO_TEXTURE: [u32; 1] = [0xffff_ffff];
 
+/// A texture's words as a draw binds them: texels a row of `width` at a time, or compressed blocks
+/// for a texture `width` x `height` texels.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextureWords<'a> {
+    /// The texels or blocks.
+    pub(crate) words: &'a [u32],
+    /// Width in texels.
+    pub(crate) width: u32,
+    /// Height in texels, for blocks, whose count does not give it; texels give their own.
+    pub(crate) height: Option<u32>,
+    /// What the words are.
+    pub(crate) encoding: orbistoun_gpu::TextureEncoding,
+}
+
+impl<'a> TextureWords<'a> {
+    /// The default texel.
+    const NONE: TextureWords<'static> = TextureWords::rgba8(&NO_TEXTURE, 1);
+
+    /// Texels, `width` to a row.
+    pub(crate) const fn rgba8(words: &'a [u32], width: u32) -> Self {
+        Self {
+            words,
+            width,
+            height: None,
+            encoding: orbistoun_gpu::TextureEncoding::Rgba8,
+        }
+    }
+}
+
 /// A texture's upload, laid out: every level's texels in staging order, the fine level's extent, and
 /// how many levels there are.
 #[derive(Debug, PartialEq, Eq)]
@@ -1367,6 +1396,7 @@ fn sampler_info(
         orbistoun_gpu::TextureWrap::ClampHalfBorder if linear => {
             vk::SamplerAddressMode::CLAMP_TO_BORDER
         }
+        orbistoun_gpu::TextureWrap::ClampBorder => vk::SamplerAddressMode::CLAMP_TO_BORDER,
         orbistoun_gpu::TextureWrap::ClampToEdge | orbistoun_gpu::TextureWrap::ClampHalfBorder => {
             vk::SamplerAddressMode::CLAMP_TO_EDGE
         }
@@ -1399,29 +1429,43 @@ fn sampler_info(
         .max_lod(max_lod)
 }
 
-/// Creates a sampled image holding `texels`, `row` of them to a row.
+/// Creates a sampled image holding `texture`'s texels or blocks.
 ///
 /// Optimally tiled and filled by a staging copy: `R8G8B8A8_UNORM` must support sampling with
 /// optimal tiling on every implementation, not with linear tiling, and the driver owns the row
 /// stride. A short final row is padded with zeroes, so extent and bytes agree. `coarse_level` asks
-/// for the harness's sentinel second level ([`staged`]); a guest's texture never has it.
+/// for the harness's sentinel second level ([`staged`]); a guest's texture never has it. `BC3`
+/// blocks go to a `BC3_UNORM_BLOCK` image as they are, which the host samples natively.
 fn create_texture(
     devices: Devices<'_>,
-    texels: &[u32],
-    row: u32,
+    texture: TextureWords<'_>,
     coarse_level: bool,
     sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
     let device = devices.device;
+    let (format, staged) = match texture.encoding {
+        orbistoun_gpu::TextureEncoding::Rgba8 => {
+            (FORMAT, staged(texture.words, texture.width, coarse_level))
+        }
+        orbistoun_gpu::TextureEncoding::Bc3 => (
+            vk::Format::BC3_UNORM_BLOCK,
+            Staged {
+                texels: texture.words.to_vec(),
+                width: texture.width,
+                height: texture.height.unwrap_or(1),
+                levels: 1,
+            },
+        ),
+    };
     let Staged {
         texels: padded,
         width,
         height,
         levels,
-    } = staged(texels, row, coarse_level);
+    } = staged;
     let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(FORMAT)
+        .format(format)
         .extent(vk::Extent3D {
             width,
             height,
@@ -1489,7 +1533,7 @@ fn create_texture(
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
-        .format(FORMAT)
+        .format(format)
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1754,8 +1798,8 @@ pub(crate) fn draw_vertices(
             initial: start.initial,
             user_data: start.user_data,
             textures: &TexturesBound {
-                first: start.texture.unwrap_or((&NO_TEXTURE, 1)),
-                second: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+                first: start.texture.unwrap_or(TextureWords::NONE),
+                second: start.second_texture.unwrap_or(TextureWords::NONE),
                 sampling: start.sampling,
             },
             blend: start.blend,
@@ -1785,7 +1829,7 @@ pub(crate) struct Start<'a> {
     /// The user-data block.
     pub(crate) user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
     /// The texture and its row length.
-    pub(crate) texture: Option<(&'a [u32], u32)>,
+    pub(crate) texture: Option<TextureWords<'a>>,
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
     /// The channels colour target zero's draws write; `None` writes every one.
@@ -1794,7 +1838,7 @@ pub(crate) struct Start<'a> {
     /// down.
     pub(crate) viewport: Option<orbistoun_gpu::ViewportTransform>,
     /// The second texture and its row length.
-    pub(crate) second_texture: Option<(&'a [u32], u32)>,
+    pub(crate) second_texture: Option<TextureWords<'a>>,
     /// How each of the two textures is sampled, as its sampler descriptor says.
     pub(crate) sampling: [orbistoun_gpu::TextureSampling; 2],
     /// The draw's pipeline, as the backend hashed it: a resident draw with a key reuses the
@@ -3671,8 +3715,7 @@ fn create_bound_resources(
     let buffers = [observation, guest_memory];
     let texture = create_texture(
         devices,
-        bound.textures.first.0,
-        bound.textures.first.1,
+        bound.textures.first,
         bound.coarse_level,
         bound.textures.sampling[0],
     )?;
@@ -3680,8 +3723,7 @@ fn create_bound_resources(
     // default white texel when nothing asked for one.
     let second_texture = create_texture(
         devices,
-        bound.textures.second.0,
-        bound.textures.second.1,
+        bound.textures.second,
         false,
         bound.textures.sampling[1],
     )?;
@@ -4241,8 +4283,8 @@ pub(crate) fn draw_resident(
             scissor,
             user_data: start.user_data,
             textures: &TexturesBound {
-                first: start.texture.unwrap_or((&NO_TEXTURE, 1)),
-                second: start.second_texture.unwrap_or((&NO_TEXTURE, 1)),
+                first: start.texture.unwrap_or(TextureWords::NONE),
+                second: start.second_texture.unwrap_or(TextureWords::NONE),
                 sampling: start.sampling,
             },
             blend: start.blend,
@@ -4293,7 +4335,7 @@ pub fn draw_mesh_over_texture(
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
             textures: &TexturesBound {
-                first: texture,
+                first: TextureWords::rgba8(texture.0, texture.1),
                 ..NO_TEXTURES
             },
             ..Bound::default()
@@ -4397,17 +4439,17 @@ struct DrawBuffersBound<'a> {
 #[derive(Clone, Copy)]
 struct TexturesBound<'a> {
     /// The first sampled image; the default texel when nothing bound one.
-    first: (&'a [u32], u32),
+    first: TextureWords<'a>,
     /// The second, likewise.
-    second: (&'a [u32], u32),
+    second: TextureWords<'a>,
     /// How each is sampled, as its sampler descriptor says.
     sampling: [orbistoun_gpu::TextureSampling; 2],
 }
 
 /// A draw that samples no texture: the default texel in both slots, point-sampled.
 static NO_TEXTURES: TexturesBound<'static> = TexturesBound {
-    first: (&NO_TEXTURE, 1),
-    second: (&NO_TEXTURE, 1),
+    first: TextureWords::NONE,
+    second: TextureWords::NONE,
     sampling: [orbistoun_gpu::TextureSampling::CLAMPED_POINT; 2],
 };
 
@@ -4716,10 +4758,44 @@ pub fn draw_with_texture(
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
             textures: &TexturesBound {
-                first: texture,
+                first: TextureWords::rgba8(texture.0, texture.1),
                 ..NO_TEXTURES
             },
             coarse_level: true,
+            ..Bound::default()
+        },
+    )
+}
+
+/// [`draw_with_texture`] with a `BC3_UNORM` texture: `blocks` four words each, a block for every
+/// four-by-four texels of a `width` x `height` image, rows of blocks in order, sampled natively.
+///
+/// # Errors
+///
+/// When no device is available, or any Vulkan call fails.
+pub fn draw_with_bc3_texture(
+    (vertex_words, fragment_words): (&[u32], &[u32]),
+    clear: [f32; 4],
+    size: (u32, u32),
+    (blocks, width, height): (&[u32], u32, u32),
+) -> Result<Pixels, DispatchError> {
+    let (frame_width, frame_height) = size;
+    render(
+        clear,
+        frame_width,
+        frame_height,
+        Some((vertex_words, fragment_words)),
+        Geometry::Vertex(VertexDraw::TRIANGLE),
+        Bound {
+            textures: &TexturesBound {
+                first: TextureWords {
+                    words: blocks,
+                    width,
+                    height: Some(height),
+                    encoding: orbistoun_gpu::TextureEncoding::Bc3,
+                },
+                ..NO_TEXTURES
+            },
             ..Bound::default()
         },
     )
@@ -4747,7 +4823,7 @@ pub fn draw_with_sampled_texture(
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
             textures: &TexturesBound {
-                first: texture,
+                first: TextureWords::rgba8(texture.0, texture.1),
                 sampling: [sampling, orbistoun_gpu::TextureSampling::CLAMPED_POINT],
                 ..NO_TEXTURES
             },

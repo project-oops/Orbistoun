@@ -170,6 +170,8 @@ pub enum RenderCommand {
         height: u32,
         /// How the draws sample it, from the sampler descriptor the pixel shader names.
         sampling: crate::registers::TextureSampling,
+        /// What the words are: texels, or blocks of compressed texels.
+        encoding: TextureEncoding,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).
@@ -290,6 +292,17 @@ pub enum Resource<'a> {
         /// draw blends in linear and writes the encoding.
         srgb: bool,
     },
+}
+
+/// What a bound texture's words are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureEncoding {
+    /// One word a texel, the guest's four bytes in memory order.
+    #[default]
+    Rgba8,
+    /// `BC3_UNORM` blocks, four words each, a block for every four-by-four texels, rows of blocks
+    /// row-major: the guest's compressed bytes as they are, which the host samples natively.
+    Bc3,
 }
 
 /// Something that can carry out [`RenderCommand`]s.

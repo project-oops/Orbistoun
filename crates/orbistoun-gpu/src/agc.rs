@@ -260,18 +260,67 @@ fn update_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `VGT_GS_OUT_PRIM_TYPE`'s value `sceAgcCreatePrimState` writes into `prim_state + 0xc` for each
+/// input topology, as `166-agc/create-prim-state` measured it for the eight it called: points 0,
+/// lines 1, triangle lists, strips, fans and line-adjacency topologies 2, quads 3, rectangle lists 4.
+const MEASURED_OUT_PRIMITIVES: [(u32, u32); 8] = [
+    (1, 0),
+    (2, 1),
+    (4, 2),
+    (5, 2),
+    (6, 2),
+    (7, 3),
+    (9, 2),
+    (17, 4),
+];
+
+/// `GE_USER_VGPR_EN`'s user-config offset (`gfx103.json`), which `sceAgcCreatePrimState` names
+/// first in `sec_state`, at `+0x8`, its value beside it measured zero (`166-agc/create-prim-state`).
+const PRIM_STATE_UC_FIRST: u32 = 0x262;
+/// `VGT_PRIMITIVE_TYPE`'s user-config offset (`gfx103.json`), named at `sec_state + 0x10` with the
+/// topology beside it.
+const VGT_PRIMITIVE_TYPE_OFFSET: u32 = 0x242;
+/// `VGT_GS_OUT_PRIM_TYPE`'s context offset (`gfx103.json`), named at `prim_state + 0x8`.
+const VGT_GS_OUT_PRIM_TYPE_OFFSET: u32 = 0x29b;
+
 /// `sceAgcCreatePrimState(prim_state, sec_state, null, vs, topology)`.
 ///
-/// Records the primitive topology (arg4) in the low five bits of `sec_state + 0x14` and returns `0`
-/// (obSCEne `166-agc/update-prim-state`). The `prim_state` routing block is left as the guest
-/// prepared it: its contents are unmeasured.
+/// Fills the two register lists as `166-agc/create-prim-state` measured them, and returns `0`.
+/// `sec_state` holds user-config `(offset, value)` pairs: `GE_USER_VGPR_EN` named at `+0x8`, and
+/// `VGT_PRIMITIVE_TYPE` at `+0x10` with the topology (arg4) in the low five bits of `+0x14`, which a
+/// title copies into an indirect register load. `prim_state` names `VGT_GS_OUT_PRIM_TYPE` at `+0x8`
+/// with the output primitive at `+0xc`, for a topology the measurement called. The bytes measured
+/// zero are left as the guest prepared them, since a zeroed buffer cannot tell a zero written from
+/// one never touched; so is the output primitive of an unmeasured topology.
 fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (prim_state, sec_state, topology) = (args[0], args[1], args[4] as u32);
     if prim_state == 0 || sec_state == 0 {
         return BAD_ARGUMENT;
     }
-    // SAFETY: `sec_state` is the guest-owned 64-byte secondary-state buffer; `+0x14` is a dword.
+    // SAFETY: `sec_state` is the guest-owned 64-byte secondary-state buffer; `+0x8` and `+0x10`
+    // are dwords in it.
+    unsafe {
+        guest::write_u32(sec_state.wrapping_add(0x8), PRIM_STATE_UC_FIRST);
+    }
+    // SAFETY: as above.
+    unsafe {
+        guest::write_u32(sec_state.wrapping_add(0x10), VGT_PRIMITIVE_TYPE_OFFSET);
+    }
+    // SAFETY: `+0x14` is a dword of the same buffer.
     unsafe { set_topology(sec_state, topology) };
+    // SAFETY: `prim_state` is the guest-owned 64-byte routing block; `+0x8` is a dword in it.
+    unsafe {
+        guest::write_u32(prim_state.wrapping_add(0x8), VGT_GS_OUT_PRIM_TYPE_OFFSET);
+    }
+    if let Some(&(_, out)) = MEASURED_OUT_PRIMITIVES
+        .iter()
+        .find(|(input, _)| *input == topology)
+    {
+        // SAFETY: `+0xc` is a dword of the same block.
+        unsafe {
+            guest::write_u32(prim_state.wrapping_add(0xc), out);
+        }
+    }
     OK
 }
 
@@ -1487,6 +1536,13 @@ mod tests {
         args[4] = 4; // DI_PT_TRILIST
 
         assert_eq!(create_prim_state(&args), OK);
+        // The register lists the measured create fills (`166-agc/create-prim-state`): the user-config
+        // pairs `(0x262, _)` and `(0x242 VGT_PRIMITIVE_TYPE, topology)` in `sec_state`, and the
+        // context pair `(0x29b VGT_GS_OUT_PRIM_TYPE, 2)` - triangles - in `prim_state`.
+        let word =
+            |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!((word(&sec, 0x8), word(&sec, 0x10)), (0x262, 0x242));
+        assert_eq!((word(&prim, 0x8), word(&prim, 0xc)), (0x29b, 2));
         let after_create = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
         assert_eq!(after_create & 0x1f, 4, "topology is DI_PT_TRILIST");
         assert_eq!(
