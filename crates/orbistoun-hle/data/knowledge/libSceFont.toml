@@ -1,0 +1,29 @@
+library = "libSceFont"
+
+[[function]]
+name = "sceFontMemoryInit"
+purpose = "Fills a font memory object describing the memory a font library instance draws from."
+returns = "status"
+edge_cases = [
+    "MEASURED, in PPSA21564's call shape (object, base, size, memory interface, mspace, destroy callback, 0): 64 bytes written - 00 0f 00 00, the size as a dword at +4, then the base, the mspace, the interface and the callback as quadwords from +8, zero to +0x3f - and 0x0 answered. The base buffer and the interface table are untouched.",
+    "MEASURED refusals: a null object 0x80460002. A size of 0 is accepted (0x0).",
+    "PPSA21564's fontMemoryCreateByMalloc() asserts at FontSystem.cpp:61 on the placeholder this answered before.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T1450Z-fm01 and -rw01, reports/hardware/20261007-082134-eboot.obs.log lines 4339-4377 (130-layout/font-memory-init)"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceFontMemoryTerm"
+purpose = "Releases a font memory object, through the destroy callback it was given."
+returns = "status"
+edge_cases = [
+    "MEASURED: calls the destroy callback once, with the object as its only argument (cb-calls 1, cb-arg the object), clears byte 1 (the 0x0f), leaves the rest, and answers 0x0. A callback that is not callable faults the caller (signal 11), so the call is made unconditionally there; orbistoun does not call a null one, which is unmeasured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T1450Z-fm01 and -rw01, reports/hardware/20261007-082134-eboot.obs.log lines 4339-4377 (130-layout/font-memory-init, arm3, arm3b)"
+found_in = []
+found_on = "2026-10-07"

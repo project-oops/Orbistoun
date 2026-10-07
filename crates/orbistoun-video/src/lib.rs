@@ -7,6 +7,7 @@
 use orbistoun_hle::guest_module;
 
 pub mod av_player;
+pub mod font;
 pub mod queued;
 pub mod recording;
 
@@ -664,6 +665,8 @@ pub fn install_flip_observer(observer: FlipObserver) {
 /// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("sceFontMemoryInit", font::font_memory_init),
+        ("sceFontMemoryTerm", font::font_memory_term),
         ("sceVideoOutOpen", video_out_open),
         ("sceVideoOutClose", video_out_close),
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),
