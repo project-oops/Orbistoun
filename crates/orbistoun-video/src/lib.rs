@@ -667,6 +667,12 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("sceFontMemoryInit", font::font_memory_init),
         ("sceFontMemoryTerm", font::font_memory_term),
+        ("sceFontSelectLibraryFt", font::font_select_library_ft),
+        (
+            "sceFontCreateLibraryWithEdition",
+            font::font_create_library_with_edition,
+        ),
+        ("sceFontDestroyLibrary", font::font_destroy_library),
         ("sceVideoOutOpen", video_out_open),
         ("sceVideoOutClose", video_out_close),
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),

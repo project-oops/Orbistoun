@@ -1,0 +1,15 @@
+library = "libSceFontFt"
+
+[[function]]
+name = "sceFontSelectLibraryFt"
+purpose = "Selects the FreeType-backed font library implementation: answers the selection a library is created over."
+returns = "pointer"
+edge_cases = [
+    "MEASURED: sceFontSelectLibraryFt(0) answers a pointer (an interface table the library owns); sceFontSelectLibraryFt(1) answers null.",
+    "orbistoun answers a pointer to a zeroed block it owns for 0 (D151), null otherwise.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261007T0850Z-fm02, reports/hardware/20261007-102530-eboot.obs.log lines 4379-4409 (130-layout/font-create-library-ft)"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-07"

@@ -27,3 +27,31 @@ known_by = "measured"
 cites = "obSCEne REQ-20261006T1450Z-fm01 and -rw01, reports/hardware/20261007-082134-eboot.obs.log lines 4339-4377 (130-layout/font-memory-init, arm3, arm3b)"
 found_in = []
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceFontCreateLibraryWithEdition"
+purpose = "Creates a font library over a font memory object: (memory, selection, edition, &library)."
+returns = "status"
+edge_cases = [
+    "MEASURED in PPSA21564's shape (memory from sceFontMemoryInit, selection from sceFontSelectLibraryFt(0), edition 0x0007001000000000): writes 0 to library first, then a library pointer, and answers 0x0; edition 0 is answered the same.",
+    "MEASURED: a null memory object answers 0x80460002 and leaves library 0.",
+    "The hardware allocates the library's blocks through the memory object's interface (four allocations); the library object is the library's own. orbistoun writes a pointer to a zeroed 0x100-byte block it owns (D151) and makes no allocations - the contents and allocation sizes are unmeasured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261007T0850Z-fm02, reports/hardware/20261007-102530-eboot.obs.log lines 4379-4409 (130-layout/font-create-library-ft)"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceFontDestroyLibrary"
+purpose = "Destroys a font library: (&library)."
+returns = "status"
+edge_cases = [
+    "MEASURED: answers 0x0 and clears library to 0; the hardware hands the library's blocks back through the memory interface (six frees), which orbistoun, owning no such blocks, does not.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261007T0850Z-fm02, reports/hardware/20261007-102530-eboot.obs.log lines 4379-4409 (130-layout/font-create-library-ft)"
+found_in = []
+found_on = "2026-10-07"
