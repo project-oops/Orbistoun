@@ -18,4 +18,7 @@ orbistoun-hle = { workspace = true }
 # The save-data parameter block, read through the checked accessors.
 orbistoun-mem = { workspace = true }
 orbistoun-shell = { workspace = true }
+# Guest calls, for the JSON library's allocator callbacks, and an anonymous mapping for its base
+# vtable.
+orbistoun-kernel = { workspace = true }
 

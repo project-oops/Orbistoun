@@ -2,18 +2,56 @@ library = "libSceJson2"
 
 [[function]]
 name = "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE"
-found_in = ["PPSA02664-app0"]
+purpose = "Starts the JSON library, taking its memory from the guest's own MemAllocator."
+returns = "status"
+edge_cases = [
+    "MEASURED, link-imported: with the allocator's object at parameter +0 and a word at +8, twelve allocations through the allocator's vtable slot 2 as (this, size, param+8) - sizes 0x18, 0x8, 0x18, 0x8, 0x20, 0x30, 0x8, 0x20, 0x68, 0x20, 0x8, 0x8 - none handed back; byte 0 of the object set to 1, the parameter block untouched, 0x0 answered.",
+    "MEASURED: a second initialize on the same object answers 0x80848111 (already initialized).",
+    "Not measured: a null parameter or allocator, and a failed allocation; orbistoun answers its placeholder there.",
+    "PPSA28061 aborts at its leaderboard system's start on the placeholder this answered before (\"sce::Json::Initializer::initialize failed\").",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init)"
+found_in = ["PPSA02664-app0", "PPSA28061-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "_ZN3sce4Json11InitializerC1Ev"
-found_in = ["PPSA02664-app0"]
+purpose = "Constructs an Initializer in place."
+returns = "status"
+edge_cases = [
+    "MEASURED: writes byte 0 of the object as 0x00 and nothing else (extent 1); the rest of a 0x40-byte 0xcc object is untouched.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init, arm1-ctor)"
+found_in = ["PPSA02664-app0", "PPSA28061-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "_ZN3sce4Json11Initializer9terminateEv"
+purpose = "Stops the JSON library, handing its memory back to the allocator it was initialized with."
+returns = "status"
+edge_cases = [
+    "MEASURED: after initialize, twelve deallocations through the allocator's vtable slot 3 - one per block - byte 0 cleared to 0x00, 0x0 answered.",
+    "Not measured: terminate on an object never initialized; orbistoun answers its placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init, arm4-term)"
+found_in = []
+found_on = "2026-10-07"
 
 [[function]]
 name = "_ZN3sce4Json12MemAllocatorC2Ev"
+purpose = "Constructs the MemAllocator base of a guest's allocator subclass."
+returns = "status"
+edge_cases = [
+    "MEASURED: writes the object's first eight bytes - its vtable pointer, into the library - and nothing else. orbistoun points it at a zeroed vtable of its own, whose slots are empty as a pure virtual's are: the subclass replaces the pointer as soon as the base constructor returns.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init, base-obj-after)"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."

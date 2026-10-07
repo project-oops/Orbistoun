@@ -469,6 +469,22 @@ fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        (
+            "_ZN3sce4Json11InitializerC1Ev",
+            json2::initializer_construct,
+        ),
+        (
+            "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE",
+            json2::initializer_initialize,
+        ),
+        (
+            "_ZN3sce4Json11Initializer9terminateEv",
+            json2::initializer_terminate,
+        ),
+        (
+            "_ZN3sce4Json12MemAllocatorC2Ev",
+            json2::mem_allocator_construct,
+        ),
         ("sceUserServiceInitialize", user_service_initialize),
         ("sceUserServiceTerminate", user_service_terminate),
         (
