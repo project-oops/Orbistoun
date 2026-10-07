@@ -590,6 +590,17 @@ const VGT_INDEX_TYPE_OFFSET: u32 = 0x243;
 /// (`packet::build::draw_index_2`): the index count is word 3 and the index-buffer address words
 /// 1-2.
 pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
+    draw_calls_reading(walk, body, &mut |_| None)
+}
+
+/// [`draw_calls`], where an offset draw whose stream set no index size in a packet takes the
+/// `VGT_INDEX_TYPE` value `index_type` gives at the draw's packet offset: the register state in
+/// force there, which a stream may load indirectly (`LOAD_UCONFIG_REG_INDEX`).
+pub fn draw_calls_reading(
+    walk: &PacketWalk,
+    body: &[u8],
+    index_type: &mut dyn FnMut(u32) -> Option<u32>,
+) -> Vec<DrawCall> {
     let mut draws = Vec::new();
     // State, in the order the stream sets it: a draw takes the instance count most recently written
     // before it, one when the stream never says; an offset draw takes the bound index buffer and
@@ -622,16 +633,13 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
                 if let (Some(offset), Some(value)) = (words.get(0), words.get(1))
                     && offset & 0xffff == VGT_INDEX_TYPE_OFFSET
                 {
-                    index_bytes = match value & 3 {
-                        0 => Some(2),
-                        1 => Some(4),
-                        _ => None,
-                    };
+                    index_bytes = index_size(value);
                 }
             }
             DRAW_INDEX_OFFSET_2 => {
+                let bytes = index_bytes.or_else(|| index_size(index_type(packet.offset)?));
                 if let (Some(base), Some(bytes), Some(offset), Some(indices)) =
-                    (index_base, index_bytes, words.get(1), words.get(2))
+                    (index_base, bytes, words.get(1), words.get(2))
                 {
                     draws.push(DrawCall {
                         packet_offset: packet.offset,
@@ -673,6 +681,16 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
         }
     }
     draws
+}
+
+/// The bytes an index takes, by `VGT_INDEX_TYPE.INDEX_TYPE`: 0 two, 1 four; the eight-bit size is
+/// not modelled.
+const fn index_size(value: u32) -> Option<u64> {
+    match value & 3 {
+        0 => Some(2),
+        1 => Some(4),
+        _ => None,
+    }
 }
 
 fn read_words(body: &[u8], start: usize, length: usize) -> Option<Words<'_>> {
@@ -3385,6 +3403,22 @@ mod tests {
                 indices: 6,
                 address: 0x100c,
             }]
+        );
+        // With no packet setting the size, the state in force at the draw gives it.
+        let loaded = stream(&[command(0x26, 2), 0x1000, 0, command(0x35, 4), 6, 3, 6, 0]);
+        assert!(
+            draw_calls(&walk(&loaded), &loaded).is_empty(),
+            "no size known"
+        );
+        let read =
+            super::draw_calls_reading(&walk(&loaded), &loaded, &mut |at| (at == 12).then_some(1));
+        assert_eq!(
+            read.iter().map(|d| d.kind).collect::<Vec<_>>(),
+            [DrawKind::Indexed {
+                indices: 6,
+                address: 0x100c,
+            }],
+            "the loaded size, read at the draw's own offset"
         );
         let unbound = stream(&[command(0x35, 4), 6, 3, 6, 0]);
         assert!(

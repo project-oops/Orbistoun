@@ -13,6 +13,7 @@ pub mod blocks;
 mod buffer;
 pub mod control;
 pub mod draw_buffers;
+pub mod evaluate;
 pub mod model;
 pub mod modifiers;
 pub mod predicated;

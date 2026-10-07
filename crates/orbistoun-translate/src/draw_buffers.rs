@@ -30,7 +30,7 @@ pub enum DescriptorWord {
 }
 
 /// Where one of a module's buffers comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BufferSource {
     /// A buffer resource constant: its four words, and how the program reads through it. The range
     /// is the one the descriptor's bounds rules admit for those reads.
@@ -47,6 +47,30 @@ pub enum BufferSource {
         /// One past the last byte any load through the base reads.
         extent: u32,
     },
+    /// A descriptor, or a scalar offset, the program computes from more than user data,
+    /// constants and loads at fixed places: found per draw by running the program up to the
+    /// access (D753).
+    Computed(Box<Computed>),
+}
+
+/// A buffer access whose descriptor the program computes (D753): the program before it, and the
+/// registers that hold the descriptor and the scalar offset when it is reached.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Computed {
+    /// The program's words before the access.
+    pub prefix: Vec<u32>,
+    /// The access's byte offset in the program.
+    pub at: u32,
+    /// The first scalar register of the four-word descriptor.
+    pub descriptor: u16,
+    /// The scalar offset field's code: a register, or an inline constant.
+    pub soffset: u8,
+    /// The scalar register the stage's first user-data word lands in.
+    pub first_register: u32,
+    /// How many user-data words the stage has; the registers past them are unknown at entry.
+    pub user_data: u32,
+    /// What the access reaches, from the descriptor's base past the scalar offset.
+    pub reads: DescriptorReads,
 }
 
 /// How a program's accesses through one descriptor reach into its buffer: what bounds the bytes a
@@ -166,17 +190,66 @@ pub fn trace(
         }
     }
     accesses.sort_by_key(|(offset, _)| *offset);
-    slots(accesses)
+    slots(accesses, decode, (first_register, count))
+}
+
+/// The program's words before byte `at`, rebuilt from its instructions: each one's words and its
+/// literal. [`None`] where an instruction's words do not account for its length.
+fn prefix_words(decode: &Decode, at: u32) -> Option<Vec<u32>> {
+    let mut words = Vec::new();
+    for instruction in decode.instructions.iter().take_while(|i| i.offset < at) {
+        let start = words.len();
+        words.push(instruction.word);
+        words.extend(instruction.second_word);
+        words.extend(
+            instruction
+                .operands
+                .iter()
+                .filter_map(|operand| match operand {
+                    Operand::Literal(value) => Some(*value),
+                    _ => None,
+                }),
+        );
+        if (words.len() - start) * 4 != instruction.length as usize {
+            return None;
+        }
+    }
+    Some(words)
 }
 
 /// Gives each distinct descriptor or base a slot, in the order the program first reaches it, with
 /// every access's reach through it combined.
-fn slots(accesses: Vec<(u32, Access)>) -> DrawBuffers {
+fn slots(
+    accesses: Vec<(u32, Access)>,
+    decode: &Decode,
+    (first_register, user_data): (u32, u32),
+) -> DrawBuffers {
     let mut keys: Vec<Key> = Vec::new();
     let mut sources: Vec<BufferSource> = Vec::new();
     let mut buffers = DrawBuffers::default();
     for (offset, access) in accesses {
         let (key, source) = match access {
+            Access::Computed {
+                descriptor,
+                soffset,
+                reads,
+            } => {
+                let Some(prefix) = prefix_words(decode, offset) else {
+                    continue;
+                };
+                (
+                    Key::Computed(offset),
+                    BufferSource::Computed(Box::new(Computed {
+                        prefix,
+                        at: offset,
+                        descriptor,
+                        soffset,
+                        first_register,
+                        user_data,
+                        reads,
+                    })),
+                )
+            }
             Access::Descriptor(words, reads) => (
                 Key::Descriptor(words),
                 BufferSource::Descriptor { words, reads },
@@ -187,7 +260,7 @@ fn slots(accesses: Vec<(u32, Access)>) -> DrawBuffers {
             ),
         };
         let slot = if let Some(slot) = keys.iter().position(|k| *k == key) {
-            sources[slot] = match (sources[slot], source) {
+            sources[slot] = match (sources[slot].clone(), source) {
                 (
                     BufferSource::Descriptor { words, reads },
                     BufferSource::Descriptor { reads: more, .. },
@@ -218,11 +291,13 @@ fn slots(accesses: Vec<(u32, Access)>) -> DrawBuffers {
     buffers
 }
 
-/// What makes two accesses read one buffer: the same descriptor words, or the same base.
+/// What makes two accesses read one buffer: the same descriptor words, or the same base. A computed
+/// one is its own, by its offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Key {
     Descriptor([DescriptorWord; 4]),
     Pointer(TableBase),
+    Computed(u32),
 }
 
 /// What each scalar register holds, where the program's own writes fix it: [`None`] where it could
@@ -236,6 +311,13 @@ enum Access {
     Descriptor([DescriptorWord; 4], DescriptorReads),
     /// A scalar load at a base, reaching `end` bytes past it.
     Pointer { base: TableBase, end: u32 },
+    /// Through a descriptor in `descriptor..descriptor + 4`, or with a scalar offset, the program
+    /// computes (D753).
+    Computed {
+        descriptor: u16,
+        soffset: u8,
+        reads: DescriptorReads,
+    },
 }
 
 /// The registers at entry: each user-data word where the hardware loads it, and nothing else known.
@@ -394,9 +476,6 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
         let [_, _, Operand::Scalar(first), soffset] = operands else {
             return None;
         };
-        if !matches!(soffset, Operand::Integer(0)) && *soffset != Operand::Named("null".into()) {
-            return None;
-        }
         // The addressing modifiers: the immediate offset in bits 11:0, `offen` at 12, `idxen` at 13.
         let word = instruction.word;
         let reach =
@@ -407,7 +486,19 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
             vector_reach: reach,
             indexed: word & (1 << 13) != 0,
         };
-        return Some(Access::Descriptor(descriptor(held, *first)?, reads));
+        let no_offset =
+            matches!(soffset, Operand::Integer(0)) || *soffset == Operand::Named("null".into());
+        // The scalar offset is added to the address and not to the range check, so a traced
+        // descriptor bounds only an access that adds none; any other is found per draw (D753),
+        // the offset field from the second word's bits 31:24.
+        return match descriptor(held, *first) {
+            Some(words) if no_offset => Some(Access::Descriptor(words, reads)),
+            _ => Some(Access::Computed {
+                descriptor: *first,
+                soffset: u8::try_from(instruction.second_word? >> 24).ok()?,
+                reads,
+            }),
+        };
     }
     None
 }
@@ -953,12 +1044,27 @@ mod tests {
         }
     }
 
-    /// A fetch that adds a scalar offset register is left to the window: the range check does not
-    /// see that offset, so the descriptor does not bound where it reads.
+    /// A fetch that adds a scalar offset register is found per draw (D753): the range check does
+    /// not see that offset, so the descriptor alone does not bound where it reads. Its source is
+    /// the program before it, the descriptor's registers and the offset's code.
     #[test]
-    fn a_fetch_adding_a_scalar_offset_is_not_traced() {
-        // buffer_load_dword v1, v0, s[0:3], s5 idxen offset:8
-        let program = [0xe030_2008, 0x0500_0100, END];
-        assert!(traced(&program, 6).sources.is_empty());
+    fn a_fetch_adding_a_scalar_offset_is_computed_per_draw() {
+        // s_nop 0; buffer_load_dword v1, v0, s[0:3], s5 idxen offset:8
+        let program = [0xbf80_0000, 0xe030_2008, 0x0500_0100, END];
+        let buffers = traced(&program, 6);
+        let [BufferSource::Computed(computed)] = buffers.sources.as_slice() else {
+            panic!("one computed source: {:?}", buffers.sources);
+        };
+        assert_eq!(
+            (
+                computed.prefix.as_slice(),
+                computed.at,
+                computed.descriptor,
+                computed.soffset
+            ),
+            (&[0xbf80_0000][..], 4, 0, 5)
+        );
+        assert_eq!((computed.first_register, computed.user_data), (0, 6));
+        assert_eq!(buffers.served.get(&4), Some(&0));
     }
 }

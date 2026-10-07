@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use orbistoun_translate::draw_buffers::{BufferSource, DescriptorReads, DescriptorWord};
+use orbistoun_translate::draw_buffers::{BufferSource, Computed, DescriptorReads, DescriptorWord};
 use orbistoun_translate::wavefront::{TableBase, TableWord};
 
 use crate::backend::{
@@ -151,6 +151,95 @@ pub(crate) fn resolve_word(
     }
 }
 
+/// A computed descriptor's four words and its scalar offset for a draw with these user-data words
+/// (D753): the program before the access, run over them and guest memory.
+///
+/// # Errors
+///
+/// A refusal naming why the prefix leaves the descriptor or the offset unknown.
+pub(crate) fn evaluate_computed(
+    computed: &Computed,
+    user_data: &[u32; USER_DATA_WORDS],
+    memory: &impl GuestMemory,
+) -> Result<([u32; 4], u32), &'static str> {
+    const UNKNOWN: &str = concat!(
+        "a buffer descriptor the program computes from something the host cannot know for the ",
+        "draw - a vector result, the execution mask, or an operation not evaluated (D753)"
+    );
+    static TABLES: std::sync::OnceLock<
+        Option<(
+            orbistoun_shader::EncodingTable,
+            orbistoun_shader::OperandTable,
+        )>,
+    > = std::sync::OnceLock::new();
+    let (encodings, operands) = TABLES
+        .get_or_init(|| {
+            Some((
+                orbistoun_shader::EncodingTable::builtin().ok()?,
+                orbistoun_shader::OperandTable::builtin().ok()?,
+            ))
+        })
+        .as_ref()
+        .ok_or("the shader encoding tables did not load")?;
+    let bytes: Vec<u8> = computed
+        .prefix
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let decode = orbistoun_shader::decode_program(&bytes, encodings, operands);
+    let count = usize::try_from(computed.user_data)
+        .unwrap_or(USER_DATA_WORDS)
+        .min(USER_DATA_WORDS);
+    let scalars = orbistoun_translate::evaluate::scalar_prefix(
+        &decode,
+        encodings,
+        computed.at,
+        (computed.first_register, &user_data[..count]),
+        &mut |address| {
+            let bytes = memory.read(address, 4)?;
+            Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        },
+    )?;
+    let first = usize::from(computed.descriptor);
+    let mut words = [0u32; 4];
+    for (step, word) in words.iter_mut().enumerate() {
+        *word = scalars
+            .get(first + step)
+            .copied()
+            .flatten()
+            .ok_or(UNKNOWN)?;
+    }
+    // The offset field's codes: a scalar register, `null` (125), or an inline integer, 128 to 192
+    // counting up from zero and 193 to 208 down from -1.
+    let soffset = match computed.soffset {
+        125 => 0,
+        code @ 128..=192 => u32::from(code - 128),
+        code @ 193..=208 => 0u32.wrapping_sub(u32::from(code - 192)),
+        code => scalars
+            .get(usize::from(code))
+            .copied()
+            .flatten()
+            .ok_or(UNKNOWN)?,
+    };
+    Ok((words, soffset))
+}
+
+/// A buffer descriptor's fourth word for a draw with these user-data words - its format and
+/// selects (D738) - where the source has one and it can be found.
+pub(crate) fn resolve_fourth_word(
+    source: &BufferSource,
+    user_data: &[u32; USER_DATA_WORDS],
+    memory: &impl GuestMemory,
+) -> Option<u32> {
+    match source {
+        BufferSource::Descriptor { words, .. } => resolve_word(words[3], user_data, memory).ok(),
+        BufferSource::Computed(computed) => evaluate_computed(computed, user_data, memory)
+            .ok()
+            .map(|(words, _)| words[3]),
+        BufferSource::Pointer { .. } => None,
+    }
+}
+
 /// A table or scalar-load base's 64-bit address for a draw with these user-data words.
 fn table_address(table: TableBase, user_data: &[u32; USER_DATA_WORDS]) -> u64 {
     let half = |word: TableWord| match word {
@@ -173,11 +262,22 @@ pub(crate) fn resolve_range(
     user_data: &[u32; USER_DATA_WORDS],
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), &'static str> {
-    let (address, length) = match *source {
+    let (address, length) = match source {
         BufferSource::Pointer { base, extent } => {
-            (table_address(base, user_data), u64::from(extent))
+            (table_address(*base, user_data), u64::from(*extent))
+        }
+        // From the descriptor's base, through the scalar offset the shader adds to every address
+        // and the extent the descriptor admits past it.
+        BufferSource::Computed(computed) => {
+            let (values, soffset) = evaluate_computed(computed, user_data, memory)?;
+            let base = decode_buffer_descriptor(values).base;
+            (
+                crate::pipeline::guest_address_of(base),
+                u64::from(soffset) + descriptor_extent(values, computed.reads)?,
+            )
         }
         BufferSource::Descriptor { words, reads } => {
+            let (words, reads) = (*words, *reads);
             let mut values = [0u32; 4];
             for (value, word) in values.iter_mut().zip(words) {
                 *value = resolve_word(word, user_data, memory)?;
@@ -423,6 +523,45 @@ mod tests {
             let start = usize::try_from(address.checked_sub(self.0)?).ok()?;
             self.1.get(start..start.checked_add(length)?)
         }
+    }
+
+    /// A computed descriptor (D753) is found by running the program before the access over the
+    /// draw's user data and memory: here a load of the descriptor from the table the user data
+    /// names. Its range runs from the descriptor's base through the scalar offset the access adds
+    /// and the extent past it, and its fourth word is the format a format load reads.
+    #[test]
+    fn a_computed_descriptor_binds_from_its_base_past_the_offset() {
+        use orbistoun_translate::draw_buffers::{BufferSource, Computed};
+        let mut table = Vec::new();
+        for word in [0x2000u32, 16 << 16, 4, STRUCTURED] {
+            table.extend(word.to_le_bytes());
+        }
+        let memory = At(0x1000, table);
+        let source = BufferSource::Computed(Box::new(Computed {
+            // s_load_dwordx4 s[0:3], s[4:5], 0x0; s_waitcnt lgkmcnt(0)
+            prefix: vec![0xf408_0002, 0xfa00_0000, 0xbf8c_c07f],
+            at: 12,
+            descriptor: 0,
+            // The inline constant 16.
+            soffset: 128 + 16,
+            first_register: 4,
+            user_data: 2,
+            reads: vector(Some(16), true),
+        }));
+        let mut user_data = [0u32; super::USER_DATA_WORDS];
+        user_data[0] = 0x1000;
+        assert_eq!(
+            super::resolve_range(&source, &user_data, &memory),
+            Ok((0x2000, 16 + 4 * 16)),
+            "four sixteen-byte records past a sixteen-byte offset"
+        );
+        assert_eq!(
+            super::resolve_fourth_word(&source, &user_data, &memory),
+            Some(STRUCTURED)
+        );
+        // A table the user data does not name leaves the descriptor unknown.
+        user_data[0] = 0x9000;
+        assert!(super::resolve_range(&source, &user_data, &memory).is_err());
     }
 
     /// An indexed draw of a primitive shader that reads its vertex ids from its index buffer binds

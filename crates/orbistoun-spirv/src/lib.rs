@@ -626,6 +626,13 @@ impl Builder {
         encode(&mut self.functions, opcode, operands);
     }
 
+    /// The function section so far, as encoded: what a reader of the instructions emitted since
+    /// some point reads from.
+    #[must_use]
+    pub fn function_words(&self) -> &[u32] {
+        &self.functions
+    }
+
     /// Imports an extended instruction set by name (e.g. `"GLSL.std.450"`), returning the id
     /// [`Self::ext_inst`] refers to as its set.
     ///

@@ -33,7 +33,7 @@ use crate::registers::{
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
     colour_target_format_at, decode_blend_control, decode_image_descriptor, depth_control_at,
-    dispatch_calls, draw_calls, primitive_topology_at, register_writes, register_writes_reading,
+    dispatch_calls, primitive_topology_at, register_writes, register_writes_reading,
     shader_candidates, stencil_control_at, viewport_transform_from,
 };
 
@@ -522,7 +522,7 @@ enum Unprepared {
 
 /// Where each of a primitive shader's buffers' fourth descriptor word comes from, by slot: `None`
 /// for a buffer read through a scalar base, which has no format.
-type FormatWords = std::sync::Arc<[Option<orbistoun_translate::draw_buffers::DescriptorWord>]>;
+type FormatWords = std::sync::Arc<[orbistoun_translate::draw_buffers::BufferSource]>;
 
 /// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
 type PlainKey = (u32, u64, bool, u32);
@@ -553,13 +553,16 @@ const VGT_INDEX_TYPE: u32 = 0xC243;
 /// (`si_state_draw.cpp:1314`): `RESET_EN` in bit 0.
 const GE_MULTI_PRIM_IB_RESET_EN: u32 = 0xC24B;
 
-/// An indexed draw's index width from `VGT_INDEX_TYPE`: `VGT_INDEX_16` (0) and `VGT_INDEX_32` (1);
-/// `VGT_INDEX_8` and an unwritten register are `None`.
+/// `VGT_INDEX_TYPE` where no submission wrote it: `VGT_INDEX_16` (D754, assumed).
+const UNWRITTEN_INDEX_TYPE: u32 = 0;
+
+/// An indexed draw's index width from `VGT_INDEX_TYPE`: `VGT_INDEX_16` (0) and `VGT_INDEX_32` (1),
+/// an unwritten register reading as sixteen bits (D754); `VGT_INDEX_8` is `None`.
 fn index_width(value: Option<u32>) -> Option<orbistoun_translate::wavefront::IndexWidth> {
     use orbistoun_translate::wavefront::IndexWidth;
-    match value.map(|value| value & 3) {
-        Some(0) => Some(IndexWidth::Bits16),
-        Some(1) => Some(IndexWidth::Bits32),
+    match value.unwrap_or(UNWRITTEN_INDEX_TYPE) & 3 {
+        0 => Some(IndexWidth::Bits16),
+        1 => Some(IndexWidth::Bits32),
         _ => None,
     }
 }
@@ -1045,23 +1048,16 @@ impl Pipeline {
             }
             ranges.push(range);
         }
-        let formats = orbistoun_translate::wavefront::reads_buffer_formats(
-            decoded,
-            &self.encodings,
-        )
-        .then(|| {
-            let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-            for (slot, source) in formats.0.iter_mut().zip(&traced.sources) {
-                if let orbistoun_translate::draw_buffers::BufferSource::Descriptor {
-                    words: descriptor,
-                    ..
-                } = source
-                {
-                    *slot = crate::draw_buffers::resolve_word(descriptor[3], &words, memory).ok();
-                }
-            }
-            formats
-        });
+        let formats =
+            orbistoun_translate::wavefront::reads_buffer_formats(decoded, &self.encodings).then(
+                || {
+                    let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
+                    for (slot, source) in formats.0.iter_mut().zip(&traced.sources) {
+                        *slot = crate::draw_buffers::resolve_fourth_word(source, &words, memory);
+                    }
+                    formats
+                },
+            );
         Ok((traced.served, ranges, formats))
     }
 
@@ -1336,7 +1332,17 @@ impl Pipeline {
         }
 
         // The draws, found once for every pass that walks them.
-        let draws = draw_calls(&walked, stream);
+        // An offset draw's index size is the `VGT_INDEX_TYPE` in force at it, which a stream may
+        // load indirectly rather than write in a packet, and sixteen bits where none wrote it
+        // (D754).
+        let mut sweep = crate::registers::RegisterSweep::new(&writes);
+        let draws = crate::registers::draw_calls_reading(&walked, stream, &mut |at| {
+            Some(
+                sweep
+                    .latest(at, VGT_INDEX_TYPE)
+                    .unwrap_or(UNWRITTEN_INDEX_TYPE),
+            )
+        });
         record_colour_target(&mut submission, &writes, &draws);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
@@ -2503,10 +2509,8 @@ impl Pipeline {
     ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
         let traced = self.format_words(address)?;
         let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-        for (slot, word) in formats.0.iter_mut().zip(traced.iter()) {
-            if let Some(word) = word {
-                *slot = crate::draw_buffers::resolve_word(*word, words, memory).ok();
-            }
+        for (slot, source) in formats.0.iter_mut().zip(traced.iter()) {
+            *slot = crate::draw_buffers::resolve_fourth_word(source, words, memory);
         }
         Some(formats)
     }
@@ -2543,20 +2547,7 @@ impl Pipeline {
                     .ok()
                 })
                 .flatten()
-                .map(|buffers| -> FormatWords {
-                    buffers
-                        .sources
-                        .iter()
-                        .map(|source| match source {
-                            orbistoun_translate::draw_buffers::BufferSource::Descriptor {
-                                words,
-                                ..
-                            } => Some(words[3]),
-                            orbistoun_translate::draw_buffers::BufferSource::Pointer { .. } => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .into()
-                });
+                .map(|buffers| -> FormatWords { buffers.sources.into() });
         self.format_words.insert(key, (content, traced.clone()));
         traced
     }
@@ -5821,7 +5812,8 @@ mod tests {
         // Larger than a wave is not refused: it is drawn in chunks (D741).
         assert!(draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0)).is_ok());
         // An indexed draw takes its index size from `VGT_INDEX_TYPE` (D740): sixteen and
-        // thirty-two bits are read, eight and an unwritten type are not, nor is primitive restart.
+        // thirty-two bits are read, an unwritten type as sixteen (D754); eight is not, nor is
+        // primitive restart.
         let indexed = DrawCall {
             packet_offset: 0,
             instances: 1,
@@ -5848,9 +5840,13 @@ mod tests {
                 Ok((6, 2, Some(width)))
             );
         }
+        assert_eq!(
+            draw_geometry(&indexed, with_index(None, 0)).map(|g| g.indices),
+            Ok(Some(orbistoun_translate::wavefront::IndexWidth::Bits16)),
+            "an unwritten size is sixteen bits"
+        );
         for refused in [
             draw_geometry(&indexed, with_index(Some(2), 0)),
-            draw_geometry(&indexed, with_index(None, 0)),
             draw_geometry(&indexed, with_index(Some(0), 1)),
         ] {
             assert!(refused.is_err(), "{refused:?}");
