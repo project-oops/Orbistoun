@@ -61,9 +61,16 @@ const SRC_SEL_ADDRESS: [u32; 2] = [0, 3];
 const DST_SEL_ADDRESS: [u32; 2] = [0, 3];
 /// `CP_DMA_ME_COMMAND.BYTE_COUNT`, bits 0-25 on this generation (`gfx103.json:12266`).
 const BYTE_COUNT_MASK: u32 = 0x03ff_ffff;
-/// `CP_DMA_ME_COMMAND` `SAIC`/`DAIC` (bits 28/29): hold the source/destination address rather than
-/// increment it. Not reproduced; a packet asking for either stops execution.
-const ADDRESS_HOLD_BITS: u32 = 0x3000_0000;
+/// `CP_DMA_ME_COMMAND` `SAIC` (bit 28): hold the source address rather than increment it
+/// (`no_increment`, `cp_pm4_table_data_gfx11.json`), so every destination dword is the same source
+/// dword.
+const SOURCE_HOLD: u32 = 1 << 28;
+/// `CP_DMA_ME_COMMAND` `DAIC` (bit 29): hold the destination address. Not reproduced; a packet
+/// asking for it stops execution.
+const DESTINATION_HOLD: u32 = 1 << 29;
+/// `CP_DMA_ME_COMMAND` `SAS` (bit 26): the source address is in register space - meaningful only
+/// with `SRC_SEL` 0 (`src_addr_using_sas`). Not reproduced there.
+const SOURCE_IN_REGISTERS: u32 = 1 << 26;
 
 /// `RELEASE_MEM` `DATA_SEL` (`sid.h:163-167`, bits 31:29 of body dword one).
 const DATA_SEL_DISCARD: u32 = 0;
@@ -424,6 +431,8 @@ struct DmaData {
     src_high: u32,
     destination: u64,
     count: usize,
+    /// `SAIC`: every destination dword is the source's first.
+    source_held: bool,
 }
 
 /// `DMA_DATA`: word zero, source (data or address), destination address, command
@@ -433,15 +442,18 @@ fn decode_dma_data(body: &[u32]) -> Result<DmaData, Stop> {
         return Err(Stop::Malformed);
     };
     let dst_sel = (control >> 20) & 0x3;
-    if !DST_SEL_ADDRESS.contains(&dst_sel) || command & ADDRESS_HOLD_BITS != 0 {
+    let src_sel = (control >> 29) & 0x3;
+    let register_source = src_sel == 0 && command & SOURCE_IN_REGISTERS != 0;
+    if !DST_SEL_ADDRESS.contains(&dst_sel) || command & DESTINATION_HOLD != 0 || register_source {
         return Err(Stop::NeedsGpu);
     }
     Ok(DmaData {
-        src_sel: (control >> 29) & 0x3,
+        src_sel,
         src_low,
         src_high,
         destination: address(dst_low, dst_high),
         count: (command & BYTE_COUNT_MASK) as usize,
+        source_held: command & SOURCE_HOLD != 0,
     })
 }
 
@@ -504,6 +516,7 @@ fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -
         src_high,
         destination,
         count,
+        source_held,
     } = decode_dma_data(body)?;
     // In place: a GL frame fills and copies megabytes per submission.
     let done = if count == 0 {
@@ -512,6 +525,12 @@ fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -
         crate::perf::span(crate::perf::Span::OtherMemory, || {
             memory.fill(destination, src_low, count)
         })
+    } else if SRC_SEL_ADDRESS.contains(&src_sel) && source_held {
+        // The held source's first dword, repeated across the destination.
+        let word = memory
+            .read(address(src_low, src_high), 4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]));
+        word.is_some_and(|word| memory.fill(destination, word, count))
     } else if SRC_SEL_ADDRESS.contains(&src_sel) {
         crate::perf::span(crate::perf::Span::Copy, || {
             memory.copy(address(src_low, src_high), destination, count)
@@ -1187,6 +1206,51 @@ mod tests {
 
         assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
         assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+    }
+
+    /// A `DMA_DATA` copy whose source address is held (`SAIC`, command bit 28: `no_increment` in
+    /// `cp_pm4_table_data_gfx11.json`) reads the same source dword for every destination dword:
+    /// PPSA03416's `[0xe0000000, src, 0x7400, dst, 0x7400, 0x14000008]` writes one word twice.
+    /// With the source through L2 (`SRC_SEL` 3) the `SAS` address space (bit 26) does not apply. A
+    /// held destination (`DAIC`), or a source in register space, still stops.
+    #[test]
+    fn a_held_source_repeats_its_word_across_the_destination() {
+        let held = vec![
+            command_header(measured::DMA_DATA, 6),
+            0xe000_0000,
+            0x2000,
+            0,
+            0x3000,
+            0,
+            0x1400_0008,
+        ];
+        let mut stream = held.clone();
+        stream.extend(release(0x1000, 1, 0xbeef_cafe));
+        let mut memory = Fake::default();
+        memory.write(0x2000, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let done = execute(&bytes(&stream), &mut memory);
+
+        assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
+        assert_eq!(memory.word(0x3000), 0x0403_0201);
+        assert_eq!(
+            memory.word(0x3004),
+            0x0403_0201,
+            "the same word, not the next"
+        );
+
+        let mut destination_held = held.clone();
+        destination_held[6] = 0x2000_0008;
+        let done = execute(&bytes(&destination_held), &mut Fake::default());
+        assert_ne!(done.stopped, Stopped::Completed, "DAIC is not carried out");
+        let mut register_source = held;
+        register_source[1] = 0x8000_0000;
+        let done = execute(&bytes(&register_source), &mut Fake::default());
+        assert_ne!(
+            done.stopped,
+            Stopped::Completed,
+            "SAS with SRC_SEL 0 is a register"
+        );
     }
 
     /// A `DMA_DATA` with `DST_SEL` "nowhere" is radeonsi's L2 prefetch
