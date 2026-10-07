@@ -6582,3 +6582,62 @@ fn pack_round_toward_zero_packs_two_halves_truncated() {
     let registers = run(&program);
     assert_eq!(vector(&registers, 3), 0x8000_0010, "2^-20 subnormal, -0.0");
 }
+
+/// `s_lshr_b64` and `s_lshl_b64`: a 64-bit value shifted by the low six bits of the second source
+/// (AMD's published RDNA instruction set). PPSA03416's vertex shader narrows its execution mask as
+/// `s_lshr_b64 exec, -1, vcc_lo`: with 40 in `vcc_lo`, lanes 0-23 run. On a pair, a shift past 32
+/// moves the halves across, and one within 32 carries bits between them.
+#[test]
+fn sixty_four_bit_shifts_move_bits_across_the_halves() {
+    if !device_or_skip("sixty_four_bit_shifts_move_bits_across_the_halves") {
+        return;
+    }
+    // `s_mov_b32 vcc_lo, 40` then `s_lshr_b64 exec, -1, vcc_lo` (126 exec, 106 vcc_lo, 193 -1).
+    let mask_program = [
+        sop1("s_mov_b32", 106, 128 + 40),
+        sop2("s_lshr_b64", 126, 193, 106),
+    ];
+    let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane < 24 { lane as u32 } else { 0 };
+        assert_eq!(*stored, expected, "lane {lane}");
+    }
+
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(0, 0x89ab_cdef));
+    program.extend(s_mov_literal(1, 0x0123_4567));
+    program.push(sop2("s_lshl_b64", 2, 0, 128 + 36));
+    program.push(sop2("s_lshr_b64", 4, 0, 128 + 4));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        (scalar(&registers, 2), scalar(&registers, 3)),
+        (0, 0x9abc_def0),
+        "<< 36"
+    );
+    assert_eq!(
+        (scalar(&registers, 4), scalar(&registers, 5)),
+        (0x789a_bcde, 0x0012_3456),
+        ">> 4"
+    );
+}
+
+/// `vcc_hi` - scalar register 107, the condition mask's high half - written and read as a scalar,
+/// as PPSA03416's primitive shader uses it for scratch (`s_bfe_u32 vcc_hi, s3, 0x80008`, then
+/// `s_lshl_b32 vcc_lo, vcc_hi, 12`). Writing it leaves `vcc_lo` as it was.
+#[test]
+fn the_condition_masks_high_half_is_a_scalar_register() {
+    if !device_or_skip("the_condition_masks_high_half_is_a_scalar_register") {
+        return;
+    }
+    let program = [
+        sop1("s_mov_b32", 106, 128 + 7),      // vcc_lo = 7
+        sop2("s_add_i32", 107, 128 + 5, 128), // vcc_hi = 5
+        sop2("s_add_i32", 0, 107, 128 + 1),   // s0 = vcc_hi + 1
+        sop2("s_add_i32", 1, 106, 128),       // s1 = vcc_lo
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 0), 6, "vcc_hi read back");
+    assert_eq!(scalar(&registers, 1), 7, "vcc_lo kept");
+}

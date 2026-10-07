@@ -369,8 +369,18 @@ name = "s_lshl_b32"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 31
+name = "s_lshl_b64"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 32
 name = "s_lshr_b32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 33
+name = "s_lshr_b64"
 
 [[mnemonic]]
 family = "SOP2"

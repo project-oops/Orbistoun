@@ -489,6 +489,11 @@ impl Model for Predicated<'_> {
                 Ok(self.load_register(file, u32::from(*register)))
             }
             // A lane mask, in a model that has none, refused by name.
+            Operand::Named(named) if model::lane_mask_high_name(named).is_some() => {
+                let mask = model::lane_mask_high_name(named).expect("checked immediately above");
+                let (_, high) = self.read_lane_mask(mask)?;
+                Ok(high)
+            }
             Operand::Named(named) if model::lane_mask_name(named).is_some() => {
                 Err(TranslateError::Unsupported {
                     offset: instruction.offset,

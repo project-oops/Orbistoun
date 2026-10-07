@@ -70,6 +70,8 @@ pub const SUPPORTED: &[&str] = &[
     "s_and_b32",
     "s_andn2_b32",
     "s_and_b64",
+    "s_lshl_b64",
+    "s_lshr_b64",
     "s_andn2_b64",
     "s_barrier",
     "s_bfe_u32",
@@ -394,6 +396,17 @@ pub fn lane_mask_name(name: &str) -> Option<&'static str> {
     match name {
         "exec" | EXEC_LOW_HALF => Some(EXEC_LOW_HALF),
         "vcc" | VCC_LOW_HALF => Some(VCC_LOW_HALF),
+        _ => None,
+    }
+}
+
+/// The lane mask whose high half a name is: `vcc_hi` is scalar register 107, the condition mask's
+/// bits 63:32, and `exec_hi` 127 the execution mask's. A shader may use either as an ordinary
+/// scalar, as PPSA03416's primitive shader does `vcc_hi`.
+pub fn lane_mask_high_name(name: &str) -> Option<&'static str> {
+    match name {
+        "exec_hi" => Some(EXEC_LOW_HALF),
+        "vcc_hi" => Some(VCC_LOW_HALF),
         _ => None,
     }
 }
@@ -2181,6 +2194,7 @@ fn scalar_instruction<M: Model + ?Sized>(
             scalar_logic(model, instruction, name)
         }
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
+        "s_lshl_b64" | "s_lshr_b64" => scalar_shift_64(model, instruction, name),
         "s_bitcmp1_b32" => scalar_bit_test(model, instruction),
         "s_and_saveexec_b64" => and_save_exec(model, instruction),
         "s_and_saveexec_b32" => and_save_exec_32(model, instruction),
@@ -3569,6 +3583,16 @@ fn write_mask_low<M: Model + ?Sized>(
     model.write_lane_mask(mask, value, high)
 }
 
+/// Writes the high half of a lane mask, leaving the low half as it was.
+fn write_mask_high<M: Model + ?Sized>(
+    model: &mut M,
+    mask: &'static str,
+    value: Id,
+) -> Result<(), TranslateError> {
+    let (low, _) = model.read_lane_mask(mask)?;
+    model.write_lane_mask(mask, low, value)
+}
+
 /// The lane mask an operand names, if it names one.
 fn mask_destination(operand: &Operand) -> Option<&'static str> {
     match operand {
@@ -3697,11 +3721,15 @@ fn scalar_integer<M: Model + ?Sized>(
     let (destination, first, second) = three_operands(instruction)?;
     let mask = mask_destination(destination);
     let to_m0 = matches!(destination, Operand::Named(named) if named == M0);
-    // A mask or `m0` destination has no register number, so the register is only resolved when
-    // there is one to resolve.
+    let high_half = match destination {
+        Operand::Named(named) => lane_mask_high_name(named),
+        _ => None,
+    };
+    // A mask, a mask's high half or `m0` has no register number, so the register is only resolved
+    // when there is one to resolve.
     let register = match mask {
         Some(_) => 0,
-        None if to_m0 => 0,
+        None if to_m0 || high_half.is_some() => 0,
         None => scalar_destination(instruction, destination)?,
     };
 
@@ -3790,10 +3818,11 @@ fn scalar_integer<M: Model + ?Sized>(
     // A mask destination goes to the mask, not the register file: `s_and_b32 exec_lo, exec_lo, s2`
     // is how a 32-lane shader narrows its execution mask. `m0` is state outside the file too:
     // `s_or_b32 m0, s0, s2` is how radeonsi's primitive shader forms its allocation request.
-    match mask {
-        Some(mask) => write_mask_low(model, mask, result)?,
-        None if to_m0 => model.write_m0(result),
-        None => model.write_scalar(register, result),
+    match (mask, high_half) {
+        (Some(mask), _) => write_mask_low(model, mask, result)?,
+        (None, Some(mask)) => write_mask_high(model, mask, result)?,
+        (None, None) if to_m0 => model.write_m0(result),
+        (None, None) => model.write_scalar(register, result),
     }
     if let Some(condition) = condition {
         model.set_condition_code(condition);
@@ -4208,6 +4237,77 @@ fn scalar_bit_field_64<M: Model + ?Sized>(
     model.set_condition_code(non_zero);
     model.count();
     Ok(())
+}
+
+/// `s_lshl_b64 d, s, amount` and `s_lshr_b64 d, s, amount`: a pair shifted by `amount[5:0]` (AMD's
+/// published RDNA instruction set), the condition code whether the result is non-zero. The
+/// destination may be a lane mask: PPSA03416's vertex shader narrows its execution mask as
+/// `s_lshr_b64 exec, -1, vcc_lo`.
+fn scalar_shift_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let (destination, source, amount) = three_operands(instruction)?;
+    let mask = match destination {
+        Operand::Named(named) => lane_mask_name(named),
+        _ => None,
+    };
+    let register = match mask {
+        Some(_) => 0,
+        None => scalar_destination(instruction, destination)?,
+    };
+    if mask.is_none() && register + 2 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a 64-bit shift runs past the end of the register file",
+        });
+    }
+    let pair = pair_source(model, instruction, source, 0)?;
+    let amount = model.read_source(instruction, amount, 0)?;
+    let six_bits = model.constant(63);
+    let amount = model.binary(op::BITWISE_AND, amount, six_bits);
+    let (low, high) = if name == "s_lshl_b64" {
+        shift_pair_left(model, pair, amount)
+    } else {
+        shift_pair_right(model, pair, amount)
+    };
+    let either = model.binary(op::BITWISE_OR, low, high);
+    let non_zero = model.is_not_zero(either);
+    if let Some(mask) = mask {
+        model.write_lane_mask(mask, low, high)?;
+    } else {
+        model.write_scalar(register, low);
+        model.write_scalar(register + 1, high);
+    }
+    model.set_condition_code(non_zero);
+    model.count();
+    Ok(())
+}
+
+/// A pair shifted left by `amount` (below sixty-four), in halves, the mirror of
+/// [`shift_pair_right`].
+fn shift_pair_left<M: Model + ?Sized>(
+    model: &mut M,
+    (low, high): (Id, Id),
+    amount: Id,
+) -> (Id, Id) {
+    let zero = model.constant(0);
+    let thirty_one = model.constant(31);
+    let thirty_two = model.constant(32);
+    let within = model.binary(op::BITWISE_AND, amount, thirty_one);
+    let back = model.binary(op::ISUB, thirty_two, within);
+    let back = model.binary(op::BITWISE_AND, back, thirty_one);
+    let carried = model.binary(op::SHIFT_RIGHT_LOGICAL, low, back);
+    let none = model.compare(op::IEQUAL, within, zero);
+    let carried = model.select(none, zero, carried);
+    let shifted_high = model.binary(op::SHIFT_LEFT_LOGICAL, high, within);
+    let short_high = model.binary(op::BITWISE_OR, shifted_high, carried);
+    let short_low = model.binary(op::SHIFT_LEFT_LOGICAL, low, within);
+    let far = model.compare(op::UGREATER_THAN_EQUAL, amount, thirty_two);
+    let low = model.select(far, zero, short_low);
+    let high = model.select(far, short_low, short_high);
+    (low, high)
 }
 
 /// A pair shifted right by `amount` (below sixty-four), logically, in halves: SPIR-V leaves a shift

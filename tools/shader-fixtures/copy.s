@@ -66,6 +66,9 @@ v_madak_f32 v17, v1, v2, 0xbdf0555d
 // The AGC titles' vertex and pixel shaders: a no-op, and two floats packed to halves.
 v_nop
 v_cvt_pkrtz_f16_f32_e64 v18, v1, v2
+// PPSA03416's vertex shader narrows its execution mask with a 64-bit shift.
+s_lshr_b64 exec, -1, vcc_lo
+s_lshl_b64 s[4:5], s[6:7], s8
 v_madmk_f32 v18, v1, 0x3e800000, v2
 // An unsigned scalar compare and a compare into the execution mask, as a pixel shader's discard
 // test is written.

@@ -2873,6 +2873,11 @@ impl Model for Wavefront<'_> {
             }
             // A lane mask read as an ordinary 32-bit source: its low half, as in `s_and_b32
             // exec_lo, exec_lo, sN` narrowing a 32-lane shader's mask.
+            Operand::Named(named) if model::lane_mask_high_name(named).is_some() => {
+                let mask = model::lane_mask_high_name(named).expect("checked immediately above");
+                let (_, high) = self.read_lane_mask(mask)?;
+                Ok(high)
+            }
             Operand::Named(named) if model::lane_mask_name(named).is_some() => {
                 let mask = model::lane_mask_name(named).expect("checked immediately above");
                 let (low, _) = self.read_lane_mask(mask)?;

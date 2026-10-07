@@ -461,3 +461,15 @@ v_cvt_pkrtz_f16_f32_e32 v200, s5, v9
 v_cvt_pkrtz_f16_f32_e32 v255, -1, v130
 v_cvt_pkrtz_f16_f32_e32 v9, 0.5, v77
 v_cvt_pkrtz_f16_f32_e32 v130, v88, v12
+
+// ---- s_lshr_b64 / s_lshl_b64: SOP2, a 64-bit value shifted by the low six bits of a 32-bit one --
+s_lshr_b64 exec, -1, vcc_lo
+s_lshr_b64 s[4:5], s[6:7], s8
+s_lshr_b64 s[100:101], s[2:3], s97
+s_lshr_b64 s[30:31], -1, 5
+s_lshr_b64 s[64:65], s[88:89], s3
+s_lshl_b64 s[4:5], s[6:7], s8
+s_lshl_b64 s[100:101], s[2:3], s97
+s_lshl_b64 s[30:31], -1, 5
+s_lshl_b64 s[64:65], s[88:89], s3
+s_lshl_b64 exec, 1, s9
