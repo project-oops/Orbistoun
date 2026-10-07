@@ -409,6 +409,26 @@ name = "s_bfe_u64"
 
 [[mnemonic]]
 family = "SOP2"
+opcode = 46
+name = "s_lshl1_add_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 47
+name = "s_lshl2_add_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 48
+name = "s_lshl3_add_u32"
+
+[[mnemonic]]
+family = "SOP2"
+opcode = 49
+name = "s_lshl4_add_u32"
+
+[[mnemonic]]
+family = "SOP2"
 opcode = 50
 name = "s_pack_ll_b32_b16"
 

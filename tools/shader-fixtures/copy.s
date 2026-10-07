@@ -70,6 +70,11 @@ v_cvt_pkrtz_f16_f32_e64 v18, v1, v2
 s_lshr_b64 exec, -1, vcc_lo
 s_lshl_b64 s[4:5], s[6:7], s8
 v_madmk_f32 v18, v1, 0x3e800000, v2
+// PPSA28061's vertex shader scales an index into a stride with a shift-and-add.
+s_lshl4_add_u32 s11, s10, 0xc0000
+s_lshl1_add_u32 s12, s10, s11
+s_lshl2_add_u32 s13, s10, s11
+s_lshl3_add_u32 s14, s10, s11
 // An unsigned scalar compare and a compare into the execution mask, as a pixel shader's discard
 // test is written.
 s_cmp_lg_u32 s2, 0

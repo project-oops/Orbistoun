@@ -473,3 +473,13 @@ s_lshl_b64 s[100:101], s[2:3], s97
 s_lshl_b64 s[30:31], -1, 5
 s_lshl_b64 s[64:65], s[88:89], s3
 s_lshl_b64 exec, 1, s9
+
+// ---- s_lshl1..4_add_u32: SOP2, the first source shifted left by one to four and the second added -
+s_lshl1_add_u32 s4, s6, s8
+s_lshl2_add_u32 s100, s2, s97
+s_lshl2_add_u32 s9, s44, s3
+s_lshl3_add_u32 s30, s21, s5
+s_lshl3_add_u32 s7, s99, s40
+s_lshl4_add_u32 s64, s88, s3
+s_lshl4_add_u32 s11, s10, s77
+s_lshl1_add_u32 vcc_hi, s5, 7

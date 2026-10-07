@@ -5968,6 +5968,76 @@ fn a_scalar_select_follows_the_condition_code_and_a_bit_mask_its_fields() {
     assert_eq!(scalar(&registers, 7), 0xff0);
 }
 
+/// `s_lshlN_add_u32` is `(a << N) + b`, its condition code the carry out of the 64-bit sum: set by
+/// a bit shifted out as much as by a wrapped add.
+#[test]
+fn a_shift_and_add_carries_what_it_shifts_out() {
+    if !device_or_skip("a_shift_and_add_carries_what_it_shifts_out") {
+        return;
+    }
+    let (one, zero) = (128 + 1, 128);
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(0, 0x1000_0001));
+    program.extend(s_mov_literal(1, 5));
+    program.push(sop2("s_lshl4_add_u32", 2, 0, 1));
+    program.push(sop2("s_cselect_b32", 3, one, zero));
+    program.push(sop2("s_lshl1_add_u32", 4, 1, 1));
+    program.push(sop2("s_cselect_b32", 5, one, zero));
+    program.extend(s_mov_literal(0, 0x7fff_ffff));
+    program.push(sop2("s_lshl1_add_u32", 6, 0, 128 + 3));
+    program.push(sop2("s_cselect_b32", 7, one, zero));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 2), 0x15, "bit 28 shifted out, 5 added");
+    assert_eq!(scalar(&registers, 3), 1, "a bit shifted out carries");
+    assert_eq!(scalar(&registers, 4), 15);
+    assert_eq!(scalar(&registers, 5), 0, "nothing lost, nothing carried");
+    assert_eq!(scalar(&registers, 6), 1, "0xfffffffe + 3 wraps");
+    assert_eq!(scalar(&registers, 7), 1, "a wrapped add carries");
+
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(1, 5));
+    program.push(sop2("s_lshl2_add_u32", 2, 1, 1));
+    program.push(sop2("s_lshl3_add_u32", 3, 1, 128 + 7));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 2), 25);
+    assert_eq!(scalar(&registers, 3), 47);
+}
+
+/// A lane mask is a 64-bit scalar source like a register pair: `s_cselect_b64 d, exec, 0` reads
+/// the whole execution mask, as PPSA28061's vertex shader does, and `vcc` reads both its halves.
+#[test]
+fn a_lane_mask_is_a_sixty_four_bit_source() {
+    if !device_or_skip("a_lane_mask_is_a_sixty_four_bit_source") {
+        return;
+    }
+    let (vcc, exec) = (106, EXEC_LO_CODE);
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(vcc, 0x1234));
+    program.extend(s_mov_literal(vcc + 1, 0x5678));
+    program.push(s_cmp_i32("s_cmp_eq_i32", 128 + 1, 128 + 1));
+    program.push(sop2("s_cselect_b64", 2, vcc, 128));
+    program.push(sop2("s_cselect_b64", 4, exec, 128));
+    program.push(s_cmp_i32("s_cmp_lg_i32", 128 + 1, 128 + 1));
+    program.push(sop2("s_cselect_b64", 6, 128, exec));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        (scalar(&registers, 2), scalar(&registers, 3)),
+        (0x1234, 0x5678)
+    );
+    assert_eq!(
+        (scalar(&registers, 4), scalar(&registers, 5)),
+        (u32::MAX, u32::MAX),
+        "every lane runs"
+    );
+    assert_eq!(
+        (scalar(&registers, 6), scalar(&registers, 7)),
+        (u32::MAX, u32::MAX)
+    );
+}
+
 /// `v_bfi_b32` takes the mask's set bits from its second source and the rest from its third;
 /// `v_cvt_f32_i32` converts signed, rounding to nearest.
 #[test]

@@ -72,6 +72,10 @@ pub const SUPPORTED: &[&str] = &[
     "s_and_b64",
     "s_lshl_b64",
     "s_lshr_b64",
+    "s_lshl1_add_u32",
+    "s_lshl2_add_u32",
+    "s_lshl3_add_u32",
+    "s_lshl4_add_u32",
     "s_andn2_b64",
     "s_barrier",
     "s_bfe_u32",
@@ -556,6 +560,10 @@ pub fn writes_condition_code(name: &str) -> bool {
             // The unsigned add sets it to the carry out; the bit test to the bit; the saving and
             // the count to whether the new mask or the count is non-zero.
             | "s_add_u32"
+            | "s_lshl1_add_u32"
+            | "s_lshl2_add_u32"
+            | "s_lshl3_add_u32"
+            | "s_lshl4_add_u32"
             | "s_bitcmp1_b32"
             | "s_and_saveexec_b64"
             | "s_and_saveexec_b32"
@@ -2204,6 +2212,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // as its destination.
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_or_b32" | "s_xor_b32"
         | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_lshr_b32" | "s_add_u32"
+        | "s_lshl1_add_u32" | "s_lshl2_add_u32" | "s_lshl3_add_u32" | "s_lshl4_add_u32"
         | "s_cselect_b32" => scalar_integer(model, instruction, name),
 
         // Field assembly that writes no condition code: two 16-bit halves into one word, and a
@@ -3708,6 +3717,24 @@ fn combine<M: Model + ?Sized>(
     }
 }
 
+/// `S_LSHL1_ADD_U32` to `S_LSHL4_ADD_U32`: `value` shifted left by `amount` (one to four) and
+/// `addend` added, with the condition code the carry out of the 64-bit sum (AMD's published RDNA
+/// instruction set: `tmp = (S0.u64 << n) + S1.u64; SCC = tmp >= 2^32`) - a bit shifted out, or a
+/// wrapped add.
+fn shift_and_add<M: Model + ?Sized>(
+    model: &mut M,
+    (value, amount): (Id, u32),
+    addend: Id,
+) -> (Id, Option<Id>) {
+    let (by, back) = (model.constant(amount), model.constant(32 - amount));
+    let shifted = model.binary(op::SHIFT_LEFT_LOGICAL, value, by);
+    let lost = model.binary(op::SHIFT_RIGHT_LOGICAL, value, back);
+    let result = model.add(shifted, addend);
+    let shifted_out = model.is_not_zero(lost);
+    let wrapped = model.compare(op::ULESS_THAN, result, shifted);
+    (result, Some(model.either(shifted_out, wrapped)))
+}
+
 /// Translates the 32-bit scalar arithmetic and logic.
 ///
 /// Every one but the multiply writes the condition code: the logical operations to whether the
@@ -3802,6 +3829,10 @@ fn scalar_integer<M: Model + ?Sized>(
             let result = model.add(left, right);
             (result, Some(model.compare(op::ULESS_THAN, result, left)))
         }
+        "s_lshl1_add_u32" => shift_and_add(model, (left, 1), right),
+        "s_lshl2_add_u32" => shift_and_add(model, (left, 2), right),
+        "s_lshl3_add_u32" => shift_and_add(model, (left, 3), right),
+        "s_lshl4_add_u32" => shift_and_add(model, (left, 4), right),
         // `S_CSELECT_B32`: the first source where the condition code is set; it writes none.
         "s_cselect_b32" => {
             let condition = crate::control::read_condition_code(model, true);
@@ -4495,6 +4526,14 @@ fn scalar_move<M: Model + ?Sized>(
             // ...` does for a 64-lane one.
             if let Some(mask) = mask_destination(destination) {
                 write_mask_low(model, mask, value)?;
+                model.count();
+                return Ok(());
+            }
+            // And `vcc_hi` or `exec_hi`, a mask's high half used as an ordinary scalar.
+            if let Operand::Named(name) = destination
+                && let Some(mask) = lane_mask_high_name(name)
+            {
+                write_mask_high(model, mask, value)?;
                 model.count();
                 return Ok(());
             }
@@ -7413,10 +7452,16 @@ fn pair_source<M: Model + ?Sized>(
             let high = model.constant(if *value < 0 { u32::MAX } else { 0 });
             return Ok((low, high));
         }
+        // A lane mask is the pair it names: `exec` is scalar codes 126-127, `vcc` 106-107.
+        Operand::Named(named) if lane_mask_name(named).is_some() => {
+            let mask = lane_mask_name(named).expect("checked immediately above");
+            return model.read_lane_mask(mask);
+        }
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "a 64-bit source that is neither a register pair nor an inline integer",
+                detail: "a 64-bit source that is neither a register pair, a lane mask nor an inline \
+                         integer",
             });
         }
     };
