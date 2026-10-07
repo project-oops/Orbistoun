@@ -694,6 +694,9 @@ fn dispatch_core(
         .map_err(|e| DispatchError::Vulkan("begin_command_buffer", e))?;
     // The images' texels reach the device before anything runs over them.
     images.record_upload(device, command);
+    if let Some(buffers) = buffers {
+        buffers.record_upload(device, command);
+    }
     // SAFETY: recording is open and the pipeline is live.
     unsafe { device.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, pipeline) };
     // SAFETY: recording is open; the layout and set match the pipeline.
@@ -735,6 +738,9 @@ fn dispatch_core(
     // SAFETY: recording is open and a pipeline is bound.
     unsafe { device.cmd_dispatch(command, groups[0], groups[1], groups[2]) };
     images.record_readback(device, command);
+    if let Some(buffers) = buffers {
+        buffers.record_readback(device, command);
+    }
     // SAFETY: recording is open.
     unsafe { device.end_command_buffer(command) }
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
