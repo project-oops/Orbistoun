@@ -119,6 +119,11 @@ pub fn released(label: u64, context: u32) -> bool {
         }
     };
     let Some(q) = queued else {
+        // `ORBISTOUN_EOP_TO_ALL` asks what a title blocked on its `sceAgcDriverAddEqEvent` queue
+        // does when that wait completes. It is off by default and intervenes (D227).
+        if std::env::var_os(orbistoun_env::EOP_TO_ALL.name).is_some() {
+            post_eop_completion(label, context);
+        }
         return false;
     };
     let replaced = on_screen().insert(q.handle, q.index);
@@ -127,4 +132,39 @@ pub fn released(label: u64, context: u32) -> bool {
         unsafe { guest::write_u64(label_of(previous), 0) };
     }
     crate::flip(q.handle, q.index, q.arg) == 0
+}
+
+/// Posts an end-of-pipe completion to every event queue, answering how many took it.
+///
+/// Only for the `ORBISTOUN_EOP_TO_ALL` diagnostic. What the driver posts for a retired
+/// interrupting release is unmeasured (obSCEne -eo01), so this models nothing: the release's
+/// context id is the `ident` and its label the `data`, which only lets a reader tell one post from
+/// another.
+pub fn post_eop_completion(label: u64, context: u32) -> usize {
+    orbistoun_kernel::sync::post_event_everywhere(orbistoun_kernel::sync::PendingEvent {
+        ident: u64::from(context),
+        filter: 0,
+        flags: 0,
+        fflags: 0,
+        data: i64::from_ne_bytes(label.to_ne_bytes()),
+        udata: 0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Under `ORBISTOUN_EOP_TO_ALL`, an interrupting release that is no flip wakes every queue: a
+    /// title blocked on its `sceAgcDriverAddEqEvent` queue gets an event, its context id as `ident`
+    /// and its label as `data`.
+    #[test]
+    fn an_end_of_pipe_completion_reaches_every_queue() {
+        let queue = orbistoun_kernel::sync::create_equeue("eop experiment");
+        assert!(super::post_eop_completion(0x7400_00c9_c610, 0x800_0101) >= 1);
+        let taken = orbistoun_kernel::sync::take_events(queue, 4);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(
+            (taken[0].ident, taken[0].data),
+            (0x800_0101, 0x7400_00c9_c610)
+        );
+    }
 }

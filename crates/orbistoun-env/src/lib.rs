@@ -275,6 +275,20 @@ pub const FLIP_TO_ALL: Var = Var {
     read_by: "orbistoun-video",
     effect: Effect::Intervenes,
 };
+/// Post an end-of-pipe completion to every event queue when an interrupting release retires.
+///
+/// A title registers its own queue through `sceAgcDriverAddEqEvent` and blocks on it, and what the
+/// driver posts there is unmeasured (obSCEne -eo01), so nothing is posted. This does not model the
+/// post; it asks whether waking that wait gets the guest further. Off by default, and it
+/// intervenes (D227).
+pub const EOP_TO_ALL: Var = Var {
+    name: "ORBISTOUN_EOP_TO_ALL",
+    kind: Kind::Diagnostic,
+    summary: "post an end-of-pipe completion to every queue - would waking that wait get the guest further?",
+    example: "1",
+    read_by: "orbistoun-video",
+    effect: Effect::Intervenes,
+};
 /// Fill the guest stack before entering.
 pub const STACK_FILL: Var = Var {
     name: "ORBISTOUN_STACK_FILL",
@@ -638,6 +652,7 @@ pub const REGISTRY: &[Var] = &[
     DUMP,
     DLSYM_STUBS,
     FLIP_TO_ALL,
+    EOP_TO_ALL,
     STACK_FILL,
     DIRECT_FILL,
     BSS_FILL,
@@ -720,6 +735,7 @@ mod tests {
         super::DUMP,
         super::DLSYM_STUBS,
         super::FLIP_TO_ALL,
+        super::EOP_TO_ALL,
         super::STACK_FILL,
         super::DIRECT_FILL,
         super::BSS_FILL,
