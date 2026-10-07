@@ -356,6 +356,65 @@ fn signed_in_user() -> u32 {
         .map_or(INITIAL_USER as u32, |user| user.id)
 }
 
+/// `SCE_USER_SERVICE_ERROR_NO_EVENT`, what the same call answers once its event has been given
+/// (call-reuse).
+const USER_SERVICE_NO_EVENT: u64 = 0x8096_0007;
+
+/// Whether the signed-in user's login event has been given.
+static LOGIN_EVENT_GIVEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `sceUserServiceGetEvent(event)` - the next user event.
+///
+/// As obSCEne's census measured it (`200-census/libSceUserService/sceUserServiceGetEvent`, sweep
+/// 20261007-113500): the first call answers `0` with eight bytes, type `0` then the signed-in
+/// user's identifier; the next answers `SCE_USER_SERVICE_ERROR_NO_EVENT` and writes nothing; a
+/// null destination is `SCE_USER_SERVICE_ERROR_INVALID_ARGUMENT`. So a title learns its user has
+/// logged in once, as on the console.
+fn user_service_get_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Ok(at) = usize::try_from(args[0]) else {
+        return USER_SERVICE_INVALID_ARGUMENT;
+    };
+    if at == 0 {
+        return USER_SERVICE_INVALID_ARGUMENT;
+    }
+    if LOGIN_EVENT_GIVEN.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return USER_SERVICE_NO_EVENT;
+    }
+    let mut event = [0_u8; 8];
+    event[4..].copy_from_slice(&signed_in_user().to_le_bytes());
+    // SAFETY: a guest-supplied event destination in identity-mapped guest memory, written at the
+    // eight bytes the call was measured writing.
+    unsafe {
+        std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<[u8; 8]>(at), event);
+    }
+    OK
+}
+
+/// The bytes `sceSystemServiceGetStatus` writes: 136, all zero on the measured console
+/// (`200-census/libSceSystemService/sceSystemServiceGetStatus`, extent and changed 136).
+const SYSTEM_STATUS_BYTES: usize = 136;
+
+/// `sceSystemServiceGetStatus(status)` - the system's state as the title sees it: no event pending,
+/// nothing overlaid, in the foreground. Answers `0` with 136 zero bytes, as measured; a null
+/// destination is refused, where the console faults.
+fn get_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Ok(at) = usize::try_from(args[0]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    if at == 0 {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    // SAFETY: a guest-supplied status destination in identity-mapped guest memory, written at the
+    // 136 bytes the call was measured writing.
+    unsafe {
+        std::ptr::write_unaligned(
+            std::ptr::with_exposed_provenance_mut::<[u8; SYSTEM_STATUS_BYTES]>(at),
+            [0; SYSTEM_STATUS_BYTES],
+        );
+    }
+    OK
+}
+
 /// `sceUserServiceGetLoginUserIdList(out)` - which users are signed in.
 ///
 /// The length of the caller's structure is unmeasured. orbistoun signs in exactly one user, so
@@ -500,6 +559,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceUserServiceGetGamePresets",
             user_service_get_game_presets,
         ),
+        ("sceUserServiceGetEvent", user_service_get_event),
+        ("sceSystemServiceGetStatus", get_status),
         ("sceErrorDialogInitialize", error_dialog_initialize),
         ("sceSystemServiceParamGetInt", param_get_int),
         ("sceSystemServiceHideSplashScreen", hide_splash_screen),

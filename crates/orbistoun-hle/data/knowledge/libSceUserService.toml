@@ -32,3 +32,18 @@ assumptions = [
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
 note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUserServiceGetEvent"
+arity = 1
+purpose = "Takes the next user event, such as a sign-in, into an eight-byte record: sceUserServiceGetEvent(event)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261007-113500, check 200-census/libSceUserService/sceUserServiceGetEvent): the first call answers 0x0 and writes eight bytes over poison - a type of 0 then the signed-in user's identifier; the next answers 0x80960007 (no event) and writes nothing; a null record answers 0x80960005.",
+    "orbistoun gives that one login event, of its own signed-in user, and then no event, as the console did. PPSA28061 polls it every frame.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12280-12296, check 200-census/libSceUserService/sceUserServiceGetEvent."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"

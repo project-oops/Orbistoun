@@ -237,3 +237,18 @@ purpose = "Launches the system web browser."
 returns = "status"
 known_by = "assumed"
 found_on = "2026-09-27"
+
+[[function]]
+name = "sceSystemServiceGetStatus"
+arity = 1
+purpose = "Reads the system's state as the title sees it - pending system events, overlays, background execution - into a status record: sceSystemServiceGetStatus(status)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261007-113500, check 200-census/libSceSystemService/sceSystemServiceGetStatus): answers 0x0 and writes 136 bytes over poison, every one zero; a null record faults the caller (signal 11).",
+    "orbistoun writes the same 136 zero bytes - nothing pending, nothing overlaid, in the foreground - and refuses a null record rather than faulting. PPSA28061 polls it every frame.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12242-12268, check 200-census/libSceSystemService/sceSystemServiceGetStatus."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"
