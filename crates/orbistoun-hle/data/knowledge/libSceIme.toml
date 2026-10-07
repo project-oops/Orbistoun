@@ -1,0 +1,15 @@
+library = "libSceIme"
+
+[[function]]
+name = "sceImeUpdate"
+purpose = "Delivers pending on-screen keyboard events to a handler: sceImeUpdate(handler)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261007-202010, check 200-census/libSceIme/sceImeUpdate): 0x80bc0002 with every argument a poisoned buffer and with every argument zero, and nothing written - the answer with no keyboard open. orbistoun opens no keyboard and answers it.",
+    "Five commercial titles import it; a title polls it every frame.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-202010-eboot.obs.log lines 12845-12855, check 200-census/libSceIme/sceImeUpdate."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-07"

@@ -527,10 +527,6 @@ mod knowledge_tests {
             "declared as 13 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
-            "libSceIme",
-            "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
             "libSceImeDialog",
             "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
