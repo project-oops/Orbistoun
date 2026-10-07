@@ -2245,7 +2245,9 @@ pub fn decode_primitive_topology(field: u32) -> PrimitiveTopology {
         0 => PrimitiveTopology::PointList,
         1 => PrimitiveTopology::LineStrip,
         2 => PrimitiveTopology::TriangleStrip,
-        3 => PrimitiveTopology::RectangleList,
+        // 3 is gfx103's `RECTLIST`, as radeonsi's blits write it; 4 is gfx11's `RECTLIST`, as
+        // `sceAgcCreatePrimState` writes it for topology 17 (D755).
+        3 | 4 => PrimitiveTopology::RectangleList,
         other => PrimitiveTopology::Other(other),
     }
 }
@@ -2656,6 +2658,22 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 
 #[cfg(test)]
 mod tests {
+    /// `VGT_GS_OUT_PRIM_TYPE` reads 3 as the rectangle list radeonsi's blits draw (gfx103's
+    /// `RECTLIST`), and 4 as the rectangle list `sceAgcCreatePrimState` names for topology 17
+    /// (gfx11's `RECTLIST`, D755); 5 is not a primitive.
+    #[test]
+    fn both_rectangle_list_codes_decode() {
+        use super::{PrimitiveTopology, decode_primitive_topology};
+        assert_eq!(
+            decode_primitive_topology(3),
+            PrimitiveTopology::RectangleList
+        );
+        assert_eq!(
+            decode_primitive_topology(4),
+            PrimitiveTopology::RectangleList
+        );
+        assert_eq!(decode_primitive_topology(5), PrimitiveTopology::Other(5));
+    }
 
     /// Sampler words as the SDK's GL layer writes them (`gl_state.c`: `cx | cy << 3` in word 0,
     /// `mag << 20 | min << 22 | mip << 26` in word 2) decode to the wrap and filters asked for; a
