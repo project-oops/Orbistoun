@@ -246,6 +246,7 @@ guest_module! {
         "sceKernelIsNeoMode" => 0,
         "sceKernelIsDevelopmentMode" => 0,
         "sceKernelGetGPI" => 0,
+        "sceKernelConvertUtcToLocaltime" => 4,
         "sceKernelIsTestKit" => 0,
         "posix_getpagesize" => 0,
         "posix_usleep" => 1,
@@ -2620,6 +2621,34 @@ fn is_neo_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// census, `200-census/libkernel/sceKernelGetGPI`, sweep 20261007-113500): every call answered `0`
 /// and wrote nothing, whatever its arguments.
 fn get_gpi(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
+/// `sceKernelConvertUtcToLocaltime(utc, &local, &timesec, &dst)`: `utc` in local time.
+///
+/// The console answers `0` and writes the local time, sixteen bytes of `timesec` - `t`, the
+/// instant the zone's current offset took effect, then `west_sec` and `dst_sec` as 32-bit seconds,
+/// and the daylight-saving seconds again as four bytes of `dst` (obSCEne
+/// `050-time/convert-utc-to-localtime`, sweep 20261007-202010, a zone an hour ahead in summer:
+/// `t` the March transition, `0`, `3600`, and `3600`). The guest's zone is UTC (D454), which has
+/// no offset to add and has held its one rule since the epoch, so every field is zero but the
+/// local time. A null out-param is left unwritten.
+fn convert_utc_to_localtime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let [utc, local, timesec, dst, ..] = *args;
+    if local != 0 {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(local, utc) };
+    }
+    if timesec != 0 {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(timesec, 0) };
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u64(timesec + 8, 0) };
+    }
+    if dst != 0 {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u32(dst, 0) };
+    }
     0
 }
 
@@ -6206,6 +6235,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelIsDevkit", is_devkit),
     ("sceKernelIsNeoMode", is_neo_mode),
     ("sceKernelGetGPI", get_gpi),
+    ("sceKernelConvertUtcToLocaltime", convert_utc_to_localtime),
     ("sceKernelIsDevelopmentMode", is_development_mode),
     ("sceKernelIsTestKit", is_testkit),
     ("posix_getpagesize", getpagesize),

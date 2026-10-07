@@ -594,6 +594,22 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
 [[function]]
+name = "sceKernelConvertUtcToLocaltime"
+arity = 4
+purpose = "Converts a UTC time to local time: sceKernelConvertUtcToLocaltime(utc, &local, &timesec, &dst)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne sweep 20261007-202010, check 050-time/convert-utc-to-localtime, lines 2219-2228): 0x0 for 2026-10-06 12:00:00 UTC on a console an hour ahead in summer; local = utc + 3600; timesec gets 16 bytes (t = 0x69c87990, the March transition, then west_sec 0 and dst_sec 3600 as 32-bit words); dst gets 4 bytes, 3600.",
+    "The guest's zone is UTC (D454), so orbistoun writes local = utc and zero for t, west_sec, dst_sec and dst: UTC has held its one rule since the epoch.",
+    "A null out-param is left unwritten; the console's answer to one is unmeasured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-202010-eboot.obs.log lines 2219-2228, check 050-time/convert-utc-to-localtime; oops-sdk src/time/time.c (the caller)."
+found_in = ["STKT00001"]
+found_on = "2026-10-07"
+
+[[function]]
 name = "sceKernelGetGPI"
 arity = 0
 purpose = "Answers the general-purpose input word: sceKernelGetGPI()."
