@@ -184,3 +184,31 @@ found_in = [
 ]
 found_on = "2026-09-03"
 note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
+
+[[function]]
+name = "sceUltMutexLock"
+arity = 1
+purpose = "Locks a ULT mutex - the export without the leading underscore."
+returns = "status"
+edge_cases = [
+    "Implemented as _sceUltMutexLock, taking the mutex _sceUltMutexCreate made. PPSA28061 locks through this name 10916 times in a run.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The underscore-less export behaves as the underscored one; nothing on the target has confirmed it."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceUltMutexUnlock"
+arity = 1
+purpose = "Unlocks a ULT mutex - the export without the leading underscore."
+returns = "status"
+edge_cases = [
+    "Implemented as _sceUltMutexUnlock, taking the mutex _sceUltMutexCreate made. PPSA28061 locks through this name 10916 times in a run.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The underscore-less export behaves as the underscored one; nothing on the target has confirmed it."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"

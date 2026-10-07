@@ -42,6 +42,9 @@ pub mod ult {
             "_sceUltMutexUnlock" => 1,
             "_sceUltMutexTryLock" => 1,
             "_sceUltMutexDestroy" => 1,
+            // The exports without the underscore take the same mutex; PPSA28061 locks through them.
+            "sceUltMutexLock" => 1,
+            "sceUltMutexUnlock" => 1,
             // (cv, name, mutex, optParam): the mutex is bound here rather than at each wait.
             "_sceUltConditionVariableCreate" => 4,
             "_sceUltConditionVariableSignal" => 1,
@@ -6110,6 +6113,8 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("_Xtime_get_ticks", xtime_get_ticks),
     ("_Thrd_sleep", thrd_sleep),
     // libSceUlt mutexes, declared in the `ult` module.
+    ("sceUltMutexLock", ult_mutex_lock),
+    ("sceUltMutexUnlock", ult_mutex_unlock),
     ("_sceUltMutexCreate", ult_mutex_create),
     ("sceUltInitialize", ult_initialize),
     (
@@ -7617,6 +7622,8 @@ mod tests {
             "_sceUltMutexUnlock",
             "_sceUltMutexTryLock",
             "_sceUltMutexDestroy",
+            "sceUltMutexLock",
+            "sceUltMutexUnlock",
             "_sceUltConditionVariableCreate",
             "_sceUltConditionVariableSignal",
             "_sceUltConditionVariableSignalAll",
