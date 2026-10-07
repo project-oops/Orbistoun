@@ -82,6 +82,13 @@ fn queue_object() -> u64 {
 /// supported" the hardware gives it.
 const RESOURCE_REGISTRATION_NOT_SUPPORTED: u64 = 0x8a6c_9018;
 
+/// `sceAgcDriverGetDefaultOwner(..)` and `sceAgcDriverGetResourceRegistrationMaxNameLength(..)`:
+/// the subsystem's two queries, taken to answer its measured `0x8a6c9018` and write nothing, as
+/// its three measured calls do. Assumed from those siblings (REQ-cn01 asks).
+fn resource_registration_query(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    RESOURCE_REGISTRATION_NOT_SUPPORTED
+}
+
 /// `sceAgcDriverRegisterOwner(owner_buf)` - stub, returns `0x8a6c9018`, writes nothing.
 fn register_owner(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
@@ -2591,6 +2598,11 @@ fn submit_described_timed(descriptor: u64) -> u64 {
 /// hardware's measured `0x8a6c9018`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("sceAgcDriverGetDefaultOwner", resource_registration_query),
+        (
+            "sceAgcDriverGetResourceRegistrationMaxNameLength",
+            resource_registration_query,
+        ),
         ("sceAgcDriverCreateQueue", create_queue),
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),

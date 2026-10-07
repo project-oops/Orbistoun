@@ -45,6 +45,7 @@ pub mod ult {
             // The exports without the underscore take the same mutex; PPSA28061 locks through them.
             "sceUltMutexLock" => 1,
             "sceUltMutexUnlock" => 1,
+            "sceUltConditionVariableSignal" => 1,
             // (cv, name, mutex, optParam): the mutex is bound here rather than at each wait.
             "_sceUltConditionVariableCreate" => 4,
             "_sceUltConditionVariableSignal" => 1,
@@ -92,6 +93,8 @@ guest_module! {
         // (object, op, value, uaddr, uaddr2): FreeBSD's futex and lock primitive.
         "_umtx_op" => 5,
         "sceKernelAllocateDirectMemory" => 6,
+        // (start, len): the release that refuses a span not allocated, as the unchecked one already does.
+        "sceKernelCheckedReleaseDirectMemory" => 2,
         // A module handle, a name, and where to put the address, measured from a guest's calls (D366).
         "sceKernelDlsym" => 3,
         // A device, the request, its size, and whether to block. The request's layout is not
@@ -6078,6 +6081,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sem_post", sem_post),
     ("sem_destroy", sem_destroy),
     ("sceKernelAllocateDirectMemory", allocate_direct_memory),
+    ("sceKernelCheckedReleaseDirectMemory", release_direct_memory),
     ("sceKernelMapDirectMemory", map_named_direct_memory),
     ("sceKernelReleaseDirectMemory", release_direct_memory),
     ("sceKernelMunmap", munmap),
@@ -6115,6 +6119,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     // libSceUlt mutexes, declared in the `ult` module.
     ("sceUltMutexLock", ult_mutex_lock),
     ("sceUltMutexUnlock", ult_mutex_unlock),
+    ("sceUltConditionVariableSignal", ult_cond_signal),
     ("_sceUltMutexCreate", ult_mutex_create),
     ("sceUltInitialize", ult_initialize),
     (
@@ -7587,120 +7592,121 @@ mod tests {
             .collect()
     }
 
+    /// Implemented here and declared in another library, deliberately.
+    ///
+    /// Where a symbol is declared is a claim about the target; where its code lives is a claim about
+    /// this repository (D367). These are declared where titles import them from, and implemented here
+    /// beside the thread registry and `sync`.
+    const DECLARED_ELSEWHERE: &[&str] = &[
+        "pthread_detach",
+        "pthread_exit",
+        "mmap",
+        // `std::call_once`'s engine: a libc symbol, implemented here because it runs a guest callback
+        // through the thread registry's reentrant call.
+        "_ZSt13_Execute_onceRSt9once_flagPFiPvS1_PS1_ES1_",
+        // The C-runtime threading family: libc symbols, implemented here beside the thread registry
+        // and `sync`.
+        "_Mtx_init",
+        "_Mtx_destroy",
+        "_Mtx_lock",
+        "_Mtx_unlock",
+        "_Mtx_trylock",
+        "_Cnd_init",
+        "_Cnd_destroy",
+        "_Cnd_wait",
+        "_Cnd_timedwait",
+        "_Cnd_signal",
+        "_Cnd_broadcast",
+        "_Xtime_get_ticks",
+        "_Thrd_sleep",
+        // libSceUlt mutexes: declared in the `ult` module, implemented here beside `sync`.
+        "_sceUltMutexCreate",
+        "_sceUltMutexLock",
+        "_sceUltMutexUnlock",
+        "_sceUltMutexTryLock",
+        "_sceUltMutexDestroy",
+        "sceUltMutexLock",
+        "sceUltMutexUnlock",
+        "sceUltConditionVariableSignal",
+        "_sceUltConditionVariableCreate",
+        "_sceUltConditionVariableSignal",
+        "_sceUltConditionVariableSignalAll",
+        "_sceUltConditionVariableWait",
+        "_sceUltConditionVariableDestroy",
+        "_sceUltUlthreadCreate",
+        // The runtime and pool setup: declared in the `ult` module, implemented beside the table that
+        // holds them.
+        "sceUltInitialize",
+        "sceUltWaitingQueueResourcePoolGetWorkAreaSize",
+        "sceUltUlthreadRuntimeGetWorkAreaSize",
+        "_sceUltWaitingQueueResourcePoolCreate",
+        "_sceUltUlthreadRuntimeCreate",
+        // The POSIX spellings of calls declared here under vendor names, separate because the POSIX
+        // signature is one argument shorter.
+        "pthread_create",
+        "pthread_cond_init",
+        "pthread_mutex_init",
+        // Thread-specific-data keys and POSIX unnamed semaphores, declared in the POSIX module and
+        // implemented beside the thread registry and the vendor semaphore primitives (D453).
+        "pthread_key_create",
+        "pthread_setspecific",
+        "pthread_getspecific",
+        "pthread_key_delete",
+        "sem_init",
+        "sem_wait",
+        "sem_trywait",
+        "sem_post",
+        "sem_destroy",
+        // The timed acquisitions, with no vendor twins: declared in the POSIX module, implemented beside
+        // the primitives whose deadlines they carry.
+        "pthread_mutex_timedlock",
+        "pthread_rwlock_timedrdlock",
+        "pthread_rwlock_timedwrlock",
+        "sem_timedwait",
+        "sem_reltimedwait_np",
+        "sem_getvalue",
+        "pthread_cond_reltimedwait_np",
+        // The POSIX timed wait and once-only initialiser: declared in the POSIX module, implemented
+        // beside the condition variables and the C++ runtime once-flag.
+        "pthread_cond_timedwait",
+        "pthread_once",
+        // The barrier and read-write lock attribute accessors, with no vendor twins: declared in the
+        // POSIX module, implemented beside the locks they configure.
+        "pthread_barrierattr_init",
+        "pthread_barrierattr_destroy",
+        "pthread_barrierattr_getpshared",
+        "pthread_barrierattr_setpshared",
+        "pthread_rwlockattr_init",
+        "pthread_rwlockattr_destroy",
+        "pthread_rwlockattr_getpshared",
+        "pthread_rwlockattr_setpshared",
+        "pthread_rwlockattr_gettype_np",
+        "pthread_rwlockattr_settype_np",
+        "pthread_yield",
+        "sched_yield",
+        "pthread_getconcurrency",
+        "pthread_setconcurrency",
+        // The attribute accessors and `pthread_equal`, with no vendor twins: declared in the POSIX
+        // module, implemented beside the attribute object they read and write.
+        "pthread_attr_getguardsize",
+        "pthread_attr_getinheritsched",
+        "pthread_attr_getschedpolicy",
+        "pthread_attr_getscope",
+        "pthread_attr_setscope",
+        "pthread_mutexattr_getpshared",
+        "pthread_mutexattr_setpshared",
+        "pthread_mutexattr_getprioceiling",
+        "pthread_mutexattr_setprioceiling",
+        "pthread_condattr_getclock",
+        "pthread_condattr_setclock",
+        "pthread_condattr_getpshared",
+        "pthread_condattr_setpshared",
+        "pthread_condattr_destroy",
+        "pthread_equal",
+    ];
+
     #[test]
     fn every_implementation_is_also_declared_here_or_says_why_not() {
-        /// Implemented here and declared in another library, deliberately.
-        ///
-        /// Where a symbol is declared is a claim about the target; where its code lives is a claim about
-        /// this repository (D367). These are declared where titles import them from, and implemented here
-        /// beside the thread registry and `sync`.
-        const DECLARED_ELSEWHERE: &[&str] = &[
-            "pthread_detach",
-            "pthread_exit",
-            "mmap",
-            // `std::call_once`'s engine: a libc symbol, implemented here because it runs a guest callback
-            // through the thread registry's reentrant call.
-            "_ZSt13_Execute_onceRSt9once_flagPFiPvS1_PS1_ES1_",
-            // The C-runtime threading family: libc symbols, implemented here beside the thread registry
-            // and `sync`.
-            "_Mtx_init",
-            "_Mtx_destroy",
-            "_Mtx_lock",
-            "_Mtx_unlock",
-            "_Mtx_trylock",
-            "_Cnd_init",
-            "_Cnd_destroy",
-            "_Cnd_wait",
-            "_Cnd_timedwait",
-            "_Cnd_signal",
-            "_Cnd_broadcast",
-            "_Xtime_get_ticks",
-            "_Thrd_sleep",
-            // libSceUlt mutexes: declared in the `ult` module, implemented here beside `sync`.
-            "_sceUltMutexCreate",
-            "_sceUltMutexLock",
-            "_sceUltMutexUnlock",
-            "_sceUltMutexTryLock",
-            "_sceUltMutexDestroy",
-            "sceUltMutexLock",
-            "sceUltMutexUnlock",
-            "_sceUltConditionVariableCreate",
-            "_sceUltConditionVariableSignal",
-            "_sceUltConditionVariableSignalAll",
-            "_sceUltConditionVariableWait",
-            "_sceUltConditionVariableDestroy",
-            "_sceUltUlthreadCreate",
-            // The runtime and pool setup: declared in the `ult` module, implemented beside the table that
-            // holds them.
-            "sceUltInitialize",
-            "sceUltWaitingQueueResourcePoolGetWorkAreaSize",
-            "sceUltUlthreadRuntimeGetWorkAreaSize",
-            "_sceUltWaitingQueueResourcePoolCreate",
-            "_sceUltUlthreadRuntimeCreate",
-            // The POSIX spellings of calls declared here under vendor names, separate because the POSIX
-            // signature is one argument shorter.
-            "pthread_create",
-            "pthread_cond_init",
-            "pthread_mutex_init",
-            // Thread-specific-data keys and POSIX unnamed semaphores, declared in the POSIX module and
-            // implemented beside the thread registry and the vendor semaphore primitives (D453).
-            "pthread_key_create",
-            "pthread_setspecific",
-            "pthread_getspecific",
-            "pthread_key_delete",
-            "sem_init",
-            "sem_wait",
-            "sem_trywait",
-            "sem_post",
-            "sem_destroy",
-            // The timed acquisitions, with no vendor twins: declared in the POSIX module, implemented beside
-            // the primitives whose deadlines they carry.
-            "pthread_mutex_timedlock",
-            "pthread_rwlock_timedrdlock",
-            "pthread_rwlock_timedwrlock",
-            "sem_timedwait",
-            "sem_reltimedwait_np",
-            "sem_getvalue",
-            "pthread_cond_reltimedwait_np",
-            // The POSIX timed wait and once-only initialiser: declared in the POSIX module, implemented
-            // beside the condition variables and the C++ runtime once-flag.
-            "pthread_cond_timedwait",
-            "pthread_once",
-            // The barrier and read-write lock attribute accessors, with no vendor twins: declared in the
-            // POSIX module, implemented beside the locks they configure.
-            "pthread_barrierattr_init",
-            "pthread_barrierattr_destroy",
-            "pthread_barrierattr_getpshared",
-            "pthread_barrierattr_setpshared",
-            "pthread_rwlockattr_init",
-            "pthread_rwlockattr_destroy",
-            "pthread_rwlockattr_getpshared",
-            "pthread_rwlockattr_setpshared",
-            "pthread_rwlockattr_gettype_np",
-            "pthread_rwlockattr_settype_np",
-            "pthread_yield",
-            "sched_yield",
-            "pthread_getconcurrency",
-            "pthread_setconcurrency",
-            // The attribute accessors and `pthread_equal`, with no vendor twins: declared in the POSIX
-            // module, implemented beside the attribute object they read and write.
-            "pthread_attr_getguardsize",
-            "pthread_attr_getinheritsched",
-            "pthread_attr_getschedpolicy",
-            "pthread_attr_getscope",
-            "pthread_attr_setscope",
-            "pthread_mutexattr_getpshared",
-            "pthread_mutexattr_setpshared",
-            "pthread_mutexattr_getprioceiling",
-            "pthread_mutexattr_setprioceiling",
-            "pthread_condattr_getclock",
-            "pthread_condattr_setclock",
-            "pthread_condattr_getpshared",
-            "pthread_condattr_setpshared",
-            "pthread_condattr_destroy",
-            "pthread_equal",
-        ];
-
         // Resolution goes through the declared symbol list, so an implementation nobody declared can
         // never be reached.
         let declared = declared_here();

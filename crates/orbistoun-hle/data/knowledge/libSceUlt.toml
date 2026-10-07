@@ -212,3 +212,17 @@ known_by = "assumed"
 assumptions = ["The underscore-less export behaves as the underscored one; nothing on the target has confirmed it."]
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceUltConditionVariableSignal"
+arity = 1
+purpose = "Wakes one waiter on a ULT condition variable - the export without the leading underscore."
+returns = "status"
+edge_cases = [
+    "Implemented as _sceUltConditionVariableSignal, taking the condition variable _sceUltConditionVariableCreate made. PPSA28061 calls it.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The underscore-less export behaves as the underscored one; REQ-cn01 asks."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"

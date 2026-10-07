@@ -126,3 +126,31 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne REQ-20260927T1130Z-b3c2 (sweep 20260928-135518, check 166-agc/driver-set-hs-offchip-param, log lines 9106-9114: resolved 0x1 by name or NID 1MoYIWUIzjA, rc 0x0 in arm-ppsa02664 and arm-zeros); obSCEne REQ-20260928T1338Z-4060 (sweep 20260928-153434, lines 9171-9188: its submissions ran on a GPU queue an earlier check had stalled, so whether the call affects the queue is unmeasured; REQ-20260928T1658Z-ff16 asks for the rerun); Mesa ac_cmdbuf_cp.c:374 (VGT_HS_OFFCHIP_PARAM)"
 found_on = "2026-09-20"
+
+[[function]]
+name = "sceAgcDriverGetDefaultOwner"
+arity = 6
+purpose = "Queries the resource-registration subsystem's default owner."
+returns = "status"
+edge_cases = [
+    "Answers 0x8a6c9018 and writes nothing, as the subsystem's three measured calls (RegisterOwner, RegisterResource, InitResourceRegistration) do. PPSA28061 and PPSA04263 call it.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["A query of the subsystem measured unsupported answers its refusal too; REQ-cn01 asks."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceAgcDriverGetResourceRegistrationMaxNameLength"
+arity = 6
+purpose = "Queries the longest name the resource-registration subsystem accepts."
+returns = "status"
+edge_cases = [
+    "Answers 0x8a6c9018 and writes nothing, as the subsystem's three measured calls do. PPSA28061 and PPSA04263 call it.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["A query of the subsystem measured unsupported answers its refusal too; REQ-cn01 asks."]
+found_in = ["PPSA28061-app0", "PPSA04263-app0"]
+found_on = "2026-10-07"

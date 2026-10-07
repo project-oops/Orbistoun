@@ -2284,3 +2284,17 @@ found_on = "2026-10-05"
 name = "key"
 kind = "u32"
 note = "a key from scePthreadKeyCreate"
+
+[[function]]
+name = "sceKernelCheckedReleaseDirectMemory"
+arity = 2
+purpose = "Returns an allocated span of direct memory to the pool, refusing one not allocated."
+returns = "status"
+edge_cases = [
+    "Implemented as sceKernelReleaseDirectMemory, which already refuses a span not allocated. PPSA02664, PPSA03416 and PPSA25872 call it.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The checked release behaves as the release with its range check; REQ-cn01 asks."]
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-07"
