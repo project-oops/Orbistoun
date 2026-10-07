@@ -405,6 +405,10 @@ fn install_filesystem(module: &str) {
         &origin,
         retention,
     );
+    // What orbistoun keeps in the title's directory is not part of its `/app0` (D756).
+    for entry in paths.title_state_entries(&title) {
+        orbistoun_fs::mount::hide(entry);
+    }
     if system {
         orbistoun_fs::sandbox::expose_library(
             &paths.filesystem_dir(),

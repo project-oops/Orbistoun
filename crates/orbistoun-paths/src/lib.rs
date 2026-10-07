@@ -328,6 +328,20 @@ impl Paths {
         self.shared.title_dir(title).join("host-pipelines.bin")
     }
 
+    /// Everything orbistoun keeps in one title's directory, which is also that title's `/app0`
+    /// when it runs from the library: its link plan, frames, translations, pipelines, save states
+    /// and guest overlay. None of it is the title's, so the guest is not shown it (D756).
+    pub fn title_state_entries(&self, title: &str) -> [PathBuf; 6] {
+        [
+            self.title_link_plan_file(title),
+            self.title_frames_file(title),
+            self.title_translations_file(title),
+            self.title_pipelines_file(title),
+            self.title_savestates_dir(title),
+            self.title_overlay_dir(title),
+        ]
+    }
+
     /// Where one title's save states are kept.
     pub fn title_savestates_dir(&self, title: &str) -> PathBuf {
         // Beside the guest filesystem, under the same title, so everything known about one title is

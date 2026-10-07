@@ -136,8 +136,34 @@ pub fn is_writable(guest_path: &str) -> bool {
     })
 }
 
+/// Host files and directories orbistoun keeps inside a mounted directory, which no guest sees.
+fn hidden() -> &'static Mutex<BTreeSet<PathBuf>> {
+    static HIDDEN: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+    HIDDEN.get_or_init(Default::default)
+}
+
+/// Hides `host`, a file or directory orbistoun keeps beside a title's own files, from every
+/// mount: a title's library directory is its `/app0` and also where orbistoun keeps that title's
+/// link plan, translations and pipelines (D756). A lookup answers it absent and a listing leaves
+/// it out, as the console's `/app0` holds nothing of the kind.
+pub fn hide(host: PathBuf) {
+    if let Ok(mut hidden) = hidden().lock() {
+        hidden.insert(host);
+    }
+}
+
+/// Whether `host` is hidden, or lies under something hidden.
+pub fn is_hidden(host: &Path) -> bool {
+    hidden()
+        .lock()
+        .is_ok_and(|hidden| hidden.iter().any(|h| host.starts_with(h)))
+}
+
 /// Forgets every mount.
 pub fn clear() {
+    if let Ok(mut hidden) = hidden().lock() {
+        hidden.clear();
+    }
     if let Ok(mut writable) = writable().lock() {
         writable.clear();
     }
@@ -167,7 +193,7 @@ pub fn is_contained(relative: &str) -> bool {
 /// checked. On a case-sensitive host this is a plain `exists`.
 #[cfg(not(windows))]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
-    root.join(rest).exists()
+    !is_hidden(&root.join(rest)) && root.join(rest).exists()
 }
 
 /// The Windows half: `canonicalize` returns the path's real on-disk case, so a wrong-case
@@ -176,6 +202,9 @@ fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
 /// `\\?\` prefix are not part of the test.
 #[cfg(windows)]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
+    if is_hidden(&root.join(rest)) {
+        return false;
+    }
     let Ok(real) = std::fs::canonicalize(root.join(rest)) else {
         return false;
     };
@@ -496,6 +525,35 @@ mod tests {
             "and a relative path is not either - nothing here has a working directory"
         );
         assert!(!super::is_directory("app0"));
+    }
+
+    /// What orbistoun keeps in a title's directory is not in its `/app0`: a lookup finds it absent
+    /// and a listing leaves it out, while the title's own files beside it answer as before (D756).
+    #[test]
+    fn a_hidden_entry_is_not_in_app0() {
+        let _guard = crate::exclusively();
+        clear();
+        let root = std::env::temp_dir().join(format!("orbistoun-hidden-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("savestates")).expect("directory");
+        std::fs::write(root.join("eboot.bin"), b"title").expect("eboot");
+        std::fs::write(root.join("link-plan.json"), b"{}").expect("plan");
+        std::fs::write(root.join("savestates").join("one"), b"state").expect("state");
+        super::layer("/app0", root.clone());
+        super::hide(root.join("link-plan.json"));
+        super::hide(root.join("savestates"));
+        assert!(super::resolve_existing("/app0/eboot.bin").is_some());
+        assert!(super::resolve_existing("/app0/link-plan.json").is_none());
+        assert!(super::resolve_existing("/app0/savestates/one").is_none());
+        assert!(!super::is_directory("/app0/savestates"));
+        let mut names: Vec<String> = crate::metadata::listing("/app0")
+            .expect("a directory")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(names, [".", "..", "eboot.bin"]);
+        clear();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A staged title's `/app0` lists every layer: the library copy's files under the writable

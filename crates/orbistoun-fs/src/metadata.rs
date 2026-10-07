@@ -428,6 +428,10 @@ pub(crate) fn listing(guest: &str) -> Option<Vec<(String, bool)>> {
             continue;
         };
         for found in reading.flatten() {
+            // What orbistoun keeps beside a title's files is not the title's (D756).
+            if crate::mount::is_hidden(&found.path()) {
+                continue;
+            }
             let name = found.file_name().to_string_lossy().into_owned();
             // A mount point already listed wins: it is what the guest can enter; and a higher
             // layer's entry shadows a lower one's of the same name.
