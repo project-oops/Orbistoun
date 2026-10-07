@@ -36,6 +36,32 @@ fn the_constructor_zeroes_the_head_and_answers_the_object() {
     assert!(buffer.iter().all(|&b| b == 0xcc), "the buffer untouched");
 }
 
+/// `apr-cb-ctor-3ptr` (REQ apr1, `reports/hardware/20261007-082134-eboot.obs.log` 7568-7674): the
+/// APR constructor called with three pointers answers the first and leaves it alone, and zeroes
+/// the first eight bytes of the second and third.
+#[test]
+fn the_apr_constructor_zeroes_the_head_of_its_second_and_third() {
+    let (first, mut second, mut third) = (object(), object(), object());
+    let at = |buffer: &[u8; 0x200]| buffer.as_ptr() as u64;
+    let rc = call(
+        "sceAmprAprCommandBufferConstructor",
+        [
+            at(&first),
+            second.as_mut_ptr() as u64,
+            third.as_mut_ptr() as u64,
+            0,
+            0,
+            0,
+        ],
+    );
+    assert_eq!(rc, at(&first), "`apr-cb-ctor-3ptr` rc, the first pointer");
+    assert!(first.iter().all(|&b| b == 0xcc), "`p0-after` untouched");
+    for after in [&second, &third] {
+        assert!(after[..8].iter().all(|&b| b == 0), "eight zero bytes");
+        assert!(after[8..].iter().all(|&b| b == 0xcc), "nothing past them");
+    }
+}
+
 /// `ampr-cb-set-buffer-1000` and `-10`: a buffer of 0x1000 bytes is bound - its size as a 32-bit
 /// word at +12, its address at +16 - and answers 0; one of 0x10 is refused with `0x80020010` and
 /// changes nothing. `ampr-cb-reset-after-2`: a reset answers 0 and leaves the binding.

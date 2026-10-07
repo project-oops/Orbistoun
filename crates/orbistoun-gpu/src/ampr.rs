@@ -47,6 +47,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceAmprCommandBufferSetBuffer", command_buffer_set_buffer),
         ("sceAmprCommandBufferReset", command_buffer_reset),
+        (
+            "sceAmprAprCommandBufferConstructor",
+            apr_command_buffer_constructor,
+        ),
     ]
 }
 
@@ -61,6 +65,21 @@ fn command_buffer_constructor(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     }
     object
+}
+
+/// `sceAmprAprCommandBufferConstructor(first, second, third, ..)`: answers the first pointer and
+/// leaves it alone, and zeroes the first eight bytes of the second and third (`apr-cb-ctor-3ptr`,
+/// REQ apr1, `reports/hardware/20261007-082134-eboot.obs.log` 7568-7674, measured with the rest
+/// zero). PPSA25872 and PPSA21564 pass three pointers so, with other words after them. A second or
+/// third that is not writable answers null, never an error code in a pointer's place.
+fn apr_command_buffer_constructor(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    for at in [args[1], args[2]] {
+        // SAFETY: a guest object the constructor writes the head of, through the checked accessor.
+        if !unsafe { guest::write_bytes(at, &[0; 8]) } {
+            return 0;
+        }
+    }
+    args[0]
 }
 
 /// `sceAmprCommandBufferSetBuffer(obj, buffer, size, ..)`: binds `size` bytes at `buffer` - the

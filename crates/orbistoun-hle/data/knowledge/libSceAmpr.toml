@@ -40,3 +40,18 @@ known_by = "measured"
 cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arm ampr-cb-reset-after-2 (REQ a5b1)."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-06"
+
+[[function]]
+name = "sceAmprAprCommandBufferConstructor"
+purpose = "Constructs an APR command-buffer object over two caller-supplied blocks."
+returns = "pointer"
+edge_cases = [
+    "MEASURED with three 0x200-byte 0xcc pointers and the rest zero: answers the first pointer and leaves its bytes alone, and writes eight zero bytes at the head of the second and of the third, nothing past them.",
+    "In that shape a SetBuffer of 0x1000 on the first answers 0x80020010 and ReadFile on it 0x80020016, so the first is not itself a bound command buffer; which object the titles bind is not yet established.",
+    "PPSA25872 calls it as (ptr, ptr, ptr, 0, u64, u64) and PPSA21564 as (ptr, ptr, ptr, 0, ptr, 0); the trailing words were zero when measured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261006T1510Z-apr1 and -rw01, reports/hardware/20261007-082134-eboot.obs.log lines 7568-7674 (166-agc/ampr-apr-file-read, apr-cb-ctor-3ptr)"
+found_in = ["PPSA25872-app0", "PPSA21564-app0"]
+found_on = "2026-10-07"
