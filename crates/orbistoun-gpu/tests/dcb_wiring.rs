@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        54,
+        55,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -785,4 +785,46 @@ fn packet_payload_answers_the_measured_kinds() {
     let (rc, out) = payload(&sh_reg, 2);
     assert_ne!(rc, 0, "kind 2 was measured on a NOP only");
     assert_eq!(out, 0xcccc_cccc_cccc_cccc, "and nothing written");
+}
+
+/// `sceAgcCbSetShRegistersDirect(cb, pairs, count)` writes each `{offset, value}` pair as its own
+/// `SET_SH_REG` - the GFX10 form of a scattered SH register write (Mesa `radeon_set_sh_reg`; the
+/// pair packet is GFX11's) - and answers the first packet's address. PPSA28061 binds its compute
+/// shader so: `COMPUTE_PGM_LO`/`HI` and the rest of the shader's ten registers. The encoding is
+/// assumed (measured only with a count of 0, which writes nothing and answers 0); REQ-cn01 asks.
+#[test]
+fn set_sh_registers_direct_writes_each_pair_as_a_register_write() {
+    let w = Writer::new(0x400);
+    let pairs: [u32; 6] = [0x20c, 0x1c2c, 0x20d, 0x40, 0x22a, 0x2800_00c0];
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = pairs.as_ptr() as usize as u64;
+    args[2] = 3;
+    let at = w.cursor();
+    assert_eq!(call("sceAgcCbSetShRegistersDirect", args), at);
+    let expected: Vec<u8> = [
+        0xc001_7600_u32,
+        0x20c,
+        0x1c2c,
+        0xc001_7600,
+        0x20d,
+        0x40,
+        0xc001_7600,
+        0x22a,
+        0x2800_00c0,
+    ]
+    .iter()
+    .flat_map(|word| word.to_le_bytes())
+    .collect();
+    assert_eq!(w.bytes(), &expected[..]);
+
+    let empty = Writer::new(0x40);
+    args[0] = empty.handle();
+    args[2] = 0;
+    assert_eq!(
+        call("sceAgcCbSetShRegistersDirect", args),
+        0,
+        "a count of 0: measured"
+    );
+    assert_eq!(empty.written(), 0, "writes nothing");
 }

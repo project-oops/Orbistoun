@@ -757,3 +757,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20260928T0730Z-7b14 (sweep 20260928-135518, check 141-suspend/agc-suspend-point, log lines 6349-6361: resolved by name or NID 2clESPv63Ic at 0x800594980, rc 0x0, elapsed-us 0x1b, bytes-written 0x0, ptr-buf-64b all 0xcc)"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-28"
+
+[[function]]
+name = "sceAgcCbSetShRegistersDirect"
+purpose = "Writes scattered SH registers from a table of {offset, value} pairs into a command buffer: (cb, pairs, count)."
+returns = "pointer"
+edge_cases = [
+    "MEASURED with a count of 0: writes nothing, advances nothing, answers 0 (166-agc/cb-set-sh-registers-direct).",
+    "PPSA28061 binds its compute shaders this way: ten pairs from the shader's register table, COMPUTE_PGM_LO/HI first (0x20c = 0x1c2c, 0x20d = 0x40, a program at image+0x1c2c00). Unimplemented, its dispatch had no program.",
+    "Each pair is written as its own SET_SH_REG (header 0xc0017600, offset, value), the GFX10 form of a scattered SH write, and the first packet's address is answered.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The encoding for a count above 0 - one SET_SH_REG per pair - follows Mesa's radeon_set_sh_reg on GFX10; REQ-cn01 asks for the bytes."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"

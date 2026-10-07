@@ -987,6 +987,35 @@ fn dcb_wait_reg_mem(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// is refused instead of becoming a wild read.
 const MAX_REGISTER_RUN: u64 = 0x3ffe;
 
+/// `sceAgcCbSetShRegistersDirect(cb, pairs, count)`: each `{offset, value}` pair at `pairs` as its
+/// own `SET_SH_REG` - the GFX10 form of a scattered SH register write (Mesa `radeon_set_sh_reg`; the
+/// pair packet is GFX11's) - answering the first packet's address. A count of 0 writes nothing and
+/// answers 0, as measured (`166-agc/cb-set-sh-registers-direct`); the encoding for a count above
+/// 0 is assumed. A table that is not readable guest memory is refused.
+fn cb_set_sh_registers_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (pairs, count) = (args[1], args[2]);
+    if count == 0 {
+        return 0;
+    }
+    if pairs == 0 || count > MAX_REGISTER_RUN {
+        return BAD_ARGUMENT;
+    }
+    let mut words = Vec::with_capacity(count as usize * 3);
+    for at in (0..count).map(|i| pairs + i * 8) {
+        // SAFETY: the guest's pair table, read through the checked accessor.
+        let (Some(offset), Some(value)) = (unsafe { guest::read_u32(at) }, unsafe {
+            guest::read_u32(at + 4)
+        }) else {
+            return BAD_ARGUMENT;
+        };
+        words.extend(packet::build::set_sh_register_range(
+            offset as u16,
+            &[value],
+        ));
+    }
+    dcb_append(args[0], &words)
+}
+
 /// `sceAgcCbSetShRegisterRangeDirect(cb, offset, values, count)`. Measured
 /// (`166-agc/dcb-set-sh-reg-direct`): a two-register run comes back as `header, offset, value,
 /// value`, with no marker, `n + 2` dwords.
@@ -1145,6 +1174,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         "sceAgcQueueEndOfPipeActionPatchAddress",
         queue_eop_patch_address,
     ),
+    ("sceAgcCbSetShRegistersDirect", cb_set_sh_registers_direct),
     (
         "sceAgcCbSetShRegisterRangeDirect",
         cb_set_sh_register_range_direct,
