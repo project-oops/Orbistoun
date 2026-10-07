@@ -1203,10 +1203,12 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     let base = last(CB_COLOR0_BASE)?;
     let extent = colour_target_mip0_extent_at(writes)?;
     let mode = colour_swizzle_mode_at(writes);
-    // The pipe-bank XOR rides in the base's low byte for `64KB_R_X`. A `4KB_D_X` base is only
-    // 4 KiB aligned, so its low byte is address, and the base is taken whole.
+    // The pipe-bank XOR rides in the base's low byte for `64KB_R_X` and `64KB_D_X`. A `4KB_D_X`
+    // base is only 4 KiB aligned, so its low byte is address, and the base is taken whole.
     let (base, pipe_bank_xor) = match mode {
-        Some(SwizzleMode::Tiled64KbRX) => (base & !0xFF, (base & 0xFF) as u8),
+        Some(SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled64KbDX) => {
+            (base & !0xFF, (base & 0xFF) as u8)
+        }
         _ => (base, 0),
     };
     let layout = mode.and_then(crate::tiling::SurfaceLayout::of);
@@ -2628,9 +2630,9 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
     // Tiling mode: dword 3 bits 24:20 (`SQ_IMG_RSRC_WORD3.SW_MODE`, gfx10-rsrc.json).
     let tiling = decode_swizzle_mode((tiling_word >> 20) & 0x1F);
     // The pipe-bank XOR sits in the 256-byte units below the block's alignment: 64 KiB for
-    // `64KB_R_X`, 4 KiB for `4KB_D_X`. A linear surface has none.
+    // `64KB_R_X` and `64KB_D_X`, 4 KiB for `4KB_D_X`. A linear surface has none.
     let xor_bits = match tiling {
-        SwizzleMode::Tiled64KbRX => 0xFF,
+        SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled64KbDX => 0xFF,
         SwizzleMode::Tiled4KbDX => 0xF,
         _ => 0,
     };
@@ -4248,6 +4250,32 @@ mod tests {
                 last_level: 0,
                 compression: None,
             }
+        );
+    }
+
+    /// A `64KB_D_X` image carries its pipe-bank XOR in the base's low byte too, as
+    /// `ac_set_mutable_tex_desc_fields` ORs `tile_swizzle` into `desc[0]` for every XOR mode.
+    /// SuperTuxKart's compressed-block copy binds 128 x 128 views at `0x4037cc0` in 256-byte
+    /// units: a block at `0x4_037c_0000` swizzled by `0xc0`, not a surface 48 KiB into one, which
+    /// would reach the copy's own program 0x36800 bytes on.
+    #[test]
+    fn a_64kb_d_x_base_splits_off_its_pipe_bank_xor() {
+        use super::decode_image_descriptor;
+        let words = [
+            0x0403_7cc0,
+            0xc4b0_0000,
+            0x801f_c01f,
+            0x91a0_0fac,
+            0,
+            0x0040_0000,
+            0,
+            0,
+        ];
+        let descriptor = decode_image_descriptor(words);
+        assert_eq!(descriptor.tiling, SwizzleMode::Tiled64KbDX);
+        assert_eq!(
+            (descriptor.base, descriptor.pipe_bank_xor),
+            (0x4_037c_0000, 0xc0)
         );
     }
 
