@@ -5,8 +5,11 @@
 
 `VGT_GS_OUT_PRIM_TYPE` 4 is read as a rectangle list, as 3 already is. Each primitive's three
 corners and the fourth the rasteriser completes are assembled as two triangles (`MeshPrimitive::
-Rectangles`). It is `assumed`: the numbering of this console's geometry engine is inferred from what
-its library writes, not measured on a draw.
+Rectangles`). Measured on a draw since (obSCEne, `reports/hardware/20261007-202010-eboot.obs.log`
+lines 8223-8236, check `166-agc/primitive-draw-rectlist`): a draw of topology 17, whose prim state
+carries 4, fills a rectangle, and so does one of topology 7, whose prim state carries 3. A
+back-facing topology-17 rectangle is culled when back faces are; a topology-7 one is drawn either
+way, which orbistoun does not distinguish yet.
 
 **Why:** `sceAgcCreatePrimState` writes the output primitive into its register list, and
 `166-agc/create-prim-state` measured it for eight input topologies: 2 for the triangle topologies,
