@@ -489,7 +489,7 @@ impl FlatTwins {
 )]
 pub struct BufferFormats(pub [Option<u32>; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize]);
 
-/// Whether a program converts a buffer load by its descriptor's format (D738), and so is translated
+/// Whether a program converts a buffer load or store by its descriptor's format (D738), and so is translated
 /// per draw with [`UserData::buffer_formats`].
 #[must_use]
 pub fn reads_buffer_formats(decode: &Decode, encodings: &EncodingTable) -> bool {
@@ -498,7 +498,9 @@ pub fn reads_buffer_formats(decode: &Decode, encodings: &EncodingTable) -> bool 
             .encoding
             .and_then(|i| encodings.encodings().get(usize::from(i)))
             .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode))
-            .is_some_and(|name| name.starts_with("buffer_load_format_"))
+            .is_some_and(|name| {
+                name.starts_with("buffer_load_format_") || name.starts_with("buffer_store_format_")
+            })
     })
 }
 

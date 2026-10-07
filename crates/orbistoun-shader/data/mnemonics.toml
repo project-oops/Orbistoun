@@ -164,6 +164,26 @@ name = "buffer_load_format_xyzw"
 
 [[mnemonic]]
 family = "MUBUF"
+opcode = 4
+name = "buffer_store_format_x"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 5
+name = "buffer_store_format_xy"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 6
+name = "buffer_store_format_xyz"
+
+[[mnemonic]]
+family = "MUBUF"
+opcode = 7
+name = "buffer_store_format_xyzw"
+
+[[mnemonic]]
+family = "MUBUF"
 opcode = 12
 name = "buffer_load_dword"
 
@@ -951,3 +971,8 @@ name = "v_cmp_ne_u32_e32"
 family = "VOPC"
 opcode = 198
 name = "v_cmp_ge_u32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 212
+name = "v_cmpx_gt_u32_e32"

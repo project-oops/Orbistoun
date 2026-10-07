@@ -940,7 +940,7 @@ impl Pipeline {
         let program = &window[..decoded.consumed];
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
-        let (served, buffers) = self.dispatch_buffers(state, &decoded, memory)?;
+        let (served, buffers, formats) = self.dispatch_buffers(state, &decoded, memory)?;
         let placed = crate::dispatch::place_window_except(
             state,
             (&decoded, &self.encodings),
@@ -964,8 +964,12 @@ impl Pipeline {
         // translated for float images whose images are integer ones is translated again for them.
         let mut integer_images = state.inputs.integer_images;
         let (module, images) = loop {
-            let (module, sources) =
-                self.dispatch_module((&decoded, program, address), state, placed, integer_images)?;
+            let (module, sources) = self.dispatch_module(
+                (&decoded, program, address),
+                state,
+                (placed, formats),
+                integer_images,
+            )?;
             let images = dispatch_images(state, &sources, memory)?;
             let wanted = [
                 images
@@ -1003,7 +1007,10 @@ impl Pipeline {
 
     /// The accesses a dispatch's own buffers take, by instruction offset, and the guest range each
     /// binds (D746): traced from the program as a draw's are, stores included, and resolved
-    /// against the dispatch's user data. Ranges that overlap are refused.
+    /// against the dispatch's user data. Ranges that overlap are refused. For a program that
+    /// converts by its descriptors' formats (D738), each buffer's fourth descriptor word too, as a
+    /// draw's are resolved; one that does not resolve stays `None`, and an access through it is
+    /// refused.
     fn dispatch_buffers(
         &self,
         state: &crate::dispatch::DispatchState,
@@ -1038,16 +1045,37 @@ impl Pipeline {
             }
             ranges.push(range);
         }
-        Ok((traced.served, ranges))
+        let formats = orbistoun_translate::wavefront::reads_buffer_formats(
+            decoded,
+            &self.encodings,
+        )
+        .then(|| {
+            let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
+            for (slot, source) in formats.0.iter_mut().zip(&traced.sources) {
+                if let orbistoun_translate::draw_buffers::BufferSource::Descriptor {
+                    words: descriptor,
+                    ..
+                } = source
+                {
+                    *slot = crate::draw_buffers::resolve_word(descriptor[3], &words, memory).ok();
+                }
+            }
+            formats
+        });
+        Ok((traced.served, ranges, formats))
     }
 
-    /// A dispatch's program translated for its entry state, its window and its images' numeric
-    /// types, from the cache where it was translated before, with where its images come from.
+    /// A dispatch's program translated for its entry state, its window, its buffers' formats and its
+    /// images' numeric types, from the cache where it was translated before, with where its images
+    /// come from.
     fn dispatch_module(
         &mut self,
         (decoded, program, address): (&orbistoun_shader::Decode, &[u8], u64),
         state: &crate::dispatch::DispatchState,
-        placed: Window,
+        (placed, formats): (
+            Window,
+            Option<orbistoun_translate::wavefront::BufferFormats>,
+        ),
         integer_images: [bool; 2],
     ) -> Result<(Vec<u32>, orbistoun_translate::wavefront::ImageSources), String> {
         let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
@@ -1066,11 +1094,16 @@ impl Pipeline {
             window_space: false,
             // Its buffers are bound on their own where traced (D746).
             draw_buffers: true,
-            buffer_formats: None,
+            buffer_formats: formats,
             flat_twins: None,
             saturated: UNSATURATED,
         };
         let key = content_hash(program)
+            // The formats are compiled in, so a dispatch through other formats is another module.
+            ^ formats.map_or(0, |formats| {
+                let words = formats.0.map(|word| word.map_or(u64::MAX, u64::from));
+                content_hash(zerocopy::IntoBytes::as_bytes(&words[..])).rotate_left(7)
+            })
             ^ window_salt(placed)
             ^ (u64::from(count) << 56)
             ^ u64::from(inputs.threads[0]) << 40
@@ -3287,9 +3320,14 @@ fn read_sampler(at: u64, memory: &impl GuestMemory) -> Option<crate::registers::
     crate::registers::decode_sampler_descriptor(words).ok()
 }
 
-/// The accesses a dispatch's own buffers take, by instruction offset, and each buffer's guest range
-/// as `(address, bytes)`, by slot (D746).
-type DispatchBuffers = (BTreeMap<u32, u32>, Vec<(u64, u64)>);
+/// The accesses a dispatch's own buffers take, by instruction offset, each buffer's guest range as
+/// `(address, bytes)`, by slot (D746), and each buffer's descriptor format word, by slot, for a
+/// program converting by it (D738).
+type DispatchBuffers = (
+    BTreeMap<u32, u32>,
+    Vec<(u64, u64)>,
+    Option<orbistoun_translate::wavefront::BufferFormats>,
+);
 
 /// Whether two `(address, bytes)` ranges share a byte.
 fn overlaps((a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {

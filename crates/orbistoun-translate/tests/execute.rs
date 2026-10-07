@@ -6426,6 +6426,26 @@ fn rounding_reversal_and_more_compares_into_exec() {
     }
 }
 
+/// `v_cmpx_gt_u32` compares unsigned, as the AGC formatted copy bounds its threads (PPSA03416):
+/// `0xfffffffb` is above every lane's index and keeps all 64, where the signed compare - `-5`
+/// above the index - keeps none.
+#[test]
+fn the_unsigned_compare_into_exec_keeps_what_the_signed_one_drops() {
+    if !device_or_skip("the_unsigned_compare_into_exec_keeps_what_the_signed_one_drops") {
+        return;
+    }
+    for (name, kept) in [("v_cmpx_gt_u32_e32", 0..64), ("v_cmpx_gt_i32_e32", 0..0)] {
+        let mut mask_program: Vec<u32> = lane_index_into(0).to_vec();
+        mask_program.extend(v_mov_literal(1, 0xffff_fffb));
+        mask_program.push(head(name) | vgpr_code(1));
+        let (_, memory) = run_memory(Fidelity::Wavefront, &stores_under_mask(&mask_program));
+        for (lane, stored) in memory.iter().take(64).enumerate() {
+            let expected = if kept.contains(&lane) { lane as u32 } else { 0 };
+            assert_eq!(*stored, expected, "{name}, lane {lane}");
+        }
+    }
+}
+
 /// radeonsi's buffer copy masks a lane past the copy's end: `v_subrev_nc_u32` takes the copy's
 /// start from the lane's offset, wrapping (`D = S1 - S0`), and `v_cmp_eq_i32` sets the condition
 /// mask where the two are equal, which `exec` then takes - five against the lane keeps lane 5.

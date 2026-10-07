@@ -21,64 +21,69 @@
 0x00007c 8 buffer_load_format_xy v[2:3], v4, s[8:11], 0 idxen
 0x000084 8 buffer_load_format_xyz v[5:7], v4, s[12:15], 0 idxen
 0x00008c 8 buffer_load_format_xyzw v[8:11], v4, s[16:19], 0 idxen
-0x000094 8 s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
-0x00009c 8 v_mad_f32 v12, v1, v2, v3
-0x0000a4 4 v_mac_f32_e32 v13, v1, v2
-0x0000a8 8 v_mul_u32_u24_e32 v14, 0x1234, v2
-0x0000b0 8 v_cmp_eq_f32_e64 s[2:3], |v1|, v2
-0x0000b8 8 v_cmp_le_f32_e64 s[4:5], v1, s9
-0x0000c0 8 v_cmp_ge_f32_e64 s[6:7], -v3, 1.0
-0x0000c8 4 s_cselect_b64 s[8:9], -1, 0
-0x0000cc 4 s_bfm_b32 s4, 8, 23
-0x0000d0 8 v_bfi_b32 v15, v1, v2, v3
-0x0000d8 4 v_cvt_f32_i32_e32 v16, v1
-0x0000dc 8 v_madak_f32 v17, v1, v2, 0xbdf0555d
-0x0000e4 8 v_madmk_f32 v18, v1, 0x3e800000, v2
-0x0000ec 4 s_cmp_lg_u32 s2, 0
-0x0000f0 4 v_cmpx_neq_f32_e32 v1, v2
-0x0000f4 8 ds_write2_b32 v1, v2, v3 offset0:4 offset1:9
-0x0000fc 8 ds_write_b8 v1, v2 offset:4
-0x000104 8 ds_read2_b32 v[5:6], v1 offset0:4 offset1:9
-0x00010c 8 ds_or_b32 v1, v2 offset:4
-0x000114 8 ds_read_u8 v5, v1 offset:4
-0x00011c 8 v_mad_u32_u16 v3, v4, v5, v6
-0x000124 8 v_max3_f32 v3, v4, v5, v6
-0x00012c 8 v_min3_f32 v3, v4, v5, v6
-0x000134 8 v_cmp_lt_f32_e64 s[2:3], v4, v5
-0x00013c 8 v_cmp_gt_f32_e64 s[2:3], v4, v5
-0x000144 8 v_cmp_neq_f32_e64 s[2:3], v4, v5
-0x00014c 8 v_mad_i32_i24 v3, v4, v5, v6
-0x000154 8 v_permlane16_b32 v3, v4, s5, s6
-0x00015c 8 v_msad_u8 v3, v4, v5, v6
-0x000164 8 v_readlane_b32 s3, v4, s5
-0x00016c 8 v_mul_lo_u32 v3, v4, v5
-0x000174 8 v_and_or_b32 v3, v4, v5, v6
-0x00017c 4 s_bfe_u64 s[4:5], s[6:7], s2
-0x000180 4 s_xor_b64 s[4:5], s[6:7], s[2:3]
-0x000184 4 s_nor_b64 s[4:5], s[6:7], s[2:3]
-0x000188 4 s_orn2_b64 s[4:5], s[6:7], s[2:3]
-0x00018c 4 s_lshr_b32 s4, s6, s2
-0x000190 4 s_add_u32 s4, s6, s2
-0x000194 4 s_cselect_b32 s4, s6, s2
-0x000198 4 s_bitcmp1_b32 s6, s2
-0x00019c 4 s_and_saveexec_b64 s[4:5], s[6:7]
-0x0001a0 4 s_bcnt1_i32_b64 s4, s[6:7]
-0x0001a4 4 v_rndne_f32_e32 v3, v1
-0x0001a8 4 v_bfrev_b32_e32 v3, v1
-0x0001ac 4 v_cmpx_gt_f32_e32 v1, v2
-0x0001b0 4 v_cmpx_eq_i32_e32 v1, v2
-0x0001b4 4 v_cmpx_gt_i32_e32 v1, v2
-0x0001b8 4 v_subrev_nc_u32_e32 v0, s4, v0
-0x0001bc 4 v_cmpx_le_i32_e32 0, v0
-0x0001c0 4 v_cmp_eq_i32_e32 vcc, 0, v0
-0x0001c4 4 v_floor_f32_e32 v3, v1
-0x0001c8 8 global_load_dwordx3 v[4:6], v8, s[6:7]
-0x0001d0 4 s_cmp_eq_u32 s7, 4
-0x0001d4 4 s_mov_b32 s102, s104
-0x0001d8 4 s_mov_b32 s105, s103
-0x0001dc 4 s_and_saveexec_b32 s54, vcc_lo
-0x0001e0 4 v_fract_f32_e32 v69, v67
-0x0001e4 4 s_andn2_b32 s54, s54, exec_lo
-0x0001e8 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0001f0 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
-0x0001f8 4 s_endpgm
+0x000094 8 buffer_store_format_x v1, v0, s[4:7], 0 idxen
+0x00009c 8 buffer_store_format_xy v[2:3], v0, s[4:7], 0 idxen
+0x0000a4 8 buffer_store_format_xyz v[5:7], v0, s[4:7], 0 idxen
+0x0000ac 8 buffer_store_format_xyzw v[8:11], v0, s[4:7], 0 idxen
+0x0000b4 8 s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
+0x0000bc 8 v_mad_f32 v12, v1, v2, v3
+0x0000c4 4 v_mac_f32_e32 v13, v1, v2
+0x0000c8 8 v_mul_u32_u24_e32 v14, 0x1234, v2
+0x0000d0 8 v_cmp_eq_f32_e64 s[2:3], |v1|, v2
+0x0000d8 8 v_cmp_le_f32_e64 s[4:5], v1, s9
+0x0000e0 8 v_cmp_ge_f32_e64 s[6:7], -v3, 1.0
+0x0000e8 4 s_cselect_b64 s[8:9], -1, 0
+0x0000ec 4 s_bfm_b32 s4, 8, 23
+0x0000f0 8 v_bfi_b32 v15, v1, v2, v3
+0x0000f8 4 v_cvt_f32_i32_e32 v16, v1
+0x0000fc 8 v_madak_f32 v17, v1, v2, 0xbdf0555d
+0x000104 8 v_madmk_f32 v18, v1, 0x3e800000, v2
+0x00010c 4 s_cmp_lg_u32 s2, 0
+0x000110 4 v_cmpx_neq_f32_e32 v1, v2
+0x000114 8 ds_write2_b32 v1, v2, v3 offset0:4 offset1:9
+0x00011c 8 ds_write_b8 v1, v2 offset:4
+0x000124 8 ds_read2_b32 v[5:6], v1 offset0:4 offset1:9
+0x00012c 8 ds_or_b32 v1, v2 offset:4
+0x000134 8 ds_read_u8 v5, v1 offset:4
+0x00013c 8 v_mad_u32_u16 v3, v4, v5, v6
+0x000144 8 v_max3_f32 v3, v4, v5, v6
+0x00014c 8 v_min3_f32 v3, v4, v5, v6
+0x000154 8 v_cmp_lt_f32_e64 s[2:3], v4, v5
+0x00015c 8 v_cmp_gt_f32_e64 s[2:3], v4, v5
+0x000164 8 v_cmp_neq_f32_e64 s[2:3], v4, v5
+0x00016c 8 v_mad_i32_i24 v3, v4, v5, v6
+0x000174 8 v_permlane16_b32 v3, v4, s5, s6
+0x00017c 8 v_msad_u8 v3, v4, v5, v6
+0x000184 8 v_readlane_b32 s3, v4, s5
+0x00018c 8 v_mul_lo_u32 v3, v4, v5
+0x000194 8 v_and_or_b32 v3, v4, v5, v6
+0x00019c 4 s_bfe_u64 s[4:5], s[6:7], s2
+0x0001a0 4 s_xor_b64 s[4:5], s[6:7], s[2:3]
+0x0001a4 4 s_nor_b64 s[4:5], s[6:7], s[2:3]
+0x0001a8 4 s_orn2_b64 s[4:5], s[6:7], s[2:3]
+0x0001ac 4 s_lshr_b32 s4, s6, s2
+0x0001b0 4 s_add_u32 s4, s6, s2
+0x0001b4 4 s_cselect_b32 s4, s6, s2
+0x0001b8 4 s_bitcmp1_b32 s6, s2
+0x0001bc 4 s_and_saveexec_b64 s[4:5], s[6:7]
+0x0001c0 4 s_bcnt1_i32_b64 s4, s[6:7]
+0x0001c4 4 v_rndne_f32_e32 v3, v1
+0x0001c8 4 v_bfrev_b32_e32 v3, v1
+0x0001cc 4 v_cmpx_gt_f32_e32 v1, v2
+0x0001d0 4 v_cmpx_eq_i32_e32 v1, v2
+0x0001d4 4 v_cmpx_gt_i32_e32 v1, v2
+0x0001d8 4 v_cmpx_gt_u32_e32 vcc_lo, v0
+0x0001dc 4 v_subrev_nc_u32_e32 v0, s4, v0
+0x0001e0 4 v_cmpx_le_i32_e32 0, v0
+0x0001e4 4 v_cmp_eq_i32_e32 vcc, 0, v0
+0x0001e8 4 v_floor_f32_e32 v3, v1
+0x0001ec 8 global_load_dwordx3 v[4:6], v8, s[6:7]
+0x0001f4 4 s_cmp_eq_u32 s7, 4
+0x0001f8 4 s_mov_b32 s102, s104
+0x0001fc 4 s_mov_b32 s105, s103
+0x000200 4 s_and_saveexec_b32 s54, vcc_lo
+0x000204 4 v_fract_f32_e32 v69, v67
+0x000208 4 s_andn2_b32 s54, s54, exec_lo
+0x00020c 8 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x000214 8 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+0x00021c 4 s_endpgm

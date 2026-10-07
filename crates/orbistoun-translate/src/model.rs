@@ -33,6 +33,10 @@ pub const SUPPORTED: &[&str] = &[
     "buffer_load_format_xy",
     "buffer_load_format_xyz",
     "buffer_load_format_xyzw",
+    "buffer_store_format_x",
+    "buffer_store_format_xy",
+    "buffer_store_format_xyz",
+    "buffer_store_format_xyzw",
     "tbuffer_load_format_x",
     "tbuffer_load_format_xy",
     "tbuffer_load_format_xyz",
@@ -87,6 +91,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmpx_gt_f32_e32",
     "v_cmpx_eq_i32_e32",
     "v_cmpx_gt_i32_e32",
+    "v_cmpx_gt_u32_e32",
     "s_bfm_b32",
     "s_bfm_b64",
     "s_buffer_load_dword",
@@ -2171,7 +2176,9 @@ fn vector_instruction<M: Model + ?Sized>(
             compare_long(model, instruction, name)
         }
         "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_eq_i32_e32"
-        | "v_cmpx_gt_i32_e32" | "v_cmpx_le_i32_e32" => compare_into_exec(model, instruction, name),
+        | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" => {
+            compare_into_exec(model, instruction, name)
+        }
 
         // The short-form select, whose mask is always the condition mask.
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
@@ -2316,11 +2323,14 @@ fn memory_instruction<M: Model + ?Sized>(
         return Ok(());
     }
     // An image a dispatch fetches from or stores to is bound whole and written back exactly, so
-    // its accesses need no window; the local data share is not guest memory.
+    // its accesses need no window; the local data share is not guest memory; and a scalar load
+    // the buffer tracer gave a slot reads the buffer bound there (D746), not the window.
     if model.exact_memory()
         && !name.starts_with("buffer_")
         && !name.starts_with("ds_")
         && !matches!(name, "image_load" | "image_load_mip" | "image_store")
+        && (!name.starts_with("s_buffer_load_dword")
+            || model.draw_buffer_slot(instruction).is_none())
     {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -2355,6 +2365,9 @@ fn memory_instruction<M: Model + ?Sized>(
         // stay distinct. The local data share follows.
         name if name.starts_with("buffer_load_format_") => {
             format_buffer_load(model, instruction, name)
+        }
+        name if name.starts_with("buffer_store_format_") => {
+            format_buffer_store(model, instruction, name)
         }
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
@@ -3918,6 +3931,7 @@ fn compare_into_exec<M: Model + ?Sized>(
         "v_cmpx_le_i16_e32" => (op::SLESS_THAN_EQUAL, 1),
         "v_cmpx_eq_i32_e32" => (op::IEQUAL, 2),
         "v_cmpx_le_i32_e32" => (op::SLESS_THAN_EQUAL, 2),
+        "v_cmpx_gt_u32_e32" => (op::UGREATER_THAN, 2),
         _ => (op::SGREATER_THAN, 2),
     };
     for lane in 0..model.lanes() {
@@ -4531,12 +4545,16 @@ const SOFFSET_NULL: u32 = 125;
 /// plus a byte offset, into consecutive scalar registers.
 ///
 /// The descriptor is read as the vector buffer accesses read it ([`read_buffer_resource`]). Each
-/// word is range-checked against the record count in bytes as a raw buffer's access is, a word at a
-/// time, and one that does not fit reads zero: from GFX8 a scalar access out of bounds does not
-/// reach memory (Mesa `ac_gpu_info.h:187`, `ac_nir_lower_mem_access_bit_sizes.c:212-217`, which
-/// clamps the offset to the record count on the generations where it does). A descriptor with a
-/// stride, or asking for addressing no access here models, reads zero, as D147 has the vector
-/// accesses do.
+/// word is range-checked against the buffer's bytes a word at a time, and one that does not fit
+/// reads zero: from GFX8 a scalar access out of bounds does not reach memory (Mesa
+/// `ac_gpu_info.h:187`, `ac_nir_lower_mem_access_bit_sizes.c:212-217`, which clamps the offset to
+/// the record count on the generations where it does). The record count is in bytes with no stride
+/// and in strides with one (radeonsi `si_state.c:3506-3527`: GFX6-7 and 10, and GFX9's SMEM), the
+/// address the base plus the offset either way. A descriptor asking for addressing no access here
+/// models reads zero, as D147 has the vector accesses do.
+///
+/// The destination may be a lane mask, as the AGC formatted copy loads its count into `vcc_lo`
+/// (PPSA03416): one word writes the mask's low half, two its whole.
 ///
 /// Refused by name: an offset register (`SOFFSET` other than `null`), which the solved layout has
 /// no operand for, and offset bits above the sixteen the probes solved.
@@ -4547,13 +4565,24 @@ fn scalar_buffer_load<M: Model + ?Sized>(
 ) -> Result<(), TranslateError> {
     let words = access_words(name);
     let (destination, base, offset) = three_operands(instruction)?;
-    let (Operand::Scalar(register), Operand::Scalar(base_register), Operand::Immediate(bytes)) =
+    let mask = mask_destination(destination).filter(|_| words <= 2);
+    let (register, Operand::Scalar(base_register), Operand::Immediate(bytes)) =
         (destination, base, offset)
     else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "a scalar buffer load needs a scalar destination, a descriptor and an immediate",
         });
+    };
+    let register = match (register, mask) {
+        (Operand::Scalar(register), _) => *register,
+        (_, Some(_)) => 0,
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a scalar buffer load needs a scalar destination, a descriptor and an immediate",
+            });
+        }
     };
     let second = instruction.second_word.unwrap_or(0);
     if (second >> 25) & 0x7f != SOFFSET_NULL {
@@ -4572,7 +4601,7 @@ fn scalar_buffer_load<M: Model + ?Sized>(
         offset: instruction.offset,
         detail: "negative load offset",
     })?;
-    let register = u32::from(*register);
+    let register = u32::from(register);
     if register + words > SCALAR_REGISTERS {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -4583,13 +4612,15 @@ fn scalar_buffer_load<M: Model + ?Sized>(
     let resource = read_buffer_resource(model, u32::from(*base_register));
     let zero = model.constant(0);
     let strided = model.is_not_zero(resource.stride);
-    let unsupported = model.is_not_zero(resource.unsupported);
-    let refused = model.either(strided, unsupported);
+    let strided_bytes = model.binary(op::IMUL, resource.records, resource.stride);
+    let bytes_in_buffer = model.select(strided, strided_bytes, resource.records);
+    let refused = model.is_not_zero(resource.unsupported);
     let slot = model.draw_buffer_slot(instruction);
+    let mut values = Vec::with_capacity(words as usize);
     for word in 0..words {
         let at = model.constant(bytes + word * 4);
         let end = model.constant(bytes + word * 4 + 4);
-        let past = model.compare(op::UGREATER_THAN, end, resource.records);
+        let past = model.compare(op::UGREATER_THAN, end, bytes_in_buffer);
         let outside = model.either(past, refused);
         // Through a bound draw buffer the word is the offset's, from the buffer's start (D733).
         let loaded = if let Some(slot) = slot {
@@ -4600,8 +4631,16 @@ fn scalar_buffer_load<M: Model + ?Sized>(
             let index = model.word_index(address);
             model.read_memory(index)
         };
-        let value = model.select(outside, zero, loaded);
-        model.write_scalar(register + word, value);
+        values.push(model.select(outside, zero, loaded));
+    }
+    match (mask, values.as_slice()) {
+        (Some(mask), [low]) => write_mask_low(model, mask, *low)?,
+        (Some(mask), [low, high]) => model.write_lane_mask(mask, *low, *high)?,
+        _ => {
+            for (word, value) in (0..).zip(values) {
+                model.write_scalar(register + word, value);
+            }
+        }
     }
     model.count();
     Ok(())
@@ -5074,6 +5113,55 @@ fn format_buffer_load<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `buffer_store_format_x` .. `_xyzw`: a typed store whose format is its descriptor's (D738), written
+/// as a typed store of that format writes it. Whole-word formats move their words; a packed format
+/// goes through the packed store, which admits only the conversions measured for it. The channels
+/// must be the format's components and the descriptor's selects the identity over them: what a
+/// store does with a reordering select, or with fewer components than channels, is unmeasured and
+/// refused by name.
+fn format_buffer_store<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let channels = typed_channels(name).ok_or(TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "a format store does not name its channels",
+    })?;
+    let slot = model
+        .draw_buffer_slot(instruction)
+        .ok_or(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format store through a buffer a dispatch does not bind, whose format is not known",
+        })?;
+    let word3 = model
+        .buffer_descriptor_format(slot)
+        .ok_or(TranslateError::NeedsBufferFormats)?;
+    let (format, selects, _) = descriptor_format(instruction, word3, channels)?;
+    if format.components() != channels as usize {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format store whose descriptor's format and channel count disagree",
+        });
+    }
+    if selects
+        .iter()
+        .take(channels as usize)
+        .zip(4..)
+        .any(|(&select, identity)| select != identity)
+    {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format store through a descriptor whose selects reorder or replace components",
+        });
+    }
+    if format.is_plain_words() {
+        buffer_access(model, instruction, false, channels)
+    } else {
+        packed_buffer_memory(model, instruction, format, false)
+    }
+}
+
 /// A fetched element's components in order, x first, each converted as its format says and zero
 /// when `outside` the buffer.
 fn element_components<M: Model + ?Sized>(
@@ -5114,7 +5202,7 @@ fn descriptor_format(
     let format = formats.get(word3 >> DESCRIPTOR_FORMAT_SHIFT & 0x7F).ok_or(
         TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a format load's descriptor names a format code with no meaning",
+            detail: "a format access's descriptor names a format code with no meaning",
         },
     )?;
     let components = u32::try_from(format.components()).unwrap_or(u32::MAX);
@@ -5126,7 +5214,7 @@ fn descriptor_format(
     {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "a format load selects a component its format does not have, or a reserved select",
+            detail: "a format access selects a component its format does not have, or a reserved select",
         });
     }
     // The element's bits: whole words for a plain format, the packed width otherwise.

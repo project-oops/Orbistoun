@@ -33,13 +33,15 @@ pub fn descriptor_extent(words: [u32; 4], reads: DescriptorReads) -> Result<u64,
         return Err("a buffer descriptor asking for swizzled or thread-indexed addressing (D733)");
     }
     let (stride, records) = (u64::from(descriptor.stride), u64::from(descriptor.records));
-    // A scalar buffer load reads each word within the record count in bytes, and zero through a
-    // descriptor with a stride (the translator's `scalar_buffer_load`).
+    // A scalar buffer load reads each word within the record count, which is in bytes with no
+    // stride and in strides with one (the translator's `scalar_buffer_load`; radeonsi
+    // `si_state.c:3506-3527`).
     let scalar = if stride == 0 {
-        records.min(u64::from(reads.scalar_reach))
+        records
     } else {
-        0
-    };
+        records * stride
+    }
+    .min(u64::from(reads.scalar_reach));
     if !reads.vector {
         return Ok(scalar);
     }
@@ -357,12 +359,23 @@ mod tests {
         assert_eq!(descriptor_extent([0, 4, 8, RAW], scalar(16)), Ok(8));
     }
 
-    /// A scalar load through a descriptor with a stride reads zero, so it reaches nothing.
+    /// Through a descriptor with a stride the record count is in units of the stride (radeonsi
+    /// `si_state.c:3506-3527`, GFX6-7 and 10, and GFX9's SMEM), so a scalar load reaches its own end
+    /// or the records' bytes: the AGC formatted copy's constants, one sixteen-byte record read for
+    /// eight bytes (PPSA03416), reach eight.
     #[test]
-    fn a_scalar_load_through_a_stride_reaches_nothing() {
+    fn a_scalar_load_through_a_stride_counts_records_in_strides() {
         assert_eq!(
             descriptor_extent([0, 4 | 16 << 16, 16, RAW], scalar(16)),
-            Ok(0)
+            Ok(16)
+        );
+        assert_eq!(
+            descriptor_extent([0, 4 | 16 << 16, 1, RAW], scalar(8)),
+            Ok(8)
+        );
+        assert_eq!(
+            descriptor_extent([0, 4 | 16 << 16, 1, RAW], scalar(32)),
+            Ok(16)
         );
     }
 

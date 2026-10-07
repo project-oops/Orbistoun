@@ -107,7 +107,7 @@ pub struct DrawBuffers {
 ///
 /// Nothing is traced in a program that writes memory, which a snapshot bound for the draw would
 /// not see - unless `stores` (a dispatch, whose buffers are written back, D746) and every write is
-/// an untyped buffer store, which is traced like a load.
+/// a buffer store through a descriptor, which is traced like a load.
 #[must_use]
 pub fn trace(
     decode: &Decode,
@@ -131,7 +131,7 @@ pub fn trace(
     if named
         .iter()
         .flatten()
-        .any(|&(_, name)| writes_memory(name) && !(stores && untyped_buffer_store(name)))
+        .any(|&(_, name)| writes_memory(name) && !(stores && bound_buffer_store(name)))
     {
         return DrawBuffers::default();
     }
@@ -318,9 +318,10 @@ fn writes_memory(name: &str) -> bool {
     (name.contains("store") || name.contains("atomic")) && !name.starts_with("ds_")
 }
 
-/// Whether an instruction is an untyped buffer store, which a dispatch's bound buffer takes (D746).
-fn untyped_buffer_store(name: &str) -> bool {
-    name.starts_with("buffer_store_dword")
+/// Whether an instruction is a buffer store a dispatch's bound buffer takes (D746): an untyped one,
+/// or one converting by its descriptor's format (D738), which addresses the buffer the same way.
+fn bound_buffer_store(name: &str) -> bool {
+    name.starts_with("buffer_store_dword") || name.starts_with("buffer_store_format_")
 }
 
 /// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
@@ -425,6 +426,14 @@ fn vector_payload(instruction: &Instruction, name: &str) -> u32 {
             .map_or(WIDEST, |format| {
                 format.widths.iter().sum::<u32>().div_ceil(8)
             });
+    }
+    // A format access's element is its descriptor's, unknown here, but each channel it names moves
+    // at most one thirty-two-bit component.
+    if let Some((_, channels)) = name.rsplit_once("_format_")
+        && !channels.is_empty()
+        && "xyzw".starts_with(channels)
+    {
+        return 4 * u32::try_from(channels.len()).unwrap_or(4);
     }
     match name.rsplit_once("dword") {
         Some((_, "")) => 4,
@@ -918,6 +927,30 @@ mod tests {
                 },
             }]
         );
+    }
+
+    /// A format access moves at most one thirty-two-bit component per channel it names, so its reach
+    /// into a record is four bytes a channel: the AGC formatted copy's `buffer_store_format_x`
+    /// (PPSA03416) reaches four, and its last record ends at the buffer's end.
+    #[test]
+    fn a_format_access_reaches_four_bytes_a_channel() {
+        // buffer_store_format_x v1, v0, s[4:7], 0 idxen; buffer_load_format_xyzw v[1:4], v0,
+        // s[0:3], 0 idxen
+        for (program, reach) in [
+            ([0xe010_2000, 0x8001_0100, END], 4),
+            ([0xe00c_2000, 0x8000_0100, END], 16),
+        ] {
+            let encodings = EncodingTable::builtin().expect("encodings");
+            let operands = OperandTable::builtin().expect("operands");
+            let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let decoded = decode_program(&bytes, &encodings, &operands);
+            // A dispatch's stores are traced (D746).
+            let buffers = trace(&decoded, &encodings, (0, 8), true);
+            let [BufferSource::Descriptor { reads, .. }] = buffers.sources[..] else {
+                panic!("one descriptor: {:?}", buffers.sources);
+            };
+            assert_eq!(reads.vector_reach, Some(reach), "{program:x?}");
+        }
     }
 
     /// A fetch that adds a scalar offset register is left to the window: the range check does not

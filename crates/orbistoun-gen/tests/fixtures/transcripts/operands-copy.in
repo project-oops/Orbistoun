@@ -112,6 +112,29 @@ buffer_load_format_xyzw v[200:203], v55, s[96:99], s101 idxen
 buffer_load_format_xyzw v[60:63], v9, s[32:35], 0 idxen
 buffer_load_format_xyzw v[130:133], v250, s[44:47], s43 idxen
 
+// ---- buffer_store_format_x .. _xyzw: MUBUF, the store a typed copy writes through its
+// descriptor's format. The same registers as the loads, so data, index and resource land apart.
+buffer_store_format_x v1, v40, s[8:11], s3 idxen
+buffer_store_format_x v37, v2, s[16:19], s13 idxen
+buffer_store_format_x v200, v55, s[96:99], s101 idxen
+buffer_store_format_x v60, v9, s[32:35], 0 idxen
+buffer_store_format_x v130, v250, s[44:47], s43 idxen
+buffer_store_format_xy v[1:2], v40, s[8:11], s3 idxen
+buffer_store_format_xy v[37:38], v2, s[16:19], s13 idxen
+buffer_store_format_xy v[200:201], v55, s[96:99], s101 idxen
+buffer_store_format_xy v[60:61], v9, s[32:35], 0 idxen
+buffer_store_format_xy v[130:131], v250, s[44:47], s43 idxen
+buffer_store_format_xyz v[1:3], v40, s[8:11], s3 idxen
+buffer_store_format_xyz v[37:39], v2, s[16:19], s13 idxen
+buffer_store_format_xyz v[200:202], v55, s[96:99], s101 idxen
+buffer_store_format_xyz v[60:62], v9, s[32:35], 0 idxen
+buffer_store_format_xyz v[130:132], v250, s[44:47], s43 idxen
+buffer_store_format_xyzw v[1:4], v40, s[8:11], s3 idxen
+buffer_store_format_xyzw v[37:40], v2, s[16:19], s13 idxen
+buffer_store_format_xyzw v[200:203], v55, s[96:99], s101 idxen
+buffer_store_format_xyzw v[60:63], v9, s[32:35], 0 idxen
+buffer_store_format_xyzw v[130:133], v250, s[44:47], s43 idxen
+
 // ---- s_buffer_load_dwordx16: SMEM, sixteen words of a constant buffer, at the extremes.
 s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
 s_buffer_load_dwordx16 s[88:103], s[100:103], 0xfff0
@@ -380,6 +403,13 @@ v_cmpx_gt_i32_e32 s5, v190
 v_cmpx_gt_i32_e32 -1, v255
 v_cmpx_gt_i32_e32 4, v77
 v_cmpx_gt_i32_e32 v130, v12
+// ---- v_cmpx_gt_u32_e32: VOPC, the unsigned form, with vcc_lo as the formatted copy has it.
+v_cmpx_gt_u32_e32 vcc_lo, v0
+v_cmpx_gt_u32_e32 v4, v5
+v_cmpx_gt_u32_e32 s5, v190
+v_cmpx_gt_u32_e32 -1, v255
+v_cmpx_gt_u32_e32 4, v77
+v_cmpx_gt_u32_e32 v130, v12
 
 // ---- radeonsi's buffer copy (si_create_dma_compute_shader): the lane's offset from the copy's
 // start, and the compares that mask off a lane past the copy's end ---------------------------

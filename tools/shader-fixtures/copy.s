@@ -41,6 +41,10 @@ buffer_load_format_x v1, v4, s[8:11], 0 idxen
 buffer_load_format_xy v[2:3], v4, s[8:11], 0 idxen
 buffer_load_format_xyz v[5:7], v4, s[12:15], 0 idxen
 buffer_load_format_xyzw v[8:11], v4, s[16:19], 0 idxen
+buffer_store_format_x v1, v0, s[4:7], 0 idxen
+buffer_store_format_xy v[2:3], v0, s[4:7], 0 idxen
+buffer_store_format_xyz v[5:7], v0, s[4:7], 0 idxen
+buffer_store_format_xyzw v[8:11], v0, s[4:7], 0 idxen
 s_buffer_load_dwordx16 s[32:47], s[4:7], 0x40
 v_mad_f32 v12, v1, v2, v3
 v_mac_f32_e32 v13, v1, v2
@@ -100,6 +104,8 @@ v_bfrev_b32_e32 v3, v1
 v_cmpx_gt_f32_e32 v1, v2
 v_cmpx_eq_i32_e32 v1, v2
 v_cmpx_gt_i32_e32 v1, v2
+// The AGC formatted copy's bound: an unsigned count against the thread index (PPSA03416).
+v_cmpx_gt_u32_e32 vcc_lo, v0
 v_subrev_nc_u32_e32 v0, s4, v0
 v_cmpx_le_i32_e32 0, v0
 v_cmp_eq_i32_e32 vcc, 0, v0
