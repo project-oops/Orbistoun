@@ -77,6 +77,14 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceFont.toml"),
     ),
     (
+        "libSceHttp2",
+        include_str!("../data/knowledge/libSceHttp2.toml"),
+    ),
+    (
+        "libSceNpWebApi2",
+        include_str!("../data/knowledge/libSceNpWebApi2.toml"),
+    ),
+    (
         "libSceAppContent",
         include_str!("../data/knowledge/libSceAppContent.toml"),
     ),

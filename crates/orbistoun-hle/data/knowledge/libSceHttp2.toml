@@ -1,0 +1,26 @@
+library = "libSceHttp2"
+
+[[function]]
+name = "sceHttp2Init"
+purpose = "Creates an HTTP/2 library context over a network pool and an SSL context."
+returns = "handle"
+edge_cases = [
+    "ASSUMED by D151: a positive context id from one, each call its own. PPSA28061 calls it after sceNetPoolCreate and sceSslInit with the pool id first, and aborts on anything negative (\"[LEADERBOARD SYSTEM] sceHttp2Init failed\").",
+    "The pools are the platform's memory accounting and nothing here draws on them. REQ-20261007T0915Z-ht01 asks what hardware answers.",
+]
+found_by = "generated"
+known_by = "assumed"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceHttp2Term"
+purpose = "Retires an HTTP/2 library context."
+returns = "status"
+edge_cases = [
+    "ASSUMED: 0 for an issued context, which is then retired; one not issued or already retired answers orbistoun's placeholder, the library's code being unmeasured.",
+]
+found_by = "generated"
+known_by = "assumed"
+found_in = []
+found_on = "2026-10-07"

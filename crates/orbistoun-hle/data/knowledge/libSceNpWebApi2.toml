@@ -1,0 +1,49 @@
+library = "libSceNpWebApi2"
+
+[[function]]
+name = "sceNpWebApi2Initialize"
+purpose = "Creates the web API library context over an HTTP/2 context."
+returns = "handle"
+edge_cases = [
+    "ASSUMED by D151: a positive library context id from one. PPSA28061 calls it with the HTTP/2 context sceHttp2Init gave it and aborts on anything negative.",
+]
+found_by = "generated"
+known_by = "assumed"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceNpWebApi2Terminate"
+purpose = "Retires a web API library context."
+returns = "status"
+edge_cases = [
+    "ASSUMED: 0 for a live library context, which is then retired; one not live answers orbistoun's placeholder, the library's code being unmeasured.",
+]
+found_by = "generated"
+known_by = "assumed"
+found_in = []
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceNpWebApi2CreateUserContext"
+purpose = "Creates a per-user context under a web API library context."
+returns = "handle"
+edge_cases = [
+    "ASSUMED by D151: a positive user context id from one, under a live library context; under one not live, orbistoun's placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+found_in = []
+found_on = "2026-10-07"
+
+[[function]]
+name = "sceNpWebApi2DeleteUserContext"
+purpose = "Retires a web API user context."
+returns = "status"
+edge_cases = [
+    "ASSUMED: 0 for a live user context, which is then retired; one not live answers orbistoun's placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+found_in = []
+found_on = "2026-10-07"

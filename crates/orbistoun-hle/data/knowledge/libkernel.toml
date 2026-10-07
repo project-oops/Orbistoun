@@ -842,6 +842,20 @@ assumptions = ["Semantics are inferred from the name and its neighbours in the s
 found_on = "2026-08-25"
 
 [[function]]
+name = "sceKernelMapNamedFlexibleMemory"
+arity = 5
+purpose = "Allocates from the flexible pool and maps it in one step, labelling the mapping."
+returns = "status"
+edge_cases = [
+    "Implemented as sceKernelMapFlexibleMemory with the fifth argument a name for the mapping, as sceKernelMapNamedDirectMemory is the direct mapping with one. PPSA28061's shipped web-API module formats the name with snprintf just before the call and fails its SceCommon::initialize on the placeholder this answered before.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The name is a label only, changing nothing a guest reads back; nothing on the target has confirmed it."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"
+
+[[function]]
 name = "sceKernelMapNamedDirectMemory"
 arity = 6
 purpose = """

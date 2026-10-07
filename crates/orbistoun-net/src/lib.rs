@@ -9,6 +9,7 @@
 //! network (D727); the account-service libraries are listed in `SERVES_NOTHING`. Online
 //! services are out of scope (`docs/SCOPE.md`).
 
+mod contexts;
 pub mod host;
 pub mod http;
 pub mod http2;
@@ -32,6 +33,8 @@ pub fn implementations() -> &'static [(&'static str, orbistoun_core::GuestFn)] {
             socket::implementations(),
             pool::implementations(),
             http::implementations(),
+            http2::implementations(),
+            npwebapi2::implementations(),
             ssl::implementations(),
             netctl::implementations(),
         ]

@@ -192,6 +192,7 @@ guest_module! {
         "sceKernelAvailableFlexibleMemorySize" => 1,
         "sceKernelConfiguredFlexibleMemorySize" => 1,
         "sceKernelMapFlexibleMemory" => 4,
+        "sceKernelMapNamedFlexibleMemory" => 5,
         "sceKernelReleaseFlexibleMemory" => 2,
         "scePthreadAttrInit" => 1, "scePthreadAttrDestroy" => 1,
         "scePthreadAttrSetstacksize" => 2, "scePthreadAttrGetstacksize" => 2,
@@ -4461,6 +4462,15 @@ fn map_flexible_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     result
 }
 
+/// `sceKernelMapNamedFlexibleMemory(out, len, prot, flags, name)`: `sceKernelMapFlexibleMemory`
+/// with a label for the mapping, as `sceKernelMapNamedDirectMemory` is the direct mapping with one.
+/// The name changes nothing a guest reads back, so it is not kept.
+fn map_named_flexible_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mut unnamed = *args;
+    unnamed[4] = 0;
+    map_flexible_memory(&unnamed)
+}
+
 /// Bases of mappings `sceKernelMapFlexibleMemory` made: placed through the direct path, so its
 /// alias table holds them too, and answered to a query as flexible memory rather than direct.
 fn flexible_mappings() -> &'static Mutex<Vec<u64>> {
@@ -6131,6 +6141,7 @@ const TABLE: &[(&str, GuestFn)] = &[
         configured_flexible_memory_size,
     ),
     ("sceKernelMapFlexibleMemory", map_flexible_memory),
+    ("sceKernelMapNamedFlexibleMemory", map_named_flexible_memory),
     ("sceKernelReleaseFlexibleMemory", release_flexible_memory),
     ("scePthreadAttrInit", pthread_attr_init),
     ("scePthreadAttrDestroy", pthread_attr_destroy),
