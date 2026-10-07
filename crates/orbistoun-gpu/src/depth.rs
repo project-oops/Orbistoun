@@ -267,6 +267,22 @@ pub const fn decode_cull(value: u32) -> CullState {
     }
 }
 
+/// `VGT_GS_OUT_PRIM_TYPE.OUTPRIM_TYPE` 3: the rectangle a quad topology draws through the prim
+/// state, which is drawn whichever way it faces (D755).
+const RECT_2D: u32 = 3;
+
+/// The cull bits a draw is rasterised under: `PA_SU_SC_MODE_CNTL`'s, except that a draw producing
+/// output primitive 3 culls nothing. Measured (obSCEne `166-agc/primitive-draw-rectlist`, sweep
+/// 20261007-202010): with back faces culled a back-facing topology-17 rectangle (output primitive 4)
+/// is not drawn, and a back-facing topology-7 one (output primitive 3) is.
+#[must_use]
+pub const fn cull_in_force(mode_cntl: u32, out_prim: Option<u32>) -> u32 {
+    match out_prim {
+        Some(prim) if prim & 0x3f == RECT_2D => mode_cntl & !0x3,
+        _ => mode_cntl,
+    }
+}
+
 /// The per-draw depth, stencil and cull commands, emitted before each draw when what is in force
 /// changed, as the blend state is.
 #[derive(Debug, Default)]
@@ -292,8 +308,12 @@ impl DrawStateSent {
             commands.push(RenderCommand::SetDepthStencil(state));
             self.depth_stencil = Some(state);
         }
-        if let Some(value) = sweep.latest(at, PA_SU_SC_MODE_CNTL)
-            && self.cull != Some(value & 0x7)
+        if let Some(value) = sweep.latest(at, PA_SU_SC_MODE_CNTL).map(|value| {
+            cull_in_force(
+                value,
+                sweep.latest(at, crate::registers::VGT_GS_OUT_PRIM_TYPE),
+            )
+        }) && self.cull != Some(value & 0x7)
         {
             commands.push(RenderCommand::SetCull(decode_cull(value)));
             self.cull = Some(value & 0x7);
@@ -620,6 +640,17 @@ mod tests {
             }
         );
         assert!(decode_cull(0x1).cull_front);
+    }
+
+    /// A draw producing output primitive 3 culls nothing whatever `PA_SU_SC_MODE_CNTL` asks; any
+    /// other keeps the cull bits it asks for (D755, measured).
+    #[test]
+    fn a_rect_2d_draw_culls_nothing() {
+        use super::cull_in_force;
+        assert_eq!(cull_in_force(0x243, Some(3)), 0x240);
+        assert_eq!(cull_in_force(0x242, Some(4)), 0x242);
+        assert_eq!(cull_in_force(0x242, Some(2)), 0x242);
+        assert_eq!(cull_in_force(0x242, None), 0x242);
     }
 
     /// The state is present only with `DB_DEPTH_CONTROL`; the stencil registers beside it read zero

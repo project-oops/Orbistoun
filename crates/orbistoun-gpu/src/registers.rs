@@ -2198,7 +2198,7 @@ pub fn colour_target_bases_in(writes: &[RegisterWrite], draws: &[u32]) -> usize 
 /// From `src/amd/registers/gfx103.json` in oops-mesa (`"map": {"at": 166508}`; `166508 / 4` =
 /// `0xA29B`), a context-space register. The point-draw capture (`agc-primitive-draw-fw1240`) writes
 /// `0` (POINTLIST); the triangle and gl-cube captures write `2` (TRISTRIP).
-const VGT_GS_OUT_PRIM_TYPE: u32 = 0xA29B;
+pub(crate) const VGT_GS_OUT_PRIM_TYPE: u32 = 0xA29B;
 
 /// The primitive a draw's geometry produces, from `VGT_GS_OUT_PRIM_TYPE.OUTPRIM_TYPE`.
 ///
