@@ -154,6 +154,15 @@ mod tests {
         assert!(p.read && p.write && p.execute, "the page must satisfy both");
     }
 
+    /// A loaded segment whose header grants no access is readable (D757). PPSA04263's eighth
+    /// `PT_LOAD` has `p_flags` 0 and holds its dynamic table, and the title reads it.
+    #[test]
+    fn a_segment_with_no_access_flags_is_read_only() {
+        let runs = page_protections(&[seg(0x1000, 0x2000, 0)], 0x1000);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].protection, Protection::READ_ONLY);
+    }
+
     /// Adjacent pages with equal protection merge into one run.
     #[test]
     fn adjacent_pages_with_equal_protection_merge_into_one_run() {
