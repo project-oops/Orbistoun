@@ -31,15 +31,15 @@ impl PlacedSegment {
         self.copied.saturating_add(self.zeroed)
     }
 
-    /// The access the segment's header asked for, and read where it asked for none: a loaded
-    /// segment is there to be read, as the Prospero generation's mapped dynamic tables are with
-    /// `p_flags` 0 (D757).
+    /// The access the segment's header asked for, and read-write where it asked for none: the
+    /// Prospero generation's mapped dynamic tables carry `p_flags` 0, and a title reads and
+    /// rewrites them in place (D757).
     pub const fn protection(&self) -> Protection {
         let asked = Protection::from_elf_flags(self.flags);
         if asked.read || asked.write || asked.execute {
             asked
         } else {
-            Protection::READ_ONLY
+            Protection::READ_WRITE
         }
     }
 }
