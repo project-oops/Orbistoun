@@ -7460,8 +7460,10 @@ fn pair_source<M: Model + ?Sized>(
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "a 64-bit source that is neither a register pair, a lane mask nor an inline \
-                         integer",
+                detail: concat!(
+                    "a 64-bit source that is neither a register pair, a lane mask nor an ",
+                    "inline integer"
+                ),
             });
         }
     };
