@@ -221,6 +221,7 @@ guest_module! {
         // `sceKernelAprWaitCommandBuffer` is confirmed only by its hash matching the import. Arity six
         // throughout is the trampoline's full capture, not a claim about the signatures.
         "sceKernelAprResolveFilepathsToIdsAndFileSizes" => 6,
+        "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes" => 6,
         "sceKernelAprSubmitCommandBufferAndGetResult" => 6,
         "sceKernelAprWaitCommandBuffer" => 6,
         "sceKernelReadTsc" => 0,
@@ -6187,6 +6188,10 @@ const TABLE: &[(&str, GuestFn)] = &[
         apr_resolve_filepaths,
     ),
     (
+        "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes",
+        apr_resolve_filepaths_with_prefix,
+    ),
+    (
         "sceKernelAprSubmitCommandBufferAndGetResult",
         apr_submit_command_buffer,
     ),
@@ -6249,14 +6254,40 @@ unsafe fn read_path(address: u64) -> String {
 /// gets the unresolved answer, since nothing gives the id the hardware assigns a file outside an
 /// index.
 fn apr_resolve_filepaths(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (array, count, ids, sizes, statuses) = (args[0], args[1], args[2], args[3], args[4]);
+    resolve_paths("", (args[0], args[1]), (args[2], args[3], args[4]))
+}
+
+/// `sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(prefix, paths, count, ids, sizes,
+/// statuses)`: [`apr_resolve_filepaths`] for paths relative to `prefix`.
+///
+/// Measured beside the plain form (obSCEne -ap02, arms 1 and 2, `166-agc/ampr-apr-file-read`): the
+/// prefix `/app0/` with `eboot.bin` and `sce_sys/param.json` answered exactly what the two whole
+/// paths did - the rc, every id, size and status. So each path is the prefix joined to it, resolved
+/// as the plain form resolves it. PPSA04263 passes an empty prefix.
+fn apr_resolve_filepaths_with_prefix(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let prefix = if args[0] == 0 {
+        String::new()
+    } else {
+        // SAFETY: the prefix is a NUL-terminated string the guest passed for this call.
+        unsafe { read_path(args[0]) }
+    };
+    resolve_paths(&prefix, (args[1], args[2]), (args[3], args[4], args[5]))
+}
+
+/// Resolves `count` paths from the array at `array`, each joined to `prefix`, writing an id, a size
+/// and a status per entry - the answer both resolve forms share.
+fn resolve_paths(
+    prefix: &str,
+    (array, count): (u64, u64),
+    (ids, sizes, statuses): (u64, u64, u64),
+) -> u64 {
     let mut paths = Vec::new();
     let mut all_resolved = true;
     for entry in 0..count {
         // SAFETY: an address the guest passed for this call, valid by its contract.
         let path = unsafe { guest::read_u64(array + entry * 8) }
             // SAFETY: each entry of the guest's path array is a path under the call's contract.
-            .map(|path| unsafe { read_path(path) })
+            .map(|path| format!("{prefix}{}", unsafe { read_path(path) }))
             .unwrap_or_default();
         let answer = apr::look_up(&path);
         let (id, size) = answer.map_or((u32::MAX, 0), |(id, size)| (id as u32, size));

@@ -315,6 +315,21 @@ found_in = ["PPSA03416-app0", "PPSA25872-app0"]
 found_on = "2026-09-08"
 
 [[function]]
+name = "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes"
+arity = 6
+purpose = "sceKernelAprResolveFilepathsToIdsAndFileSizes for paths relative to a prefix: (prefix, paths, count, u32 *ids, u64 *sizes, u32 *statuses)."
+returns = "status"
+edge_cases = [
+    "MEASURED (obSCEne -ap02, reports/hardware/20261007-113500-eboot.obs.log lines 8814-8844): the prefix /app0/ with eboot.bin and sce_sys/param.json answered exactly what the plain form answered for the two whole paths - rc, every id, size and status. orbistoun joins each path to the prefix and resolves it as the plain form does, from the title's own index (D591).",
+    "PPSA04263 calls it 302 times with an empty prefix and one path each.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 8814-8844, checks ap02-arm1-resolve and ap02-arm2-prefix."
+found_in = ["PPSA04263-app0", "PPSA21564-app0", "PPSA28061-app0"]
+found_on = "2026-10-07"
+
+[[function]]
 name = "sceKernelAprSubmitCommandBufferAndGetResult"
 arity = 6
 purpose = "Submits a command buffer of asynchronous file operations and reports the result."
