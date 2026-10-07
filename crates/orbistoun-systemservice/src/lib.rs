@@ -661,6 +661,7 @@ mod tests {
             .chain(super::lnc_util::MODULE.imports.iter())
             .chain(super::error_dialog::MODULE.imports.iter())
             .chain(super::save_data::MODULE.imports.iter())
+            .chain(super::json2::MODULE.imports.iter())
             .map(|i| i.name)
             .collect();
         for (name, _) in implementations() {
