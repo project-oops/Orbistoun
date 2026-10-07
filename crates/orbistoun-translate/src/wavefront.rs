@@ -1412,6 +1412,9 @@ impl Wavefront<'_> {
                 sampler_offset: bound
                     .sampler
                     .and_then(|sampler| self.sampler_offset(sampler, bound.source.table)),
+                sampler_user_data: bound
+                    .sampler
+                    .and_then(|sampler| self.resident_sampler(sampler)),
                 saturated: bound.texture.saturate,
                 ..bound.source
             })
@@ -1484,6 +1487,7 @@ impl Wavefront<'_> {
             sampler_offset: None,
             saturated: [false; 2],
             user_data,
+            sampler_user_data: None,
         })
     }
 
@@ -1492,23 +1496,48 @@ impl Wavefront<'_> {
     /// dispatch has no table at fixed user-data words to fall back on, so anything else is
     /// refused. `None` at any other stage, and for a descriptor a table load put there.
     fn resident_descriptor(&self, descriptor: u32) -> Result<Option<u32>, &'static str> {
-        if self.stage != Stage::Compute || self.descriptor_loads.0.contains_key(&descriptor) {
+        let resident_stage = matches!(self.stage, Stage::Compute | Stage::Fragment);
+        if !resident_stage || self.descriptor_loads.0.contains_key(&descriptor) {
             return Ok(None);
         }
-        let (first, count) = self.images.user_data_registers;
-        let span = model::IMAGE_DESCRIPTOR_REGISTERS;
-        let seeded = descriptor >= first && descriptor + span <= first + count;
-        let untouched = (descriptor..descriptor + span).all(|register| {
-            register >= u128::BITS || self.images.written_scalars >> register & 1 == 0
-        });
-        if seeded && untouched {
-            Ok(Some(descriptor - first))
+        let seeded = self.still_seeded(descriptor, model::IMAGE_DESCRIPTOR_REGISTERS);
+        if let Some(word) = seeded {
+            Ok(Some(word))
+        } else if self.stage == Stage::Fragment {
+            // A pixel shader's descriptor from neither is read where a pipeline finds an untraced
+            // one: offset zero of the table its first two user-data words name.
+            Ok(None)
         } else {
             Err(concat!(
                 "a compute program reads an image descriptor that is neither loaded from a table ",
                 "nor still in the user data it was seeded with, so which image it names is not traced"
             ))
         }
+    }
+}
+
+impl Wavefront<'_> {
+    /// The user-data word `span` registers from `first` start at, where the user data seeded them
+    /// and the program has written none of them.
+    fn still_seeded(&self, first: u32, span: u32) -> Option<u32> {
+        let (seeded_from, count) = self.images.user_data_registers;
+        let seeded = first >= seeded_from && first + span <= seeded_from + count;
+        let untouched = (first..first + span).all(|register| {
+            register >= u128::BITS || self.images.written_scalars >> register & 1 == 0
+        });
+        (seeded && untouched).then(|| first - seeded_from)
+    }
+
+    /// Where a sampler descriptor starting at scalar register `sampler` lies in the user data, for
+    /// a stage that reads descriptors there, as [`Self::resident_descriptor`] finds an image's:
+    /// never loaded, never written, within the words the user data seeded.
+    fn resident_sampler(&self, sampler: u32) -> Option<u32> {
+        if !matches!(self.stage, Stage::Compute | Stage::Fragment)
+            || self.descriptor_loads.1.contains_key(&sampler)
+        {
+            return None;
+        }
+        self.still_seeded(sampler, 4)
     }
 }
 
@@ -3536,6 +3565,11 @@ pub struct TextureSource {
     /// dispatch's descriptors arrive this way. `None` for a descriptor from a table.
     #[serde(default)]
     pub user_data: Option<u32>,
+    /// The stage's user-data word the sampler descriptor's four registers start at, when the
+    /// program samples through them where the user data put them, never having loaded or written
+    /// them. `None` for a sampler from a table, from anywhere else, or for a fetch.
+    #[serde(default)]
+    pub sampler_user_data: Option<u32>,
     /// The coordinates, across then down, the module's samples of this texture saturate (D743): a
     /// sampler clamping to half a border is honoured only by a module translated to.
     #[serde(default)]

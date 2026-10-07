@@ -601,6 +601,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 table: TableBase::default(),
                 sampler_offset: None,
                 user_data: None,
+                sampler_user_data: None,
                 saturated: [false; 2],
             },
             TextureSource {
@@ -609,6 +610,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 table: TableBase::default(),
                 sampler_offset: None,
                 user_data: None,
+                sampler_user_data: None,
                 saturated: [false; 2],
             },
         ]
@@ -794,6 +796,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             table: TableBase::default(),
             sampler_offset: Some(0x20),
             user_data: None,
+            sampler_user_data: None,
             saturated: [false; 2],
         }]
     );

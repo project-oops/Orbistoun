@@ -3383,6 +3383,7 @@ fn bind_textures(
                     table: TableBase::default(),
                     sampler_offset: None,
                     user_data: None,
+                    sampler_user_data: None,
                     saturated: [false; 2],
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
@@ -3391,10 +3392,20 @@ fn bind_textures(
                     slots
                 };
                 for source in slots {
+                    let user = words.as_ref().map_or(&[][..], |w| &w[..]);
+                    // A descriptor still in the user data the stage was seeded with is read from
+                    // those words, with a sampler beside it there.
+                    if let Some(first) = source.user_data {
+                        let bound = user_data_texture(source, first, user, memory, texels);
+                        if bound.is_none() {
+                            *unbound += 1;
+                        }
+                        out.extend(bound);
+                        continue;
+                    }
                     // The table where the program formed its address: user-data words or
                     // constants.
-                    let table =
-                        table_address(source.table, words.as_ref().map_or(&[][..], |w| &w[..]));
+                    let table = table_address(source.table, user);
                     let at = table + u64::from(source.table_offset.unwrap_or(0));
                     // Read once per descriptor per submission: guest memory does not change while a
                     // submission is prepared, and a frame binds the same few textures many times.
@@ -3441,6 +3452,41 @@ fn bind_textures(
     *commands = out;
 }
 
+/// The texture a descriptor in the user data names, from word `first`, sampled as the sampler beside
+/// it there says when the module samples through one: the texture a pixel shader that never loads
+/// its descriptor reads. `None` where the words are not all there, or where the image or the sampler
+/// cannot be read exactly.
+fn user_data_texture(
+    source: &TextureSource,
+    first: u32,
+    user: &[u32],
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    let words_from = |start: u32, count: usize| {
+        let start = usize::try_from(start).ok()?;
+        user.get(start..start.checked_add(count)?)
+    };
+    let descriptor: [u32; 8] = words_from(first, 8)?.try_into().ok()?;
+    if descriptor.iter().all(|&word| word == 0) {
+        return Some(null_texture(source.slot));
+    }
+    let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
+    if let Some(sampler) = source.sampler_user_data {
+        let words: [u32; 4] = words_from(sampler, 4)?.try_into().ok()?;
+        let decoded = crate::registers::decode_sampler_descriptor(words).ok()?;
+        // A half-border clamp is honoured only by a module that saturates the coordinates it names
+        // (D743).
+        if decoded.saturated() != source.saturated {
+            return None;
+        }
+        if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
+            *sampling = decoded;
+        }
+    }
+    Some(bound)
+}
+
 /// Whether the image descriptor at `at` is all zero: a texture unit nothing bound, as RADV writes a
 /// null descriptor (`radv_write_image_descriptor`, `memset(dst, 0, size)`).
 fn is_null_descriptor(at: u64, memory: &impl GuestMemory) -> bool {
@@ -3482,6 +3528,16 @@ fn read_texture(
     for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
         *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
+    texture_from_words(words, slot, memory, texels)
+}
+
+/// [`read_texture`] for a descriptor's eight words already in hand.
+fn texture_from_words(
+    words: [u32; 8],
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
     let descriptor = decode_image_descriptor(words);
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     match (descriptor.tiling, format) {
@@ -4528,6 +4584,7 @@ mod tests {
                 table: TableBase::default(),
                 sampler_offset: Some(0x60),
                 user_data: None,
+                sampler_user_data: None,
                 saturated: [false; 2],
             }],
         )]);
@@ -4615,6 +4672,7 @@ mod tests {
                     table: TableBase::default(),
                     sampler_offset: Some(0x20),
                     user_data: None,
+                    sampler_user_data: None,
                     saturated,
                 }],
             )]);
@@ -4652,6 +4710,87 @@ mod tests {
             (0, Some([TextureWrap::ClampHalfBorder; 2])),
             "saturated: bound as the sampler says"
         );
+    }
+
+    /// A pixel shader that samples through a descriptor and sampler still in its user data binds the
+    /// image those words name, sampled as the sampler words say: no table is read. Traced as a table
+    /// at the first two words, the same draw would read the descriptor's own words as an address.
+    #[test]
+    fn a_descriptor_in_the_user_data_binds_its_image() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        use crate::registers::TextureWrap;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (texels, width, height) = (0x1_0000_u64, 8u32, 4u32);
+        let memory = Memory(vec![0x7f; 0x1_0000]);
+        let image = [
+            (texels >> 8) as u32,
+            (1 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            (9 << 28) | (27 << 20) | 4 | 1 << 9,
+        ];
+        // `GL_CLAMP` across and down, both filters linear.
+        let sampler = [4 | 4 << 3, 0, 1 << 20 | 1 << 22];
+        let mut words = [0u32; super::USER_DATA_WORDS];
+        words[..4].copy_from_slice(&image);
+        words[8..11].copy_from_slice(&sampler);
+        let shader = ResourceId(7);
+        let bind = |user_data: Option<u32>| {
+            let sources = std::collections::BTreeMap::from([(
+                shader,
+                vec![TextureSource {
+                    slot: 0,
+                    table_offset: None,
+                    table: TableBase::default(),
+                    sampler_offset: None,
+                    user_data,
+                    sampler_user_data: user_data.map(|_| 8),
+                    saturated: [true; 2],
+                }],
+            )]);
+            let mut commands = vec![
+                RenderCommand::SetUserData {
+                    stage: ShaderStage::Fragment,
+                    words,
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader,
+                },
+                RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                },
+            ];
+            let mut unbound = 0;
+            bind_textures(
+                &mut commands,
+                (&sources, &mut super::TexelCache::new()),
+                &memory,
+                &mut unbound,
+            );
+            let bound = commands.iter().find_map(|command| match command {
+                RenderCommand::BindTexture {
+                    width,
+                    height,
+                    sampling,
+                    ..
+                } => Some((*width, *height, sampling.wrap)),
+                _ => None,
+            });
+            (unbound, bound)
+        };
+        assert_eq!(
+            bind(Some(0)),
+            (0, Some((width, height, [TextureWrap::ClampHalfBorder; 2])))
+        );
+        assert_eq!(bind(None), (1, None), "the words read as a table address");
     }
 
     /// A draw whose pixel shader no earlier draw prepared still has its half-border samplers read

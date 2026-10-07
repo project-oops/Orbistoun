@@ -1212,6 +1212,42 @@ mod tests {
         );
     }
 
+    /// A pixel shader that samples through a descriptor and a sampler still in the registers its
+    /// user data seeded - never loaded from a table, never written - names both by their user-data
+    /// words, as PPSA28061's does: the image in `s[0:7]` and the sampler in `s[8:11]`.
+    #[test]
+    fn a_pixel_shader_samples_through_its_user_data() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        // image_sample v[0:3], v[0:1], s[0:7], s[8:11] dmask:0xf dim:SQ_RSRC_IMG_2D; s_endpgm
+        let words = [0xf080_0f08, 0x0040_0000, 0xbf81_0000];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 12,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let sampled = translated.textures.first().copied().expect("a texture");
+        assert_eq!(
+            (
+                sampled.user_data,
+                sampled.sampler_user_data,
+                sampled.table_offset
+            ),
+            (Some(0), Some(8), None)
+        );
+    }
+
     /// An image load with sixteen-bit address and data (`a16 d16`, ACO's image copy) translates, an
     /// odd number of sixteen-bit components too; one returning a status word (`tfe`), whose
     /// registers are not modelled, is refused rather than read some other way.
