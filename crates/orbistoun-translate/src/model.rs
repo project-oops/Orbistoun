@@ -92,6 +92,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmpx_eq_i32_e32",
     "v_cmpx_gt_i32_e32",
     "v_cmpx_gt_u32_e32",
+    "v_nop",
+    "v_cvt_pkrtz_f16_f32_e64",
     "s_bfm_b32",
     "s_bfm_b64",
     "s_buffer_load_dword",
@@ -1382,6 +1384,83 @@ pub trait Model {
         self.select(is_negative, zero, non_negative)
     }
 
+    /// Narrows a register's float to a half rounding toward zero, as `v_cvt_pkrtz_f16_f32` does, and
+    /// returns the half's sixteen bits zero-extended. Done in integers, because `OpFConvert`
+    /// rounds to nearest: the mantissa is truncated; a finite value past the largest half packs
+    /// to the largest finite (`0x7bff`), as rounding toward zero gives, infinity to infinity, and a
+    /// NaN to a quiet NaN keeping its top mantissa bits; a value below the smallest normal half
+    /// becomes the subnormal it truncates to, and below the smallest subnormal a signed zero. A
+    /// single-precision subnormal is below every half, so it packs to zero too.
+    fn float_bits_to_half_toward_zero(&mut self, bits: Id) -> Id {
+        let sign = {
+            let shift = self.constant(16);
+            let shifted = self.binary(op::SHIFT_RIGHT_LOGICAL, bits, shift);
+            let mask = self.constant(0x8000);
+            self.binary(op::BITWISE_AND, shifted, mask)
+        };
+        let exponent = {
+            let shift = self.constant(23);
+            let shifted = self.binary(op::SHIFT_RIGHT_LOGICAL, bits, shift);
+            let mask = self.constant(0xFF);
+            self.binary(op::BITWISE_AND, shifted, mask)
+        };
+        let mantissa = {
+            let mask = self.constant(0x7F_FFFF);
+            self.binary(op::BITWISE_AND, bits, mask)
+        };
+        let thirteen = self.constant(13);
+        let top_mantissa = self.binary(op::SHIFT_RIGHT_LOGICAL, mantissa, thirteen);
+
+        // Normal halves: single exponents 113..=142 rebias by 112 into 1..=30.
+        let normal = {
+            let rebias = self.constant(112);
+            let half_exponent = self.binary(op::ISUB, exponent, rebias);
+            let ten = self.constant(10);
+            let field = self.binary(op::SHIFT_LEFT_LOGICAL, half_exponent, ten);
+            self.binary(op::BITWISE_OR, field, top_mantissa)
+        };
+        // Subnormal halves: single exponents 103..=112, the significand with its leading one
+        // shifted right by 126 - exponent (14..=23), the exponent clamped so the shift stays in
+        // range where the result is discarded.
+        let subnormal = {
+            let leading = self.constant(0x80_0000);
+            let significand = self.binary(op::BITWISE_OR, mantissa, leading);
+            let base = self.constant(126);
+            let lowest = self.constant(103);
+            let highest = self.constant(112);
+            let below = self.compare(op::ULESS_THAN, exponent, lowest);
+            let clamped = self.select(below, lowest, exponent);
+            let above = self.compare(op::UGREATER_THAN, clamped, highest);
+            let clamped = self.select(above, highest, clamped);
+            let shift = self.binary(op::ISUB, base, clamped);
+            self.binary(op::SHIFT_RIGHT_LOGICAL, significand, shift)
+        };
+        let zero = self.constant(0);
+        let largest_finite = self.constant(0x7BFF);
+        let infinity = self.constant(0x7C00);
+        let nan = {
+            let quiet = self.constant(0x7E00);
+            self.binary(op::BITWISE_OR, quiet, top_mantissa)
+        };
+
+        let all_ones = self.constant(0xFF);
+        let is_special = self.compare(op::IEQUAL, exponent, all_ones);
+        let has_payload = self.is_not_zero(mantissa);
+        let special = self.select(has_payload, nan, infinity);
+        let over_edge = self.constant(142);
+        let is_over = self.compare(op::UGREATER_THAN, exponent, over_edge);
+        let normal_edge = self.constant(113);
+        let is_below_normal = self.compare(op::ULESS_THAN, exponent, normal_edge);
+        let subnormal_edge = self.constant(103);
+        let is_below_subnormal = self.compare(op::ULESS_THAN, exponent, subnormal_edge);
+
+        let magnitude = self.select(is_below_normal, subnormal, normal);
+        let magnitude = self.select(is_below_subnormal, zero, magnitude);
+        let magnitude = self.select(is_over, largest_finite, magnitude);
+        let magnitude = self.select(is_special, special, magnitude);
+        self.binary(op::BITWISE_OR, sign, magnitude)
+    }
+
     /// `condition ? when_true : when_false`, on `u32` values.
     fn select(&mut self, condition: Id, when_true: Id, when_false: Id) -> Id {
         let u32_type = self.u32_type();
@@ -2060,8 +2139,8 @@ pub fn instruction<M: Model + ?Sized>(
         // - `s_barrier` waits for the workgroup's other waves. Every module here is one invocation
         //   standing in for one wave, and a workgroup of more than one wave is refused where its
         //   entry state is built, so there is never another wave to wait for.
-        "s_endpgm" | "s_waitcnt" | "s_clause" | "s_nop" | "s_inst_prefetch" | "s_setprio"
-        | "s_waitcnt_vscnt" | "s_waitcnt_depctr" | "s_barrier" => Ok(()),
+        "s_endpgm" | "s_waitcnt" | "s_clause" | "s_nop" | "v_nop" | "s_inst_prefetch"
+        | "s_setprio" | "s_waitcnt_vscnt" | "s_waitcnt_depctr" | "s_barrier" => Ok(()),
 
         // The export, which is why a fragment stage exists at all (D553).
         "exp" => export(model, instruction),
@@ -2291,7 +2370,9 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // Two floats packed into one register as halves, which is how a pixel shader prepares a
         // compressed export for an 8_8_8_8 target.
-        "v_cvt_pkrtz_f16_f32_e32" => pack_halves(model, instruction),
+        "v_cvt_pkrtz_f16_f32_e32" | "v_cvt_pkrtz_f16_f32_e64" => {
+            pack_halves(model, instruction, name)
+        }
 
         // Unary vector float ALU and transcendentals: square root, reciprocal square root, sin,
         // cos, base-2 exp and base-2 log.
@@ -2587,16 +2668,22 @@ fn float_min_max<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `v_cvt_pkrtz_f16_f32`: two floats, each narrowed to a half, packed low then high.
+/// `v_cvt_pkrtz_f16_f32`: two floats, each narrowed to a half rounding toward zero, packed low then
+/// high (AMD's published RDNA instruction set).
 ///
 /// The first source lands in bits 0-15 and the second in bits 16-31, the order Mesa's ACO packs
 /// `(r, g)` and `(b, a)` for an FP16 colour export (`aco_select_ps_epilog.cpp:170-178`). The
-/// instruction rounds toward zero; `OpFConvert` rounds as the device chooses, typically to nearest
-/// even. They differ by at most one unit in the last place of a half, so this is not claimed exact.
+/// narrowing is done in integers ([`Model::float_bits_to_half_toward_zero`]), since `OpFConvert`
+/// rounds to nearest. The long form reaches [`pack_two_halves`] through
+/// [`long_form_arithmetic`], its modifiers applied first.
 fn pack_halves<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    name: &str,
 ) -> Result<(), TranslateError> {
+    if name.ends_with("_e64") {
+        return long_form_arithmetic(model, instruction, name);
+    }
     let (destination, first, second) = three_operands(instruction)?;
     let Operand::Vector(register) = destination else {
         return Err(TranslateError::Unsupported {
@@ -2608,15 +2695,20 @@ fn pack_halves<M: Model + ?Sized>(
     for lane in running_lanes(model) {
         let low = model.read_source(instruction, first, lane)?;
         let high = model.read_source(instruction, second, lane)?;
-        let low = model.float_bits_to_half(low);
-        let high = model.float_bits_to_half(high);
-        let sixteen = model.constant(16);
-        let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
-        let packed = model.binary(op::BITWISE_OR, low, high);
+        let packed = pack_two_halves(model, low, high);
         model.write_vector_lane(register, lane, packed);
     }
     model.count();
     Ok(())
+}
+
+/// Two floats' bits as halves rounded toward zero, the first in bits 15:0.
+fn pack_two_halves<M: Model + ?Sized>(model: &mut M, low: Id, high: Id) -> Id {
+    let low = model.float_bits_to_half_toward_zero(low);
+    let high = model.float_bits_to_half_toward_zero(high);
+    let sixteen = model.constant(16);
+    let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
+    model.binary(op::BITWISE_OR, low, high)
 }
 
 /// GLSL.std.450 instruction number for `Sin`.
@@ -3556,6 +3648,7 @@ fn combine<M: Model + ?Sized>(
     sources: &[Id],
 ) -> Result<Id, TranslateError> {
     match (name, sources) {
+        ("v_cvt_pkrtz_f16_f32_e64", [low, high]) => Ok(pack_two_halves(model, *low, *high)),
         (
             "v_add_f32_e64" | "v_sub_f32_e64" | REVERSE_SUBTRACT | "v_mul_f32_e64",
             [first, second],

@@ -6540,3 +6540,45 @@ fn a_compact_move_sets_m0() {
     let registers = run(&program);
     assert_eq!(scalar(&registers, 2), 0x1001);
 }
+
+/// `v_cvt_pkrtz_f16_f32`: the first source as a half in bits 15:0 and the second in 31:16, each
+/// rounded toward zero (AMD's published RDNA instruction set), as PPSA03416's pixel shader packs
+/// its colour; and `v_nop` changes nothing (its vertex shader opens with one). Round toward zero
+/// is what tells it from `OpFConvert`'s nearest: `65520` packs to the largest finite half
+/// `0x7bff`, not infinity, and `1.00146484375` to `0x3c01`, not `0x3c02`. A subnormal half and a
+/// negative zero keep their bits, and the long form's absolute flag applies before packing.
+#[test]
+fn pack_round_toward_zero_packs_two_halves_truncated() {
+    if !device_or_skip("pack_round_toward_zero_packs_two_halves_truncated") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.push(0x7e00_0000); // v_nop
+    program.extend(v_mov_literal(1, 1.0f32.to_bits()));
+    program.extend(v_mov_literal(2, (-2.5f32).to_bits()));
+    program.push(v_op2("v_cvt_pkrtz_f16_f32_e32", 3, vgpr_code(1), 2));
+    program.extend(v_mov_literal(4, 65520.0f32.to_bits()));
+    program.extend(v_mov_literal(5, (-1.001_464_8_f32).to_bits()));
+    program.extend(vop3(
+        "v_cvt_pkrtz_f16_f32_e64",
+        6,
+        [vgpr_code(4), vgpr_code(5), 0],
+        0b10,
+        0,
+    ));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 0xc100_3c00, "1.0 and -2.5");
+    assert_eq!(
+        vector(&registers, 6),
+        0x3c01_7bff,
+        "65520 truncates to the largest finite, |-1.00146| to 1 + 2^-10"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 2.0f32.powi(-20).to_bits()));
+    program.extend(v_mov_literal(2, (-0.0f32).to_bits()));
+    program.push(v_op2("v_cvt_pkrtz_f16_f32_e32", 3, vgpr_code(1), 2));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 0x8000_0010, "2^-20 subnormal, -0.0");
+}

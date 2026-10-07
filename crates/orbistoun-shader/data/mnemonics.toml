@@ -544,6 +544,11 @@ name = "v_interp_mov_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 0
+name = "v_nop"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 1
 name = "v_mov_b32_e32"
 
@@ -766,6 +771,11 @@ name = "v_cndmask_b32_e64"
 family = "VOP3"
 opcode = 264
 name = "v_mul_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 303
+name = "v_cvt_pkrtz_f16_f32_e64"
 
 [[mnemonic]]
 family = "VOP3"

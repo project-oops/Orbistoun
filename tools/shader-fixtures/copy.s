@@ -63,6 +63,9 @@ v_cvt_f32_i32_e32 v16, v1
 // The multiply-adds with a constant ACO folds in (`aco_optimizer.cpp`'s madak/madmk): the
 // constant K is a literal word after the instruction.
 v_madak_f32 v17, v1, v2, 0xbdf0555d
+// The AGC titles' vertex and pixel shaders: a no-op, and two floats packed to halves.
+v_nop
+v_cvt_pkrtz_f16_f32_e64 v18, v1, v2
 v_madmk_f32 v18, v1, 0x3e800000, v2
 // An unsigned scalar compare and a compare into the execution mask, as a pixel shader's discard
 // test is written.

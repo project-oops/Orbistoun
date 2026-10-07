@@ -446,3 +446,18 @@ s_andn2_b32 s0, s1, s2
 s_andn2_b32 s105, -1, s104
 s_andn2_b32 s7, s3, 64
 s_andn2_b32 exec_lo, exec_lo, s9
+
+// ---- v_nop: VOP1 opcode 0, no operands (PPSA03416's vertex shader) --------------------------
+v_nop
+
+// ---- v_cvt_pkrtz_f16_f32: two floats to halves, round toward zero, packed (its pixel shader) --
+v_cvt_pkrtz_f16_f32_e64 v0, v1, v2
+v_cvt_pkrtz_f16_f32_e64 v200, s5, v9
+v_cvt_pkrtz_f16_f32_e64 v255, v12, v130
+v_cvt_pkrtz_f16_f32_e64 v9, -1, v77
+v_cvt_pkrtz_f16_f32_e64 v130, v88, s101
+v_cvt_pkrtz_f16_f32_e32 v3, v4, v5
+v_cvt_pkrtz_f16_f32_e32 v200, s5, v9
+v_cvt_pkrtz_f16_f32_e32 v255, -1, v130
+v_cvt_pkrtz_f16_f32_e32 v9, 0.5, v77
+v_cvt_pkrtz_f16_f32_e32 v130, v88, v12
