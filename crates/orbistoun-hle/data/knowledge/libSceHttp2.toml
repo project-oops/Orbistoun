@@ -5,11 +5,13 @@ name = "sceHttp2Init"
 purpose = "Creates an HTTP/2 library context over a network pool and an SSL context."
 returns = "handle"
 edge_cases = [
-    "ASSUMED by D151: a positive context id from one, each call its own. PPSA28061 calls it after sceNetPoolCreate and sceSslInit with the pool id first, and aborts on anything negative (\"[LEADERBOARD SYSTEM] sceHttp2Init failed\").",
-    "The pools are the platform's memory accounting and nothing here draws on them. REQ-20261007T0915Z-ht01 asks what hardware answers.",
+    "MEASURED: sceHttp2Init(0xbb9, 2, 0x40000, 1) with the pool and SSL ids just created answers 0x30000001, a second call 0x30000002 - contexts number upward from 0x30000001.",
+    "MEASURED: a pool id of 0 is accepted (0x30000003, the library's own pool); an SSL id of 0 is refused with 0x8095f006.",
+    "PPSA28061 calls it after sceNetPoolCreate and sceSslInit and aborts on anything negative (\"[LEADERBOARD SYSTEM] sceHttp2Init failed\").",
 ]
 found_by = "generated"
-known_by = "assumed"
+known_by = "measured"
+cites = "obSCEne REQ-20261007T0915Z-ht01, reports/hardware/20261007-102530-eboot.obs.log lines 4410-4423 (130-layout/http2-init)"
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
 
@@ -18,9 +20,10 @@ name = "sceHttp2Term"
 purpose = "Retires an HTTP/2 library context."
 returns = "status"
 edge_cases = [
-    "ASSUMED: 0 for an issued context, which is then retired; one not issued or already retired answers orbistoun's placeholder, the library's code being unmeasured.",
+    "MEASURED: 0x0 for a live context, and 0x817b1100 for the same context terminated a second time. A context never issued answers 0x817b1100 here too, the nearest measured case.",
 ]
 found_by = "generated"
-known_by = "assumed"
+known_by = "measured"
+cites = "obSCEne REQ-20261007T0915Z-ht01, reports/hardware/20261007-102530-eboot.obs.log lines 4410-4423 (130-layout/http2-init, arm4-term)"
 found_in = []
 found_on = "2026-10-07"

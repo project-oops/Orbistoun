@@ -1,9 +1,9 @@
 //! `libSceHttp2` - the second-generation HTTP client.
 //!
 //! The names come from real import tables (D504); every arity is `6`, the trampoline's full
-//! capture, not a claim about the argument count. The library context is implemented by D151 - a
-//! handle the guest only compares and passes back is a small integer from one - and is assumed,
-//! not measured (REQ-ht01 asks). The transfers are not implemented.
+//! capture, not a claim about the argument count. The library context is implemented as obSCEne
+//! measured it (REQ-ht01, `reports/hardware/20261007-102530-eboot.obs.log` 4410-4423). The
+//! transfers are not implemented.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
@@ -44,25 +44,34 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[("sceHttp2Init", init), ("sceHttp2Term", term)]
 }
 
-/// The contexts issued and not yet retired.
-static CONTEXTS: Contexts = Contexts::new();
+/// The contexts issued and not yet retired, numbered from `0x30000001` (`arm2-init`).
+static CONTEXTS: Contexts = Contexts::from(0x3000_0001);
 
-/// `sceHttp2Init(netPoolId, sslCtxId, poolSize, maxConcurrentRequests)`: a library context, a
-/// positive id from one (D151). PPSA28061 passes the pool and SSL ids it was just given and treats
-/// anything negative as failure. The pools are the platform's memory accounting; nothing here
-/// draws on them.
-fn init(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// An SSL context id of 0 (`arm3-zero-ids`, `rc-ssl0`).
+const INVALID_SSL_CONTEXT: u64 = 0x8095_f006;
+
+/// `sceHttp2Term` on a context already retired (`arm4-term`, `rc-second`).
+const ALREADY_TERMINATED: u64 = 0x817b_1100;
+
+/// `sceHttp2Init(netPoolId, sslCtxId, poolSize, maxConcurrentRequests)`: a library context, the
+/// next from `0x30000001`. A pool id of 0 is accepted - the library's own pool - and an SSL id of
+/// 0 refused (REQ-ht01, `130-layout/http2-init`). The pools are the platform's memory accounting;
+/// nothing here draws on them.
+fn init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[1] == 0 {
+        return INVALID_SSL_CONTEXT;
+    }
     CONTEXTS
         .issue()
         .map_or(u64::from(GuestError::HostFailed.as_raw()), u64::from)
 }
 
-/// `sceHttp2Term(context)`: retires a context and answers 0. One not issued, or already retired,
-/// answers the placeholder: the library's code for it is unmeasured.
+/// `sceHttp2Term(context)`: retires a context and answers 0; one already retired answers
+/// `0x817b1100`, as measured. One never issued answers the same, the nearest measured case.
 fn term(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if CONTEXTS.retire(args[0]) {
         0
     } else {
-        u64::from(GuestError::Unimplemented.as_raw())
+        ALREADY_TERMINATED
     }
 }

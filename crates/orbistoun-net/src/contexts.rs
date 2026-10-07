@@ -1,5 +1,5 @@
-//! Library contexts the guest only compares and passes back (D151): small integers from one, each
-//! retired once.
+//! Library contexts the guest only compares and passes back (D151): integers from a base - one,
+//! unless a measured library numbers its own from elsewhere - each retired once.
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -11,12 +11,17 @@ pub(crate) struct Contexts {
 
 impl Contexts {
     pub(crate) const fn new() -> Self {
+        Self::from(1)
+    }
+
+    /// Ids numbered from `first`.
+    pub(crate) const fn from(first: u32) -> Self {
         Self {
-            state: Mutex::new((1, BTreeSet::new())),
+            state: Mutex::new((first, BTreeSet::new())),
         }
     }
 
-    /// A fresh id, from one; `None` only if the table is poisoned.
+    /// A fresh id, the next from the base; `None` only if the table is poisoned.
     pub(crate) fn issue(&self) -> Option<u32> {
         let mut state = self.state.lock().ok()?;
         let id = state.0;
