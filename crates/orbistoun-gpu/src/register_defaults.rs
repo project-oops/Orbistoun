@@ -19,8 +19,6 @@ use serde::Deserialize;
 const DESCRIPTOR_BYTES: usize = 0x40;
 /// Bytes of a record.
 const RECORD_BYTES: usize = 12;
-/// Bytes obSCEne read at each entry, and so the most a title's read of one is known to cover.
-const ENTRY_BYTES: usize = 16;
 
 #[derive(Deserialize)]
 struct File {
@@ -36,7 +34,8 @@ struct Measured {
     tables: [u64; 4],
     /// Each table's entry count.
     lengths: [u32; 4],
-    /// `[id, loc, third, entry, the 16 bytes at entry]`.
+    /// `[id, loc, third, entry, the bytes at entry]`: the whole entry, to the next entry's address
+    /// (capped at 0x400), where REQ-rd01 measured it, else the 16 bytes REQ-4e9b read.
     records: Vec<(u32, u32, u32, u64, String)>,
 }
 
@@ -77,9 +76,15 @@ fn build(measured: &Measured) -> Option<Built> {
         }
     }
     let low = measured.records.iter().map(|r| r.3).min()?;
-    let high = measured.records.iter().map(|r| r.3).max()?;
     let values_at = end;
-    let span = usize::try_from(high - low).ok()? + ENTRY_BYTES;
+    // Each entry's bytes run as far as it was measured, so the span ends at the furthest of them.
+    let span = measured
+        .records
+        .iter()
+        .map(|r| Some(usize::try_from(r.3 - low).ok()? + r.4.len() / 2))
+        .collect::<Option<Vec<usize>>>()?
+        .into_iter()
+        .max()?;
     end = (values_at + span).next_multiple_of(8);
 
     let mut memory = vec![0_u64; end / 8].into_boxed_slice();
@@ -172,8 +177,35 @@ pub fn descriptor(function: &str, version: u32) -> Option<u64> {
 mod tests {
     use super::{build, measured};
 
+    /// The colour-target entry is whole (REQ-rd01, `reports/hardware/20261007-102530-eboot.obs.log`
+    /// 4793-7912): record `0x38e92c91` holds 0x400 bytes, colour targets 0 to 7 as
+    /// `{offset, value}` pairs, `CB_COLOR0_INFO` (`0x31c`) the third. With only its first 16 bytes,
+    /// PPSA03416's and PPSA02664's colour-target registers after `CB_COLOR0_VIEW` landed on
+    /// context offset 0.
+    #[test]
+    fn the_colour_target_entry_is_whole() {
+        let m = measured()
+            .iter()
+            .find(|m| m.function == "sceAgcGetRegisterDefaults2" && m.version == 0xd)
+            .expect("version 0xd");
+        let (.., value) = m
+            .records
+            .iter()
+            .find(|r| r.0 == 0x38e9_2c91)
+            .expect("the colour-target record");
+        let bytes = super::hex(value).expect("hex");
+        assert_eq!(bytes.len(), 0x400, "the whole entry");
+        assert_eq!(
+            bytes[16..20],
+            0x31c_u32.to_le_bytes(),
+            "CB_COLOR0_INFO third"
+        );
+        let built = build(m).expect("builds");
+        assert_ne!(built.address(), 0);
+    }
+
     /// Every measured descriptor builds: no record names a null table or a slot past its table's
-    /// length, and wherever two entries' 16-byte dumps overlap they agree byte for byte.
+    /// length, and wherever two entries' dumps overlap they agree byte for byte.
     #[test]
     fn every_measurement_is_self_consistent() {
         assert_eq!(measured().len(), 6, "three versions of each function");
