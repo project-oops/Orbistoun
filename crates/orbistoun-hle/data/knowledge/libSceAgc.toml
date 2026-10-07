@@ -320,7 +320,11 @@ found_on = "2026-09-14"
 
 [[function]]
 name = "sceAgcDcbDrawIndexOffset"
-edge_cases = ["SIZE ONLY: the builder ran, its GetSize answered 0x14 bytes (5 dwords), and it advanced and wrote exactly that. No packet header or body was reported, so nothing here says what it emits - only how much. Not implementable on a length."]
+edge_cases = [
+    "SIZE MEASURED: the builder ran, its GetSize answered 0x14 bytes (5 dwords), and it advanced and wrote exactly that; no header or body was reported.",
+    "Five dwords is Mesa's DRAW_INDEX_OFFSET_2 (sid.h 0x35, body [max_size, index_offset, index_count, initiator]), an indexed draw from the buffer INDEX_BASE bound. Implemented as that, called (dcb, index_offset, index_count, modifier): the count as max_size and the modifier as the initiator word, as sceAgcDcbDrawIndex was measured to place them. The body is ASSUMED; REQ-cn01 asks for it.",
+    "PPSA28061 draws this way every frame, (dcb, 0, 6, 0x40000000); unimplemented, its frames had no draws.",
+]
 known_by = "measured"
 cites = "obSCEne sweep 20260914-222710, eboot leg, check 166-agc/*-getsize."
 found_on = "2026-09-14"

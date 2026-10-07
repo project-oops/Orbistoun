@@ -573,6 +573,14 @@ const NUM_INSTANCES: u8 = 0x2F;
 /// Opcode of the indexed draw, whose body carries its own index count and buffer address.
 const DRAW_INDEX_2: u8 = 0x27;
 
+/// Opcode of the indexed draw from the bound index buffer (Mesa `sid.h` `PKT3_DRAW_INDEX_OFFSET_2`),
+/// body `[max_size, index_offset, index_count, initiator]`.
+const DRAW_INDEX_OFFSET_2: u8 = 0x35;
+
+/// `VGT_INDEX_TYPE`'s user-config offset (`gfx103.json`, `0x3090C`), the index size an offset draw
+/// steps by: `INDEX_TYPE` 0 sixteen bits, 1 thirty-two.
+const VGT_INDEX_TYPE_OFFSET: u32 = 0x243;
+
 /// Every draw a submission asked for, in order.
 ///
 /// The auto-indexed draw's first body word is its vertex count, and the instance-count packet's is
@@ -584,8 +592,11 @@ const DRAW_INDEX_2: u8 = 0x27;
 pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
     let mut draws = Vec::new();
     // State, in the order the stream sets it: a draw takes the instance count most recently written
-    // before it, one when the stream never says.
+    // before it, one when the stream never says; an offset draw takes the bound index buffer and
+    // the index size most recently written.
     let mut instances = 1;
+    let mut index_base: Option<u64> = None;
+    let mut index_bytes: Option<u64> = None;
 
     for packet in &walk.packets {
         let PacketKind::Command { opcode } = packet.kind else {
@@ -600,6 +611,36 @@ pub fn draw_calls(walk: &PacketWalk, body: &[u8]) -> Vec<DrawCall> {
             NUM_INSTANCES => {
                 if let Some(count) = words.first() {
                     instances = count;
+                }
+            }
+            measured::INDEX_BASE => {
+                if let (Some(lo), Some(hi)) = (words.get(0), words.get(1)) {
+                    index_base = Some(u64::from(lo) | (u64::from(hi) << 32));
+                }
+            }
+            measured::SET_UCONFIG_REG | measured::SET_UCONFIG_REG_INDEX => {
+                if let (Some(offset), Some(value)) = (words.get(0), words.get(1))
+                    && offset & 0xffff == VGT_INDEX_TYPE_OFFSET
+                {
+                    index_bytes = match value & 3 {
+                        0 => Some(2),
+                        1 => Some(4),
+                        _ => None,
+                    };
+                }
+            }
+            DRAW_INDEX_OFFSET_2 => {
+                if let (Some(base), Some(bytes), Some(offset), Some(indices)) =
+                    (index_base, index_bytes, words.get(1), words.get(2))
+                {
+                    draws.push(DrawCall {
+                        packet_offset: packet.offset,
+                        instances,
+                        kind: DrawKind::Indexed {
+                            indices,
+                            address: base + u64::from(offset) * bytes,
+                        },
+                    });
                 }
             }
             DRAW_INDEX_AUTO => {
@@ -3303,6 +3344,40 @@ mod tests {
     }
 
     /// An indexed draw is read from its own body, address and count both: the measured
+    /// `DRAW_INDEX_OFFSET_2` (Mesa `sid.h` `0x35`, body `[max_size, index_offset, index_count,
+    /// initiator]`) draws from the index buffer `INDEX_BASE` bound, starting `index_offset` indices
+    /// in - each the size `VGT_INDEX_TYPE` (uconfig `0x243`) gives: 0 two bytes, 1 four. Without a
+    /// bound buffer, or with an index size not modelled, it is not read as a draw.
+    #[test]
+    fn an_offset_draw_reads_from_the_bound_index_buffer() {
+        let bytes = stream(&[
+            command(0x26, 2),
+            0x1000, // INDEX_BASE, low half first
+            0,
+            command(0x7A, 2),
+            0x2000_0243, // SET_UCONFIG_REG_INDEX VGT_INDEX_TYPE
+            0x401,       // thirty-two-bit indices
+            command(0x35, 4),
+            6, // max_size
+            3, // index_offset
+            6, // index_count
+            0, // initiator
+        ]);
+        let draws = draw_calls(&walk(&bytes), &bytes);
+        assert_eq!(
+            draws.iter().map(|d| d.kind).collect::<Vec<_>>(),
+            [DrawKind::Indexed {
+                indices: 6,
+                address: 0x100c,
+            }]
+        );
+        let unbound = stream(&[command(0x35, 4), 6, 3, 6, 0]);
+        assert!(
+            draw_calls(&walk(&unbound), &unbound).is_empty(),
+            "no buffer"
+        );
+    }
+
     /// `DRAW_INDEX_2` body is `[max_size, addr_lo, addr_hi, index_count, initiator]`.
     #[test]
     fn an_indexed_draw_is_decoded_from_its_own_measured_body() {

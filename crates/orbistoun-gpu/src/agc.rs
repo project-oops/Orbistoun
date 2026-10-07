@@ -40,6 +40,7 @@ guest_module! {
         "sceAgcDcbDispatchIndirect" => 6,
         "sceAgcDcbDmaData" => 6,
         "sceAgcDcbDrawIndex" => 6,
+        "sceAgcDcbDrawIndexOffset" => 6,
         "sceAgcDcbDrawIndexAuto" => 6,
         "sceAgcDcbDrawIndexIndirect" => 6,
         "sceAgcDcbDrawIndirect" => 6,
@@ -1061,6 +1062,28 @@ fn dcb_draw_index(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
+/// `sceAgcDcbDrawIndexOffset(dcb, index_offset, index_count, modifier)`: a `DRAW_INDEX_OFFSET_2`
+/// (Mesa `sid.h` `0x35`) from the bound index buffer, body `[max_size, index_offset, index_count,
+/// initiator]`, in the 20 bytes the builder was measured to take (`166-agc/*-getsize`). The index
+/// count goes in `max_size` and the modifier in the initiator word, as `sceAgcDcbDrawIndex` was
+/// measured to place them; the body is assumed.
+fn dcb_draw_index_offset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (offset, count, modifier) = (args[1] as u32, args[2] as u32, args[3] as u32);
+    dcb_append(
+        args[0],
+        &[
+            packet::build::command_header(DRAW_INDEX_OFFSET_2, 4),
+            count,
+            offset,
+            count,
+            modifier,
+        ],
+    )
+}
+
+/// `DRAW_INDEX_OFFSET_2`'s opcode (Mesa `sid.h`).
+const DRAW_INDEX_OFFSET_2: u8 = 0x35;
+
 /// `sceAgcDcbSetIndexSize(dcb, type, flags)`, measured across eight argument pairs; see
 /// [`packet::build::set_index_size`] for the mapping.
 fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -1180,6 +1203,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         cb_set_sh_register_range_direct,
     ),
     ("sceAgcDcbDrawIndex", dcb_draw_index),
+    ("sceAgcDcbDrawIndexOffset", dcb_draw_index_offset),
     ("sceAgcDcbSetIndexSize", dcb_set_index_size),
     ("0x53bbd82b51d172db", agc_init_raw),
     ("sceAgcInit", agc_init),

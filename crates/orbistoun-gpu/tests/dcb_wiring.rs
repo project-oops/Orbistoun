@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        55,
+        56,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -827,4 +827,27 @@ fn set_sh_registers_direct_writes_each_pair_as_a_register_write() {
         "a count of 0: measured"
     );
     assert_eq!(empty.written(), 0, "writes nothing");
+}
+
+/// `sceAgcDcbDrawIndexOffset(dcb, index_offset, index_count, modifier)` writes a
+/// `DRAW_INDEX_OFFSET_2` (Mesa `sid.h` `0x35`, body `[max_size, index_offset, index_count,
+/// initiator]`) in the 20 bytes its builder was measured to take (`166-agc/*-getsize`), with the
+/// index count as `max_size` and the modifier as the initiator word, as `sceAgcDcbDrawIndex`
+/// was measured to place them. PPSA28061 draws this way, `(dcb, 0, 6, 0x40000000)`, every frame.
+/// The body is assumed; REQ-cn01 asks.
+#[test]
+fn draw_index_offset_writes_an_offset_draw_in_its_measured_twenty_bytes() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = 0;
+    args[2] = 6;
+    args[3] = 0x4000_0000;
+    let at = w.cursor();
+    assert_eq!(call("sceAgcDcbDrawIndexOffset", args), at);
+    let expected: Vec<u8> = [0xc003_3500_u32, 6, 0, 6, 0x4000_0000]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    assert_eq!(w.bytes(), &expected[..]);
 }

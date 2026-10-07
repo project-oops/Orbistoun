@@ -213,8 +213,14 @@ fn dispatch_direct(
 /// `DRAW_INDEX_AUTO`, the two the translator turns into draws. An indirect draw reads its arguments
 /// from memory at execution time and is not among them.
 pub(crate) const fn is_draw(opcode: u8) -> bool {
-    matches!(opcode, measured::DRAW_INDEX_2 | measured::DRAW_INDEX_AUTO)
+    matches!(
+        opcode,
+        measured::DRAW_INDEX_2 | measured::DRAW_INDEX_AUTO | DRAW_INDEX_OFFSET_2
+    )
 }
+
+/// `DRAW_INDEX_OFFSET_2` (Mesa `sid.h` `0x35`): an indexed draw from the bound index buffer.
+const DRAW_INDEX_OFFSET_2: u8 = 0x35;
 
 /// Why execution stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1206,6 +1212,16 @@ mod tests {
 
         assert_eq!(done.stopped, Stopped::Completed, "{done:?}");
         assert_eq!(memory.word(0x1000), 0xbeef_cafe);
+    }
+
+    /// The three draw packets are each a draw the command processor hands to the GPU: the indexed
+    /// draw from the bound buffer (`0x35`) as well as the two carrying their own.
+    #[test]
+    fn every_draw_packet_is_a_draw() {
+        for opcode in [0x27, 0x2D, 0x35] {
+            assert!(super::is_draw(opcode), "{opcode:#x}");
+        }
+        assert!(!super::is_draw(0x50), "DMA_DATA is not a draw");
     }
 
     /// A `DMA_DATA` copy whose source address is held (`SAIC`, command bit 28: `no_increment` in
