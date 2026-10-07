@@ -927,6 +927,9 @@ fn colour_target_mip0_extent_at(writes: &[RegisterWrite]) -> Option<ColourTarget
 /// `0x318`. The value is the address in 256-byte units, like [`ImageDescriptor`]'s base, so the
 /// byte address is `value << 8`.
 const CB_COLOR0_BASE: u32 = 0xA318;
+/// `CB_COLOR0_BASE_EXT` (`gfx103.json`, byte `167488`, dword `0xA390`): `BASE_256B` 7:0, address
+/// bits 47:40 above the base's 39:8.
+const CB_COLOR0_BASE_EXT: u32 = 0xA390;
 
 /// Colour buffer zero, as a submission set it up: where it is and how big.
 ///
@@ -1164,8 +1167,11 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         Some(format) if format.format == COLOR_8 => layout.at_bytes_per_texel(1).unwrap_or(layout),
         _ => layout,
     };
+    // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
+    // unwritten extension reads as its reset value, zero.
+    let high = u64::from(last(CB_COLOR0_BASE_EXT).unwrap_or(0) & 0xFF) << 32;
     chain_level(
-        (u64::from(base) << 8, pipe_bank_xor),
+        ((u64::from(base) | high) << 8, pipe_bank_xor),
         (extent.width, extent.height),
         (levels, level),
         layout,
@@ -3558,6 +3564,28 @@ mod tests {
         assert_eq!(
             colour_target_at(&linear).map(|t| (t.base, t.pipe_bank_xor)),
             Some((0x4_0286_c000, 0))
+        );
+    }
+
+    /// `CB_COLOR0_BASE_EXT` (`0xA390`, `BASE_256B` 7:0 in `gfx103.json`) carries address bits
+    /// 47:40 above the base's 39:8: PPSA03416's targets sit in `0x7400_...` memory, which the base
+    /// alone cannot name. Unwritten, it reads as its reset value, zero.
+    #[test]
+    fn a_target_s_base_takes_its_high_bits_from_the_extension() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let target = [
+            write(0xA318, 0x0002_e800),
+            write(0xA390, 0x74),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        assert_eq!(
+            colour_target_at(&target).map(|t| t.base),
+            Some(0x7400_02e8_0000)
         );
     }
 
