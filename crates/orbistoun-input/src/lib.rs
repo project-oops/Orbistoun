@@ -30,6 +30,9 @@ guest_module! {
     "libScePad" {
         // Every name here is imported by a real module; the arities are provisional.
         "scePadInit" => 0,
+        // Known by NID only: answers `0` and writes nothing, whatever it is passed (obSCEne
+        // census, `200-census/libScePad/0xda809fad5f12799f`, sweep 20261007-113500).
+        "n3kSX62fgNo" => 0,
         "scePadOpen" => 4,
         "scePadOpenExt" => 4,
         "scePadClose" => 1,
@@ -197,6 +200,7 @@ fn pad_read(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("scePadInit", pad_init),
+        ("n3kSX62fgNo", pad_census_nid),
         // Both spellings, as for `scePadOpen`.
         ("scePadReadState", pad_read_state),
         ("scePadReadStateExt", pad_read_state),
@@ -214,8 +218,26 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     ]
 }
 
+/// libScePad's NID `0xda809fad5f12799f`, which PPSA28061 calls: answers `0` and writes nothing,
+/// with every argument a buffer and with every argument zero, as obSCEne's census measured it
+/// (`200-census/libScePad/0xda809fad5f12799f`, sweep 20261007-113500).
+fn pad_census_nid(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The NID-only call answers `0` whatever it is passed, as measured.
+    #[test]
+    fn the_census_nid_answers_zero() {
+        let (_, f) = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "n3kSX62fgNo")
+            .expect("implemented");
+        assert_eq!(f(&[0; GUEST_ARG_REGISTERS]), 0);
+        assert_eq!(f(&[0xa1; GUEST_ARG_REGISTERS]), 0);
+    }
 
     /// Recording handles out of order never lowers the mark.
     #[test]

@@ -244,6 +244,7 @@ guest_module! {
         // Two more booleans of the same shape.
         "sceKernelIsNeoMode" => 0,
         "sceKernelIsDevelopmentMode" => 0,
+        "sceKernelGetGPI" => 0,
         "sceKernelIsTestKit" => 0,
         "posix_getpagesize" => 0,
         "posix_usleep" => 1,
@@ -2612,6 +2613,13 @@ fn is_devkit(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceKernelIsNeoMode()`: false, presenting a base unit rather than the more capable hardware.
 fn is_neo_mode(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from(machine().is_faster_revision())
+}
+
+/// `sceKernelGetGPI()`: the general-purpose input word, `0` on the measured retail console (obSCEne
+/// census, `200-census/libkernel/sceKernelGetGPI`, sweep 20261007-113500): every call answered `0`
+/// and wrote nothing, whatever its arguments.
+fn get_gpi(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
 }
 
 /// `sceKernelIsDevelopmentMode()`: false. See [`is_devkit`].
@@ -6192,6 +6200,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelGetModuleInfo", get_module_info),
     ("sceKernelIsDevkit", is_devkit),
     ("sceKernelIsNeoMode", is_neo_mode),
+    ("sceKernelGetGPI", get_gpi),
     ("sceKernelIsDevelopmentMode", is_development_mode),
     ("sceKernelIsTestKit", is_testkit),
     ("posix_getpagesize", getpagesize),

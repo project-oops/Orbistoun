@@ -252,3 +252,18 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12242-12268, check 200-census/libSceSystemService/sceSystemServiceGetStatus."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceSystemServiceGetHdrToneMapLuminance"
+arity = 1
+purpose = "Reads the display's tone-mapping luminances into a twelve-byte record: sceSystemServiceGetHdrToneMapLuminance(record)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261007-113500, check 200-census/libSceSystemService/sceSystemServiceGetHdrToneMapLuminance): 0x0 with twelve bytes written over poison, 6a541f44 58497544 ecddff3d - three floats, about 637.3, 981.1 and 0.125; a null record answers 0x80a10003.",
+    "orbistoun presents that console's display: the same twelve bytes, and the same answer for a null record.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12225-12241, check 200-census/libSceSystemService/sceSystemServiceGetHdrToneMapLuminance."
+found_in = ["PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-07"

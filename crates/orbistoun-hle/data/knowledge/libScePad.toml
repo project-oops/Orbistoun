@@ -276,3 +276,16 @@ assumptions = [
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-10"
+
+[[function]]
+name = "n3kSX62fgNo"
+arity = 0
+purpose = "A pad call known by NID only (0xda809fad5f12799f), which PPSA28061 makes."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261007-113500, check 200-census/libScePad/0xda809fad5f12799f, lines 12306-12316): 0x0 with every argument a poisoned buffer and with every argument zero, and no buffer written. orbistoun answers it so; what the call is for is not established.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12306-12316, check 200-census/libScePad/0xda809fad5f12799f."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-07"

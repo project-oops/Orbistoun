@@ -62,3 +62,28 @@ fn the_system_status_is_136_zero_bytes() {
     assert_eq!(status[..136], [0; 136]);
     assert_eq!(status[136..], [0xa1; 24], "136 bytes and no more");
 }
+
+/// The tone-mapping luminances are the twelve bytes the measured console wrote, and a null record
+/// is answered as it answered one.
+#[test]
+fn the_tone_map_luminances_are_the_measured_ones() {
+    let mut record = [0xa1_u8; 16];
+    assert_eq!(
+        call(
+            "sceSystemServiceGetHdrToneMapLuminance",
+            &[record.as_mut_ptr() as u64]
+        ),
+        0
+    );
+    assert_eq!(
+        record[..12],
+        [
+            0x6a, 0x54, 0x1f, 0x44, 0x58, 0x49, 0x75, 0x44, 0xec, 0xdd, 0xff, 0x3d
+        ]
+    );
+    assert_eq!(record[12..], [0xa1; 4], "twelve bytes and no more");
+    assert_eq!(
+        call("sceSystemServiceGetHdrToneMapLuminance", &[0]),
+        0x80a1_0003
+    );
+}

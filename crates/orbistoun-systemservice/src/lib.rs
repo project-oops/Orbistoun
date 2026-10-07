@@ -28,6 +28,7 @@ guest_module! {
         "sceSystemServiceParamGetInt" => 2,
         "sceSystemServiceHideSplashScreen" => 0,
         "sceSystemServiceGetStatus" => 1,
+        "sceSystemServiceGetHdrToneMapLuminance" => 1,
         // title id, argv, parameter block.
         "sceSystemServiceLaunchApp" => 3,
         // A system-flag setter. The real signature is unmeasured, so the arity is the trampoline's
@@ -415,6 +416,36 @@ fn get_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// The twelve bytes `sceSystemServiceGetHdrToneMapLuminance` wrote on the measured console
+/// (`200-census/libSceSystemService/sceSystemServiceGetHdrToneMapLuminance`, sweep 20261007-113500):
+/// three floats, about 637.3, 981.1 and 0.125 - two peak luminances and a minimum, in nits.
+const HDR_TONE_MAP_LUMINANCE: [u8; 12] = [
+    0x6a, 0x54, 0x1f, 0x44, 0x58, 0x49, 0x75, 0x44, 0xec, 0xdd, 0xff, 0x3d,
+];
+/// What the same call answered for a null record (call-zeros).
+const HDR_TONE_MAP_NO_RECORD: u64 = 0x80a1_0003;
+
+/// `sceSystemServiceGetHdrToneMapLuminance(record)` - the display's tone-mapping luminances.
+/// Answers `0` with the twelve bytes the measured console wrote, and `0x80a10003` for a null
+/// record, as measured. orbistoun presents that console's display.
+fn get_hdr_tone_map_luminance(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Ok(at) = usize::try_from(args[0]) else {
+        return HDR_TONE_MAP_NO_RECORD;
+    };
+    if at == 0 {
+        return HDR_TONE_MAP_NO_RECORD;
+    }
+    // SAFETY: a guest-supplied record in identity-mapped guest memory, written at the twelve
+    // bytes the call was measured writing.
+    unsafe {
+        std::ptr::write_unaligned(
+            std::ptr::with_exposed_provenance_mut::<[u8; 12]>(at),
+            HDR_TONE_MAP_LUMINANCE,
+        );
+    }
+    OK
+}
+
 /// `sceUserServiceGetLoginUserIdList(out)` - which users are signed in.
 ///
 /// The length of the caller's structure is unmeasured. orbistoun signs in exactly one user, so
@@ -561,6 +592,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceUserServiceGetEvent", user_service_get_event),
         ("sceSystemServiceGetStatus", get_status),
+        (
+            "sceSystemServiceGetHdrToneMapLuminance",
+            get_hdr_tone_map_luminance,
+        ),
         ("sceErrorDialogInitialize", error_dialog_initialize),
         ("sceSystemServiceParamGetInt", param_get_int),
         ("sceSystemServiceHideSplashScreen", hide_splash_screen),

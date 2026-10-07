@@ -50,3 +50,11 @@ fn the_plain_signal_wakes_through_a_created_condition_variable() {
     );
     assert_eq!(call("sceUltConditionVariableSignal", [c, 0, 0, 0, 0, 0]), 0);
 }
+
+/// `sceKernelGetGPI` answers the measured console's input word, `0`, whatever it is passed
+/// (`200-census/libkernel/sceKernelGetGPI`, sweep 20261007-113500).
+#[test]
+fn the_general_purpose_input_is_zero() {
+    assert_eq!(call("sceKernelGetGPI", [0; GUEST_ARG_REGISTERS]), 0);
+    assert_eq!(call("sceKernelGetGPI", [0xa1; GUEST_ARG_REGISTERS]), 0);
+}
