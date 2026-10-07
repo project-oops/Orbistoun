@@ -66,6 +66,7 @@ fn backend(depth: Option<ResourceId>) -> VulkanBackend {
             Resource::RenderTarget {
                 width: 16,
                 height: 16,
+                srgb: false,
             },
         )
         .expect("target resident");

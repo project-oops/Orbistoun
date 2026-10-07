@@ -41,15 +41,34 @@ impl Pixels {
 /// and eight bits a channel make the clear values exact: `0.0` is `0` and `1.0` is `255`.
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 
-/// Creates a device-local image usable as a colour attachment and as a copy source.
+/// The format a colour attachment is drawn through: [`FORMAT`], or for an sRGB target its sRGB
+/// twin, which decodes before blending and encodes on write. The image stays [`FORMAT`], so seeding,
+/// clearing and reading back move the encoded bytes untouched; only the view differs. Both are
+/// mandatory colour-attachment formats with blending.
+const fn drawn_format(srgb: bool) -> vk::Format {
+    if srgb {
+        vk::Format::R8G8B8A8_SRGB
+    } else {
+        FORMAT
+    }
+}
+
+/// Creates a device-local image usable as a colour attachment and as a copy source; an `srgb` one
+/// may be viewed as [`drawn_format`]'s sRGB format.
 fn create_attachment(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     device: &ash::Device,
-    width: u32,
-    height: u32,
+    (width, height): (u32, u32),
+    srgb: bool,
 ) -> Result<(vk::Image, vk::DeviceMemory), DispatchError> {
+    let flags = if srgb {
+        vk::ImageCreateFlags::MUTABLE_FORMAT
+    } else {
+        vk::ImageCreateFlags::empty()
+    };
     let info = vk::ImageCreateInfo::default()
+        .flags(flags)
         .image_type(vk::ImageType::TYPE_2D)
         .format(FORMAT)
         .extent(vk::Extent3D {
@@ -120,7 +139,11 @@ pub(crate) fn bind_device_local(
 /// before the store lands. With `loads`, the attachment is copied in first and arrives in
 /// `TRANSFER_DST_OPTIMAL`, which the pass takes as its initial layout and loads rather than clears;
 /// a second external dependency orders that copy before the pass writes.
-fn create_render_pass(device: &ash::Device, loads: bool) -> Result<vk::RenderPass, DispatchError> {
+fn create_render_pass(
+    device: &ash::Device,
+    loads: bool,
+    format: vk::Format,
+) -> Result<vk::RenderPass, DispatchError> {
     let (load_op, initial_layout) = if loads {
         (
             vk::AttachmentLoadOp::LOAD,
@@ -130,7 +153,7 @@ fn create_render_pass(device: &ash::Device, loads: bool) -> Result<vk::RenderPas
         (vk::AttachmentLoadOp::CLEAR, vk::ImageLayout::UNDEFINED)
     };
     let attachments = [vk::AttachmentDescription::default()
-        .format(FORMAT)
+        .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
         .load_op(load_op)
         .store_op(vk::AttachmentStoreOp::STORE)
@@ -180,9 +203,12 @@ fn create_render_pass(device: &ash::Device, loads: bool) -> Result<vk::RenderPas
 /// in `COLOR_ATTACHMENT_OPTIMAL`, so consecutive draws land on each other with no copy between. The
 /// external dependencies order each pass after whatever last wrote the attachment and before the
 /// readback copy.
-fn create_resident_render_pass(device: &ash::Device) -> Result<vk::RenderPass, DispatchError> {
+fn create_resident_render_pass(
+    device: &ash::Device,
+    format: vk::Format,
+) -> Result<vk::RenderPass, DispatchError> {
     let attachments = [vk::AttachmentDescription::default()
-        .format(FORMAT)
+        .format(format)
         .samples(vk::SampleCountFlags::TYPE_1)
         .load_op(vk::AttachmentLoadOp::LOAD)
         .store_op(vk::AttachmentStoreOp::STORE)
@@ -361,6 +387,8 @@ pub(crate) struct ResidentAttachment {
     buffer_memory: vk::DeviceMemory,
     width: u32,
     height: u32,
+    /// Whether it is drawn through an sRGB view ([`drawn_format`]).
+    srgb: bool,
     /// The pass drawing on it with a depth attachment beside it, made for one depth attachment.
     depth_pass: Option<DepthPass>,
 }
@@ -402,7 +430,8 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let device = &session.device;
-        let render_pass = crate::depth::create_render_pass(device, FORMAT, depth.format())?;
+        let render_pass =
+            crate::depth::create_render_pass(device, drawn_format(self.srgb), depth.format())?;
         let views = [self.view, depth.view()];
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
@@ -461,12 +490,12 @@ impl ResidentAttachment {
     }
 
     /// Creates the attachment, holding `initial` (tightly packed `Rgba8`, exactly the extent) or
-    /// cleared to `clear`, and leaves it ready to draw on.
+    /// cleared to `clear`, and leaves it ready to draw on - through an sRGB view when `srgb`.
     pub(crate) fn create(
-        width: u32,
-        height: u32,
+        (width, height): (u32, u32),
         initial: Option<&[u8]>,
         clear: [f32; 4],
+        srgb: bool,
     ) -> Result<Self, DispatchError> {
         let session = crate::compute::session()?;
         let session = session
@@ -475,14 +504,15 @@ impl ResidentAttachment {
         let (instance, physical, device) = (&session.instance, session.physical, &session.device);
         let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
         let initial = initial.filter(|bytes| bytes.len() as u64 == size);
-        let (image, memory) = create_attachment(instance, physical, device, width, height)?;
+        let (image, memory) = create_attachment(instance, physical, device, (width, height), srgb)?;
         let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
         if let Some(bytes) = initial {
             fill_host_memory(device, buffer_memory, bytes)?;
         }
-        let render_pass = create_resident_render_pass(device)?;
+        let format = drawn_format(srgb);
+        let render_pass = create_resident_render_pass(device, format)?;
         let (view, framebuffer) =
-            view_and_framebuffer(device, image, render_pass, (width, height))?;
+            view_and_framebuffer(device, image, render_pass, ((width, height), format))?;
 
         one_shot(&session, |device, command| {
             let top = (
@@ -560,8 +590,14 @@ impl ResidentAttachment {
             buffer_memory,
             width,
             height,
+            srgb,
             depth_pass: None,
         })
+    }
+
+    /// Whether it is drawn through an sRGB view.
+    pub(crate) const fn srgb(&self) -> bool {
+        self.srgb
     }
 
     /// Gives it new contents in place: `pixels` (tightly packed `Rgba8`, exactly the extent) copied
@@ -945,17 +981,17 @@ impl FrameSnapshot {
     }
 }
 
-/// A colour image's view and a framebuffer over it for `render_pass`.
+/// A colour image's view as `format` and a framebuffer over it for `render_pass`.
 fn view_and_framebuffer(
     device: &ash::Device,
     image: vk::Image,
     render_pass: vk::RenderPass,
-    (width, height): (u32, u32),
+    ((width, height), format): ((u32, u32), vk::Format),
 ) -> Result<(vk::ImageView, vk::Framebuffer), DispatchError> {
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
-        .format(FORMAT)
+        .format(format)
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1730,6 +1766,7 @@ pub(crate) fn draw_vertices(
                 buffers: start.buffers,
                 ..NO_DRAW_BUFFERS
             },
+            srgb: start.srgb,
             ..Bound::default()
         },
     )
@@ -1771,6 +1808,8 @@ pub(crate) struct Start<'a> {
     pub(crate) depth_clear: Option<crate::depth::DepthClear>,
     /// The primitive shader's and the pixel shader's buffers (D733).
     pub(crate) buffers: [&'a [orbistoun_gpu::DrawBuffer]; 2],
+    /// Whether the target holds sRGB-encoded colour; a resident attachment carries its own.
+    pub(crate) srgb: bool,
 }
 
 /// The Vulkan viewport a guest's transform describes.
@@ -2018,14 +2057,17 @@ fn render_over(
     let initial = bound
         .initial
         .filter(|bytes| u64::try_from(bytes.len()).is_ok_and(|len| len == size));
-    let (image, image_memory) = create_attachment(instance, physical, device, width, height)?;
-    let render_pass = create_render_pass(device, initial.is_some())?;
+    let (image, image_memory) =
+        create_attachment(instance, physical, device, (width, height), bound.srgb)?;
+    let format = drawn_format(bound.srgb);
+    let render_pass = create_render_pass(device, initial.is_some(), format)?;
     let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
     if let Some(bytes) = initial {
         fill_host_memory(device, buffer_memory, bytes)?;
     }
 
-    let (view, framebuffer) = view_and_framebuffer(device, image, render_pass, (width, height))?;
+    let (view, framebuffer) =
+        view_and_framebuffer(device, image, render_pass, ((width, height), format))?;
 
     let pipeline = shaders
         .map(|(vertex, fragment)| {
@@ -4333,6 +4375,8 @@ struct Bound<'a> {
     /// The draw's buffers (D733); none by default. By reference, so `Bound` stays cheap to pass by
     /// value.
     draw_buffers: &'a DrawBuffersBound<'a>,
+    /// Draw a fresh attachment through an sRGB view.
+    srgb: bool,
 }
 
 /// A draw's buffers (D733) as a draw binds them: each stage's, and once found where the session is
@@ -4398,6 +4442,7 @@ impl Default for Bound<'_> {
             cull: None,
             depth_clear: None,
             draw_buffers: &NO_DRAW_BUFFERS,
+            srgb: false,
         }
     }
 }
@@ -4818,8 +4863,9 @@ mod tests {
         }
         let (width, height) = (8, 4);
         let ramp: Vec<u8> = (0..width * height * 4).map(|i| (i % 251) as u8).collect();
-        let resident = super::ResidentAttachment::create(width, height, Some(&ramp), [0.0; 4])
-            .expect("an attachment");
+        let resident =
+            super::ResidentAttachment::create((width, height), Some(&ramp), [0.0; 4], false)
+                .expect("an attachment");
         resident.reload_uniform(0x8040_2010).expect("reloaded");
         let read = resident.read_back().expect("read back");
         resident.destroy();

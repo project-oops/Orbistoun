@@ -2009,6 +2009,9 @@ pub const COLOR_8_8_8_8: u32 = 10;
 pub const COLOR_8: u32 = 1;
 /// `SurfaceNumber` `NUMBER_UNORM` (`gfx103.json`, enum `SurfaceNumber`).
 pub const NUMBER_UNORM: u32 = 0;
+/// `SurfaceNumber` `NUMBER_SRGB` (`gfx103.json`, enum `SurfaceNumber`): the bytes hold sRGB-encoded
+/// colour, which the colour block decodes to linear before blending and encodes again on write.
+pub const NUMBER_SRGB: u32 = 6;
 
 /// Which memory byte each of a four-channel colour target's shader outputs lands in -
 /// `CB_COLOR0_INFO.COMP_SWAP`.
@@ -2040,12 +2043,13 @@ pub struct ColourTargetFormat {
 }
 
 impl ColourTargetFormat {
-    /// Whether this is a four-byte `8_8_8_8` `UNORM` target in an order [`Self::swap`] names - the
-    /// layout a rendered `Rgba8` frame can be written into exactly.
+    /// Whether this is a four-byte `8_8_8_8` `UNORM` or `SRGB` target in an order [`Self::swap`]
+    /// names - the layout a rendered `Rgba8` frame can be written into exactly. An `SRGB` one is
+    /// drawn through an sRGB attachment ([`Self::is_srgb`]), so its bytes are the encoded ones.
     #[must_use]
     pub const fn is_rgba8_class(&self) -> bool {
         self.format == COLOR_8_8_8_8
-            && self.number_type == NUMBER_UNORM
+            && (self.number_type == NUMBER_UNORM || self.number_type == NUMBER_SRGB)
             && matches!(
                 self.swap,
                 ComponentSwap::Standard | ComponentSwap::Alternate
@@ -2059,6 +2063,13 @@ impl ColourTargetFormat {
         self.format == COLOR_8
             && self.number_type == NUMBER_UNORM
             && matches!(self.swap, ComponentSwap::Standard)
+    }
+
+    /// Whether its bytes hold sRGB-encoded colour (`NUMBER_SRGB`): a draw blends in linear and
+    /// writes the encoding, as an sRGB attachment does.
+    #[must_use]
+    pub const fn is_srgb(&self) -> bool {
+        self.number_type == NUMBER_SRGB
     }
 
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
@@ -2786,6 +2797,10 @@ mod tests {
         assert!(alternate.is_rgba8_class());
         assert!(!decode_colour_target_format(0x0001_80a8 | (2 << 11)).is_rgba8_class());
         assert!(!decode_colour_target_format(0x0001_80a8 | (1 << 8)).is_rgba8_class());
+        // PPSA28061's display target: `8_8_8_8`, `NUMBER_SRGB`.
+        let srgb = decode_colour_target_format(0x0001_80a8 | (6 << 8));
+        assert!(srgb.is_rgba8_class() && srgb.is_srgb());
+        assert!(!measured.is_srgb());
         assert!(!decode_colour_target_format(0x0001_8000 | (12 << 2)).is_rgba8_class());
     }
 

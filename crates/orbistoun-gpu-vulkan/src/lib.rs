@@ -201,6 +201,9 @@ pub struct VulkanBackend {
     /// Colour render targets made resident, by id, to their `(width, height)`. A target holds no
     /// host object (a draw allocates its own attachment), so this carries only dimensions.
     targets: BTreeMap<ResourceId, (u32, u32)>,
+    /// The resident colour targets whose bytes hold sRGB-encoded colour, drawn through an sRGB
+    /// attachment.
+    srgb_targets: std::collections::BTreeSet<ResourceId>,
     /// The colour target a `SetRenderTargets` selected, that a following `Draw` renders into.
     current_target: Option<ResourceId>,
     /// The viewport a `SetViewport` set, restricting a following `Draw` to a rectangle, or [`None`]
@@ -315,6 +318,7 @@ impl VulkanBackend {
             shaders: BTreeMap::new(),
             buffers: BTreeMap::new(),
             targets: BTreeMap::new(),
+            srgb_targets: std::collections::BTreeSet::new(),
             current_target: None,
             current_viewport: None,
             bound_compute: None,
@@ -694,17 +698,23 @@ impl VulkanBackend {
         Ok(())
     }
 
+    /// Whether `target` holds sRGB-encoded colour; the interim square does not.
+    fn is_srgb(&self, target: Option<ResourceId>) -> bool {
+        target.is_some_and(|id| self.srgb_targets.contains(&id))
+    }
+
     /// `target`'s resident attachment at `width` x `height`, created from its [`Self::contents`] (or
-    /// the clear) when it has none or has one of another size.
+    /// the clear) when it has none or has one of another size or encoding.
     fn resident_for(
         &mut self,
         target: Option<ResourceId>,
         (width, height): (u32, u32),
     ) -> Result<&framebuffer::ResidentAttachment, DispatchError> {
+        let srgb = self.is_srgb(target);
         if self
             .resident
             .get(&target)
-            .is_some_and(|r| r.extent() != (width, height))
+            .is_some_and(|r| r.extent() != (width, height) || r.srgb() != srgb)
         {
             self.retire_resident(target)?;
         }
@@ -717,10 +727,10 @@ impl VulkanBackend {
                     .filter(|pixels| (pixels.width, pixels.height) == (width, height))
                     .map(|pixels| pixels.bytes.as_slice());
                 slot.insert(framebuffer::ResidentAttachment::create(
-                    width,
-                    height,
+                    (width, height),
                     initial,
                     CLEAR_COLOUR,
+                    srgb,
                 )?)
             }
         })
@@ -865,6 +875,8 @@ impl VulkanBackend {
         self.blend.hash(&mut hasher);
         self.write_mask.hash(&mut hasher);
         self.current_depth.is_some().hash(&mut hasher);
+        // And whether the target is sRGB: its pass's attachment format.
+        self.is_srgb(self.current_target).hash(&mut hasher);
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
         self.viewport_transform
@@ -1093,6 +1105,7 @@ impl VulkanBackend {
             cull: self.cull,
             depth_clear,
             buffers: [&draw_buffers[0], &draw_buffers[1]],
+            srgb: self.is_srgb(target),
         };
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
@@ -1289,10 +1302,19 @@ impl RenderBackend for VulkanBackend {
                 self.buffers.insert(id, resident);
                 Ok(())
             }
-            Resource::RenderTarget { width, height } => {
-                // A target holds no host object, so making it resident records its size. Idempotent
-                // by id.
+            Resource::RenderTarget {
+                width,
+                height,
+                srgb,
+            } => {
+                // A target holds no host object, so making it resident records its size and
+                // encoding. Idempotent by id.
                 self.targets.insert(id, (width, height));
+                if srgb {
+                    self.srgb_targets.insert(id);
+                } else {
+                    self.srgb_targets.remove(&id);
+                }
                 Ok(())
             }
         }
@@ -2093,6 +2115,79 @@ mod tests {
         );
     }
 
+    /// A colour target whose `CB_COLOR0_INFO` says `NUMBER_SRGB` holds the sRGB encoding of what
+    /// its draws write: a shader's linear `0.5` lands as byte `188` (`1.055 * 0.5^(1/2.4) - 0.055`
+    /// is `0.7354`), where a `UNORM` target holds `128`. Skips where there is no device.
+    #[test]
+    fn an_srgb_target_holds_the_encoded_colour() {
+        use orbistoun_gpu::pipeline::Submission;
+        use orbistoun_gpu::registers::decode_colour_target_format;
+        use orbistoun_gpu::{ColourTargetExtent, ResourceId, ShaderStage, drive};
+        use std::collections::BTreeMap;
+
+        if !super::probe().is_available() {
+            return;
+        }
+        let (width, height) = (64u32, 32u32);
+        let target =
+            ResourceId(0x8000_0000_0000_0000 | (u64::from(width) << 16) | u64::from(height));
+        let (vertex_id, fragment_id) = (ResourceId(1), ResourceId(2));
+        let vertex = orbistoun_spirv::fullscreen_triangle_vertex_module();
+        let fragment = orbistoun_spirv::constant_colour_fragment_module([0.0, 0.5, 0.0, 1.0]);
+        let frame_with = |number_type: u32| {
+            let submission = Submission {
+                commands: vec![
+                    RenderCommand::SetRenderTargets {
+                        colour: vec![target],
+                        depth: None,
+                    },
+                    RenderCommand::BindShader {
+                        stage: ShaderStage::Vertex,
+                        shader: vertex_id,
+                    },
+                    RenderCommand::BindShader {
+                        stage: ShaderStage::Fragment,
+                        shader: fragment_id,
+                    },
+                    RenderCommand::Draw {
+                        vertices: 3,
+                        instances: 1,
+                        first_vertex: 0,
+                    },
+                ],
+                modules: BTreeMap::from([
+                    (vertex_id, vertex.clone()),
+                    (fragment_id, fragment.clone()),
+                ]),
+                targets: BTreeMap::from([(target, ColourTargetExtent { width, height })]),
+                colour_target_format: Some(decode_colour_target_format(
+                    0x0001_80a8 | (number_type << 8),
+                )),
+                ..Submission::default()
+            };
+            let mut backend = VulkanBackend::new();
+            let outcome = drive(&mut backend, &submission).expect("the frame drives");
+            assert_eq!(outcome.refused, 0);
+            backend
+                .last_frame()
+                .and_then(|frame| frame.at(width / 2, height / 2))
+                .expect("a frame was rendered")
+        };
+        // `0.5 * 255` is `127.5`, a tie either neighbour of which is a correct conversion.
+        let [red, green, blue, alpha] = frame_with(0);
+        assert_eq!((red, blue, alpha), (0, 0, 255));
+        assert!(
+            (127..=128).contains(&green),
+            "a UNORM target holds 0.5 as 127 or 128: {green}"
+        );
+        let [red, green, blue, alpha] = frame_with(6);
+        assert_eq!((red, blue, alpha), (0, 0, 255));
+        assert!(
+            green.abs_diff(188) <= 1,
+            "an sRGB target holds 0.5 encoded, near 188: {green}"
+        );
+    }
+
     /// An indexed draw routes to the graphics path, not the generic refusal.
     ///
     /// With nothing bound, the refusal is the graphics one ("no vertex and fragment shaders
@@ -2668,6 +2763,7 @@ mod tests {
                 Resource::RenderTarget {
                     width: WIDTH,
                     height: HEIGHT,
+                    srgb: false,
                 },
             )
             .expect("the target is made resident");

@@ -286,6 +286,9 @@ pub enum Resource<'a> {
         width: u32,
         /// Height in pixels.
         height: u32,
+        /// Whether its bytes hold sRGB-encoded colour (`CB_COLOR0_INFO.NUMBER_TYPE` `SRGB`), so a
+        /// draw blends in linear and writes the encoding.
+        srgb: bool,
     },
 }
 
