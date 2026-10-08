@@ -45,14 +45,21 @@ pub const FLEXIBLE_CONFIGURED: u64 = 0x1c00_0000;
 /// mapped.
 static FLEXIBLE_MAPPED: AtomicU64 = AtomicU64::new(0);
 
-/// The configured flexible-memory total, which does not move as memory is mapped.
+/// The flexible memory the system has mapped at launch: the measured gap between the configured
+/// and the available figures, which a title's own setting does not move.
+pub const FLEXIBLE_SYSTEM_SHARE: u64 = FLEXIBLE_CONFIGURED - FLEXIBLE_MEMORY_SIZE;
+
+/// The configured flexible-memory total, which does not move as memory is mapped: the title's own
+/// setting when it states one (D772), else the system default.
 pub fn flexible_configured() -> u64 {
-    FLEXIBLE_CONFIGURED
+    configured().flexible_bytes
 }
 
 /// The flexible memory available to map now: the launch figure minus what the guest has mapped.
 pub fn flexible_available() -> u64 {
-    FLEXIBLE_MEMORY_SIZE.saturating_sub(FLEXIBLE_MAPPED.load(Ordering::Relaxed))
+    flexible_configured()
+        .saturating_sub(FLEXIBLE_SYSTEM_SHARE)
+        .saturating_sub(FLEXIBLE_MAPPED.load(Ordering::Relaxed))
 }
 
 /// Records a flexible mapping of `len` bytes against the budget.
@@ -448,6 +455,8 @@ pub struct Settings {
     /// A setting because it depends on the guest class (see [`DIRECT_MEMORY_SIZE`]). The pool and
     /// the reported size are one field, so they cannot describe different machines.
     pub pool_bytes: u64,
+    /// The configured flexible memory, what `sceKernelConfiguredFlexibleMemorySize` reports.
+    pub flexible_bytes: u64,
 }
 
 impl Default for Settings {
@@ -456,8 +465,36 @@ impl Default for Settings {
             map_direct_memory: true,
             map_shape: MapShape::ReservedLow,
             pool_bytes: DIRECT_MEMORY_SIZE,
+            flexible_bytes: FLEXIBLE_CONFIGURED,
         }
     }
+}
+
+/// `settings` with the flexible memory a title states (`param.json` `kernel.flexibleMemorySize`)
+/// taken from the direct pool or given back to it, so the two keep the total they had (D772).
+///
+/// A request larger than the two together leaves the settings as they were.
+#[must_use]
+pub fn fitted(settings: Settings, flexible: u64) -> Settings {
+    let total = settings.pool_bytes.saturating_add(settings.flexible_bytes);
+    let Some(pool_bytes) = total.checked_sub(flexible) else {
+        return settings;
+    };
+    Settings {
+        pool_bytes,
+        flexible_bytes: flexible,
+        ..settings
+    }
+}
+
+/// Applies a title's flexible-memory setting before the direct map is built (D772); once a guest
+/// call has built it, the map is not resized and this answers `false`.
+pub fn fit_title(flexible: u64) -> bool {
+    if MAP.get().is_some() {
+        return false;
+    }
+    configure(fitted(configured(), flexible));
+    true
 }
 
 /// The settings in force.
@@ -478,12 +515,14 @@ pub fn configured() -> Settings {
     settings().lock().map(|s| *s).unwrap_or_default()
 }
 
+/// The direct-memory map, once a guest call has built it.
+static MAP: OnceLock<Mutex<DirectMemory>> = OnceLock::new();
+
 /// The one direct-memory map, shared by every guest thread.
 ///
 /// Global because the guest's model is global: one physical range, visible to every thread.
 /// A `Mutex`, because allocation is rare next to the work it enables.
 pub fn map() -> &'static Mutex<DirectMemory> {
-    static MAP: OnceLock<Mutex<DirectMemory>> = OnceLock::new();
     // Built lazily from the settings installed during setup, before any guest call can reach it,
     // so there is one initialisation path.
     MAP.get_or_init(|| {
@@ -498,6 +537,26 @@ pub fn map() -> &'static Mutex<DirectMemory> {
 #[cfg(test)]
 mod tests {
     use super::{DIRECT_ALIGN, DIRECT_MEMORY_SIZE, DirectMemory, MapShape};
+
+    /// A title stating its own flexible memory moves the difference to or from the direct pool,
+    /// keeping the total (D772): PPSA21564's 328 MiB gives the pool the 120 MiB its allocations
+    /// need past 12 GiB, and PPSA28061's 1 GiB takes 576 MiB from it.
+    #[test]
+    fn a_title_s_flexible_setting_moves_the_difference_to_the_direct_pool() {
+        let default = super::Settings::default();
+        let total = default.pool_bytes + default.flexible_bytes;
+        let small = super::fitted(default, 343_932_928);
+        assert_eq!(small.flexible_bytes, 343_932_928);
+        assert_eq!(small.pool_bytes, DIRECT_MEMORY_SIZE + 0x780_0000);
+        assert_eq!(small.pool_bytes + small.flexible_bytes, total);
+        let large = super::fitted(default, 0x4000_0000);
+        assert_eq!(large.pool_bytes, DIRECT_MEMORY_SIZE - 0x2400_0000);
+        assert_eq!(
+            super::fitted(default, total + 1),
+            default,
+            "more than the total"
+        );
+    }
 
     #[test]
     fn flexible_budget_is_the_measured_pair_and_falls_as_it_is_mapped() {

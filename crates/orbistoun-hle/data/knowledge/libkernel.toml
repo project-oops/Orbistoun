@@ -362,7 +362,8 @@ name = "sceKernelAvailableFlexibleMemorySize"
 arity = 1
 purpose = "How much memory may be mapped without reserving physical pages first."
 returns = "status"
-edge_cases = ["Measured on hardware: obSCEne `020-memory/flexible-available` reported pass, value 0x1b400000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
+edge_cases = [
+    "A title whose param.json states kernel.flexibleMemorySize is configured with that instead, and the difference from the default comes from or goes to its direct pool (D772): PPSA21564 states 0x14800000, PPSA28061 0x40000000.","Measured on hardware: obSCEne `020-memory/flexible-available` reported pass, value 0x1b400000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository."]
 found_by = "static"
 known_by = "assumed"
 assumptions = [

@@ -907,6 +907,8 @@ fn prepare_diagnostics(
     limits: Limits,
     labels: &[String],
 ) {
+    // Before the run's conditions are recorded, which builds the direct map (D772).
+    fit_memory_to_title(module);
     let experiments = record_run_conditions(service, limits);
 
     install_guest_region_lookups();
@@ -2742,6 +2744,32 @@ fn enter<W: Write>(
     let returned = transfer_to_guest(entry, entry_stack, argument, second, entry_settings);
 
     finish_returned_run(output, image, summary, module, reporting, returned)
+}
+
+/// Fits the memory budgets to the title's own `param.json`, before any guest call builds the
+/// direct map: a stated `kernel.flexibleMemorySize` is the configured flexible memory, taken from
+/// the direct pool or given back to it (D772).
+fn fit_memory_to_title(module: &str) {
+    let Some(directory) = Path::new(module).parent() else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(directory.join("sce_sys").join("param.json")) else {
+        return;
+    };
+    let Some(flexible) = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|param| param.get("kernel")?.get("flexibleMemorySize")?.as_u64())
+    else {
+        return;
+    };
+    if orbistoun_kernel::direct::fit_title(flexible) {
+        tracing::info!(
+            "the title states {flexible:#x} bytes of flexible memory; the direct pool is {:#x}",
+            orbistoun_kernel::direct::configured().pool_bytes
+        );
+    } else {
+        tracing::warn!("the title's flexible memory setting came after the direct map was built");
+    }
 }
 
 /// Tells the kernel where the executable's process parameters are, as relocation left them, so
