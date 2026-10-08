@@ -346,6 +346,27 @@ impl AddressSpace {
             .is_some_and(|(_, r)| end <= r.base.saturating_add(r.len))
     }
 
+    /// Copies `len` bytes at `base` out of one readable region this space reserved, or `None`
+    /// when the span is not wholly inside one.
+    ///
+    /// For a caller above this crate that needs what a placed image holds, such as a module's
+    /// relocated `.tdata` (D763), without a raw pointer of its own.
+    #[must_use]
+    pub fn read(&self, base: u64, len: u64) -> Option<Vec<u8>> {
+        let region = self.region_at(base)?;
+        if !region.protection.read || !self.owns(base, len) {
+            return None;
+        }
+        let count = usize::try_from(len).ok()?;
+        let at = usize::try_from(base).ok()?;
+        // SAFETY: `base..base + len` lies inside a region this space reserved readable and still
+        // holds, so every byte is mapped and readable for as long as `self` is borrowed.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), count)
+        };
+        Some(bytes.to_vec())
+    }
+
     /// The first `align`-aligned start at or above `hint` where `len` bytes overlap no region: where
     /// FreeBSD's `mmap` places a mapping whose address is a hint rather than `MAP_FIXED`
     /// (`vm_map_find`, searching upward from the hint). `None` past the end of the address space.
@@ -447,6 +468,22 @@ mod tests {
             Some(0x10_c810_0000),
             "a hint inside a region moves past it"
         );
+    }
+
+    /// What a region holds can be copied out, and nothing outside one can (D763).
+    #[test]
+    fn a_reserved_span_reads_back_and_one_outside_does_not() {
+        let base = super::unique_test_base();
+        let len = 2 * GUEST_PAGE_SIZE;
+        let mut space = AddressSpace::new();
+        space
+            .reserve(base, len, Protection::READ_WRITE)
+            .expect("reserved");
+        // SAFETY: inside the region just reserved read-write.
+        assert!(unsafe { crate::guest::write_bytes(base + 8, &[1, 2, 3]) });
+        assert_eq!(space.read(base + 8, 4), Some(vec![1, 2, 3, 0]));
+        assert_eq!(space.read(base + len - 2, 4), None, "past the region's end");
+        assert_eq!(space.read(base + len, 1), None, "outside it");
     }
 
     /// Releasing a whole region returns its host memory, so the same range can be reserved

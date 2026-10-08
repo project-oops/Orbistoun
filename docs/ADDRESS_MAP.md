@@ -42,6 +42,7 @@ to the next base collides without failing it.
 | `0x0000_6900_0000_0000` | `MAIN_TLS_BASE` | `orbistoun-worker` | The main thread's thread-local block |
 | `0x0000_6A00_0000_0000` | `THREAD_TLS_BASE` | `orbistoun-worker` | Spawned threads' thread-local blocks |
 | `0x0000_6B00_0000_0000` | `POLICY_REGION_BASE` | `orbistoun-service` | Regions handed to a guest by policy |
+| `0x0000_6C00_0000_0000` | `DYNAMIC_TLS_BASE` | `orbistoun-kernel` | Per-thread thread-local blocks of the modules a title ships (D763) |
 | `0x0000_7000_0000_0000` | `SUGGESTED_BASE` | `orbistoun-thunk` | The thunk table |
 | `0x0000_7200_0000_0000` | `SUGGESTED_DATA_BASE` | `orbistoun-thunk` | Storage for imports that name data, not functions |
 | `0x0000_7400_0000_0000` | `MAPPING_BASE` | `orbistoun-kernel` | Guest-requested mappings, when the guest expresses no preference |

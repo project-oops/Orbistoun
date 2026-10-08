@@ -1200,6 +1200,22 @@ assumptions = [
 found_on = "2026-08-25"
 
 [[function]]
+name = "__tls_get_addr"
+arity = 1
+purpose = "The calling thread's address of a thread-local variable, given a pointer to {module, offset}: how a module's general and local dynamic thread-local code finds its block."
+edge_cases = [
+    "The executable is module 1 and its block is below the thread pointer; every module the title ships with thread-locals of its own gets a later id, which its local DTPMOD64 relocation writes, and a block per thread made from its template the first time that thread asks (D763).",
+    "PPSA02664's own libc.prx asks for modules through two local indices; before D763 the relocation wrote module 1 there, and the call answered the placeholder, which the title dereferenced.",
+    "An index naming no module answers null, so the guest faults at address zero rather than using a placeholder as a pointer.",
+]
+returns = "pointer"
+found_by = "published-standard"
+known_by = "published"
+cites = "ELF Handling For Thread-Local Storage (the x86-64 general and local dynamic models: tls_index, DTPMOD64, DTPOFF64)"
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-08"
+
+[[function]]
 name = "sceKernelRemoveExceptionHandler"
 arity = 1
 purpose = "Removes a handler installed for a signal. Called as (signum)."

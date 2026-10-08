@@ -2386,6 +2386,9 @@ fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, E
 
     // Kept so a spawned thread can build its own block from it.
     let _ = TLS_TEMPLATE.set(Some((layout, tdata.clone())));
+    // So `__tls_get_addr` on the executable's own module finds its block below the thread pointer
+    // (D763).
+    orbistoun_kernel::tls::register_main(layout.block_size);
     // Registers the hook the kernel calls at the top of every new guest thread, now that there is a
     // template for it to read.
     orbistoun_kernel::thread::install_thread_start(set_up_this_threads_tls);

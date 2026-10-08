@@ -48,6 +48,10 @@ pub struct TlsLayout {
     pub align: u64,
     /// `total_size` rounded up to `align`: the distance below the thread pointer.
     pub block_size: u64,
+    /// Which module the block belongs to: [`MAIN_MODULE_ID`] for the executable, whose block sits
+    /// below the thread pointer, and a later id for a module the title ships, whose block is
+    /// found through `__tls_get_addr` (D763).
+    pub module: u64,
 }
 
 impl TlsLayout {
@@ -63,7 +67,19 @@ impl TlsLayout {
             total_size,
             align,
             block_size,
+            module: MAIN_MODULE_ID,
         }
+    }
+
+    /// The same layout, as the block of module `id` (D763).
+    #[must_use]
+    pub const fn as_module(self, id: u64) -> Self {
+        Self { module: id, ..self }
+    }
+
+    /// Whether this is the executable's block, the one below the thread pointer.
+    pub const fn is_main(&self) -> bool {
+        self.module == MAIN_MODULE_ID
     }
 
     /// Total bytes to reserve for one thread: the block plus its control block.

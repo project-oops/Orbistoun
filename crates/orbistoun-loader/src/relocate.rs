@@ -11,7 +11,7 @@ use orbistoun_elf::reloc::{Elf64Rela, RelocationTally, kind, parse_table};
 use orbistoun_elf::{Container, dynamic::DynamicInfo};
 
 use crate::plan::SlotWrite;
-use crate::tls::{self, TlsLayout};
+use crate::tls::TlsLayout;
 use crate::{Image, LoadError};
 
 /// The outcome of resolving a dynamic symbol index.
@@ -243,7 +243,8 @@ pub fn value_for(
 /// The thread-local cases, split out to keep the main match readable.
 ///
 /// Only the module's own block is handled. A relocation naming another module needs a
-/// descriptor table and a second loaded image, so it is reported rather than answered.
+/// descriptor table and a second loaded image, so it is reported rather than answered. A module
+/// the title ships has no static offset: its block is not below the thread pointer (D763).
 fn tls_value_for(entry: &Elf64Rela, addend: i64, tls: Option<&TlsLayout>) -> Result<u64, Outcome> {
     let Some(layout) = tls else {
         return Err(Outcome::TlsDeferred);
@@ -252,12 +253,13 @@ fn tls_value_for(entry: &Elf64Rela, addend: i64, tls: Option<&TlsLayout>) -> Res
         return Err(Outcome::TlsDeferred);
     }
     match entry.kind() {
-        // Which module the variable belongs to: the main module.
-        kind::DTPMOD64 => Ok(tls::MAIN_MODULE_ID),
+        // Which module the variable belongs to: this one, by the id it was placed under (D763).
+        kind::DTPMOD64 => Ok(layout.module),
         // An offset within that module's block, so the addend needs no adjustment.
         kind::DTPOFF64 => Ok(addend as u64),
         // Measured from the thread pointer, so negative: the block sits below it.
-        kind::TPOFF64 => Ok(layout.tp_offset(addend as u64) as u64),
+        kind::TPOFF64 if layout.is_main() => Ok(layout.tp_offset(addend as u64) as u64),
+        kind::TPOFF64 => Err(Outcome::TlsDeferred),
         _ => Err(Outcome::Unsupported),
     }
 }
@@ -760,6 +762,28 @@ mod tests {
         assert_eq!(
             value_for(&entry(kind::DTPOFF64, 0, 24), 0, &Nothing, Some(&layout)),
             Ok(RelocValue::Address(24))
+        );
+    }
+
+    /// A title module's `DTPMOD64` answers its own id, not the executable's (D763): a module that
+    /// read the executable's block through `__tls_get_addr` would overwrite its variables.
+    #[test]
+    fn a_title_module_answers_its_own_module_id() {
+        let layout = TlsLayout::new(0x180, 0x468, 16).as_module(3);
+        assert_eq!(
+            value_for(&entry(kind::DTPMOD64, 0, 0), 0, &Nothing, Some(&layout)),
+            Ok(RelocValue::Address(3))
+        );
+    }
+
+    /// A title module's block is not below the thread pointer, so a static offset into it has
+    /// no answer and is deferred (D763).
+    #[test]
+    fn a_title_module_has_no_static_thread_local_offset() {
+        let layout = TlsLayout::new(0, 64, 8).as_module(2);
+        assert_eq!(
+            value_for(&entry(kind::TPOFF64, 0, 8), 0, &Nothing, Some(&layout)),
+            Err(Outcome::TlsDeferred)
         );
     }
 

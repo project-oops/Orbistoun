@@ -17,6 +17,7 @@ pub mod mapped;
 mod quarantine;
 pub mod sync;
 pub mod thread;
+pub mod tls;
 
 use std::sync::{Mutex, OnceLock};
 
@@ -121,6 +122,8 @@ guest_module! {
         "sceKernelInstallExceptionHandler" => 2,
         "sceKernelRemoveExceptionHandler" => 1,
         "sceKernelRaiseException" => 2,
+        // A pointer to `{module, offset}`, the ELF thread-local storage ABI's `tls_index`.
+        "__tls_get_addr" => 1,
         "sceKernelSetVirtualRangeName" => 3,
         "sceKernelAllocateMainDirectMemory" => 4,
         "sceKernelGetDirectMemorySize" => 0,
@@ -5892,6 +5895,23 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `__tls_get_addr(&{module, offset})`: the calling thread's address of a thread-local variable,
+/// as the ELF thread-local storage ABI's dynamic models read it (D763).
+///
+/// The executable's block is below the thread pointer; a module the title ships gets a block
+/// per thread the first time that thread asks. An index naming no module answers null, so the
+/// guest faults at a named address rather than reading a placeholder as a pointer.
+fn tls_get_addr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let index = args[0];
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let (Some(module), Some(offset)) = (unsafe { guest::read_u64(index) }, unsafe {
+        guest::read_u64(index.wrapping_add(8))
+    }) else {
+        return 0;
+    };
+    tls::address_of(module, offset, orbistoun_abi::thread_pointer::current()).unwrap_or(0)
+}
+
 /// `sceKernelMapperGetParam(out)`: fills a size-prefixed structure and answers `0`.
 ///
 /// Measured on firmware 12.40 (obSCEne `137-kernelcall/mapper-param`): answers `0` and fills the
@@ -6167,6 +6187,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ),
     ("sceKernelRemoveExceptionHandler", remove_exception_handler),
     ("sceKernelRaiseException", raise_exception),
+    ("__tls_get_addr", tls_get_addr),
     ("sceKernelSetVirtualRangeName", set_virtual_range_name),
     ("mmap", mmap),
     ("sceKernelMmap", mmap),

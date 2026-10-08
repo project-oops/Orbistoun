@@ -1729,15 +1729,64 @@ impl Service {
         bytes: &[u8],
         resolver: &impl orbistoun_loader::relocate::SymbolResolver,
     ) -> Result<orbistoun_loader::relocate::Applied, ServiceError> {
+        self.relocate_module_recorded(
+            image,
+            bytes,
+            resolver,
+            orbistoun_loader::tls::MAIN_MODULE_ID,
+        )
+    }
+
+    /// [`Self::relocate_image_recorded`] for the module whose thread-locals are module `tls_module`
+    /// (D763): the executable is [`orbistoun_loader::tls::MAIN_MODULE_ID`], and each module the
+    /// title ships has its own.
+    pub fn relocate_module_recorded(
+        &self,
+        image: &orbistoun_loader::Image,
+        bytes: &[u8],
+        resolver: &impl orbistoun_loader::relocate::SymbolResolver,
+        tls_module: u64,
+    ) -> Result<orbistoun_loader::relocate::Applied, ServiceError> {
         // The module's own thread-local layout, read from the container so a caller cannot pair an
         // image with another module's layout.
-        let tls = orbistoun_loader::tls::layout_of(bytes)?.map(|(layout, _, _)| layout);
+        let tls = orbistoun_loader::tls::layout_of(bytes)?
+            .map(|(layout, _, _)| layout.as_module(tls_module));
         Ok(orbistoun_loader::relocate::apply_recorded(
             image,
             bytes,
             resolver,
             tls.as_ref(),
         )?)
+    }
+
+    /// Relocates the title's `index`th module, numbering its thread-locals when it has any and
+    /// registering their template once relocation has written it (D763).
+    fn relocate_title_module(
+        &self,
+        image: &orbistoun_loader::Image,
+        bytes: &[u8],
+        resolver: &impl orbistoun_loader::relocate::SymbolResolver,
+        index: usize,
+    ) -> Result<orbistoun_loader::relocate::Applied, ServiceError> {
+        let tls = orbistoun_loader::tls::layout_of(bytes)?.filter(|(l, _, _)| l.total_size > 0);
+        let Some((layout, _, vaddr)) = tls else {
+            return self.relocate_image_recorded(image, bytes, resolver);
+        };
+        // The executable's thread-locals are module 1, and the title's `index`th module is the
+        // id after them by its place in the order: sparse, which an id need not avoid.
+        let module = orbistoun_loader::tls::MAIN_MODULE_ID + 1 + index as u64;
+        let applied = self.relocate_module_recorded(image, bytes, resolver, module)?;
+        // After relocation, because `.tdata` may hold pointers relocation wrote.
+        let init = if layout.init_size == 0 {
+            Vec::new()
+        } else {
+            image
+                .space()
+                .read(image.base().saturating_add(vaddr), layout.init_size)
+                .unwrap_or_default()
+        };
+        orbistoun_kernel::tls::register_module(module, layout.total_size, init);
+        Ok(applied)
     }
 
     /// Applies each segment's declared access to a placed, relocated image. Separate from
@@ -1943,7 +1992,7 @@ impl Service {
                 bound: per_module.get(index + 1).unwrap_or(&nothing),
                 inner: &shifted,
             };
-            let applied = self.relocate_image_recorded(image, bytes, &resolver)?;
+            let applied = self.relocate_title_module(image, bytes, &resolver, index)?;
             plans.push(linkplan::module_plan(
                 library,
                 image,
