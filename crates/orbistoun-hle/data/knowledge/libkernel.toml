@@ -1771,6 +1771,23 @@ assumptions = [
 found_on = "2026-08-25"
 
 [[function]]
+name = "scePthreadCondTimedwait"
+arity = 3
+purpose = "scePthreadCondWait for at most a span: scePthreadCondTimedwait(cond, mutex, usec), the span relative and in microseconds, a 32-bit SceKernelUseconds - unlike POSIX pthread_cond_timedwait's absolute deadline. Releases and retakes the mutex as scePthreadCondWait does."
+returns = "status"
+edge_cases = [
+    "A wait that runs its span out answers ETIMEDOUT in the kernel's vendor encoding, 0x8002003c.",
+    "A signal owed to the condition is taken at once, as scePthreadCondWait takes it.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "The span is relative microseconds, as the vendor's SceKernelUseconds argument type says; nothing on the target has measured it.",
+    "The timeout code is the vendor encoding of ETIMEDOUT; unmeasured.",
+]
+found_on = "2026-10-08"
+
+[[function]]
 name = "scePthreadCondattrDestroy"
 arity = 1
 purpose = "Releases a condition-variable attribute object."

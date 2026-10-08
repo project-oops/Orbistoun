@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 49] {
+pub(crate) fn modules() -> [ModuleDesc; 50] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -71,6 +71,7 @@ pub(crate) fn modules() -> [ModuleDesc; 49] {
         orbistoun_systemservice::json2::MODULE,
         orbistoun_systemservice::msg_dialog::MODULE,
         orbistoun_systemservice::random::MODULE,
+        orbistoun_systemservice::rtc::MODULE,
         orbistoun_systemservice::remoteplay::MODULE,
         orbistoun_systemservice::save_data::MODULE,
         orbistoun_systemservice::web_browser_dialog::MODULE,
@@ -143,6 +144,8 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_systemservice::common_dialog::implementations());
     // libSceRandom: random bytes for a title's arc4random, a fixed-seed stream so runs compare.
     all.extend_from_slice(orbistoun_systemservice::random::implementations());
+    // libSceRtc: the real-time clock's tick, the host's wall clock from year one (D776).
+    all.extend_from_slice(orbistoun_systemservice::rtc::implementations());
     // libSceAppContent: the app-content init sequence an IL2CPP title runs at startup,
     // `sceAppContentInitialize` (0) and `sceAppContentAppParamGetInt` (a placeholder integer, as
     // `sceSystemServiceParamGetInt`).

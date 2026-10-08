@@ -496,6 +496,43 @@ fn a_guest_condition_variable_remembers_a_signal_that_arrived_early() {
     assert_eq!(call("scePthreadCondSignal", &[cond.at()]), INVALID);
 }
 
+/// The vendor timed wait takes a relative span in microseconds, not POSIX's absolute deadline: it
+/// waits that long for a signal nobody sends, then answers the kernel's `ETIMEDOUT`; a signal
+/// owed is taken at once. PPSA03416 waits this way a million times and needs each to pass time.
+#[test]
+fn a_vendor_timed_wait_waits_its_microseconds() {
+    /// `ETIMEDOUT` (60) in the kernel's vendor encoding.
+    const TIMED_OUT: u64 = 0x8002_003c;
+    let cond = Slot::one();
+    let name = Name::new("tick");
+    assert_eq!(call("scePthreadCondInit", &[cond.at(), 0, name.at()]), OK);
+    let started = std::time::Instant::now();
+    let before = call("sceKernelGetProcessTime", &[]);
+    assert_eq!(
+        call("scePthreadCondTimedwait", &[cond.at(), 0, 30_000]),
+        TIMED_OUT
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(25),
+        "30 ms waited, not answered at once: {:?}",
+        started.elapsed()
+    );
+    // And the waiting thread's clock moved by the span, as a sleep moves it (D735): a guest that
+    // reads the time after a wait that ran out sees that the time passed.
+    let after = call("sceKernelGetProcessTime", &[]);
+    assert!(
+        after >= before + 30_000,
+        "{before} then {after} microseconds"
+    );
+    assert_eq!(call("scePthreadCondSignal", &[cond.at()]), OK);
+    assert_eq!(
+        call("scePthreadCondTimedwait", &[cond.at(), 0, 5_000_000]),
+        OK,
+        "the owed wake is taken"
+    );
+    assert_eq!(call("scePthreadCondDestroy", &[cond.at()]), OK);
+}
+
 /// A condition variable left as `PTHREAD_COND_INITIALIZER` is made the first time it is used, as
 /// libthr makes it (D766); until then there is nothing to destroy.
 #[test]

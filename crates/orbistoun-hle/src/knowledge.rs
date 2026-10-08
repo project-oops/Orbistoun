@@ -141,6 +141,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceRandom.toml"),
     ),
     (
+        "libSceRtc",
+        include_str!("../data/knowledge/libSceRtc.toml"),
+    ),
+    (
         "libSceHttp",
         include_str!("../data/knowledge/libSceHttp.toml"),
     ),

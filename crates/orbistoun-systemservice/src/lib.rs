@@ -18,6 +18,7 @@ pub mod launch;
 pub mod msg_dialog;
 pub mod random;
 pub mod remoteplay;
+pub mod rtc;
 pub mod save_data;
 pub mod web_browser_dialog;
 

@@ -169,6 +169,8 @@ guest_module! {
         "sceKernelGetProcessTimeCounter" => 0,
         "sceKernelGetProcessTimeCounterFrequency" => 0,
         "scePthreadCondInit" => 3, "scePthreadCondWait" => 2,
+        // The condition, the mutex, and a relative span in microseconds.
+        "scePthreadCondTimedwait" => 3,
         "scePthreadCondSignal" => 1, "scePthreadCondBroadcast" => 1,
         "scePthreadCondDestroy" => 1,
         "scePthreadRwlockInit" => 3, "scePthreadRwlockRdlock" => 1,
@@ -4963,7 +4965,15 @@ fn pthread_cond_timedwait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     cond_timedwait(args[0], args[1], timeout)
 }
 
-/// The body both timed condition waits share, once the timeout is a plain span.
+/// `scePthreadCondTimedwait(cond, mutex, usec)`: [`pthread_cond_wait`] for at most `usec`
+/// microseconds. Unlike POSIX's absolute deadline the vendor's span is relative, a 32-bit
+/// `SceKernelUseconds`; a wait that runs it out answers the kernel's `ETIMEDOUT`.
+fn pthread_cond_timedwait_usec(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let span = std::time::Duration::from_micros(args[2] & u64::from(u32::MAX));
+    cond_timedwait(args[0], args[1], span)
+}
+
+/// The body the timed condition waits share, once the timeout is a plain span.
 fn cond_timedwait(cond: u64, mutex: u64, timeout: std::time::Duration) -> u64 {
     let handle = match cond_or_static(cond) {
         Ok(handle) => handle,
@@ -4980,7 +4990,11 @@ fn cond_timedwait(cond: u64, mutex: u64, timeout: std::time::Duration) -> u64 {
     }
     match woken {
         Some(true) => OK,
-        Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw()),
+        Some(false) => {
+            // The span passed, on the thread's logical clock too, as a sleep's does (D735).
+            orbistoun_hle::clocks::advance(timeout.as_nanos());
+            u64::from(GuestError::vendor(orbistoun_core::errno::TIMED_OUT).as_raw())
+        }
         None => u64::from(GuestError::InvalidHandle.as_raw()),
     }
 }
@@ -6352,6 +6366,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ),
     ("scePthreadCondInit", pthread_cond_init),
     ("scePthreadCondWait", pthread_cond_wait),
+    ("scePthreadCondTimedwait", pthread_cond_timedwait_usec),
     ("scePthreadCondSignal", pthread_cond_signal),
     ("scePthreadCondBroadcast", pthread_cond_broadcast),
     ("scePthreadCondDestroy", pthread_cond_destroy),

@@ -1,0 +1,18 @@
+library = "libSceRtc"
+
+[[function]]
+name = "sceRtcGetCurrentTick"
+arity = 1
+purpose = "The real-time clock's current tick, written to the caller's 64-bit word: microseconds since 0001-01-01 00:00 UTC, proleptic Gregorian (D776). sceRtcGetCurrentTick(tick)."
+returns = "status"
+edge_cases = [
+    "The clock is the host's wall clock, the one gettimeofday answers, so the two agree to the microsecond.",
+    "A null destination is refused with the reserved placeholder; what the console answers is not measured.",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = [
+    "A tick is a microsecond from 0001-01-01 UTC, as the platform's published RTC interface describes its tick; nothing on the target has measured it.",
+]
+found_in = ["PPSA03416"]
+found_on = "2026-10-08"
