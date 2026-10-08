@@ -253,7 +253,7 @@ pub struct TableSnapshot {
 }
 
 impl TableSnapshot {
-    /// Reads every table `walk`'s indirect loads name from `memory`, as [`indirect_load`] reads
+    /// Reads every table `walk`'s indirect loads name from `memory`, as a load reads
     /// one; a table not readable is left to be read live, and is refused there as before.
     #[must_use]
     pub fn of(walk: &PacketWalk, body: &[u8], memory: &dyn crate::pipeline::GuestMemory) -> Self {
