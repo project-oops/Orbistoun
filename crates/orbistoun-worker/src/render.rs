@@ -788,6 +788,27 @@ fn write_failed_submission(submission: &Submission) {
     write_submission(submission, "failed");
 }
 
+/// One command of a dumped submission. Addresses and resource ids read best in hexadecimal and
+/// sizes in decimal, so the commands that carry a size name it in pixels.
+fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
+    match command {
+        orbistoun_gpu::RenderCommand::BindTexture {
+            slot,
+            width,
+            height,
+            ..
+        } => format!("BindTexture {{ slot {slot}, {width}x{height} }}"),
+        orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
+            draw_buffers_line(*stage, buffers)
+        }
+        orbistoun_gpu::RenderCommand::SetViewport(rect) => format!(
+            "SetViewport {{ at ({}, {}), {}x{} }}",
+            rect.x, rect.y, rect.width, rect.height
+        ),
+        other => format!("{other:x?}"),
+    }
+}
+
 /// A dumped submission's colour target: its base in hexadecimal and its size in pixels, in
 /// decimal. Printed whole as hexadecimal, a 1920 x 1080 target read as `780 x 438`.
 fn colour_target_line(
@@ -836,19 +857,7 @@ fn write_submission(submission: &Submission, name: &str) {
     };
     let mut text = String::new();
     for (index, command) in submission.commands.iter().enumerate() {
-        let shown = match command {
-            orbistoun_gpu::RenderCommand::BindTexture {
-                slot,
-                width,
-                height,
-                ..
-            } => format!("BindTexture {{ slot {slot}, {width}x{height} }}"),
-            orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
-                draw_buffers_line(*stage, buffers)
-            }
-            other => format!("{other:x?}"),
-        };
-        let _ = writeln!(text, "{index:5}  {shown}");
+        let _ = writeln!(text, "{index:5}  {}", command_line(command));
     }
     let _ = writeln!(
         text,
@@ -1124,6 +1133,22 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{RenderOutcome, render};
+
+    /// A dumped scissor reads in pixels too: `SetViewport` printed in hexadecimal made a 1920 x 1080
+    /// one read as `780 x 438`.
+    #[test]
+    fn a_dumped_scissor_is_in_pixels() {
+        let line = super::command_line(&orbistoun_gpu::RenderCommand::SetViewport(
+            orbistoun_gpu::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        ));
+        assert!(line.contains("1920x1080"), "{line}");
+        assert!(!line.contains("780"), "{line}");
+    }
 
     /// A dumped submission names its colour target's size in pixels, as decimal: printed with the
     /// rest of the target in hexadecimal, a 1920 x 1080 target read as `780 x 438`.
