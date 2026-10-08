@@ -3642,6 +3642,15 @@ fn read_texture(
     texture_from_words(words, slot, memory, texels)
 }
 
+/// The swizzle modes a texture is read in through [`read_tiled_texture`], as their layouts place a
+/// chain ([`crate::tiling::SurfaceLayout`]).
+const SAMPLED_AS_RENDERED: [SwizzleMode; 4] = [
+    SwizzleMode::Tiled64KbRX,
+    SwizzleMode::Tiled4KbDX,
+    SwizzleMode::Tiled4KbS,
+    SwizzleMode::Linear,
+];
+
 /// [`read_texture`] for a descriptor's eight words already in hand.
 fn texture_from_words(
     words: [u32; 8],
@@ -3658,8 +3667,9 @@ fn texture_from_words(
         (SwizzleMode::Linear, TexelFormat::Rgba8) => {}
         // The tiled layouts modelled, each sampled as it is rendered (crate::tiling); a one-byte
         // linear image with no pitch of its own lies as its layout's chain places it.
-        (SwizzleMode::Tiled64KbRX | SwizzleMode::Tiled4KbDX | SwizzleMode::Linear, _)
-            if descriptor.tiling != SwizzleMode::Linear || words[4].trailing_zeros() >= 14 =>
+        (tiling, _)
+            if SAMPLED_AS_RENDERED.contains(&tiling)
+                && (tiling != SwizzleMode::Linear || words[4].trailing_zeros() >= 14) =>
         {
             return read_tiled_texture(&descriptor, format, slot, memory, texels)
                 .map(|bound| swizzled_texture(bound, format, selects));
@@ -3931,6 +3941,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::Dx4KbBpp16 => 1 << 23,
         crate::tiling::SurfaceLayout::S64KbBpp16 => 1 << 21,
         crate::tiling::SurfaceLayout::S4KbBpp16 => 1 << 20,
+        crate::tiling::SurfaceLayout::S4Kb => 1 << 19,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
@@ -5016,6 +5027,53 @@ mod tests {
         let tags: Vec<u32> = texels.chunks(4).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
         assert_eq!(texels[1], 1, "a block's words in order");
+    }
+
+    /// A 32-bpp texture in `4KB_S` binds, each texel read from where that swizzle puts it: the
+    /// 4 x 4 `8_8_8_8_UNORM` image PPSA02664 samples beside its `BC3` one.
+    #[test]
+    fn a_32_bpp_4kb_s_texture_binds_its_texels() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; 4096];
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let at = crate::tiling::tiled_byte_offset_4kb_s_bpp4(x, y, 4);
+                bytes[at..at + 4].copy_from_slice(&(y << 8 | x).to_le_bytes());
+            }
+        }
+        let (width, height) = (4u32, 4u32);
+        let words = [
+            0x100,
+            (56 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14),
+            // 2D, ADDR_SW_4KB_S, the channels as they are.
+            0x9050_0fac,
+            0,
+            0x70_0000,
+            0,
+            0,
+        ];
+        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: 4,
+            height: 4,
+            ..
+        }) = bound
+        else {
+            panic!("bound: {bound:?}");
+        };
+        let expected: Vec<u32> = (0..4u32)
+            .flat_map(|y| (0..4u32).map(move |x| y << 8 | x))
+            .collect();
+        assert_eq!(texels.to_vec(), expected);
     }
 
     /// A mipmapped `BC3` texture in `4KB_S` binds the level its view reads first, from where the
