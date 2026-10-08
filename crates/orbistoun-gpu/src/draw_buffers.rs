@@ -80,15 +80,23 @@ pub fn descriptor_extent(words: [u32; 4], reads: DescriptorReads) -> Result<u64,
 /// The most bytes one draw buffer binds; a descriptor naming more is refused rather than read.
 const MOST_BYTES: u64 = 256 << 20;
 
-/// How many ranges [`BufferCache`] keeps before it restarts: a frame's constants and vertices, and
-/// a bound for a guest streaming new ones every frame.
-const CACHE_ENTRIES: usize = 256;
+/// How many bytes [`BufferCache`] keeps, the oldest ranges going first past it: a world's vertex
+/// buffers, which a frame draws from again, and a bound for a guest streaming new ones every frame.
+const CACHE_BYTES: usize = 512 << 20;
 
 /// Guest bytes read for draws, by where they lie and how many, kept across submissions while the
 /// host's write tracking reports them unwritten, as texels are.
 #[derive(Debug, Default)]
 pub struct BufferCache {
-    entries: std::collections::HashMap<(u64, usize), (Option<u64>, DrawBuffer)>,
+    /// Each range's bytes, when it was marked, and the generation it was kept at.
+    entries: std::collections::HashMap<(u64, usize), (Option<u64>, DrawBuffer, u64)>,
+    /// The ranges in the order they were kept, each with its generation; one whose entry was kept
+    /// again since is a stale place and is skipped.
+    order: std::collections::VecDeque<((u64, usize), u64)>,
+    /// The bytes the entries hold.
+    bytes: usize,
+    /// The next generation to keep a range at.
+    generation: u64,
 }
 
 impl BufferCache {
@@ -108,7 +116,7 @@ impl BufferCache {
             });
         }
         let span = length as u64;
-        if let Some((since, buffer)) = self.entries.get(&(address, length))
+        if let Some((since, buffer, _)) = self.entries.get(&(address, length))
             && since.and_then(|since| orbistoun_mem::watch::written_since(address, span, since))
                 == Some(false)
         {
@@ -131,12 +139,34 @@ impl BufferCache {
             bytes: padded.into(),
             base: address,
         };
-        if self.entries.len() >= CACHE_ENTRIES {
-            self.entries.clear();
-        }
-        self.entries
-            .insert((address, length), (since, buffer.clone()));
+        self.keep((address, length), since, buffer.clone());
         Ok(buffer)
+    }
+
+    /// Keeps `buffer` for its range, letting the oldest ranges go while the cache holds more than
+    /// [`CACHE_BYTES`].
+    fn keep(&mut self, range: (u64, usize), since: Option<u64>, buffer: DrawBuffer) {
+        let size = buffer.bytes.len();
+        if let Some((_, old, _)) = self.entries.remove(&range) {
+            self.bytes -= old.bytes.len();
+        }
+        self.generation += 1;
+        self.entries.insert(range, (since, buffer, self.generation));
+        self.order.push_back((range, self.generation));
+        self.bytes += size;
+        while self.bytes > CACHE_BYTES {
+            let Some((oldest, generation)) = self.order.pop_front() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&oldest)
+                .is_some_and(|entry| entry.2 == generation)
+                && let Some((_, gone, _)) = self.entries.remove(&oldest)
+            {
+                self.bytes -= gone.bytes.len();
+            }
+        }
     }
 }
 
@@ -591,6 +621,48 @@ pub fn bind_draw_buffers(
         out.push(command);
     }
     *commands = out;
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{BufferCache, CACHE_BYTES};
+    use crate::backend::DrawBuffer;
+
+    fn buffer(bytes: usize) -> DrawBuffer {
+        DrawBuffer {
+            hash: bytes as u64,
+            bytes: vec![0u8; bytes].into(),
+            base: 0,
+        }
+    }
+
+    /// A world's many vertex buffers all stay while they fit the budget; past it the oldest go
+    /// first, and a range kept again is not let go for its first place.
+    #[test]
+    fn the_cache_keeps_every_range_it_has_room_for() {
+        let mut cache = BufferCache::default();
+        for range in 0..300u64 {
+            cache.keep((range * 0x1000, 64), None, buffer(64));
+        }
+        assert_eq!(
+            cache.entries.len(),
+            300,
+            "three hundred small ranges all kept"
+        );
+        cache.keep((0, 64), None, buffer(64));
+        let big = CACHE_BYTES - 64;
+        cache.keep((0x100_0000, big), None, buffer(big));
+        assert!(
+            cache.entries.contains_key(&(0, 64)),
+            "kept again, so newest but one"
+        );
+        assert!(cache.entries.contains_key(&(0x100_0000, big)));
+        assert!(
+            !cache.entries.contains_key(&(0x1000, 64)),
+            "the oldest went first"
+        );
+        assert!(cache.bytes <= CACHE_BYTES);
+    }
 }
 
 #[cfg(test)]
