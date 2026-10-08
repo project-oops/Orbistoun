@@ -1256,6 +1256,34 @@ found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app
 found_on = "2026-10-08"
 
 [[function]]
+name = "sceKernelGetModuleInfoForUnwind"
+arity = 3
+purpose = "Where the module holding an address keeps its unwind tables, for a C++ unwinder walking frames: (address, flags, info)."
+edge_cases = [
+    "The block is the title's own unwinder's (PPSA02664 libc.prx +0x39b2f..+0x39db2): it sets +0 to 0x130 and calls with flags 1, then on 0 reads .eh_frame_hdr at +0x108, .eh_frame at +0x110 (which must be non-null), a 32-bit .eh_frame length at +0x118 and the module base at +0x120. Orbistoun also writes the file name from +8 and the code segment's size at +0x128 (D768).",
+    "Each placed module's tables come from its PT_GNU_EH_FRAME: every module in the corpus encodes the .eh_frame pointer pc-relative sdata4 and places .eh_frame just below the index, so its length runs to the index.",
+    "An address in no placed module, or a block stating less than 0x130, answers the placeholder; the unwinder then searches the frames registered with it, as it does on any miss. The real error code is unmeasured.",
+]
+returns = "status"
+known_by = "guest-observed"
+cites = "the guest: PPSA02664 libc.prx's unwinder (+0x39ae0) and the PT_GNU_EH_FRAME headers of its eboot, libc.prx and Il2CppUserAssemblies.prx"
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA04263-app0", "PPSA28061-app0"]
+found_on = "2026-10-08"
+
+[[function]]
+name = "_is_signal_return"
+arity = 1
+purpose = "Whether a return address is the signal trampoline's, where an unwinder reads a signal frame instead of a call frame."
+edge_cases = [
+    "Always no in orbistoun: a handler runs on its own stack through a reentrant call, and no trampoline is placed in the guest's space, so no return address in a guest frame is one (D768).",
+]
+returns = "status"
+known_by = "assumed"
+assumptions = ["What the hardware answers for its own trampoline's address is unmeasured; it does not arise here."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-08"
+
+[[function]]
 name = "sceKernelRemoveExceptionHandler"
 arity = 1
 purpose = "Removes a handler installed for a signal. Called as (signum)."

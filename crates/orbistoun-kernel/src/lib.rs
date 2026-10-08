@@ -125,6 +125,9 @@ guest_module! {
         // A pointer to `{module, offset}`, the ELF thread-local storage ABI's `tls_index`.
         "__tls_get_addr" => 1,
         "sceKernelGetProcParam" => 0,
+        // An address in a module, flags, and the block to fill, whose first word states its size.
+        "sceKernelGetModuleInfoForUnwind" => 3,
+        "_is_signal_return" => 1,
         "sceKernelGetSanitizerMallocReplaceExternal" => 0,
         "sceKernelGetSanitizerNewReplaceExternal" => 0,
         "sceKernelSetVirtualRangeName" => 3,
@@ -6042,6 +6045,99 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// A placed module's unwind tables, recorded for the unwinder that asks by address (D768).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnwindModule {
+    /// The module's file name, which the block carries.
+    pub name: String,
+    /// Where the module's placed span starts and ends.
+    pub span: (u64, u64),
+    /// `.eh_frame_hdr`.
+    pub eh_frame_hdr: u64,
+    /// `.eh_frame`, and how many bytes of it there are.
+    pub eh_frame: (u64, u64),
+    /// The module's code segment, and its size.
+    pub text: (u64, u64),
+}
+
+/// Every placed module's unwind tables.
+static UNWIND_MODULES: Mutex<Vec<UnwindModule>> = Mutex::new(Vec::new());
+
+/// Records a placed module's unwind tables.
+pub fn note_unwind_module(module: UnwindModule) {
+    if let Ok(mut modules) = UNWIND_MODULES.lock() {
+        modules.push(module);
+    }
+}
+
+/// The block `sceKernelGetModuleInfoForUnwind` fills, as the title's own unwinder reads it
+/// (PPSA02664 `libc.prx` `+0x39b2f`..`+0x39db2`): a size word the caller sets to `0x130`, the
+/// module's name from `+0x08`, then `.eh_frame_hdr`, `.eh_frame`, its length, and the code
+/// segment and its size.
+mod unwind_block {
+    pub(crate) const SIZE: u64 = 0x130;
+    pub(crate) const NAME: u64 = 0x08;
+    pub(crate) const NAME_LEN: usize = 0x100;
+    pub(crate) const EH_FRAME_HDR: u64 = 0x108;
+    pub(crate) const EH_FRAME: u64 = 0x110;
+    pub(crate) const EH_FRAME_LEN: u64 = 0x118;
+    pub(crate) const TEXT: u64 = 0x120;
+    pub(crate) const TEXT_LEN: u64 = 0x128;
+}
+
+/// `sceKernelGetModuleInfoForUnwind(address, flags, info)`: the unwind tables of the module holding
+/// `address` (D768).
+///
+/// Answers `0` with the block filled. A block stating less than its full size, or an address in no
+/// placed module, is refused with the placeholder; the unwinder then searches the frames
+/// registered with it, as it does on a miss.
+fn get_module_info_for_unwind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (address, out) = (args[0], args[2]);
+    let refused = u64::from(GuestError::Unimplemented.as_raw());
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if unsafe { guest::read_u64(out) }.is_none_or(|size| size < unwind_block::SIZE) {
+        return refused;
+    }
+    let found = UNWIND_MODULES.lock().ok().and_then(|modules| {
+        modules
+            .iter()
+            .find(|m| (m.span.0..m.span.1).contains(&address))
+            .cloned()
+    });
+    let Some(module) = found else {
+        return refused;
+    };
+    let mut name = [0_u8; unwind_block::NAME_LEN];
+    let bytes = module.name.as_bytes();
+    let len = bytes.len().min(unwind_block::NAME_LEN - 1);
+    name[..len].copy_from_slice(&bytes[..len]);
+    // SAFETY: the caller stated the block is at least `SIZE` bytes, and the name field lies inside it.
+    if !unsafe { guest::write_bytes(out + unwind_block::NAME, &name) } {
+        return refused;
+    }
+    let fields = [
+        (unwind_block::EH_FRAME_HDR, module.eh_frame_hdr),
+        (unwind_block::EH_FRAME, module.eh_frame.0),
+        (unwind_block::EH_FRAME_LEN, module.eh_frame.1),
+        (unwind_block::TEXT, module.text.0),
+        (unwind_block::TEXT_LEN, module.text.1),
+    ];
+    // SAFETY: as above; every offset is below `SIZE`.
+    let written = fields
+        .iter()
+        .all(|&(at, value)| unsafe { guest::write_u64(out + at, value) });
+    if written { OK } else { refused }
+}
+
+/// `_is_signal_return(address)`: whether `address` is the signal trampoline's return, where an
+/// unwinder would read a signal frame instead of a call frame (D768).
+///
+/// Never: orbistoun runs a handler on its own stack through a reentrant call and places no
+/// trampoline in the guest's space, so no return address in a guest frame is one.
+fn is_signal_return(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// The placed address of the executable's process parameters, zero until noted.
 static PROCESS_PARAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -6362,6 +6458,11 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelRaiseException", raise_exception),
     ("__tls_get_addr", tls_get_addr),
     ("sceKernelGetProcParam", get_proc_param),
+    (
+        "sceKernelGetModuleInfoForUnwind",
+        get_module_info_for_unwind,
+    ),
+    ("_is_signal_return", is_signal_return),
     (
         "sceKernelGetSanitizerMallocReplaceExternal",
         no_sanitizer_replacement,
@@ -8554,6 +8655,44 @@ mod tests {
         assert_eq!(super::load_start_module(&args), handle);
         assert_eq!(super::load_start_module(&args), handle, "and again");
         assert_eq!(super::start_needed_modules().0, 0, "nothing starts twice");
+    }
+
+    /// The unwinder is told the tables of the module holding an address, in the block layout the
+    /// title's own unwinder reads (D768), and a block too small or an address in no module is
+    /// refused.
+    #[test]
+    fn the_unwind_tables_of_the_module_holding_an_address_are_answered() {
+        super::note_unwind_module(super::UnwindModule {
+            name: "libc.prx".to_owned(),
+            span: (0x4800_0299_0000, 0x4800_02ab_0000),
+            eh_frame_hdr: 0x4800_02a9_4164,
+            eh_frame: (0x4800_02a7_8de0, 0x1b384),
+            text: (0x4800_0299_0000, 0xc8092),
+        });
+        let block = orbistoun_mem::blocks::block(0x130 / 8);
+        // SAFETY: the block just handed out is writable.
+        assert!(unsafe { super::guest::write_u64(block, 0x130) });
+        let args = [0x4800_029c_7b1f, 1, block, 0, 0, 0];
+        assert_eq!(super::get_module_info_for_unwind(&args), super::OK);
+        // SAFETY: inside the block.
+        let read = |at: u64| unsafe { super::guest::read_u64(block + at) };
+        assert_eq!(read(0x108), Some(0x4800_02a9_4164));
+        assert_eq!(read(0x110), Some(0x4800_02a7_8de0));
+        assert_eq!(read(0x118), Some(0x1b384));
+        assert_eq!(read(0x120), Some(0x4800_0299_0000));
+        assert_eq!(read(0x128), Some(0xc8092));
+        assert_eq!(read(0x08), Some(u64::from_le_bytes(*b"libc.prx")));
+        assert_ne!(
+            super::get_module_info_for_unwind(&[0x10, 1, block, 0, 0, 0]),
+            super::OK
+        );
+        // SAFETY: as above.
+        assert!(unsafe { super::guest::write_u64(block, 0x40) });
+        assert_ne!(
+            super::get_module_info_for_unwind(&args),
+            super::OK,
+            "too small"
+        );
     }
 
     /// A retail process has no sanitizer allocator to put in place of the title's (D765).

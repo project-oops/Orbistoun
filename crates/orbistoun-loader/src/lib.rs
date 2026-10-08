@@ -15,6 +15,7 @@ pub mod process;
 pub mod protect;
 pub mod relocate;
 pub mod tls;
+pub mod unwind;
 
 pub use image::{Image, PlacedSegment};
 

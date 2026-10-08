@@ -1766,16 +1766,19 @@ impl Service {
         image: &orbistoun_loader::Image,
         bytes: &[u8],
         resolver: &impl orbistoun_loader::relocate::SymbolResolver,
-        index: usize,
+        (library, index): (&str, usize),
     ) -> Result<orbistoun_loader::relocate::Applied, ServiceError> {
         let tls = orbistoun_loader::tls::layout_of(bytes)?.filter(|(l, _, _)| l.total_size > 0);
         let Some((layout, _, vaddr)) = tls else {
-            return self.relocate_image_recorded(image, bytes, resolver);
+            let applied = self.relocate_image_recorded(image, bytes, resolver)?;
+            note_unwind_module(&format!("{library}.prx"), image, bytes);
+            return Ok(applied);
         };
         // The executable's thread-locals are module 1, and the title's `index`th module is the
         // id after them by its place in the order: sparse, which an id need not avoid.
         let module = orbistoun_loader::tls::MAIN_MODULE_ID + 1 + index as u64;
         let applied = self.relocate_module_recorded(image, bytes, resolver, module)?;
+        note_unwind_module(&format!("{library}.prx"), image, bytes);
         // After relocation, because `.tdata` may hold pointers relocation wrote.
         let init = if layout.init_size == 0 {
             Vec::new()
@@ -1992,7 +1995,7 @@ impl Service {
                 bound: per_module.get(index + 1).unwrap_or(&nothing),
                 inner: &shifted,
             };
-            let applied = self.relocate_title_module(image, bytes, &resolver, index)?;
+            let applied = self.relocate_title_module(image, bytes, &resolver, (library, index))?;
             plans.push(linkplan::module_plan(
                 library,
                 image,
@@ -2130,7 +2133,9 @@ impl Service {
                 if let Some(address) = resolution.addresses.get(&import.symbol_index) {
                     // Asked of the dispatch tables, which answer the call: a name known but not
                     // bound is not implemented.
-                    if orbistoun_thunk::is_implemented(at) {
+                    if orbistoun_thunk::is_implemented(at)
+                        && !self.yields_to_title_module(import.nid)
+                    {
                         kept.push(import.name.clone());
                         // Named with its library: kept by orbistoun is correct for libc and
                         // suspicious for a title's own module.
@@ -2156,6 +2161,15 @@ impl Service {
             by_library,
         };
         Ok((per_module, kept, account))
+    }
+
+    /// Whether orbistoun hands an import it implements to a module the title ships that exports it
+    /// (D769): the C++ exception runtime, whose stand-ins here end the run because orbistoun has no
+    /// unwinder, where the title's own libc continues the unwind it began.
+    fn yields_to_title_module(&self, nid: u64) -> bool {
+        YIELDED_TO_A_TITLE_MODULE
+            .iter()
+            .any(|name| self.hasher.hash(name).as_raw() == nid)
     }
 
     /// The library name an import names, or a stand-in when it names none.
@@ -2362,6 +2376,41 @@ fn initialisers_of(bytes: &[u8], base: u64) -> Option<orbistoun_kernel::ModuleIn
     })
 }
 
+/// Records where a placed module's unwind tables are, for the unwinder that asks by address
+/// (D768). `name` is its file name, which the block carries for a reader and nothing here depends
+/// on. A module without `PT_GNU_EH_FRAME` is not recorded.
+pub fn note_unwind_module(name: &str, image: &orbistoun_loader::Image, bytes: &[u8]) {
+    let Some(sections) = orbistoun_loader::unwind::sections_of(image, bytes) else {
+        return;
+    };
+    let (start, len) = image.span();
+    orbistoun_kernel::note_unwind_module(orbistoun_kernel::UnwindModule {
+        name: name.to_owned(),
+        span: (start, start.saturating_add(len)),
+        eh_frame_hdr: sections.eh_frame_hdr,
+        eh_frame: (sections.eh_frame, sections.eh_frame_len),
+        text: (sections.text, sections.text_len),
+    });
+}
+
+/// What orbistoun implements but hands to a module the title ships that exports it (D769).
+///
+/// The C++ runtime's unwinding and throwing entry points. Orbistoun's stand-ins end the run, since
+/// it has no unwinder of its own; a title's own libc has one, and an unwind it began must be
+/// continued, and a throw caught, by the same runtime.
+const YIELDED_TO_A_TITLE_MODULE: &[&str] = &[
+    "_Unwind_Resume",
+    "_ZSt9terminatev",
+    "__cxa_pure_virtual",
+    "_ZSt14_Xlength_errorPKc",
+    "_ZSt14_Xout_of_rangePKc",
+    "_ZSt18_Xinvalid_argumentPKc",
+    "_ZSt11_Xbad_allocv",
+    "_ZSt19_Xbad_function_callv",
+    "_ZSt14_Throw_C_errori",
+    "_ZSt16_Throw_Cpp_errori",
+];
+
 /// Records which of the title's modules start before the executable's entry (D767). `owned` is
 /// every module's label and bytes, the executable first under the empty label.
 fn note_start_order(owned: &[(String, Vec<u8>)]) {
@@ -2439,6 +2488,17 @@ type SlotTables<'a> = (
 #[cfg(test)]
 mod tests {
     use super::{LibrarySettings, Path, Service, ServiceConfig, scripted_pad, slot_ranges};
+
+    /// The exception runtime is handed to a title module that exports it, and nothing else is
+    /// (D769).
+    #[test]
+    fn the_exception_runtime_yields_to_a_title_s_own() {
+        let service = Service::new(ServiceConfig::default());
+        let nid = |name: &str| service.nid_for(name).as_raw();
+        assert!(service.yields_to_title_module(nid("_Unwind_Resume")));
+        assert!(service.yields_to_title_module(nid("_ZSt14_Xlength_errorPKc")));
+        assert!(!service.yields_to_title_module(nid("malloc")));
+    }
 
     /// The shipped modules an executable needs start before it, each after what it needs (D767):
     /// PPSA02664 lists il2cpp first and libc last, and il2cpp needs libc, so libc starts first. A

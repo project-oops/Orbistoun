@@ -2737,6 +2737,7 @@ fn enter<W: Write>(
     }
 
     note_process_param(image, bytes);
+    orbistoun_service::note_unwind_module("eboot.bin", image, bytes);
 
     let returned = transfer_to_guest(entry, entry_stack, argument, second, entry_settings);
 
