@@ -2134,11 +2134,9 @@ impl Service {
                     // Asked of the dispatch tables, which answer the call: a name known but not
                     // bound is not implemented.
                     if orbistoun_thunk::is_implemented(at)
-                        && !self.yields_to_title_module(import.nid)
+                        && self.keeps_import(&library, import.nid)
                     {
                         kept.push(import.name.clone());
-                        // Named with its library: kept by orbistoun is correct for libc and
-                        // suspicious for a title's own module.
                         note(Unbound::KeptByOrbistoun, &library);
                     } else {
                         bound.insert(import.symbol_index, *address);
@@ -2161,6 +2159,16 @@ impl Service {
             by_library,
         };
         Ok((per_module, kept, account))
+    }
+
+    /// Whether orbistoun answers an import a title module also answers (D777): only one from a
+    /// library it declares, as libc, and not the exception runtime it yields (D769). A library only
+    /// the title ships is the title's: the console binds its export, whatever the name.
+    fn keeps_import(&self, library: &str, nid: u64) -> bool {
+        symbols::modules()
+            .iter()
+            .any(|module| module.name == library)
+            && !self.yields_to_title_module(nid)
     }
 
     /// Whether orbistoun hands an import it implements to a module the title ships that exports it
@@ -2542,6 +2550,19 @@ mod tests {
         assert!(service.yields_to_title_module(nid("_Unwind_Resume")));
         assert!(service.yields_to_title_module(nid("_ZSt14_Xlength_errorPKc")));
         assert!(!service.yields_to_title_module(nid("malloc")));
+    }
+
+    /// orbistoun keeps an import a title module also answers only for a library it declares (D777):
+    /// libc's `setenv` is its own, but PPSA25872's executable imports `setenv` from the title's
+    /// `Il2cppUserAssemblies`, whose export the console binds; the exception runtime yields either
+    /// way (D769).
+    #[test]
+    fn orbistoun_keeps_only_what_its_own_libraries_name() {
+        let service = Service::new(ServiceConfig::default());
+        let nid = |name: &str| service.nid_for(name).as_raw();
+        assert!(service.keeps_import("libc", nid("setenv")));
+        assert!(!service.keeps_import("Il2cppUserAssemblies", nid("setenv")));
+        assert!(!service.keeps_import("libc", nid("_Unwind_Resume")));
     }
 
     /// The shipped modules an executable needs start before it, each after what it needs (D767):
