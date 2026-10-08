@@ -179,6 +179,35 @@ pub fn surface_bytes_64kb_s_bpp16(width: u32, height: u32) -> usize {
         * BLOCK_BYTES
 }
 
+/// Byte offset of element `(x, y)` in a 128-bpp `4KB_S` surface `width` elements wide: its
+/// 16 x 16 block, row-major across the pitch, then the low twelve bits of the `64KB_S` equation,
+/// which is all a 4 KiB block holds. Read off `Addr2ComputeSurfaceAddrFromCoord` for this console's
+/// configuration (`SW_4KB_S`, 128 bpp, a 512 x 256 surface): every x and y bit below 16, a second
+/// block across and down, and (300, 200).
+#[must_use]
+pub fn tiled_byte_offset_4kb_s_bpp16(x: u32, y: u32, width: u32) -> usize {
+    let blocks_per_row = width.div_ceil(S4_BPP16_BLOCK_EXTENT) as usize;
+    let block = (y / S4_BPP16_BLOCK_EXTENT) as usize * blocks_per_row
+        + (x / S4_BPP16_BLOCK_EXTENT) as usize;
+    let mut offset = 0;
+    for (bit, place) in S_BPP16_X_BITS.iter().take(4).enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in S_BPP16_Y_BITS.iter().take(4).enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    block * S4_BLOCK_BYTES + offset
+}
+
+/// A 128-bpp `4KB_S` block's side in elements: 256 elements of sixteen bytes.
+const S4_BPP16_BLOCK_EXTENT: u32 = 16;
+/// A `4KB_S` block's bytes.
+const S4_BLOCK_BYTES: usize = 4096;
+
 /// Bytes a whole 8-bpp `64KB_R_X` surface occupies: every block it touches, whole.
 #[must_use]
 pub fn surface_bytes_64kb_rx_bpp1(width: u32, height: u32) -> usize {
@@ -813,6 +842,12 @@ pub enum SurfaceLayout {
     /// `4KB_D_X` at sixteen bytes a texel: 16 x 16-texel blocks, by addrlib's 128-bpp equation
     /// ([`tiled_byte_offset_4kb_dx_bpp16_surface`]). A texel is four words.
     Dx4KbBpp16,
+    /// `64KB_S` at sixteen bytes an element, a block-compressed image's blocks: 64 x 64-element
+    /// blocks ([`tiled_byte_offset_64kb_s_bpp16`]). An element is four words.
+    S64KbBpp16,
+    /// `4KB_S` at sixteen bytes an element: 16 x 16-element blocks
+    /// ([`tiled_byte_offset_4kb_s_bpp16`]). An element is four words.
+    S4KbBpp16,
 }
 
 /// A linear surface's row pitch in texels: its width rounded up to 64, 256 bytes.
@@ -830,9 +865,10 @@ impl SurfaceLayout {
             // Only its sixteen-byte form is modelled, which `at_bytes_per_texel` keeps to.
             SwizzleMode::Tiled64KbDX => Some(Self::Dx64KbBpp16),
             SwizzleMode::Linear => Some(Self::Linear),
-            // Modelled only for a block-compressed texture's blocks, which are read apart from
-            // these layouts.
-            SwizzleMode::Tiled64KbS | SwizzleMode::Other(_) => None,
+            // Only their sixteen-byte forms, a block-compressed image's blocks.
+            SwizzleMode::Tiled64KbS => Some(Self::S64KbBpp16),
+            SwizzleMode::Tiled4KbS => Some(Self::S4KbBpp16),
+            SwizzleMode::Other(_) => None,
         }
     }
 
@@ -841,8 +877,10 @@ impl SurfaceLayout {
     #[must_use]
     pub const fn at_bytes_per_texel(self, bytes_per_texel: u32) -> Option<Self> {
         match (self, bytes_per_texel) {
-            (Self::Dx64KbBpp16 | Self::Dx4KbBpp16, 16) => Some(self),
-            (Self::Dx64KbBpp16 | Self::Dx4KbBpp16, _) => None,
+            (Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16, 16) => {
+                Some(self)
+            }
+            (Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16, _) => None,
             (Self::Dx4Kb, 16) => Some(Self::Dx4KbBpp16),
             (Self::Rx64Kb, 1) => Some(Self::Rx64KbBpp1),
             (Self::Linear, 1) => Some(Self::LinearBpp1),
@@ -857,16 +895,17 @@ impl SurfaceLayout {
         match self {
             Self::Rx64KbBpp1 | Self::LinearBpp1 => 0,
             Self::Rx64Kb | Self::Dx4Kb | Self::Linear => 2,
-            Self::Dx64KbBpp16 | Self::Dx4KbBpp16 => 4,
+            Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16 => 4,
         }
     }
 
     /// Byte offset of texel `(x, y)` in a sixteen-byte layout's surface `width` texels wide.
     fn sixteen_byte_offset(self, x: u32, y: u32, width: u32, pipe_bank_xor: u8) -> usize {
-        if self == Self::Dx4KbBpp16 {
-            tiled_byte_offset_4kb_dx_bpp16_surface(x, y, width)
-        } else {
-            tiled_byte_offset_64kb_dx_bpp16_xor(x, y, width, pipe_bank_xor)
+        match self {
+            Self::Dx4KbBpp16 => tiled_byte_offset_4kb_dx_bpp16_surface(x, y, width),
+            Self::S64KbBpp16 => tiled_byte_offset_64kb_s_bpp16(x, y, width),
+            Self::S4KbBpp16 => tiled_byte_offset_4kb_s_bpp16(x, y, width),
+            _ => tiled_byte_offset_64kb_dx_bpp16_xor(x, y, width, pipe_bank_xor),
         }
     }
 
@@ -898,6 +937,13 @@ impl SurfaceLayout {
                     * BLOCK_BYTES
                     / 4
             }
+            Self::S64KbBpp16 => surface_bytes_64kb_s_bpp16(width, height) / 4,
+            Self::S4KbBpp16 => {
+                width.div_ceil(S4_BPP16_BLOCK_EXTENT) as usize
+                    * height.div_ceil(S4_BPP16_BLOCK_EXTENT) as usize
+                    * S4_BLOCK_BYTES
+                    / 4
+            }
             Self::Dx4KbBpp16 => {
                 width.div_ceil(DX4_BPP16_BLOCK_EXTENT) as usize
                     * height.div_ceil(DX4_BPP16_BLOCK_EXTENT) as usize
@@ -915,9 +961,9 @@ impl SurfaceLayout {
     /// `log2` of the bytes one block of this layout holds (`GetBlockSizeLog2`).
     const fn block_log2(self) -> u32 {
         match self {
-            Self::Rx64Kb | Self::Rx64KbBpp1 | Self::Dx64KbBpp16 => 16,
+            Self::Rx64Kb | Self::Rx64KbBpp1 | Self::Dx64KbBpp16 | Self::S64KbBpp16 => 16,
             // A linear surface has no blocks; its "block" is a row's 256 bytes, never a tail's.
-            Self::Dx4Kb | Self::Dx4KbBpp16 => 12,
+            Self::Dx4Kb | Self::Dx4KbBpp16 | Self::S4KbBpp16 => 12,
             Self::Linear | Self::LinearBpp1 => 8,
         }
     }
@@ -1080,7 +1126,13 @@ impl SurfaceLayout {
     pub const fn models(self, pipe_bank_xor: u8) -> bool {
         match self {
             Self::Rx64Kb | Self::Rx64KbBpp1 | Self::Dx64KbBpp16 => true,
-            Self::Dx4Kb | Self::Dx4KbBpp16 | Self::Linear | Self::LinearBpp1 => pipe_bank_xor == 0,
+            // The standard swizzles have no pipe XOR (`ADDR_SW_64KB_S`, `addrtypes.h:236`).
+            Self::Dx4Kb
+            | Self::Dx4KbBpp16
+            | Self::Linear
+            | Self::LinearBpp1
+            | Self::S64KbBpp16
+            | Self::S4KbBpp16 => pipe_bank_xor == 0,
         }
     }
 
@@ -1137,7 +1189,8 @@ impl SurfaceLayout {
                 })
                 .collect(),
             // Each texel is four words, in order.
-            Self::Dx64KbBpp16 | Self::Dx4KbBpp16 => (0..height)
+            Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16 => (0
+                ..height)
                 .flat_map(|y| (0..width).map(move |x| (x, y)))
                 .flat_map(|(x, y)| {
                     let at = self.sixteen_byte_offset(x, y, width, pipe_bank_xor) / 4;
@@ -1243,7 +1296,7 @@ impl SurfaceLayout {
                 Ok(())
             }
             // Each texel's four words, in order.
-            Self::Dx64KbBpp16 | Self::Dx4KbBpp16 => {
+            Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16 => {
                 let needed_words = self.words(width, height);
                 let words = width as usize * height as usize * 4;
                 if tiled.len() < needed_words || linear.len() != words {
@@ -1267,6 +1320,56 @@ impl SurfaceLayout {
 
 #[cfg(test)]
 mod tests {
+    /// A 2048 x 1024 `BC3` texture of 12 levels in `4KB_S`, as PPSA02664 samples one: 512 x 256
+    /// blocks, placed and addressed as addrlib's `Addr2ComputeSurfaceInfo` and
+    /// `Addr2ComputeSurfaceAddrFromCoord` place and address them for this console's configuration.
+    #[test]
+    fn a_4kb_s_chain_is_placed_as_addrlib_places_it() {
+        use super::SurfaceLayout;
+        let layout = SurfaceLayout::of(SwizzleMode::Tiled4KbS)
+            .and_then(|layout| layout.at_bytes_per_texel(16))
+            .expect("modelled");
+        let (width, height, levels) = (512, 256, 12);
+        assert_eq!(layout.first_level_in_tail(width, height, levels), 6);
+        let offsets: Vec<Option<u64>> = (0..6)
+            .map(|level| layout.level_offset(width, height, levels, level))
+            .collect();
+        assert_eq!(
+            offsets,
+            [704_512, 180_224, 49152, 16384, 8192, 4096].map(Some)
+        );
+        let tails: Vec<Option<(u32, u32)>> = (6..12)
+            .map(|level| layout.tail_origin(width, height, levels, level))
+            .collect();
+        assert_eq!(
+            tails,
+            [(8, 0), (4, 8), (0, 12), (0, 8), (4, 4), (4, 0)].map(Some)
+        );
+        for ((x, y), addr) in [
+            ((1, 0), 704_576),
+            ((8, 0), 706_560),
+            ((0, 8), 705_536),
+            ((16, 0), 708_608),
+            ((0, 16), 835_584),
+            ((5, 9), 706_128),
+            ((300, 200), 2_354_688),
+        ] {
+            assert_eq!(
+                704_512 + layout.sixteen_byte_offset(x, y, width, 0),
+                addr,
+                "level 0 ({x}, {y})"
+            );
+        }
+        // Tail levels, within the tail's block at the surface's start.
+        for ((x, y), addr) in [((8, 0), 2048), ((11, 2), 2272), ((0, 8), 1024)] {
+            assert_eq!(
+                layout.sixteen_byte_offset(x, y, 16, 0),
+                addr,
+                "tail ({x}, {y})"
+            );
+        }
+    }
+
     /// `64KB_S` at sixteen bytes an element answers what addrlib answers for this console: the
     /// addresses `Addr2ComputeSurfaceAddrFromCoord` gave for these elements.
     #[test]

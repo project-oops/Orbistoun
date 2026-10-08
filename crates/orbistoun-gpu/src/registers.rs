@@ -1802,6 +1802,8 @@ const ADDR_SW_4KB_D_X: u32 = 22;
 const ADDR_SW_64KB_D_X: u32 = 26;
 /// `ADDR_SW_64KB_S` (`addrtypes.h:236`): the standard swizzle with no pipe XOR.
 const ADDR_SW_64KB_S: u32 = 9;
+/// `ADDR_SW_4KB_S` (`addrtypes.h:232`): the standard swizzle in 4 KiB blocks.
+const ADDR_SW_4KB_S: u32 = 5;
 
 /// The tiling (swizzle) mode of a surface - a colour target or a texture.
 ///
@@ -1823,6 +1825,9 @@ pub enum SwizzleMode {
     /// 64KB_S (`ADDR_SW_64KB_S`), the standard swizzle with no pipe XOR; modelled at sixteen bytes
     /// an element, a block-compressed image's blocks.
     Tiled64KbS,
+    /// 4KB_S (`ADDR_SW_4KB_S`), the standard swizzle in 4 KiB blocks; modelled at sixteen bytes an
+    /// element, a block-compressed image's blocks.
+    Tiled4KbS,
     /// A mode orbistoun does not model, carried by its raw five-bit swizzle-mode value.
     Other(u32),
 }
@@ -1840,6 +1845,7 @@ pub fn decode_swizzle_mode(field: u32) -> SwizzleMode {
         ADDR_SW_4KB_D_X => SwizzleMode::Tiled4KbDX,
         ADDR_SW_64KB_D_X => SwizzleMode::Tiled64KbDX,
         ADDR_SW_64KB_S => SwizzleMode::Tiled64KbS,
+        ADDR_SW_4KB_S => SwizzleMode::Tiled4KbS,
         other => SwizzleMode::Other(other),
     }
 }
@@ -4209,11 +4215,11 @@ mod tests {
         );
         // COLOR_SW_MODE is bits 18:14, so field value 0 is linear whatever the other bits carry.
         assert_eq!(decode_colour_swizzle_mode(0x0000_0000), SwizzleMode::Linear);
-        // An unmodelled mode is carried by its raw value: 4KB_S is ADDR_SW_4KB_S = 5, so `5 << 14`
-        // = 0x0001_4000 in the field.
+        // An unmodelled mode is carried by its raw value: 4KB_D is ADDR_SW_4KB_D = 6, so `6 << 14`
+        // = 0x0001_8000 in the field.
         assert_eq!(
-            decode_colour_swizzle_mode(0x0001_4000),
-            SwizzleMode::Other(5)
+            decode_colour_swizzle_mode(0x0001_8000),
+            SwizzleMode::Other(6)
         );
     }
 

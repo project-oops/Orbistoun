@@ -3929,6 +3929,8 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::LinearBpp1 => 1 << 25,
         crate::tiling::SurfaceLayout::Dx64KbBpp16 => 1 << 24,
         crate::tiling::SurfaceLayout::Dx4KbBpp16 => 1 << 23,
+        crate::tiling::SurfaceLayout::S64KbBpp16 => 1 << 21,
+        crate::tiling::SurfaceLayout::S4KbBpp16 => 1 << 20,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
@@ -4001,10 +4003,12 @@ fn read_tiled_texture(
     })
 }
 
-/// A `BC3_UNORM` texture's blocks, read whole from its `64KB_S` surface and laid out row-major, a
-/// block (four words) for every four-by-four texels, for the host to sample natively. Only a 2D,
-/// single-level, uncompressed image returning its channels as they are is read; any other is `None`,
-/// and the draw is refused rather than sampled some other way.
+/// A `BC3_UNORM` texture's blocks at the level its view reads first, read from its standard-swizzle
+/// chain (`64KB_S` or `4KB_S`, the level placed as addrlib places it) and laid out row-major, a
+/// block (four words) for every four-by-four texels, for the host to sample natively - the one level
+/// every texture is bound with. Only a 2D, uncompressed image returning its channels as they are is
+/// read, at a level whose blocks the chain's element extent gives; any other is `None`, and the draw
+/// is refused rather than sampled some other way.
 fn read_bc3_texture(
     descriptor: &ImageDescriptor,
     word3: u32,
@@ -4012,24 +4016,52 @@ fn read_bc3_texture(
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    const WORDS_PER_BLOCK: usize = 4;
-    let single_level = descriptor.levels == 1 && descriptor.base_level == descriptor.last_level;
     if word3 >> 28 != IMAGE_TYPE_2D
         || destination_selects(word3) != IDENTITY_SELECTS
-        || descriptor.tiling != SwizzleMode::Tiled64KbS
+        || !matches!(
+            descriptor.tiling,
+            SwizzleMode::Tiled64KbS | SwizzleMode::Tiled4KbS
+        )
         || descriptor.compression.is_some()
-        || !single_level
     {
         return None;
     }
-    let (width, height) = (descriptor.width, descriptor.height);
-    let (across, down) = (width.div_ceil(4), height.div_ceil(4));
-    let span = crate::tiling::surface_bytes_64kb_s_bpp16(across, down);
-    let key = (descriptor.base, width, height, 1 << 22);
+    let layout = crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(16)?;
+    // The chain is laid out in blocks, four texels a side (addrlib counts a compressed surface's
+    // elements, `pIn->width / 4`); the level's texels are level 0's halved.
+    let level = if descriptor.levels <= 1 {
+        0
+    } else {
+        descriptor.base_level
+    };
+    let (width, height) = (
+        (descriptor.width >> level).max(1),
+        (descriptor.height >> level).max(1),
+    );
+    let surface = crate::registers::chain_level(
+        (descriptor.base, 0),
+        (descriptor.width.div_ceil(4), descriptor.height.div_ceil(4)),
+        (descriptor.levels, level),
+        layout,
+    )?;
+    // A level whose blocks are not the chain's halved elements (an odd extent's rounding) is not
+    // read from a place it does not have.
+    if (surface.width, surface.height) != (width.div_ceil(4), height.div_ceil(4)) {
+        return None;
+    }
+    let span = surface.words() * 4;
+    let tail_tag = match surface.place {
+        crate::registers::Place::Whole => 0,
+        crate::registers::Place::Within { origin: (x, y), .. } => {
+            1 << 30 | (x & 0x3FF) << 10 | (y & 0x3FF)
+        }
+    };
+    let key = (surface.base, width, height, 1 << 22 | tail_tag);
     if let Some(cached) = texels.get(&key)
-        && cached.since.and_then(|since| {
-            orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
-        }) == Some(false)
+        && cached
+            .since
+            .and_then(|since| orbistoun_mem::watch::written_since(surface.base, span as u64, since))
+            == Some(false)
     {
         return Some(bc3_bind(
             slot,
@@ -4038,20 +4070,13 @@ fn read_bc3_texture(
             (width, height),
         ));
     }
-    let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
-    let bytes = memory.read(descriptor.base, span)?;
-    let mut blocks = Vec::with_capacity(across as usize * down as usize * WORDS_PER_BLOCK);
-    for y in 0..down {
-        for x in 0..across {
-            let at = crate::tiling::tiled_byte_offset_64kb_s_bpp16(x, y, across);
-            let block = bytes.get(at..at + WORDS_PER_BLOCK * 4)?;
-            blocks.extend(
-                block
-                    .chunks_exact(4)
-                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])),
-            );
-        }
-    }
+    let since = orbistoun_mem::watch::mark(surface.base, span as u64);
+    let tiled: Vec<u32> = memory
+        .read(surface.base, span)?
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect();
+    let blocks = surface.detile_mapped(&tiled, |w| w);
     let hash = crate::content_hash(&blocks);
     let shared: std::sync::Arc<[u32]> = blocks.into();
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
@@ -4991,6 +5016,81 @@ mod tests {
         let tags: Vec<u32> = texels.chunks(4).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
         assert_eq!(texels[1], 1, "a block's words in order");
+    }
+
+    /// A mipmapped `BC3` texture in `4KB_S` binds the level its view reads first, from where the
+    /// chain places it: a 64 x 64 chain of seven levels has level 0 after the tail's block and
+    /// level 1 at (8, 0) in that block, eight blocks a side.
+    #[test]
+    fn a_mipmapped_4kb_s_bc3_texture_binds_its_base_level() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let tag = |level: u32, x: u32, y: u32, word: u32| level << 16 | y << 12 | x << 8 | word;
+        let mut bytes = vec![0u8; 8192];
+        for y in 0..16 {
+            for x in 0..16 {
+                let at = 4096 + crate::tiling::tiled_byte_offset_4kb_s_bpp16(x, y, 16);
+                for word in 0..4 {
+                    bytes[at + 4 * word as usize..][..4]
+                        .copy_from_slice(&tag(0, x, y, word).to_le_bytes());
+                }
+            }
+        }
+        for y in 0..8 {
+            for x in 0..8 {
+                let at = crate::tiling::tiled_byte_offset_4kb_s_bpp16(8 + x, y, 16);
+                for word in 0..4 {
+                    bytes[at + 4 * word as usize..][..4]
+                        .copy_from_slice(&tag(1, x, y, word).to_le_bytes());
+                }
+            }
+        }
+        let memory = Memory(bytes);
+        let (width, height) = (64u32, 64u32);
+        let words = |base_level: u32| {
+            [
+                0x100,
+                (173 << 20) | (((width - 1) & 3) << 30),
+                ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+                // 2D, ADDR_SW_4KB_S, levels base..=6, the channels as they are.
+                0x9056_0fac | base_level << 12,
+                0,
+                6 << 4,
+                0,
+                0,
+            ]
+        };
+        for (base_level, side) in [(1, 32), (0, 64)] {
+            let bound =
+                texture_from_words(words(base_level), 0, &memory, &mut super::TexelCache::new());
+            let Some(RenderCommand::BindTexture {
+                texels,
+                width: bound_width,
+                height: bound_height,
+                encoding: crate::backend::TextureEncoding::Bc3,
+                ..
+            }) = bound
+            else {
+                panic!("level {base_level} bound as BC3 blocks: {bound:?}");
+            };
+            assert_eq!((bound_width, bound_height), (side, side));
+            let across = side / 4;
+            assert_eq!(texels.len(), (across * across * 4) as usize);
+            for (x, y) in [(0, 0), (1, 0), (0, 1), (across - 1, across - 1)] {
+                let at = ((y * across + x) * 4) as usize;
+                assert_eq!(
+                    texels[at..at + 4],
+                    [0, 1, 2, 3].map(|word| tag(base_level, x, y, word)),
+                    "level {base_level} block ({x}, {y})"
+                );
+            }
+        }
     }
 
     /// A pixel shader that samples through a descriptor and sampler still in its user data binds the
