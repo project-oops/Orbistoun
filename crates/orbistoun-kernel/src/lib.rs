@@ -1738,6 +1738,59 @@ pub fn note_module_initialisers(library: &str, initialisers: ModuleInitialisers)
     }
 }
 
+/// The modules the executable needs that the title ships, in the order they start: each after
+/// the modules it needs (D767).
+static START_ORDER: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The handle each module started before entry was given, by library name, so a later
+/// `sceKernelLoadStartModule` of it answers that handle and runs nothing again (D767).
+static STARTED_BEFORE_ENTRY: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+/// Records which placed modules start before the executable's entry, and in what order.
+pub fn note_start_order(order: Vec<String>) {
+    if let Ok(mut recorded) = START_ORDER.lock() {
+        *recorded = order;
+    }
+}
+
+/// Starts the modules the executable needs, as the platform's runtime linker does before the
+/// entry (D767): each in the recorded order, each given a handle a later load answers with.
+/// Answers how many modules started and how many initialisers ran.
+pub fn start_needed_modules() -> (usize, u64) {
+    let order = START_ORDER.lock().map(|o| o.clone()).unwrap_or_default();
+    let mut modules = 0;
+    let mut ran = 0;
+    for library in order {
+        if handle_started_before_entry(&library).is_some() {
+            continue;
+        }
+        let initialisers = PLACED_MODULES
+            .lock()
+            .ok()
+            .and_then(|placed| placed.iter().find(|(l, _)| *l == library).map(|(_, i)| *i));
+        let handle = NEXT_MODULE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Recorded before the initialisers run, so a module that loads itself while starting is
+        // answered rather than started twice.
+        if let Ok(mut started_before) = STARTED_BEFORE_ENTRY.lock() {
+            started_before.push((library.clone(), handle));
+        }
+        let count = initialisers.map_or(0, run_initialisers);
+        started(&library, handle, count);
+        modules += 1;
+        ran += count;
+    }
+    (modules, ran)
+}
+
+/// The handle a module was given when it started before entry, if it did.
+fn handle_started_before_entry(library: &str) -> Option<u64> {
+    let started_before = STARTED_BEFORE_ENTRY.lock().ok()?;
+    started_before
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(library))
+        .map(|(_, handle)| *handle)
+}
+
 /// Runs every placed module's initialisers, whether or not the guest asked for it.
 ///
 /// A diagnostic, off by default: a module starts when the guest starts it (D515), and a module
@@ -1754,6 +1807,9 @@ pub fn start_every_placed_module() -> (usize, u64) {
     drop(placed);
     let mut ran = 0;
     for (library, initialisers) in &all {
+        if handle_started_before_entry(library).is_some() {
+            continue;
+        }
         let count = run_initialisers(*initialisers);
         started(library, u64::MAX, count);
         ran += count;
@@ -5532,9 +5588,16 @@ fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // A title's own module, under `/app0`, gets a fresh non-negative handle, which a guest keys its
     // later calls on.
     if path.starts_with("/app0/") {
-        let handle = NEXT_MODULE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: an address the guest passed for this call, valid by its contract.
         unsafe { guest::write_u32(args[5], 0) };
+        // A module the runtime linker already started answers its handle and runs nothing again
+        // (D767).
+        let leaf = path.rsplit('/').next().unwrap_or(&path);
+        let stem = leaf.rsplit_once('.').map_or(leaf, |(stem, _)| stem);
+        if let Some(handle) = handle_started_before_entry(stem) {
+            return handle;
+        }
+        let handle = NEXT_MODULE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The module is already placed, relocated and protected by `place_title_modules`, so starting it
         // runs its `DT_INIT` and `DT_INIT_ARRAY` (D515). A module the loader never recorded is reported
         // as unstarted.
@@ -8475,6 +8538,22 @@ mod tests {
         assert_eq!(super::pthread_mutex_unlock(&args), super::OK);
         assert_eq!(super::pthread_mutex_destroy(&args), super::OK);
         assert_ne!(super::pthread_mutex_lock(&args), super::OK);
+    }
+
+    /// A module the runtime linker started before entry is answered with the same handle when the
+    /// title loads and starts it by path, and is not started again (D767).
+    #[test]
+    fn a_module_started_before_entry_is_answered_not_started_again() {
+        super::note_start_order(vec!["NeededBeforeEntry".to_owned()]);
+        assert_eq!(super::start_needed_modules().0, 1);
+        let handle = super::handle_started_before_entry("NeededBeforeEntry").expect("started");
+        let path = std::ffi::CString::new("/app0/Media/Modules/NeededBeforeEntry.prx")
+            .expect("no interior nul");
+        let result = orbistoun_mem::blocks::block(1);
+        let args = [path.as_ptr() as u64, 0, 0, 0, 0, result];
+        assert_eq!(super::load_start_module(&args), handle);
+        assert_eq!(super::load_start_module(&args), handle, "and again");
+        assert_eq!(super::start_needed_modules().0, 0, "nothing starts twice");
     }
 
     /// A retail process has no sanitizer allocator to put in place of the title's (D765).

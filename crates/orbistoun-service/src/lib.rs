@@ -2040,8 +2040,10 @@ impl Service {
             .map(|export| (export.nid, export.address))
             .collect();
         orbistoun_kernel::note_guest_exports(self.hasher.suffix_bytes(), &exports);
-        let labels = self.import_labels_for(&modules, &slots, symbols)?;
+        // Which of them start before the entry, and in what order (D767).
+        note_start_order(&owned);
         Ok(LinkedTitle {
+            labels: self.import_labels_for(&modules, &slots, symbols)?,
             placed,
             slots,
             tallies,
@@ -2051,7 +2053,6 @@ impl Service {
             data,
             bound,
             binding,
-            labels,
             kept_by_orbistoun,
         })
     }
@@ -2361,6 +2362,64 @@ fn initialisers_of(bytes: &[u8], base: u64) -> Option<orbistoun_kernel::ModuleIn
     })
 }
 
+/// Records which of the title's modules start before the executable's entry (D767). `owned` is
+/// every module's label and bytes, the executable first under the empty label.
+fn note_start_order(owned: &[(String, Vec<u8>)]) {
+    let needs = |label: &str| -> Vec<String> {
+        owned
+            .iter()
+            .find(|(l, _)| l == label)
+            .and_then(|(_, bytes)| {
+                let container = orbistoun_elf::Container::parse(bytes).ok()?;
+                container.needed_libraries(bytes).ok()
+            })
+            .unwrap_or_default()
+    };
+    let shipped: Vec<String> = owned
+        .iter()
+        .skip(1)
+        .map(|(label, _)| label.clone())
+        .collect();
+    orbistoun_kernel::note_start_order(start_order(&needs, &shipped));
+}
+
+/// The modules the title ships that start before the executable's entry, in the order the
+/// runtime linker starts them: those the executable needs, each after the shipped modules it
+/// needs itself, depth first in `DT_NEEDED` order (D767).
+///
+/// `needs(label)` answers a module's `DT_NEEDED` names, and the executable is the label `""`. A
+/// needed name is matched to a shipped module by its stem, case-insensitively, as a title's files
+/// are matched to its import names (D482). A cycle starts each member once.
+fn start_order(needs: &dyn Fn(&str) -> Vec<String>, shipped: &[String]) -> Vec<String> {
+    fn shipped_as<'a>(name: &str, shipped: &'a [String]) -> Option<&'a String> {
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        shipped.iter().find(|s| s.eq_ignore_ascii_case(stem))
+    }
+    fn visit(
+        label: &str,
+        needs: &dyn Fn(&str) -> Vec<String>,
+        shipped: &[String],
+        seen: &mut Vec<String>,
+        order: &mut Vec<String>,
+    ) {
+        for name in needs(label) {
+            let Some(module) = shipped_as(&name, shipped) else {
+                continue;
+            };
+            if seen.contains(module) {
+                continue;
+            }
+            seen.push(module.clone());
+            visit(module, needs, shipped, seen, order);
+            order.push(module.clone());
+        }
+    }
+    let mut seen = Vec::new();
+    let mut order = Vec::new();
+    visit("", needs, shipped, &mut seen, &mut order);
+    order
+}
+
 /// What binding the title's own modules produced: the map the relocator reads, the names
 /// orbistoun kept for itself, and an account of every import either way.
 type TitleBinding = (
@@ -2380,6 +2439,35 @@ type SlotTables<'a> = (
 #[cfg(test)]
 mod tests {
     use super::{LibrarySettings, Path, Service, ServiceConfig, scripted_pad, slot_ranges};
+
+    /// The shipped modules an executable needs start before it, each after what it needs (D767):
+    /// PPSA02664 lists il2cpp first and libc last, and il2cpp needs libc, so libc starts first. A
+    /// shipped module nothing needs does not start, and a cycle starts each member once.
+    #[test]
+    fn needed_modules_start_after_what_they_need() {
+        let needs = |label: &str| -> Vec<String> {
+            let names: &[&str] = match label {
+                "" => &[
+                    "Il2CppUserAssemblies.prx",
+                    "PS5Util.prx",
+                    "libkernel.prx",
+                    "libc.prx",
+                ],
+                "Il2CppUserAssemblies" => &["libc.prx", "libkernel.prx", "PS5Util.prx"],
+                "PS5Util" => &["Il2CppUserAssemblies.prx"],
+                _ => &[],
+            };
+            names.iter().map(|n| (*n).to_owned()).collect()
+        };
+        let shipped: Vec<String> = ["Il2CppUserAssemblies", "PS5Util", "libc", "libSceFace"]
+            .iter()
+            .map(|n| (*n).to_owned())
+            .collect();
+        assert_eq!(
+            super::start_order(&needs, &shipped),
+            ["libc", "PS5Util", "Il2CppUserAssemblies"]
+        );
+    }
     use orbistoun_input::{Pads, Source};
 
     /// A `Pads` with one port driven by a script at `name`, for exercising [`scripted_pad`].

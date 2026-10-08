@@ -2473,9 +2473,16 @@ fn arm_diagnostics(
     Ok(experiments)
 }
 
-/// What runs just before the guest's entry when asked: the placed modules' initialisers, and the
-/// sampler that says where the entering thread spends its time.
+/// What runs just before the guest's entry: the modules the executable needs, started as the
+/// runtime linker starts them (D767); every placed module when asked; and the sampler that says
+/// where the entering thread spends its time.
 fn before_entry_if_asked() {
+    let (modules, initialisers) = orbistoun_kernel::start_needed_modules();
+    if modules > 0 {
+        tracing::info!(
+            "started {modules} needed module(s) before entry, {initialisers} initialiser(s) ran"
+        );
+    }
     start_placed_modules_if_asked();
     profile::watch_this_thread("guest main");
 }
