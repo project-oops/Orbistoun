@@ -1742,7 +1742,7 @@ const EXPORT_PARAMETER: i64 = 32;
 /// How many parameter targets there are, so a code past them is not read as one.
 const EXPORT_PARAMETERS: i64 = 32;
 /// The primitive export: the triangle's vertex indices, packed into one register.
-const EXPORT_PRIMITIVE: i64 = 20;
+pub(crate) const EXPORT_PRIMITIVE: i64 = 20;
 /// `SQ_EXP_NULL` (`gfx10-rsrc.json`): an export that writes nothing, which ACO's early exit from a
 /// pixel shader makes with no channels, `done` and `vm` (`aco_lower_to_hw_instr.cpp:2471`).
 const EXPORT_NULL: i64 = 9;

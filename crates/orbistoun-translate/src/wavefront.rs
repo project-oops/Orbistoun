@@ -4011,6 +4011,33 @@ pub fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u3
     locations
 }
 
+/// Whether a primitive shader exports the `v0` it was entered with as its primitive (D759): an
+/// `exp prim` whose first source is `v0`, with nothing before it in the program writing `v0`.
+///
+/// Such a shader was compiled for passthrough. Mesa's NGG lowering exports the packed primitive it
+/// was handed unchanged only in passthrough mode, and otherwise packs the export from the vertex
+/// indices, which entry `v0` then holds sixteen bits each (`ac_nir_lower_ngg.c:127-131`, `:139-151`). Conservative: any instruction
+/// naming `v0` as its first operand before the export counts as a write.
+#[must_use]
+pub fn exports_entry_primitive(decode: &Decode, encodings: &EncodingTable) -> bool {
+    for instruction in &decode.instructions {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        if named == Some("exp") {
+            if instruction.operands.first() == Some(&Operand::Immediate(model::EXPORT_PRIMITIVE)) {
+                return instruction.operands.get(1) == Some(&Operand::Vector(0));
+            }
+            continue;
+        }
+        if instruction.operands.first() == Some(&Operand::Vector(0)) {
+            return false;
+        }
+    }
+    false
+}
+
 /// Whether a pixel shader exports depth: any `exp mrtz`, which needs a `FragDepth` output declared
 /// before the entry point is.
 #[must_use]
@@ -4157,6 +4184,16 @@ pub fn translate_with_user_data(
     if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
         inputs.check(width.lanes())?;
     }
+    // A primitive shader that exports its entry `v0` was compiled for passthrough, whatever the
+    // stream wrote (D759).
+    let mut user_data = user_data;
+    if stage == Stage::Mesh
+        && let Some(geometry) = user_data.geometry.as_mut()
+        && !geometry.passthrough
+        && exports_entry_primitive(decode, encodings)
+    {
+        geometry.passthrough = true;
+    }
     if let (Stage::Mesh, Some(geometry)) = (stage, user_data.geometry)
         && let Some(detail) = geometry.refusal(width.lanes())
     {
@@ -4197,6 +4234,40 @@ pub fn translate_with_user_data(
     let sources = module.image_sources();
     let (words, translated) = module.finish()?;
     Ok((words, translated, sources))
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+
+    fn exports(words: &[u32]) -> bool {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        super::exports_entry_primitive(&decode, &encodings)
+    }
+
+    /// `exp prim v0, off, off, off done` straight from entry is a passthrough shader's export; one
+    /// after `v0` is rewritten, or of another register, is not (D759).
+    #[test]
+    fn only_an_export_of_entry_v0_is_passthrough() {
+        const EXP_PRIM_V0: [u32; 2] = [0xf800_0941, 0x0000_0000];
+        const EXP_PRIM_V1: [u32; 2] = [0xf800_0941, 0x0000_0001];
+        const MOV_V0_ZERO: u32 = 0x7e00_0280; // v_mov_b32 v0, 0
+        const MOV_V1_ZERO: u32 = 0x7e02_0280; // v_mov_b32 v1, 0
+        const END: u32 = 0xbf81_0000;
+        assert!(exports(&[MOV_V1_ZERO, EXP_PRIM_V0[0], EXP_PRIM_V0[1], END]));
+        assert!(!exports(&[
+            MOV_V0_ZERO,
+            EXP_PRIM_V0[0],
+            EXP_PRIM_V0[1],
+            END
+        ]));
+        assert!(!exports(&[EXP_PRIM_V1[0], EXP_PRIM_V1[1], END]));
+        assert!(!exports(&[END]));
+    }
 }
 
 #[cfg(test)]
