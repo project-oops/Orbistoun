@@ -110,7 +110,7 @@ fn centre(records: u32, depth: bool) -> [u8; 4] {
             Resource::RenderTarget {
                 width: 16,
                 height: 16,
-                srgb: false,
+                encoding: orbistoun_gpu::TargetEncoding::Unorm8,
             },
         )
         .expect("target resident");
@@ -239,7 +239,7 @@ fn format_centre(word3: u32) -> [u8; 4] {
             Resource::RenderTarget {
                 width: 16,
                 height: 16,
-                srgb: false,
+                encoding: orbistoun_gpu::TargetEncoding::Unorm8,
             },
         )
         .expect("target resident");
@@ -460,7 +460,7 @@ fn batched_primitive_shaders_each_read_their_own_buffer() {
                 Resource::RenderTarget {
                     width: 16,
                     height: 16,
-                    srgb: false,
+                    encoding: orbistoun_gpu::TargetEncoding::Unorm8,
                 },
             )
             .expect("target resident");
@@ -635,7 +635,7 @@ fn draw_vertex_ids(mesh: &Vec<u32>, firsts: &[u32]) -> [u8; 4] {
             Resource::RenderTarget {
                 width: 16,
                 height: 16,
-                srgb: false,
+                encoding: orbistoun_gpu::TargetEncoding::Unorm8,
             },
         )
         .expect("target resident");

@@ -8,6 +8,7 @@
 //! path only, because an error means a test process about to exit.
 
 use ash::vk;
+use orbistoun_gpu::TargetEncoding;
 
 use crate::compute::{DispatchBuffer, DispatchError};
 
@@ -44,25 +45,35 @@ const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 /// The format a colour attachment is drawn through: [`FORMAT`], or for an sRGB target its sRGB
 /// twin, which decodes before blending and encodes on write. The image stays [`FORMAT`], so seeding,
 /// clearing and reading back move the encoded bytes untouched; only the view differs. Both are
-/// mandatory colour-attachment formats with blending.
-const fn drawn_format(srgb: bool) -> vk::Format {
-    if srgb {
-        vk::Format::R8G8B8A8_SRGB
-    } else {
-        FORMAT
+/// mandatory colour-attachment formats with blending. A `10_11_11` float target is drawn through
+/// the same packed format it is held in (D773).
+const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
+    match encoding {
+        TargetEncoding::Unorm8 => FORMAT,
+        TargetEncoding::Srgb8 => vk::Format::R8G8B8A8_SRGB,
+        TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
     }
 }
 
-/// Creates a device-local image usable as a colour attachment and as a copy source; an `srgb` one
+/// The format a colour attachment's image is created in: four bytes a texel either way, so seeding
+/// and reading back move the guest's own words.
+const fn image_format(encoding: TargetEncoding) -> vk::Format {
+    match encoding {
+        TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
+        TargetEncoding::Unorm8 | TargetEncoding::Srgb8 => FORMAT,
+    }
+}
+
+/// Creates a device-local image usable as a colour attachment and as a copy source; an sRGB one
 /// may be viewed as [`drawn_format`]'s sRGB format.
 fn create_attachment(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     device: &ash::Device,
     (width, height): (u32, u32),
-    srgb: bool,
+    encoding: TargetEncoding,
 ) -> Result<(vk::Image, vk::DeviceMemory), DispatchError> {
-    let flags = if srgb {
+    let flags = if encoding == TargetEncoding::Srgb8 {
         vk::ImageCreateFlags::MUTABLE_FORMAT
     } else {
         vk::ImageCreateFlags::empty()
@@ -70,7 +81,7 @@ fn create_attachment(
     let info = vk::ImageCreateInfo::default()
         .flags(flags)
         .image_type(vk::ImageType::TYPE_2D)
-        .format(FORMAT)
+        .format(image_format(encoding))
         .extent(vk::Extent3D {
             width,
             height,
@@ -387,8 +398,8 @@ pub(crate) struct ResidentAttachment {
     buffer_memory: vk::DeviceMemory,
     width: u32,
     height: u32,
-    /// Whether it is drawn through an sRGB view ([`drawn_format`]).
-    srgb: bool,
+    /// How its texels hold colour, and so the format it is drawn through ([`drawn_format`]).
+    encoding: TargetEncoding,
     /// The pass drawing on it with a depth attachment beside it, made for one depth attachment.
     depth_pass: Option<DepthPass>,
 }
@@ -431,7 +442,7 @@ impl ResidentAttachment {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let device = &session.device;
         let render_pass =
-            crate::depth::create_render_pass(device, drawn_format(self.srgb), depth.format())?;
+            crate::depth::create_render_pass(device, drawn_format(self.encoding), depth.format())?;
         let views = [self.view, depth.view()];
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
@@ -490,12 +501,12 @@ impl ResidentAttachment {
     }
 
     /// Creates the attachment, holding `initial` (tightly packed `Rgba8`, exactly the extent) or
-    /// cleared to `clear`, and leaves it ready to draw on - through an sRGB view when `srgb`.
+    /// cleared to `clear`, and leaves it ready to draw on in the format `encoding` names.
     pub(crate) fn create(
         (width, height): (u32, u32),
         initial: Option<&[u8]>,
         clear: [f32; 4],
-        srgb: bool,
+        encoding: TargetEncoding,
     ) -> Result<Self, DispatchError> {
         let session = crate::compute::session()?;
         let session = session
@@ -504,12 +515,13 @@ impl ResidentAttachment {
         let (instance, physical, device) = (&session.instance, session.physical, &session.device);
         let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
         let initial = initial.filter(|bytes| bytes.len() as u64 == size);
-        let (image, memory) = create_attachment(instance, physical, device, (width, height), srgb)?;
+        let (image, memory) =
+            create_attachment(instance, physical, device, (width, height), encoding)?;
         let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
         if let Some(bytes) = initial {
             fill_host_memory(device, buffer_memory, bytes)?;
         }
-        let format = drawn_format(srgb);
+        let format = drawn_format(encoding);
         let render_pass = create_resident_render_pass(device, format)?;
         let (view, framebuffer) =
             view_and_framebuffer(device, image, render_pass, ((width, height), format))?;
@@ -590,14 +602,14 @@ impl ResidentAttachment {
             buffer_memory,
             width,
             height,
-            srgb,
+            encoding,
             depth_pass: None,
         })
     }
 
-    /// Whether it is drawn through an sRGB view.
-    pub(crate) const fn srgb(&self) -> bool {
-        self.srgb
+    /// How its texels hold colour.
+    pub(crate) const fn encoding(&self) -> TargetEncoding {
+        self.encoding
     }
 
     /// Gives it new contents in place: `pixels` (tightly packed `Rgba8`, exactly the extent) copied
@@ -1810,7 +1822,7 @@ pub(crate) fn draw_vertices(
                 buffers: start.buffers,
                 ..NO_DRAW_BUFFERS
             },
-            srgb: start.srgb,
+            encoding: start.encoding,
             ..Bound::default()
         },
     )
@@ -1854,8 +1866,8 @@ pub(crate) struct Start<'a> {
     pub(crate) depth_clear: Option<crate::depth::DepthClear>,
     /// The primitive shader's and the pixel shader's buffers (D733).
     pub(crate) buffers: [&'a [orbistoun_gpu::DrawBuffer]; 2],
-    /// Whether the target holds sRGB-encoded colour; a resident attachment carries its own.
-    pub(crate) srgb: bool,
+    /// How the target's texels hold colour; a resident attachment carries its own.
+    pub(crate) encoding: TargetEncoding,
 }
 
 /// The Vulkan viewport a guest's transform describes.
@@ -2104,8 +2116,8 @@ fn render_over(
         .initial
         .filter(|bytes| u64::try_from(bytes.len()).is_ok_and(|len| len == size));
     let (image, image_memory) =
-        create_attachment(instance, physical, device, (width, height), bound.srgb)?;
-    let format = drawn_format(bound.srgb);
+        create_attachment(instance, physical, device, (width, height), bound.encoding)?;
+    let format = drawn_format(bound.encoding);
     let render_pass = create_render_pass(device, initial.is_some(), format)?;
     let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
     if let Some(bytes) = initial {
@@ -4452,8 +4464,8 @@ struct Bound<'a> {
     /// The draw's buffers (D733); none by default. By reference, so `Bound` stays cheap to pass by
     /// value.
     draw_buffers: &'a DrawBuffersBound<'a>,
-    /// Draw a fresh attachment through an sRGB view.
-    srgb: bool,
+    /// The encoding a fresh attachment is drawn in.
+    encoding: TargetEncoding,
 }
 
 /// A draw's buffers (D733) as a draw binds them: each stage's, and once found where the session is
@@ -4519,7 +4531,7 @@ impl Default for Bound<'_> {
             cull: None,
             depth_clear: None,
             draw_buffers: &NO_DRAW_BUFFERS,
-            srgb: false,
+            encoding: TargetEncoding::Unorm8,
         }
     }
 }
@@ -4981,9 +4993,13 @@ mod tests {
         }
         let (width, height) = (8, 4);
         let ramp: Vec<u8> = (0..width * height * 4).map(|i| (i % 251) as u8).collect();
-        let resident =
-            super::ResidentAttachment::create((width, height), Some(&ramp), [0.0; 4], false)
-                .expect("an attachment");
+        let resident = super::ResidentAttachment::create(
+            (width, height),
+            Some(&ramp),
+            [0.0; 4],
+            orbistoun_gpu::TargetEncoding::Unorm8,
+        )
+        .expect("an attachment");
         resident.reload_uniform(0x8040_2010).expect("reloaded");
         let read = resident.read_back().expect("read back");
         resident.destroy();

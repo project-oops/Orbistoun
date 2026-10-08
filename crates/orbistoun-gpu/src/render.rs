@@ -71,16 +71,16 @@ pub fn drive(
     }
 
     // Colour target zero's format is the only one decoded, and is every target's here.
-    let srgb = submission
+    let encoding = submission
         .colour_target_format
-        .is_some_and(|format| format.is_srgb());
+        .map_or(crate::TargetEncoding::Unorm8, |format| format.encoding());
     for (id, extent) in &submission.targets {
         backend.ensure_resident(
             *id,
             Resource::RenderTarget {
                 width: extent.width,
                 height: extent.height,
-                srgb,
+                encoding,
             },
         )?;
         outcome.resident += 1;

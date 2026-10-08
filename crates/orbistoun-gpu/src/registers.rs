@@ -2038,6 +2038,10 @@ pub const NUMBER_UNORM: u32 = 0;
 /// `SurfaceNumber` `NUMBER_SRGB` (`gfx103.json`, enum `SurfaceNumber`): the bytes hold sRGB-encoded
 /// colour, which the colour block decodes to linear before blending and encodes again on write.
 pub const NUMBER_SRGB: u32 = 6;
+/// `ColorFormat` `COLOR_10_11_11` (`gfx103.json`): what Mesa targets `R11G11B10_FLOAT` at.
+pub const COLOR_10_11_11: u32 = 6;
+/// `SurfaceNumber` `NUMBER_FLOAT` (`gfx103.json`).
+pub const NUMBER_FLOAT: u32 = 7;
 
 /// Which memory byte each of a four-channel colour target's shader outputs lands in -
 /// `CB_COLOR0_INFO.COMP_SWAP`.
@@ -2098,11 +2102,32 @@ impl ColourTargetFormat {
         self.number_type == NUMBER_SRGB
     }
 
+    /// Whether this is a four-byte `10_11_11` `FLOAT` target in its standard order - the packed
+    /// unsigned-float HDR format a frame can be drawn in and written back exactly (D773).
+    #[must_use]
+    pub const fn is_float_11_11_10(&self) -> bool {
+        self.format == COLOR_10_11_11
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
+    /// How its texels hold colour, for the attachment a draw writes through.
+    #[must_use]
+    pub const fn encoding(&self) -> crate::TargetEncoding {
+        if self.is_float_11_11_10() {
+            crate::TargetEncoding::Float11_11_10
+        } else if self.is_srgb() {
+            crate::TargetEncoding::Srgb8
+        } else {
+            crate::TargetEncoding::Unorm8
+        }
+    }
+
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
-    /// [`Self::is_rgba8_class`], one for [`Self::is_r8_class`].
+    /// [`Self::is_rgba8_class`] and [`Self::is_float_11_11_10`], one for [`Self::is_r8_class`].
     #[must_use]
     pub const fn written_back_bytes(&self) -> Option<u32> {
-        if self.is_rgba8_class() {
+        if self.is_rgba8_class() || self.is_float_11_11_10() {
             Some(4)
         } else if self.is_r8_class() {
             Some(1)
@@ -2866,6 +2891,17 @@ mod tests {
         // PPSA28061's display target: `8_8_8_8`, `NUMBER_SRGB`.
         let srgb = decode_colour_target_format(0x0001_80a8 | (6 << 8));
         assert!(srgb.is_rgba8_class() && srgb.is_srgb());
+        // PPSA02664's HDR target: `10_11_11`, `NUMBER_FLOAT`, written back four bytes a texel
+        // (D773); with any other swap it is not.
+        let float = decode_colour_target_format(0x0001_8018 | (7 << 8));
+        assert!(float.is_float_11_11_10());
+        assert_eq!(float.encoding(), crate::TargetEncoding::Float11_11_10);
+        assert_eq!(float.written_back_bytes(), Some(4));
+        assert!(
+            !decode_colour_target_format(0x0001_8018 | (7 << 8) | (1 << 11)).is_float_11_11_10()
+        );
+        assert_eq!(srgb.encoding(), crate::TargetEncoding::Srgb8);
+        assert_eq!(measured.encoding(), crate::TargetEncoding::Unorm8);
         assert!(!measured.is_srgb());
         assert!(!decode_colour_target_format(0x0001_8000 | (12 << 2)).is_rgba8_class());
     }

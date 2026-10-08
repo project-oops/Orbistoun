@@ -291,10 +291,24 @@ pub enum Resource<'a> {
         width: u32,
         /// Height in pixels.
         height: u32,
-        /// Whether its bytes hold sRGB-encoded colour (`CB_COLOR0_INFO.NUMBER_TYPE` `SRGB`), so a
-        /// draw blends in linear and writes the encoding.
-        srgb: bool,
+        /// How its texels hold colour, which decides the attachment a draw writes through.
+        encoding: TargetEncoding,
     },
+}
+
+/// How a colour target's texels hold colour: what a backend draws it through, and what its bytes
+/// are when read back. Each is four bytes a texel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TargetEncoding {
+    /// Eight bits a channel, `UNORM`.
+    #[default]
+    Unorm8,
+    /// Eight bits a channel holding sRGB-encoded colour (`NUMBER_SRGB`): a draw blends in linear and
+    /// writes the encoding.
+    Srgb8,
+    /// `COLOR_10_11_11` `FLOAT` (D773): red and green as eleven-bit and blue as ten-bit unsigned
+    /// floats, red in the low bits - the packing Vulkan's `B10G11R11_UFLOAT_PACK32` holds.
+    Float11_11_10,
 }
 
 /// What a bound texture's words are.

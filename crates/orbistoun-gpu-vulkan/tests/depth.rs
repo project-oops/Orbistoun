@@ -66,7 +66,7 @@ fn backend(depth: Option<ResourceId>) -> VulkanBackend {
             Resource::RenderTarget {
                 width: 16,
                 height: 16,
-                srgb: false,
+                encoding: orbistoun_gpu::TargetEncoding::Unorm8,
             },
         )
         .expect("target resident");
