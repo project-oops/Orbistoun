@@ -477,7 +477,10 @@ impl GuestCp<'_> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
-            let prepared = pipeline.submit(&bytes, Queue::Draw, &[], &self.memory);
+            // The registers as submitted: the tables read then, not what the guest has since
+            // written to them.
+            let prepared =
+                pipeline.submit(&bytes, Queue::Draw, &[], &whole.tables.over(&self.memory));
             keep_new_translations(pipeline);
             prepared
         };
@@ -2479,6 +2482,21 @@ fn submit_described(descriptor: u64) -> u64 {
     })
 }
 
+/// What a submission left in the registers is what the next one starts from (D737), its indirect
+/// loads read from the tables as it was submitted with them.
+fn carry_registers(bytes: &[u8], submission: &Submission) {
+    if let Some(pipeline) = live_pipeline()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
+        pipeline.carry(
+            bytes,
+            Some(&submission.tables.over(&MappedRegions::current())),
+        );
+    }
+}
+
 /// [`submit_described`]'s body, timed whole as [`crate::perf::Phase::Submit`].
 fn submit_described_timed(descriptor: u64) -> u64 {
     let Some((gpu_addr, length)) = submit_descriptor(descriptor) else {
@@ -2564,14 +2582,7 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         )
     });
     hand_releases_to_display();
-    // What this submission left in the registers is what the next one starts from (D737).
-    if let Some(pipeline) = live_pipeline()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_mut()
-    {
-        pipeline.carry(&bytes, Some(&MappedRegions::current()));
-    }
+    carry_registers(&bytes, &submission);
     if executed.draws == 0
         && let Ok(mut pending) = undelivered_modules().lock()
     {

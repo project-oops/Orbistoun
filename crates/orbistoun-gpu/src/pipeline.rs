@@ -416,6 +416,9 @@ struct Candidate {
 pub struct Submission {
     /// What the backend should do, in order.
     pub commands: Vec<RenderCommand>,
+    /// The tables the stream's indirect register loads read, as they stood when it was submitted:
+    /// what its draw segments and the registers it carries forward read them from.
+    pub tables: crate::registers::TableSnapshot,
     /// Modules the commands refer to, for a backend that has not seen them before.
     pub modules: BTreeMap<ResourceId, Vec<u32>>,
     /// Colour render targets the commands select, by the id a [`RenderCommand::SetRenderTargets`]
@@ -1320,8 +1323,11 @@ impl Pipeline {
     ) -> Submission {
         use crate::perf::{Span, span};
         let walked = span(Span::PrepareWalk, || walk(stream));
+        // The tables its indirect loads name, read once, now: what it carries forward and its
+        // draw segments read them from, whatever the guest writes there after.
+        let tables = crate::registers::TableSnapshot::of(&walked, stream, memory);
         let (writes, own_writes) = span(Span::PrepareRegisters, || {
-            self.writes_in_force(&walked, stream, Some(memory))
+            self.writes_in_force(&walked, stream, Some(&tables.over(memory)))
         });
         let inferred = shader_candidates(&writes, &self.vocabulary);
 
@@ -1331,6 +1337,7 @@ impl Pipeline {
                 register_writes: own_writes,
                 ..SubmissionReport::default()
             },
+            tables,
             ..Submission::default()
         };
 

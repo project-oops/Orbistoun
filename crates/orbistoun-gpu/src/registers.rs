@@ -242,6 +242,87 @@ fn indirect_load(
         .collect()
 }
 
+/// The tables a stream's indirect register loads name, read once: what the command processor reads
+/// at those packets is what the guest wrote by the time it submitted. Later preparations of the
+/// same submission - its draw segments (D729), the registers it carries forward (D737) - read
+/// the tables through [`Self::over`], so a guest that rewrites its table ring for the next frame
+/// cannot change the registers this one set.
+#[derive(Debug, Clone, Default)]
+pub struct TableSnapshot {
+    tables: Vec<(u64, Vec<u8>)>,
+}
+
+impl TableSnapshot {
+    /// Reads every table `walk`'s indirect loads name from `memory`, as [`indirect_load`] reads
+    /// one; a table not readable is left to be read live, and is refused there as before.
+    #[must_use]
+    pub fn of(walk: &PacketWalk, body: &[u8], memory: &dyn crate::pipeline::GuestMemory) -> Self {
+        let mut tables = Vec::new();
+        for packet in &walk.packets {
+            let PacketKind::Command { opcode } = packet.kind else {
+                continue;
+            };
+            if !INDIRECT_LOADS.iter().any(|(load, _)| *load == opcode) {
+                continue;
+            }
+            let start = packet.body_offset() as usize;
+            let Some(words) = read_words(body, start, packet.body_length() as usize) else {
+                continue;
+            };
+            let (Some(low), Some(high), Some(format), Some(count)) =
+                (words.get(0), words.get(1), words.get(2), words.get(3))
+            else {
+                continue;
+            };
+            let address = u64::from(low & !3) | (u64::from(high) << 32);
+            let length =
+                (count & 0x3fff) as usize * if format & OFFSET_AND_DATA != 0 { 8 } else { 4 };
+            if let Some(bytes) = memory.read(address, length) {
+                tables.push((address, bytes.to_vec()));
+            }
+        }
+        Self { tables }
+    }
+
+    /// `memory` with the snapshot's tables answering for the spans they cover.
+    #[must_use]
+    pub const fn over<'a, M: crate::pipeline::GuestMemory + ?Sized>(
+        &'a self,
+        memory: &'a M,
+    ) -> SnapshotOver<'a, M> {
+        SnapshotOver {
+            snapshot: self,
+            memory,
+        }
+    }
+}
+
+/// Guest memory with a [`TableSnapshot`]'s tables in place of what memory now holds there.
+pub struct SnapshotOver<'a, M: ?Sized> {
+    snapshot: &'a TableSnapshot,
+    memory: &'a M,
+}
+
+impl<M: ?Sized> std::fmt::Debug for SnapshotOver<'_, M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotOver")
+            .field("snapshot", self.snapshot)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<M: crate::pipeline::GuestMemory + ?Sized> crate::pipeline::GuestMemory
+    for SnapshotOver<'_, M>
+{
+    fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+        let held = self.snapshot.tables.iter().find_map(|(at, bytes)| {
+            let start = usize::try_from(address.checked_sub(*at)?).ok()?;
+            bytes.get(start..start.checked_add(length)?)
+        });
+        held.or_else(|| self.memory.read(address, length))
+    }
+}
+
 /// [`register_writes`], with the tables indirect register loads name read from `tables`: the
 /// command processor writes those registers from guest memory when it reaches the packet.
 pub fn register_writes_reading(
@@ -3058,6 +3139,45 @@ mod tests {
             let start = usize::try_from(address.checked_sub(self.0)?).ok()?;
             self.1.get(start..start.checked_add(length)?)
         }
+    }
+
+    /// The tables a stream's indirect loads name are read once, when it is submitted, and the
+    /// snapshot answers for them after: PPSA03416's render thread rewrites its table ring while a
+    /// submission's later draw segments are still being prepared, and a segment that read the ring
+    /// again found another shader's registers in it. Memory the loads do not name is read live.
+    #[test]
+    fn a_submissions_register_tables_are_read_once() {
+        use super::TableSnapshot;
+        /// Guest memory at one moment: its base and bytes.
+        struct Frozen(u64, Vec<u8>);
+        impl crate::pipeline::GuestMemory for Frozen {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(self.0)?).ok()?;
+                self.1.get(start..start.checked_add(length)?)
+            }
+        }
+        let at = 0x7400_023c_8d10_u64;
+        let bytes = stream(&[
+            command(0x63, 4),
+            at as u32,
+            (at >> 32) as u32,
+            0x8000_0000,
+            2,
+        ]);
+        let walked = walk(&bytes);
+        let submitted = Frozen(at, stream(&[0x8, 0x1b_78a8, 0xB, 0x18, 0xdead, 0xbeef]));
+        let snapshot = TableSnapshot::of(&walked, &bytes, &submitted);
+        // The ring is rewritten: another shader's registers where these were.
+        let now = Frozen(at, stream(&[0x8, 0x1b_7809, 0xB, 0, 0xdead, 0xbeef]));
+        let writes =
+            register_writes_reading(&walked, &bytes, &vocabulary(), Some(&snapshot.over(&now)));
+        let read: Vec<(u32, u32)> = writes.iter().map(|w| (w.register, w.value)).collect();
+        assert_eq!(read, [(0x2C08, 0x1b_78a8), (0x2C0B, 0x18)], "as submitted");
+        // Past the table, the live memory answers.
+        assert_eq!(
+            crate::pipeline::GuestMemory::read(&snapshot.over(&now), at + 16, 4),
+            Some(&0xdead_u32.to_le_bytes()[..])
+        );
     }
 
     /// `LOAD_SH_REG_INDEX` (`0x63`) loads SH registers from the table its body names (Mesa
