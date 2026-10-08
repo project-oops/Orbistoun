@@ -542,6 +542,12 @@ pub struct GeometryInputs {
     /// (D740). `None` for a draw whose vertex ids count up from [`Self::first_vertex`].
     #[serde(default)]
     pub indices: Option<IndexWidth>,
+    /// A passthrough primitive shader's (`VGT_SHADER_STAGES_EN.PRIMGEN_PASSTHRU_EN`): `v0` holds
+    /// the primitive already packed as `exp prim` takes it, three nine-bit vertex indices at bits
+    /// 0, 10 and 20 (Mesa `ac_nir_lower_intrinsics_to_args.c:278`, `ac_nir_lower_ngg.c:127`),
+    /// in place of the first two indices sixteen bits each.
+    #[serde(default)]
+    pub passthrough: bool,
 }
 
 /// How wide an indexed draw's indices are: `VGT_INDEX_TYPE`'s `VGT_INDEX_16` and `VGT_INDEX_32`
@@ -1939,6 +1945,7 @@ impl<'a> Wavefront<'a> {
             vertices: whole,
             assembly,
             indices,
+            passthrough,
             ..
         } = geometry;
         // An indexed draw's index buffer is bound after the buffers the program reads through.
@@ -1968,8 +1975,13 @@ impl<'a> Wavefront<'a> {
             // v0: the first two vertex indices; v1: the third; v2: the primitive id; v3: the
             // invocation id; v4: the fifth and sixth indices; v5: the vertex id, unless an index
             // buffer gives it; v6, v7: user VGPRs; v8: the instance id.
+            let packed = if passthrough {
+                first | (second << 10) | (third << 20)
+            } else {
+                first | (second << 16)
+            };
             let words: [(Option<Id>, u32); 9] = [
-                (Some(is_primitive), first | (second << 16)),
+                (Some(is_primitive), packed),
                 (Some(is_primitive), third),
                 (Some(is_primitive), lane),
                 (None, 0),
@@ -4266,6 +4278,7 @@ mod wave32_mask_tests {
                 primitives: 1,
                 assembly: Assembly::List,
                 indices: None,
+                passthrough: false,
             }),
             ..UserData::default()
         };

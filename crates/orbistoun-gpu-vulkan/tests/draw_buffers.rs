@@ -585,6 +585,7 @@ fn vertex_id_primitive_shader() -> Vec<u32> {
                 primitives: 0,
                 assembly: Assembly::List,
                 indices: Some(IndexWidth::Bits32),
+                passthrough: false,
             }),
             ..UserData::default()
         },

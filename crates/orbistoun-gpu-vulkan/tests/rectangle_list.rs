@@ -193,6 +193,7 @@ fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
         primitives: 0,
         assembly: orbistoun_translate::wavefront::Assembly::List,
         indices: None,
+        passthrough: false,
     }))
     .expect("translates with its geometry")
     .module;
@@ -346,4 +347,52 @@ fn a_rectangle_list_covers_the_parallelogram_its_three_corners_span() {
         Some([0, 0, 255, 255]),
         "a triangle leaves the fourth corner clear"
     );
+}
+
+/// A passthrough primitive shader (`VGT_SHADER_STAGES_EN.PRIMGEN_PASSTHRU_EN`) finds its primitive
+/// already packed in `v0`, three nine-bit vertex indices at bits 0, 10 and 20, the form `exp prim`
+/// takes (Mesa `ac_nir_lower_intrinsics_to_args.c:278`, `ac_nir_lower_ngg.c:127`); every other
+/// input is where the non-passthrough shader finds it.
+#[test]
+fn a_passthrough_primitive_shader_finds_its_primitive_packed() {
+    use orbistoun_translate::wavefront::{GeometryInputs, UserData};
+    if !device_or_skip("a_passthrough_primitive_shader_finds_its_primitive_packed") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let decoded = decode_program(&storing_inputs_shader(), &encodings, &operands);
+    let module = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Auto,
+            width: Width::Wave64,
+        },
+        (Stage::Mesh, MeshPrimitive::Rectangles),
+        Window::spanning(0, 1024).expect("a power of two"),
+        UserData {
+            geometry: Some(GeometryInputs {
+                first_vertex: 0,
+                vertices: 0,
+                primitives: 0,
+                assembly: orbistoun_translate::wavefront::Assembly::List,
+                indices: None,
+                passthrough: true,
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("translates with its geometry")
+    .module;
+    let fragment = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+    let (_, six) = draw_mesh_of_vertices_over((&module, &fragment), 6, (4, 4), &vec![0u32; 1024])
+        .expect("the six-vertex draw ran");
+    let lane = |n: usize| &six[n * 4..n * 4 + 4];
+    assert_eq!(
+        lane(0),
+        [1 << 10 | 2 << 20, 2, 0, 0],
+        "v0 packed, v1, v5, v2"
+    );
+    assert_eq!(lane(1)[0], 3 | 4 << 10 | 5 << 20, "primitive thread one");
 }

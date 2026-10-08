@@ -583,7 +583,7 @@ const PROVOKING_VTX_LAST: u32 = 1 << 19;
 const DI_PT_TRILIST: u32 = 4;
 const DI_PT_RECTLIST: u32 = 17;
 /// `VGT_SHADER_STAGES_EN` (`gfx103.json`, dword `0xA2D5`); its `PRIMGEN_PASSTHRU_EN`, bit 25, hands
-/// the primitive shader its primitive already packed in `v0`, a layout not seeded.
+/// the primitive shader its primitive already packed in `v0` ([`GeometryInputs::passthrough`]).
 const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
 const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
 /// `GE_INDX_OFFSET` (`gfx103.json`, byte `198952`, uconfig dword `0xC24A`): added to every vertex
@@ -591,8 +591,7 @@ const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
 const GE_INDX_OFFSET: u32 = 0xC24A;
 
 /// The geometry-engine inputs a draw hands its primitive shader whole (D730), or why it cannot: a
-/// draw of one instance over a list or strip of triangles, with no index offset and no
-/// passthrough. One wave may not hold them; [`chunk_plans`] splits those that it does not.
+/// draw of one instance over a list or strip of triangles or lines, with no index offset. One wave may not hold them; [`chunk_plans`] splits those that it does not.
 fn draw_geometry(
     draw: &DrawCall,
     mut latest: impl FnMut(u32) -> Option<u32>,
@@ -635,9 +634,8 @@ fn draw_geometry(
             ));
         }
     };
-    if latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0) {
-        return Err("a passthrough primitive shader's inputs are not seeded".to_owned());
-    }
+    let passthrough =
+        latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0);
     if latest(GE_INDX_OFFSET).is_some_and(|value| value != 0) {
         return Err("a draw with an index offset's vertex ids are not seeded".to_owned());
     }
@@ -647,6 +645,7 @@ fn draw_geometry(
         primitives,
         assembly,
         indices,
+        passthrough,
     })
 }
 
@@ -707,6 +706,7 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
                     primitives,
                     assembly: whole.assembly,
                     indices: Some(width),
+                    passthrough: whole.passthrough,
                 },
                 index_buffer,
             }
@@ -6027,13 +6027,37 @@ mod tests {
         assert!(!entry.matches(&[3, 4]));
     }
 
+    /// A draw under `PRIMGEN_PASSTHRU_EN` is seeded for a passthrough primitive shader, its
+    /// primitive packed in `v0`; one without it is not.
+    #[test]
+    fn a_passthrough_draw_is_seeded_as_one() {
+        use super::{DI_PT_TRILIST, PRIMGEN_PASSTHRU_EN, VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN};
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = DrawCall {
+            packet_offset: 0,
+            instances: 1,
+            kind: DrawKind::Auto { vertices: 3 },
+        };
+        for (stages, passthrough) in [(PRIMGEN_PASSTHRU_EN, true), (0, false)] {
+            let registers = move |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(DI_PT_TRILIST),
+                VGT_SHADER_STAGES_EN => Some(stages),
+                _ => None,
+            };
+            assert_eq!(
+                super::draw_geometry(&draw, registers).map(|g| g.passthrough),
+                Ok(passthrough)
+            );
+        }
+    }
+
     /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list or strip
     /// of triangles, without passthrough or an index offset (D730); anything else says why not.
     #[test]
     fn a_draw_s_geometry_is_seeded_only_for_one_instance_of_triangles() {
         use super::{
-            DI_PT_RECTLIST, DI_PT_TRILIST, GE_INDX_OFFSET, GeometryInputs, PRIMGEN_PASSTHRU_EN,
-            VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN, draw_geometry,
+            DI_PT_RECTLIST, DI_PT_TRILIST, GE_INDX_OFFSET, GeometryInputs, VGT_PRIMITIVE_TYPE,
+            VGT_SHADER_STAGES_EN, draw_geometry,
         };
         use crate::registers::{DrawCall, DrawKind};
         let draw = |vertices, instances| DrawCall {
@@ -6057,6 +6081,7 @@ mod tests {
                 primitives: 1,
                 assembly: super::Assembly::List,
                 indices: None,
+                passthrough: false,
             })
         );
         // A strip of six vertices is four triangles, its provoking convention from
@@ -6077,6 +6102,7 @@ mod tests {
                     primitives: 4,
                     assembly: super::Assembly::Strip { provoking_last },
                     indices: None,
+                    passthrough: false,
                 })
             );
         }
@@ -6087,10 +6113,6 @@ mod tests {
         for refused in [
             draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0)),
             draw_geometry(&draw(3, 1), registers(5, 0, 0)),
-            draw_geometry(
-                &draw(3, 1),
-                registers(DI_PT_RECTLIST, PRIMGEN_PASSTHRU_EN, 0),
-            ),
             draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 4)),
         ] {
             assert!(refused.is_err(), "{refused:?}");
@@ -6175,6 +6197,7 @@ mod tests {
             primitives,
             assembly,
             indices,
+            passthrough: false,
         };
         assert!(chunk_plans(whole(63, 21, Assembly::List, None), None, 64).is_empty());
         // 96 vertices of a list at 64 lanes: 21 triangles, then 11.
