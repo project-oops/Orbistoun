@@ -257,6 +257,9 @@ pub struct VulkanBackend {
     /// Counts every change to what a draw would be bound with - every command but a draw and the
     /// geometry stage's user data, and every window, target or resource change (D718).
     state_generation: u64,
+    /// Whether the geometry stage's buffers were bound again since the batch's places were worked
+    /// out (D747): a draw joining it then places them and names them in its words.
+    geometry_buffers_rebound: bool,
     /// The batch the last mesh draw went into, and the generation it was drawn at: a draw at the same
     /// generation differs from it only in its geometry words, so it joins without being worked out
     /// again.
@@ -348,6 +351,7 @@ impl VulkanBackend {
             next_snapshot: 0,
             spare_snapshots: Vec::new(),
             state_generation: 0,
+            geometry_buffers_rebound: false,
             batched: None,
             user_data: [0; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
             texture: None,
@@ -939,10 +943,31 @@ impl VulkanBackend {
         if generation != self.state_generation {
             return false;
         }
+        // The geometry buffers bound since are placed in the arenas and named in the draw's
+        // words (D747); the draw still joins when that leaves the set the batch binds unchanged.
+        let places = if self.geometry_buffers_rebound {
+            let Ok(session) = compute::session() else {
+                return false;
+            };
+            let session = session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match draw_buffers::descriptor_set(
+                &session,
+                [&self.draw_buffers[0], &self.draw_buffers[1]],
+            ) {
+                Ok((set, places)) if set == key.buffers() => places,
+                _ => return false,
+            }
+        } else {
+            places
+        };
         let (words, _) = framebuffer::split_user_data(&self.user_data, (vertices, &places));
         if !framebuffer::join_open_batch(&key, &words) {
             return false;
         }
+        self.batched = Some((generation, key, places));
+        self.geometry_buffers_rebound = false;
         let target = self.current_target;
         self.unread.insert(target);
         self.last_drawn = Some(DrawnOn(target));
@@ -992,6 +1017,7 @@ impl VulkanBackend {
             framebuffer::draw_resident(shaders, vertices, start, resident, (&window, scissor))
                 .map_err(|e| device_error("draw (resident)", e))?;
         self.batched = batched.map(|(key, places)| (self.state_generation, key, places));
+        self.geometry_buffers_rebound = false;
         self.unread.insert(target);
         self.last_drawn = Some(DrawnOn(target));
         // Read when asked for, not after every draw.
@@ -1000,14 +1026,19 @@ impl VulkanBackend {
         Ok(())
     }
 
-    /// Counts a change to what a draw would be bound with: anything but a draw or the geometry
-    /// stage's words (D718).
+    /// Counts a change to what a draw would be bound with: anything but a draw, the geometry
+    /// stage's words (D718), or the geometry stage's buffers, which a draw names in its words
+    /// (D747).
     fn note_state_change(&mut self, command: &RenderCommand) {
         if !matches!(
             command,
             RenderCommand::Draw { .. }
                 | RenderCommand::DrawIndexed { .. }
                 | RenderCommand::SetUserData {
+                    stage: ShaderStage::Vertex,
+                    ..
+                }
+                | RenderCommand::BindDrawBuffers {
                     stage: ShaderStage::Vertex,
                     ..
                 }
@@ -1053,6 +1084,7 @@ impl VulkanBackend {
             }
         };
         self.draw_buffers[index] = buffers.to_vec();
+        self.geometry_buffers_rebound |= index == 0;
         Ok(())
     }
 

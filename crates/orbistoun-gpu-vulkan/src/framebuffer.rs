@@ -2556,6 +2556,13 @@ pub(crate) struct BatchKey {
     fragment: DrawWords,
 }
 
+impl BatchKey {
+    /// The draw buffers' set the batch binds (D733).
+    pub(crate) const fn buffers(&self) -> vk::DescriptorSet {
+        self.buffers
+    }
+}
+
 /// The geometry stage's share of a user-data block, and the fragment stage's, each as a draw's
 /// words; the geometry stage's carry the draw's vertex count (D745) and where each of its buffers
 /// lies (D747) after them.

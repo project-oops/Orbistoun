@@ -514,6 +514,12 @@ fn batched_primitive_shaders_each_read_their_own_buffer() {
 /// vertex's id, as a float over eight, to parameter zero's red over the covering triangle of
 /// [`colour_primitive_shader`].
 fn vertex_id_primitive_shader() -> Vec<u32> {
+    vertex_id_primitive_shader_at(Width::Wave64, None)
+}
+
+/// [`vertex_id_primitive_shader`] translated for a wave of `width` lanes, one invocation per lane
+/// when `per_invocation` (D760).
+fn vertex_id_primitive_shader_at(width: Width, per_invocation: Option<u32>) -> Vec<u32> {
     use orbistoun_translate::wavefront::{Assembly, GeometryInputs, IndexWidth};
     let words: [u32; 38] = [
         // A raw descriptor over user-data word 0 with sixteen bytes; four words into s[8:11],
@@ -575,13 +581,14 @@ fn vertex_id_primitive_shader() -> Vec<u32> {
         &encodings,
         Strategy::Predicated {
             fidelity: Fidelity::Wavefront,
-            width: Width::Wave64,
+            width,
         },
         (Stage::Mesh, MeshPrimitive::default()),
         Window::default(),
         UserData {
             count: 1,
             draw_buffers: true,
+            per_invocation,
             geometry: Some(GeometryInputs {
                 first_vertex: 0,
                 vertices: 0,
@@ -612,6 +619,68 @@ fn counting(first: u32) -> DrawBuffer {
     }
 }
 
+/// Draws chunks of an indexed draw through `mesh`, one per first id, and reads the centre: the
+/// harness of [`indexed_chunks_each_read_their_own_vertex_ids`].
+fn draw_vertex_ids(mesh: &Vec<u32>, firsts: &[u32]) -> [u8; 4] {
+    let mut backend = VulkanBackend::new();
+    let pixel = orbistoun_spirv::passthrough_fragment_module();
+    for (id, words) in [(TRIANGLE, mesh), (PIXEL, &pixel)] {
+        backend
+            .ensure_resident(id, Resource::Shader(words))
+            .expect("resident");
+    }
+    backend
+        .ensure_resident(
+            TARGET,
+            Resource::RenderTarget {
+                width: 16,
+                height: 16,
+                srgb: false,
+            },
+        )
+        .expect("target resident");
+    let mut words = [0u32; orbistoun_gpu::USER_DATA_WORDS];
+    words[0] = 0x0010_0000;
+    let mut commands = vec![
+        RenderCommand::SetRenderTargets {
+            colour: vec![TARGET],
+            depth: None,
+        },
+        RenderCommand::SetUserData {
+            stage: ShaderStage::Vertex,
+            words,
+        },
+        RenderCommand::BindShader {
+            stage: ShaderStage::Vertex,
+            shader: TRIANGLE,
+        },
+        RenderCommand::BindShader {
+            stage: ShaderStage::Fragment,
+            shader: PIXEL,
+        },
+    ];
+    for &first in firsts {
+        commands.push(RenderCommand::BindDrawBuffers {
+            stage: ShaderStage::Vertex,
+            buffers: vec![colour_buffer([0.0, 0.5, 0.0, 0.0]), counting(first)],
+        });
+        commands.push(RenderCommand::DrawIndexed {
+            indices: 3,
+            instances: 1,
+            first_index: 0,
+            index_buffer: Some(orbistoun_gpu::IndexBuffer::Counting { first }),
+        });
+    }
+    for command in &commands {
+        backend.execute(command).expect("the command runs");
+    }
+    backend
+        .last_frame()
+        .expect("a frame")
+        .at(8, 8)
+        .expect("the centre")
+}
+
 /// Chunks of an indexed draw each read their own vertex ids (D740, D741): a chunk of ids 0 to 2
 /// colours the centre by their weighted mean, and a second chunk of ids 3 to 5 drawn over it, in
 /// the same batch, by its own. At the centre of the covering triangle the weights are a half and
@@ -622,66 +691,8 @@ fn indexed_chunks_each_read_their_own_vertex_ids() {
     if !device_or_skip("indexed_chunks_each_read_their_own_vertex_ids") {
         return;
     }
-    let draw = |firsts: &[u32]| {
-        let mut backend = VulkanBackend::new();
-        let mesh = vertex_id_primitive_shader();
-        let pixel = orbistoun_spirv::passthrough_fragment_module();
-        for (id, words) in [(TRIANGLE, &mesh), (PIXEL, &pixel)] {
-            backend
-                .ensure_resident(id, Resource::Shader(words))
-                .expect("resident");
-        }
-        backend
-            .ensure_resident(
-                TARGET,
-                Resource::RenderTarget {
-                    width: 16,
-                    height: 16,
-                    srgb: false,
-                },
-            )
-            .expect("target resident");
-        let mut words = [0u32; orbistoun_gpu::USER_DATA_WORDS];
-        words[0] = 0x0010_0000;
-        let mut commands = vec![
-            RenderCommand::SetRenderTargets {
-                colour: vec![TARGET],
-                depth: None,
-            },
-            RenderCommand::SetUserData {
-                stage: ShaderStage::Vertex,
-                words,
-            },
-            RenderCommand::BindShader {
-                stage: ShaderStage::Vertex,
-                shader: TRIANGLE,
-            },
-            RenderCommand::BindShader {
-                stage: ShaderStage::Fragment,
-                shader: PIXEL,
-            },
-        ];
-        for &first in firsts {
-            commands.push(RenderCommand::BindDrawBuffers {
-                stage: ShaderStage::Vertex,
-                buffers: vec![colour_buffer([0.0, 0.5, 0.0, 0.0]), counting(first)],
-            });
-            commands.push(RenderCommand::DrawIndexed {
-                indices: 3,
-                instances: 1,
-                first_index: 0,
-                index_buffer: Some(orbistoun_gpu::IndexBuffer::Counting { first }),
-            });
-        }
-        for command in &commands {
-            backend.execute(command).expect("the command runs");
-        }
-        backend
-            .last_frame()
-            .expect("a frame")
-            .at(8, 8)
-            .expect("the centre")
-    };
+    let mesh = vertex_id_primitive_shader();
+    let draw = |firsts: &[u32]| draw_vertex_ids(&mesh, firsts);
     let red = |ids: [f32; 3]| ((0.5 * ids[0] + 0.25 * ids[1] + 0.25 * ids[2]) / 8.0 * 255.0) as i32;
     let near = |got: u8, want: i32| (i32::from(got) - want).abs() <= 3;
     let first = draw(&[0]);
@@ -696,4 +707,38 @@ fn indexed_chunks_each_read_their_own_vertex_ids() {
         "ids 3 to 5: {second:?}"
     );
     assert!(near(second[1], 128), "green from slot 0: {second:?}");
+}
+
+/// A primitive shader run one invocation per lane (D760) draws what one invocation simulating the
+/// whole wave draws: each lane its own vertex id from the index buffer, its lane from
+/// `v_mbcnt_lo`, its vertex and primitive written at its own slot - for a wave of thirty-two lanes
+/// on a subgroup as wide, and for one of sixty-four exchanging through workgroup memory.
+#[test]
+fn a_primitive_shader_run_per_lane_draws_what_the_wave_draws() {
+    let Availability::Available { properties } = probe() else {
+        println!("[per-lane primitive shader] SKIPPED - no device");
+        return;
+    };
+    if properties.subgroup_size != 32 {
+        println!(
+            "[per-lane primitive shader] SKIPPED - subgroup {} wide, not 32",
+            properties.subgroup_size
+        );
+        return;
+    }
+    // A wave the subgroup holds takes ballots and shuffles; one twice as wide exchanges through
+    // workgroup memory.
+    for width in [Width::Wave32, Width::Wave64] {
+        let wave = vertex_id_primitive_shader_at(width, None);
+        let per_lane = vertex_id_primitive_shader_at(width, Some(32));
+        for firsts in [&[0][..], &[0, 3]] {
+            let expected = draw_vertex_ids(&wave, firsts);
+            assert_ne!(expected, [0, 0, 0, 0], "the wave model draws");
+            assert_eq!(
+                draw_vertex_ids(&per_lane, firsts),
+                expected,
+                "{width:?}, chunks {firsts:?}"
+            );
+        }
+    }
 }

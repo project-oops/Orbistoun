@@ -757,6 +757,7 @@ mod tests {
                     compute: None,
                     geometry: None,
                     window_space: false,
+                    per_invocation: None,
                     draw_buffers: false,
                     buffer_formats: None,
                     flat_twins: None,

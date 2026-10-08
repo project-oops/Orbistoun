@@ -77,6 +77,17 @@ pub mod op {
     /// Turns each invocation's per-lane `bool` into the mask word the guest's scalar instructions
     /// read.
     pub const GROUP_NON_UNIFORM_BALLOT: u16 = 339;
+    /// Another invocation's value of an operand, by that invocation's index in the subgroup.
+    ///
+    /// Reads one lane's register from another when one invocation is one lane.
+    pub const GROUP_NON_UNIFORM_SHUFFLE: u16 = 345;
+    /// Waits until every invocation of the scope reaches it, making the memory the semantics name
+    /// visible across them.
+    pub const CONTROL_BARRIER: u16 = 224;
+    /// Ands a value into the word a pointer names, as one indivisible step.
+    pub const ATOMIC_AND: u16 = 240;
+    /// Ors a value into the word a pointer names, as one indivisible step.
+    pub const ATOMIC_OR: u16 = 241;
     /// A floating-point type.
     pub const TYPE_FLOAT: u16 = 22;
     /// A function type.
@@ -388,6 +399,8 @@ pub mod capability {
     pub const GROUP_NON_UNIFORM: u32 = 61;
     /// Invocations may take a ballot across their subgroup.
     pub const GROUP_NON_UNIFORM_BALLOT: u32 = 64;
+    /// Invocations may read each other's values by index.
+    pub const GROUP_NON_UNIFORM_SHUFFLE: u32 = 65;
     /// 16-bit floating-point types and arithmetic.
     ///
     /// Widens a packed half through a real 16-bit float type, using the driver's IEEE conversion
@@ -405,6 +418,16 @@ pub mod scope {
     /// A scope is an identifier operand in the encoding, so it is declared as a constant like any
     /// other value.
     pub const SUBGROUP: u32 = 3;
+    /// The workgroup: every invocation of one dispatch group.
+    pub const WORKGROUP: u32 = 2;
+}
+
+/// Memory semantics, for the barriers.
+pub mod semantics {
+    /// Earlier writes become visible to later reads, both ways across the barrier.
+    pub const ACQUIRE_RELEASE: u32 = 0x8;
+    /// The ordering applies to workgroup memory.
+    pub const WORKGROUP_MEMORY: u32 = 0x100;
 }
 
 /// Built-in variables, by their decoration value.
@@ -412,6 +435,9 @@ pub mod built_in {
     /// This invocation's index within its subgroup: the guest's lane number when one invocation is
     /// one lane.
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
+    /// This invocation's index within its workgroup, flattened: the guest's lane number when one
+    /// invocation is one lane and the wave is wider than a subgroup.
+    pub const LOCAL_INVOCATION_INDEX: u32 = 29;
     /// This workgroup's index within its dispatch (a `uvec3`): which draw of a batch a mesh
     /// workgroup is (D718).
     pub const WORKGROUP_ID: u32 = 26;
@@ -1859,6 +1885,37 @@ static SHAPES: &[ShapeEntry] = &[
         op::GROUP_NON_UNIFORM_BALLOT,
         Some(1),
         &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    // Execution scope, memory scope and semantics, all identifiers.
+    (
+        op::CONTROL_BARRIER,
+        None,
+        &[0, 1, 2],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, pointer, scope, semantics and value.
+    (
+        op::ATOMIC_AND,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_OR,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, an execution-scope identifier, the value and the invocation index.
+    (
+        op::GROUP_NON_UNIFORM_SHUFFLE,
+        Some(1),
+        &[0, 2, 3, 4],
         None,
         RestStride::Every,
     ),

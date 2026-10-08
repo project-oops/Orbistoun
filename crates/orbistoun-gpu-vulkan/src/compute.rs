@@ -59,6 +59,9 @@ pub struct Properties {
     /// Reported rather than assumed: the guest's wavefront is 32 or 64 lanes, and the ratio to the
     /// host subgroup is what a lane-mapped translation is built around.
     pub subgroup_size: u32,
+    /// Whether the mesh stage may take a subgroup ballot and shuffle, which a primitive shader run
+    /// one invocation per lane needs (D760).
+    pub mesh_subgroup_ops: bool,
     /// Whether a fragment shader on this device may write a storage buffer.
     ///
     /// Reports what was enabled at device creation, not what the hardware offers, because a feature
@@ -613,6 +616,15 @@ impl Session {
                 preserved
             },
             subgroup_size: subgroup.subgroup_size,
+            mesh_subgroup_ops: mesh_enabled == vk::TRUE
+                && subgroup
+                    .supported_stages
+                    .contains(vk::ShaderStageFlags::MESH_EXT)
+                && subgroup.supported_operations.contains(
+                    vk::SubgroupFeatureFlags::BASIC
+                        | vk::SubgroupFeatureFlags::BALLOT
+                        | vk::SubgroupFeatureFlags::SHUFFLE,
+                ),
             // Derived from the creation request, so the report follows whatever was enabled.
             fragment_stores: wanted_features.fragment_stores_and_atomics == vk::TRUE,
             // Enabled, not merely offered, like every other field.

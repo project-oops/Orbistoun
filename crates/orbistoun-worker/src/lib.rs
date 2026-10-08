@@ -523,6 +523,17 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::set_write_back_at_flip(
         orbistoun_env::TARGET_WRITEBACK.get().as_deref() != Some("submit"),
     );
+    // The subgroup a primitive shader runs one invocation per lane on, where the device has one
+    // (D760).
+    if let orbistoun_gpu_vulkan::compute::Availability::Available { properties } =
+        orbistoun_gpu_vulkan::compute::probe()
+    {
+        orbistoun_gpu::set_host_subgroup(
+            properties
+                .mesh_subgroup_ops
+                .then_some(properties.subgroup_size),
+        );
+    }
     // A submission's finer spans, when asked for.
     orbistoun_gpu::perf::set_detail(orbistoun_env::PERF_DETAIL.get().as_deref() == Some("1"));
     // A copy out of a colour target still on the device, carried out when its destination is first

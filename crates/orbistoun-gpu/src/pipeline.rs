@@ -221,6 +221,15 @@ fn stage_strategy(strategy: Strategy, stage: Stage, widths: WaveWidths) -> (Stra
     (strategy, salt)
 }
 
+/// Distinguishes a primitive shader run one invocation per lane (D760), and the subgroup it runs on,
+/// in the cache key.
+const fn per_lane_salt(subgroup: Option<u32>) -> u64 {
+    match subgroup {
+        Some(width) => 0x5045_524c_414e_4500 ^ width as u64,
+        None => 0,
+    }
+}
+
 /// Distinguishes a module that reads its draw's bound buffers from one that reaches guest memory
 /// only through the window (D733), in the cache key.
 const DRAW_BUFFERS_SALT: u64 = 0x4452_4157_4255_4653;
@@ -1088,6 +1097,7 @@ impl Pipeline {
             compute: Some(inputs),
             geometry: None,
             window_space: false,
+            per_invocation: None,
             // Its buffers are bound on their own where traced (D746).
             draw_buffers: true,
             buffer_formats: formats,
@@ -2335,6 +2345,28 @@ impl Pipeline {
         );
     }
 
+    /// The host subgroup a primitive shader runs one invocation per lane on (D760): wherever the
+    /// host recorded one, for any shader but a rectangle list's and one whose lanes exchange in a
+    /// way a ballot, shuffle or workgroup memory cannot stand in for. `None` for every other module.
+    fn per_lane_subgroup(
+        &self,
+        (stage, primitive): (Stage, MeshPrimitive),
+        (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
+    ) -> Option<u32> {
+        if stage != Stage::Mesh || primitive == MeshPrimitive::Rectangles {
+            return None;
+        }
+        let subgroup = crate::host_subgroup()?;
+        let fits = decoded.map_or_else(
+            || {
+                let again = decode_program(shader, &self.encodings, &self.operands);
+                orbistoun_translate::wavefront::runs_per_lane(&again, &self.encodings)
+            },
+            |decoded| orbistoun_translate::wavefront::runs_per_lane(decoded, &self.encodings),
+        );
+        fits.then_some(subgroup)
+    }
+
     /// Records how a translated module reaches guest memory: the buffers a draw binds for it
     /// (D733), and whether anything else it reads goes through the window. A pixel shader's
     /// exported colour channels are recorded with them, from the same decode.
@@ -2908,6 +2940,10 @@ impl Pipeline {
             ..user_data
         };
         let (strategy, width_salt) = stage_strategy(self.strategy, host_stage, widths);
+        let user_data = UserData {
+            per_invocation: self.per_lane_subgroup((host_stage, primitive), (shader, decoded)),
+            ..user_data
+        };
         // The user-data layout and the wave width are in the module too.
         let key = content_hash(shader)
             ^ stage_salt(host_stage)
@@ -2921,7 +2957,8 @@ impl Pipeline {
                 DRAW_BUFFERS_SALT
             } else {
                 0
-            };
+            }
+            ^ per_lane_salt(user_data.per_invocation);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
                 return Ok(Prepared::Cached {
@@ -4060,6 +4097,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             compute: None,
             geometry: None,
             window_space: false,
+            per_invocation: None,
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
@@ -4075,6 +4113,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             compute: None,
             geometry: None,
             window_space: false,
+            per_invocation: None,
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,

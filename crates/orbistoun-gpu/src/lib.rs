@@ -28,6 +28,24 @@ pub mod translations;
 #[cfg(test)]
 mod translator_inputs;
 
+/// The host's subgroup width, when its mesh stage can take a subgroup ballot and shuffle: a primitive
+/// shader of that wave width runs one invocation per lane there (D760). Zero for none.
+static HOST_SUBGROUP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Records the host's subgroup width for primitive shaders (D760), or that it has none to offer.
+pub fn set_host_subgroup(lanes: Option<u32>) {
+    HOST_SUBGROUP.store(lanes.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`set_host_subgroup`].
+#[must_use]
+pub fn host_subgroup() -> Option<u32> {
+    match HOST_SUBGROUP.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        lanes => Some(lanes),
+    }
+}
+
 /// A content hash of guest words - what a shader or texture is, for recognising it again.
 ///
 /// A fast, unkeyed hash: a guest cannot usefully choose a collision, and a keyed hasher costs more

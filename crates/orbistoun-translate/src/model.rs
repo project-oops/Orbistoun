@@ -886,27 +886,27 @@ pub trait Model {
     /// Sets bit `lane` of a pair of half-masks from a boolean: the low half for lanes 0-31, the
     /// high half for the rest.
     fn set_lane_bit(&mut self, halves: (Id, Id), lane: u32, condition: Id) -> (Id, Id) {
-        let (low, high) = halves;
-        let bit = self.constant(1u32 << (lane % 32));
-        let zero = self.constant(0);
-        let u32_type = self.u32_type();
+        constant_lane_bit(self, halves, lane, condition)
+    }
 
-        let b = self.builder();
-        let contribution = b.id();
-        b.function(
-            op::SELECT,
-            &[u32_type.0, contribution.0, condition.0, bit.0, zero.0],
-        );
-        let updated = self.binary(
-            op::BITWISE_OR,
-            if lane < 32 { low } else { high },
-            contribution,
-        );
-        if lane < 32 {
-            (updated, high)
-        } else {
-            (low, updated)
-        }
+    /// The lane this invocation is, when each invocation is one lane (D760); `None` where the lane
+    /// a per-lane loop names is the lane.
+    fn lane_index(&mut self) -> Option<Id> {
+        None
+    }
+
+    /// After a local-data-share access: where each invocation is one lane (D760), what one lane
+    /// wrote is made visible to every other before any goes on, as the wave's own program order
+    /// does. Nothing where one invocation is the whole wave.
+    fn after_local_access(&mut self) {}
+
+    /// Merges into word `word_index` of the local data share where each invocation is one lane
+    /// (D760): keeps the bits `keep` has set, then sets `set`'s, each as one indivisible step, so
+    /// lanes merging into one word at once each keep the others' bytes. Only where `lane` runs.
+    /// `false` where one invocation is the whole wave and merges in lane order instead.
+    fn merge_local(&mut self, word_index: Id, (keep, set): (Id, Id), lane: u32) -> bool {
+        let _ = (word_index, keep, set, lane);
+        false
     }
 
     /// Writes one word of guest memory, honouring the execution mask.
@@ -1089,23 +1089,7 @@ pub trait Model {
     /// Whether bit `lane` of a sixty-four-bit mask, held as two halves, is set. `v_cndmask_b32`
     /// takes an arbitrary register pair rather than a named mask.
     fn lane_bit(&mut self, low: Id, high: Id, lane: u32) -> Id {
-        let half = if lane < 32 { low } else { high };
-        let shift = self.constant(lane % 32);
-        let one = self.constant(1);
-        let zero = self.constant(0);
-        let (u32_type, bool_type) = (self.u32_type(), self.bool_type());
-
-        let b = self.builder();
-        let shifted = b.id();
-        b.function(
-            op::SHIFT_RIGHT_LOGICAL,
-            &[u32_type.0, shifted.0, half.0, shift.0],
-        );
-        let bit = b.id();
-        b.function(op::BITWISE_AND, &[u32_type.0, bit.0, shifted.0, one.0]);
-        let result = b.id();
-        b.function(op::INOT_EQUAL, &[bool_type.0, result.0, bit.0, zero.0]);
-        result
+        constant_lane_test(self, (low, high), lane)
     }
 
     /// Counts the set bits of a value.
@@ -2489,9 +2473,21 @@ fn memory_instruction<M: Model + ?Sized>(
         }
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
-        "ds_write_b32" | "ds_read_b32" => local_share(model, instruction, name),
-        "ds_write2_b32" | "ds_read2_b32" => local_share_pair(model, instruction, name),
-        "ds_write_b8" | "ds_read_u8" | "ds_or_b32" => local_share_merge(model, instruction, name),
+        "ds_write_b32" | "ds_read_b32" => {
+            local_share(model, instruction, name)?;
+            model.after_local_access();
+            Ok(())
+        }
+        "ds_write2_b32" | "ds_read2_b32" => {
+            local_share_pair(model, instruction, name)?;
+            model.after_local_access();
+            Ok(())
+        }
+        "ds_write_b8" | "ds_read_u8" | "ds_or_b32" => {
+            local_share_merge(model, instruction, name)?;
+            model.after_local_access();
+            Ok(())
+        }
 
         // A texture sample or fetch; the descriptor rules are D690's.
         "image_sample_lz" | "image_sample" | "image_sample_l" | "image_load" | "image_load_mip" => {
@@ -2552,7 +2548,11 @@ fn mask_bit_count<M: Model + ?Sized>(
             }
         };
 
-        let below = model.constant(below);
+        // One invocation per lane (D760): the bits below this lane, at run time.
+        let below = match model.lane_index() {
+            Some(index) => lanes_below(model, index, high_half),
+            None => model.constant(below),
+        };
         let selected = model.binary(op::BITWISE_AND, mask_value, below);
         let counted = model.bit_count(selected);
         let total = model.add(base, counted);
@@ -4752,9 +4752,24 @@ fn local_share_merge<M: Model + ?Sized>(
         let offset = model.constant(offset);
         let byte_address = model.add(base, offset);
         let index = model.word_index(byte_address);
-        let word = model.read_local(index)?;
         let within = model.binary(op::BITWISE_AND, byte_address, three);
         let shift = model.binary(op::IMUL, within, eight);
+        // One invocation per lane (D760): a write merges indivisibly, keeping other lanes' bytes.
+        if name != "ds_read_u8" && model.lane_index().is_some() {
+            let data = model.read_source(instruction, destination, lane)?;
+            let (keep, set) = if name == "ds_write_b8" {
+                let data = model.binary(op::BITWISE_AND, data, byte);
+                let placed = model.binary(op::SHIFT_LEFT_LOGICAL, data, shift);
+                let hole = model.binary(op::SHIFT_LEFT_LOGICAL, byte, shift);
+                (model.not(hole), placed)
+            } else {
+                (model.constant(u32::MAX), data)
+            };
+            if model.merge_local(index, (keep, set), lane) {
+                continue;
+            }
+        }
+        let word = model.read_local(index)?;
         match name {
             "ds_read_u8" => {
                 let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
@@ -7159,15 +7174,33 @@ fn permute_lanes_16<M: Model + ?Sized>(
     // Every lane's value first: each reads the source before any lane writes the destination.
     let mut values = Vec::new();
     for lane in running_lanes(model) {
-        let within = lane % 16;
-        let shift = model.constant(4 * (within % 8));
-        let select = model.binary(
-            op::SHIFT_RIGHT_LOGICAL,
-            selects[usize::from(within >= 8)],
-            shift,
-        );
+        let (select, row) = if let Some(index) = model.lane_index() {
+            // One invocation per lane (D760): its place in its row, at run time.
+            let (fifteen, seven, eight, four) = (
+                model.constant(15),
+                model.constant(7),
+                model.constant(8),
+                model.constant(4),
+            );
+            let within = model.binary(op::BITWISE_AND, index, fifteen);
+            let upper = model.compare(op::UGREATER_THAN_EQUAL, within, eight);
+            let word = model.select(upper, selects[1], selects[0]);
+            let place = model.binary(op::BITWISE_AND, within, seven);
+            let shift = model.binary(op::IMUL, place, four);
+            let select = model.binary(op::SHIFT_RIGHT_LOGICAL, word, shift);
+            let row = model.binary(op::ISUB, index, within);
+            (select, row)
+        } else {
+            let within = lane % 16;
+            let shift = model.constant(4 * (within % 8));
+            let select = model.binary(
+                op::SHIFT_RIGHT_LOGICAL,
+                selects[usize::from(within >= 8)],
+                shift,
+            );
+            (select, model.constant(lane - within))
+        };
         let select = model.binary(op::BITWISE_AND, select, nibble);
-        let row = model.constant(lane - within);
         let from = model.add(row, select);
         let fetched = model
             .read_vector_at(source, from)
@@ -7176,7 +7209,15 @@ fn permute_lanes_16<M: Model + ?Sized>(
                 detail: "a lane permute needs every lane",
             })?;
         // The source lane's execution bit: rows below thirty-two in the low half.
-        let half = if lane < 32 { running_low } else { running_high };
+        let half = if model.lane_index().is_some() {
+            let thirty_two = model.constant(32);
+            let upper = model.compare(op::UGREATER_THAN_EQUAL, from, thirty_two);
+            model.select(upper, running_high, running_low)
+        } else if lane < 32 {
+            running_low
+        } else {
+            running_high
+        };
         let thirty_one = model.constant(31);
         let bit = model.binary(op::BITWISE_AND, from, thirty_one);
         let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, half, bit);
@@ -8164,6 +8205,113 @@ fn flat_memory<M: Model + ?Sized>(
             detail: "no translation for this flat memory instruction",
         }),
     }
+}
+
+/// The bits of one half of a mask below lane `index`, a run-time value (D760): `v_mbcnt_lo`'s for
+/// the low half and `v_mbcnt_hi`'s for the high one - all of a half below the lane, none above it,
+/// and in the lane's own half the bits before it.
+fn lanes_below<M: Model + ?Sized>(model: &mut M, index: Id, high_half: bool) -> Id {
+    let (u32_type, bool_type) = (model.u32_type(), model.bool_type());
+    let (zero, one, all, thirty_two) = (
+        model.constant(0),
+        model.constant(1),
+        model.constant(u32::MAX),
+        model.constant(32),
+    );
+    let b = model.builder();
+    // The lane's position counted from this half's first bit, and whether it is past this half.
+    let within = if high_half {
+        let within = b.id();
+        b.function(op::ISUB, &[u32_type.0, within.0, index.0, thirty_two.0]);
+        within
+    } else {
+        index
+    };
+    let before = b.id();
+    b.function(
+        op::ULESS_THAN,
+        &[
+            bool_type.0,
+            before.0,
+            index.0,
+            if high_half { thirty_two.0 } else { zero.0 },
+        ],
+    );
+    let past = b.id();
+    b.function(
+        op::UGREATER_THAN_EQUAL,
+        &[bool_type.0, past.0, within.0, thirty_two.0],
+    );
+    // `1 << within` is defined for a within below thirty-two; the other cases are selected away.
+    let shift = b.id();
+    b.function(
+        op::SHIFT_LEFT_LOGICAL,
+        &[u32_type.0, shift.0, one.0, within.0],
+    );
+    let mask = b.id();
+    b.function(op::ISUB, &[u32_type.0, mask.0, shift.0, one.0]);
+    let capped = b.id();
+    b.function(op::SELECT, &[u32_type.0, capped.0, past.0, all.0, mask.0]);
+    let result = b.id();
+    b.function(
+        op::SELECT,
+        &[u32_type.0, result.0, before.0, zero.0, capped.0],
+    );
+    result
+}
+
+/// [`Model::set_lane_bit`] for a lane known as a constant: bit `lane % 32` of the half it is in.
+pub(crate) fn constant_lane_bit<M: Model + ?Sized>(
+    model: &mut M,
+    (low, high): (Id, Id),
+    lane: u32,
+    condition: Id,
+) -> (Id, Id) {
+    let bit = model.constant(1u32 << (lane % 32));
+    let zero = model.constant(0);
+    let u32_type = model.u32_type();
+
+    let b = model.builder();
+    let contribution = b.id();
+    b.function(
+        op::SELECT,
+        &[u32_type.0, contribution.0, condition.0, bit.0, zero.0],
+    );
+    let updated = model.binary(
+        op::BITWISE_OR,
+        if lane < 32 { low } else { high },
+        contribution,
+    );
+    if lane < 32 {
+        (updated, high)
+    } else {
+        (low, updated)
+    }
+}
+
+/// [`Model::lane_bit`] for a lane known as a constant.
+pub(crate) fn constant_lane_test<M: Model + ?Sized>(
+    model: &mut M,
+    (low, high): (Id, Id),
+    lane: u32,
+) -> Id {
+    let half = if lane < 32 { low } else { high };
+    let shift = model.constant(lane % 32);
+    let one = model.constant(1);
+    let zero = model.constant(0);
+    let (u32_type, bool_type) = (model.u32_type(), model.bool_type());
+
+    let b = model.builder();
+    let shifted = b.id();
+    b.function(
+        op::SHIFT_RIGHT_LOGICAL,
+        &[u32_type.0, shifted.0, half.0, shift.0],
+    );
+    let bit = b.id();
+    b.function(op::BITWISE_AND, &[u32_type.0, bit.0, shifted.0, one.0]);
+    let result = b.id();
+    b.function(op::INOT_EQUAL, &[bool_type.0, result.0, bit.0, zero.0]);
+    result
 }
 
 /// Vector registers the guest has.
