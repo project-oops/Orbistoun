@@ -1216,6 +1216,46 @@ found_in = ["PPSA02664-app0"]
 found_on = "2026-10-08"
 
 [[function]]
+name = "sceKernelGetProcParam"
+arity = 0
+purpose = "The executable's process parameter block: its PT_SCE_PROCPARAM segment, as relocation left it."
+edge_cases = [
+    "Every commercial title in the corpus ships its own libc.prx, and its _malloc_init calls this first: it reads a size of at least 0x40 at +0 and the libc parameters through the pointer at +0x38, then sets up the heap every allocation inside libc.prx draws from. PPSA02664's segment states 0x60 bytes and \"ORBI\" at +8, and relocation writes +0x30..+0x48. Answered with the placeholder, _malloc_init dereferenced it (D764).",
+    "Null when the executable carries no PT_SCE_PROCPARAM segment.",
+]
+returns = "pointer"
+known_by = "guest-observed"
+cites = "the guest: PPSA02664's PT_SCE_PROCPARAM (vaddr 0x1994688, size 0x60, magic ORBI, relative relocations at +0x30..+0x48) and its libc.prx _malloc_init (+0x5c80: size test at +0, libc parameters through +0x38)"
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA04263-app0", "PPSA28061-app0"]
+found_on = "2026-10-08"
+
+[[function]]
+name = "sceKernelGetSanitizerMallocReplaceExternal"
+arity = 0
+purpose = "The malloc replacement table a sanitizer runtime puts in place of the title's own, or null when none is loaded."
+edge_cases = [
+    "Every commercial title's libc.prx asks for it while setting up its heap in _malloc_init, tests the answer for null, and reads a size-prefixed table through anything else (PPSA02664 libc.prx +0x16252: null skips, else [rax] >= 0xc0). A retail process loads no sanitizer, so orbistoun answers null and the title's own allocator stays (D765).",
+]
+returns = "pointer"
+known_by = "assumed"
+assumptions = ["A retail process has no sanitizer runtime loaded; unmeasured, and asked of obSCEne."]
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA04263-app0", "PPSA28061-app0"]
+found_on = "2026-10-08"
+
+[[function]]
+name = "sceKernelGetSanitizerNewReplaceExternal"
+arity = 0
+purpose = "The operator new replacement table a sanitizer runtime puts in place of the title's own, or null when none is loaded."
+edge_cases = [
+    "Every commercial title's libc.prx asks for it while setting up its heap in _malloc_init, tests the answer for null, and reads a size-prefixed table through anything else (PPSA02664 libc.prx +0x16252: null skips, else [rax] >= 0xc0). A retail process loads no sanitizer, so orbistoun answers null and the title's own allocator stays (D765).",
+]
+returns = "pointer"
+known_by = "assumed"
+assumptions = ["A retail process has no sanitizer runtime loaded; unmeasured, and asked of obSCEne."]
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA04263-app0", "PPSA28061-app0"]
+found_on = "2026-10-08"
+
+[[function]]
 name = "sceKernelRemoveExceptionHandler"
 arity = 1
 purpose = "Removes a handler installed for a signal. Called as (signum)."
@@ -1911,7 +1951,7 @@ arity = 1
 purpose = "Takes a lock, blocking until it is available."
 returns = "status"
 edge_cases = [
-    "A **statically initialised** lock is the case worth naming: the guest filled the location with a constant at compile time and never called init, so the value there names nothing this crate made. It is reported as an invalid handle, because a stub returning success would let every thread through the critical section at once and the corruption would be blamed on whatever the lock was protecting.",
+    "A **statically initialised** lock (`PTHREAD_MUTEX_INITIALIZER`, 0, or the adaptive initialiser, 1) is made the first time it is taken, error-checking by default, as FreeBSD libthr's CHECK_AND_INIT_MUTEX makes it; a destroyed lock holds the marker 2 and answers EINVAL (D766). A title's own libc.prx guards its static constructors with such locks, and il2cpp's collector lock is one.",
     "A non-recursive lock taken again by its owner is refused rather than waited on. Waiting would deadlock the thread against itself and look like a hang in the guest, with nothing naming the cause.",
     "A refusal and a lookup miss get different codes deliberately - one is a guest bug, the other is a gap here, and a trace that cannot tell them apart is worth much less.",
 ]

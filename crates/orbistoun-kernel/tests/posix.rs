@@ -30,6 +30,8 @@ const NOT_OWNER: u64 = 0x8002_0001;
 const BUSY: u64 = 0x8002_0010;
 /// No such object: the vendor `ESRCH` a bad event-flag handle answers on the hardware.
 const NO_SUCH: u64 = 0x8002_0003;
+/// `EINVAL`, which a destroyed condition variable answers, as libthr's does (D766).
+const INVALID: u64 = 0x8002_0016;
 
 /// A guest object: a run of words at a real address.
 struct Slot {
@@ -237,8 +239,8 @@ fn a_guest_mutex_is_initialised_used_and_destroyed_through_its_own_pointer() {
     assert_eq!(call("scePthreadMutexDestroy", &[mutex.at()]), OK);
     assert_eq!(
         mutex.read(0),
-        0,
-        "the slot is cleared, so a use-after-destroy shows up here"
+        2,
+        "the slot is marked destroyed as libthr marks it, so a use-after-destroy shows up here          and is not taken for a static initialiser (D766)"
     );
     assert_eq!(
         call("scePthreadMutexDestroy", &[mutex.at()]),
@@ -247,29 +249,24 @@ fn a_guest_mutex_is_initialised_used_and_destroyed_through_its_own_pointer() {
     );
 }
 
-/// A statically initialised lock names nothing, and says so.
-///
-/// The guest filled the location at compile time and never called init, so the handle there
-/// is not one this crate issued. Answering success would let every thread into the critical
-/// section at once.
+/// A lock the guest left as `PTHREAD_MUTEX_INITIALIZER` is made the first time it is taken, as
+/// FreeBSD's libthr makes it (D766); until then there is nothing to unlock or destroy.
 #[test]
-fn a_lock_that_was_never_initialised_names_nothing() {
-    let mutex = Slot::one(); // still zero: never initialised
+fn a_statically_initialised_lock_is_made_when_first_taken() {
+    let mutex = Slot::one(); // still zero: `PTHREAD_MUTEX_INITIALIZER`
 
-    assert_eq!(call("scePthreadMutexLock", &[mutex.at()]), INVALID_HANDLE);
     assert_eq!(call("scePthreadMutexUnlock", &[mutex.at()]), INVALID_HANDLE);
-    assert_eq!(
-        call("scePthreadMutexTrylock", &[mutex.at()]),
-        INVALID_HANDLE
-    );
     assert_eq!(
         call("scePthreadMutexDestroy", &[mutex.at()]),
         INVALID_HANDLE
     );
+    assert_eq!(call("scePthreadMutexTrylock", &[mutex.at()]), OK);
+    assert_ne!(mutex.read(0), 0, "the lock was made");
+    assert_eq!(call("scePthreadMutexUnlock", &[mutex.at()]), OK);
 
     // And a null pointer is not a lock either.
     assert_eq!(call("scePthreadMutexInit", &[0, 0, 0]), INVALID_ARGUMENT);
-    assert_eq!(call("scePthreadMutexLock", &[0]), INVALID_HANDLE);
+    assert_ne!(call("scePthreadMutexLock", &[0]), OK);
 }
 
 /// `Trylock` reports a lock it could not take as `Busy`, not `OK`.
@@ -496,19 +493,18 @@ fn a_guest_condition_variable_remembers_a_signal_that_arrived_early() {
     assert_eq!(call("scePthreadCondWait", &[cond.at(), 0]), OK);
 
     assert_eq!(call("scePthreadCondDestroy", &[cond.at()]), OK);
-    assert_eq!(call("scePthreadCondSignal", &[cond.at()]), INVALID_HANDLE);
+    assert_eq!(call("scePthreadCondSignal", &[cond.at()]), INVALID);
 }
 
-/// A condition variable that was never initialised names nothing.
+/// A condition variable left as `PTHREAD_COND_INITIALIZER` is made the first time it is used, as
+/// libthr makes it (D766); until then there is nothing to destroy.
 #[test]
-fn an_uninitialised_condition_variable_names_nothing() {
+fn a_statically_initialised_condition_variable_is_made_when_first_used() {
     let cond = Slot::one();
-    assert_eq!(call("scePthreadCondSignal", &[cond.at()]), INVALID_HANDLE);
-    assert_eq!(
-        call("scePthreadCondBroadcast", &[cond.at()]),
-        INVALID_HANDLE
-    );
     assert_eq!(call("scePthreadCondDestroy", &[cond.at()]), INVALID_HANDLE);
+    assert_eq!(call("scePthreadCondSignal", &[cond.at()]), OK);
+    assert_ne!(cond.read(0), 0, "the condition was made");
+    assert_eq!(call("scePthreadCondBroadcast", &[cond.at()]), OK);
     assert_eq!(call("scePthreadCondInit", &[0, 0, 0]), INVALID_ARGUMENT);
 }
 

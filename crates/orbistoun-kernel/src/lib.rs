@@ -124,6 +124,9 @@ guest_module! {
         "sceKernelRaiseException" => 2,
         // A pointer to `{module, offset}`, the ELF thread-local storage ABI's `tls_index`.
         "__tls_get_addr" => 1,
+        "sceKernelGetProcParam" => 0,
+        "sceKernelGetSanitizerMallocReplaceExternal" => 0,
+        "sceKernelGetSanitizerNewReplaceExternal" => 0,
         "sceKernelSetVirtualRangeName" => 3,
         "sceKernelAllocateMainDirectMemory" => 4,
         "sceKernelGetDirectMemorySize" => 0,
@@ -2388,21 +2391,63 @@ fn mutex_recursion_from_attr(attr: u64) -> sync::Recursion {
     }
 }
 
-/// Resolves the lock a guest pointer refers to.
+/// Resolves the lock a guest pointer refers to, without making one.
 ///
-/// `None` covers a statically initialised lock, filled with a constant at compile time and never
-/// passed to init: the handle there is not one this crate issued. Answering success would let
-/// every thread into the critical section at once.
+/// `None` covers a statically initialised lock nobody has taken yet: the word there is not a
+/// handle this crate issued. Taking one makes it ([`mutex_or_static`]); anything else on it is
+/// refused, since answering success would let every thread into the critical section at once.
 fn mutex_at(pointer: u64) -> Option<sync::MutexHandle> {
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let handle = unsafe { guest::read_u64(pointer) }?;
     (handle != sync::NO_MUTEX).then_some(handle)
 }
 
+/// FreeBSD libthr's `THR_MUTEX_INITIALIZER`: `PTHREAD_MUTEX_INITIALIZER`, a lock nobody has made.
+const STATIC_MUTEX: u64 = 0;
+/// `THR_ADAPTIVE_MUTEX_INITIALIZER`, the adaptive spelling of the same.
+const STATIC_ADAPTIVE_MUTEX: u64 = 1;
+/// `THR_MUTEX_DESTROYED`, what a destroyed lock's word holds.
+const DESTROYED_MUTEX: u64 = 2;
+
+/// The lock a guest pointer refers to, made now if the word still holds a static initialiser,
+/// as libthr's `CHECK_AND_INIT_MUTEX` does (D766). The answer on failure is the code to return.
+///
+/// Made under one lock and re-read under it, so two threads taking the same static lock first
+/// make one lock between them. The default type is libthr's default, error-checking; the adaptive
+/// initialiser makes a normal lock.
+fn mutex_or_static(pointer: u64) -> Result<sync::MutexHandle, u64> {
+    static MAKING: Mutex<()> = Mutex::new(());
+    let invalid = || u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let word = unsafe { guest::read_u64(pointer) }.ok_or_else(invalid)?;
+    if word > DESTROYED_MUTEX {
+        return Ok(word);
+    }
+    if word == DESTROYED_MUTEX {
+        return Err(invalid());
+    }
+    let _making = MAKING.lock().map_err(|_| invalid())?;
+    // SAFETY: as above.
+    let word = unsafe { guest::read_u64(pointer) }.ok_or_else(invalid)?;
+    let recursion = match word {
+        STATIC_MUTEX => sync::Recursion::Errorcheck,
+        STATIC_ADAPTIVE_MUTEX => sync::Recursion::Forbidden,
+        DESTROYED_MUTEX => return Err(invalid()),
+        made => return Ok(made),
+    };
+    let handle = sync::create(recursion, "static");
+    // SAFETY: as above.
+    if !unsafe { guest::write_u64(pointer, handle) } {
+        return Err(invalid());
+    }
+    Ok(handle)
+}
+
 /// `scePthreadMutexLock(mutex)`.
 fn pthread_mutex_lock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(handle) = mutex_at(args[0]) else {
-        return u64::from(GuestError::InvalidHandle.as_raw());
+    let handle = match mutex_or_static(args[0]) {
+        Ok(handle) => handle,
+        Err(code) => return code,
     };
     let by = thread::adopt("main");
     match sync::acquire(handle, by, sync::Blocking::Forever) {
@@ -2437,8 +2482,9 @@ fn pthread_mutex_unlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Must not answer `OK` when it fails: a guest branches on the answer, and success would send it
 /// into a critical section it does not hold.
 fn pthread_mutex_trylock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(handle) = mutex_at(args[0]) else {
-        return u64::from(GuestError::InvalidHandle.as_raw());
+    let handle = match mutex_or_static(args[0]) {
+        Ok(handle) => handle,
+        Err(code) => return code,
     };
     let by = thread::adopt("main");
     match sync::acquire(handle, by, sync::Blocking::Never) {
@@ -2467,9 +2513,10 @@ fn pthread_mutex_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !sync::destroy(handle) {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
-    // Cleared, so a second destroy or a use after destroy is told the handle is gone.
+    // Marked destroyed as libthr marks it, so a second destroy or a use after destroy is told the
+    // handle is gone rather than taking it for a static initialiser (D766).
     // SAFETY: an address the guest passed for this call, valid by its contract.
-    unsafe { guest::write_u64(args[0], sync::NO_MUTEX) };
+    unsafe { guest::write_u64(args[0], DESTROYED_MUTEX) };
     OK
 }
 
@@ -2879,7 +2926,38 @@ fn sigismember(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn cond_at(pointer: u64) -> Option<sync::CondHandle> {
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let handle = unsafe { guest::read_u64(pointer) }?;
-    (handle != 0).then_some(handle)
+    (handle > DESTROYED_COND).then_some(handle)
+}
+
+/// libthr's `THR_COND_INITIALIZER`: `PTHREAD_COND_INITIALIZER`, a condition nobody has made.
+const STATIC_COND: u64 = 0;
+/// `THR_COND_DESTROYED`, what a destroyed condition's word holds.
+const DESTROYED_COND: u64 = 1;
+
+/// The condition variable a guest pointer refers to, made now if the word still holds the static
+/// initialiser, as libthr's `CHECK_AND_INIT_COND` does (D766). The answer on failure is the code to
+/// return. Made under one lock and re-read under it, as [`mutex_or_static`] does.
+fn cond_or_static(pointer: u64) -> Result<sync::CondHandle, u64> {
+    static MAKING: Mutex<()> = Mutex::new(());
+    let invalid = || u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let word = unsafe { guest::read_u64(pointer) }.ok_or_else(invalid)?;
+    if word > DESTROYED_COND {
+        return Ok(word);
+    }
+    let _making = MAKING.lock().map_err(|_| invalid())?;
+    // SAFETY: as above.
+    match unsafe { guest::read_u64(pointer) }.ok_or_else(invalid)? {
+        STATIC_COND => {}
+        DESTROYED_COND => return Err(invalid()),
+        made => return Ok(made),
+    }
+    let handle = sync::create_cond("static");
+    // SAFETY: as above.
+    if !unsafe { guest::write_u64(pointer, handle) } {
+        return Err(invalid());
+    }
+    Ok(handle)
 }
 
 /// `scePthreadCondInit(cond, attr, name)`.
@@ -2902,8 +2980,9 @@ fn pthread_cond_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// two objects are independent: a signal arriving in the gap is lost where on the platform it
 /// would not be.
 fn pthread_cond_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(cond) = cond_at(args[0]) else {
-        return u64::from(GuestError::InvalidHandle.as_raw());
+    let cond = match cond_or_static(args[0]) {
+        Ok(cond) => cond,
+        Err(code) => return code,
     };
     let mutex = mutex_at(args[1]);
     let by = thread::adopt("main");
@@ -2923,17 +3002,19 @@ fn pthread_cond_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `scePthreadCondSignal(cond)`.
 fn pthread_cond_signal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match cond_at(args[0]).and_then(sync::cond_signal) {
-        Some(true) => OK,
-        _ => u64::from(GuestError::InvalidHandle.as_raw()),
+    match cond_or_static(args[0]).map(sync::cond_signal) {
+        Ok(Some(true)) => OK,
+        Err(code) => code,
+        Ok(_) => u64::from(GuestError::InvalidHandle.as_raw()),
     }
 }
 
 /// `scePthreadCondBroadcast(cond)`.
 fn pthread_cond_broadcast(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match cond_at(args[0]).and_then(sync::cond_broadcast) {
-        Some(true) => OK,
-        _ => u64::from(GuestError::InvalidHandle.as_raw()),
+    match cond_or_static(args[0]).map(sync::cond_broadcast) {
+        Ok(Some(true)) => OK,
+        Err(code) => code,
+        Ok(_) => u64::from(GuestError::InvalidHandle.as_raw()),
     }
 }
 
@@ -2945,8 +3026,9 @@ fn pthread_cond_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !sync::cond_destroy(handle) {
         return u64::from(GuestError::InvalidHandle.as_raw());
     }
+    // Marked destroyed as libthr marks it, not taken for a static initialiser later (D766).
     // SAFETY: an address the guest passed for this call, valid by its contract.
-    unsafe { guest::write_u64(args[0], 0) };
+    unsafe { guest::write_u64(args[0], DESTROYED_COND) };
     OK
 }
 
@@ -4814,8 +4896,9 @@ fn pthread_cond_timedwait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The body both timed condition waits share, once the timeout is a plain span.
 fn cond_timedwait(cond: u64, mutex: u64, timeout: std::time::Duration) -> u64 {
-    let Some(handle) = cond_at(cond) else {
-        return u64::from(GuestError::InvalidHandle.as_raw());
+    let handle = match cond_or_static(cond) {
+        Ok(handle) => handle,
+        Err(code) => return code,
     };
     let held = mutex_at(mutex);
     let by = thread::adopt("main");
@@ -4910,8 +4993,9 @@ fn timed_out(outcome: Option<bool>) -> u64 {
 
 /// `pthread_mutex_timedlock(mutex, abstime)`, POSIX.1-2008.
 fn pthread_mutex_timedlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let Some(handle) = mutex_at(args[0]) else {
-        return u64::from(GuestError::InvalidHandle.as_raw());
+    let handle = match mutex_or_static(args[0]) {
+        Ok(handle) => handle,
+        Err(code) => return code,
     };
     let Some(until) = deadline_at(args[1]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
@@ -5895,6 +5979,32 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// The placed address of the executable's process parameters, zero until noted.
+static PROCESS_PARAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Records where the executable's `PT_SCE_PROCPARAM` block sits once placed and relocated.
+pub fn note_process_param(address: u64) {
+    PROCESS_PARAM.store(address, std::sync::atomic::Ordering::Release);
+}
+
+/// `sceKernelGetProcParam()`: the executable's own process parameter block (D764).
+///
+/// The block is the executable's `PT_SCE_PROCPARAM` segment, as relocation left it: a title's own
+/// libc reads its size at `+0` and the libc parameters through `+0x38`, which are the segment's
+/// size field and a pointer relocation writes. Null when the executable carries none.
+fn get_proc_param(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    PROCESS_PARAM.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// `sceKernelGetSanitizer{Malloc,New}ReplaceExternal()`: the allocator a sanitizer runtime puts in
+/// place of the title's, which a retail process does not have (D765).
+///
+/// A title's libc tests the answer for null and reads a table through anything else, so null is
+/// "no sanitizer" and the title's own allocator stays in place.
+fn no_sanitizer_replacement(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `__tls_get_addr(&{module, offset})`: the calling thread's address of a thread-local variable,
 /// as the ELF thread-local storage ABI's dynamic models read it (D763).
 ///
@@ -6188,6 +6298,15 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelRemoveExceptionHandler", remove_exception_handler),
     ("sceKernelRaiseException", raise_exception),
     ("__tls_get_addr", tls_get_addr),
+    ("sceKernelGetProcParam", get_proc_param),
+    (
+        "sceKernelGetSanitizerMallocReplaceExternal",
+        no_sanitizer_replacement,
+    ),
+    (
+        "sceKernelGetSanitizerNewReplaceExternal",
+        no_sanitizer_replacement,
+    ),
     ("sceKernelSetVirtualRangeName", set_virtual_range_name),
     ("mmap", mmap),
     ("sceKernelMmap", mmap),
@@ -8309,6 +8428,72 @@ mod tests {
             super::arena_span(super::MAPPING_BASE + 0x2_0000),
             Some((super::MAPPING_BASE, 0x2_0000)),
             "the span runs from the base to how far the guest reached"
+        );
+    }
+
+    /// A lock left as `PTHREAD_MUTEX_INITIALIZER` is made the first time it is taken, as FreeBSD's
+    /// libthr does (D766): it locks, it excludes another thread, and the word now holds a lock.
+    #[test]
+    fn a_statically_initialised_mutex_is_made_on_first_lock() {
+        let word = orbistoun_mem::blocks::block(1);
+        let args = |p: u64| [p, 0, 0, 0, 0, 0];
+        assert_eq!(super::pthread_mutex_lock(&args(word)), super::OK);
+        // SAFETY: the block just handed out is readable.
+        let made = unsafe { super::guest::read_u64(word) };
+        assert!(made.is_some_and(|h| h > 2), "the word holds a lock now");
+        let other = std::thread::spawn(move || super::pthread_mutex_trylock(&args(word)))
+            .join()
+            .expect("the other thread returns");
+        assert_ne!(other, super::OK, "and it excludes another thread");
+        assert_eq!(super::pthread_mutex_unlock(&args(word)), super::OK);
+    }
+
+    /// A condition variable left as `PTHREAD_COND_INITIALIZER` is made the first time it is used,
+    /// as libthr's `CHECK_AND_INIT_COND` makes it (D766), and a destroyed one is not made again.
+    #[test]
+    fn a_statically_initialised_condition_is_made_on_first_use() {
+        let word = orbistoun_mem::blocks::block(1);
+        let args = [word, 0, 0, 0, 0, 0];
+        assert_eq!(super::pthread_cond_broadcast(&args), super::OK);
+        // SAFETY: the block just handed out is readable.
+        let made = unsafe { super::guest::read_u64(word) };
+        assert!(
+            made.is_some_and(|h| h > 1),
+            "the word holds a condition now"
+        );
+        assert_eq!(super::pthread_cond_signal(&args), super::OK);
+        assert_eq!(super::pthread_cond_destroy(&args), super::OK);
+        assert_ne!(super::pthread_cond_broadcast(&args), super::OK);
+    }
+
+    /// A destroyed lock answers `EINVAL` rather than being made again (D766).
+    #[test]
+    fn a_destroyed_mutex_is_not_made_again() {
+        let word = orbistoun_mem::blocks::block(1);
+        let args = [word, 0, 0, 0, 0, 0];
+        assert_eq!(super::pthread_mutex_lock(&args), super::OK);
+        assert_eq!(super::pthread_mutex_unlock(&args), super::OK);
+        assert_eq!(super::pthread_mutex_destroy(&args), super::OK);
+        assert_ne!(super::pthread_mutex_lock(&args), super::OK);
+    }
+
+    /// A retail process has no sanitizer allocator to put in place of the title's (D765).
+    #[test]
+    fn no_sanitizer_replaces_the_title_s_allocator() {
+        assert_eq!(
+            super::no_sanitizer_replacement(&[0; GUEST_ARG_REGISTERS]),
+            0
+        );
+    }
+
+    /// The process parameters a title's libc asks for are the executable's own block, where it was
+    /// placed (D764).
+    #[test]
+    fn the_process_parameters_are_the_executable_s_block() {
+        super::note_process_param(0x4000_0199_4688);
+        assert_eq!(
+            super::get_proc_param(&[0; GUEST_ARG_REGISTERS]),
+            0x4000_0199_4688
         );
     }
 

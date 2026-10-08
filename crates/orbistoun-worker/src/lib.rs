@@ -2729,9 +2729,29 @@ fn enter<W: Write>(
         }
     }
 
+    note_process_param(image, bytes);
+
     let returned = transfer_to_guest(entry, entry_stack, argument, second, entry_settings);
 
     finish_returned_run(output, image, summary, module, reporting, returned)
+}
+
+/// Tells the kernel where the executable's process parameters are, as relocation left them, so
+/// `sceKernelGetProcParam` answers the executable's own block (D764). Nothing is noted for an
+/// executable with no `PT_SCE_PROCPARAM` segment.
+fn note_process_param(image: &Image, bytes: &[u8]) {
+    let Ok(container) = orbistoun_elf::Container::parse(bytes) else {
+        return;
+    };
+    let Ok(headers) = container.program_headers() else {
+        return;
+    };
+    if let Some(header) = headers
+        .iter()
+        .find(|h| h.p_type.get() == orbistoun_elf::segment::SCE_PROCPARAM)
+    {
+        orbistoun_kernel::note_process_param(image.base().saturating_add(header.vaddr.get()));
+    }
 }
 
 /// Adopts the guest float environment, runs asked-for initialisers, and jumps to the entry.
