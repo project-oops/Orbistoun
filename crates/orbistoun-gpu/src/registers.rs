@@ -2486,6 +2486,9 @@ pub struct TextureSampling {
     pub mip: MipFilter,
     /// The colour a border clamp reads.
     pub border: BorderColour,
+    /// The most an anisotropic filter stretches its footprint, a power of two up to sixteen; one
+    /// for a filter that is not anisotropic (D775).
+    pub anisotropy: u8,
 }
 
 impl TextureSampling {
@@ -2497,6 +2500,7 @@ impl TextureSampling {
         minify: TextureFilter::Nearest,
         mip: MipFilter::Nearest,
         border: BorderColour::TransparentBlack,
+        anisotropy: 1,
     };
 
     /// Which coordinates, across then down, the shader saturates before sampling: those a
@@ -2516,8 +2520,9 @@ impl Default for TextureSampling {
 
 /// Decodes a sampler descriptor's four words into how it samples, or names the field it cannot
 /// honour exactly: a border clamp, a mirror-once mode, a half-border clamp whose border colour is
-/// the table's, an anisotropic filter, or a reserved value. Only the wrap across and down, the
-/// three filters and the built-in border colour are read; a 2D texture has no third coordinate.
+/// the table's, or a reserved value. Only the wrap across and down, the three filters, the
+/// anisotropy ratio and the built-in border colour are read; a 2D texture has no third coordinate.
+/// An anisotropic filter is its point or bilinear base at `1 << MAX_ANISO_RATIO` (D775).
 pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
     let wrap = |value: u32| match value {
         0 => Ok(TextureWrap::Repeat),
@@ -2530,10 +2535,20 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
             "exact host form"
         )),
     };
-    let filter = |value: u32| match value {
-        0 => Ok(TextureFilter::Nearest),
-        1 => Ok(TextureFilter::Linear),
-        _ => Err("the sampler filters anisotropically, which is not reproduced"),
+    // `SQ_TEX_XY_FILTER` (`gfx6.json`): point, bilinear, then their anisotropic forms.
+    let filter = |value: u32| {
+        if value & 1 == 0 {
+            TextureFilter::Nearest
+        } else {
+            TextureFilter::Linear
+        }
+    };
+    let (magnify, minify) = ((words[2] >> 20) & 0x3, (words[2] >> 22) & 0x3);
+    // `MAX_ANISO_RATIO`, `SQ_IMG_SAMP_WORD0` bits 11:9: radv writes `min(log2(maxAnisotropy), 4)`.
+    let anisotropy = if magnify >= 2 || minify >= 2 {
+        1 << ((words[0] >> 9) & 0x7).min(4)
+    } else {
+        1
     };
     let mip = match (words[2] >> 26) & 0x3 {
         0 => MipFilter::None,
@@ -2559,10 +2574,11 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
     };
     Ok(TextureSampling {
         wrap,
-        magnify: filter((words[2] >> 20) & 0x3)?,
-        minify: filter((words[2] >> 22) & 0x3)?,
+        magnify: filter(magnify),
+        minify: filter(minify),
         mip,
         border,
+        anisotropy,
     })
 }
 
@@ -2786,10 +2802,26 @@ mod tests {
             decode_sampler_descriptor(words(0, 5, 0, 0, 0)).is_err(),
             "mirror once to half a border"
         );
-        assert!(
-            decode_sampler_descriptor(words(0, 0, 2, 0, 0)).is_err(),
-            "aniso"
+        // An anisotropic filter is its base filter at `1 << MAX_ANISO_RATIO`, the inverse of radv's
+        // encoding (D775): PPSA02664's `BC3` sampler, bilinear at 16x, and a point one at 2x.
+        let aniso =
+            decode_sampler_descriptor([0x6892, 0x00ff_f000, 0x0af0_0000, 0]).expect("aniso");
+        assert_eq!(
+            (aniso.magnify, aniso.minify, aniso.mip, aniso.anisotropy),
+            (
+                TextureFilter::Linear,
+                TextureFilter::Linear,
+                MipFilter::Linear,
+                16
+            )
         );
+        let mut point = words(0, 0, 2, 0, 0);
+        point[0] |= 1 << 9;
+        assert_eq!(
+            decode_sampler_descriptor(point).map(|s| (s.magnify, s.anisotropy)),
+            Ok((TextureFilter::Nearest, 2))
+        );
+        assert_eq!(repeat_linear.anisotropy, 1, "no anisotropy asked for");
     }
 
     /// The sweep answers what the whole stream would, forwards, backwards and past the table.

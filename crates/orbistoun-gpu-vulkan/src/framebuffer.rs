@@ -1439,6 +1439,9 @@ fn sampler_info(
         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
         .border_color(border)
         .max_lod(max_lod)
+        // At the ratio radv would have encoded this descriptor from (D775).
+        .anisotropy_enable(sampling.anisotropy > 1 && crate::compute::sampler_anisotropy())
+        .max_anisotropy(f32::from(sampling.anisotropy))
 }
 
 /// The host format a texture is created in and its texels as staged: `Rgba8` words padded and

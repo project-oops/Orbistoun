@@ -418,6 +418,16 @@ pub(crate) fn depth_clip_control() -> bool {
     DEPTH_CLIP_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the session's device was created with `sampler_anisotropy`.
+static SAMPLER_ANISOTROPY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a sampler may filter anisotropically: the device enabled `sampler_anisotropy`, whose
+/// limit is then at least sixteen, the most a guest sampler asks for (D775).
+pub(crate) fn sampler_anisotropy() -> bool {
+    SAMPLER_ANISOTROPY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The shared session, created on first use and never destroyed.
 ///
 /// A failure is cached with the stage that failed, so a machine with no device does not repeat the
@@ -524,7 +534,9 @@ impl Session {
             .texture_compression_bc(available.texture_compression_bc == vk::TRUE)
             // `geometry_shader` serves a pixel shader that reads its render-target layer, which
             // SPIR-V spells as the `Geometry` capability.
-            .geometry_shader(available.geometry_shader == vk::TRUE);
+            .geometry_shader(available.geometry_shader == vk::TRUE)
+            // `sampler_anisotropy` serves a guest sampler that filters anisotropically (D775).
+            .sampler_anisotropy(available.sampler_anisotropy == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -579,6 +591,10 @@ impl Session {
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
+        SAMPLER_ANISOTROPY.store(
+            wanted_features.sampler_anisotropy == vk::TRUE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok((device, wanted_features, wanted_mesh.mesh_shader))
     }
 

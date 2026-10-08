@@ -842,6 +842,7 @@ fn a_half_border_clamp_holds_a_coordinate_past_the_edge_at_half_the_border() {
         minify: TextureFilter::Linear,
         mip: MipFilter::None,
         border: BorderColour::TransparentBlack,
+        anisotropy: 1,
     };
     let white = [u32::MAX; 4];
     let drawn = draw_with_sampled_texture(
