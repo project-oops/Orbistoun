@@ -15,6 +15,7 @@ pub mod cstring;
 mod ctype;
 mod cxx;
 mod floats;
+pub mod heap_trace;
 mod locks;
 pub mod math;
 mod mspace;
@@ -3659,6 +3660,7 @@ fn sysconf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 pub fn implementations() -> Vec<(&'static str, GuestFn)> {
     let mut all = core_implementations().to_vec();
     all.extend_from_slice(cstring::implementations());
+    all.extend_from_slice(heap_trace::implementations());
     all.extend_from_slice(clock::implementations());
     all.extend_from_slice(ctype::implementations());
     all.extend_from_slice(atomic::implementations());
@@ -4210,6 +4212,8 @@ mod tests {
             "htons",
             "ntohl",
             "ntohs",
+            // The heap-tracing hook, declared in its own library, `libSceLibcInternalExt` (D770).
+            "sceLibcHeapGetTraceInfo",
         ];
 
         // An implementation nobody declared can never be reached: resolution goes through the

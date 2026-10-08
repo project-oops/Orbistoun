@@ -7,7 +7,9 @@
 Before the executable's entry, the modules it lists in `DT_NEEDED` that the title ships are
 started: their `DT_INIT` and `DT_INIT_ARRAY` run. Each module starts after the shipped modules it
 needs itself, depth first in `DT_NEEDED` order; a cycle starts each member once. A needed name
-matches a shipped module by its stem, case-insensitively. A shipped module nothing needs is not
+matches a shipped module by its stem, case-insensitively. A module also needs every shipped module
+its imports were bound into, whether or not it names it: PPSA28061's `libSceNpCppWebApi` names the
+system's `libSceLibcInternal`, and its heap calls bind into the title's own `libc.prx` instead. A shipped module nothing needs is not
 started until the guest starts it (D515).
 
 A module started this way has a handle. A later `sceKernelLoadStartModule` of its path answers that

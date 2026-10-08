@@ -208,6 +208,8 @@ guest_module! {
         "sceKernelConfiguredFlexibleMemorySize" => 1,
         "sceKernelMapFlexibleMemory" => 4,
         "sceKernelMapNamedFlexibleMemory" => 5,
+        // The same shape; a title's own libc maps its heap through it.
+        "sceKernelMapNamedFlexibleMemoryInternal" => 5,
         "sceKernelReleaseFlexibleMemory" => 2,
         "scePthreadAttrInit" => 1, "scePthreadAttrDestroy" => 1,
         "scePthreadAttrSetstacksize" => 2, "scePthreadAttrGetstacksize" => 2,
@@ -4694,6 +4696,14 @@ fn map_named_flexible_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     map_flexible_memory(&unnamed)
 }
 
+/// `sceKernelMapNamedFlexibleMemoryInternal(out, len, prot, flags, name)`: the named flexible
+/// mapping a title's own libc makes for its heap, called in the same shape (PPSA28061 `libc.prx`
+/// `+0x1b2d8`..`+0x1b2eb`: `prot` 3, `flags` `0x8000`). It maps as the named call does; flag
+/// `0x8000` is not one the mapping reads.
+fn map_named_flexible_memory_internal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    map_named_flexible_memory(args)
+}
+
 /// Bases of mappings `sceKernelMapFlexibleMemory` made: placed through the direct path, so its
 /// alias table holds them too, and answered to a query as flexible memory rather than direct.
 fn flexible_mappings() -> &'static Mutex<Vec<u64>> {
@@ -6529,6 +6539,10 @@ const TABLE: &[(&str, GuestFn)] = &[
     ),
     ("sceKernelMapFlexibleMemory", map_flexible_memory),
     ("sceKernelMapNamedFlexibleMemory", map_named_flexible_memory),
+    (
+        "sceKernelMapNamedFlexibleMemoryInternal",
+        map_named_flexible_memory_internal,
+    ),
     ("sceKernelReleaseFlexibleMemory", release_flexible_memory),
     ("scePthreadAttrInit", pthread_attr_init),
     ("scePthreadAttrDestroy", pthread_attr_destroy),
@@ -8693,6 +8707,19 @@ mod tests {
             super::OK,
             "too small"
         );
+    }
+
+    /// The Internal flexible mapping a title's libc makes for its heap maps as the named one does,
+    /// writing the address back and charging the flexible budget.
+    #[test]
+    fn the_internal_flexible_mapping_maps_as_the_named_one_does() {
+        let out = orbistoun_mem::blocks::block(1);
+        let before = direct::flexible_available();
+        let args = [out, 0x10_0000, 3, 0x8000, 0, 0];
+        assert_eq!(super::map_named_flexible_memory_internal(&args), super::OK);
+        // SAFETY: the block just handed out is readable.
+        assert!(unsafe { super::guest::read_u64(out) }.is_some_and(|base| base != 0));
+        assert!(direct::flexible_available() < before);
     }
 
     /// A retail process has no sanitizer allocator to put in place of the title's (D765).

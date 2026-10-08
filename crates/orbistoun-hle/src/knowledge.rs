@@ -62,6 +62,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         "libSceUlt",
         include_str!("../data/knowledge/libSceUlt.toml"),
     ),
+    (
+        "libSceLibcInternalExt",
+        include_str!("../data/knowledge/libSceLibcInternalExt.toml"),
+    ),
     // The rest, in directory order. The guard test below checks that every file on disk is listed,
     // so none is written and never loaded.
     (

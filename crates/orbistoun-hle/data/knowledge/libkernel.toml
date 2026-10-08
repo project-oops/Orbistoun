@@ -1284,6 +1284,20 @@ found_in = ["PPSA02664-app0"]
 found_on = "2026-10-08"
 
 [[function]]
+name = "sceKernelMapNamedFlexibleMemoryInternal"
+arity = 5
+purpose = "Maps flexible memory under a name, as sceKernelMapNamedFlexibleMemory does: (out, len, prot, flags, name). A title's own libc maps its heap through it."
+edge_cases = [
+    "Called in the named call's shape by PPSA28061's libc.prx _malloc_init (+0x1b2d8..+0x1b2eb): out holding zero, prot 3, flags 0x8000. Unanswered, libc aborted with 0xa002000e.",
+]
+returns = "status"
+known_by = "guest-observed"
+assumptions = ["Flag 0x8000 is not one orbistoun's mapping reads, so the call maps exactly as the named one; what the flag asks of the kernel is unmeasured."]
+found_by = "generated"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-08"
+
+[[function]]
 name = "sceKernelRemoveExceptionHandler"
 arity = 1
 purpose = "Removes a handler installed for a signal. Called as (signum)."

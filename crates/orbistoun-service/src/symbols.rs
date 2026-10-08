@@ -27,13 +27,14 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 48] {
+pub(crate) fn modules() -> [ModuleDesc; 49] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
         orbistoun_kernel::sync_on_address::MODULE,
         orbistoun_kernel::fiber::MODULE,
         orbistoun_libc::MODULE,
+        orbistoun_libc::heap_trace::MODULE,
         orbistoun_posix::MODULE,
         orbistoun_gpu::MODULE,
         orbistoun_gpu::agc::MODULE,

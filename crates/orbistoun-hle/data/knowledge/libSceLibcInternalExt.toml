@@ -1,0 +1,15 @@
+library = "libSceLibcInternalExt"
+
+[[function]]
+name = "sceLibcHeapGetTraceInfo"
+arity = 1
+purpose = "Hands a title's own libc the heap tracer's switch and the two words it writes its trace state through, while _malloc_init sets up the heap."
+edge_cases = [
+    "The caller passes a 32-byte block filled from a template and reads back a switch at +0x0c (tracing on when non-zero) and two pointers at +0x10 and +0x18, which it keeps; it writes zero through the first at once and its trace state through the second when tracing is on (PPSA28061 libc.prx _malloc_init, +0x1aec1..+0x1af9a). Unanswered, the first pointer stayed null and libc wrote to address zero.",
+    "Orbistoun reports tracing off and names two zeroed words of its own memory; the rest of the block is left as the caller filled it (D770).",
+]
+returns = "status"
+known_by = "assumed"
+assumptions = ["A retail process runs without the heap tracer, so the switch reads zero there too; what the console puts in the two pointers is unmeasured and asked of obSCEne."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-08"

@@ -2044,7 +2044,7 @@ impl Service {
             .collect();
         orbistoun_kernel::note_guest_exports(self.hasher.suffix_bytes(), &exports);
         // Which of them start before the entry, and in what order (D767).
-        note_start_order(&owned);
+        note_start_order(&owned, &placed, &per_module);
         Ok(LinkedTitle {
             labels: self.import_labels_for(&modules, &slots, symbols)?,
             placed,
@@ -2412,17 +2412,61 @@ const YIELDED_TO_A_TITLE_MODULE: &[&str] = &[
 ];
 
 /// Records which of the title's modules start before the executable's entry (D767). `owned` is
-/// every module's label and bytes, the executable first under the empty label.
-fn note_start_order(owned: &[(String, Vec<u8>)]) {
+/// every module's label and bytes, the executable first under the empty label; `per_module` is
+/// where each module's imports were bound, the executable first and then `placed`'s images in
+/// order.
+///
+/// A module needs what its `DT_NEEDED` names, and also every shipped module its imports were
+/// bound into: a module that calls into another's code needs it started first, whether or not it
+/// names it, as a title module naming a system library the title's own libc stands in for does.
+fn note_start_order(
+    owned: &[(String, Vec<u8>)],
+    placed: &titleplacement::PlacedTitleModules,
+    per_module: &[std::collections::BTreeMap<u32, u64>],
+) {
+    let spans: Vec<(&str, u64, u64)> = placed
+        .images()
+        .iter()
+        .map(|(label, image)| {
+            let (base, len) = image.span();
+            (label.as_str(), base, base.saturating_add(len))
+        })
+        .collect();
+    let bound_into = |label: &str| -> Vec<String> {
+        let index = if label.is_empty() {
+            Some(0)
+        } else {
+            spans
+                .iter()
+                .position(|(l, _, _)| *l == label)
+                .map(|i| i + 1)
+        };
+        let into: std::collections::BTreeSet<&str> = index
+            .and_then(|i| per_module.get(i))
+            .into_iter()
+            .flat_map(std::collections::BTreeMap::values)
+            .filter_map(|address| {
+                spans
+                    .iter()
+                    .find(|(_, start, end)| (*start..*end).contains(address))
+                    .map(|(l, _, _)| *l)
+            })
+            .filter(|l| *l != label)
+            .collect();
+        // As a needed name spells it, so a label with a dot of its own keeps it.
+        into.into_iter().map(|l| format!("{l}.prx")).collect()
+    };
     let needs = |label: &str| -> Vec<String> {
-        owned
+        let mut names = owned
             .iter()
             .find(|(l, _)| l == label)
             .and_then(|(_, bytes)| {
                 let container = orbistoun_elf::Container::parse(bytes).ok()?;
                 container.needed_libraries(bytes).ok()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        names.extend(bound_into(label));
+        names
     };
     let shipped: Vec<String> = owned
         .iter()
