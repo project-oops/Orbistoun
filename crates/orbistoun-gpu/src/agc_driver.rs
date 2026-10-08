@@ -411,9 +411,13 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
         return Some(format!(
             concat!(
                 "{} sampled texture slot(s) had no texture bound, and the placeholder is ",
-                "not the guest's picture"
+                "not the guest's picture{}"
             ),
-            report.unbound_textures
+            report.unbound_textures,
+            report
+                .first_unbound_texture
+                .as_ref()
+                .map_or_else(String::new, |first| format!(" - the first: {first}"))
         ));
     }
     if report.unshaded_draws > 0 {

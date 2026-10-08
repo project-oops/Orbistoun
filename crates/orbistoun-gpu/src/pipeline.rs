@@ -344,6 +344,9 @@ pub struct SubmissionReport {
     /// Draws' sampled texture slots nothing could be bound to - an unreadable descriptor, or one
     /// this does not read - so the backend would sample its placeholder.
     pub unbound_textures: usize,
+    /// The first of [`Self::unbound_textures`], described: its slot, where its descriptor was read,
+    /// and the words there.
+    pub first_unbound_texture: Option<String>,
     /// Draws whose viewport transform the stream turned off (`PA_CL_VTE_CNTL`), so their positions
     /// are not the clip space the backend draws.
     pub unmodelled_viewports: usize,
@@ -2344,7 +2347,10 @@ impl Pipeline {
             &mut submission.commands,
             (&self.texture_sources, &mut self.texels),
             memory,
-            &mut submission.report.unbound_textures,
+            (
+                &mut submission.report.unbound_textures,
+                &mut submission.report.first_unbound_texture,
+            ),
         );
         crate::draw_buffers::bind_draw_buffers(
             &mut submission.commands,
@@ -3469,7 +3475,7 @@ fn bind_textures(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
-    unbound: &mut usize,
+    (unbound, first_unbound): (&mut usize, &mut Option<String>),
 ) {
     // Each draw's textures, where its pixel shader says they are: for every slot the bound fragment
     // module samples, the descriptor at that slot's table offset (zero for a module whose texture
@@ -3522,6 +3528,9 @@ fn bind_textures(
                         let bound = user_data_texture(source, first, user, memory, texels);
                         if bound.is_none() {
                             *unbound += 1;
+                            first_unbound.get_or_insert_with(|| {
+                                unbound_in_user_data(source.slot, first, user)
+                            });
                         }
                         out.extend(bound);
                         continue;
@@ -3564,6 +3573,8 @@ fn bind_textures(
                     // refused rather than drawn wrong.
                     if bound.is_none() {
                         *unbound += 1;
+                        first_unbound
+                            .get_or_insert_with(|| unbound_in_table(source.slot, at, memory));
                     }
                     out.extend(bound);
                 }
@@ -3573,6 +3584,30 @@ fn bind_textures(
         out.push(command);
     }
     *commands = out;
+}
+
+/// An unbound slot whose descriptor is in the user data from word `first`, described.
+fn unbound_in_user_data(slot: u32, first: u32, user: &[u32]) -> String {
+    let at = usize::try_from(first).unwrap_or(usize::MAX);
+    let words = user.get(at..).map_or(&[][..], |w| &w[..w.len().min(8)]);
+    format!("slot {slot}, from user data {first}: {}", hex_words(words))
+}
+
+/// An unbound slot whose descriptor is at `at` in guest memory, described.
+fn unbound_in_table(slot: u32, at: u64, memory: &impl GuestMemory) -> String {
+    let words: Vec<u32> = memory.read(at, 32).map_or_else(Vec::new, |bytes| {
+        bytes
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect()
+    });
+    format!("slot {slot}, from {at:#x}: {}", hex_words(&words))
+}
+
+/// Words as a report quotes them: `[0x1, 0x2]`.
+fn hex_words(words: &[u32]) -> String {
+    let quoted: Vec<String> = words.iter().map(|word| format!("{word:#x}")).collect();
+    format!("[{}]", quoted.join(", "))
 }
 
 /// The texture a descriptor in the user data names, from word `first`, sampled as the sampler beside
@@ -4889,7 +4924,7 @@ mod tests {
             &mut commands,
             (&sources, &mut super::TexelCache::new()),
             &memory,
-            &mut unbound,
+            (&mut unbound, &mut None),
         );
         assert_eq!(unbound, 0);
         let bound = commands.iter().find_map(|command| match command {
@@ -4906,6 +4941,64 @@ mod tests {
             bound,
             Some((1, vec![0], 1, 1)),
             "one texel, every channel zero"
+        );
+    }
+
+    /// A slot nothing binds is counted and the first is described - the slot, where its
+    /// descriptor was read and the words there - so the refusal says what could not be read. The
+    /// words are PPSA02664's: a buffer descriptor where its pixel shader samples from user data.
+    #[test]
+    fn the_first_unbound_slot_is_described() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        struct Memory;
+        impl super::GuestMemory for Memory {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let shader = ResourceId(1);
+        let mut words = [0u32; super::USER_DATA_WORDS];
+        words[..8].copy_from_slice(&[0x11e9_df14, 0x10_7400, 1, 0x4_dfac, 0, 0x70_00b0, 0, 0]);
+        let sources = std::collections::BTreeMap::from([(
+            shader,
+            vec![TextureSource {
+                slot: 0,
+                table_offset: None,
+                table: TableBase::default(),
+                sampler_offset: None,
+                user_data: Some(0),
+                sampler_user_data: Some(8),
+                saturated: [false; 2],
+            }],
+        )]);
+        let mut commands = vec![
+            RenderCommand::SetUserData {
+                stage: ShaderStage::Fragment,
+                words,
+            },
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader,
+            },
+            RenderCommand::Draw {
+                vertices: 3,
+                instances: 1,
+                first_vertex: 0,
+            },
+        ];
+        let (mut unbound, mut first) = (0, None);
+        bind_textures(
+            &mut commands,
+            (&sources, &mut super::TexelCache::new()),
+            &Memory,
+            (&mut unbound, &mut first),
+        );
+        assert_eq!(unbound, 1);
+        assert_eq!(
+            first.as_deref(),
+            Some(
+                "slot 0, from user data 0: [0x11e9df14, 0x107400, 0x1, 0x4dfac, 0x0, 0x7000b0, 0x0, 0x0]"
+            )
         );
     }
 
@@ -4977,7 +5070,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &memory,
-                &mut unbound,
+                (&mut unbound, &mut None),
             );
             let sampling = commands.iter().find_map(|command| match command {
                 RenderCommand::BindTexture { sampling, .. } => Some(*sampling),
@@ -5225,7 +5318,7 @@ mod tests {
                 &mut commands,
                 (&sources, &mut super::TexelCache::new()),
                 &memory,
-                &mut unbound,
+                (&mut unbound, &mut None),
             );
             let bound = commands.iter().find_map(|command| match command {
                 RenderCommand::BindTexture {
