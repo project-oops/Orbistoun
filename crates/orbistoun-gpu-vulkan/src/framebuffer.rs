@@ -1824,6 +1824,8 @@ pub(crate) struct Start<'a> {
     pub(crate) clear: [f32; 4],
     /// A mesh draw's vertex count, which its words carry (D745).
     pub(crate) mesh_vertices: u32,
+    /// A mesh draw's first vertex, which its words carry (D761).
+    pub(crate) mesh_first_vertex: u32,
     /// The attachment's starting pixels.
     pub(crate) initial: Option<&'a [u8]>,
     /// The user-data block.
@@ -2568,7 +2570,7 @@ impl BatchKey {
 /// lies (D747) after them.
 pub(crate) fn split_user_data(
     block: &[u32; USER_DATA_BLOCK_WORDS],
-    (vertices, places): (u32, &crate::draw_buffers::GeometryPlaces),
+    ((vertices, first), places): ((u32, u32), &crate::draw_buffers::GeometryPlaces),
 ) -> (DrawWords, DrawWords) {
     let mut geometry = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
     let mut fragment = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
@@ -2576,6 +2578,7 @@ pub(crate) fn split_user_data(
     geometry[..share].copy_from_slice(&block[..share]);
     fragment[..share].copy_from_slice(&block[share..]);
     geometry[DRAW_DATA_VERTICES_WORD as usize] = vertices;
+    geometry[DRAW_DATA_FIRST_VERTEX_WORD as usize] = first;
     let (first, bases) = (
         DRAW_DATA_BUFFERS_WORD as usize,
         DRAW_DATA_BASES_WORD as usize,
@@ -4099,7 +4102,10 @@ pub fn draw_mesh_with(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh { vertices: 0 },
+        Geometry::Mesh {
+            vertices: 0,
+            first: 0,
+        },
         Bound::default(),
     )
 }
@@ -4152,7 +4158,10 @@ pub fn draw_mesh_over_viewport(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh { vertices: 0 },
+        Geometry::Mesh {
+            vertices: 0,
+            first: 0,
+        },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
@@ -4180,7 +4189,7 @@ pub fn draw_mesh_of_vertices_over(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh { vertices },
+        Geometry::Mesh { vertices, first: 0 },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
@@ -4212,7 +4221,10 @@ pub(crate) fn draw_mesh_over_clipped(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh { vertices: 0 },
+        Geometry::Mesh {
+            vertices: 0,
+            first: 0,
+        },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
@@ -4260,7 +4272,10 @@ pub(crate) fn draw_resident(
         .pipeline_key
         .filter(|_| vertices.is_none())
         .map(|pipeline| {
-            let (_, fragment) = split_user_data(start.user_data, (start.mesh_vertices, &places));
+            let (_, fragment) = split_user_data(
+                start.user_data,
+                ((start.mesh_vertices, start.mesh_first_vertex), &places),
+            );
             BatchKey {
                 pipeline: pipeline.get(),
                 framebuffer: pass.framebuffer,
@@ -4273,7 +4288,10 @@ pub(crate) fn draw_resident(
             }
         });
     if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
-        let (words, _) = split_user_data(start.user_data, (start.mesh_vertices, &places));
+        let (words, _) = split_user_data(
+            start.user_data,
+            ((start.mesh_vertices, start.mesh_first_vertex), &places),
+        );
         if join_open_batch(&key, &words) {
             return Ok(Some((key, places)));
         }
@@ -4287,6 +4305,7 @@ pub(crate) fn draw_resident(
         vertices.map_or(
             Geometry::Mesh {
                 vertices: start.mesh_vertices,
+                first: start.mesh_first_vertex,
             },
             Geometry::Vertex,
         ),
@@ -4343,7 +4362,10 @@ pub fn draw_mesh_over_texture(
         width,
         height,
         Some((mesh_words, fragment_words)),
-        Geometry::Mesh { vertices: 0 },
+        Geometry::Mesh {
+            vertices: 0,
+            first: 0,
+        },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
@@ -4554,17 +4576,18 @@ enum Geometry {
     /// A vertex shader over the vertices the draw supplies.
     Vertex(VertexDraw),
     /// A mesh shader, one workgroup, which supplies its own; `vertices` is the guest draw's vertex
-    /// count, which a primitive shader seeded with its geometry reads (D745).
-    Mesh { vertices: u32 },
+    /// count, which a primitive shader seeded with its geometry reads (D745), and `first` the
+    /// vertex its ids count up from (D761).
+    Mesh { vertices: u32, first: u32 },
 }
 
 impl Geometry {
-    /// The vertex count a mesh draw's words carry (D745); zero for a vertex draw, whose words are
-    /// not a mesh module's.
-    fn mesh_vertices(self) -> u32 {
+    /// The vertex count (D745) and first vertex (D761) a mesh draw's words carry; zero for a
+    /// vertex draw, whose words are not a mesh module's.
+    fn mesh_vertices(self) -> (u32, u32) {
         match self {
-            Self::Mesh { vertices } => vertices,
-            Self::Vertex(_) => 0,
+            Self::Mesh { vertices, first } => (vertices, first),
+            Self::Vertex(_) => (0, 0),
         }
     }
 }
@@ -4591,6 +4614,9 @@ pub const DRAW_DATA_STRIDE_WORDS: u32 = 68;
 /// Where a draw's vertex count is in its stride (D745). Mirrors `orbistoun_spirv`'s
 /// `DRAW_DATA_VERTICES_WORD`.
 pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
+/// Where a draw's first vertex id is in its stride (D761). Mirrors `orbistoun_spirv`'s
+/// `DRAW_DATA_FIRST_VERTEX_WORD`.
+pub const DRAW_DATA_FIRST_VERTEX_WORD: u32 = 33;
 /// Where a draw's geometry buffers' places begin in its stride (D747). Mirrors `orbistoun_spirv`'s
 /// `DRAW_DATA_BUFFERS_WORD`.
 pub const DRAW_DATA_BUFFERS_WORD: u32 = 36;

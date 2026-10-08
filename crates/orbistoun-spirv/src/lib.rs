@@ -1491,6 +1491,10 @@ pub const DRAW_DATA_STRIDE_WORDS: u32 = 68;
 /// user-data words (D745).
 pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
 
+/// Where in a draw's stride its first vertex id is (D761): the vertex a chunk of a draw too large
+/// for one wave starts at, which its vertex threads count up from in place of an index buffer.
+pub const DRAW_DATA_FIRST_VERTEX_WORD: u32 = 33;
+
 /// Where in a draw's stride its geometry buffers' places begin (D747): for each slot, three words -
 /// the arena at the geometry binding it is a range of, its first word there, and how many words it
 /// holds.

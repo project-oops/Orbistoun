@@ -714,7 +714,9 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
                     vertices: whole.assembly.vertices_for(primitives),
                     primitives,
                     assembly: whole.assembly,
-                    indices: Some(width),
+                    // A chunk of a draw with no indices counts its ids up from its first vertex,
+                    // which its draw's words carry, so every chunk runs one module (D761).
+                    indices: whole.indices.map(|_| width),
                     passthrough: whole.passthrough,
                 },
                 index_buffer,
@@ -3285,11 +3287,19 @@ fn push_chunks(
                 shader: shader.1,
             });
         }
-        commands.push(RenderCommand::DrawIndexed {
-            indices: chunk.indices,
-            instances,
-            first_index: 0,
-            index_buffer: Some(chunk.index_buffer),
+        commands.push(match chunk.index_buffer {
+            // Counted from its first vertex, which the draw's words carry (D761).
+            IndexBuffer::Counting { first } => RenderCommand::Draw {
+                vertices: chunk.indices,
+                instances,
+                first_vertex: first,
+            },
+            IndexBuffer::Guest { .. } => RenderCommand::DrawIndexed {
+                indices: chunk.indices,
+                instances,
+                first_index: 0,
+                index_buffer: Some(chunk.index_buffer),
+            },
         });
     }
 }
@@ -6258,11 +6268,11 @@ mod tests {
             list,
             [
                 ChunkPlan {
-                    geometry: whole(63, 21, Assembly::List, Some(IndexWidth::Bits32)),
+                    geometry: whole(63, 21, Assembly::List, None),
                     index_buffer: IndexBuffer::Counting { first: 0 },
                 },
                 ChunkPlan {
-                    geometry: whole(33, 11, Assembly::List, Some(IndexWidth::Bits32)),
+                    geometry: whole(33, 11, Assembly::List, None),
                     index_buffer: IndexBuffer::Counting { first: 63 },
                 },
             ]

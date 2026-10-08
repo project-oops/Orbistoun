@@ -2100,6 +2100,13 @@ impl<'a> Wavefront<'a> {
             .draw_word(orbistoun_spirv::DRAW_DATA_VERTICES_WORD)
             .unwrap_or_else(|| self.constant(whole));
         let primitives = self.primitives_of(assembly, vertices);
+        // Where a draw's vertex ids count up from, from its words where it has them (D761).
+        let first_id = self
+            .draw_word(orbistoun_spirv::DRAW_DATA_FIRST_VERTEX_WORD)
+            .map(|word| {
+                let base = self.constant(first_vertex);
+                self.binary(op::IADD, word, base)
+            });
         let (twelve, twenty_two, eight) = (self.constant(12), self.constant(22), self.constant(8));
         let shifted_vertices = self.binary(op::SHIFT_LEFT_LOGICAL, vertices, twelve);
         let shifted_primitives = self.binary(op::SHIFT_LEFT_LOGICAL, primitives, twenty_two);
@@ -2113,7 +2120,12 @@ impl<'a> Wavefront<'a> {
         let zero = self.constant(0);
         // One invocation per lane (D760): the same inputs, for the lane this invocation is.
         if let Some(at) = self.invocation {
-            self.seed_invocation_geometry(at, geometry, (vertices, primitives), index_slot);
+            self.seed_invocation_geometry(
+                at,
+                geometry,
+                (vertices, primitives, first_id),
+                index_slot,
+            );
             return;
         }
         for lane in 0..self.lanes {
@@ -2150,6 +2162,12 @@ impl<'a> Wavefront<'a> {
                 };
                 self.store_lane_masked(register, lane, value);
             }
+            if let (None, Some(first)) = (indices, first_id) {
+                let at = self.constant(lane);
+                let id = self.binary(op::IADD, first, at);
+                let id = self.select(is_vertex, id, zero);
+                self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
+            }
             if let Some(width) = indices {
                 // A lane past the draw's vertices reads the first index and keeps zero.
                 let position = self.select(is_vertex, at, zero);
@@ -2166,7 +2184,7 @@ impl<'a> Wavefront<'a> {
         &mut self,
         at: Id,
         geometry: GeometryInputs,
-        (vertices, primitives): (Id, Id),
+        (vertices, primitives, first_id): (Id, Id, Option<Id>),
         index_slot: u32,
     ) {
         let GeometryInputs {
@@ -2190,7 +2208,7 @@ impl<'a> Wavefront<'a> {
             let second = self.binary(op::SHIFT_LEFT_LOGICAL, second, sixteen);
             self.binary(op::BITWISE_OR, first, second)
         };
-        let base = self.constant(first_vertex);
+        let base = first_id.unwrap_or_else(|| self.constant(first_vertex));
         let vertex_id = self.binary(op::IADD, base, at);
         let words: [(Option<Id>, Id); 9] = [
             (Some(is_primitive), packed),
