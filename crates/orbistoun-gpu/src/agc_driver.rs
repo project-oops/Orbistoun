@@ -99,32 +99,31 @@ fn register_resource(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
 }
 
-/// Whether a handle names a live event queue - the kernel's table, installed by the worker, since
-/// this crate does not reach the kernel.
-pub type QueueLookup = fn(u64) -> bool;
+/// Registers the driver's end-of-pipe event `id` with `udata` against an event queue, answering
+/// whether the queue exists - installed by the worker, since this crate does not reach the kernel.
+pub type QueueRegistration = fn(u64, u64, u64) -> bool;
 
-fn queue_lookup() -> &'static OnceLock<QueueLookup> {
-    static LOOKUP: OnceLock<QueueLookup> = OnceLock::new();
-    &LOOKUP
+fn queue_registration() -> &'static OnceLock<QueueRegistration> {
+    static REGISTER: OnceLock<QueueRegistration> = OnceLock::new();
+    &REGISTER
 }
 
-/// Installs the live event-queue check `sceAgcDriverAddEqEvent` consults. First install wins.
-pub fn install_queue_lookup(lookup: QueueLookup) {
-    let _ = queue_lookup().set(lookup);
+/// Installs what `sceAgcDriverAddEqEvent` registers through. First install wins.
+pub fn install_queue_registration(register: QueueRegistration) {
+    let _ = queue_registration().set(register);
 }
 
 /// `SCE_KERNEL_ERROR_EBADF`: what `sceAgcDriverAddEqEvent` answers for a handle that names no
 /// event queue (obSCEne REQ-20260928T1338Z-5b78, `add-eq-bad-queue`).
 const BAD_QUEUE: u64 = 0x8002_0009;
 
-/// `sceAgcDriverAddEqEvent(queue, ...)`: registers the driver's completion event against a guest
-/// event queue. Measured (obSCEne REQ-20260928T1338Z-5b78, the export found by name): `0` for a
-/// queue the guest created, with the second argument `0` or `1`; `0x80020009` for a handle that
-/// names no queue. What the driver later posts to the queue, and when, is unmeasured - the probe's
-/// submissions never ran - so nothing is posted: the answer is the call's, not the event's.
+/// `sceAgcDriverAddEqEvent(queue, id, udata)`: registers the driver's end-of-pipe event against a
+/// guest event queue, which every interrupting release then posts to (D762). Measured (obSCEne
+/// REQ-20260928T1338Z-5b78): `0` for a queue the guest created, with the second argument `0` or
+/// `1`; `0x80020009` for a handle that names no queue.
 fn add_eq_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match queue_lookup().get() {
-        Some(live) if live(args[0]) => 0,
+    match queue_registration().get() {
+        Some(register) if register(args[0], args[1], args[2]) => 0,
         Some(_) => BAD_QUEUE,
         None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
@@ -3596,7 +3595,7 @@ mod tests {
     /// (obSCEne REQ-20260928T1338Z-5b78).
     #[test]
     fn add_eq_event_answers_as_measured() {
-        super::install_queue_lookup(|handle| handle == 0x5e2d_0000_ee40);
+        super::install_queue_registration(|handle, _, _| handle == 0x5e2d_0000_ee40);
         let served = super::implementations()
             .iter()
             .find(|(name, _)| *name == "sceAgcDriverAddEqEvent")

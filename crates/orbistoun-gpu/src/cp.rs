@@ -593,8 +593,11 @@ fn release_mem(
     if !written.is_empty() && !memory.write(destination, &written) {
         return Err(Stop::OutOfBounds(destination));
     }
-    // The last body dword is the interrupt's context id (`INT_CTXID`).
-    memory.released(destination, body.get(6).copied().unwrap_or(0));
+    // An interrupting release (`INT_SEL`, bits 26:24, Mesa `sid.h` `EOP_INT_SEL`, none at 0) raises
+    // the interrupt whose context id is the last body dword (`INT_CTXID`).
+    if (selectors >> 24) & 0x7 != 0 {
+        memory.released(destination, body.get(6).copied().unwrap_or(0));
+    }
     result.releases += 1;
     result.bytes_written += written.len() as u64;
     Ok(())

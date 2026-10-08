@@ -107,10 +107,47 @@ pub fn wait_label(handle: u64, index: u64) -> Option<u64> {
     .then_some(label)
 }
 
-/// The command processor released `label` with interrupt context id `context`. When that is a
+/// The filter of the event the graphics driver posts for an interrupting release: `EVFILT_AGC`,
+/// read on hardware as -14 (obSCEne REQ-20261008T1200Z-eo03, `166-agc/driver-add-eq-event`, sweep
+/// 20261008-142306).
+const EVFILT_AGC: i16 = -14;
+/// Its flags word, `0x20` (`EV_CLEAR`) on hardware (`-eo03`).
+const AGC_EVENT_FLAGS: u16 = 0x20;
+/// The low sixteen bits of its `data`, `0xff00` on hardware for both context ids tried (`-eo03`:
+/// `0` and `0x101`), the release's context id above them.
+const AGC_EVENT_TYPE: u64 = 0xff00;
+
+/// `sceAgcDriverAddEqEvent(queue, id, udata)`: registers the driver's end-of-pipe event `id`
+/// against an event queue (D762), answering whether the queue exists.
+#[must_use]
+pub fn register_end_of_pipe(queue: u64, id: u64, udata: u64) -> bool {
+    orbistoun_kernel::sync::register_filtered_event(queue, EVFILT_AGC, id, udata)
+}
+
+/// Posts the driver's end-of-pipe event to every queue registered for it (D762), as hardware posts
+/// it for a retired interrupting release (`-eo03`, `kevent-32b`): `ident` the registered id,
+/// `filter` [`EVFILT_AGC`], `flags` [`AGC_EVENT_FLAGS`], `fflags` 0, `data` the release's context
+/// id above [`AGC_EVENT_TYPE`], `udata` the registration's. Answers how many queues took one.
+pub fn post_end_of_pipe(context: u32) -> usize {
+    let data = (u64::from(context) << 16) | AGC_EVENT_TYPE;
+    orbistoun_kernel::sync::post_filtered_event(EVFILT_AGC, |id| {
+        orbistoun_kernel::sync::PendingEvent {
+            ident: id,
+            filter: EVFILT_AGC,
+            flags: AGC_EVENT_FLAGS,
+            fflags: 0,
+            data: i64::from_ne_bytes(data.to_ne_bytes()),
+            udata: 0,
+        }
+    })
+}
+
+/// The command processor released `label` with an interrupt whose context id is `context`. The
+/// driver's end-of-pipe event goes to every queue registered for it (D762). When the release is a
 /// queued flip, the flip is performed and the label of the buffer it replaced on screen is cleared;
 /// anything else is not a flip and is left alone. Answers whether a flip was performed.
 pub fn released(label: u64, context: u32) -> bool {
+    post_end_of_pipe(context);
     let queued = {
         let mut waiting = pending();
         match waiting.get(&context) {
@@ -149,6 +186,36 @@ pub fn post_eop_completion(label: u64, context: u32) -> usize {
         data: i64::from_ne_bytes(label.to_ne_bytes()),
         udata: 0,
     })
+}
+
+#[cfg(test)]
+mod end_of_pipe_tests {
+    /// An interrupting release posts what hardware posted for one (obSCEne REQ-20261008T1200Z-eo03,
+    /// sweep 20261008-142306, `arm3-eo03-helper-release-ev0`): with event 0 registered under
+    /// `udata` `0x11223344`, a release under context id `0x101` delivers exactly these 32 bytes.
+    #[test]
+    fn an_interrupting_release_posts_the_measured_event() {
+        let queue = orbistoun_kernel::sync::create_equeue("end of pipe");
+        assert!(super::register_end_of_pipe(queue, 0, 0x1122_3344));
+        assert!(
+            !super::released(0x7400_0000_1000, 0x101),
+            "no flip was queued"
+        );
+        // Other tests release concurrently into the same process's queues, so this one's event is
+        // looked for among them.
+        let taken: Vec<_> = orbistoun_kernel::sync::take_events(queue, 16)
+            .into_iter()
+            .map(orbistoun_kernel::sync::PendingEvent::to_bytes)
+            .collect();
+        let measured: [u8; 32] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0xf2, 0xff, 0x20, 0, 0, 0, 0, 0, //
+            0, 0xff, 0x01, 0x01, 0, 0, 0, 0, 0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0,
+        ];
+        assert!(
+            taken.iter().any(|bytes| bytes[..] == measured),
+            "{taken:x?}"
+        );
+    }
 }
 
 #[cfg(test)]

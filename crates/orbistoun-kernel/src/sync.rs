@@ -803,6 +803,56 @@ pub fn register_event_with_udata(handle: EqueueHandle, identifier: u64, udata: u
     true
 }
 
+/// The bits above which a filter's registrations carry the filter, keeping them apart from plain
+/// identifiers and from another filter's (see [`register_filtered_event`]).
+const FILTER_SHIFT: u32 = 48;
+
+/// The registered identifier of `filter`'s event `id`.
+fn filter_key(filter: i16, id: u64) -> u64 {
+    (u64::from(u16::from_ne_bytes(filter.to_ne_bytes())) << FILTER_SHIFT)
+        | (id & ((1 << FILTER_SHIFT) - 1))
+}
+
+/// Registers `filter`'s event `id` against a queue, carrying the caller's opaque word, answering
+/// whether the queue exists. Kept apart from plain identifiers, so a subsystem that posts by
+/// filter ([`post_filtered_event`]) reaches only what registered for it.
+pub fn register_filtered_event(handle: EqueueHandle, filter: i16, id: u64, udata: u64) -> bool {
+    register_event_with_udata(handle, filter_key(filter, id), udata)
+}
+
+/// Posts `event(id)` to every queue that registered one of `filter`'s events, for each `id` it
+/// registered, echoing its `udata`; answers how many took one.
+pub fn post_filtered_event(filter: i16, event: impl Fn(u64) -> PendingEvent) -> usize {
+    let Ok(table) = equeues().lock() else {
+        return 0;
+    };
+    let tag = u64::from(u16::from_ne_bytes(filter.to_ne_bytes()));
+    let mut posted = 0;
+    for queue in table.values() {
+        let Ok(ids) = queue.registered.lock() else {
+            continue;
+        };
+        let mine: Vec<(u64, u64)> = ids
+            .iter()
+            .filter(|(key, _)| key >> FILTER_SHIFT == tag)
+            .map(|&(key, udata)| (key & ((1 << FILTER_SHIFT) - 1), udata))
+            .collect();
+        drop(ids);
+        if mine.is_empty() {
+            continue;
+        }
+        if let Ok(mut pending) = queue.pending.lock() {
+            for (id, udata) in mine {
+                pending.push_back(PendingEvent { udata, ..event(id) });
+                posted += 1;
+            }
+            drop(pending);
+            queue.arrived.notify_all();
+        }
+    }
+    posted
+}
+
 /// Posts an event to every queue that registered `ident`, answering how many took it.
 ///
 /// Routing by registered identifier lets the completing subsystem (a flip, for example) post
