@@ -1652,7 +1652,8 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
     };
     // Reserve-then-map, as for the named map: a range the guest already reserved is re-protected in
     // place (D460).
-    let placed = if space.owns(base, len) {
+    let reserved_before = space.owns(base, len);
+    let placed = if reserved_before {
         space.protect(base, len, protection)
     } else {
         space.reserve(base, len, protection).map(|_| ())
@@ -1661,6 +1662,10 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
         return u64::from(GuestError::NoMemory.as_raw());
     }
     drop(space);
+    // Recorded as the named map records its own, so an unmap can release it.
+    if !reserved_before && let Ok(mut whole) = placed_by_mmap().lock() {
+        whole.insert(base, len);
+    }
     mapping_placed(base, len, protection, true);
     note_requested_protection(base, len, prot);
     if let Ok(mut mapped) = physical_mappings().lock() {
@@ -3912,38 +3917,43 @@ fn munmap(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// Releases the host memory behind a mapping a call placed whole, when `[address, address + len)` is
-/// the whole of it and no direct-memory view still maps it there, and holds its base back for reuse
-/// (D749). Anything else keeps its reservation: releasing a piece would hole an address space the
-/// guest believes contiguous.
+/// Releases the host memory behind every mapping a call placed whole inside `[address, address +
+/// len)` that no direct-memory view still maps there, and holds each base back for reuse (D749). A
+/// batch map places a buffer in as many pieces as it arrived in batches, so an unmap of the buffer
+/// covers several. A placement only partly inside keeps its reservation: releasing a piece would
+/// hole an address space the guest believes contiguous.
 fn release_mapping(address: u64, len: u64) {
     let Some(len) = checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE) else {
         return;
     };
-    let still_viewed = physical_mappings().lock().map_or(true, |mapped| {
-        mapped.values().any(|alias| alias.base == address)
-    });
-    if still_viewed {
-        return;
-    }
+    let end = address.saturating_add(len);
     let Ok(mut placed) = placed_by_mmap().lock() else {
         return;
     };
-    if placed.get(&address) != Some(&len) {
-        return;
-    }
-    let released = mappings()
-        .lock()
-        .is_ok_and(|mut space| space.release(address, len));
-    if !released {
-        return;
-    }
-    placed.remove(&address);
-    drop(placed);
-    if address >= MAPPING_BASE
-        && let Ok(mut quarantine) = released_bases().lock()
-    {
-        quarantine.release(address, mapping_slot(len, slot_unit()));
+    let inside: Vec<(u64, u64)> = placed
+        .iter()
+        .filter(|&(&base, &size)| base >= address && base.saturating_add(size) <= end)
+        .map(|(&base, &size)| (base, size))
+        .collect();
+    for (base, size) in inside {
+        let still_viewed = physical_mappings().lock().map_or(true, |mapped| {
+            mapped.values().any(|alias| alias.base == base)
+        });
+        if still_viewed {
+            continue;
+        }
+        let released = mappings()
+            .lock()
+            .is_ok_and(|mut space| space.release(base, size));
+        if !released {
+            continue;
+        }
+        placed.remove(&base);
+        if base >= MAPPING_BASE
+            && let Ok(mut quarantine) = released_bases().lock()
+        {
+            quarantine.release(base, mapping_slot(size, slot_unit()));
+        }
     }
 }
 
@@ -7387,6 +7397,50 @@ mod tests {
             seen, 0x5eed,
             "and holds what was written through the batch map"
         );
+    }
+
+    /// A buffer batch-mapped in two batches, as oops-mesa's winsys maps a GPU address, is released
+    /// whole when the guest unmaps it: the address can be handed to the next buffer. SuperTuxKart
+    /// on the host clock had Mesa reuse a retained range's address and every map of it refused,
+    /// because nothing the batch placed was ever released.
+    #[test]
+    fn an_unmapped_batch_map_leaves_its_address_free() {
+        const PAGE: u64 = 0x4000;
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let size = 128 * PAGE;
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = size;
+        args[1] = size;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+
+        let va = 0x6e50_0000_0000_u64;
+        for batch in 0..2_u64 {
+            let entries: Vec<u64> = (0..64_u64)
+                .flat_map(|i| {
+                    let page = batch * 64 + i;
+                    [va + page * PAGE, physical + page * PAGE, PAGE, 0x33]
+                })
+                .collect();
+            let mut completed = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = entries.as_ptr() as usize as u64;
+            args[1] = 64;
+            args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+            assert_eq!(super::batch_map(&args), 0, "batch {batch} maps");
+        }
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = va;
+        args[1] = size;
+        assert_eq!(super::munmap(&args), 0);
+        let held = super::mappings().lock().map_or(true, |space| {
+            space.region_at(va).is_some() || space.region_at(va + size / 2).is_some()
+        });
+        assert!(!held, "both halves of the buffer are released");
     }
 
     /// Two views of one memory are two mappings, and unmapping one leaves the other: oops-mesa's
