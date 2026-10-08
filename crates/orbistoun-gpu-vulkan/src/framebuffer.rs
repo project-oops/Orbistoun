@@ -2569,8 +2569,14 @@ pub(crate) fn split_user_data(
     geometry[..share].copy_from_slice(&block[..share]);
     fragment[..share].copy_from_slice(&block[share..]);
     geometry[DRAW_DATA_VERTICES_WORD as usize] = vertices;
-    let first = DRAW_DATA_BUFFERS_WORD as usize;
-    geometry[first..first + places.len() * 3].copy_from_slice(places.as_flattened());
+    let (first, bases) = (
+        DRAW_DATA_BUFFERS_WORD as usize,
+        DRAW_DATA_BASES_WORD as usize,
+    );
+    for (slot, [arena, from, words, base]) in places.iter().copied().enumerate() {
+        geometry[first + slot * 3..first + slot * 3 + 3].copy_from_slice(&[arena, from, words]);
+        geometry[bases + slot] = base;
+    }
     (geometry, fragment)
 }
 
@@ -3060,7 +3066,7 @@ fn batch_draw(
     session: &crate::compute::Session,
     key: &BatchKey,
     state: &BindState,
-    draw: DrawWords,
+    draw: &DrawWords,
 ) -> Result<(), DispatchError> {
     let mut open = open_pass()
         .lock()
@@ -3074,7 +3080,7 @@ fn batch_draw(
         && batch.key == *key
         && batch.draws.len() < DRAW_DATA_MOST_DRAWS as usize
     {
-        batch.draws.push(draw);
+        batch.draws.push(*draw);
         return Ok(());
     }
     if let Some(batch) = open.batch.take() {
@@ -3083,7 +3089,7 @@ fn batch_draw(
     open.batch = Some(MeshBatch {
         key: *key,
         state: *state,
-        draws: vec![draw],
+        draws: vec![*draw],
     });
     Ok(())
 }
@@ -3091,7 +3097,7 @@ fn batch_draw(
 /// Adds a draw to the open batch without touching the pipeline or the session, when the pass is on
 /// `key`'s attachment and the batch is `key`'s and has room (D718). `false` otherwise, and the draw
 /// takes the whole path.
-pub(crate) fn join_open_batch(key: &BatchKey, draw: DrawWords) -> bool {
+pub(crate) fn join_open_batch(key: &BatchKey, draw: &DrawWords) -> bool {
     let mut open = open_pass()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3108,7 +3114,7 @@ pub(crate) fn join_open_batch(key: &BatchKey, draw: DrawWords) -> bool {
     {
         return false;
     }
-    batch.draws.push(draw);
+    batch.draws.push(*draw);
     // A draw carried out is a draw, whether it took the whole path or joined a batch.
     orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
     true
@@ -3301,7 +3307,7 @@ fn render_resident_with(
                     fragment,
                 },
                 &built.bind_state(),
-                geometry_words,
+                &geometry_words,
             )?;
         } else {
             flush_batch(session)?;
@@ -3486,7 +3492,7 @@ fn record(
             &built.user_data,
             (built.geometry.mesh_vertices(), &built.draw_places),
         );
-        let offset = write_one_draw_waiting(device, geometry_words)?;
+        let offset = write_one_draw_waiting(device, &geometry_words)?;
         bind_for_draw(device, command, &built.bind_state(), offset);
         issue_draw(instance, device, command, built.geometry, 1);
     }
@@ -4261,7 +4267,7 @@ pub(crate) fn draw_resident(
         });
     if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
         let (words, _) = split_user_data(start.user_data, (start.mesh_vertices, &places));
-        if join_open_batch(&key, words) {
+        if join_open_batch(&key, &words) {
             return Ok(Some((key, places)));
         }
     }
@@ -4458,7 +4464,7 @@ static NO_DRAW_BUFFERS: DrawBuffersBound<'static> = DrawBuffersBound {
     buffers: [&[], &[]],
     set: None,
     layout: None,
-    places: [[0; 3]; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize],
+    places: [[0; 4]; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize],
 };
 
 /// The block a draw that sets no user data pushes.
@@ -4574,13 +4580,16 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 /// `DRAW_DATA_BINDING`, `DRAW_DATA_STRIDE_WORDS` and `DRAW_DATA_MOST_DRAWS`.
 pub const DRAW_DATA_BINDING: u32 = 5;
 /// See [`DRAW_DATA_BINDING`].
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 64;
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 68;
 /// Where a draw's vertex count is in its stride (D745). Mirrors `orbistoun_spirv`'s
 /// `DRAW_DATA_VERTICES_WORD`.
 pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
 /// Where a draw's geometry buffers' places begin in its stride (D747). Mirrors `orbistoun_spirv`'s
 /// `DRAW_DATA_BUFFERS_WORD`.
 pub const DRAW_DATA_BUFFERS_WORD: u32 = 36;
+/// Where a draw's geometry buffers' guest bases begin in its stride (D758). Mirrors
+/// `orbistoun_spirv`'s `DRAW_DATA_BASES_WORD`.
+pub const DRAW_DATA_BASES_WORD: u32 = 60;
 /// See [`DRAW_DATA_BINDING`].
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
 
@@ -4698,15 +4707,15 @@ fn ensure_draw_room(session: &crate::compute::Session) -> Result<(), DispatchErr
 
 /// Writes one draw's words for a recording outside the resident pass, waiting for the device and
 /// taking the buffer back when it is full.
-fn write_one_draw_waiting(device: &ash::Device, words: DrawWords) -> Result<u32, DispatchError> {
-    if let Some(offset) = write_draw_data(&[words]) {
+fn write_one_draw_waiting(device: &ash::Device, words: &DrawWords) -> Result<u32, DispatchError> {
+    if let Some(offset) = write_draw_data(std::slice::from_ref(words)) {
         return Ok(offset);
     }
     // SAFETY: the device is live; once it is idle no recorded work still reads the buffer.
     unsafe { device.device_wait_idle() }
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
     reset_draw_data();
-    write_draw_data(&[words]).ok_or(DispatchError::Unsupported(
+    write_draw_data(std::slice::from_ref(words)).ok_or(DispatchError::Unsupported(
         "the draw-data buffer has no room for one draw when empty".to_owned(),
     ))
 }

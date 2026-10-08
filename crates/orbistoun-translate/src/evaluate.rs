@@ -8,8 +8,10 @@
 //! restated here. A value the host cannot know is unknown, and anything computed from it is
 //! unknown: a vector result written to a scalar, the execution mask at entry (which differs from
 //! wave to wave), and an operation this reader does not evaluate.
-
-use std::collections::HashMap;
+//!
+//! A primitive shader's global loads run the same way lane by lane (D758): vector instructions too,
+//! from the execution mask the module starts with, following each branch whose condition is known,
+//! so the addresses each lane forms are what a draw binds.
 
 use orbistoun_shader::{Decode, EncodingTable, Instruction, Operand};
 use orbistoun_spirv::{Builder, Id, op};
@@ -23,6 +25,11 @@ pub const SCALAR_CODES: usize = 128;
 const VCC: usize = 106;
 const M0: usize = 124;
 const EXEC: usize = 126;
+/// The vector registers a primitive shader's module seeds with ids from its draw's geometry before
+/// the program runs, in its vertex lanes and zero past them (the wavefront's `seed_geometry`): the
+/// primitive's vertex indices and its id in `v0`-`v2`, and the vertex id in `v5`. A lane run does
+/// not know them; the module seeds every other register zero.
+const SEEDED_IDS: [u32; 4] = [0, 1, 2, 5];
 /// The scalar offset field's "no offset" code.
 const SOFFSET_NULL: u32 = 0x7d;
 
@@ -95,6 +102,306 @@ pub fn scalar_prefix(
     Ok(model.scalars)
 }
 
+/// The addresses a primitive shader's global loads read, for one draw: each load's byte offset in
+/// the program, and the full 64-bit address every active lane forms, its immediate offset added.
+pub type LaneAddresses = Vec<(u32, Vec<u64>)>;
+
+/// Runs `decode` lane by lane over a primitive shader's draw (D758), until the instruction at
+/// `until` has been passed, and answers the address each active lane forms at each load in
+/// `loads` the run reaches.
+///
+/// The run starts as the module does, over a wave of `width` lanes: the user-data words from
+/// `first_register`, every lane's execution-mask bit set, and every vector register zero but the
+/// primitive and vertex ids the module seeds in the draw's vertex lanes, which are unknown here. A
+/// lane is active at a load when its mask bit is known set and it is below `lanes`, the draw's
+/// vertices. A branch whose condition is known is followed; any other ends the run.
+///
+/// # Errors
+///
+/// A reason, where a load's mask or an active lane's address is unknown, or the run cannot follow
+/// the program to a load.
+pub fn lane_addresses(
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    (first_register, user_data): (u32, &[u32]),
+    (width, lanes): (u32, u32),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<LaneAddresses, &'static str> {
+    const UNKNOWN: &str = concat!(
+        "a global load whose lanes' addresses, or whose execution mask, the host cannot know for ",
+        "the draw (D758)"
+    );
+    let LaneProgram {
+        decode,
+        loads,
+        until,
+        kept: needed,
+        crosses,
+    } = program;
+    let (loads, until) = (loads.as_slice(), *until);
+    let mut model = Concrete::new(encodings, decode.instructions.len());
+    for (register, word) in (first_register as usize..).zip(user_data) {
+        if register < model::SCALAR_REGISTERS as usize {
+            model.scalars[register] = Some(*word);
+        }
+    }
+    // The module's entry: every lane of the wave runs until the program narrows the mask.
+    let width = width.clamp(1, 64);
+    let mask = u64::MAX >> (64 - width);
+    model.scalars[EXEC] = Some(mask as u32);
+    model.scalars[EXEC + 1] = Some((mask >> 32) as u32);
+    model.width = width;
+    model.vertices = lanes;
+    model.lanes = true;
+    // Only the draw's vertex lanes, where nothing the run does reads one lane from another.
+    model.modelled = if *crosses {
+        width
+    } else {
+        lanes.clamp(1, width)
+    };
+    let mut found = LaneAddresses::new();
+    let mut at = 0usize;
+    // A bound on the steps, since a known branch can go backwards.
+    let mut steps = 0usize;
+    while let Some(instruction) = decode.instructions.get(at) {
+        if instruction.offset > until || steps > 4 * decode.instructions.len() {
+            break;
+        }
+        steps += 1;
+        let Some((family, name)) = named(encodings, instruction) else {
+            return Err("an instruction before a global load has no name (D758)");
+        };
+        if loads.contains(&instruction.offset) {
+            let addresses = model.load_addresses(instruction, lanes).ok_or(UNKNOWN)?;
+            found.push((instruction.offset, addresses));
+        }
+        at += 1;
+        match family {
+            "SOPP" if name == "s_endpgm" => break,
+            "SOPP" if branches(name) => {
+                let taken = match name {
+                    "s_branch" => Some(true),
+                    "s_cbranch_scc0" => model.condition.map(|scc| scc == 0),
+                    "s_cbranch_scc1" => model.condition.map(|scc| scc != 0),
+                    _ => None,
+                };
+                let Some(taken) = taken else {
+                    return Err("the program branches on what the host cannot know (D758)");
+                };
+                if taken {
+                    let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
+                        return Err("a branch with no target (D758)");
+                    };
+                    let target = i64::from(instruction.offset) + 4 + 4 * jump;
+                    at = decode
+                        .instructions
+                        .iter()
+                        .position(|i| i64::from(i.offset) == target)
+                        .ok_or("a branch into the middle of an instruction (D758)")?;
+                }
+            }
+            // A program-control instruction that stays on the line, and an export, write no
+            // register.
+            "SOPP" | "EXP" => {}
+            "SMEM" => model.scalar_load(instruction, name, read),
+            "SOP1" | "SOP2" | "SOPK" | "SOPC" => {
+                if name.starts_with("s_setpc") || name.starts_with("s_swappc") {
+                    return Err("the program jumps to a computed address (D758)");
+                }
+                if model::instruction(&mut model, instruction).is_err() {
+                    model.forget_written(instruction, name);
+                }
+                model.catch_up();
+            }
+            // A vector instruction nothing at a load's address reads is not run: what it writes
+            // stays as it was, which no address depends on.
+            "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" if !needed[at - 1] => {}
+            "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" => {
+                if model::instruction(&mut model, instruction).is_err() {
+                    model.forget_vector(instruction.operands.first(), 4);
+                    model.forget_vector_writes(instruction, name);
+                }
+                model.catch_up();
+            }
+            // Any other access's destination is what memory held, unknown here.
+            _ => model.forget_vector(instruction.operands.first(), 4),
+        }
+    }
+    Ok(found)
+}
+
+/// A program prepared for lane runs (D758): decoded, with which instructions a run needs and
+/// whether any of them reads one lane from another. All of it is fixed by the program, so it is found
+/// once and serves every draw.
+#[derive(Debug, Clone)]
+pub struct LaneProgram {
+    decode: Decode,
+    /// The global loads' byte offsets.
+    loads: Vec<u32>,
+    /// The last of them: a run ends once past it.
+    until: u32,
+    /// Which instructions a run runs, by index ([`address_slice`]).
+    kept: Vec<bool>,
+    /// Whether a kept instruction reads across lanes ([`crosses_lanes`]).
+    crosses: bool,
+}
+
+impl LaneProgram {
+    /// `decode` prepared for runs that find the addresses of its global loads at `loads`.
+    #[must_use]
+    pub fn new(decode: Decode, encodings: &EncodingTable, loads: &[u32]) -> Self {
+        let kept = address_slice(&decode, encodings, loads);
+        let crosses = crosses_lanes(&decode, encodings, &kept);
+        Self {
+            until: loads.iter().copied().max().unwrap_or(0),
+            loads: loads.to_vec(),
+            decode,
+            kept,
+            crosses,
+        }
+    }
+}
+
+/// Which instructions a lane run must run for the addresses at `loads`: by index, every one but the
+/// vector instructions whose results nothing reaching a load's address reads.
+///
+/// Found backwards to a fixed point over the whole program, so a writer on either side of a branch,
+/// or round a loop, is kept. Conservatively wide: a vector instruction writing a scalar or a lane
+/// mask is always kept, a vector destination counts as a register pair, and every vector source of
+/// a kept instruction is needed as a pair.
+fn address_slice(decode: &Decode, encodings: &EncodingTable, loads: &[u32]) -> Vec<bool> {
+    let pair = |register: u16| [u32::from(register), u32::from(register) + 1];
+    let mut needed: std::collections::BTreeSet<u32> = decode
+        .instructions
+        .iter()
+        .filter(|i| loads.contains(&i.offset))
+        .filter_map(|i| match i.operands.get(1) {
+            Some(Operand::Vector(register)) => Some(pair(*register)),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let mut kept = vec![true; decode.instructions.len()];
+    loop {
+        let before = needed.len();
+        for (index, instruction) in decode.instructions.iter().enumerate().rev() {
+            let Some((family, name)) = named(encodings, instruction) else {
+                continue;
+            };
+            if !matches!(family, "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC") {
+                continue;
+            }
+            let writes_mask = family == "VOPC"
+                || name.contains("_co_")
+                || name.contains("readlane")
+                || name.contains("readfirstlane")
+                || !matches!(instruction.operands.first(), Some(Operand::Vector(_)));
+            let keep = writes_mask
+                || matches!(instruction.operands.first(),
+                    Some(Operand::Vector(destination))
+                        if pair(*destination).iter().any(|r| needed.contains(r)));
+            kept[index] = keep;
+            if keep {
+                for operand in instruction.operands.iter().skip(1) {
+                    if let Operand::Vector(source) = operand {
+                        needed.extend(pair(*source));
+                    }
+                }
+            }
+        }
+        if needed.len() == before {
+            return kept;
+        }
+    }
+}
+
+/// Whether any instruction a lane run runs (`kept`, by index) reads one lane's value from another:
+/// a lane read, write or permute, a data-parallel or local-data-share access, or a read of a lane
+/// mask a vector instruction wrote other than a lane's own bit (a select's or a carry's).
+/// Conservatively wide: any instruction with no name counts.
+fn crosses_lanes(decode: &Decode, encodings: &EncodingTable, kept: &[bool]) -> bool {
+    // Scalar register codes a vector instruction has written a mask into.
+    let mut masks: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    let code = |operand: &Operand| match operand {
+        Operand::Scalar(register) => Some(u32::from(*register)),
+        Operand::Named(name) => mask_code(name)
+            .or_else(|| {
+                model::lane_mask_high_name(name)
+                    .and_then(mask_code)
+                    .map(|c| c + 1)
+            })
+            .map(|c| c as u32),
+        _ => None,
+    };
+    for (instruction, &kept) in decode.instructions.iter().zip(kept) {
+        if !kept {
+            continue;
+        }
+        let Some((family, name)) = named(encodings, instruction) else {
+            return true;
+        };
+        if family == "DS"
+            || [
+                "readlane",
+                "readfirstlane",
+                "writelane",
+                "permlane",
+                "_dpp",
+                "swizzle",
+                "mbcnt_hi",
+            ]
+            .iter()
+            .any(|part| name.contains(part))
+        {
+            return true;
+        }
+        let vector = matches!(family, "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC");
+        // A read of a written mask: a lane's own bit only through a select or a carry-in.
+        let own_bit =
+            name.starts_with("v_cndmask") || name.contains("_co_ci_") || name.contains("subb");
+        // A carry-out's or a divide-scale's second operand is written, not read.
+        let second = vector && (name.contains("_co_") || name.contains("div_scale"));
+        let reads: Vec<u32> = instruction
+            .operands
+            .iter()
+            .skip(if second { 2 } else { 1 })
+            .filter_map(code)
+            .chain(
+                (family == "SOPP" && (name.contains("vcc") || name.contains("exec")))
+                    .then_some([VCC as u32, EXEC as u32])
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect();
+        if !(vector && own_bit)
+            && reads
+                .iter()
+                .any(|r| masks.contains(r) || masks.contains(&(r + 1)))
+        {
+            return true;
+        }
+        if vector {
+            // What it writes as a mask: its destination when that is not a vector register, and a
+            // carry-out's or a divide-scale's second operand.
+            for operand in instruction.operands.iter().take(if second { 2 } else { 1 }) {
+                if let Some(written) = code(operand) {
+                    masks.extend([written, written + 1]);
+                }
+            }
+            if name.starts_with("v_cmpx") {
+                masks.extend([EXEC as u32, EXEC as u32 + 1]);
+            }
+            if family == "VOPC" {
+                masks.extend([VCC as u32, VCC as u32 + 1]);
+            }
+        } else if let Some(written) = instruction.operands.first().and_then(code) {
+            // A scalar write replaces whatever mask was there.
+            masks.remove(&written);
+        }
+    }
+    false
+}
+
 /// An instruction's family and mnemonic.
 fn named<'a>(
     encodings: &'a EncodingTable,
@@ -125,16 +432,80 @@ enum Value {
     Pair(u32, u32),
 }
 
+/// Values by id. The builder numbers ids from one up, so they index a vector.
+#[derive(Default)]
+struct Values(Vec<Option<Value>>);
+
+impl Values {
+    fn get(&self, id: u32) -> Option<&Value> {
+        self.0.get(id as usize)?.as_ref()
+    }
+
+    fn insert(&mut self, id: u32, value: Value) {
+        let at = id as usize;
+        if at >= self.0.len() {
+            self.0.resize(at + 1, None);
+        }
+        self.0[at] = Some(value);
+    }
+}
+
+/// What one lane of one vector register holds in a lane run.
+#[derive(Debug, Clone, Copy, Default)]
+enum Lane {
+    /// Nothing the run did wrote it: what the module starts it at.
+    #[default]
+    Unwritten,
+    /// Written with what the host cannot know.
+    Unknown,
+    /// Written with this.
+    Known(u32),
+}
+
+/// Each vector register's value in each lane, indexed by register and lane.
+#[derive(Default)]
+struct VectorFile(Vec<Lane>);
+
+impl VectorFile {
+    fn get(&self, (register, lane): (u32, u32)) -> Lane {
+        self.0
+            .get((register * 64 + lane) as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn insert(&mut self, (register, lane): (u32, u32), value: Option<u32>) {
+        let at = (register * 64 + lane) as usize;
+        if at >= self.0.len() {
+            self.0.resize(at + 1, Lane::Unwritten);
+        }
+        self.0[at] = value.map_or(Lane::Unknown, Lane::Known);
+    }
+}
+
 /// The model the prefix runs through: registers that hold numbers, and a builder whose output is
 /// read back and evaluated.
 struct Concrete<'a> {
     encodings: &'a EncodingTable,
     builder: Builder,
     /// Values by id; an id with none is unknown.
-    values: HashMap<u32, Value>,
+    values: Values,
     /// How far into the builder's function section has been evaluated.
     read: usize,
+    /// The operands of the instruction being evaluated.
+    operands: Vec<u32>,
     scalars: Scalars,
+    /// Each vector register's value in each lane once written, [`None`] where unknown; only a lane
+    /// run writes them.
+    vectors: VectorFile,
+    /// Whether vector writes are kept (a lane run, D758).
+    lanes: bool,
+    /// How many lanes the wave has.
+    width: u32,
+    /// How many of them are the draw's vertices, whose seeded ids are unknown.
+    vertices: u32,
+    /// How many lanes, from lane zero, the run models.
+    modelled: u32,
     condition: Option<u32>,
     instructions: usize,
     types: [Id; 6],
@@ -162,9 +533,15 @@ impl<'a> Concrete<'a> {
         Self {
             encodings,
             builder,
-            values: HashMap::new(),
+            values: Values::default(),
             read: 0,
+            operands: Vec::new(),
             scalars: [None; SCALAR_CODES],
+            vectors: VectorFile::default(),
+            lanes: false,
+            width: 64,
+            vertices: 0,
+            modelled: 64,
             condition: None,
             instructions,
             types,
@@ -184,7 +561,7 @@ impl<'a> Concrete<'a> {
     /// The number an id holds, evaluating what was emitted since the last look.
     fn word(&mut self, id: Id) -> Option<u32> {
         self.catch_up();
-        match self.values.get(&id.0)? {
+        match self.values.get(id.0)? {
             Value::Word(value) => Some(*value),
             Value::Bool(value) => Some(u32::from(*value)),
             Value::Pair(..) => None,
@@ -201,9 +578,13 @@ impl<'a> Concrete<'a> {
                 self.read = words.len();
                 return;
             }
-            let operands: Vec<u32> = words[self.read + 1..self.read + count].to_vec();
+            // Through a buffer kept between instructions: a lane run reads thousands.
+            let mut operands = std::mem::take(&mut self.operands);
+            operands.clear();
+            operands.extend_from_slice(&words[self.read + 1..self.read + count]);
             self.read += count;
             self.evaluate((head & 0xffff) as u16, &operands);
+            self.operands = operands;
         }
     }
 
@@ -226,7 +607,7 @@ impl<'a> Concrete<'a> {
     }
 
     fn number(&self, id: u32) -> Option<u32> {
-        match self.values.get(&id)? {
+        match self.values.get(id)? {
             Value::Word(value) => Some(*value),
             Value::Bool(value) => Some(u32::from(*value)),
             Value::Pair(..) => None,
@@ -234,7 +615,7 @@ impl<'a> Concrete<'a> {
     }
 
     fn truth(&self, id: u32) -> Option<bool> {
-        match self.values.get(&id)? {
+        match self.values.get(id)? {
             Value::Bool(value) => Some(*value),
             Value::Word(value) => Some(*value != 0),
             Value::Pair(..) => None,
@@ -253,7 +634,7 @@ impl<'a> Concrete<'a> {
                     return None;
                 }
             }
-            op::BITCAST => self.values.get(arguments.first()?)?.clone(),
+            op::BITCAST => self.values.get(*arguments.first()?)?.clone(),
             op::IADD => Value::Word(word(0)?.wrapping_add(word(1)?)),
             op::ISUB => Value::Word(word(0)?.wrapping_sub(word(1)?)),
             op::IMUL => Value::Word(word(0)?.wrapping_mul(word(1)?)),
@@ -299,7 +680,7 @@ impl<'a> Concrete<'a> {
             }
             op::SELECT => {
                 let chosen = if truth(0)? { 1 } else { 2 };
-                self.values.get(arguments.get(chosen)?)?.clone()
+                self.values.get(*arguments.get(chosen)?)?.clone()
             }
             op::IEQUAL => Value::Bool(word(0)? == word(1)?),
             op::INOT_EQUAL => Value::Bool(word(0)? != word(1)?),
@@ -328,12 +709,13 @@ impl<'a> Concrete<'a> {
                 let product = u64::from(word(0)?) * u64::from(word(1)?);
                 Value::Pair(product as u32, (product >> 32) as u32)
             }
-            op::COMPOSITE_EXTRACT => match (self.values.get(arguments.first()?)?, arguments.get(1))
-            {
-                (Value::Pair(low, _), Some(0)) => Value::Word(*low),
-                (Value::Pair(_, high), Some(1)) => Value::Word(*high),
-                _ => return None,
-            },
+            op::COMPOSITE_EXTRACT => {
+                match (self.values.get(*arguments.first()?)?, arguments.get(1)) {
+                    (Value::Pair(low, _), Some(0)) => Value::Word(*low),
+                    (Value::Pair(_, high), Some(1)) => Value::Word(*high),
+                    _ => return None,
+                }
+            }
             _ => return None,
         })
     }
@@ -383,6 +765,59 @@ impl<'a> Concrete<'a> {
             let value = address.and_then(|address| read(address + 4 * step as u64));
             if let Some(slot) = self.scalars.get_mut(destination + step) {
                 *slot = value;
+            }
+        }
+    }
+
+    /// What vector `register` holds in `lane`: what was written, or else what the module starts it
+    /// at - zero, but for the ids its geometry seeds in a vertex lane, which the host does not know.
+    fn vector(&self, register: u32, lane: u32) -> Option<u32> {
+        match self.vectors.get((register, lane)) {
+            Lane::Known(value) => Some(value),
+            Lane::Unknown => None,
+            Lane::Unwritten if SEEDED_IDS.contains(&register) && lane < self.vertices => None,
+            Lane::Unwritten => Some(0),
+        }
+    }
+
+    /// Whether `lane` runs: its execution-mask bit, where known.
+    fn lane_runs(&self, lane: u32) -> Option<bool> {
+        let half = self.scalars[EXEC + (lane / 32) as usize]?;
+        Some(half & (1 << (lane % 32)) != 0)
+    }
+
+    /// The full address each active lane below `lanes` forms at a global load with no scalar base:
+    /// its vector address pair plus its immediate offset. [`None`] where a mask bit or an active
+    /// lane's address is unknown.
+    fn load_addresses(&self, instruction: &Instruction, lanes: u32) -> Option<Vec<u64>> {
+        let Some(Operand::Vector(pair)) = instruction.operands.get(1) else {
+            return None;
+        };
+        let offset = match instruction.operands.get(3) {
+            Some(Operand::Immediate(offset)) => *offset,
+            _ => 0,
+        };
+        let mut addresses = Vec::new();
+        for lane in 0..lanes.min(self.modelled) {
+            if !self.lane_runs(lane)? {
+                continue;
+            }
+            let low = self.vector(u32::from(*pair), lane)?;
+            let high = self.vector(u32::from(*pair) + 1, lane)?;
+            let address = (u64::from(high) << 32) | u64::from(low);
+            addresses.push(address.wrapping_add_signed(offset));
+        }
+        Some(addresses)
+    }
+
+    /// Forgets `count` vector registers from the one `operand` names, in every lane.
+    fn forget_vector(&mut self, operand: Option<&Operand>, count: u32) {
+        if let Some(Operand::Vector(first)) = operand {
+            let first = u32::from(*first);
+            for register in first..first + count {
+                for lane in 0..self.width {
+                    self.vectors.insert((register, lane), None);
+                }
             }
         }
     }
@@ -453,7 +888,11 @@ impl Model for Concrete<'_> {
     }
 
     fn lanes(&self) -> u32 {
-        64
+        self.width
+    }
+
+    fn modelled_lanes(&self) -> u32 {
+        self.modelled
     }
 
     fn constant(&mut self, value: u32) -> Id {
@@ -464,7 +903,7 @@ impl Model for Concrete<'_> {
         &mut self,
         instruction: &Instruction,
         operand: &Operand,
-        _lane: u32,
+        lane: u32,
     ) -> Result<Id, TranslateError> {
         Ok(match operand {
             Operand::Integer(value) => {
@@ -476,6 +915,10 @@ impl Model for Concrete<'_> {
             }
             Operand::Literal(value) => self.hold(Some(*value)),
             Operand::Scalar(register) => self.read_scalar(u32::from(*register)),
+            Operand::Vector(register) => {
+                let value = self.vector(u32::from(*register), lane);
+                self.hold(value)
+            }
             Operand::Named(name) => {
                 if let Some(code) = mask_code(name) {
                     self.hold(self.scalars[code])
@@ -491,7 +934,19 @@ impl Model for Concrete<'_> {
         })
     }
 
-    fn write_vector_lane(&mut self, _register: u32, _lane: u32, _value: Id) {}
+    fn write_vector_lane(&mut self, register: u32, lane: u32, value: Id) {
+        if !self.lanes {
+            return;
+        }
+        // As the module writes a lane: not at all when it is known not to run, and unknown when
+        // whether it runs is.
+        let value = match self.lane_runs(lane) {
+            Some(false) => return,
+            Some(true) => self.word(value),
+            None => None,
+        };
+        self.vectors.insert((register, lane), value);
+    }
 
     fn write_scalar(&mut self, register: u32, value: Id) {
         let value = self.word(value);
@@ -600,7 +1055,7 @@ impl Model for Concrete<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{VCC, scalar_prefix};
+    use super::{VCC, lane_addresses, scalar_prefix};
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
     use std::collections::BTreeMap;
 
@@ -665,6 +1120,96 @@ mod tests {
         );
         // s4 is non-zero, so the condition is clear and the fourth word is bits 11:4 of the table.
         assert_eq!(scalars[3], Some(0x20));
+    }
+
+    /// The open-toolchain GL context's vertex prologue and one four-component attribute fetch
+    /// (oops-sdk `glsl_vs.c`, `vs_emit_ngg_preamble` and `vs_load_attributes`): one triangle a wave,
+    /// the vertex index `s12` plus the lane, and the attribute read from `base + stride * index`
+    /// with the base and stride from the table at `s[10:11]`; three components or four by the
+    /// table's fourth word.
+    const GL_FETCH: [u32; 30] = [
+        0xbfa0_0001, // s_inst_prefetch 0x1
+        0xbe8d_037e, // s_mov_b32 s13, exec_lo
+        0xbefc_03ff,
+        0x0000_1003, // s_mov_b32 m0, 0x1003
+        0xbf80_0000, // s_nop 0
+        0xbf90_0009, // s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+        0xbefe_0381, // s_mov_b32 exec_lo, 1
+        0x7e02_02ff,
+        0x2028_0600, // v_mov_b32 v1, 0x20280600
+        0xf800_0941,
+        0x0000_0001, // exp prim v1, off, off, off done
+        0xbf8c_ff0f, // s_waitcnt expcnt(0)
+        0xbefe_0387, // s_mov_b32 exec_lo, 7
+        0xd765_000e,
+        0x0001_00c1, // v_mbcnt_lo_u32_b32 v14, -1, 0
+        0x4a1c_1c0c, // v_add_nc_u32 v14, s12, v14
+        0x7e02_0280, // v_mov_b32 v1, 0
+        0xf408_0105,
+        0xfa00_0000, // s_load_dwordx4 s[4:7], s[10:11], 0x0
+        0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+        0xd569_0004,
+        0x0002_1c06, // v_mul_lo_u32 v4, s6, v14
+        0xd70f_6a02,
+        0x0002_0804, // v_add_co_u32 v2, vcc_lo, s4, v4
+        0x5006_0205, // v_add_co_ci_u32_e32 v3, vcc_lo, s5, v1, vcc_lo
+        0xbf06_8407, // s_cmp_eq_u32 s7, 4
+        0xbf85_0004, // s_cbranch_scc1 4
+        0x7e2e_02f2, // v_mov_b32 v23, 1.0
+        0xdc3c_8000,
+        0x147d_0002, // global_load_dwordx3 v[20:22], v[2:3], off
+    ];
+    /// What follows [`GL_FETCH`]: the branch over the four-component load, the load, and the end.
+    const GL_FETCH_TAIL: [u32; 5] = [
+        0xbf82_0002, // s_branch 2
+        0xdc38_8000,
+        0x147d_0002, // global_load_dwordx4 v[20:23], v[2:3], off
+        0xbf8c_3f70, // s_waitcnt vmcnt(0)
+        0xbf81_0000, // s_endpgm
+    ];
+
+    /// Each lane of a GL attribute fetch forms its vertex's address from the draw's table and base
+    /// vertex, through the branch the table's component count takes; the lanes the program's mask
+    /// leaves out, and those past the draw's vertices, form none.
+    #[test]
+    fn a_global_loads_lanes_are_evaluated_from_the_draws_memory() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words: Vec<u32> = GL_FETCH.iter().chain(&GL_FETCH_TAIL).copied().collect();
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let loads: Vec<u32> = decode
+            .instructions
+            .iter()
+            .filter(|i| i.word >> 26 == 0x37)
+            .map(|i| i.offset)
+            .collect();
+        assert_eq!(loads.len(), 2, "the three- and four-component loads");
+
+        let (table, vertices) = (0x2000_0000u64, 0x74_3000_0000u64);
+        let memory = BTreeMap::from([
+            (table, vertices as u32),
+            (table + 4, (vertices >> 32) as u32),
+            (table + 8, 28),
+            (table + 12, 4),
+        ]);
+        // s[8:9] the uniform block, s[10:11] the attribute table, s12 the base vertex.
+        let user_data = [0x1000_0000, 0, table as u32, (table >> 32) as u32, 3];
+        let program = super::LaneProgram::new(decode, &encodings, &loads);
+        let run = |lanes| {
+            lane_addresses(
+                &program,
+                &encodings,
+                (8, &user_data),
+                (32, lanes),
+                &mut |address| memory.get(&address).copied(),
+            )
+        };
+        let expected: Vec<u64> = (3..6).map(|index| vertices + 28 * index).collect();
+        // Four components, so the branch skips the three-component load.
+        assert_eq!(run(64), Ok(vec![(loads[1], expected.clone())]));
+        assert_eq!(run(2), Ok(vec![(loads[1], expected[..2].to_vec())]));
     }
 
     /// A value the host cannot know stays unknown: the execution mask at entry, and so anything

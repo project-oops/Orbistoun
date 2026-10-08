@@ -1456,9 +1456,10 @@ pub const SECOND_TEXTURE_BINDING: u32 = 4;
 pub const DRAW_DATA_BINDING: u32 = 5;
 
 /// Words each draw has in the draw-data buffer: one stage's share of the user-data block, the
-/// draw's vertex count at [`DRAW_DATA_VERTICES_WORD`] (D745), and where each of its geometry
-/// buffers lies at [`DRAW_DATA_BUFFERS_WORD`] (D747), padded to a multiple of four.
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 64;
+/// draw's vertex count at [`DRAW_DATA_VERTICES_WORD`] (D745), where each of its geometry buffers
+/// lies at [`DRAW_DATA_BUFFERS_WORD`] (D747) and each one's guest base at
+/// [`DRAW_DATA_BASES_WORD`] (D758), padded to a multiple of four.
+pub const DRAW_DATA_STRIDE_WORDS: u32 = 68;
 
 /// Where in a draw's stride of the draw-data buffer its vertex count is: after the thirty-two
 /// user-data words (D745).
@@ -1468,6 +1469,10 @@ pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
 /// the arena at the geometry binding it is a range of, its first word there, and how many words it
 /// holds.
 pub const DRAW_DATA_BUFFERS_WORD: u32 = 36;
+
+/// Where in a draw's stride its geometry buffers' guest bases begin (D758): for each slot, the low
+/// half of the guest address its range starts at, which a global load's address is read against.
+pub const DRAW_DATA_BASES_WORD: u32 = DRAW_DATA_BUFFERS_WORD + DRAW_BUFFERS_PER_STAGE * 3;
 
 /// The most draws one dispatch carries, and so how many strides the draw-data binding spans.
 pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;

@@ -3334,6 +3334,14 @@ impl Model for Wavefront<'_> {
         served.get(&instruction.offset).copied()
     }
 
+    fn draw_buffer_base(&mut self, slot: u32) -> Option<Id> {
+        // A primitive shader's draw data carries each slot's base beside its place (D758).
+        if self.stage != Stage::Mesh {
+            return None;
+        }
+        self.draw_word(orbistoun_spirv::DRAW_DATA_BASES_WORD + slot)
+    }
+
     fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
         self.buffer_formats?
             .0
@@ -4058,7 +4066,7 @@ pub fn draw_buffers_for(
         decode,
         encodings,
         (user_data.first_register, user_data.count),
-        stage == Stage::Compute,
+        (stage == Stage::Compute, stage == Stage::Mesh),
     );
     if buffers.sources.len() > orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize {
         return Err(TranslateError::Unsupported {

@@ -623,6 +623,13 @@ pub trait Model {
     /// wavefront where one invocation simulates all of them.
     fn lanes(&self) -> u32;
 
+    /// How many of [`Self::lanes`] the per-lane loops run, from lane zero: all of them, but in a
+    /// model that knows no lane past these is read (a lane run, D758), which leaves each skipped
+    /// lane's registers and mask bits as they were.
+    fn modelled_lanes(&self) -> u32 {
+        self.lanes()
+    }
+
     /// Whether `lane` may be active here. `false` only where the execution mask is known at
     /// translation time with the lane's bit clear, so a masked-write-only instruction can emit
     /// nothing for that lane.
@@ -805,6 +812,13 @@ pub trait Model {
     /// reaches guest memory through the window. `None` in a model that binds no draw buffers.
     fn draw_buffer_slot(&self, instruction: &Instruction) -> Option<u32> {
         let _ = instruction;
+        None
+    }
+
+    /// The low half of the guest address the draw buffer at `slot` starts at, which a global load's
+    /// address is read against (D758); `None` in a model whose draw data carries no bases.
+    fn draw_buffer_base(&mut self, slot: u32) -> Option<Id> {
+        let _ = slot;
         None
     }
 
@@ -2105,7 +2119,7 @@ fn only_enabled(builder: &mut Builder, (vec4, colour): (Id, Id), value: Id, enab
 /// are inactive. An instruction that writes a mask loops over every lane instead, because its
 /// answer for an inactive lane is a bit that is read.
 fn running_lanes<M: Model + ?Sized>(model: &M) -> Vec<u32> {
-    (0..model.lanes())
+    (0..model.modelled_lanes())
         .filter(|&lane| model.lane_may_run(lane))
         .collect()
 }
@@ -2928,7 +2942,7 @@ fn carry_arithmetic<M: Model + ?Sized>(
     let mut mask = (zero, zero);
     // Every lane, not only the running ones: the carry is a mask, and its bit for an inactive lane
     // is part of the answer.
-    for lane in 0..model.lanes() {
+    for lane in 0..model.modelled_lanes() {
         let left = model.read_source(instruction, first, lane)?;
         let right = model.read_source(instruction, second, lane)?;
 
@@ -3372,7 +3386,7 @@ fn division_scale<M: Model + ?Sized>(
     let mut halves = (constants.zero, constants.zero);
 
     // Every lane: this writes a mask as well as values (see `carry_arithmetic`).
-    for lane in 0..model.lanes() {
+    for lane in 0..model.modelled_lanes() {
         let (value, set) = division_scale_lane(
             model,
             instruction,
@@ -4037,7 +4051,7 @@ fn compare<M: Model + ?Sized>(
     let zero = model.constant(0);
     let mut halves = (zero, zero);
     // Every lane: the answer is a mask (see `carry_arithmetic`).
-    for lane in 0..model.lanes() {
+    for lane in 0..model.modelled_lanes() {
         let left = model.read_source(instruction, first, lane)?;
         let right = model.read_source(instruction, second, lane)?;
         let (left, right) = if floats {
@@ -4087,7 +4101,7 @@ fn compare_into_exec<M: Model + ?Sized>(
         "v_cmpx_gt_u32_e32" => (op::UGREATER_THAN, 2),
         _ => (op::SGREATER_THAN, 2),
     };
-    for lane in 0..model.lanes() {
+    for lane in 0..model.modelled_lanes() {
         let mut sides = [zero; 2];
         for (slot, source) in sides.iter_mut().zip([first, second]) {
             let value = model.read_source(instruction, source, lane)?;
@@ -7350,7 +7364,7 @@ fn compare_long<M: Model + ?Sized>(
     let (destination, first, second) = three_operands(instruction)?;
     let zero = model.constant(0);
     let mut halves = (zero, zero);
-    for lane in 0..model.lanes() {
+    for lane in 0..model.modelled_lanes() {
         let mut sides = [zero, zero];
         for (source, (side, operand)) in sides.iter_mut().zip([first, second]).enumerate() {
             let value = model.read_source(instruction, operand, lane)?;
@@ -8078,13 +8092,35 @@ fn flat_memory<M: Model + ?Sized>(
                     detail: "a flat load runs past the end of the vector register file",
                 });
             }
+            // A traced load reads the draw buffer its lanes' addresses span, from its guest base
+            // (D758).
+            let bound = match model.draw_buffer_slot(instruction) {
+                Some(slot) => Some((
+                    slot,
+                    model
+                        .draw_buffer_base(slot)
+                        .ok_or(TranslateError::Unsupported {
+                            offset: instruction.offset,
+                            detail: "a global load's draw buffer in a module whose draw data carries no base (D758)",
+                        })?,
+                )),
+                None => None,
+            };
             for lane in running_lanes(model) {
                 let address = model.flat_address(instruction, vaddr, base, lane)?;
                 for word in 0..words {
                     // Consecutive words, stepped by address so each word is bounds-checked: a
                     // multi-word access can start inside the window and end outside it.
                     let stepped = step_address(model, address, word);
-                    let value = read_guarded(model, stepped);
+                    let value = match bound {
+                        Some((slot, base)) => {
+                            let offset = model.binary(op::ISUB, stepped, base);
+                            let two = model.constant(2);
+                            let index = model.binary(op::SHIFT_RIGHT_LOGICAL, offset, two);
+                            model.read_draw_buffer(slot, index)?
+                        }
+                        None => read_guarded(model, stepped),
+                    };
                     model.write_vector_lane(register + word, lane, value);
                 }
             }

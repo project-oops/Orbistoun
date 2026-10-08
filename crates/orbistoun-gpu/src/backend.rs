@@ -238,6 +238,9 @@ pub struct DrawBuffer {
     pub bytes: std::sync::Arc<[u8]>,
     /// [`crate::content_hash`] of the bytes, taken once as they were read.
     pub hash: u64,
+    /// The guest address the first byte was read from, which a global load's address is read
+    /// against (D758); zero for bytes no guest range holds, such as a chunk's counting indices.
+    pub base: u64,
 }
 
 /// Why a backend could not carry out what it was given.

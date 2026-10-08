@@ -51,6 +51,26 @@ pub enum BufferSource {
     /// constants and loads at fixed places: found per draw by running the program up to the
     /// access (D753).
     Computed(Box<Computed>),
+    /// A primitive shader's global loads, all through one buffer: the range their lanes' addresses
+    /// span, found per draw by running the program lane by lane (D758).
+    Global(Box<GlobalLoads>),
+}
+
+/// A primitive shader's global loads with no scalar base (D758): the program through the last of
+/// them, and where each is and how far past its address it reads.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GlobalLoads {
+    /// The program's words through the last load.
+    pub prefix: Vec<u32>,
+    /// Each load's byte offset in the program, and how many bytes it reads from its address.
+    pub loads: Vec<(u32, u32)>,
+    /// The scalar register the stage's first user-data word lands in.
+    pub first_register: u32,
+    /// How many user-data words the stage has.
+    pub user_data: u32,
+    /// How many lanes the program's wave has, which only the stream's registers say: set by
+    /// whoever knows them, sixty-four until then.
+    pub width: u32,
 }
 
 /// An access whose descriptor or base the program computes (D753): the program before it, and the
@@ -150,13 +170,14 @@ pub struct DrawBuffers {
 ///
 /// Nothing is traced in a program that writes memory, which a snapshot bound for the draw would
 /// not see - unless `stores` (a dispatch, whose buffers are written back, D746) and every write is
-/// a buffer store through a descriptor, which is traced like a load.
+/// a buffer store through a descriptor, which is traced like a load. With `globals` (a primitive
+/// shader, D758), its global loads with no scalar base share one buffer after the others.
 #[must_use]
 pub fn trace(
     decode: &Decode,
     encodings: &EncodingTable,
     (first_register, count): (u32, u32),
-    stores: bool,
+    (stores, globals): (bool, bool),
 ) -> DrawBuffers {
     let named: Vec<Option<(&str, &str)>> = decode
         .instructions
@@ -204,6 +225,11 @@ pub fn trace(
                 && let Some(access) = access(instruction, name, &held)
             {
                 accesses.push((instruction.offset, access));
+            } else if let Some(&(_, name)) = named.as_ref()
+                && globals
+                && let Some(bytes) = global_load(instruction, name)
+            {
+                accesses.push((instruction.offset, Access::Global { bytes }));
             }
             step(&mut held, instruction, *named);
         }
@@ -246,8 +272,13 @@ fn slots(
     let mut keys: Vec<Key> = Vec::new();
     let mut sources: Vec<BufferSource> = Vec::new();
     let mut buffers = DrawBuffers::default();
+    let mut globals: Vec<(u32, u32)> = Vec::new();
     for (offset, access) in accesses {
         let (key, source) = match access {
+            Access::Global { bytes } => {
+                globals.push((offset, bytes));
+                continue;
+            }
             Access::Computed { through, soffset } => {
                 let Some(prefix) = prefix_words(decode, offset) else {
                     continue;
@@ -301,6 +332,23 @@ fn slots(
             .served
             .insert(offset, u32::try_from(slot).unwrap_or(u32::MAX));
     }
+    // Every global load through one buffer, after the others: the run that finds their addresses
+    // goes through the last of them.
+    if let Some(&(last, _)) = globals.last()
+        && let Some(prefix) = prefix_words(decode, last + 1)
+    {
+        let slot = u32::try_from(sources.len()).unwrap_or(u32::MAX);
+        for &(offset, _) in &globals {
+            buffers.served.insert(offset, slot);
+        }
+        sources.push(BufferSource::Global(Box::new(GlobalLoads {
+            prefix,
+            loads: globals,
+            first_register,
+            user_data,
+            width: 64,
+        })));
+    }
     buffers.sources = sources;
     buffers
 }
@@ -330,6 +378,21 @@ enum Access {
         through: ComputedAccess,
         soffset: u8,
     },
+    /// A global load with no scalar base, reading `bytes` from its address (D758).
+    Global { bytes: u32 },
+}
+
+/// How many bytes a global load with no scalar base reads from its address, its immediate offset
+/// counted in the address; [`None`] for any other instruction.
+fn global_load(instruction: &Instruction, name: &str) -> Option<u32> {
+    let words = match name.strip_prefix("global_load_dword")? {
+        "" => 1,
+        count => count.strip_prefix('x')?.parse().ok()?,
+    };
+    match instruction.operands.get(2)? {
+        Operand::Named(base) if base == crate::model::FLAT_NO_BASE => Some(words * 4),
+        _ => None,
+    }
 }
 
 /// The registers at entry: each user-data word where the hardware loads it, and nothing else known.
@@ -689,7 +752,7 @@ mod tests {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let decoded = decode_program(&bytes, &encodings, &operands);
         assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
-        trace(&decoded, &encodings, (0, count), false)
+        trace(&decoded, &encodings, (0, count), (false, false))
     }
 
     /// radeonsi's buffer copy as STKT00001 dispatches it, in its least: one dword loaded through
@@ -730,7 +793,7 @@ mod tests {
             ],
             "the hand-assembled copy"
         );
-        let dispatch = trace(&copy, &encodings, (0, 16), true);
+        let dispatch = trace(&copy, &encodings, (0, 16), (true, false));
         assert_eq!(dispatch.sources.len(), 2, "a buffer for each descriptor");
         assert_eq!(
             dispatch.served,
@@ -738,17 +801,89 @@ mod tests {
             "the load through slot 0, the store through slot 1"
         );
         assert!(
-            trace(&copy, &encodings, (0, 16), false).sources.is_empty(),
+            trace(&copy, &encodings, (0, 16), (false, false))
+                .sources
+                .is_empty(),
             "a draw's store is not traced"
         );
         let mut global = COPY[..3].to_vec();
         // global_store_dword v[0:1], v2, off
         global.extend([0xdc70_8000, 0x007d_0200, END]);
         assert!(
-            trace(&decode(&global), &encodings, (0, 16), true)
+            trace(&decode(&global), &encodings, (0, 16), (true, false))
                 .sources
                 .is_empty(),
             "a dispatch that stores another way traces nothing"
+        );
+    }
+
+    /// The open-toolchain GL context's vertex prologue and one four-component attribute fetch
+    /// (oops-sdk `glsl_vs.c`, `vs_emit_ngg_preamble` and `vs_load_attributes`): the vertex index
+    /// `s12` plus the lane, read from `base + stride * index` with the base and stride from the
+    /// table at `s[10:11]`, as three components or four by the table's fourth word.
+    const GL_FETCH: [u32; 35] = [
+        0xbfa0_0001, // s_inst_prefetch 0x1
+        0xbe8d_037e, // s_mov_b32 s13, exec_lo
+        0xbefc_03ff,
+        0x0000_1003, // s_mov_b32 m0, 0x1003
+        0xbf80_0000, // s_nop 0
+        0xbf90_0009, // s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+        0xbefe_0381, // s_mov_b32 exec_lo, 1
+        0x7e02_02ff,
+        0x2028_0600, // v_mov_b32 v1, 0x20280600
+        0xf800_0941,
+        0x0000_0001, // exp prim v1, off, off, off done
+        0xbf8c_ff0f, // s_waitcnt expcnt(0)
+        0xbefe_0387, // s_mov_b32 exec_lo, 7
+        0xd765_000e,
+        0x0001_00c1, // v_mbcnt_lo_u32_b32 v14, -1, 0
+        0x4a1c_1c0c, // v_add_nc_u32 v14, s12, v14
+        0x7e02_0280, // v_mov_b32 v1, 0
+        0xf408_0105,
+        0xfa00_0000, // s_load_dwordx4 s[4:7], s[10:11], 0x0
+        0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+        0xd569_0004,
+        0x0002_1c06, // v_mul_lo_u32 v4, s6, v14
+        0xd70f_6a02,
+        0x0002_0804, // v_add_co_u32 v2, vcc_lo, s4, v4
+        0x5006_0205, // v_add_co_ci_u32_e32 v3, vcc_lo, s5, v1, vcc_lo
+        0xbf06_8407, // s_cmp_eq_u32 s7, 4
+        0xbf85_0004, // s_cbranch_scc1 4
+        0x7e2e_02f2, // v_mov_b32 v23, 1.0
+        0xdc3c_8000,
+        0x147d_0002, // global_load_dwordx3 v[20:22], v[2:3], off
+        0xbf82_0002, // s_branch 2
+        0xdc38_8000,
+        0x147d_0002, // global_load_dwordx4 v[20:23], v[2:3], off
+        0xbf8c_3f70, // s_waitcnt vmcnt(0)
+        0xbf81_0000, // s_endpgm
+    ];
+
+    /// A primitive shader's global loads with no scalar base share one buffer after the others
+    /// (D758): the three- and four-component loads either side of the branch both read it, and
+    /// the attribute table the base comes from is a buffer of its own before it. Only a caller
+    /// asking for global loads gets them.
+    #[test]
+    fn a_primitive_shaders_global_loads_share_one_buffer() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = GL_FETCH.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let traced = trace(&decoded, &encodings, (8, 5), (false, true));
+        let [BufferSource::Pointer { .. }, BufferSource::Global(global)] =
+            traced.sources.as_slice()
+        else {
+            panic!("the table and the global loads: {:?}", traced.sources);
+        };
+        assert_eq!(global.loads, vec![(112, 12), (124, 16)]);
+        assert_eq!(traced.served.get(&112), Some(&1));
+        assert_eq!(traced.served.get(&124), Some(&1));
+        let without = trace(&decoded, &encodings, (8, 5), (false, false));
+        assert!(
+            !without
+                .sources
+                .iter()
+                .any(|source| matches!(source, BufferSource::Global(_)))
         );
     }
 
@@ -1059,7 +1194,7 @@ mod tests {
             let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
             let decoded = decode_program(&bytes, &encodings, &operands);
             // A dispatch's stores are traced (D746).
-            let buffers = trace(&decoded, &encodings, (0, 8), true);
+            let buffers = trace(&decoded, &encodings, (0, 8), (true, false));
             let [BufferSource::Descriptor { reads, .. }] = buffers.sources[..] else {
                 panic!("one descriptor: {:?}", buffers.sources);
             };

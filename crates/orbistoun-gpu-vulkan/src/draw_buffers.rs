@@ -35,9 +35,10 @@ const ARENA_BYTES: u64 = 32 << 20;
 const ARENAS_MOST: usize = DRAW_BUFFERS_PER_STAGE as usize;
 
 /// Where each of a draw's geometry buffers lies, by slot (D747): the arena at the geometry binding
-/// it is a range of, its first word there, and how many words it holds. Its draw's words carry
-/// them, so draws with different geometry buffers share one set and batch.
-pub(crate) type GeometryPlaces = [[u32; 3]; DRAW_BUFFERS_PER_STAGE as usize];
+/// it is a range of, its first word there, how many words it holds, and the low half of the guest
+/// address it starts at (D758). Its draw's words carry them, so draws with different geometry
+/// buffers share one set and batch.
+pub(crate) type GeometryPlaces = [[u32; 4]; DRAW_BUFFERS_PER_STAGE as usize];
 
 /// Where an uploaded buffer lies: its arena's buffer, and the range of it.
 #[derive(Clone, Copy)]
@@ -328,7 +329,7 @@ pub(crate) fn descriptor_set(
             ));
         }
     }
-    let mut places: GeometryPlaces = [[0; 3]; DRAW_BUFFERS_PER_STAGE as usize];
+    let mut places: GeometryPlaces = [[0; 4]; DRAW_BUFFERS_PER_STAGE as usize];
     for (place, buffer) in places.iter_mut().zip(stages[0]) {
         let Some(range) = held.buffers.get(&(buffer.hash, buffer.bytes.len())) else {
             continue;
@@ -342,6 +343,7 @@ pub(crate) fn descriptor_set(
             u32::try_from(arena).unwrap_or(0),
             u32::try_from(range.offset / 4).unwrap_or(u32::MAX),
             u32::try_from(range.range / 4).unwrap_or(u32::MAX),
+            buffer.base as u32,
         ];
     }
     // The geometry binding is the arenas, so the set is the pixel stage's buffers' and how many

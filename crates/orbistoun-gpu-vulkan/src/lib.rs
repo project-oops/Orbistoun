@@ -940,7 +940,7 @@ impl VulkanBackend {
             return false;
         }
         let (words, _) = framebuffer::split_user_data(&self.user_data, (vertices, &places));
-        if !framebuffer::join_open_batch(&key, words) {
+        if !framebuffer::join_open_batch(&key, &words) {
             return false;
         }
         let target = self.current_target;

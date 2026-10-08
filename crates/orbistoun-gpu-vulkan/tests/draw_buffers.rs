@@ -89,6 +89,7 @@ fn buffer() -> DrawBuffer {
     DrawBuffer {
         hash: orbistoun_gpu::content_hash(&words.map(f32::to_bits)),
         bytes: bytes.into(),
+        base: 0,
     }
 }
 
@@ -248,6 +249,7 @@ fn format_centre(word3: u32) -> [u8; 4] {
     let buffer = DrawBuffer {
         hash: orbistoun_gpu::content_hash(&[u32::from_le_bytes(texel)]),
         bytes: texel.to_vec().into(),
+        base: 0,
     };
     let commands = [
         RenderCommand::SetRenderTargets {
@@ -430,6 +432,7 @@ fn colour_buffer(colour: [f32; 4]) -> DrawBuffer {
             .flat_map(|w| w.to_le_bytes())
             .collect::<Vec<u8>>()
             .into(),
+        base: 0,
     }
 }
 
@@ -605,6 +608,7 @@ fn counting(first: u32) -> DrawBuffer {
             .flat_map(|w| w.to_le_bytes())
             .collect::<Vec<u8>>()
             .into(),
+        base: 0,
     }
 }
 

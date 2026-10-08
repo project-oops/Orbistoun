@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use orbistoun_translate::draw_buffers::{
-    BufferSource, Computed, ComputedAccess, DescriptorReads, DescriptorWord,
+    BufferSource, Computed, ComputedAccess, DescriptorReads, DescriptorWord, GlobalLoads,
 };
 use orbistoun_translate::wavefront::{TableBase, TableWord};
 
@@ -99,6 +99,14 @@ impl BufferCache {
         length: usize,
         memory: &impl GuestMemory,
     ) -> Result<DrawBuffer, &'static str> {
+        // Nothing to read: a buffer no lane reaches (D758).
+        if length == 0 {
+            return Ok(DrawBuffer {
+                hash: crate::ContentHasher::new(0).finish(),
+                bytes: Vec::new().into(),
+                base: address,
+            });
+        }
         let span = length as u64;
         if let Some((since, buffer)) = self.entries.get(&(address, length))
             && since.and_then(|since| orbistoun_mem::watch::written_since(address, span, since))
@@ -121,6 +129,7 @@ impl BufferCache {
         let buffer = DrawBuffer {
             hash: hasher.finish(),
             bytes: padded.into(),
+            base: address,
         };
         if self.entries.len() >= CACHE_ENTRIES {
             self.entries.clear();
@@ -169,27 +178,7 @@ pub(crate) fn evaluate_computed(
         "a buffer descriptor the program computes from something the host cannot know for the ",
         "draw - a vector result, the execution mask, or an operation not evaluated (D753)"
     );
-    static TABLES: std::sync::OnceLock<
-        Option<(
-            orbistoun_shader::EncodingTable,
-            orbistoun_shader::OperandTable,
-        )>,
-    > = std::sync::OnceLock::new();
-    let (encodings, operands) = TABLES
-        .get_or_init(|| {
-            Some((
-                orbistoun_shader::EncodingTable::builtin().ok()?,
-                orbistoun_shader::OperandTable::builtin().ok()?,
-            ))
-        })
-        .as_ref()
-        .ok_or("the shader encoding tables did not load")?;
-    let bytes: Vec<u8> = computed
-        .prefix
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
-    let decode = orbistoun_shader::decode_program(&bytes, encodings, operands);
+    let (encodings, decode) = decode_prefix(&computed.prefix)?;
     let count = usize::try_from(computed.user_data)
         .unwrap_or(USER_DATA_WORDS)
         .min(USER_DATA_WORDS);
@@ -230,6 +219,157 @@ pub(crate) fn evaluate_computed(
     Ok((words, soffset))
 }
 
+/// The shader tables, and a prefix of a program decoded with them.
+fn decode_prefix(
+    prefix: &[u32],
+) -> Result<
+    (
+        &'static orbistoun_shader::EncodingTable,
+        orbistoun_shader::Decode,
+    ),
+    &'static str,
+> {
+    static TABLES: std::sync::OnceLock<
+        Option<(
+            orbistoun_shader::EncodingTable,
+            orbistoun_shader::OperandTable,
+        )>,
+    > = std::sync::OnceLock::new();
+    let (encodings, operands) = TABLES
+        .get_or_init(|| {
+            Some((
+                orbistoun_shader::EncodingTable::builtin().ok()?,
+                orbistoun_shader::OperandTable::builtin().ok()?,
+            ))
+        })
+        .as_ref()
+        .ok_or("the shader encoding tables did not load")?;
+    let bytes: Vec<u8> = prefix.iter().flat_map(|word| word.to_le_bytes()).collect();
+    Ok((
+        encodings,
+        orbistoun_shader::decode_program(&bytes, encodings, operands),
+    ))
+}
+
+/// The guest range a primitive shader's global loads read for a draw of `vertices` vertices with
+/// these user-data words (D758): from the lowest address an active lane forms to the end of the
+/// widest read from the highest. Empty, at zero, when no lane reaches a load.
+///
+/// # Errors
+///
+/// A refusal naming why the lanes' addresses cannot be found.
+fn global_range(
+    global: &GlobalLoads,
+    user_data: &[u32; USER_DATA_WORDS],
+    vertices: u32,
+    memory: &impl GuestMemory,
+) -> Result<(u64, u64), &'static str> {
+    /// A run's answer, and every word it read with the value it read: the answer holds while they
+    /// all still read the same.
+    type Run = (Vec<(u64, Option<u32>)>, Result<(u64, u64), &'static str>);
+    /// Runs kept, by program, user data and vertices; a bound, since a guest streaming new tables
+    /// every frame adds a run a draw.
+    const RUNS_KEPT: usize = 4096;
+    static RUNS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Vec<u32>, Run>>> =
+        std::sync::OnceLock::new();
+    if vertices > global.width {
+        return Err(concat!(
+            "a draw of more vertices than one wave holds, whose global loads' lanes are not all ",
+            "run by one (D758)"
+        ));
+    }
+    let count = usize::try_from(global.user_data)
+        .unwrap_or(USER_DATA_WORDS)
+        .min(USER_DATA_WORDS);
+    let word = |address: u64| {
+        let bytes = memory.read(address, 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    // The same program over the same user data and vertices reads the same words; while they hold
+    // what they held, the lanes form the same addresses.
+    let hash = crate::content_hash(&global.prefix);
+    let mut key = vec![
+        hash as u32,
+        (hash >> 32) as u32,
+        global.first_register,
+        global.width,
+        vertices,
+    ];
+    key.extend_from_slice(&user_data[..count]);
+    let runs = RUNS.get_or_init(Default::default);
+    if let Ok(runs) = runs.lock()
+        && let Some((reads, answer)) = runs.get(&key)
+        && reads.iter().all(|&(address, value)| word(address) == value)
+    {
+        return *answer;
+    }
+    let mut reads = Vec::new();
+    let answer = run_global_loads(global, (&user_data[..count], vertices), &mut |address| {
+        let value = word(address);
+        reads.push((address, value));
+        value
+    });
+    if let Ok(mut runs) = runs.lock() {
+        if runs.len() >= RUNS_KEPT {
+            runs.clear();
+        }
+        runs.insert(key, (reads, answer));
+    }
+    answer
+}
+
+/// [`global_range`] found by running the program, reading guest memory through `read`.
+fn run_global_loads(
+    global: &GlobalLoads,
+    (user_data, vertices): (&[u32], u32),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<(u64, u64), &'static str> {
+    use orbistoun_translate::evaluate::LaneProgram;
+    /// Programs prepared for runs, by their words: each is decoded and sliced once.
+    type Programs = std::collections::HashMap<Vec<u32>, std::sync::Arc<LaneProgram>>;
+    static PROGRAMS: std::sync::OnceLock<std::sync::Mutex<Programs>> = std::sync::OnceLock::new();
+    let (encodings, _) = decode_prefix(&[])?;
+    let programs = PROGRAMS.get_or_init(Default::default);
+    let known = programs
+        .lock()
+        .ok()
+        .and_then(|programs| programs.get(&global.prefix).cloned());
+    let program = if let Some(program) = known {
+        program
+    } else {
+        let (_, decode) = decode_prefix(&global.prefix)?;
+        let offsets: Vec<u32> = global.loads.iter().map(|&(at, _)| at).collect();
+        let program = std::sync::Arc::new(LaneProgram::new(decode, encodings, &offsets));
+        if let Ok(mut programs) = programs.lock() {
+            programs.insert(global.prefix.clone(), program.clone());
+        }
+        program
+    };
+    let found = orbistoun_translate::evaluate::lane_addresses(
+        &program,
+        encodings,
+        (global.first_register, user_data),
+        (global.width, vertices),
+        read,
+    )?;
+    let mut span: Option<(u64, u64)> = None;
+    for (at, addresses) in found {
+        let reads = global
+            .loads
+            .iter()
+            .find(|&&(load, _)| load == at)
+            .map_or(16, |&(_, bytes)| u64::from(bytes));
+        for address in addresses {
+            let end = address.saturating_add(reads);
+            span = Some(span.map_or((address, end), |(low, high)| {
+                (low.min(address), high.max(end))
+            }));
+        }
+    }
+    // Whole words, from the word the lowest address is in, as the module reads them.
+    Ok(span.map_or((0, 0), |(low, high)| (low & !3, high - (low & !3))))
+}
+
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and
 /// selects (D738) - where the source has one and it can be found.
 pub(crate) fn resolve_fourth_word(
@@ -246,8 +386,8 @@ pub(crate) fn resolve_fourth_word(
                 .ok()
                 .map(|(words, _)| words[3])
         }
-        // A scalar load's base names no format.
-        BufferSource::Computed(_) | BufferSource::Pointer { .. } => None,
+        // A scalar load's base names no format, and a global load has no descriptor.
+        BufferSource::Computed(_) | BufferSource::Pointer { .. } | BufferSource::Global(_) => None,
     }
 }
 
@@ -263,17 +403,19 @@ fn table_address(table: TableBase, user_data: &[u32; USER_DATA_WORDS]) -> u64 {
     u64::from(half(table.low)) | u64::from(half(table.high)) << 32
 }
 
-/// The guest range a source names for a draw with these user-data words: its address and length.
+/// The guest range a source names for a draw of `vertices` vertices with these user-data words: its
+/// address and length.
 ///
 /// # Errors
 ///
 /// A refusal naming why the range cannot be bound exactly.
 pub(crate) fn resolve_range(
     source: &BufferSource,
-    user_data: &[u32; USER_DATA_WORDS],
+    (user_data, vertices): (&[u32; USER_DATA_WORDS], u32),
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), &'static str> {
     let (address, length) = match source {
+        BufferSource::Global(global) => global_range(global, user_data, vertices, memory)?,
         BufferSource::Pointer { base, extent } => {
             (table_address(*base, user_data), u64::from(*extent))
         }
@@ -333,6 +475,7 @@ fn counting_indices(indices: Option<Result<(IndexBuffer, u32), &'static str>>) -
     DrawBuffer {
         hash: hasher.finish(),
         bytes: bytes.into(),
+        base: 0,
     }
 }
 
@@ -354,7 +497,7 @@ pub fn bind_draw_buffers(
     let index = |stage: ShaderStage| STAGES.iter().position(|s| *s == stage);
     let mut words = [[0u32; USER_DATA_WORDS]; 2];
     let mut modules: [Option<ResourceId>; 2] = [None; 2];
-    let mut bound: [Option<Vec<(u64, usize)>>; 2] = [None, None];
+    let mut bound: [Option<Vec<(u64, usize, u64)>>; 2] = [None, None];
     // Ranges read this submission: guest memory does not change while it is prepared.
     let mut read: BTreeMap<(u64, u64), Result<DrawBuffer, &'static str>> = BTreeMap::new();
     let mut out = Vec::with_capacity(commands.len());
@@ -371,6 +514,12 @@ pub fn bind_draw_buffers(
                 }
             }
             RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } => {
+                // The lanes a primitive shader's draw runs as vertices (D758).
+                let vertices = match &command {
+                    RenderCommand::Draw { vertices, .. } => *vertices,
+                    RenderCommand::DrawIndexed { indices, .. } => *indices,
+                    _ => 0,
+                };
                 for (at, stage) in STAGES.into_iter().enumerate() {
                     let empty = Vec::new();
                     let module = modules[at];
@@ -394,7 +543,9 @@ pub fn bind_draw_buffers(
                     }
                     let ranges = list
                         .iter()
-                        .map(|source| resolve_range(source, &words[at], memory).map(Some))
+                        .map(|source| {
+                            resolve_range(source, (&words[at], vertices), memory).map(Some)
+                        })
                         .chain(indices.map(|found| {
                             found.map(|(buffer, count)| match buffer {
                                 IndexBuffer::Guest { address, bytes } => {
@@ -419,8 +570,10 @@ pub fn bind_draw_buffers(
                         .collect();
                     match resolved {
                         Ok(buffers) => {
-                            let key: Vec<(u64, usize)> =
-                                buffers.iter().map(|b| (b.hash, b.bytes.len())).collect();
+                            let key: Vec<(u64, usize, u64)> = buffers
+                                .iter()
+                                .map(|b| (b.hash, b.bytes.len(), b.base))
+                                .collect();
                             if bound[at].as_ref() != Some(&key) {
                                 out.push(RenderCommand::BindDrawBuffers { stage, buffers });
                                 bound[at] = Some(key);
@@ -571,7 +724,7 @@ mod tests {
         let mut user_data = [0u32; super::USER_DATA_WORDS];
         user_data[0] = 0x1000;
         assert_eq!(
-            super::resolve_range(&source, &user_data, &memory),
+            super::resolve_range(&source, (&user_data, 0), &memory),
             Ok((0x2000, 16 + 4 * 16)),
             "four sixteen-byte records past a sixteen-byte offset"
         );
@@ -593,7 +746,7 @@ mod tests {
             user_data: 2,
         }));
         assert_eq!(
-            super::resolve_range(&pointer, &user_data, &memory),
+            super::resolve_range(&pointer, (&user_data, 0), &memory),
             Ok((0x1010, 16))
         );
         assert_eq!(
@@ -602,7 +755,88 @@ mod tests {
         );
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
-        assert!(super::resolve_range(&source, &user_data, &memory).is_err());
+        assert!(super::resolve_range(&source, (&user_data, 0), &memory).is_err());
+    }
+
+    /// The open-toolchain GL context's vertex prologue and one four-component attribute fetch
+    /// (oops-sdk `glsl_vs.c`, `vs_emit_ngg_preamble` and `vs_load_attributes`): the vertex index
+    /// `s12` plus the lane, read from `base + stride * index` with the base and stride from the
+    /// table at `s[10:11]`, as three components or four by the table's fourth word.
+    const GL_FETCH: [u32; 35] = [
+        0xbfa0_0001, // s_inst_prefetch 0x1
+        0xbe8d_037e, // s_mov_b32 s13, exec_lo
+        0xbefc_03ff,
+        0x0000_1003, // s_mov_b32 m0, 0x1003
+        0xbf80_0000, // s_nop 0
+        0xbf90_0009, // s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+        0xbefe_0381, // s_mov_b32 exec_lo, 1
+        0x7e02_02ff,
+        0x2028_0600, // v_mov_b32 v1, 0x20280600
+        0xf800_0941,
+        0x0000_0001, // exp prim v1, off, off, off done
+        0xbf8c_ff0f, // s_waitcnt expcnt(0)
+        0xbefe_0387, // s_mov_b32 exec_lo, 7
+        0xd765_000e,
+        0x0001_00c1, // v_mbcnt_lo_u32_b32 v14, -1, 0
+        0x4a1c_1c0c, // v_add_nc_u32 v14, s12, v14
+        0x7e02_0280, // v_mov_b32 v1, 0
+        0xf408_0105,
+        0xfa00_0000, // s_load_dwordx4 s[4:7], s[10:11], 0x0
+        0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+        0xd569_0004,
+        0x0002_1c06, // v_mul_lo_u32 v4, s6, v14
+        0xd70f_6a02,
+        0x0002_0804, // v_add_co_u32 v2, vcc_lo, s4, v4
+        0x5006_0205, // v_add_co_ci_u32_e32 v3, vcc_lo, s5, v1, vcc_lo
+        0xbf06_8407, // s_cmp_eq_u32 s7, 4
+        0xbf85_0004, // s_cbranch_scc1 4
+        0x7e2e_02f2, // v_mov_b32 v23, 1.0
+        0xdc3c_8000,
+        0x147d_0002, // global_load_dwordx3 v[20:22], v[2:3], off
+        0xbf82_0002, // s_branch 2
+        0xdc38_8000,
+        0x147d_0002, // global_load_dwordx4 v[20:23], v[2:3], off
+        0xbf8c_3f70, // s_waitcnt vmcnt(0)
+        0xbf81_0000, // s_endpgm
+    ];
+
+    /// A primitive shader's global loads (D758) bind, for each draw, the range its vertex lanes'
+    /// addresses span: here three vertices from the draw's base vertex, `stride` apart, each read
+    /// sixteen bytes wide. A draw of more vertices than the wave holds is refused.
+    #[test]
+    fn a_global_load_binds_the_range_its_vertex_lanes_read() {
+        let encodings = orbistoun_shader::EncodingTable::builtin().expect("encodings");
+        let operands = orbistoun_shader::OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = GL_FETCH.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = orbistoun_shader::decode_program(&bytes, &encodings, &operands);
+        let traced =
+            orbistoun_translate::draw_buffers::trace(&decode, &encodings, (8, 5), (false, true));
+        // The attribute table, then the global loads.
+        let [
+            _,
+            orbistoun_translate::draw_buffers::BufferSource::Global(global),
+        ] = traced.sources.as_slice()
+        else {
+            panic!("the table and the global loads: {:?}", traced.sources);
+        };
+        let mut global = global.clone();
+        global.width = 32;
+        let source = orbistoun_translate::draw_buffers::BufferSource::Global(global);
+
+        let (table, vertices, stride) = (0x2000_0000u64, 0x74_3000_0000u64, 28u64);
+        let mut words = Vec::new();
+        for word in [vertices as u32, (vertices >> 32) as u32, stride as u32, 4] {
+            words.extend(word.to_le_bytes());
+        }
+        let memory = At(table, words);
+        let mut user_data = [0u32; super::USER_DATA_WORDS];
+        user_data[2] = table as u32;
+        user_data[4] = 3;
+        assert_eq!(
+            super::resolve_range(&source, (&user_data, 3), &memory),
+            Ok((vertices + 3 * stride, 2 * stride + 16))
+        );
+        assert!(super::resolve_range(&source, (&user_data, 33), &memory).is_err());
     }
 
     /// An indexed draw of a primitive shader that reads its vertex ids from its index buffer binds

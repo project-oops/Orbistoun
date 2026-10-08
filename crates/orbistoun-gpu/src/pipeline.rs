@@ -1038,7 +1038,7 @@ impl Pipeline {
         }
         let mut ranges = Vec::with_capacity(traced.sources.len());
         for source in &traced.sources {
-            let range = crate::draw_buffers::resolve_range(source, &words, memory)?;
+            let range = crate::draw_buffers::resolve_range(source, (&words, 0), memory)?;
             if ranges.iter().any(|&held| overlaps(held, range)) {
                 return Err(concat!(
                     "two buffers the dispatch binds overlap, and two copies of one byte would ",
@@ -2342,7 +2342,7 @@ impl Pipeline {
         &mut self,
         resource: ResourceId,
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
-        (stage, user_data): (Stage, UserData),
+        (stage, user_data, strategy): (Stage, UserData, Strategy),
     ) {
         let again;
         let decoded = if let Some(decoded) = decoded {
@@ -2360,6 +2360,15 @@ impl Pipeline {
             user_data,
         )
         .unwrap_or_default();
+        let mut buffers = buffers;
+        // Its global loads run lane by lane over the wave the stream's registers say (D758).
+        if let Strategy::Predicated { width, .. } = strategy {
+            for source in &mut buffers.sources {
+                if let orbistoun_translate::draw_buffers::BufferSource::Global(global) = source {
+                    global.width = width.lanes();
+                }
+            }
+        }
         if let Some(access) = reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
             self.memory_readers.insert(resource, access);
         }
@@ -2956,7 +2965,11 @@ impl Pipeline {
         self.cache.insert(key, Cached::of(resource, shader));
         // Where each texture the module samples comes from, for binding them per draw.
         self.texture_sources.insert(resource, kept.textures);
-        self.note_memory(resource, (shader, decoded), (host_stage, user_data));
+        self.note_memory(
+            resource,
+            (shader, decoded),
+            (host_stage, user_data, strategy),
+        );
         Ok(Prepared::Fresh {
             resource,
             module: kept.module,
