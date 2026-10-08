@@ -594,6 +594,62 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-08-19"
 
 [[function]]
+name = "getuid"
+arity = 0
+purpose = "Answers the process's real user id: getuid()."
+returns = "count"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261008-004521, check 200-census/libkernel/getuid): 0x1 on both calls. A title runs as user and group 1, real and effective alike.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261008-004521-eboot.obs.log, check 200-census/libkernel/getuid."
+found_in = ["STKT00001"]
+found_on = "2026-10-08"
+
+[[function]]
+name = "geteuid"
+arity = 0
+purpose = "Answers the process's effective user id: geteuid()."
+returns = "count"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261008-004521, check 200-census/libkernel/geteuid): 0x1 on both calls. A title runs as user and group 1, real and effective alike.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261008-004521-eboot.obs.log, check 200-census/libkernel/geteuid."
+found_in = ["STKT00001"]
+found_on = "2026-10-08"
+
+[[function]]
+name = "getgid"
+arity = 0
+purpose = "Answers the process's real group id: getgid()."
+returns = "count"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261008-004521, check 200-census/libkernel/getgid): 0x1 on both calls. A title runs as user and group 1, real and effective alike.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261008-004521-eboot.obs.log, check 200-census/libkernel/getgid."
+found_in = ["STKT00001"]
+found_on = "2026-10-08"
+
+[[function]]
+name = "getegid"
+arity = 0
+purpose = "Answers the process's effective group id: getegid()."
+returns = "count"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261008-004521, check 200-census/libkernel/getegid): 0x1 on both calls. A title runs as user and group 1, real and effective alike.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261008-004521-eboot.obs.log, check 200-census/libkernel/getegid."
+found_in = ["STKT00001"]
+found_on = "2026-10-08"
+
+[[function]]
 name = "sceKernelConvertUtcToLocaltime"
 arity = 4
 purpose = "Converts a UTC time to local time: sceKernelConvertUtcToLocaltime(utc, &local, &timesec, &dst)."

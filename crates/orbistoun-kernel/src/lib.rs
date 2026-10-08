@@ -247,6 +247,10 @@ guest_module! {
         "sceKernelIsDevelopmentMode" => 0,
         "sceKernelGetGPI" => 0,
         "sceKernelConvertUtcToLocaltime" => 4,
+        "getuid" => 0,
+        "geteuid" => 0,
+        "getgid" => 0,
+        "getegid" => 0,
         "sceKernelIsTestKit" => 0,
         "posix_getpagesize" => 0,
         "posix_usleep" => 1,
@@ -2650,6 +2654,13 @@ fn convert_utc_to_localtime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         unsafe { guest::write_u32(dst, 0) };
     }
     0
+}
+
+/// `getuid()`, `geteuid()`, `getgid()` and `getegid()`: `1`, the real and effective user and group
+/// a title runs as (obSCEne `200-census/libkernel/<name>`, sweep 20261008-004521, each `0x1` twice).
+/// Real and effective agree, so Mesa's `__normal_user()` honours its environment options.
+fn process_id_one(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    1
 }
 
 /// `sceKernelIsDevelopmentMode()`: false. See [`is_devkit`].
@@ -6236,6 +6247,10 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelIsNeoMode", is_neo_mode),
     ("sceKernelGetGPI", get_gpi),
     ("sceKernelConvertUtcToLocaltime", convert_utc_to_localtime),
+    ("getuid", process_id_one),
+    ("geteuid", process_id_one),
+    ("getgid", process_id_one),
+    ("getegid", process_id_one),
     ("sceKernelIsDevelopmentMode", is_development_mode),
     ("sceKernelIsTestKit", is_testkit),
     ("posix_getpagesize", getpagesize),

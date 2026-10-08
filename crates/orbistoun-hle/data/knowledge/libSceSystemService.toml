@@ -254,6 +254,21 @@ found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
 
 [[function]]
+name = "sceSystemServiceReceiveEvent"
+arity = 1
+purpose = "Takes the next pending system event into the caller's buffer: sceSystemServiceReceiveEvent(event)."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, sweep 20261008-004521, check 200-census/libSceSystemService/sceSystemServiceReceiveEvent): 0x80a10004 (SCE_SYSTEM_SERVICE_ERROR_NO_EVENT) on three calls in a row, each leaving a 0x200-byte poisoned buffer untouched; zeroed arguments answer the same.",
+    "orbistoun has no system events to deliver, so it answers 0x80a10004 and writes nothing. oops-sdk's event pump calls it every frame.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261008-004521-eboot.obs.log, check 200-census/libSceSystemService/sceSystemServiceReceiveEvent."
+found_in = ["STKT00001", "CRFT00001", "TSHP00001"]
+found_on = "2026-10-08"
+
+[[function]]
 name = "sceSystemServiceGetHdrToneMapLuminance"
 arity = 1
 purpose = "Reads the display's tone-mapping luminances into a twelve-byte record: sceSystemServiceGetHdrToneMapLuminance(record)."

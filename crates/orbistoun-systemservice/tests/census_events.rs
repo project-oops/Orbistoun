@@ -87,3 +87,18 @@ fn the_tone_map_luminances_are_the_measured_ones() {
         0x80a1_0003
     );
 }
+
+/// `sceSystemServiceReceiveEvent(&event)`: `0x80a10004` with nothing pending, the buffer left as it
+/// was, on every call (`200-census/libSceSystemService/sceSystemServiceReceiveEvent`, sweep
+/// 20261008-004521: three calls in a row, each `0x80a10004`, 0x200 poisoned bytes untouched).
+#[test]
+fn no_system_event_is_pending() {
+    let mut event = [0xcc_u8; 0x200];
+    for _ in 0..3 {
+        assert_eq!(
+            call("sceSystemServiceReceiveEvent", &[event.as_mut_ptr() as u64]),
+            0x80a1_0004
+        );
+    }
+    assert_eq!(event, [0xcc; 0x200]);
+}

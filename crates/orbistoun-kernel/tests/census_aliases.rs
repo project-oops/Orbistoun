@@ -58,3 +58,12 @@ fn the_general_purpose_input_is_zero() {
     assert_eq!(call("sceKernelGetGPI", [0; GUEST_ARG_REGISTERS]), 0);
     assert_eq!(call("sceKernelGetGPI", [0xa1; GUEST_ARG_REGISTERS]), 0);
 }
+
+/// `getuid`, `geteuid`, `getgid` and `getegid` are `1` in a title's process, each call
+/// (`200-census/libkernel/<name>`, sweep 20261008-004521, two calls each).
+#[test]
+fn a_title_runs_as_user_and_group_one() {
+    for name in ["getuid", "geteuid", "getgid", "getegid"] {
+        assert_eq!(call(name, [0; GUEST_ARG_REGISTERS]), 1, "{name}");
+    }
+}

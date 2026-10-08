@@ -28,6 +28,7 @@ guest_module! {
         "sceSystemServiceParamGetInt" => 2,
         "sceSystemServiceHideSplashScreen" => 0,
         "sceSystemServiceGetStatus" => 1,
+        "sceSystemServiceReceiveEvent" => 1,
         "sceSystemServiceGetHdrToneMapLuminance" => 1,
         // title id, argv, parameter block.
         "sceSystemServiceLaunchApp" => 3,
@@ -416,6 +417,17 @@ fn get_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `SCE_SYSTEM_SERVICE_ERROR_NO_EVENT`: what `sceSystemServiceReceiveEvent` answers with nothing
+/// pending (`200-census/libSceSystemService/sceSystemServiceReceiveEvent`, sweep 20261008-004521).
+const NO_SYSTEM_EVENT: u64 = 0x80a1_0004;
+
+/// `sceSystemServiceReceiveEvent(event)` - the next system event, if one is pending. None is here,
+/// as none was on the measured console: three calls in a row each answered
+/// [`NO_SYSTEM_EVENT`] and left all 0x200 poisoned bytes of the buffer as they were.
+fn receive_event(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    NO_SYSTEM_EVENT
+}
+
 /// The twelve bytes `sceSystemServiceGetHdrToneMapLuminance` wrote on the measured console
 /// (`200-census/libSceSystemService/sceSystemServiceGetHdrToneMapLuminance`, sweep 20261007-113500):
 /// three floats, about 637.3, 981.1 and 0.125 - two peak luminances and a minimum, in nits.
@@ -592,6 +604,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceUserServiceGetEvent", user_service_get_event),
         ("sceSystemServiceGetStatus", get_status),
+        ("sceSystemServiceReceiveEvent", receive_event),
         (
             "sceSystemServiceGetHdrToneMapLuminance",
             get_hdr_tone_map_luminance,
