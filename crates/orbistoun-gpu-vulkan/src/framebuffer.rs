@@ -1441,6 +1441,27 @@ fn sampler_info(
         .max_lod(max_lod)
 }
 
+/// The host format a texture is created in and its texels as staged: `Rgba8` words padded and
+/// given their coarse level where asked; compressed blocks and packed floats as they are, one level,
+/// since averaging their bytes would mix their bit fields (D774).
+fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format, Staged) {
+    let as_they_are = || Staged {
+        texels: texture.words.to_vec(),
+        width: texture.width,
+        height: texture.height.unwrap_or(1),
+        levels: 1,
+    };
+    match texture.encoding {
+        orbistoun_gpu::TextureEncoding::Rgba8 => {
+            (FORMAT, staged(texture.words, texture.width, coarse_level))
+        }
+        orbistoun_gpu::TextureEncoding::Float11_11_10 => {
+            (vk::Format::B10G11R11_UFLOAT_PACK32, as_they_are())
+        }
+        orbistoun_gpu::TextureEncoding::Bc3 => (vk::Format::BC3_UNORM_BLOCK, as_they_are()),
+    }
+}
+
 /// Creates a sampled image holding `texture`'s texels or blocks.
 ///
 /// Optimally tiled and filled by a staging copy: `R8G8B8A8_UNORM` must support sampling with
@@ -1455,20 +1476,7 @@ fn create_texture(
     sampling: orbistoun_gpu::TextureSampling,
 ) -> Result<Texture, DispatchError> {
     let device = devices.device;
-    let (format, staged) = match texture.encoding {
-        orbistoun_gpu::TextureEncoding::Rgba8 => {
-            (FORMAT, staged(texture.words, texture.width, coarse_level))
-        }
-        orbistoun_gpu::TextureEncoding::Bc3 => (
-            vk::Format::BC3_UNORM_BLOCK,
-            Staged {
-                texels: texture.words.to_vec(),
-                width: texture.width,
-                height: texture.height.unwrap_or(1),
-                levels: 1,
-            },
-        ),
-    };
+    let (format, staged) = staged_texture(&texture, coarse_level);
     let Staged {
         texels: padded,
         width,

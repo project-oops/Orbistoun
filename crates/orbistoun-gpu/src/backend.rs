@@ -320,6 +320,9 @@ pub enum TextureEncoding {
     /// `BC3_UNORM` blocks, four words each, a block for every four-by-four texels, rows of blocks
     /// row-major: the guest's compressed bytes as they are, which the host samples natively.
     Bc3,
+    /// One word a texel, `10_11_11_FLOAT`'s packed unsigned floats as the guest holds them, which
+    /// the host samples natively as `B10G11R11_UFLOAT_PACK32` (D774).
+    Float11_11_10,
 }
 
 /// Something that can carry out [`RenderCommand`]s.

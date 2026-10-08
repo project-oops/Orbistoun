@@ -503,7 +503,10 @@ fn dispatch_image(
     orbistoun_gpu_vulkan::compute_images::DispatchImage {
         texels: &image.texels,
         format: match image.format {
-            orbistoun_gpu::pipeline::TexelFormat::Rgba8 => {
+            // A dispatch image is never a packed-float one: `dispatch_format` reads no such format,
+            // so its arm is the four-byte one's.
+            orbistoun_gpu::pipeline::TexelFormat::Rgba8
+            | orbistoun_gpu::pipeline::TexelFormat::Float11_11_10 => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba8
             }
             orbistoun_gpu::pipeline::TexelFormat::Rgba32Uint => {

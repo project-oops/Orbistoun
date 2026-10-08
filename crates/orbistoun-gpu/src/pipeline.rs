@@ -1484,6 +1484,8 @@ pub enum TexelFormat {
     R8,
     /// Four thirty-two-bit unsigned channels, a texel four words.
     Rgba32Uint,
+    /// Three packed unsigned floats, eleven, eleven and ten bits, a texel a word (D774).
+    Float11_11_10,
 }
 
 impl TexelFormat {
@@ -1491,7 +1493,7 @@ impl TexelFormat {
     #[must_use]
     pub const fn bytes(self) -> u32 {
         match self {
-            Self::Rgba8 => 4,
+            Self::Rgba8 | Self::Float11_11_10 => 4,
             Self::R8 => 1,
             Self::Rgba32Uint => 16,
         }
@@ -3395,6 +3397,8 @@ const FORMAT_8_8_8_8_UNORM: u32 = 56;
 const FORMAT_8_UNORM: u32 = 1;
 /// `GFX10_FORMAT_BC3_UNORM` (`gfx10-rsrc.json:127`): four-by-four texels to a sixteen-byte block.
 const FORMAT_BC3_UNORM: u32 = 173;
+/// `GFX10_FORMAT_10_11_11_FLOAT` (`gfx10-rsrc.json`, value 36): three packed unsigned floats.
+const FORMAT_10_11_11_FLOAT: u32 = 36;
 /// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
 const FORMAT_32_32_32_32_UINT: u32 = 75;
 
@@ -3713,6 +3717,7 @@ fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelForm
     let format = match descriptor.format {
         FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
         FORMAT_8_UNORM => TexelFormat::R8,
+        FORMAT_10_11_11_FLOAT => TexelFormat::Float11_11_10,
         _ => return None,
     };
     let selects = destination_selects(word3);
@@ -3739,12 +3744,29 @@ const IDENTITY_SELECTS: [u32; 4] = [SELECT_X, SELECT_X + 1, SELECT_X + 2, SELECT
 /// Whether every select is one this reads exactly for `format`: a constant, or a channel the format
 /// holds. A one-byte texel holds X alone; what a select of its Y, Z or W returns is not taken on
 /// trust, and the reserved codes are refused.
+///
+/// A packed float texel's channels cannot be moved within the word the host samples, so it is read
+/// only as it is, with its missing alpha as the constant one the host also answers (D774).
 fn selects_exactly(format: TexelFormat, selects: [u32; 4]) -> bool {
+    if format == TexelFormat::Float11_11_10 {
+        return matches!(selects, [4, 5, 6, 7 | 1]);
+    }
     selects.iter().all(|&select| match select {
         0 | 1 | SELECT_X => true,
         5..=7 => format == TexelFormat::Rgba8,
         _ => false,
     })
+}
+
+/// How a bound texture of `format` reaches the host: packed floats as they are, anything else as
+/// `Rgba8` words.
+const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncoding {
+    match format {
+        TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
+        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint => {
+            crate::backend::TextureEncoding::Rgba8
+        }
+    }
 }
 
 /// A bound texture's texels as its selects return them, as linear `Rgba8` words: a one-byte texel
@@ -3786,7 +3808,9 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             let channels = match format {
                 // A draw's texture is never a sixteen-byte one: `sampled_format` reads no such
                 // format, so its arm is the four-byte one's.
-                TexelFormat::Rgba8 | TexelFormat::Rgba32Uint => texel.to_le_bytes(),
+                TexelFormat::Rgba8 | TexelFormat::Rgba32Uint | TexelFormat::Float11_11_10 => {
+                    texel.to_le_bytes()
+                }
                 TexelFormat::R8 => [texel.to_le_bytes()[0], 0, 0, 0xFF],
             };
             u32::from_le_bytes(selects.map(|select| pick(channels, select)))
@@ -3868,7 +3892,11 @@ fn read_tiled_texture(
             1 << 30 | (x & 0x3FFF) << 14 | (y & 0x3FFF)
         }
     };
-    let tag = layout_tag | tail_tag | u32::from(cleared) << 29 | 1 << 28;
+    let encoding = texture_encoding(format);
+    // The packed-float read is its own entry, so the same bytes bound as `Rgba8` are never reused
+    // for it.
+    let float_tag = u32::from(encoding == crate::backend::TextureEncoding::Float11_11_10) << 22;
+    let tag = layout_tag | tail_tag | float_tag | u32::from(cleared) << 29 | 1 << 28;
     let key = (surface.base, width, height, tag);
     if let Some(cached) = texels.get(&key)
         && cached
@@ -3883,7 +3911,7 @@ fn read_tiled_texture(
             width,
             height,
             sampling: crate::registers::TextureSampling::default(),
-            encoding: crate::backend::TextureEncoding::Rgba8,
+            encoding,
         });
     }
     let since = orbistoun_mem::watch::mark(surface.base, span as u64);
@@ -3894,7 +3922,7 @@ fn read_tiled_texture(
         let bytes = memory.read(surface.base, span)?;
         let mut hasher = crate::ContentHasher::new(span / 4);
         hasher.bytes(bytes);
-        let hash = hasher.finish();
+        let hash = hasher.finish() ^ u64::from(float_tag);
         let shared = match texels.get(&key) {
             Some(cached) if cached.hash == hash => cached.texels.clone(),
             _ => {
@@ -3925,7 +3953,7 @@ fn read_tiled_texture(
         width,
         height,
         sampling: crate::registers::TextureSampling::default(),
-        encoding: crate::backend::TextureEncoding::Rgba8,
+        encoding,
     })
 }
 
@@ -5333,6 +5361,77 @@ mod tests {
         else {
             panic!("a tiled RGBA8 texture binds");
         };
+        assert_eq!((w, h), (width, height));
+        let expected: Vec<u32> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| y * 100 + x))
+            .collect();
+        assert_eq!(
+            texels.as_ref(),
+            expected.as_slice(),
+            "row-major after detiling"
+        );
+    }
+
+    /// A `10_11_11_FLOAT` texture - PPSA02664's HDR target, sampled by the pass that follows it -
+    /// binds its words detiled and untouched, for the host to sample as packed floats (D774).
+    #[test]
+    fn a_packed_float_texture_binds_its_words_as_they_are() {
+        use super::{RenderCommand, read_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        // One 64 KiB block after the descriptor, on the block alignment the layout has: the
+        // descriptor's low base bits are the pipe-bank XOR, not address.
+        let (table, texels, width, height) = (0x1000_u64, 0x1_0000_u64, 8u32, 4u32);
+        let mut bytes = vec![0u8; 0xF000 + 0x1_0000];
+        let descriptor = [
+            (texels >> 8) as u32,
+            ((texels >> 40) as u32 & 0xff) | (36 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            (9 << 28) | (27 << 20) | 0xfac,
+            0,
+            0,
+            0,
+            0,
+        ];
+        for (i, word) in descriptor.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // Texel (x, y) holds `y * 100 + x`, placed where the measured 64KB_R_X addressing puts it.
+        for y in 0..height {
+            for x in 0..width {
+                let at = (texels - table) as usize
+                    + crate::tiling::tiled_byte_offset_64kb_rx_bpp4_surface(x, y, width);
+                bytes[at..at + 4].copy_from_slice(&(y * 100 + x).to_le_bytes());
+            }
+        }
+        let mut cache = super::TexelCache::new();
+        let swapped = {
+            let mut swapped = bytes.clone();
+            // Red and green exchanged: not a read a packed float texel can give.
+            let word3 = (9_u32 << 28) | (27 << 20) | 0xfa5;
+            swapped[12..16].copy_from_slice(&word3.to_le_bytes());
+            swapped
+        };
+        assert!(
+            read_texture(table, 0, &Memory(swapped), &mut super::TexelCache::new()).is_none(),
+            "channels moved within a packed texel are not read"
+        );
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: w,
+            height: h,
+            encoding,
+            ..
+        }) = read_texture(table, 0, &Memory(bytes), &mut cache)
+        else {
+            panic!("a tiled 10_11_11 float texture binds");
+        };
+        assert_eq!(encoding, crate::backend::TextureEncoding::Float11_11_10);
         assert_eq!((w, h), (width, height));
         let expected: Vec<u32> = (0..height)
             .flat_map(|y| (0..width).map(move |x| y * 100 + x))
