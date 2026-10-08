@@ -217,13 +217,34 @@ impl GuestSemaphore {
     ///
     /// All-or-nothing, as on the hardware: asking for two where one is left answers busy. A caller
     /// granted part of a request could neither tell nor give it back.
+    ///
+    /// A signal raised on the sleeping thread runs here with the lock dropped, and the thread
+    /// waits again: a signal is not a count (D652).
     fn take(&self, need: u32, until: Blocking) -> bool {
-        let Ok(count) = self.state.lock() else {
+        let Ok(mut count) = self.state.lock() else {
             return false;
         };
-        let Some(mut count) = wait_while(&self.available, count, until, |c| *c < need) else {
+        loop {
+            let Some(woken) = wait_while(&self.available, count, until, |c| {
+                *c < need && !signal_pending()
+            }) else {
+                return false;
+            };
+            if !signal_pending() {
+                count = woken;
+                break;
+            }
+            // The handler is guest code and may take this very semaphore.
+            drop(woken);
+            deliver_signal();
+            let Ok(again) = self.state.lock() else {
+                return false;
+            };
+            count = again;
+        }
+        if *count < need {
             return false;
-        };
+        }
         *count -= need;
         true
     }
@@ -445,6 +466,17 @@ pub fn cond_wait(handle: CondHandle, timeout: Option<Duration>) -> Option<bool> 
             if *pending > 0 {
                 *pending -= 1;
                 return true;
+            }
+            // A signal raised on this thread runs with the lock dropped, and the wait goes on: a
+            // signal is not a wake (D652).
+            if signal_pending() {
+                drop(pending);
+                deliver_signal();
+                let Ok(again) = c.pending.lock() else {
+                    return false;
+                };
+                pending = again;
+                continue;
             }
             let Some(until) = deadline else {
                 let Ok(next) = c.signal.wait(pending) else {
@@ -1153,6 +1185,13 @@ pub fn event_flag_wait(
             }
             return Some(Some(found_pattern));
         }
+        // As in `cond_wait`: the handler runs unlocked, then the wait goes on (D652).
+        if signal_pending() {
+            drop(bits);
+            deliver_signal();
+            bits = found.bits.lock().ok()?;
+            continue;
+        }
         match deadline {
             None => {
                 bits = found.changed.wait(bits).ok()?;
@@ -1272,13 +1311,13 @@ fn deliver_signal() {
     }
 }
 
-/// Nudges every address queue, so a thread with a signal pending re-tests its predicate.
+/// Nudges every wait that delivers signals, so a thread with a signal pending re-tests its
+/// predicate.
 ///
-/// Every queue, because a raise knows its target thread but not which word it sleeps on.
-/// Each other sleeper re-tests once and sleeps again, once per raise. The queue's lock is
-/// taken before notifying, so the flag cannot be set between a sleeper's last test and its
-/// sleep.
-pub fn nudge_address_waiters() {
+/// Every address queue, semaphore, condition variable and event flag, because a raise knows its target thread but not what
+/// it sleeps on. Each other sleeper re-tests once and sleeps again, once per raise. Each lock is
+/// taken before notifying, so the flag cannot be set between a sleeper's last test and its sleep.
+pub fn nudge_waiters() {
     let queues: Vec<Arc<AddressWaiters>> = match address_waiters().lock() {
         Ok(table) => table.values().cloned().collect(),
         Err(_) => return,
@@ -1287,6 +1326,36 @@ pub fn nudge_address_waiters() {
         if let Ok(state) = queue.state.lock() {
             drop(state);
             queue.woken.notify_all();
+        }
+    }
+    let semaphores: Vec<Arc<GuestSemaphore>> = match semaphores().lock() {
+        Ok(table) => table.values().cloned().collect(),
+        Err(_) => return,
+    };
+    for semaphore in semaphores {
+        if let Ok(count) = semaphore.state.lock() {
+            drop(count);
+            semaphore.available.notify_all();
+        }
+    }
+    let conds: Vec<Arc<GuestCond>> = match conds().lock() {
+        Ok(table) => table.values().cloned().collect(),
+        Err(_) => return,
+    };
+    for cond in conds {
+        if let Ok(pending) = cond.pending.lock() {
+            drop(pending);
+            cond.signal.notify_all();
+        }
+    }
+    let flags: Vec<Arc<GuestEventFlag>> = match event_flags().lock() {
+        Ok(table) => table.values().cloned().collect(),
+        Err(_) => return,
+    };
+    for flag in flags {
+        if let Ok(bits) = flag.bits.lock() {
+            drop(bits);
+            flag.changed.notify_all();
         }
     }
 }
@@ -1534,6 +1603,69 @@ mod tests {
         );
         assert_eq!(super::semaphore_signal(h, 1), Some(true));
         assert_eq!(super::semaphore_wait(h, 1, Blocking::Never), Some(true));
+    }
+
+    /// The thread a test signal is raised on, and how many handlers have run there.
+    static SIGNALLED: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
+    static DELIVERED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// Raises a test signal on `on` and waits long enough for an owned wait to run it.
+    fn raise_on(on: std::thread::ThreadId) {
+        super::install_signal_delivery(super::SignalDelivery {
+            pending: || {
+                SIGNALLED
+                    .lock()
+                    .is_ok_and(|t| *t == Some(std::thread::current().id()))
+            },
+            deliver: || {
+                if let Ok(mut target) = SIGNALLED.lock() {
+                    if *target == Some(std::thread::current().id()) {
+                        *target = None;
+                        DELIVERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            },
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Ok(mut target) = SIGNALLED.lock() {
+            *target = Some(on);
+        }
+        super::nudge_waiters();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    /// A signal raised on a thread asleep in a semaphore, a condition variable or an event flag
+    /// runs there, and the thread goes back to waiting (D652). A collector suspends threads
+    /// asleep in any of them, and each still hands out only what it was given.
+    #[test]
+    fn a_signal_runs_in_each_owned_wait_which_then_waits_on() {
+        use std::sync::atomic::Ordering;
+        let before = DELIVERED.load(Ordering::SeqCst);
+
+        let h = super::create_semaphore(0, 1, "suspend ack");
+        let waiter = std::thread::spawn(move || super::semaphore_wait(h, 1, Blocking::Forever));
+        raise_on(waiter.thread().id());
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), before + 1, "semaphore");
+        assert!(!waiter.is_finished(), "a signal is not a count");
+        assert_eq!(super::semaphore_signal(h, 1), Some(true));
+        assert_eq!(waiter.join().ok(), Some(Some(true)));
+
+        let c = super::create_cond("finalizer");
+        let waiter = std::thread::spawn(move || super::cond_wait(c, None));
+        raise_on(waiter.thread().id());
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), before + 2, "condition");
+        assert!(!waiter.is_finished(), "a signal is not a wake");
+        assert_eq!(super::cond_signal(c), Some(true));
+        assert_eq!(waiter.join().ok(), Some(Some(true)));
+
+        let f = super::create_event_flag(0, "job worker");
+        let waiter =
+            std::thread::spawn(move || super::event_flag_wait(f, 1, false, false, false, None));
+        raise_on(waiter.thread().id());
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), before + 3, "event flag");
+        assert!(!waiter.is_finished(), "a signal is not a bit");
+        assert_eq!(super::event_flag_set(f, 1), Some(true));
+        assert_eq!(waiter.join().ok(), Some(Some(Some(1))));
     }
 
     #[test]

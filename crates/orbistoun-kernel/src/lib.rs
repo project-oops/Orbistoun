@@ -626,7 +626,7 @@ fn c_cnd_wait_inner(
     if let Some(handle) = mutex {
         sync::unlock(handle, by);
     }
-    let woken = sync::cond_wait(cond, timeout);
+    let woken = parked(|| sync::cond_wait(cond, timeout));
     if let Some(handle) = mutex {
         sync::acquire(handle, by, sync::Blocking::Forever);
     }
@@ -918,7 +918,7 @@ fn ult_cond_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if let Some(handle) = mutex {
         sync::unlock(handle, by);
     }
-    let woken = sync::cond_wait(cond, None);
+    let woken = parked(|| sync::cond_wait(cond, None));
     if let Some(handle) = mutex {
         sync::acquire(handle, by, sync::Blocking::Forever);
     }
@@ -2907,7 +2907,7 @@ fn pthread_cond_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if let Some(handle) = mutex {
         sync::unlock(handle, by);
     }
-    let woken = sync::cond_wait(cond, None);
+    let woken = parked(|| sync::cond_wait(cond, None));
     if let Some(handle) = mutex {
         sync::acquire(handle, by, sync::Blocking::Forever);
     }
@@ -3395,14 +3395,16 @@ fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(all) = wait_mode(mode) else {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
-    let Some(outcome) = sync::event_flag_wait(
-        flag,
-        pattern,
-        all,
-        mode & WAIT_CLEAR_ALL != 0,
-        mode & WAIT_CLEAR_PAT != 0,
-        timeout,
-    ) else {
+    let Some(outcome) = parked(|| {
+        sync::event_flag_wait(
+            flag,
+            pattern,
+            all,
+            mode & WAIT_CLEAR_ALL != 0,
+            mode & WAIT_CLEAR_PAT != 0,
+            timeout,
+        )
+    }) else {
         // ESRCH for a bad handle, as the rest of the event-flag family answers.
         return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
     };
@@ -3484,6 +3486,16 @@ fn kernel_signal_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// Runs a wait a signal raised on this thread reaches: the handler runs and the thread waits on
+/// (D652). A collector suspends threads asleep on semaphores, condition variables and event
+/// flags as often as on addresses.
+fn parked<R>(wait: impl FnOnce() -> R) -> R {
+    let was = thread::set_parked(true);
+    let outcome = wait();
+    thread::set_parked(was);
+    outcome
+}
+
 /// `sceKernelWaitSema(semaphore, need, timeout)`.
 ///
 /// Takes the same `need` as its polling twin; the two differ only in whether they wait.
@@ -3494,7 +3506,7 @@ fn kernel_wait_sema(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(need) = u32::try_from(args[1]).ok().filter(|n| *n > 0) else {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
     };
-    match sync::semaphore_wait(handle, need, sync::Blocking::Forever) {
+    match parked(|| sync::semaphore_wait(handle, need, sync::Blocking::Forever)) {
         Some(true) => OK,
         Some(false) => u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw()),
         None => u64::from(GuestError::InvalidHandle.as_raw()),
@@ -3674,7 +3686,9 @@ fn sem_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sem_wait(sem)`: takes one, waiting for it.
 fn sem_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    match posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, sync::Blocking::Forever)) {
+    match posix_sema_at(args[0])
+        .and_then(|h| parked(|| sync::semaphore_wait(h, 1, sync::Blocking::Forever)))
+    {
         Some(true) => OK,
         _ => u64::from(GuestError::InvalidHandle.as_raw()),
     }
@@ -4805,7 +4819,7 @@ fn cond_timedwait(cond: u64, mutex: u64, timeout: std::time::Duration) -> u64 {
     if let Some(m) = held {
         sync::unlock(m, by);
     }
-    let woken = sync::cond_wait(handle, Some(timeout));
+    let woken = parked(|| sync::cond_wait(handle, Some(timeout)));
     if let Some(m) = held {
         sync::acquire(m, by, sync::Blocking::Forever);
     }
@@ -4937,7 +4951,7 @@ fn sem_timedwait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(until) = deadline_at(args[1]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, until)))
+    timed_out(posix_sema_at(args[0]).and_then(|h| parked(|| sync::semaphore_wait(h, 1, until))))
 }
 
 /// `sem_reltimedwait_np(sem, reltime)`: the same wait, given a span instead.
@@ -4945,7 +4959,7 @@ fn sem_reltimedwait_np(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(until) = deadline_after(args[1]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    timed_out(posix_sema_at(args[0]).and_then(|h| sync::semaphore_wait(h, 1, until)))
+    timed_out(posix_sema_at(args[0]).and_then(|h| parked(|| sync::semaphore_wait(h, 1, until))))
 }
 
 /// `sem_getvalue(sem, sval)`: how many the semaphore has free.
@@ -5865,7 +5879,7 @@ fn raise_exception(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if !thread::raise_pending(thread, signum) {
             return u64::from(GuestError::Unimplemented.as_raw());
         }
-        sync::nudge_address_waiters();
+        sync::nudge_waiters();
         return 0;
     }
     // SAFETY: `handler` is a guest function pointer the guest itself passed to
