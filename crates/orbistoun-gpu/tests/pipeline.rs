@@ -866,6 +866,12 @@ fn a_shader_that_does_not_translate_is_reported_with_its_reason() {
         "got: {:?}",
         submission.report.failures[0]
     );
+    // And says which instruction, so a refusal names what it refused without the shader's bytes.
+    assert!(
+        submission.report.failures[0].reason.contains(", word 0x"),
+        "the refused instruction is quoted: {:?}",
+        submission.report.failures[0]
+    );
     assert!(submission.commands.is_empty());
 }
 

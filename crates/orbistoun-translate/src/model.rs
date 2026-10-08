@@ -6891,6 +6891,17 @@ fn scalar_select_64<M: Model + ?Sized>(
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let (destination, first, second) = three_operands(instruction)?;
+    let (first_low, first_high) = pair_source(model, instruction, first, 0)?;
+    let (second_low, second_high) = pair_source(model, instruction, second, 0)?;
+    let condition = crate::control::read_condition_code(model, true);
+    let low = model.select(condition, first_low, second_low);
+    let high = model.select(condition, first_high, second_high);
+    // A lane mask is the pair it names, as a source is (`s_cselect_b64 vcc, exec, 0`).
+    if let Some(mask) = mask_destination(destination) {
+        model.write_lane_mask(mask, low, high)?;
+        model.count();
+        return Ok(());
+    }
     let register = scalar_destination(instruction, destination)?;
     if register + 2 > SCALAR_REGISTERS {
         return Err(TranslateError::Unsupported {
@@ -6898,11 +6909,6 @@ fn scalar_select_64<M: Model + ?Sized>(
             detail: "s_cselect_b64 runs past the end of the register file",
         });
     }
-    let (first_low, first_high) = pair_source(model, instruction, first, 0)?;
-    let (second_low, second_high) = pair_source(model, instruction, second, 0)?;
-    let condition = crate::control::read_condition_code(model, true);
-    let low = model.select(condition, first_low, second_low);
-    let high = model.select(condition, first_high, second_high);
     model.write_scalar(register, low);
     model.write_scalar(register + 1, high);
     model.count();

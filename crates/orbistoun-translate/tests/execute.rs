@@ -6038,6 +6038,38 @@ fn a_lane_mask_is_a_sixty_four_bit_source() {
     );
 }
 
+/// A lane mask is a 64-bit scalar destination too: `s_cselect_b64 vcc, exec, 0`, as PPSA02664's
+/// vertex shader writes it, leaves `vcc` the whole execution mask where the condition code is set
+/// and zero where it is clear.
+#[test]
+fn a_lane_mask_is_a_sixty_four_bit_select_destination() {
+    if !device_or_skip("a_lane_mask_is_a_sixty_four_bit_select_destination") {
+        return;
+    }
+    let (vcc, exec) = (106, EXEC_LO_CODE);
+    let program = [
+        s_cmp_i32("s_cmp_eq_i32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", vcc, exec, 128),
+        sop2("s_cselect_b64", 2, vcc, 128),
+        s_cmp_i32("s_cmp_lg_i32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", vcc, exec, 128),
+        s_cmp_i32("s_cmp_eq_i32", 128 + 1, 128 + 1),
+        sop2("s_cselect_b64", 4, vcc, 128),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(
+        (scalar(&registers, 2), scalar(&registers, 3)),
+        (u32::MAX, u32::MAX),
+        "set: vcc is every lane"
+    );
+    assert_eq!(
+        (scalar(&registers, 4), scalar(&registers, 5)),
+        (0, 0),
+        "clear: vcc is none"
+    );
+}
+
 /// `v_bfi_b32` takes the mask's set bits from its second source and the rest from its third;
 /// `v_cvt_f32_i32` converts signed, rounding to nearest.
 #[test]

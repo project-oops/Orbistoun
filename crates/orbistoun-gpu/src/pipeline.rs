@@ -3057,7 +3057,11 @@ impl Pipeline {
             context.user_data,
         )
         .map_err(|e| {
-            let reason = format!("the shader at {address:#x} could not be translated: {e}");
+            let named = refused_instruction(&e)
+                .and_then(|offset| instruction_text(decoded, &self.encodings, offset))
+                .map(|text| format!(" ({text})"))
+                .unwrap_or_default();
+            let reason = format!("the shader at {address:#x} could not be translated: {e}{named}");
             if matches!(
                 e,
                 orbistoun_translate::TranslateError::ReadsGeometryInputs
@@ -3081,6 +3085,46 @@ impl Pipeline {
                 .collect(),
         })
     }
+}
+
+/// The offset of the instruction a translation refused, when the refusal names one.
+const fn refused_instruction(error: &orbistoun_translate::TranslateError) -> Option<u32> {
+    match error {
+        orbistoun_translate::TranslateError::Unsupported { offset, .. }
+        | orbistoun_translate::TranslateError::Unrecognised { offset } => Some(*offset),
+        _ => None,
+    }
+}
+
+/// The instruction at `offset` as a report quotes it: its name, operands and first word, so a
+/// refusal says what it refused without the shader's bytes in hand.
+fn instruction_text(
+    decoded: &orbistoun_shader::decode::Decode,
+    encodings: &EncodingTable,
+    offset: u32,
+) -> Option<String> {
+    let instruction = decoded.instructions.iter().find(|i| i.offset == offset)?;
+    let family = encodings
+        .encodings()
+        .get(usize::from(instruction.encoding?))?
+        .name
+        .as_str();
+    let name = encodings
+        .mnemonic_for(family, instruction.opcode)
+        .map_or_else(
+            || format!("{family} opcode {}", instruction.opcode),
+            str::to_owned,
+        );
+    let operands: Vec<String> = instruction
+        .operands
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    Some(format!(
+        "`{name} {}`, word {:#010x}",
+        operands.join(", "),
+        instruction.word
+    ))
 }
 
 /// A stage's user-data words as they stand at `at`, the stage by its index in
