@@ -249,6 +249,12 @@ pub enum Stopped {
     WaitNeverSatisfied {
         /// Byte offset of the packet in the stream.
         offset: u32,
+        /// The address it polls.
+        address: u64,
+        /// The value it waits for, under its mask.
+        reference: u64,
+        /// What the address held, under the mask.
+        observed: u64,
     },
     /// The stream could not be walked with confidence, or a packet was shorter than its layout.
     Malformed {
@@ -374,7 +380,16 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
                     opcode,
                     address,
                 },
-                Stop::Wait => Stopped::WaitNeverSatisfied { offset },
+                Stop::Wait {
+                    address,
+                    reference,
+                    observed,
+                } => Stopped::WaitNeverSatisfied {
+                    offset,
+                    address,
+                    reference,
+                    observed,
+                },
                 Stop::Malformed => Stopped::Malformed { offset },
             };
             return result;
@@ -421,7 +436,12 @@ enum Stop {
     NeedsGpu,
     /// The address a packet named that is not the guest's.
     OutOfBounds(u64),
-    Wait,
+    /// A wait that does not hold: the address it polls, the value it waits for and what it read.
+    Wait {
+        address: u64,
+        reference: u64,
+        observed: u64,
+    },
     Malformed,
 }
 
@@ -675,7 +695,11 @@ fn wait_reg_mem(
         _ => return Err(Stop::NeedsGpu),
     };
     if !holds {
-        return Err(Stop::Wait);
+        return Err(Stop::Wait {
+            address: polled,
+            reference: u64::from(reference),
+            observed: u64::from(value),
+        });
     }
     result.waits += 1;
     Ok(())
@@ -720,7 +744,11 @@ fn wait_reg_mem64(
         _ => return Err(Stop::NeedsGpu),
     };
     if !holds {
-        return Err(Stop::Wait);
+        return Err(Stop::Wait {
+            address: polled,
+            reference,
+            observed: value,
+        });
     }
     result.waits += 1;
     Ok(())
@@ -879,8 +907,17 @@ mod tests {
         let mut stream = release(label + 4, 1, 1);
         stream.extend(wait);
         let done = execute(&bytes(&stream), &mut memory);
+        // The stop says what it waited on, for a report to name the label nothing released.
         assert!(
-            matches!(done.stopped, Stopped::WaitNeverSatisfied { .. }),
+            matches!(
+                done.stopped,
+                Stopped::WaitNeverSatisfied {
+                    address: 0x1000,
+                    reference: 0,
+                    observed: 0x1_0000_0000,
+                    ..
+                }
+            ),
             "{done:?}"
         );
     }
