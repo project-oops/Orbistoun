@@ -4629,25 +4629,21 @@ pub const TEXTURE_BINDING: u32 = 2;
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
 
 /// Which binding a mesh module reads its per-draw user data from, how many words each draw has
-/// there, and how many draws one dispatch carries (D718). Mirrors `orbistoun_spirv`'s
-/// `DRAW_DATA_BINDING`, `DRAW_DATA_STRIDE_WORDS` and `DRAW_DATA_MOST_DRAWS`.
-pub const DRAW_DATA_BINDING: u32 = 5;
+/// there, and how many draws one dispatch carries (D718): `orbistoun_spirv`'s, which the modules
+/// read them by.
+pub const DRAW_DATA_BINDING: u32 = orbistoun_spirv::DRAW_DATA_BINDING;
 /// See [`DRAW_DATA_BINDING`].
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 68;
-/// Where a draw's vertex count is in its stride (D745). Mirrors `orbistoun_spirv`'s
-/// `DRAW_DATA_VERTICES_WORD`.
-pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
-/// Where a draw's first vertex id is in its stride (D761). Mirrors `orbistoun_spirv`'s
-/// `DRAW_DATA_FIRST_VERTEX_WORD`.
-pub const DRAW_DATA_FIRST_VERTEX_WORD: u32 = 33;
-/// Where a draw's geometry buffers' places begin in its stride (D747). Mirrors `orbistoun_spirv`'s
-/// `DRAW_DATA_BUFFERS_WORD`.
-pub const DRAW_DATA_BUFFERS_WORD: u32 = 36;
-/// Where a draw's geometry buffers' guest bases begin in its stride (D758). Mirrors
-/// `orbistoun_spirv`'s `DRAW_DATA_BASES_WORD`.
-pub const DRAW_DATA_BASES_WORD: u32 = 60;
+pub const DRAW_DATA_STRIDE_WORDS: u32 = orbistoun_spirv::DRAW_DATA_STRIDE_WORDS;
+/// Where a draw's vertex count is in its stride (D745).
+pub const DRAW_DATA_VERTICES_WORD: u32 = orbistoun_spirv::DRAW_DATA_VERTICES_WORD;
+/// Where a draw's first vertex id is in its stride (D761).
+pub const DRAW_DATA_FIRST_VERTEX_WORD: u32 = orbistoun_spirv::DRAW_DATA_FIRST_VERTEX_WORD;
+/// Where a draw's geometry buffers' places begin in its stride (D747).
+pub const DRAW_DATA_BUFFERS_WORD: u32 = orbistoun_spirv::DRAW_DATA_BUFFERS_WORD;
+/// Where a draw's geometry buffers' guest bases begin in its stride (D758).
+pub const DRAW_DATA_BASES_WORD: u32 = orbistoun_spirv::DRAW_DATA_BASES_WORD;
 /// See [`DRAW_DATA_BINDING`].
-pub const DRAW_DATA_MOST_DRAWS: u32 = 4096;
+pub const DRAW_DATA_MOST_DRAWS: u32 = orbistoun_spirv::DRAW_DATA_MOST_DRAWS;
 
 /// One draw's words in the draw-data buffer: its user data, then its vertex count (D745) and its
 /// geometry buffers' places (D747).

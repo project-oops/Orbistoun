@@ -494,7 +494,37 @@ impl FlatTwins {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct BufferFormats(pub [Option<u32>; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize]);
+pub struct BufferFormats {
+    /// Each slot's word, zero where none was resolved.
+    words: [u32; orbistoun_spirv::DRAW_BUFFERS_PER_STAGE as usize],
+    /// Which slots were resolved, a bit each: the words packed, so the draw state a module is
+    /// translated for stays small enough to pass by value.
+    resolved: u32,
+}
+
+impl BufferFormats {
+    /// Records `slot`'s word, or that the draw resolved none; a slot past a stage's buffers is
+    /// none of a draw's.
+    pub fn set(&mut self, slot: usize, word: Option<u32>) {
+        let Some(at) = self.words.get_mut(slot) else {
+            return;
+        };
+        *at = word.unwrap_or(0);
+        self.resolved = self.resolved & !(1 << slot) | u32::from(word.is_some()) << slot;
+    }
+
+    /// `slot`'s word, `None` where the draw resolved none.
+    #[must_use]
+    pub fn get(&self, slot: usize) -> Option<u32> {
+        let word = *self.words.get(slot)?;
+        (self.resolved >> slot & 1 == 1).then_some(word)
+    }
+
+    /// Every slot's word in order, `None` where the draw resolved none.
+    pub fn slots(&self) -> impl Iterator<Item = Option<u32>> + '_ {
+        (0..self.words.len()).map(|slot| self.get(slot))
+    }
+}
 
 /// Whether a program converts a buffer load or store by its descriptor's format (D738), and so is translated
 /// per draw with [`UserData::buffer_formats`].
@@ -1303,7 +1333,7 @@ fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
 fn lanes_per_invocation(
     stage: Stage,
     width: Width,
-    user_data: UserData,
+    user_data: &UserData,
 ) -> (Option<(u32, bool)>, u32) {
     let per_lane = user_data
         .per_invocation
@@ -1944,7 +1974,7 @@ impl<'a> Wavefront<'a> {
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
         let mesh_reserved = MeshReserved::new(&mut b, stage, primitive, parameters);
-        let (per_lane, modelled) = lanes_per_invocation(stage, width, user_data);
+        let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
         emit_header(&mut b, (stage, primitive, per_lane), main, (output, depth));
         declare_base_types(&mut b, &ids);
         let output =
@@ -1965,7 +1995,7 @@ impl<'a> Wavefront<'a> {
         let reads_buffers = !buffers.served.is_empty() || indexed;
         let user_data_source =
             declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, user_data);
-        let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, user_data);
+        let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, &user_data);
         let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
@@ -3907,11 +3937,7 @@ impl Model for Wavefront<'_> {
     }
 
     fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
-        self.buffer_formats?
-            .0
-            .get(usize::try_from(slot).ok()?)
-            .copied()
-            .flatten()
+        self.buffer_formats?.get(usize::try_from(slot).ok()?)
     }
 
     fn write_draw_buffer(

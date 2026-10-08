@@ -118,7 +118,7 @@ impl DispatchState {
         b: &mut Builder,
         ids: &super::Reserved,
         stage: super::Stage,
-        user_data: super::UserData,
+        user_data: &super::UserData,
     ) -> Option<Self> {
         (stage == super::Stage::Compute && user_data.compute.is_some())
             .then(|| Self::declare(b, ids.u32_type, (ids.counter_ptr, ids.counter_zero)))

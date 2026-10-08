@@ -200,7 +200,7 @@ fn format_pixel_shader(word3: u32) -> Vec<u32> {
     let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
     let decoded = decode_program(&bytes, &encodings, &operands);
     let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-    formats.0[0] = Some(word3);
+    formats.set(0, Some(word3));
     translate_with_user_data(
         &decoded,
         &encodings,

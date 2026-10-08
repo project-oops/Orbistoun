@@ -63,8 +63,8 @@ fn translated(source: u32, destination: u32) -> Result<Vec<u32>, String> {
     let bytes: Vec<u8> = COPY.iter().flat_map(|w| w.to_le_bytes()).collect();
     let decoded = decode(&bytes, &encodings, &operands);
     let mut formats = BufferFormats::default();
-    formats.0[0] = Some(source);
-    formats.0[1] = Some(destination);
+    formats.set(0, Some(source));
+    formats.set(1, Some(destination));
     translate_with_user_data(
         &decoded,
         &encodings,
@@ -168,9 +168,9 @@ fn the_titles_formatted_fill_runs_as_its_program_says() {
     let decoded = decode(&bytes, &encodings, &operands);
     let mut formats = BufferFormats::default();
     // Slots in the order the program first reaches each buffer: constants, source, destination.
-    formats.0[0] = Some(CONSTANTS_WORD3);
-    formats.0[1] = Some(TITLE_WORD3);
-    formats.0[2] = Some(TITLE_WORD3);
+    formats.set(0, Some(CONSTANTS_WORD3));
+    formats.set(1, Some(TITLE_WORD3));
+    formats.set(2, Some(TITLE_WORD3));
     let (module, _, _) = translate_with_user_data(
         &decoded,
         &encodings,

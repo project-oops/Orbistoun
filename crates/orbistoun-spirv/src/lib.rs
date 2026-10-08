@@ -1485,7 +1485,8 @@ pub const DRAW_DATA_BINDING: u32 = 5;
 /// draw's vertex count at [`DRAW_DATA_VERTICES_WORD`] (D745), where each of its geometry buffers
 /// lies at [`DRAW_DATA_BUFFERS_WORD`] (D747) and each one's guest base at
 /// [`DRAW_DATA_BASES_WORD`] (D758), padded to a multiple of four.
-pub const DRAW_DATA_STRIDE_WORDS: u32 = 68;
+pub const DRAW_DATA_STRIDE_WORDS: u32 =
+    (DRAW_DATA_BASES_WORD + DRAW_BUFFERS_PER_STAGE).next_multiple_of(4);
 
 /// Where in a draw's stride of the draw-data buffer its vertex count is: after the thirty-two
 /// user-data words (D745).
@@ -1521,8 +1522,9 @@ pub const PIXEL_BUFFERS_BINDING: u32 = 1;
 /// draw stages', and writable, since a dispatch's stores through them are written back (D746).
 pub const COMPUTE_BUFFERS_BINDING: u32 = 2;
 
-/// How many buffers one stage of a draw binds: the length of each binding's array.
-pub const DRAW_BUFFERS_PER_STAGE: u32 = 8;
+/// How many buffers one stage of a draw binds: the length of each binding's array. Sixteen: a
+/// retail vertex shader traces eleven, its descriptors, a table and the streams its fetch forms.
+pub const DRAW_BUFFERS_PER_STAGE: u32 = 16;
 
 /// A fragment shader that writes one texel of a storage image, and a colour.
 ///
@@ -2554,6 +2556,23 @@ mod tests {
         Builder, Id, MAGIC, ModuleError, VERSION_1_0, decoration, minimal_compute_module, op,
         storage,
     };
+
+    /// A stage binds the eleven buffers PPSA02664's vertex shaders trace (four descriptors in user
+    /// data, a table, and six vertex streams its fetch forms), and a draw's stride holds every slot's
+    /// place and base after its user data.
+    #[test]
+    fn a_draw_stage_binds_what_a_retail_vertex_shader_reads() {
+        use super::{
+            DRAW_BUFFERS_PER_STAGE, DRAW_DATA_BASES_WORD, DRAW_DATA_BUFFERS_WORD,
+            DRAW_DATA_STRIDE_WORDS,
+        };
+        const {
+            assert!(DRAW_BUFFERS_PER_STAGE >= 11);
+            assert!(DRAW_DATA_BASES_WORD == DRAW_DATA_BUFFERS_WORD + 3 * DRAW_BUFFERS_PER_STAGE);
+            assert!(DRAW_DATA_STRIDE_WORDS >= DRAW_DATA_BASES_WORD + DRAW_BUFFERS_PER_STAGE);
+            assert!(DRAW_DATA_STRIDE_WORDS % 4 == 0);
+        }
+    }
 
     /// Stripping removes exactly the float-controls declaration: the capability, the extension and
     /// the execution mode go, and every other word stays.

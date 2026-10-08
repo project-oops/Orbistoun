@@ -125,8 +125,7 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
     });
     let formats = for_draw.buffer_formats.map_or(0, |formats| {
         let words: Vec<u32> = formats
-            .0
-            .iter()
+            .slots()
             .flat_map(|word| [u32::from(word.is_some()), word.unwrap_or(0)])
             .collect();
         0x4655_4d54_0000_0000 ^ crate::content_hash(&words)
@@ -1063,8 +1062,11 @@ impl Pipeline {
             orbistoun_translate::wavefront::reads_buffer_formats(decoded, &self.encodings).then(
                 || {
                     let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-                    for (slot, source) in formats.0.iter_mut().zip(&traced.sources) {
-                        *slot = crate::draw_buffers::resolve_fourth_word(source, &words, memory);
+                    for (slot, source) in traced.sources.iter().enumerate() {
+                        formats.set(
+                            slot,
+                            crate::draw_buffers::resolve_fourth_word(source, &words, memory),
+                        );
                     }
                     formats
                 },
@@ -1109,7 +1111,10 @@ impl Pipeline {
         let key = content_hash(program)
             // The formats are compiled in, so a dispatch through other formats is another module.
             ^ formats.map_or(0, |formats| {
-                let words = formats.0.map(|word| word.map_or(u64::MAX, u64::from));
+                let words: Vec<u64> = formats
+                    .slots()
+                    .map(|word| word.map_or(u64::MAX, u64::from))
+                    .collect();
                 content_hash(zerocopy::IntoBytes::as_bytes(&words[..])).rotate_left(7)
             })
             ^ window_salt(placed)
@@ -2554,8 +2559,11 @@ impl Pipeline {
     ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
         let traced = self.format_words(address)?;
         let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-        for (slot, source) in formats.0.iter_mut().zip(traced.iter()) {
-            *slot = crate::draw_buffers::resolve_fourth_word(source, words, memory);
+        for (slot, source) in traced.iter().enumerate() {
+            formats.set(
+                slot,
+                crate::draw_buffers::resolve_fourth_word(source, words, memory),
+            );
         }
         Some(formats)
     }
@@ -5421,11 +5429,11 @@ mod tests {
         let address = 0x40_0000;
         pipeline.decoded.insert(address, program(20));
         let first = pipeline.draw_buffer_formats(address, &words, &Nothing);
-        assert_eq!(first.map(|f| f.0[0]), Some(Some(0x1111_1111)));
+        assert_eq!(first.map(|f| f.get(0)), Some(Some(0x1111_1111)));
         assert_eq!(
             pipeline
                 .draw_buffer_formats(address, &words, &Nothing)
-                .map(|f| f.0[0]),
+                .map(|f| f.get(0)),
             Some(Some(0x1111_1111)),
             "served again"
         );
@@ -5433,7 +5441,7 @@ mod tests {
         assert_eq!(
             pipeline
                 .draw_buffer_formats(address, &words, &Nothing)
-                .map(|f| f.0[0]),
+                .map(|f| f.get(0)),
             Some(Some(0x2222_2222)),
             "the rewritten program's descriptor"
         );
