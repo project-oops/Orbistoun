@@ -3128,8 +3128,13 @@ fn instruction_text(
         .iter()
         .map(ToString::to_string)
         .collect();
+    // A two-word instruction's second word too: its modifiers or wider operands.
+    let second = instruction
+        .second_word
+        .map(|word| format!(" {word:#010x}"))
+        .unwrap_or_default();
     Some(format!(
-        "`{name} {}`, word {:#010x}",
+        "`{name} {}`, word {:#010x}{second}",
         operands.join(", "),
         instruction.word
     ))

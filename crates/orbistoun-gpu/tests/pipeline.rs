@@ -872,6 +872,14 @@ fn a_shader_that_does_not_translate_is_reported_with_its_reason() {
         "the refused instruction is quoted: {:?}",
         submission.report.failures[0]
     );
+    // Both of a two-word instruction's words: the second holds its modifiers or operands.
+    assert!(
+        submission.report.failures[0]
+            .reason
+            .contains(&format!("word {:#010x} 0x00000000", export.value)),
+        "both words are quoted: {:?}",
+        submission.report.failures[0]
+    );
     assert!(submission.commands.is_empty());
 }
 
