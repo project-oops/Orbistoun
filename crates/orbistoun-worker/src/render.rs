@@ -788,6 +788,26 @@ fn write_failed_submission(submission: &Submission) {
     write_submission(submission, "failed");
 }
 
+/// A dumped submission's colour target: its base in hexadecimal and its size in pixels, in
+/// decimal. Printed whole as hexadecimal, a 1920 x 1080 target read as `780 x 438`.
+fn colour_target_line(
+    target: Option<&orbistoun_gpu::registers::ColourTarget>,
+    tiling: Option<orbistoun_gpu::registers::SwizzleMode>,
+    format: Option<orbistoun_gpu::registers::ColourTargetFormat>,
+    bases: usize,
+) -> String {
+    let target = target.map_or_else(
+        || "none".to_owned(),
+        |t| {
+            format!(
+                "{:#x}, {}x{}, pipe-bank xor {:#x}, {:?}, {:?}",
+                t.base, t.width, t.height, t.pipe_bank_xor, t.layout, t.place
+            )
+        },
+    );
+    format!("colour target {target}, tiling {tiling:?}, format {format:?}, {bases} base(s)")
+}
+
 /// Writes `submission` under `name`: `failed` for a drive the device refused, `last` for the
 /// run's last submission, which is where a wrong picture is read from.
 /// A stage's draw buffers in a listing: each slot's length and first words, not its bytes.
@@ -838,11 +858,13 @@ fn write_submission(submission: &Submission, name: &str) {
     );
     let _ = writeln!(
         text,
-        "colour target {:x?}, tiling {:?}, format {:?}, {} base(s)",
-        submission.colour_target,
-        submission.colour_target_tiling,
-        submission.colour_target_format,
-        submission.colour_target_bases
+        "{}",
+        colour_target_line(
+            submission.colour_target.as_ref(),
+            submission.colour_target_tiling,
+            submission.colour_target_format,
+            submission.colour_target_bases,
+        )
     );
     let listing = dir.join(format!("{name}-submission.txt"));
     let window: Vec<u8> = submission
@@ -1102,6 +1124,26 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{RenderOutcome, render};
+
+    /// A dumped submission names its colour target's size in pixels, as decimal: printed with the
+    /// rest of the target in hexadecimal, a 1920 x 1080 target read as `780 x 438`.
+    #[test]
+    fn a_colour_target_is_described_in_pixels() {
+        use orbistoun_gpu::registers::{ColourTarget, Place};
+        let target = ColourTarget {
+            base: 0x40_0000_0000,
+            width: 1920,
+            height: 1080,
+            pipe_bank_xor: 0,
+            layout: orbistoun_gpu::tiling::SurfaceLayout::default(),
+            place: Place::Whole,
+        };
+        let line = super::colour_target_line(Some(&target), None, None, 1);
+        assert!(line.contains("1920x1080"), "{line}");
+        assert!(line.contains("0x4000000000"), "{line}");
+        assert!(!line.contains("780"), "{line}");
+    }
+
     use orbistoun_gpu::pipeline::{GuestMemory, Pipeline, Queue};
     use orbistoun_gpu_vulkan::compute::{Availability, probe};
     use orbistoun_translate::{Fidelity, Strategy, Width};
