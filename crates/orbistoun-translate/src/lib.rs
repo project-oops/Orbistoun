@@ -574,8 +574,8 @@ fn fidelity_warnings(
     if staged && asked_for != Fidelity::Wavefront {
         vec![Warning::SlowestFidelity {
             because: concat!(
-                "the module is for a graphics stage, and the wavefront model is the only one ",
-                "with fragment inputs and a colour output"
+                "the module is a primitive shader, and the wavefront model is the only one ",
+                "with its vertex inputs and mesh outputs"
             ),
             subgroup_would_need: width.lanes(),
         }]
@@ -621,6 +621,9 @@ pub fn translate_with_user_data(
     };
     let asked_for = fidelity;
     let mut fidelity = resolve(fidelity, decode, encodings);
+    // What the shader itself needs, before a stage or a dispatch decides for it: only this says
+    // whether it reads or writes a lane mask.
+    let needed = fidelity;
     let staged = stage != wavefront::Stage::Compute;
     // A guest dispatch's entry state and exact memory exist only in the wavefront model.
     let dispatch = !staged && user_data.compute.is_some();
@@ -628,7 +631,10 @@ pub fn translate_with_user_data(
         fidelity = Fidelity::Wavefront;
     }
 
-    let warnings = fidelity_warnings((staged, dispatch), asked_for, fidelity, width);
+    // A fragment module simulates one lane, its pixel, so only a mesh module pays for the whole
+    // wavefront in one invocation.
+    let simulates_wavefront = staged && stage != wavefront::Stage::Fragment;
+    let warnings = fidelity_warnings((simulates_wavefront, dispatch), asked_for, needed, width);
 
     if decode.desynchronised {
         return Err(TranslateError::UntrustworthyDecode {
@@ -943,6 +949,27 @@ mod tests {
         let quiet = translate(&quiet, &table, Strategy::default()).expect("translates");
         assert_eq!(quiet.fidelity, Fidelity::Lane);
         assert!(quiet.warnings.is_empty(), "{:?}", quiet.warnings);
+    }
+
+    /// A fragment module simulates one lane, the pixel it is invoked for (`simulated_lanes`), so
+    /// it is not the sixty-four-lane cost the slowest-fidelity warning describes, and says nothing.
+    #[test]
+    fn a_fragment_module_is_not_warned_as_the_slowest_fidelity() {
+        let (table, operands) = tables();
+        let decoded = decode(&stream(TRIVIAL), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::default(),
+            (
+                super::wavefront::Stage::Fragment,
+                super::wavefront::MeshPrimitive::default(),
+            ),
+            Window::default(),
+            super::wavefront::UserData::default(),
+        )
+        .expect("translates");
+        assert!(translated.warnings.is_empty(), "{:?}", translated.warnings);
     }
 
     /// `Auto` is never reported as itself, and only the subgroup level sets a subgroup width.
