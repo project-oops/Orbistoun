@@ -5427,6 +5427,45 @@ fn an_exclusive_or_works_whole_and_on_a_selected_word() {
     );
 }
 
+/// A float instruction in its SDWA form over whole registers is its long form: PPSA02664's pixel
+/// shader doubles a product through SDWA's output multiplier (`v_mul_f32_sdwa v1, v2, v8 mul:2`,
+/// modifier word 0x06064602), and the source modifiers take absolute value and negate as the
+/// long form's do: |-1.5| * 2.0 * 2 is 6.0, and with the second source negated, -6.0.
+#[test]
+fn a_float_sdwa_over_whole_registers_is_its_long_form() {
+    // Output multiplier 15:14 (1 doubles), first source's absolute 21, second source's negate 28.
+    const DOUBLED: u32 = 1 << 14;
+    const FIRST_ABSOLUTE: u32 = 1 << 21;
+    const SECOND_NEGATED: u32 = 1 << 28;
+    if !device_or_skip("a_float_sdwa_over_whole_registers_is_its_long_form") {
+        return;
+    }
+    let whole = |src0| Sdwa {
+        src0,
+        src0_scalar: false,
+        src0_sel: SEL_DWORD,
+        src0_sext: false,
+        src1_sel: SEL_DWORD,
+        src1_sext: false,
+        dst_sel: SEL_DWORD,
+        dst_unused: 0,
+    };
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0xbfc0_0000));
+    program.extend(v_mov_literal(1, 0x4000_0000));
+    let [head_word, sdwa] = vop2_sdwa("v_mul_f32_e32", 2, 1, whole(0));
+    assert_eq!(sdwa | DOUBLED, 0x0606_4600, "PPSA02664's word, from v0");
+    program.extend([head_word, sdwa | DOUBLED | FIRST_ABSOLUTE]);
+    program.extend([
+        head_word & !(0xff << 17) | 3 << 17,
+        sdwa | DOUBLED | FIRST_ABSOLUTE | SECOND_NEGATED,
+    ]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 0x40c0_0000, "|-1.5| * 2.0 * 2");
+    assert_eq!(vector(&registers, 3), 0xc0c0_0000, "|-1.5| * -2.0 * 2");
+}
+
 /// radeonsi's index packing, as its blit primitive shader writes it: `v_lshlrev_b32_sdwa v2, 10,
 /// v0 src1_sel:WORD_1` then `v_or_b32_sdwa v0, v0, v2 src0_sel:WORD_0`, turning two 16-bit
 /// indices into ten-bit fields. Then a byte into a preserved destination, and a sign-extended

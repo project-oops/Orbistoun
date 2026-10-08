@@ -1324,21 +1324,26 @@ mod tests {
     }
 
     /// A modifier word is refused by name, before anything is translated, unless it is SDWA on an
-    /// instruction whose SDWA form is translated: a DPP16 `v_mov_b32` and an SDWA `v_mul_f32` are
-    /// refused, radeonsi's `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1` is not.
+    /// instruction whose SDWA form is translated: a DPP16 `v_mov_b32` is refused, radeonsi's
+    /// `v_lshlrev_b32_sdwa v2, 10, v0 src1_sel:WORD_1` is not. A float SDWA `v_mul_f32` is
+    /// translated over whole registers, and refused where it selects a byte of one.
     #[test]
     fn a_modifier_word_is_refused_by_name_unless_its_sdwa_form_is_translated() {
         let (table, operands) = tables();
-        for words in [[0x7e00_02fa, 0x0000_00ff], [0x1000_00f9, 0x0006_0600]] {
+        let outcome = |words: [u32; 2]| {
             let decoded = decode(&stream(&words), &table, &operands);
             assert!(decoded.is_trustworthy());
-            let refused = translate(&decoded, &table, Strategy::default())
-                .expect_err("refused")
-                .to_string();
-            assert!(refused.contains("SDWA or DPP"), "{refused}");
-        }
-        let decoded = decode(&stream(&[0x3404_00f9, 0x0586_068a]), &table, &operands);
-        assert!(translate(&decoded, &table, Strategy::default()).is_ok());
+            translate(&decoded, &table, Strategy::default()).map_err(|e| e.to_string())
+        };
+        let dpp = outcome([0x7e00_02fa, 0x0000_00ff]).expect_err("DPP refused");
+        assert!(dpp.contains("SDWA or DPP"), "{dpp}");
+        let byte = outcome([0x1000_00f9, 0x0006_0600]).expect_err("a byte of a float refused");
+        assert!(byte.contains("selects part of a register"), "{byte}");
+        assert!(
+            outcome([0x1000_00f9, 0x0606_0600]).is_ok(),
+            "a whole-register product"
+        );
+        assert!(outcome([0x3404_00f9, 0x0586_068a]).is_ok());
     }
 
     /// A pixel shader reading attribute 0's `x` interpolated and its `y` flat, as Mesa packs a value

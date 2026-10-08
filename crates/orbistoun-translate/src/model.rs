@@ -2134,8 +2134,11 @@ pub fn instruction<M: Model + ?Sized>(
     let name = name.as_str();
 
     // An SDWA form: the same operation over selected parts of its sources, placed into part of
-    // its destination. Admitted only for `SDWA_INTEGER`, before translation began.
+    // its destination. Admitted only for `SDWA_INTEGER` and `SDWA_FLOAT`, before translation began.
     if let Some(word) = sdwa_word(model.encodings(), instruction) {
+        if let Some(long) = sdwa_float_long_form(name) {
+            return sdwa_float(model, instruction, long, word);
+        }
         return sdwa_integer(model, instruction, name, word);
     }
 
@@ -3047,7 +3050,18 @@ fn long_form_arithmetic<M: Model + ?Sized>(
     };
     let register = u32::from(*register);
     let sources: Vec<Operand> = instruction.operands[1..].to_vec();
+    arithmetic_with_modifiers(model, instruction, name, (register, &sources), modifiers)
+}
 
+/// A long-form vector ALU operation `name` writing `register` from `sources`, under its source and
+/// output modifiers: the body every form whose modifiers are the long form's shares.
+fn arithmetic_with_modifiers<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    (register, sources): (u32, &[Operand]),
+    modifiers: Modifiers,
+) -> Result<(), TranslateError> {
     // The output multiplier: applied to a 32-bit float result, before the clamp, and refused by
     // name otherwise.
     let scale = output_scale(modifiers.output_multiplier);
@@ -3090,10 +3104,10 @@ fn long_form_arithmetic<M: Model + ?Sized>(
     };
 
     if name == CNDMASK {
-        return select_per_lane(model, instruction, register, &sources, modifiers);
+        return select_per_lane(model, instruction, register, sources, modifiers);
     }
     if name == "v_div_fmas_f32" {
-        return division_fmas(model, instruction, register, &sources, modifiers);
+        return division_fmas(model, instruction, register, sources, modifiers);
     }
 
     for lane in running_lanes(model) {
@@ -6030,8 +6044,26 @@ pub const SDWA_INTEGER: &[&str] = &[
     "v_and_b32_e32",
 ];
 
+/// The float short-form instructions translated in their SDWA form over whole registers, each with
+/// the long form it then is: SDWA's source negate and absolute value, clamp and output multiplier
+/// are the long form's (RDNA ISA, SDWA), so only the selects are SDWA's own.
+pub const SDWA_FLOAT: &[(&str, &str)] = &[
+    ("v_add_f32_e32", "v_add_f32_e64"),
+    ("v_sub_f32_e32", "v_sub_f32_e64"),
+    ("v_subrev_f32_e32", REVERSE_SUBTRACT),
+    ("v_mul_f32_e32", "v_mul_f32_e64"),
+];
+
+/// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
+fn sdwa_float_long_form(name: &str) -> Option<&'static str> {
+    SDWA_FLOAT
+        .iter()
+        .find(|(short, _)| *short == name)
+        .map(|(_, long)| *long)
+}
+
 /// Whether an instruction's modifier - `marker`, from its first source - is one translated: SDWA
-/// on an `SDWA_INTEGER` instruction.
+/// on an `SDWA_INTEGER` or `SDWA_FLOAT` instruction.
 #[must_use]
 pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &EncodingTable) -> bool {
     marker == SDWA_MARKER
@@ -6039,7 +6071,58 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
             .encoding
             .and_then(|index| encodings.encodings().get(usize::from(index)))
             .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
-            .is_some_and(|name| SDWA_INTEGER.contains(&name))
+            .is_some_and(|name| {
+                SDWA_INTEGER.contains(&name) || sdwa_float_long_form(name).is_some()
+            })
+}
+
+/// An `SDWA_FLOAT` instruction in its SDWA form: over whole registers, its long form `long` under
+/// the word's source negate and absolute value (20, 21; 28, 29), clamp (13) and output multiplier
+/// (15:14). A select of part of a register, a sign extension, or a destination part, which would
+/// read or write a float's bits as an integer field, is refused.
+fn sdwa_float<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    long: &str,
+    word: u32,
+) -> Result<(), TranslateError> {
+    let fields = SdwaFields::read(word);
+    let whole = fields
+        .select
+        .iter()
+        .all(|&(select, extend)| select == SDWA_DWORD && !extend)
+        && fields.dst_sel == SDWA_DWORD;
+    let (Some(Operand::Vector(register)), Some(Operand::Vector(vsrc1)), true) = (
+        instruction.operands.first(),
+        instruction.operands.get(2),
+        whole,
+    ) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a float SDWA instruction selects part of a register, or its destination or ",
+                "second source is not a register field"
+            ),
+        });
+    };
+    let sources = [
+        sdwa_operand(instruction, fields.src0, fields.src0_scalar)?,
+        sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?,
+    ];
+    let bit = |at: u32| word >> at & 1 != 0;
+    let modifiers = Modifiers {
+        negate: [bit(20), bit(28), false],
+        absolute: [bit(21), bit(29), false],
+        clamp: bit(13),
+        output_multiplier: word >> 14 & 0x3,
+    };
+    arithmetic_with_modifiers(
+        model,
+        instruction,
+        long,
+        (u32::from(*register), &sources),
+        modifiers,
+    )
 }
 
 /// An instruction's SDWA modifier word, when it carries one.
