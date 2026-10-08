@@ -4598,12 +4598,13 @@ mod tests {
         assert_ne!(p, 0);
         assert_eq!(
             stats(msp),
-            (0, [0x10028, 0x40_0000, 0x40_0000, 0x20_0000, 0x20_0000])
+            (0, [0x10028, 0x40_0000, 0x40_0000, 0x20_0010, 0x20_0010]),
+            "a block counts its dlmalloc header too (D771)"
         );
         call("sceLibcMspaceFree", [msp, p, 0, 0, 0, 0]);
         assert_eq!(
             stats(msp),
-            (0, [0x10028, 0x40_0000, 0x40_0000, 0x20_0000, 0]),
+            (0, [0x10028, 0x40_0000, 0x40_0000, 0x20_0010, 0]),
             "the peak stays"
         );
     }
