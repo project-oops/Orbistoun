@@ -119,6 +119,36 @@ fn a_formatted_copy_moves_whole_word_elements() {
     assert_eq!(done.buffers[1], source, "the destination holds the copy");
 }
 
+/// A load through a null descriptor - a fourth word of zero, as radv writes for a null vertex buffer
+/// and PPSA02664 binds for a stream it leaves unused - reads zero in every channel: its `DST_SEL_X..W`
+/// are all `SQ_SEL_0`, so no format is consulted, and the copy stores zeros.
+#[test]
+fn a_load_through_a_null_descriptor_reads_zero() {
+    match probe() {
+        Availability::Available { properties } => println!("device: {}", properties.device),
+        Availability::Unavailable { reason } => {
+            println!("SKIPPED - no device: {reason}");
+            return;
+        }
+    }
+    let module = translated(0, word3(UINT_32X4)).expect("a null source translates");
+    let source = vec![0x1234_5678_u32; (ELEMENTS * 4) as usize];
+    let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
+    let done = dispatch_guest_with_buffers(
+        &module,
+        &[0],
+        (&user_data(0, word3(UINT_32X4)), [1, 1, 1]),
+        &DispatchImages::default(),
+        &[source, destination],
+    )
+    .expect("dispatched");
+    assert_eq!(
+        done.buffers[1],
+        vec![0; (ELEMENTS * 4) as usize],
+        "zeros stored"
+    );
+}
+
 /// PPSA03416's and PPSA02664's first dispatch, word for word: the thread's index is the group's
 /// `s12` times 64 plus its lane (`v_lshl_add_u32`); a thread at or past the count in the constant
 /// buffer at words 8-11 drops out (`v_cmpx_gt_u32`); the rest load element `index & mask`, the

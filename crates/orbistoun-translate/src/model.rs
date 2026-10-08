@@ -5276,6 +5276,29 @@ fn typed_buffer_memory<M: Model + ?Sized>(
     }
 }
 
+/// A format load through a null descriptor - a fourth word of zero, as radv writes for a null
+/// buffer: every `DST_SEL` is `SQ_SEL_0`, so each channel written reads zero whatever the format.
+fn null_format_load<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    channels: u32,
+) -> Result<(), TranslateError> {
+    let Some(Operand::Vector(register)) = instruction.operands.first() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a format load's data is not vector registers",
+        });
+    };
+    let zero = model.constant(0);
+    for lane in running_lanes(model) {
+        for channel in 0..channels {
+            model.write_vector_lane(u32::from(*register) + channel, lane, zero);
+        }
+    }
+    model.count();
+    Ok(())
+}
+
 /// `SQ_BUF_RSRC_WORD3.FORMAT`, bits 18:12 (`gfx10-rsrc.json`): a `GFX10_FORMAT` code, numbered as
 /// the typed-buffer table's are - all 77 of the table's codes name the same format there.
 const DESCRIPTOR_FORMAT_SHIFT: u32 = 12;
@@ -5306,6 +5329,9 @@ fn format_buffer_load<M: Model + ?Sized>(
     let word3 = model
         .buffer_descriptor_format(slot)
         .ok_or(TranslateError::NeedsBufferFormats)?;
+    if word3 == 0 {
+        return null_format_load(model, instruction, channels);
+    }
     let (format, selects, total_bits) = descriptor_format(instruction, word3, channels)?;
     let one = if matches!(format.kind, ComponentKind::Uint | ComponentKind::Sint) {
         1
