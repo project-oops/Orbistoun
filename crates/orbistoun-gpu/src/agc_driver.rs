@@ -18,6 +18,8 @@ guest_module! {
     "libSceAgcDriver" {
         "sceAgcDriverAddEqEvent" => 6,
         "sceAgcDriverCreateQueue" => 3,
+        // (queue): refused as measured.
+        "sceAgcDriverDestroyQueue" => 1,
         "sceAgcDriverGetDefaultOwner" => 6,
         "sceAgcDriverGetResourceRegistrationMaxNameLength" => 6,
         "sceAgcDriverInitResourceRegistration" => 6,
@@ -57,6 +59,17 @@ fn create_queue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     }
     0
+}
+
+/// What `sceAgcDriverDestroyQueue` answered for a queue `sceAgcDriverCreateQueue` had just made, of
+/// each of the types 0 to 4 (`166-agc/driver-create-queue`, `driver-queue-types`,
+/// `20261009-151440-eboot.obs.log`).
+const DESTROY_QUEUE_REFUSED: u64 = 0x8a6d_0003;
+
+/// `sceAgcDriverDestroyQueue(queue)`: refused with `0x8a6d0003`, as the console refused every queue
+/// it was handed; the queue stays usable.
+fn destroy_queue(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    DESTROY_QUEUE_REFUSED
 }
 
 /// The opaque queue object orbistoun hands a guest, one per process, its address written into
@@ -2726,6 +2739,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             resource_registration_query,
         ),
         ("sceAgcDriverCreateQueue", create_queue),
+        ("sceAgcDriverDestroyQueue", destroy_queue),
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),
         ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
@@ -3247,6 +3261,24 @@ mod tests {
             |s| s.colour_target_tiling = Some(SwizzleMode::Linear)
         ));
         assert!(refused(|s| s.colour_target_format = None));
+    }
+
+    /// DestroyQueue refuses with `0x8a6d0003` on a queue CreateQueue just made, of every type, as
+    /// the console did (`166-agc/driver-create-queue` and `driver-queue-types`,
+    /// `20261009-151440-eboot.obs.log`).
+    #[test]
+    fn destroy_queue_refuses_as_measured() {
+        let mut queue_out: u64 = 0;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[1] = std::ptr::addr_of_mut!(queue_out) as usize as u64;
+        assert_eq!(create_queue(&args), 0);
+        let (_, destroy) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == "sceAgcDriverDestroyQueue")
+            .expect("implemented");
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = queue_out;
+        assert_eq!(destroy(&args), 0x8a6d_0003);
     }
 
     /// CreateQueue returns the measured success code and hands back the same non-null queue handle

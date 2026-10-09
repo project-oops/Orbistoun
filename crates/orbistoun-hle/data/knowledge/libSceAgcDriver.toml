@@ -155,3 +155,16 @@ known_by = "assumed"
 assumptions = ["A query of the subsystem measured unsupported answers its refusal too; REQ-cn01 asks."]
 found_in = ["PPSA28061-app0", "PPSA04263-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceAgcDriverDestroyQueue"
+arity = 1
+purpose = "Destroys a submission queue: (queue)."
+edge_cases = [
+    "MEASURED (166-agc/driver-create-queue, driver-queue-types, driver-add-eq-event): 0x8a6d0003 for a queue sceAgcDriverCreateQueue had just made, of each type 0 to 4, in every sweep from 20261008-111104 to 20261009-151440.",
+    "orbistoun answers 0x8a6d0003 and the queue stays usable. STKT00001's GL context calls it twice at shutdown.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 5266 and 10029-10051, 166-agc/driver-create-queue and driver-queue-types."
+found_in = ["STKT00001"]
+found_on = "2026-10-09"
