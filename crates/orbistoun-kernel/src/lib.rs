@@ -278,6 +278,7 @@ guest_module! {
         "sceKernelUsleep" => 1,
         // Arity 2, read off the guest's calls: a clock identifier and a writable stack address.
         "sceKernelClockGettime" => 2,
+        "sceKernelGettimeofday" => 2,
 
     }
 }
@@ -3277,6 +3278,30 @@ fn kernel_clock_gettime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: an address the guest passed for this call, valid by its contract.
     if !unsafe { guest::write_u64(args[1].saturating_add(8), nanos) } {
         return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
+    OK
+}
+
+/// `sceKernelGettimeofday(tv, tz)`: the vendor-named form of `gettimeofday(2)`.
+///
+/// The wall clock `orbistoun_hle::clocks` answers for every other caller, written as FreeBSD's
+/// `struct timeval` (`sys/sys/_timeval.h`): seconds, then microseconds, eight bytes each. As
+/// `sys_gettimeofday` copies out only when given somewhere to, a null `tv` is success with nothing
+/// written; `tz` is obsolete and ignored, as the libc form ignores it. A `tv` that cannot be
+/// written is `EFAULT`, the copy-out's errno, in the vendor family (D525).
+fn kernel_gettimeofday(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return OK;
+    }
+    let (seconds, nanos) = orbistoun_hle::clocks::wall_clock();
+    let fault = u64::from(GuestError::vendor(orbistoun_core::errno::FAULT).as_raw());
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(args[0], seconds) } {
+        return fault;
+    }
+    // SAFETY: the structure's second field, eight bytes on.
+    if !unsafe { guest::write_u64(args[0].saturating_add(8), nanos / 1_000) } {
+        return fault;
     }
     OK
 }
@@ -6636,6 +6661,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("posix_usleep", usleep),
     ("sceKernelUsleep", usleep),
     ("sceKernelClockGettime", kernel_clock_gettime),
+    ("sceKernelGettimeofday", kernel_gettimeofday),
     ("posix_sigemptyset", sigemptyset),
     ("posix_sigfillset", sigfillset),
     ("posix_sigaddset", sigaddset),

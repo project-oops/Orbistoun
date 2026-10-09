@@ -797,9 +797,17 @@ found_on = "2026-08-25"
 
 [[function]]
 name = "sceKernelGettimeofday"
+arity = 2
+purpose = "The vendor-named form of gettimeofday(2): (tv, tz) fills struct timeval with the wall clock."
+edge_cases = [
+    "struct timeval is two eight-byte fields, seconds then microseconds (FreeBSD sys/sys/_timeval.h).",
+    "A null tv is success with nothing written: FreeBSD's sys_gettimeofday copies out only when tv is given. tz is obsolete and ignored.",
+    "A failure answers the vendor family (0x8002_0000 | errno, D525): EFAULT for a tv that cannot be written. The hardware code is unmeasured.",
+]
+known_by = "published"
+cites = "FreeBSD sys/kern/kern_time.c sys_gettimeofday; sys/sys/_timeval.h."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 3 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceKernelInstallExceptionHandler"

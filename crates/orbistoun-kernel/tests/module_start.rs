@@ -234,3 +234,22 @@ fn the_vendor_clock_writes_both_fields_and_refuses_what_it_cannot_answer() {
         "it is in the vendor family a caller tests against: {refused:#x}"
     );
 }
+
+/// `sceKernelGettimeofday(tv, tz)` is FreeBSD's `gettimeofday(2)` under the vendor name: it fills
+/// both eight-byte fields of `struct timeval`, the microseconds below a million, and a null `tv`
+/// is success with nothing written, as `sys_gettimeofday` copies out only when one is given.
+#[test]
+fn the_vendor_gettimeofday_writes_seconds_and_microseconds() {
+    let call = implementation("sceKernelGettimeofday");
+    let mut when = [0xA5A5_A5A5_A5A5_A5A5_u64; 2];
+    let mut regs = [0_u64; GUEST_ARG_REGISTERS];
+    regs[0] = when.as_mut_ptr() as usize as u64;
+    assert_eq!(call(&regs), 0);
+    assert!(when[0] > 1_600_000_000, "seconds: {:#x}", when[0]);
+    assert!(when[1] < 1_000_000, "microseconds: {:#x}", when[1]);
+    assert_eq!(
+        call(&[0; GUEST_ARG_REGISTERS]),
+        0,
+        "a null tv writes nothing"
+    );
+}
