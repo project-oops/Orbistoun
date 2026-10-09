@@ -5,7 +5,8 @@ name = "sceImeUpdate"
 purpose = "Delivers pending on-screen keyboard events to a handler: sceImeUpdate(handler)."
 returns = "status"
 edge_cases = [
-    "Measured (obSCEne census, sweep 20261007-202010, check 200-census/libSceIme/sceImeUpdate): 0x80bc0002 with every argument a poisoned buffer and with every argument zero, and nothing written - the answer with no keyboard open. orbistoun opens no keyboard and answers it.",
+    "Measured (obSCEne census, sweep 20261007-202010, check 200-census/libSceIme/sceImeUpdate): 0x80bc0002 with every argument a poisoned buffer and with every argument zero, and nothing written - the answer with no keyboard open.",
+    "MEASURED (REQ-ik01, 101-input-ext/ime-keyboard-lifecycle, reports/hardware/20261009-151440-eboot.obs.log): after sceImeKeyboardOpen for the signed-in user it answers 0 with no key pressed, the handler not called. orbistoun answers 0 while a keyboard is open and 0x80bc0002 otherwise.",
     "Five commercial titles import it; a title polls it every frame.",
 ]
 found_by = "generated"
@@ -13,3 +14,29 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261007-202010-eboot.obs.log lines 12845-12855, check 200-census/libSceIme/sceImeUpdate."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceImeKeyboardOpen"
+arity = 2
+purpose = "Opens the hardware keyboard for a user: sceImeKeyboardOpen(user, param)."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ik01, 101-input-ext/ime-keyboard-lifecycle): user 0xffffffff answers 0x80bc0010 (invalid user) every time; the signed-in user opens with 0 with no keyboard attached, and a second open answers 0x80bc0001; the param block is not written.",
+    "PPSA02664 and PPSA03416 call it about four times a frame as (0xffffffff, param), so they get the refusal every time, as on the console. orbistoun takes any user but 0xffffffff as valid.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-ik01, reports/hardware/20261009-151440-eboot.obs.log, 101-input-ext/ime-keyboard-lifecycle."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceImeKeyboardClose"
+arity = 1
+purpose = "Closes a user's hardware keyboard: sceImeKeyboardClose(user)."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ik01): 0 for the user whose keyboard was opened, 0x80bc0002 (not opened) for 0xffffffff, which never opened one.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-ik01, reports/hardware/20261009-151440-eboot.obs.log, 101-input-ext/ime-keyboard-lifecycle."
+found_on = "2026-10-09"

@@ -201,6 +201,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
         ("scePadInit", pad_init),
         ("sceImeUpdate", ime::update),
+        ("sceImeKeyboardOpen", ime::keyboard_open),
+        ("sceImeKeyboardClose", ime::keyboard_close),
         ("n3kSX62fgNo", pad_census_nid),
         // Both spellings, as for `scePadOpen`.
         ("scePadReadState", pad_read_state),
@@ -229,15 +231,46 @@ fn pad_census_nid(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 #[cfg(test)]
 mod tests {
 
-    /// `sceImeUpdate` answers the console's no-keyboard-open code, whatever it is passed.
+    /// The keyboard as REQ-ik01 measured it (`20261009-151440-eboot.obs.log`,
+    /// `101-input-ext/ime-keyboard-lifecycle`): user `0xffffffff` is refused with `0x80bc0010`;
+    /// a user opens once (0), a second open answers `0x80bc0001`, close answers 0 and then
+    /// `0x80bc0002`; `sceImeUpdate` answers 0 while a keyboard is open and `0x80bc0002` otherwise,
+    /// whatever it is passed.
     #[test]
-    fn the_ime_update_answers_no_keyboard_open() {
-        let (_, f) = super::implementations()
-            .iter()
-            .find(|(name, _)| *name == "sceImeUpdate")
-            .expect("implemented");
-        assert_eq!(f(&[0; GUEST_ARG_REGISTERS]), 0x80bc_0002);
-        assert_eq!(f(&[0xa1; GUEST_ARG_REGISTERS]), 0x80bc_0002);
+    fn the_keyboard_opens_once_per_user_and_update_follows_it() {
+        let call = |name: &str, args: [u64; GUEST_ARG_REGISTERS]| {
+            let (_, f) = super::implementations()
+                .iter()
+                .find(|(n, _)| *n == name)
+                .expect("implemented");
+            f(&args)
+        };
+        let user = 0x1ea2_f4d9;
+        assert_eq!(call("sceImeUpdate", [0; GUEST_ARG_REGISTERS]), 0x80bc_0002);
+        assert_eq!(
+            call("sceImeUpdate", [0xa1; GUEST_ARG_REGISTERS]),
+            0x80bc_0002
+        );
+        assert_eq!(
+            call("sceImeKeyboardOpen", [0xffff_ffff, 0, 0, 0, 0, 0]),
+            0x80bc_0010
+        );
+        assert_eq!(
+            call("sceImeKeyboardClose", [0xffff_ffff, 0, 0, 0, 0, 0]),
+            0x80bc_0002
+        );
+        assert_eq!(call("sceImeKeyboardOpen", [user, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(call("sceImeUpdate", [0; GUEST_ARG_REGISTERS]), 0);
+        assert_eq!(
+            call("sceImeKeyboardOpen", [user, 0, 0, 0, 0, 0]),
+            0x80bc_0001
+        );
+        assert_eq!(call("sceImeKeyboardClose", [user, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            call("sceImeKeyboardClose", [user, 0, 0, 0, 0, 0]),
+            0x80bc_0002
+        );
+        assert_eq!(call("sceImeUpdate", [0; GUEST_ARG_REGISTERS]), 0x80bc_0002);
     }
 
     /// The NID-only call answers `0` whatever it is passed, as measured.
