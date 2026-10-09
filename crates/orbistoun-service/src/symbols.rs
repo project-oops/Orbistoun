@@ -515,10 +515,6 @@ mod knowledge_tests {
     // A module that serves nothing goes here with its reason.
     const SERVES_NOTHING: &[(&str, &str)] = &[
         (
-            "libSceAjm",
-            "declared as 14 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
             "libSceAudio3d",
             "declared as 7 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),

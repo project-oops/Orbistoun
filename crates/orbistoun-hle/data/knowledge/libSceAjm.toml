@@ -1,0 +1,15 @@
+library = "libSceAjm"
+
+[[function]]
+name = "sceAjmInitialize"
+arity = 2
+purpose = "Creates an audio codec job manager context: (0, &ctx), writing its 32-bit identifier."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 1, a slot filled 0xff): rc 0x0 and the first four bytes became 0x15; a second call answered 0x0 and wrote 0x16. More than one context is allowed and the identifiers count up; the four bytes after the identifier are left as they were.",
+    "MEASURED (200-census/libSceAjm/sceAjmInitialize): pattern arguments (a non-zero first argument) and zero arguments (a null slot) both answered 0x80930005.",
+    "orbistoun numbers contexts from 0x15 as measured. FMOD, inside PPSA02664, PPSA03416 and PPSA25872, calls it before opening an output device and fails with error 33 when it is refused.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10 and REQ-aj01, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls; reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAjm/sceAjmInitialize."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-09"

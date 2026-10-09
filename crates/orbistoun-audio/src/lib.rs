@@ -216,7 +216,7 @@ fn audio_out_set_volume(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The audio implementations this crate provides.
 ///
-/// The `ajm`, `audio3d`, `audio_in` and `audio_out2` modules contribute none.
+/// The `ajm` module contributes `sceAjmInitialize`; `audio3d`, `audio_in` and `audio_out2` none.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
@@ -226,12 +226,29 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAudioOutOutput", audio_out_output),
         ("sceAudioOutGetPortState", audio_out_get_port_state),
         ("sceAudioOutSetVolume", audio_out_set_volume),
+        ("sceAjmInitialize", ajm::ajm_initialize),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// `sceAjmInitialize(0, &ctx)` answers 0 and writes a 32-bit context identifier, `0x15` and then
+    /// the next, over a slot filled `0xff` whose other bytes it leaves; a non-zero first argument or
+    /// a null slot answers `0x80930005` (REQ-cn10 arm 1, `20261009-151440-eboot.obs.log`; the
+    /// census's pattern and zero arguments).
+    #[test]
+    fn an_ajm_context_is_numbered_as_measured() {
+        let mut ctx = [0xff_u8; 8];
+        let at = ctx.as_mut_ptr() as u64;
+        assert_eq!(call("sceAjmInitialize", [0, at, 0, 0, 0, 0]), 0);
+        assert_eq!(ctx, [0x15, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(call("sceAjmInitialize", [0, at, 0, 0, 0, 0]), 0);
+        assert_eq!(ctx[..4], [0x16, 0, 0, 0]);
+        assert_eq!(call("sceAjmInitialize", [1, at, 0, 0, 0, 0]), 0x8093_0005);
+        assert_eq!(call("sceAjmInitialize", [0, 0, 0, 0, 0, 0]), 0x8093_0005);
+    }
 
     /// An implementation by name, so a test cannot reach one a guest cannot.
     fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
