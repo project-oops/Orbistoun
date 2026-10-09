@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        58,
+        83,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -850,4 +850,47 @@ fn draw_index_offset_writes_an_offset_draw_in_its_measured_twenty_bytes() {
         .flat_map(|word| word.to_le_bytes())
         .collect();
     assert_eq!(w.bytes(), &expected[..]);
+}
+
+/// Each fixed-length builder's `GetSize` answers, in bytes, what obSCEne measured with its
+/// arguments zero, and `sceAgcCbNopGetSize(n)` answers `4 * n`
+/// (`reports/hardware/20261009-151440-eboot.obs.log`, the `166-agc/*` checks). PPSA04263 sizes a
+/// NOP fill from two of these, and a placeholder answer made that fill 0x3dffc002 dwords.
+#[test]
+fn the_getsize_queries_answer_the_measured_sizes() {
+    for (name, bytes) in [
+        ("sceAgcAcbAcquireMemGetSize", 0x20),
+        ("sceAgcDcbAcquireMemGetSize", 0x20),
+        ("sceAgcAcbDmaDataGetSize", 0x1c),
+        ("sceAgcDcbDmaDataGetSize", 0x1c),
+        ("sceAgcAcbDispatchIndirectGetSize", 0x10),
+        ("sceAgcDcbDispatchIndirectGetSize", 0xc),
+        ("sceAgcAcbEventWriteGetSize", 0x8),
+        ("sceAgcAcbJumpGetSize", 0x10),
+        ("sceAgcDcbJumpGetSize", 0x10),
+        ("sceAgcCbBranchGetSize", 0x38),
+        ("sceAgcCbQueueEndOfPipeActionGetSize", 0x20),
+        ("sceAgcDcbCondExecGetSize", 0x14),
+        ("sceAgcDcbDrawIndexIndirectGetSize", 0x14),
+        ("sceAgcDcbDrawIndexIndirectMultiGetSize", 0x40),
+        ("sceAgcDcbDrawIndexOffsetGetSize", 0x14),
+        ("sceAgcDcbDrawIndirectGetSize", 0x14),
+        ("sceAgcDcbGetLodStatsGetSize", 0x14),
+        ("sceAgcDcbRewindGetSize", 0x8),
+        ("sceAgcDcbSetCxRegistersIndirectGetSize", 0x14),
+        ("sceAgcDcbSetShRegistersIndirectGetSize", 0x14),
+        ("sceAgcDcbSetUcRegistersIndirectGetSize", 0x14),
+        ("sceAgcDcbSetUcRegisterDirectGetSize", 0xc),
+        ("sceAgcDcbStallCommandBufferParserGetSize", 0x8),
+        ("sceAgcDcbSetIndexCountGetSize", 0x8),
+    ] {
+        assert_eq!(call(name, [0; GUEST_ARG_REGISTERS]), bytes, "{name}");
+    }
+    for n in [0_u64, 1, 2, 4, 8] {
+        assert_eq!(
+            call("sceAgcCbNopGetSize", [n, 0, 0, 0, 0, 0]),
+            4 * n,
+            "a NOP of {n} dwords"
+        );
+    }
 }

@@ -18,6 +18,32 @@ guest_module! {
         // (record, vs, ps, ptr, registers, 4), as PPSA02664, PPSA03416 and PPSA28061 call them.
         "0x71040c4df8235e1d" => 6,
         "0x8a6f69da59a5b375" => 6,
+        // Packet-size queries, answered as measured (`measured_size!`).
+        "sceAgcAcbAcquireMemGetSize" => 6,
+        "sceAgcDcbAcquireMemGetSize" => 6,
+        "sceAgcAcbDmaDataGetSize" => 6,
+        "sceAgcDcbDmaDataGetSize" => 6,
+        "sceAgcAcbDispatchIndirectGetSize" => 6,
+        "sceAgcDcbDispatchIndirectGetSize" => 6,
+        "sceAgcAcbEventWriteGetSize" => 6,
+        "sceAgcAcbJumpGetSize" => 6,
+        "sceAgcDcbJumpGetSize" => 6,
+        "sceAgcCbBranchGetSize" => 6,
+        "sceAgcCbQueueEndOfPipeActionGetSize" => 6,
+        "sceAgcDcbCondExecGetSize" => 6,
+        "sceAgcDcbDrawIndexIndirectGetSize" => 6,
+        "sceAgcDcbDrawIndexIndirectMultiGetSize" => 6,
+        "sceAgcDcbDrawIndexOffsetGetSize" => 6,
+        "sceAgcDcbDrawIndirectGetSize" => 6,
+        "sceAgcDcbGetLodStatsGetSize" => 6,
+        "sceAgcDcbRewindGetSize" => 6,
+        "sceAgcDcbSetCxRegistersIndirectGetSize" => 6,
+        "sceAgcDcbSetShRegistersIndirectGetSize" => 6,
+        "sceAgcDcbSetUcRegistersIndirectGetSize" => 6,
+        "sceAgcDcbSetUcRegisterDirectGetSize" => 6,
+        "sceAgcDcbStallCommandBufferParserGetSize" => 6,
+        "sceAgcDcbSetIndexCountGetSize" => 6,
+        "sceAgcCbNopGetSize" => 6,
         "sceAgcAcbAcquireMem" => 6,
         "sceAgcAcbDispatchIndirect" => 6,
         "sceAgcAcbDmaData" => 6,
@@ -1196,11 +1222,120 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     IMPLEMENTATIONS
 }
 
+/// A packet-size query answering a constant: the bytes its builder's `GetSize` answered with its
+/// arguments zero, in the `166-agc` check named beside it
+/// (`reports/hardware/20261009-151440-eboot.obs.log`). Each builder emits a packet of fixed length,
+/// and the builder advanced the writer by exactly that answer where it was measured.
+macro_rules! measured_size {
+    ($($name:ident = $bytes:literal, $check:literal;)*) => {
+        $(
+            #[doc = concat!("Answers `", stringify!($bytes), "` bytes (`166-agc/", $check, "`).")]
+            fn $name(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+                $bytes
+            }
+        )*
+    };
+}
+
+measured_size! {
+    acb_acquire_mem_get_size = 0x20, "acb-acquire-mem-getsize";
+    dcb_acquire_mem_get_size = 0x20, "dcb-acquire-mem-getsize";
+    acb_dma_data_get_size = 0x1c, "acb-dma-data-getsize";
+    dcb_dma_data_get_size = 0x1c, "dcb-dma-data-getsize";
+    acb_dispatch_indirect_get_size = 0x10, "acb-dispatch-indirect";
+    dcb_dispatch_indirect_get_size = 0xc, "dcb-dispatch-indirect";
+    acb_event_write_get_size = 0x8, "acb-event-write";
+    acb_jump_get_size = 0x10, "acb-jump-getsize";
+    dcb_jump_get_size = 0x10, "dcb-jump-getsize";
+    cb_branch_get_size = 0x38, "cb-branch-getsize";
+    cb_queue_end_of_pipe_action_get_size = 0x20, "cb-queue-eop-action-getsize";
+    dcb_cond_exec_get_size = 0x14, "dcb-cond-exec";
+    dcb_draw_index_indirect_get_size = 0x14, "dcb-draw-index-indirect-getsize";
+    dcb_draw_index_indirect_multi_get_size = 0x40, "dcb-draw-index-indirect-multi-getsize";
+    dcb_draw_index_offset_get_size = 0x14, "dcb-draw-index-offset";
+    dcb_draw_indirect_get_size = 0x14, "dcb-draw-indirect";
+    dcb_get_lod_stats_get_size = 0x14, "dcb-get-lod-stats-getsize";
+    dcb_rewind_get_size = 0x8, "dcb-rewind-getsize";
+    dcb_set_cx_registers_indirect_get_size = 0x14, "dcb-set-cx-registers-indirect";
+    dcb_set_sh_registers_indirect_get_size = 0x14, "dcb-set-sh-registers-indirect";
+    dcb_set_uc_registers_indirect_get_size = 0x14, "dcb-set-uc-registers-indirect";
+    dcb_set_uc_register_direct_get_size = 0xc, "dcb-set-uc-register-direct-getsize";
+    dcb_stall_command_buffer_parser_get_size = 0x8, "dcb-stall-cb-parser-getsize";
+    dcb_set_index_count_get_size = 0x8, "dcb-set-index-count-getsize";
+}
+
+/// `sceAgcCbNopGetSize(n)`: four bytes for each of the `n` dwords the NOP holds - 0, 4, 8, 16 and
+/// 32 for `n` 0, 1, 2, 4 and 8 (`166-agc/cb-nop-getsize`).
+fn cb_nop_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    args[0].wrapping_mul(4)
+}
+
 /// The list [`implementations`] answers.
 const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("0x7d86501b8094ef57", agc_packet_payload),
     ("0x71040c4df8235e1d", interpolants_71040c4d),
     ("0x8a6f69da59a5b375", interpolants_8a6f69da),
+    ("sceAgcAcbAcquireMemGetSize", acb_acquire_mem_get_size),
+    ("sceAgcDcbAcquireMemGetSize", dcb_acquire_mem_get_size),
+    ("sceAgcAcbDmaDataGetSize", acb_dma_data_get_size),
+    ("sceAgcDcbDmaDataGetSize", dcb_dma_data_get_size),
+    (
+        "sceAgcAcbDispatchIndirectGetSize",
+        acb_dispatch_indirect_get_size,
+    ),
+    (
+        "sceAgcDcbDispatchIndirectGetSize",
+        dcb_dispatch_indirect_get_size,
+    ),
+    ("sceAgcAcbEventWriteGetSize", acb_event_write_get_size),
+    ("sceAgcAcbJumpGetSize", acb_jump_get_size),
+    ("sceAgcDcbJumpGetSize", dcb_jump_get_size),
+    ("sceAgcCbBranchGetSize", cb_branch_get_size),
+    (
+        "sceAgcCbQueueEndOfPipeActionGetSize",
+        cb_queue_end_of_pipe_action_get_size,
+    ),
+    ("sceAgcDcbCondExecGetSize", dcb_cond_exec_get_size),
+    (
+        "sceAgcDcbDrawIndexIndirectGetSize",
+        dcb_draw_index_indirect_get_size,
+    ),
+    (
+        "sceAgcDcbDrawIndexIndirectMultiGetSize",
+        dcb_draw_index_indirect_multi_get_size,
+    ),
+    (
+        "sceAgcDcbDrawIndexOffsetGetSize",
+        dcb_draw_index_offset_get_size,
+    ),
+    ("sceAgcDcbDrawIndirectGetSize", dcb_draw_indirect_get_size),
+    ("sceAgcDcbGetLodStatsGetSize", dcb_get_lod_stats_get_size),
+    ("sceAgcDcbRewindGetSize", dcb_rewind_get_size),
+    (
+        "sceAgcDcbSetCxRegistersIndirectGetSize",
+        dcb_set_cx_registers_indirect_get_size,
+    ),
+    (
+        "sceAgcDcbSetShRegistersIndirectGetSize",
+        dcb_set_sh_registers_indirect_get_size,
+    ),
+    (
+        "sceAgcDcbSetUcRegistersIndirectGetSize",
+        dcb_set_uc_registers_indirect_get_size,
+    ),
+    (
+        "sceAgcDcbSetUcRegisterDirectGetSize",
+        dcb_set_uc_register_direct_get_size,
+    ),
+    (
+        "sceAgcDcbStallCommandBufferParserGetSize",
+        dcb_stall_command_buffer_parser_get_size,
+    ),
+    (
+        "sceAgcDcbSetIndexCountGetSize",
+        dcb_set_index_count_get_size,
+    ),
+    ("sceAgcCbNopGetSize", cb_nop_get_size),
     ("sceAgcCreateShader", create_shader),
     ("sceAgcSuspendPoint", suspend_point),
     ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),

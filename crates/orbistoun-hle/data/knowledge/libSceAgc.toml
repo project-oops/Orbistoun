@@ -804,3 +804,304 @@ known_by = "measured"
 cites = "obSCEne REQ-cn04, reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAgc/0x8a6f69da59a5b375; probe arm obscene src/probe/sections/census.c check_census_39."
 found_in = ["PPSA28061"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcAcbAcquireMemGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/acb-acquire-mem-getsize): with its arguments zero it answered 0x20 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x20 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/acb-acquire-mem-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbAcquireMemGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-acquire-mem-getsize): with its arguments zero it answered 0x20 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x20 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-acquire-mem-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcAcbDmaDataGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/acb-dma-data-getsize): with its arguments zero it answered 0x1c bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x1c whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/acb-dma-data-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbDmaDataGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-dma-data-getsize): with its arguments zero it answered 0x1c bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x1c whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-dma-data-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcAcbDispatchIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/acb-dispatch-indirect): with its arguments zero it answered 0x10 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x10 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/acb-dispatch-indirect."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbDispatchIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-dispatch-indirect): with its arguments zero it answered 0xc bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0xc whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-dispatch-indirect."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcAcbEventWriteGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/acb-event-write): with its arguments zero it answered 0x8 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x8 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/acb-event-write."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcAcbJumpGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/acb-jump-getsize): with its arguments zero it answered 0x10 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x10 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/acb-jump-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbJumpGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-jump-getsize): with its arguments zero it answered 0x10 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x10 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-jump-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcCbBranchGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/cb-branch-getsize): with its arguments zero it answered 0x38 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x38 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/cb-branch-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcCbQueueEndOfPipeActionGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/cb-queue-eop-action-getsize): with its arguments zero it answered 0x20 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x20 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/cb-queue-eop-action-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbCondExecGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-cond-exec): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-cond-exec."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbDrawIndexIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-draw-index-indirect-getsize): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbDrawIndexIndirectMultiGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-draw-index-indirect-multi-getsize): with its arguments zero it answered 0x40 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x40 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-draw-index-indirect-multi-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbDrawIndexOffsetGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-draw-index-offset): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-draw-index-offset."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbDrawIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-draw-indirect): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-draw-indirect."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbGetLodStatsGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-get-lod-stats-getsize): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-get-lod-stats-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbRewindGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-rewind-getsize): with its arguments zero it answered 0x8 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x8 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-rewind-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbSetCxRegistersIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-set-cx-registers-indirect): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-set-cx-registers-indirect."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbSetShRegistersIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-set-sh-registers-indirect): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-set-sh-registers-indirect."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbSetUcRegistersIndirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-set-uc-registers-indirect): with its arguments zero it answered 0x14 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x14 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-set-uc-registers-indirect."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbSetUcRegisterDirectGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-set-uc-register-direct-getsize): with its arguments zero it answered 0xc bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0xc whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-set-uc-register-direct-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbStallCommandBufferParserGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-stall-cb-parser-getsize): with its arguments zero it answered 0x8 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x8 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-stall-cb-parser-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcDcbSetIndexCountGetSize"
+purpose = "The bytes the matching builder reserves in a command buffer."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/dcb-set-index-count-getsize): with its arguments zero it answered 0x8 bytes, its high half zero; where the builder was called too it advanced the writer by exactly that.",
+    "orbistoun answers 0x8 whatever it is passed: the builder emits a packet of fixed length.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/dcb-set-index-count-getsize."
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAgcCbNopGetSize"
+purpose = "The bytes a NOP of n dwords reserves: (n)."
+returns = "count"
+edge_cases = [
+    "MEASURED (166-agc/cb-nop-getsize): n 0, 1, 2, 4 and 8 answered 0, 4, 8, 16 and 32 bytes; sceAgcCbNop of 1 then advanced the writer 4 bytes.",
+    "orbistoun answers 4 * n. PPSA04263 sizes a NOP fill from the two AcquireMem size queries; answered with placeholders, its fill came to 0x3dffc002 dwords.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/cb-nop-getsize."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-09"
