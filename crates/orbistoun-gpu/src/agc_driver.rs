@@ -471,6 +471,66 @@ impl GuestCp<'_> {
         if segment.whole {
             return self.draw_into_target(whole);
         }
+        // A segment that draws into more than one colour target is drawn a run at a time, each run
+        // into its own target.
+        for (first, end) in self.target_runs(segment, whole)? {
+            self.draw_run(
+                &cp::DrawSegment {
+                    stream: segment.stream,
+                    first,
+                    end,
+                    whole: false,
+                },
+                whole,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The spans of a segment's runs of draws into one colour target ([`colour_target_runs`]),
+    /// from the registers in force as the stream was submitted.
+    fn target_runs(
+        &self,
+        segment: &cp::DrawSegment<'_>,
+        whole: &Submission,
+    ) -> Result<Vec<(u32, u32)>, String> {
+        let walked = crate::packet::walk(segment.stream);
+        let writes = {
+            let live = live_pipeline()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pipeline = live.as_ref().ok_or("no pipeline is live")?;
+            pipeline
+                .writes_in_force(
+                    &walked,
+                    segment.stream,
+                    Some(&whole.tables.over(&self.memory)),
+                )
+                .0
+        };
+        let draws: Vec<(u32, u32)> = walked
+            .packets
+            .iter()
+            .filter(|packet| {
+                matches!(packet.kind, crate::packet::PacketKind::Command { opcode } if cp::is_draw(opcode))
+                    && (segment.first..segment.end).contains(&packet.offset)
+            })
+            .map(|packet| (packet.offset, packet.offset + packet.length))
+            .collect();
+        let runs = crate::registers::colour_target_runs(&writes, &draws);
+        Ok(if runs.is_empty() {
+            vec![(segment.first, segment.end)]
+        } else {
+            runs
+        })
+    }
+
+    /// Prepares one run of a segment's draws from [`segment_stream`] and draws it into its target.
+    fn draw_run(
+        &mut self,
+        segment: &cp::DrawSegment<'_>,
+        whole: &Submission,
+    ) -> Result<(), String> {
         let bytes = segment_stream(segment);
         let mut prepared = {
             let mut live = live_pipeline()

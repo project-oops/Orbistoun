@@ -2286,6 +2286,38 @@ pub fn colour_target_format_at(writes: &[RegisterWrite]) -> Option<ColourTargetF
     Some(decode_colour_target_format(value))
 }
 
+/// Consecutive draws grouped by the colour target zero base each draws into: each run's span, from
+/// its first draw packet to the end of its last. `draws` are the draw packets' spans. A segment that
+/// draws into more than one target is drawn a run at a time, each into its own target.
+#[must_use]
+pub fn colour_target_runs(writes: &[RegisterWrite], draws: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut bases_written: Vec<(u32, u32)> = writes
+        .iter()
+        .filter(|write| write.register == CB_COLOR0_BASE)
+        .map(|write| (write.packet_offset, write.value))
+        .collect();
+    bases_written.sort_by_key(|&(offset, _)| offset);
+    let mut draws = draws.to_vec();
+    draws.sort_unstable();
+    let mut runs: Vec<(Option<u32>, u32, u32)> = Vec::new();
+    let (mut next, mut in_force) = (0, None);
+    for (start, end) in draws {
+        while let Some(&(offset, value)) = bases_written.get(next)
+            && offset < start
+        {
+            in_force = Some(value);
+            next += 1;
+        }
+        match runs.last_mut() {
+            Some((base, _, run_end)) if *base == in_force => *run_end = end,
+            _ => runs.push((in_force, start, end)),
+        }
+    }
+    runs.into_iter()
+        .map(|(_, start, end)| (start, end))
+        .collect()
+}
+
 /// How many distinct colour target zero base addresses a stream's draws drew into, counting the
 /// base left in force after them - the one a frame is written back to. `draws` are the draw
 /// packets' byte offsets. A submission whose draws are carried out together and written back as one
@@ -4233,6 +4265,32 @@ mod tests {
             "no draw: the one left"
         );
         assert_eq!(colour_target_bases_in(&[], &[16]), 0);
+    }
+
+    /// A segment's draws split into runs of consecutive draws that draw into one colour target:
+    /// PPSA02664's segment draws a pass into one target and then another into a second, each a run
+    /// drawn as a segment of its own. A draw's span runs from its packet to the packet's end.
+    #[test]
+    fn draws_split_into_runs_by_the_colour_target_they_draw_into() {
+        use super::{CB_COLOR0_BASE, RegisterWrite, colour_target_runs};
+        let base = |packet_offset, value| RegisterWrite {
+            packet_offset,
+            register: CB_COLOR0_BASE,
+            value,
+        };
+        let writes = [base(0, 0x100), base(40, 0x200), base(80, 0x200)];
+        let draws = [(16, 28), (28, 40), (48, 60), (88, 100)];
+        assert_eq!(
+            colour_target_runs(&writes, &draws),
+            [(16, 40), (48, 100)],
+            "two draws into 0x100, then two into 0x200"
+        );
+        assert_eq!(
+            colour_target_runs(&[base(0, 0x100)], &draws),
+            [(16, 100)],
+            "one target, one run"
+        );
+        assert!(colour_target_runs(&writes, &[]).is_empty());
     }
 
     #[test]
