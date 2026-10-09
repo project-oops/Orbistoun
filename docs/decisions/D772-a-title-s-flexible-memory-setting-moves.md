@@ -2,7 +2,7 @@
 
 **Status:** decided
 **Date:** 2026-10-08
-**known_by:** assumed
+**known_by:** measured (REQ-20261008T1845Z-fm03, `reports/hardware/20261009-104652-eboot.obs.log`: a package stating `flexibleMemorySize` 343932928 reported configured flexible `0x14800000`, available `0x13c00000` and direct size `0x307800000`, the three figures this decision predicts; its direct pool held 0x30 allocations of 256 MiB)
 
 When a title's `sce_sys/param.json` states `kernel.flexibleMemorySize`, that is its configured
 flexible memory: what `sceKernelConfiguredFlexibleMemorySize` reports. The available figure is
