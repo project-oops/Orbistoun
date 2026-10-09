@@ -992,3 +992,26 @@ fn is_stack_reports_the_span_that_was_noted_and_answers_zero() {
     // Null out-parameters are how a caller says it wants neither, and must not fault.
     assert_eq!(call("sceKernelIsStack", &[base, 0, 0]), 0);
 }
+
+/// `scePthreadAttrGetaffinity(attr, mask)` reads back the whole 64-bit mask its setter stored,
+/// as FreeBSD's `pthread_attr_getaffinity_np` copies the attribute's set out, and refuses a null
+/// out-parameter.
+#[test]
+fn an_attribute_affinity_reads_back_the_whole_mask() {
+    let attr = Slot::one();
+    call("scePthreadAttrInit", &[attr.at()]);
+    assert_eq!(
+        call("scePthreadAttrSetaffinity", &[attr.at(), 0x1_0000_0040]),
+        OK
+    );
+    let out = Slot::one();
+    assert_eq!(
+        call("scePthreadAttrGetaffinity", &[attr.at(), out.at()]),
+        OK
+    );
+    assert_eq!(out.read(0), 0x1_0000_0040);
+    assert_eq!(
+        call("scePthreadAttrGetaffinity", &[attr.at(), 0]),
+        INVALID_ARGUMENT
+    );
+}

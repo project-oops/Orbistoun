@@ -2545,3 +2545,16 @@ known_by = "assumed"
 assumptions = ["The checked release behaves as the release with its range check; REQ-cn01 asks."]
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "scePthreadAttrGetaffinity"
+arity = 2
+purpose = "Reads a thread attribute's CPU affinity mask: (attr, mask), writing the 64-bit mask scePthreadAttrSetaffinity stored."
+edge_cases = [
+    "FreeBSD pthread_attr_getaffinity_np under the vendor name: the attribute's set copied out. The mask is eight bytes, as scePthreadGetaffinity writes it, not the int of the other attribute getters.",
+    "A null out-parameter or an attribute object never initialised is refused with the placeholder the other attribute getters answer; the hardware's code is unmeasured.",
+]
+known_by = "published"
+cites = "FreeBSD lib/libthr/thread/thr_attr.c _pthread_attr_getaffinity_np."
+found_in = ["PPSA02664-app0", "PPSA21564-app0", "PPSA28061-app0"]
+found_on = "2026-10-09"

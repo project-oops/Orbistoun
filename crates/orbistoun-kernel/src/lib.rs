@@ -228,7 +228,7 @@ guest_module! {
         "scePthreadSetaffinity" => 2,
         "scePthreadGetaffinity" => 2,
         "scePthreadAttrSetschedpolicy" => 2, "scePthreadAttrSetinheritsched" => 2,
-        "scePthreadAttrSetaffinity" => 2, "scePthreadAttrSetguardsize" => 2,
+        "scePthreadAttrSetaffinity" => 2, "scePthreadAttrGetaffinity" => 2, "scePthreadAttrSetguardsize" => 2,
         // The platform's asynchronous file path. A title resolves paths to ids and sizes, builds a
         // command buffer of reads, submits it and waits, so it opens files and reads nothing through
         // the descriptors. Declared so the calls are visible in a trace; each answers the placeholder
@@ -5406,6 +5406,26 @@ fn pthread_attr_setaffinity(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     attr_set(args, ATTR_AFFINITY)
 }
 
+/// `scePthreadAttrGetaffinity(attr, mask)`: the mask [`pthread_attr_setaffinity`] stored, whole.
+///
+/// FreeBSD's `pthread_attr_getaffinity_np` under the vendor name: the attribute's set copied out.
+/// Eight bytes, the 64-bit mask `scePthreadGetaffinity` also writes, not the `int` the other
+/// attribute getters write (D272). A null out-parameter is refused, as those getters refuse it.
+fn pthread_attr_getaffinity(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(object) = attr_at(args[0]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    // SAFETY: the attribute object this kernel allocated, whose field this is.
+    let Some(mask) = (unsafe { guest::read_u64(object + ATTR_AFFINITY) }) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u64(args[1], mask) } {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// `scePthreadSetaffinity(thread, mask)`: the running-thread form.
 ///
 /// Accepted and not applied (D523). There is nowhere to store it, so a later
@@ -6625,6 +6645,7 @@ const TABLE: &[(&str, GuestFn)] = &[
         pthread_attr_setinheritsched,
     ),
     ("scePthreadAttrSetaffinity", pthread_attr_setaffinity),
+    ("scePthreadAttrGetaffinity", pthread_attr_getaffinity),
     ("scePthreadAttrSetguardsize", pthread_attr_setguardsize),
     // Reported rather than answered; see each handler.
     (
