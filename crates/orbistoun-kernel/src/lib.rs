@@ -4075,7 +4075,9 @@ fn allocate_direct_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // itself: an allocation after an earlier one starts where that one ended.
     let Some(address) = guard.allocate_aligned_from(search_start, len, alignment, memory_type)
     else {
-        return u64::from(GuestError::NoMemory.as_raw());
+        // An exhausted pool answers `EAGAIN` in the vendor family, as obSCEne's
+        // `020-memory/direct-pool-exhaustion` measured once the pool was full.
+        return u64::from(GuestError::vendor(orbistoun_core::errno::AGAIN).as_raw());
     };
     // Refused after the fact: the pool decides where a request fits, and a range it cannot satisfy
     // is a real out-of-memory for that range.
@@ -7582,6 +7584,19 @@ mod tests {
         args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
         assert_eq!(super::allocate_main_direct_memory(&args), 0);
         assert_ne!(physical, u64::MAX, "an address was written");
+    }
+
+    /// A request the pool cannot hold answers `0x80020023`, `EAGAIN` in the vendor family, as
+    /// `020-memory/direct-pool-exhaustion` measured once 0x30 chunks of 256 MiB had filled the
+    /// retail pool (`20261009-104652-eboot.obs.log`): sixteen gibibytes fits no pool here.
+    #[test]
+    fn an_allocation_the_pool_cannot_hold_answers_eagain() {
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[2] = 0x4_0000_0000;
+        args[3] = 0x1_0000;
+        args[5] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_direct_memory(&args), 0x8002_0023);
     }
 
     #[test]

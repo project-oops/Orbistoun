@@ -246,6 +246,7 @@ edge_cases = [
     "Measured on hardware: obSCEne `018-relational/direct-memory-round-trip` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x10000 in `data/hardware/ps5-full.txt`; reported pass, value 0x7fc000 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
     "Measured on hardware: obSCEne `018-relational/allocations-do-not-overlap` reported pass, value 0x4000. The check names the condition; see `data/hardware/ps5-full.txt` and `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
     "Measured on hardware: obSCEne `020-memory/allocate` did not report the same thing twice, so the value is not a constant of the platform: reported pass, value 0x10000 in `data/hardware/ps5-full.txt`; reported pass, value 0x7fc000 in `data/hardware/ps5-imports.txt`. The check names the condition; both are in the sibling conformance-probe repository.",
+    "MEASURED (020-memory/direct-pool-exhaustion, reports/hardware/20261009-104652-eboot.obs.log): in a homebrew package whose param.json declares kernel.flexibleMemorySize, 0x30 allocations of 0x10000000 bytes succeeded (0x300000000 in all, the retail pool) and the next answered 0x80020023, EAGAIN in the vendor family. orbistoun answers an exhausted pool so.",
 ]
 found_by = "generated"
 known_by = "guest-observed"
