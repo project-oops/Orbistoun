@@ -2116,6 +2116,9 @@ pub fn viewport_transform_from(
 /// `CB_COLOR0_INFO`, a context register: `gfx103.json` maps it at byte `167024`, dword `0xA31C`.
 pub(crate) const CB_COLOR0_INFO: u32 = 0xA31C;
 
+/// `ColorFormat` `COLOR_INVALID` (`gfx103.json`, enum `ColorFormat`): no colour buffer, what
+/// radeonsi writes into an empty slot's `CB_COLOR*_INFO` (`si_state.c:2720-2724`).
+pub const COLOR_INVALID: u32 = 0;
 /// `ColorFormat` `COLOR_8_8_8_8` (`gfx103.json`, enum `ColorFormat`).
 pub const COLOR_8_8_8_8: u32 = 10;
 /// `ColorFormat`'s one-byte `COLOR_8` (`gfx103.json`).
@@ -2180,6 +2183,13 @@ impl ColourTargetFormat {
         self.format == COLOR_8
             && self.number_type == NUMBER_UNORM
             && matches!(self.swap, ComponentSwap::Standard)
+    }
+
+    /// Whether no colour buffer is bound (`COLOR_INVALID`): the colour block writes nothing, so a
+    /// draw through it writes only depth and stencil (D779).
+    #[must_use]
+    pub const fn is_unbound(&self) -> bool {
+        self.format == COLOR_INVALID
     }
 
     /// Whether its bytes hold sRGB-encoded colour (`NUMBER_SRGB`): a draw blends in linear and
@@ -3023,6 +3033,11 @@ mod tests {
         assert_eq!(measured.encoding(), crate::TargetEncoding::Unorm8);
         assert!(!measured.is_srgb());
         assert!(!decode_colour_target_format(0x0001_8000 | (12 << 2)).is_rgba8_class());
+        // `COLOR_INVALID`: no colour buffer bound, as radeonsi writes for an empty slot and
+        // PPSA02664's depth passes leave colour target zero (D779).
+        let unbound = decode_colour_target_format(0x0001_8000);
+        assert!(unbound.is_unbound());
+        assert!(!measured.is_unbound() && !float.is_unbound());
     }
 
     #[test]

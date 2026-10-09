@@ -555,6 +555,9 @@ impl GuestCp<'_> {
         let (Some(execute), Some(read)) = (draw_executor().get(), frame_reader().get()) else {
             return Err("no device is installed to draw with".to_owned());
         };
+        if draws_depth_only(submission) {
+            return self.draw_depth_only(submission, *execute);
+        }
         let (target, swap) = writable_target(submission).ok_or_else(|| {
             format!(
                 concat!(
@@ -621,6 +624,46 @@ impl GuestCp<'_> {
         set_pending(Some((target, swap)));
         Ok(())
     }
+}
+
+impl GuestCp<'_> {
+    /// Draws a submission whose colour target zero is unbound (D779): its draws write only the
+    /// depth the drawer keeps (the guest's depth tiling is unmeasured, so depth is never written
+    /// back), and the colour the drawer produces is no target's. A frame pending for any target
+    /// is written back first, and the drawer's colour is then forgotten, so the next colour draw
+    /// starts from what guest memory holds.
+    fn draw_depth_only(
+        &mut self,
+        submission: &Submission,
+        execute: DrawExecutor,
+    ) -> Result<(), String> {
+        if let Some(why) = unmodelled_draws(submission) {
+            return Err(why);
+        }
+        if pending_target().is_some() && !write_back_pending(self) {
+            return Err("the frame pending for its target could not be written back".to_owned());
+        }
+        forget_written();
+        set_pending(None);
+        let drawn = execute(submission, Before::Uniform(0));
+        forget_written();
+        if drawn {
+            Ok(())
+        } else {
+            Err(format!(
+                "the device did not draw it{}",
+                shader_failures(submission)
+            ))
+        }
+    }
+}
+
+/// Whether a submission's colour target zero is unbound - `COLOR_INVALID` - so its draws write
+/// depth alone (D779).
+fn draws_depth_only(submission: &Submission) -> bool {
+    submission
+        .colour_target_format
+        .is_some_and(|format| format.is_unbound())
 }
 
 /// Runs a guest compute dispatch's module over its window, images and buffers: the module, the
@@ -2642,6 +2685,23 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
     use std::sync::{Mutex, PoisonError};
+
+    /// A submission whose colour target zero is `COLOR_INVALID` draws depth alone and is not a
+    /// target a frame is written back to; an `8_8_8_8` one draws colour (D779). PPSA02664's depth
+    /// passes leave `CB_COLOR0_INFO` at `0x0001_8000`.
+    #[test]
+    fn an_unbound_colour_target_draws_depth_alone() {
+        let with = |info| crate::pipeline::Submission {
+            colour_target_format: Some(crate::registers::decode_colour_target_format(info)),
+            ..crate::pipeline::Submission::default()
+        };
+        assert!(super::draws_depth_only(&with(0x0001_8000)));
+        assert!(!super::draws_depth_only(&with(0x0001_80a8)));
+        assert!(!super::draws_depth_only(
+            &crate::pipeline::Submission::default()
+        ));
+        assert!(super::writable_target(&with(0x0001_8000)).is_none());
+    }
 
     /// A dispatch's buffer left holding one word throughout is a fill of it, whatever it held
     /// before; one with two words in it is not (D750).
