@@ -209,15 +209,15 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     });
 }
 
-/// Whether the flipped buffer is exactly the frame's target, in the one scanout layout this
-/// shows, so the device copy is the frame with no memory to read (D719).
+/// Whether the flipped buffer is exactly the frame's target, so the device copy is the frame with
+/// no memory to read (D719). Its video-out format does not decide it: the device copy holds the
+/// colours the title drew, which is what a working title shows (D784).
 fn shows_directly(
     address: u64,
     shape: orbistoun_video::BufferShape,
     shown: orbistoun_gpu::agc_driver::ShownFrame,
 ) -> bool {
-    shape.format == SCANOUT_BGRA8
-        && shape.tiling == 0
+    shape.tiling == 0
         && address == shown.target.base
         && (shape.width, shape.height) == (shown.target.width, shown.target.height)
 }
@@ -265,11 +265,9 @@ fn present_shown(job: &PresentJob) {
     let Some(frame) = take_snapshot(shown.snapshot) else {
         return;
     };
-    let linear: Vec<u32> = frame
-        .iter()
-        .map(|&word| scanout_rgba(orbistoun_gpu::agc_driver::memory_order(word, shown.swap)))
-        .collect();
-    let bytes = zerocopy::IntoBytes::as_bytes(linear.as_slice());
+    // The device copy is linear `Rgba8`, the colours the title drew: shown as-is (D784), which for
+    // the SDK's alternate-order targets is exactly what their B, G, R, A scanout shows.
+    let bytes = zerocopy::IntoBytes::as_bytes(frame.as_slice());
     emit_presented(
         (shown.target.width, shown.target.height),
         bytes,
@@ -1137,6 +1135,49 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{RenderOutcome, render};
+
+    /// A flipped buffer that is exactly its frame's colour target is shown from the device copy
+    /// whatever its video-out format: PPSA28061 flips 3840x2160 in `0x8000000022000000`, not the
+    /// SDK's format, and its frames are what it drew (D784).
+    #[test]
+    fn a_flipped_target_is_shown_whatever_its_video_out_format() {
+        let target = orbistoun_gpu::registers::ColourTarget {
+            base: 0x7400_1001_0000,
+            width: 3840,
+            height: 2160,
+            pipe_bank_xor: 0,
+            layout: orbistoun_gpu::tiling::SurfaceLayout::Rx64Kb,
+            place: orbistoun_gpu::registers::Place::Whole,
+        };
+        let shown = orbistoun_gpu::agc_driver::ShownFrame {
+            snapshot: 0,
+            target,
+            swap: orbistoun_gpu::registers::ComponentSwap::Standard,
+        };
+        let shape = orbistoun_video::BufferShape {
+            tiling: 0,
+            width: 3840,
+            height: 2160,
+            format: 0x8000_0000_2200_0000,
+        };
+        assert!(super::shows_directly(0x7400_1001_0000, shape, shown));
+        assert!(
+            !super::shows_directly(0x7400_2001_0000, shape, shown),
+            "another buffer"
+        );
+    }
+
+    /// For the SDK's targets, written in the alternate order and scanned out as B, G, R, A, the
+    /// device copy already is the shown pixel, so showing it as-is changes nothing for them.
+    #[test]
+    fn the_sdk_s_scanout_shows_the_device_copy_unchanged() {
+        let word = 0x8040_2010;
+        let alternate = orbistoun_gpu::registers::ComponentSwap::Alternate;
+        assert_eq!(
+            super::scanout_rgba(orbistoun_gpu::agc_driver::memory_order(word, alternate)),
+            word
+        );
+    }
 
     /// A dumped scissor reads in pixels too: `SetViewport` printed in hexadecimal made a 1920 x 1080
     /// one read as `780 x 438`.
