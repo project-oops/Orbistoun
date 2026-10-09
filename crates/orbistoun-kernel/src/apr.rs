@@ -87,6 +87,53 @@ pub fn on_file_size(sizer: Sizer) {
     let _ = SIZER.set(sizer);
 }
 
+/// Writes a guest file's `struct stat` at a guest address, installed from above like
+/// [`on_file_read`]; `false` for a path that names nothing or an address that cannot be written.
+type StatWriter = fn(&str, u64) -> bool;
+
+/// The installed stat writer, if anything installed one.
+static STAT_WRITER: OnceLock<StatWriter> = OnceLock::new();
+
+/// Installs what a stat by identifier writes with.
+pub fn on_file_stat(writer: StatWriter) {
+    let _ = STAT_WRITER.set(writer);
+}
+
+/// The path behind every identifier a resolve has given out, an index's or a synthesised one.
+fn identified() -> &'static Mutex<std::collections::BTreeMap<u64, String>> {
+    static IDENTIFIED: OnceLock<Mutex<std::collections::BTreeMap<u64, String>>> = OnceLock::new();
+    IDENTIFIED.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Records that a resolve gave `path` the identifier `id`.
+pub(crate) fn remember(id: u64, path: &str) {
+    if let Ok(mut held) = identified().lock() {
+        held.insert(id, path.to_owned());
+    }
+}
+
+/// The path a resolve gave `id`, or nothing for an identifier no resolve gave.
+pub(crate) fn path_of(id: u64) -> Option<String> {
+    identified().lock().ok()?.get(&id).cloned()
+}
+
+/// Writes the `struct stat` of the file a resolve gave `id` at `at`, as `sceKernelStat` writes it.
+pub(crate) fn stat_by_id(id: u64, at: u64) -> Option<bool> {
+    let path = path_of(id)?;
+    STAT_WRITER.get().map(|write| write(&path, at))
+}
+
+/// `sceKernelAprGetFileStat(id, stat)`: the `struct stat` of the file a resolve gave `id`, written
+/// as `sceKernelStat` writes it, answering 0 (D782, assumed: on firmware 12.40 no probe can hold a
+/// real identifier). An identifier no resolve gave, or a stat that cannot be written, is refused
+/// with the project's placeholder, since the hardware's code for it is unmeasured.
+pub(crate) fn get_file_stat(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    match stat_by_id(args[0], args[1]) {
+        Some(true) => 0,
+        _ => u64::from(orbistoun_core::GuestError::InvalidArgument.as_raw()),
+    }
+}
+
 /// The first identifier synthesised for a file outside the title's index (D782): a range of its
 /// own, so a synthesised identifier never meets one an index assigns.
 pub(crate) const SYNTHESISED_FIRST: u64 = 0x4000_0000;
@@ -139,5 +186,41 @@ mod tests {
         );
         assert_eq!(super::synthesise("/app0/Media/missing.json"), None);
         assert_eq!(super::synthesise("/data/ScriptingAssemblies.json"), None);
+    }
+
+    /// The path a stat by identifier names: whatever a resolve gave that identifier, an index's or
+    /// a synthesised one, and nothing for an identifier no resolve gave (D782).
+    #[test]
+    fn an_identifier_names_the_path_it_was_resolved_from() {
+        super::remember(130, "/app0/Media/level0");
+        assert_eq!(super::path_of(130).as_deref(), Some("/app0/Media/level0"));
+        assert_eq!(super::path_of(0x7777_7777), None);
+    }
+
+    /// Writes one marker word where a stat was asked for, for the test below.
+    fn marker_stat(path: &str, at: u64) -> bool {
+        if path != "/app0/Media/sharedassets0.assets" {
+            return false;
+        }
+        // SAFETY: the test's own buffer, eight bytes at least.
+        unsafe { orbistoun_mem::guest::write_u64(at, 0x5354_4154) }
+    }
+
+    /// `sceKernelAprGetFileStat(id, stat)` writes the stat of the file a resolve gave `id` and
+    /// answers 0; an identifier no resolve gave is refused and nothing is written (D782).
+    #[test]
+    fn a_stat_by_identifier_writes_the_resolved_file_s_stat() {
+        super::on_file_stat(marker_stat);
+        super::remember(0x4000_0100, "/app0/Media/sharedassets0.assets");
+        let mut stat = [0_u64; 16];
+        let mut args = [0_u64; orbistoun_core::GUEST_ARG_REGISTERS];
+        args[0] = 0x4000_0100;
+        args[1] = stat.as_mut_ptr() as u64;
+        assert_eq!(super::get_file_stat(&args), 0);
+        assert_eq!(stat[0], 0x5354_4154);
+        stat[0] = 0;
+        args[0] = 0x4000_0fff;
+        assert_ne!(super::get_file_stat(&args), 0);
+        assert_eq!(stat[0], 0, "nothing written");
     }
 }

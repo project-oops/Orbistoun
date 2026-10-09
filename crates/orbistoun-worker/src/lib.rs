@@ -1605,6 +1605,7 @@ fn install_reporting(
     orbistoun_kernel::apr::on_file_read(read_guest_file);
     orbistoun_kernel::apr::on_index_lookup(look_up_in_index);
     orbistoun_kernel::apr::on_file_size(guest_file_size);
+    orbistoun_kernel::apr::on_file_stat(orbistoun_fs::metadata::stat_into);
 
     let armed = experiments
         .watchpoints()

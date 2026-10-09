@@ -2559,3 +2559,16 @@ known_by = "published"
 cites = "FreeBSD lib/libthr/thread/thr_attr.c _pthread_attr_getaffinity_np."
 found_in = ["PPSA02664-app0", "PPSA21564-app0", "PPSA28061-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceKernelAprGetFileStat"
+arity = 2
+purpose = "The struct stat of a file named by the identifier an APR resolve gave it: (id, stat)."
+edge_cases = [
+    "orbistoun writes the same 120-byte structure sceKernelStat writes, for the path a resolve gave the identifier (an index's or a D782 synthesised one), and answers 0. An identifier no resolve gave is refused with the placeholder and nothing is written.",
+    "PPSA04263 calls it about 300 times with synthesised identifiers from 0x40000000.",
+]
+known_by = "assumed"
+assumptions = ["That the stat is the one sceKernelStat writes for the same file: no probe on firmware 12.40 can hold a real APR identifier (D782)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-09"

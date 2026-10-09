@@ -238,6 +238,8 @@ guest_module! {
         // throughout is the trampoline's full capture, not a claim about the signatures.
         "sceKernelAprResolveFilepathsToIdsAndFileSizes" => 6,
         "sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes" => 6,
+        // (id, stat): the stat of a file a resolve gave the identifier (D782).
+        "sceKernelAprGetFileStat" => 2,
         "sceKernelAprSubmitCommandBufferAndGetResult" => 6,
         "sceKernelAprWaitCommandBuffer" => 6,
         "sceKernelReadTsc" => 0,
@@ -6663,6 +6665,7 @@ const TABLE: &[(&str, GuestFn)] = &[
         apr_submit_command_buffer,
     ),
     ("sceKernelAprWaitCommandBuffer", apr_wait_command_buffer),
+    ("sceKernelAprGetFileStat", apr::get_file_stat),
     ("sceKernelReadTsc", read_tsc),
     ("sceKernelGetTscFrequency", get_tsc_frequency),
     ("sceKernelIsStack", is_stack),
@@ -6765,6 +6768,9 @@ fn resolve_paths(
         // The title's index first; an existing app0 file it does not name is given an identifier
         // of its own (D782).
         let answer = apr::look_up(&path).or_else(|| apr::synthesise(&path));
+        if let Some((id, _)) = answer {
+            apr::remember(id, &path);
+        }
         let (id, size) = answer.map_or((u32::MAX, 0), |(id, size)| (id as u32, size));
         all_resolved &= answer.is_some();
         // Written per entry, at the measured widths.

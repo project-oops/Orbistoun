@@ -239,6 +239,13 @@ pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// Writes the `struct stat` of `guest` at `at`, as `sceKernelStat` writes it, for a caller that
+/// names a file another way (the asynchronous file path's identifiers, D782). `false` for a path
+/// nothing answers or an address that cannot be written.
+pub fn stat_into(guest: &str, at: u64) -> bool {
+    facts_of(guest).is_some_and(|facts| write_stat(at, facts))
+}
+
 /// What a guest is told about a path, host directory or mount point.
 ///
 /// A mount point is a directory with no host behind it: `/` holds `app0` and `data` and no
