@@ -150,6 +150,15 @@ fn set_hs_offchip_param(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// `sceAgcDriverSetTFRing(ring, size, ring >> 32, base, ..)`: sets the tessellation-factor ring,
+/// answering 0 and writing nothing - in PPSA04263's shape `(B + 0x200, 0x3fff8, B >> 32, B, ..)`,
+/// with size `0x40000` at `B`, on a repeat, and with every argument zero (`166-agc/driver-set-tf-ring`,
+/// `20261009-215800-eboot.log`; the census). The ring only feeds tessellation, which draws here do
+/// not reach.
+fn set_tf_ring(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `sceAgcDriverInitResourceRegistration(...)` - stub, returns `0x8a6c9018`.
 fn init_resource_registration(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     RESOURCE_REGISTRATION_NOT_SUPPORTED
@@ -2743,6 +2752,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverRegisterOwner", register_owner),
         ("sceAgcDriverRegisterResource", register_resource),
         ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
+        ("sceAgcDriverSetTFRing", set_tf_ring),
         ("sceAgcDriverAddEqEvent", add_eq_event),
         (
             "sceAgcDriverInitResourceRegistration",
@@ -3261,6 +3271,21 @@ mod tests {
             |s| s.colour_target_tiling = Some(SwizzleMode::Linear)
         ));
         assert!(refused(|s| s.colour_target_format = None));
+    }
+
+    /// SetTFRing answers 0 and writes nothing in PPSA04263's shape, as `166-agc/driver-set-tf-ring`
+    /// measured (`20261009-215800-eboot.log`).
+    #[test]
+    fn set_tf_ring_answers_zero_in_the_title_s_shape() {
+        let (_, f) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == "sceAgcDriverSetTFRing")
+            .expect("implemented");
+        let mut ring = [0x55_u8; 0x40];
+        let base = ring.as_mut_ptr() as u64;
+        let args = [base + 0x200, 0x3fff8, base >> 32, base, 0, 0];
+        assert_eq!(f(&args), 0);
+        assert!(ring.iter().all(|&b| b == 0x55), "nothing written");
     }
 
     /// DestroyQueue refuses with `0x8a6d0003` on a queue CreateQueue just made, of every type, as
