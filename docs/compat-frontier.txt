@@ -3,6 +3,7 @@ PPSA02664-app0         presented  317 imports (308 answered)    7017339 calls  1
 obscene-probe-prospero-native presented  223 imports (211 answered)      39546 calls  100% standing   ran to the time limit
 PPSA99980              presented  215 imports (206 answered)     416694 calls  100% standing   ran to the time limit
 PPSA28061-app0         presented  157 imports (150 answered)     566231 calls  100% standing   ran to the time limit
+CRFT00001              presented  106 imports (100 answered)     345461 calls  100% standing   ran to the time limit
 OPSY00001              presented   65 imports (57 answered)      23006 calls  100% standing   ran to the time limit
 BGII00001              presented   55 imports (47 answered)    6267850 calls  100% standing   ran to the time limit
 BUGD00001              presented   55 imports (47 answered)   88848677 calls  100% standing   ran to the time limit
@@ -18,7 +19,6 @@ PPSA25872-app0         flipped    308 imports (293 answered)    8873808 calls  1
 obscene                flipped    193 imports (180 answered)     280274 calls  100% standing   ran to the time limit
 obscene-payload        flipped    187 imports (177 answered)       4914 calls  100% standing   0x5e2d
 PPSA21564-app0         entered    103 imports (96 answered)     505299 calls  100% standing   image+0x2990db
-CRFT00001              entered     93 imports (80 answered)     155161 calls  100% standing   ran to the time limit
 MDEM00001              entered     89 imports (74 answered)      74759 calls  100% standing   ran to the time limit
 PPSA04263-app0         entered     78 imports (75 answered)      38813 calls   99% standing   image+0x19676d7
 MCUB00001              entered     67 imports (61 answered)      50348 calls  100% standing   ran to the time limit

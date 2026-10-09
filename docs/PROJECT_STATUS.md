@@ -12,6 +12,7 @@ out of date.
 | obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
 | PPSA28061-app0 | presented | 157 | 566,231 | 100% | `ran to the time limit` | `76feb9bce01fde24` match |
+| CRFT00001 | presented | 106 | 345,461 | 100% | `ran to the time limit` | `5ec4c46ef3083591` match |
 | OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
 | BGII00001 | presented | 55 | 6,267,850 | 100% | `ran to the time limit` | `135e110d3e230943` new |
 | BUGD00001 | presented | 55 | 88,848,677 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` new |
@@ -27,7 +28,6 @@ out of date.
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
 | PPSA21564-app0 | entered | 103 | 505,299 | 100% | `image+0x2990db` | `e14140f4ef1f171b` new |
-| CRFT00001 | entered | 93 | 155,161 | 100% | `ran to the time limit` | `a5979edf0f7ebb41` match |
 | MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
 | PPSA04263-app0 | entered | 78 | 38,813 | 99% | `image+0x19676d7` | `19f92dc4726302a2` new |
 | MCUB00001 | entered | 67 | 50,348 | 100% | `ran to the time limit` | `ecc399008f7c33ff` new |
@@ -87,9 +87,9 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1121 / 963 |
+| Functions declared / implemented | 1124 / 966 |
 | Declared in a library that serves nothing | 54 across 9 libraries - names written down, no implementation |
-| Recorded behaviours | 991 - 398 published, 147 measured, 124 guest-observed, 305 assumed |
+| Recorded behaviours | 994 - 398 published, 150 measured, 124 guest-observed, 305 assumed |
 | Open questions a hardware probe could settle | 882 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
