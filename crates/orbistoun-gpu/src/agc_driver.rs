@@ -611,8 +611,13 @@ impl GuestCp<'_> {
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
         // each of the many submissions a GL frame takes (D714).
-        let before = read_target(self, target, swap)
-            .ok_or("its colour target is not readable guest memory")?;
+        let before = read_target(self, target, swap).ok_or_else(|| {
+            format!(
+                "its colour target at {:#x}, {:#x} bytes, is not readable guest memory",
+                target.base,
+                target.words() * 4
+            )
+        })?;
         if !execute(submission, before.before()) {
             forget_written();
             set_pending(None);

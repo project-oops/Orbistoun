@@ -1913,6 +1913,36 @@ pub(crate) fn guest_viewport(transform: orbistoun_gpu::ViewportTransform) -> vk:
     }
 }
 
+/// The viewport a draw is built with: the guest's ([`guest_viewport`]), its depth range clamped
+/// into `0..1` when the draw does not test depth. Its depth values then reach no test and no write
+/// (Vulkan writes depth only where the test runs, as `DB_DEPTH_CONTROL.Z_WRITE_ENABLE` does only
+/// under `Z_ENABLE`), so the clamp changes nothing it draws, where a range outside `0..1` would be
+/// refused.
+pub(crate) fn drawn_viewport(
+    transform: orbistoun_gpu::ViewportTransform,
+    tests_depth: bool,
+) -> vk::Viewport {
+    let viewport = guest_viewport(transform);
+    if tests_depth {
+        return viewport;
+    }
+    vk::Viewport {
+        min_depth: viewport.min_depth.clamp(0.0, 1.0),
+        max_depth: viewport.max_depth.clamp(0.0, 1.0),
+        ..viewport
+    }
+}
+
+/// Whether a draw bound so tests depth: a depth pass whose state enables the test, or one whose
+/// state is not known.
+fn tests_depth(bound: &Bound<'_>) -> bool {
+    bound.depth.is_some_and(|depth| {
+        depth
+            .state
+            .is_none_or(|state| state.control.depth_test_enable)
+    })
+}
+
 /// Refuses a viewport the device cannot take: wider or taller than `maxViewportDimensions`, or
 /// reaching outside `viewportBoundsRange` - both invalid usage in Vulkan rather than a clamp. A
 /// window-space draw's viewport (D731) spans `2 * WINDOW_SPACE_SCALE` pixels from `-S`.
@@ -3642,7 +3672,7 @@ fn build_pipeline(
 ) -> Result<Pipeline, DispatchError> {
     let device = devices.device;
     if let Some(transform) = bound.viewport {
-        viewport_within_limits(devices, guest_viewport(transform))?;
+        viewport_within_limits(devices, drawn_viewport(transform, tests_depth(&bound)))?;
     }
     let (Some(buffers_layout), Some(draw_buffers)) =
         (bound.draw_buffers.layout, bound.draw_buffers.set)
@@ -4000,7 +4030,7 @@ fn create_graphics_pipeline(
             min_depth: 0.0,
             max_depth: 1.0,
         },
-        guest_viewport,
+        |transform| drawn_viewport(transform, tests_depth(&bound)),
     )];
     // The whole attachment unless the draw set a scissor, which restricts rasterisation so pixels
     // outside keep the clear. Clamped to the attachment, because Vulkan refuses a scissor past it.
@@ -4978,6 +5008,30 @@ mod tests {
             range(with(orbistoun_gpu::DepthMapping::IDENTITY)),
             (0.0, 1.0)
         );
+    }
+
+    /// A draw that does not test depth takes its depth range clamped into `0..1`: its depth values
+    /// reach no test and no write, so a GL transform's `-1..1` - PPSA02664's textured fullscreen
+    /// pass, depth test off - is drawn rather than refused. One that tests depth keeps the guest's
+    /// range, refused where it reaches outside.
+    #[test]
+    fn a_draw_that_does_not_test_depth_takes_its_range_clamped() {
+        use super::drawn_viewport;
+        let transform = orbistoun_gpu::ViewportTransform {
+            x_scale: 960.0,
+            x_offset: 960.0,
+            y_scale: -540.0,
+            y_offset: 540.0,
+            depth: orbistoun_gpu::DepthMapping {
+                negative_one_to_one: true,
+                z_scale: 1.0,
+                z_offset: 0.0,
+            },
+        };
+        let range = |viewport: ash::vk::Viewport| (viewport.min_depth, viewport.max_depth);
+        assert_eq!(range(guest_viewport(transform)), (-1.0, 1.0));
+        assert_eq!(range(drawn_viewport(transform, false)), (0.0, 1.0));
+        assert_eq!(range(drawn_viewport(transform, true)), (-1.0, 1.0));
     }
 
     /// A guest's texture is uploaded with the one level it carries: no invented second level, and
