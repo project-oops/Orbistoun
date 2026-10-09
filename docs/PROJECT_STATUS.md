@@ -7,6 +7,7 @@ out of date.
 
 | Title | Reach | Imports | Calls | Standing | Ends | Link plan |
 |---|---|---|---|---|---|---|
+| PPSA03416-app0 | presented | 325 | 3,674,071 | 100% | `ran to the time limit` | `fbf9776e327156e4` new |
 | PPSA02664-app0 | presented | 317 | 7,017,339 | 100% | `ran to the time limit` | `f29b17e0ffb822c6` new |
 | obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
@@ -23,7 +24,6 @@ out of date.
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
 | PPSA25872-app0 | flipped | 308 | 8,873,808 | 100% | `ran to the time limit` | `c80e1ee97b5382f3` new |
-| PPSA03416-app0 | flipped | 224 | 470,362 | 100% | `image+0x3f8f0` | - |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
 | PPSA21564-app0 | entered | 103 | 505,299 | 100% | `image+0x2990db` | `e14140f4ef1f171b` new |
@@ -87,10 +87,10 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1121 / 962 |
+| Functions declared / implemented | 1121 / 963 |
 | Declared in a library that serves nothing | 54 across 9 libraries - names written down, no implementation |
-| Recorded behaviours | 990 - 398 published, 147 measured, 126 guest-observed, 302 assumed |
-| Open questions a hardware probe could settle | 879 |
+| Recorded behaviours | 991 - 398 published, 147 measured, 124 guest-observed, 305 assumed |
+| Open questions a hardware probe could settle | 882 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
