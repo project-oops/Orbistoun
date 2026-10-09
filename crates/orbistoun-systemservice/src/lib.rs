@@ -29,6 +29,8 @@ guest_module! {
         "sceSystemServiceParamGetInt" => 2,
         "sceSystemServiceHideSplashScreen" => 0,
         "sceSystemServiceGetStatus" => 1,
+        // (flag): one byte.
+        "sceSystemServiceGetNoticeScreenSkipFlag" => 1,
         "sceSystemServiceReceiveEvent" => 1,
         "sceSystemServiceGetHdrToneMapLuminance" => 1,
         // title id, argv, parameter block.
@@ -539,6 +541,30 @@ fn user_service_get_age_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceUserServiceGetAccessibilityVibration(user, out)` and its trigger-effect twin: for the
+/// signed-in user each answered `0x80960002` and wrote none of a buffer filled `0xa5` (REQ-cn10
+/// arm 6, `20261009-151440-eboot.obs.log`), the code `sceUserServiceGetAgeLevel` answers. Another
+/// user is unmeasured and refused with the placeholder.
+fn user_service_get_accessibility(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == u64::from(signed_in_user()) {
+        AGE_LEVEL_SIGNED_IN
+    } else {
+        u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
+/// `sceSystemServiceGetNoticeScreenSkipFlag(flag)`: writes one byte, 1, and answers 0 (REQ-cn10
+/// arm 4: of a buffer filled `0xa5`, only its first byte changed, to `01`). A null flag is
+/// unmeasured and refused with the placeholder.
+fn system_service_get_notice_screen_skip_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's out-parameter, one byte by the measurement.
+    if args[0] != 0 && unsafe { orbistoun_mem::guest::write_bytes(args[0], &[1]) } {
+        OK
+    } else {
+        u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
 /// `sceUserServiceGetInitialUser(out)` - the user a title should start as.
 fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
@@ -622,6 +648,18 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceUserServiceGetUserName", user_service_get_user_name),
         ("sceUserServiceGetAgeLevel", user_service_get_age_level),
+        (
+            "sceUserServiceGetAccessibilityVibration",
+            user_service_get_accessibility,
+        ),
+        (
+            "sceUserServiceGetAccessibilityTriggerEffect",
+            user_service_get_accessibility,
+        ),
+        (
+            "sceSystemServiceGetNoticeScreenSkipFlag",
+            system_service_get_notice_screen_skip_flag,
+        ),
         (
             "sceUserServiceGetGamePresets",
             user_service_get_game_presets,

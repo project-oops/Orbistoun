@@ -1,0 +1,14 @@
+library = "libSceAudioOut2"
+
+[[function]]
+name = "sceAudioOut2UserDestroy"
+arity = 1
+purpose = "Destroys an audio output user: (user)."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 2): for the user sceAudioOut2UserCreate made (0x80268001) and for 0 alike it answered 0x80268010.",
+    "orbistoun answers 0x80268010 whatever it is handed.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 2."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"

@@ -282,3 +282,16 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12225-12241, check 200-census/libSceSystemService/sceSystemServiceGetHdrToneMapLuminance."
 found_in = ["PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceSystemServiceGetNoticeScreenSkipFlag"
+arity = 1
+purpose = "Reads whether the title may skip its notice screen, as one byte: (flag)."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 4): rc 0x0, and of a 0x40-byte buffer filled with 0xa5 only the first byte changed, to 0x01.",
+    "orbistoun writes the byte 1 and answers 0; a null flag is unmeasured and refused with the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 4."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"

@@ -216,7 +216,8 @@ fn audio_out_set_volume(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The audio implementations this crate provides.
 ///
-/// The `ajm` module contributes `sceAjmInitialize`; `audio3d`, `audio_in` and `audio_out2` none.
+/// The `ajm` module contributes `sceAjmInitialize` and `audio_out2` `sceAudioOut2UserDestroy`;
+/// `audio3d` and `audio_in` none.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
@@ -227,12 +228,27 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAudioOutGetPortState", audio_out_get_port_state),
         ("sceAudioOutSetVolume", audio_out_set_volume),
         ("sceAjmInitialize", ajm::ajm_initialize),
+        ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// `sceAudioOut2UserDestroy` answers `0x80268010` for a user `sceAudioOut2UserCreate` made and for
+    /// 0 alike (REQ-cn10 arm 2, `20261009-151440-eboot.obs.log`).
+    #[test]
+    fn an_audio_out2_user_destroy_answers_as_measured() {
+        assert_eq!(
+            call("sceAudioOut2UserDestroy", [0x8026_8001, 0, 0, 0, 0, 0]),
+            0x8026_8010
+        );
+        assert_eq!(
+            call("sceAudioOut2UserDestroy", [0, 0, 0, 0, 0, 0]),
+            0x8026_8010
+        );
+    }
 
     /// `sceAjmInitialize(0, &ctx)` answers 0 and writes a 32-bit context identifier, `0x15` and then
     /// the next, over a slot filled `0xff` whose other bytes it leaves; a non-zero first argument or

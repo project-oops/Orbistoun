@@ -1,0 +1,14 @@
+library = "libSceNpManager"
+
+[[function]]
+name = "sceNpGetAccountCountryA"
+arity = 2
+purpose = "Reads the country of a user's network account: (user, out)."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 7): on a console signed in to no network account, for user 0x1ea2f4d9 it answered 0x80550006 and wrote none of a 0x40-byte buffer filled with 0xa5.",
+    "orbistoun is signed in to no network account, so it answers 0x80550006 and writes nothing.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 7."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"

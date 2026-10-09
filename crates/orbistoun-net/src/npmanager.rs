@@ -1,16 +1,34 @@
 //! `libSceNpManager` - account sign-in and presence.
 //!
-//! Declared and not implemented. The names come from real import tables (D504); every
-//! arity is `6`, the trampoline's full capture, not a claim about the argument count.
-//! Listed in `SERVES_NOTHING` because nothing here is implemented.
+//! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
+//! full capture, not a claim about the argument count. Only `sceNpGetAccountCountryA` is
+//! implemented, as measured.
 
+use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 use orbistoun_hle::guest_module;
 
 guest_module! {
     "libSceNpManager" {
-        "sceNpGetAccountCountryA" => 6,
+        // (user, out)
+        "sceNpGetAccountCountryA" => 2,
         "sceNpGetAccountIdA" => 6,
         "sceNpGetNpReachabilityState" => 6,
         "sceNpGetState" => 6,
     }
+}
+
+/// Implementations this module provides, by symbol name.
+#[must_use]
+pub fn implementations() -> &'static [(&'static str, GuestFn)] {
+    &[("sceNpGetAccountCountryA", get_account_country_a)]
+}
+
+/// What `sceNpGetAccountCountryA` answered on a console signed in to no account (REQ-cn10 arm 7,
+/// `20261009-151440-eboot.obs.log`).
+const NOT_SIGNED_IN: u64 = 0x8055_0006;
+
+/// `sceNpGetAccountCountryA(user, out)`: no account is signed in, so the console's refusal, with
+/// `out` left as it was.
+fn get_account_country_a(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    NOT_SIGNED_IN
 }

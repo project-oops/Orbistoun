@@ -61,3 +61,29 @@ known_by = "measured"
 cites = "obSCEne REQ-cn10, reports/hardware/20261009-104652-eboot.obs.log, 070-user/oneshot-setup-calls and 200-census/libSceUserService/sceUserServiceGetAgeLevel."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceUserServiceGetAccessibilityVibration"
+arity = 2
+purpose = "Reads a user's controller-vibration accessibility setting: (user, out)."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 6): for the signed-in user 0x1ea2f4d9 it answered 0x80960002 and wrote none of a 0x40-byte out buffer filled with 0xa5, the code sceUserServiceGetAgeLevel answers.",
+    "orbistoun answers 0x80960002 for its signed-in user, writing nothing; another user is unmeasured and refused with the placeholder. PPSA02664 and PPSA03416 call it during set-up.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 6."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceUserServiceGetAccessibilityTriggerEffect"
+arity = 2
+purpose = "Reads a user's adaptive-trigger accessibility setting: (user, out)."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 6): for the signed-in user 0x1ea2f4d9 it answered 0x80960002 and wrote none of a 0x40-byte out buffer filled with 0xa5.",
+    "orbistoun answers as sceUserServiceGetAccessibilityVibration does.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 6."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"

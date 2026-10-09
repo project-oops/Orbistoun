@@ -37,6 +37,7 @@ pub fn implementations() -> &'static [(&'static str, orbistoun_core::GuestFn)] {
             npwebapi2::implementations(),
             ssl::implementations(),
             netctl::implementations(),
+            npmanager::implementations(),
         ]
         .concat()
     })
@@ -54,6 +55,23 @@ pub const NET_ERROR_BASE: u32 = 0x8041_0100;
 #[cfg(test)]
 mod tests {
     use super::NET_ERROR_BASE;
+
+    /// `sceNpGetAccountCountryA(user, out)` answers `0x80550006` (not signed in) and writes none of
+    /// a buffer filled `0xa5`, as REQ-cn10 arm 7 measured on a console signed in to no account
+    /// (`20261009-151440-eboot.obs.log`).
+    #[test]
+    fn the_account_country_is_refused_when_signed_in_to_nothing() {
+        let (_, f) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == "sceNpGetAccountCountryA")
+            .expect("implemented");
+        let mut out = [0xa5_u8; 0x40];
+        let mut args = [0_u64; orbistoun_core::GUEST_ARG_REGISTERS];
+        args[0] = 0x1ea2_f4d9;
+        args[1] = out.as_mut_ptr() as u64;
+        assert_eq!(f(&args), 0x8055_0006);
+        assert!(out.iter().all(|&b| b == 0xa5), "nothing written");
+    }
 
     /// The measured codes are this base plus the ordinary BSD errno.
     #[test]
