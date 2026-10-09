@@ -230,6 +230,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_mov_b32_e32",
     "v_mul_f32_e32",
     "v_mul_f32_e64",
+    "v_mac_f32_e64",
     "v_or_b32_e32",
     "v_and_b32_e32",
     "v_xor_b32_e32",
@@ -2319,9 +2320,8 @@ fn vector_instruction<M: Model + ?Sized>(
         // flags, in bits neither the operand layout nor the encoding table describes; read
         // separately and refused where not implemented.
         "v_cndmask_b32_e64" | "v_add_f32_e64" | "v_sub_f32_e64" | "v_subrev_f32_e64"
-        | "v_mul_f32_e64" | "v_fma_f32" | "v_mad_f32" | "v_div_fixup_f32" | "v_div_fmas_f32" => {
-            long_form_arithmetic(model, instruction, name)
-        }
+        | "v_mul_f32_e64" | "v_mac_f32_e64" | "v_fma_f32" | "v_mad_f32" | "v_div_fixup_f32"
+        | "v_div_fmas_f32" => long_form_arithmetic(model, instruction, name),
 
         // The division pre-scale, and the carry-producing arithmetic that writes a per-lane carry
         // mask as a second destination; 64-bit address arithmetic is built from these.
@@ -3048,8 +3048,20 @@ fn long_form_arithmetic<M: Model + ?Sized>(
             detail: "a long-form vector destination is not a vector register",
         });
     };
-    let register = u32::from(*register);
-    let sources: Vec<Operand> = instruction.operands[1..].to_vec();
+    let destination = *register;
+    let register = u32::from(destination);
+    let mut sources: Vec<Operand> = instruction.operands[1..].to_vec();
+    // The accumulating form adds into its destination, read as a third source: the encoding has no
+    // third operand, so modifier bits naming one are not this translation's to interpret.
+    if name == "v_mac_f32_e64" {
+        if modifiers.negate[2] || modifiers.absolute[2] {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "an accumulating multiply-add sets modifiers on the addend it has no field for",
+            });
+        }
+        sources.push(Operand::Vector(destination));
+    }
     arithmetic_with_modifiers(model, instruction, name, (register, &sources), modifiers)
 }
 
@@ -3734,7 +3746,7 @@ fn combine<M: Model + ?Sized>(
             let product = model.f32_binary(op::FMUL, *a, *b);
             Ok(model.f32_binary(op::FADD, product, *c))
         }
-        ("v_mad_f32", [a, b, c]) => Ok(legacy_multiply_add(model, *a, *b, *c)),
+        ("v_mad_f32" | "v_mac_f32_e64", [a, b, c]) => Ok(legacy_multiply_add(model, *a, *b, *c)),
         ("v_div_fixup_f32", [quotient, denominator, numerator]) => {
             Ok(division_fixup(model, *quotient, *denominator, *numerator))
         }
@@ -6210,7 +6222,7 @@ fn sdwa_operand(
 ) -> Result<Operand, TranslateError> {
     let refuse = TranslateError::Unsupported {
         offset: instruction.offset,
-        detail: "an SDWA source names a special register or an inline float, which is not translated",
+        detail: "an SDWA source names a special register, which is not translated",
     };
     // An eight-bit code always fits.
     let register = u16::try_from(code & 0xff).unwrap_or(u16::MAX);
@@ -6222,8 +6234,23 @@ fn sdwa_operand(
         // The inline integers: 128 is zero, 129-192 are 1 to 64, 193-208 are -1 to -16.
         128..=192 => Ok(Operand::Integer(i64::from(code) - 128)),
         193..=208 => Ok(Operand::Integer(192 - i64::from(code))),
-        _ => Err(refuse),
+        // The rest of the scalar space is the ordinary source encoding's, so the solved operand
+        // table names it; an inline float is read by its name like any other, and a special
+        // register stays refused.
+        _ => match sdwa_operand_table().map(|table| table.classify(code, None)) {
+            Some(Operand::Named(name)) if name.parse::<f32>().is_ok() => Ok(Operand::Named(name)),
+            _ => Err(refuse),
+        },
     }
+}
+
+/// The solved operand table, parsed once for the SDWA sources that name its constants.
+fn sdwa_operand_table() -> Option<&'static orbistoun_shader::OperandTable> {
+    static TABLE: std::sync::OnceLock<Option<orbistoun_shader::OperandTable>> =
+        std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(|| orbistoun_shader::OperandTable::builtin().ok())
+        .as_ref()
 }
 
 /// One source's selected part, as a 32-bit value: a byte or a word zero- or sign-extended, or the

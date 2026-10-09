@@ -5466,6 +5466,38 @@ fn a_float_sdwa_over_whole_registers_is_its_long_form() {
     assert_eq!(vector(&registers, 3), 0xc0c0_0000, "|-1.5| * -2.0 * 2");
 }
 
+/// An SDWA source whose scalar flag is set names whatever the ordinary source encoding does, an
+/// inline float among them: PPSA28061's notice-screen pixel shader adds 0.5 through SDWA over
+/// whole registers (`v_add_f32_sdwa v5, 0.5, v2`, words 0x060a04f9 0x868606f0). 0.5 + 1.25 is 1.75.
+#[test]
+fn an_sdwa_source_can_be_an_inline_float() {
+    if !device_or_skip("an_sdwa_source_can_be_an_inline_float") {
+        return;
+    }
+    let [head_word, sdwa] = vop2_sdwa(
+        "v_add_f32_e32",
+        5,
+        2,
+        Sdwa {
+            src0: 240,
+            src0_scalar: true,
+            src0_sel: SEL_DWORD,
+            src0_sext: false,
+            src1_sel: SEL_DWORD,
+            src1_sext: false,
+            dst_sel: SEL_DWORD,
+            dst_unused: 0,
+        },
+    );
+    assert_eq!(head_word, 0x060a_04f9, "PPSA28061's first word");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(2, 1.25f32.to_bits()));
+    program.extend([head_word, sdwa]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 5), 1.75f32.to_bits());
+}
+
 /// radeonsi's index packing, as its blit primitive shader writes it: `v_lshlrev_b32_sdwa v2, 10,
 /// v0 src1_sel:WORD_1` then `v_or_b32_sdwa v0, v0, v2 src0_sel:WORD_0`, turning two 16-bit
 /// indices into ten-bit fields. Then a byte into a preserved destination, and a sign-extended
@@ -5770,7 +5802,7 @@ fn a_three_way_signed_half_minimum_keeps_the_other_half() {
     assert_eq!(vector(&registers, 6), 0xcafe_0005, "5, low; high kept");
 }
 
-/// `v_mad_f32` and `v_mac_f32` are the legacy multiply-add: rounded after the multiply and again
+/// `v_mad_f32` and `v_mac_f32`, in both its forms, are the legacy multiply-add: rounded after the multiply and again
 /// after the add, with denormals flushed whatever the mode (ACO `aco_ir.h:138-139`). 1.5 * 2 +
 /// 0.25 is 3.25; (1 + 2^-12)^2 - (1 + 2^-11) is 0 when the product is rounded first, where a fused
 /// operation gives 2^-24; the smallest denormal times one is flushed to zero, and a negative
@@ -5788,10 +5820,18 @@ fn the_legacy_multiply_add_rounds_twice_and_flushes() {
         program.extend(vop3("v_mad_f32", 3, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
         program.extend(v_mov_literal(4, c));
         program.push(vop2_vv("v_mac_f32_e32", 4, 0, 1));
+        // The long form, its destination the addend as in the short form (VOP3 opcode 287).
+        program.extend(v_mov_literal(5, c));
+        program.extend(vop3("v_mac_f32_e64", 5, [VGPR_0, VGPR_0 + 1, 0], 0, 0));
         program.push(s_endpgm());
         let registers = run(&program);
         let (mad, mac) = (vector(&registers, 3), vector(&registers, 4));
         assert_eq!(mad, mac, "v_mad_f32 and v_mac_f32 agree");
+        assert_eq!(
+            vector(&registers, 5),
+            mac,
+            "v_mac_f32_e64 agrees with v_mac_f32_e32"
+        );
         mad
     };
     assert_eq!(

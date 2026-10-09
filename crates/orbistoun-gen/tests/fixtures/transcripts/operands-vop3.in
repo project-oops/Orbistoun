@@ -275,3 +275,12 @@ v_lshrrev_b64 v[100:101], v200, v[130:131]
 v_lshrrev_b64 v[254:255], s30, v[12:13]
 v_lshrrev_b64 v[8:9], 4, v[44:45]
 v_lshrrev_b64 v[40:41], v77, s[70:71]
+// The legacy multiply-accumulate in its three-operand form, which PPSA28061's notice-screen
+// pixel shader uses (VOP3 opcode 287, beside its short form v_mac_f32_e32). The destination
+// is also the addend, so only the destination and two sources are encoded. Varied vector,
+// scalar and inline sources, and registers spread across the file.
+v_mac_f32_e64 v2, v4, v6
+v_mac_f32_e64 v100, v200, v130
+v_mac_f32_e64 v255, s30, v12
+v_mac_f32_e64 v9, 1.0, v77
+v_mac_f32_e64 v130, v88, s101
