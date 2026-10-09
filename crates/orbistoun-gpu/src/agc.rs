@@ -312,12 +312,12 @@ const VGT_PRIMITIVE_TYPE_OFFSET: u32 = 0x242;
 /// `VGT_GS_OUT_PRIM_TYPE`'s context offset (`gfx103.json`), named at `prim_state + 0x8`.
 const VGT_GS_OUT_PRIM_TYPE_OFFSET: u32 = 0x29b;
 
-/// The bytes of `prim_state` a title copies into an indirect register load: two `(offset, value)`
-/// pairs (D781).
+/// The bytes of `prim_state` the create writes: two `(offset, value)` pairs, and nothing past them
+/// (D781, measured over a buffer filled with `0xa5`).
 const PRIM_STATE_LIST_BYTES: usize = 0x10;
-/// The bytes of `sec_state` a title copies into an indirect register load: thirty-two pairs, the
-/// whole distance to the `prim_state` beside it on PPSA02664's stack (D781).
-const SEC_STATE_LIST_BYTES: usize = 0x100;
+/// The bytes of `sec_state` the create writes: three pairs, and nothing past them (D781, measured
+/// as above).
+const SEC_STATE_LIST_BYTES: usize = 0x18;
 
 /// `sceAgcCreatePrimState(prim_state, sec_state, null, vs, topology)`.
 ///
@@ -326,8 +326,8 @@ const SEC_STATE_LIST_BYTES: usize = 0x100;
 /// `VGT_PRIMITIVE_TYPE` at `+0x10` with the topology (arg4) in the low five bits of `+0x14`, which a
 /// title copies into an indirect register load. `prim_state` names `VGT_GS_OUT_PRIM_TYPE` at `+0x8`
 /// with the output primitive at `+0xc`, for a topology the measurement called. Each list is written
-/// whole, every byte the measurement did not name zero (D781), so no pair a title copies carries
-/// what it left in the buffer; the output primitive of an unmeasured topology stays zero.
+/// whole, its unnamed bytes zero, and nothing after it (D781); the output primitive of an
+/// unmeasured topology stays zero.
 fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (prim_state, sec_state, topology) = (args[0], args[1], args[4] as u32);
     if prim_state == 0 || sec_state == 0 {
@@ -644,9 +644,10 @@ fn patch_address(packet: u64, at: u64, address: u64) {
 
 /// `sceAgcDmaDataPatchSetDstAddressOrOffset(packet, address)`: writes the destination into dw4 and
 /// dw5 and answers `0x0`. Measured: `0x3000_0000` and `0x5000_0000` came back as dw4, nothing
-/// else changed (`166-agc/patch-dma-data-dst`, sweep 20260915-203058); the high half into dw5, as
-/// the builder places a destination's and the Cx address patch its own, is assumed. PPSA03416 fills
-/// a `CP_SYNC` fill's destination this way after building it with zero.
+/// else changed (`166-agc/patch-dma-data-dst`, sweep 20260915-203058), and a 64-bit
+/// `0x8_8001_0c00` came back as dw4 `0x8001_0c00` and dw5 `0x8`, over a dw5 the probe had set to 1
+/// (`arm1-64bit-dst`, `arm2-dw5-one-dst`, `20261009-104652-eboot.obs.log`). PPSA03416 fills a
+/// `CP_SYNC` fill's destination this way after building it with zero.
 fn dma_data_patch_destination(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     patch_address(args[0], DMA_DATA_DESTINATION_AT, args[1]);
     OK
@@ -654,7 +655,8 @@ fn dma_data_patch_destination(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(packet, source)`: writes the source into
 /// dw2 and dw3 and answers `0x0`. Measured: `0x4000_0000` and `0x6000_0000` came back as dw2
-/// (`166-agc/patch-dma-data-src`); the high half into dw3 is assumed, as for the destination.
+/// (`166-agc/patch-dma-data-src`), and a 64-bit source's high half as dw3, over a dw3 set to 1
+/// (`arm1-64bit-src`, `arm2-dw3-one-src`, `20261009-104652-eboot.obs.log`).
 fn dma_data_patch_source(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     patch_address(args[0], DMA_DATA_SOURCE_AT, args[1]);
     OK
@@ -1589,11 +1591,10 @@ mod tests {
         );
     }
 
-    /// The create writes both register lists whole (D781): over buffers full of stale bytes, as a
-    /// title's uninitialised stack hands them over, every pair is the measured one or `(0, 0)` -
-    /// `(0x262, 0)` and `(0x242 VGT_PRIMITIVE_TYPE, topology)` among thirty-two in `sec_state`, and
-    /// `(0, 0)` then `(0x29b VGT_GS_OUT_PRIM_TYPE, 2)` - triangles - in `prim_state`. What lies past
-    /// the lists is not touched.
+    /// The create writes both register lists whole and nothing past them (D781), as
+    /// `166-agc/create-prim-state` measured over buffers filled with `0xa5`: `(0, 0)`, `(0x262, 0)`
+    /// and `(0x242 VGT_PRIMITIVE_TYPE, topology)` in `sec_state`, and `(0, 0)` then
+    /// `(0x29b VGT_GS_OUT_PRIM_TYPE, 2)` - triangles - in `prim_state`.
     #[test]
     fn prim_state_lists_hold_only_measured_pairs() {
         let mut prim = [0xa5u8; 0x20];
@@ -1615,19 +1616,39 @@ mod tests {
                 })
                 .collect()
         };
-        let mut sec_expected = vec![(0, 0); 32];
-        sec_expected[1] = (0x262, 0);
-        sec_expected[2] = (0x242, 4);
-        assert_eq!(pairs(&sec, 32), sec_expected);
+        assert_eq!(pairs(&sec, 3), [(0, 0), (0x262, 0), (0x242, 4)]);
         assert_eq!(pairs(&prim, 2), [(0, 0), (0x29b, 2)]);
         assert!(
-            sec[0x100..].iter().all(|&byte| byte == 0xa5),
+            sec[0x18..].iter().all(|&byte| byte == 0xa5),
             "past sec_state's list"
         );
         assert!(
             prim[0x10..].iter().all(|&byte| byte == 0xa5),
             "past prim_state's list"
         );
+    }
+
+    /// The DMA patches write a 64-bit address's halves into their two dwords, the high half over
+    /// whatever was there, as `arm2-dw5-one-dst` and `arm2-dw3-one-src` measured with it set to 1:
+    /// `0x8_8001_0c00` becomes dw4 `0x8001_0c00` and dw5 `0x8`, or dw2 and dw3.
+    #[test]
+    fn a_dma_patch_writes_both_halves_over_what_was_there() {
+        for (patch, low, high) in [
+            (
+                dma_data_patch_destination as fn(&[u64; GUEST_ARG_REGISTERS]) -> u64,
+                4,
+                5,
+            ),
+            (dma_data_patch_source, 2, 3),
+        ] {
+            let mut packet = [0xc005_5000u32, 0x10_0000, 0, 0, 0, 0, 0];
+            packet[high] = 1;
+            let mut args = [0u64; GUEST_ARG_REGISTERS];
+            args[0] = packet.as_mut_ptr() as u64;
+            args[1] = 0x8_8001_0c00;
+            assert_eq!(patch(&args), OK);
+            assert_eq!((packet[low], packet[high]), (0x8001_0c00, 0x8));
+        }
     }
 
     /// Primitive topology lands in the low five bits of `sec_state + 0x14`: the create writes

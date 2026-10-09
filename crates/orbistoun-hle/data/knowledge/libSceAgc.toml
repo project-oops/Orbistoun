@@ -177,7 +177,7 @@ purpose = "Instantiates the primitive-state routing block and records the primit
 edge_cases = [
     "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
     "MEASURED (166-agc/create-prim-state, zeroed 64-byte buffers, eight topologies): sec_state's first 32 bytes are the words 0, 0, 0x262, 0, 0x242, topology, 0, 0 - user-config (offset, value) pairs GE_USER_VGPR_EN then VGT_PRIMITIVE_TYPE, which a title copies into an indirect register load with sceAgcSetUcRegIndirectPatchAddRegisters(patch, 3, sec_state); prim_state's are 0, 0, 0x29b, out, 0, 0, 0, 0 - VGT_GS_OUT_PRIM_TYPE with out 0 for topology 1, 1 for 2, 2 for 4, 5, 6 and 9, 3 for 7 and 4 for 17.",
-    "orbistoun writes the offsets 0x262, 0x242 and 0x29b, the topology bits, and the output primitive for those eight topologies, over lists it first zeroes whole: sec_state's first 0x100 bytes and prim_state's first 0x10 (D781, assumed). PPSA02664 copies exactly those from uninitialised stack buffers into a SET_CONTEXT_REG_INDIRECT table, thirty-two pairs and two, so a byte left as the caller prepared it wrote an arbitrary context register. A topology not measured leaves the output primitive zero.",
+    "MEASURED (166-agc/create-prim-state, arms topo-4-a5 and topo-17-a5, buffers filled with 0xa5, reports/hardware/20261009-104652-eboot.obs.log): the call writes prim_state's first 0x10 bytes and sec_state's first 0x18, its zero words included, and nothing after them; the topology dword is written whole. orbistoun writes exactly those (D781). A topology not measured leaves the output primitive zero.",
 ]
 known_by = "measured"
 cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state; reports/hardware/20261007-113500-eboot.obs.log lines 10585-10616, section 166-agc/create-prim-state."
@@ -651,7 +651,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcDmaDataPatchSetDstAddressOrOffset"
 purpose = "Writes the destination address (or offset) into a DMA_DATA packet a DmaData builder reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-dst, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the packet's dw4: 0x30000000 / 0x50000000 came back at byte 16 and nothing else changed (patch-diff-pass-a/b, extent 20). The high half into dw5 is assumed, where the builder puts a destination's. PPSA03416 and PPSA02664 build a fill with a zero destination and patch it before submitting."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-dst, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the packet's dw4: 0x30000000 / 0x50000000 came back at byte 16 and nothing else changed (patch-diff-pass-a/b, extent 20). MEASURED (arm1-64bit-dst, arm2-dw5-one-dst, reports/hardware/20261009-104652-eboot.obs.log): a 64-bit 0x8_80010c00 came back as dw4 0x80010c00 and dw5 0x8, and a dw5 preset to 1 was overwritten with 0x8. PPSA03416 and PPSA02664 build a fill with a zero destination and patch it before submitting."]
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-dma-data-dst, sweep 20260915-203058 (patch-rc-pass-a/b 0x0, patch-diff-pass-a/b at byte 16)."
 found_on = "2026-09-15"
@@ -659,7 +659,7 @@ found_on = "2026-09-15"
 [[function]]
 name = "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate"
 purpose = "Writes the source address, offset or immediate into a DMA_DATA packet a DmaData builder reserved."
-edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-src, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the packet's dw2: 0x40000000 / 0x60000000 came back at byte 8 (patch-diff-pass-a/b). The high half into dw3 is assumed, as for the destination."]
+edge_cases = ["RETURN MEASURED 0x0 across two passes (obSCEne 166-agc/patch-dma-data-src, patch-rc-pass-a/b 0x0, sweep 20260915-203058). Writes arg1 into the packet's dw2: 0x40000000 / 0x60000000 came back at byte 8 (patch-diff-pass-a/b). MEASURED (arm1-64bit-src, arm2-dw3-one-src, reports/hardware/20261009-104652-eboot.obs.log): a 64-bit source's high half came back as dw3, over a dw3 preset to 1."]
 known_by = "measured"
 cites = "obSCEne 166-agc/patch-dma-data-src, sweep 20260915-203058 (patch-rc-pass-a/b 0x0, patch-diff-pass-a/b at byte 8)."
 found_on = "2026-09-15"
