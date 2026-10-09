@@ -10,22 +10,31 @@ attested_by = "operator"
 on = "2026-09-19"
 note = "runs on a real PS5; the CreateWorkload wall is orbistoun's gap, not the title's (D708)"
 
+[reproduce]
+module_sha256 = "1baa80e62ed78dd2c04a4f465985cf926dd42bc057b4a061d0267aa71689288b"
+limit_seconds = 120
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
 [compat]
 
 [settings]
 
 [status]
-reach = "flipped"
-outcome = "image+0x3f8f0"
-imports = 224
-calls = 418362
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 317
+calls = 7017339
 standing = 100
 default_return = "unimplemented"
-frames = 1
-unanswered = 11
-limit_seconds = 20
-build = "v0.1.0 - 712d8c6-dirty"
-measured_on = "2026-09-21"
+frames = 3565
+unanswered = 9
+limit_seconds = 120
+build = "v0.1.0 - 8f05ac3"
+measured_on = "2026-10-09"
+link_plan = "f29b17e0ffb822c6"
+link_plan_stored = "new"
 
 [experiment]
 reach = "flipped"
