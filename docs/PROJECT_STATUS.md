@@ -8,7 +8,7 @@ out of date.
 | Title | Reach | Imports | Calls | Standing | Ends | Link plan |
 |---|---|---|---|---|---|---|
 | PPSA03416-app0 | presented | 325 | 3,674,071 | 100% | `ran to the time limit` | `fbf9776e327156e4` new |
-| PPSA02664-app0 | presented | 317 | 7,017,339 | 100% | `ran to the time limit` | `f29b17e0ffb822c6` new |
+| PPSA02664-app0 | presented | 320 | 7,300,943 | 100% | `ran to the time limit` | `f29b17e0ffb822c6` new |
 | obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
 | PPSA28061-app0 | presented | 157 | 566,231 | 100% | `ran to the time limit` | `76feb9bce01fde24` match |
@@ -27,7 +27,7 @@ out of date.
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
-| PPSA25872-app0 | flipped | 308 | 8,873,808 | 100% | `ran to the time limit` | `c80e1ee97b5382f3` new |
+| PPSA25872-app0 | flipped | 316 | 9,494,853 | 100% | `ran to the time limit` | `c80e1ee97b5382f3` new |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
 | PPSA04263-app0 | entered | 148 | 68,036 | 100% | `image+0x2bf156c` | `7a9afb165e73b6f2` match |
@@ -90,9 +90,9 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1154 / 998 |
+| Functions declared / implemented | 1155 / 1002 |
 | Declared in a library that serves nothing | 51 across 8 libraries - names written down, no implementation |
-| Recorded behaviours | 1026 - 398 published, 185 measured, 124 guest-observed, 305 assumed |
+| Recorded behaviours | 1029 - 398 published, 188 measured, 124 guest-observed, 305 assumed |
 | Open questions a hardware probe could settle | 882 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
