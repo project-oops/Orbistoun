@@ -1276,6 +1276,52 @@ mod tests {
         );
     }
 
+    /// A descriptor the program copied out of its user data before sampling is still read from
+    /// there: PPSA28061's notice-screen pixel shader moves its image descriptor from `s[6:13]` to
+    /// `s[20:27]` and its sampler from `s[14:17]` to `s[8:11]` with `s_mov_b64`, then samples.
+    #[test]
+    fn a_descriptor_moved_out_of_the_user_data_is_read_from_there() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let words = [
+            0xbe94_0406, // s_mov_b64 s[20:21], s[6:7]
+            0xbe96_0408, // s_mov_b64 s[22:23], s[8:9]
+            0xbe98_040a, // s_mov_b64 s[24:25], s[10:11]
+            0xbe9a_040c, // s_mov_b64 s[26:27], s[12:13]
+            0xbe88_040e, // s_mov_b64 s[8:9], s[14:15]
+            0xbe8a_0410, // s_mov_b64 s[10:11], s[16:17]
+            // image_sample v0, v2, s[20:27], s[8:11] dmask:0x7
+            0xf080_0708,
+            0x0045_0002,
+            0xbf81_0000,
+        ];
+        let decoded = decode(&stream(&words), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 18,
+                ..UserData::default()
+            },
+        )
+        .expect("translates");
+        let sampled = translated.textures.first().copied().expect("a texture");
+        assert_eq!(
+            (
+                sampled.user_data,
+                sampled.sampler_user_data,
+                sampled.table_offset
+            ),
+            (Some(6), Some(14), None)
+        );
+    }
+
     /// An image load with sixteen-bit address and data (`a16 d16`, ACO's image copy) translates, an
     /// odd number of sixteen-bit components too; one returning a status word (`tfe`), whose
     /// registers are not modelled, is refused rather than read some other way.

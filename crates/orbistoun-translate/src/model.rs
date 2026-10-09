@@ -1046,6 +1046,11 @@ pub trait Model {
     /// Writes the `m0` register. Never masked, like every scalar write.
     fn write_m0(&mut self, value: Id);
 
+    /// Says that scalar register `destination` was just written with a plain copy of scalar
+    /// register `source`, so a descriptor the program moved out of its user data is still found
+    /// there. Called after the write; a model with no use for it ignores it.
+    fn note_scalar_copy(&mut self, _destination: u32, _source: u32) {}
+
     /// The program counter: a private variable holding the index of the block to run. Private
     /// because it is written in one arm of the dispatch switch and read in the header.
     fn program_counter(&mut self) -> Id;
@@ -4554,6 +4559,11 @@ fn scalar_move<M: Model + ?Sized>(
 
             model.write_scalar(register, low);
             model.write_scalar(register + 1, high);
+            if let Operand::Scalar(from) = source {
+                let from = u32::from(*from);
+                model.note_scalar_copy(register, from);
+                model.note_scalar_copy(register + 1, from + 1);
+            }
             model.count();
             Ok(())
         }
@@ -4598,6 +4608,9 @@ fn scalar_move<M: Model + ?Sized>(
                 });
             };
             model.write_scalar(u32::from(*register), value);
+            if let Operand::Scalar(from) = source {
+                model.note_scalar_copy(u32::from(*register), u32::from(*from));
+            }
             model.count();
             Ok(())
         }

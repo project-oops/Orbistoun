@@ -1579,6 +1579,9 @@ pub struct Wavefront<'a> {
     /// The draw's bound buffers, and the slot each traced access reads, by the access's offset
     /// (D733). `None` for a module that reads through none.
     draw_buffers: Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)>,
+    /// Scalar registers the program filled with a plain copy of one still holding a user-data word,
+    /// and that word: a descriptor moved out of its user data is still read from there.
+    scalar_copies: BTreeMap<u32, u32>,
 }
 
 /// A primitive shader's system SGPRs, `s0`-`s7`, ahead of its user SGPRs: gs_tg_info in `s2` and
@@ -1716,7 +1719,25 @@ impl Wavefront<'_> {
         let untouched = (first..first + span).all(|register| {
             register >= u128::BITS || self.images.written_scalars >> register & 1 == 0
         });
-        (seeded && untouched).then(|| first - seeded_from)
+        if seeded && untouched {
+            return Some(first - seeded_from);
+        }
+        // Or copied there, in order, from consecutive user-data words: `s_mov_b64 s[20:21], s[6:7]`
+        // and its siblings move a pixel shader's image descriptor before it samples.
+        let word = |register: u32| {
+            let seeded_here = register >= seeded_from
+                && register < seeded_from + count
+                && (register >= u128::BITS || self.images.written_scalars >> register & 1 == 0);
+            if seeded_here {
+                Some(register - seeded_from)
+            } else {
+                self.scalar_copies.get(&register).copied()
+            }
+        };
+        let start = word(first)?;
+        (1..span)
+            .all(|step| word(first + step) == Some(start + step))
+            .then_some(start)
     }
 
     /// Where a sampler descriptor starting at scalar register `sampler` lies in the user data, for
@@ -2099,6 +2120,7 @@ impl<'a> Wavefront<'a> {
             reads_geometry_input: false,
             draw_data: None,
             draw_buffers,
+            scalar_copies: BTreeMap::new(),
         };
 
         this.seed_entry(user_data_source, user_data, &system);
@@ -3588,6 +3610,8 @@ impl Model for Wavefront<'_> {
             self.images.written_scalars |= 1 << register;
             self.images.opaque_scalars &= !(1 << register);
         }
+        // Whatever it held is gone; a copy says so again once the write is done.
+        self.scalar_copies.remove(&register);
         // A write into either descriptor group means the next sample does not read the texture the
         // last one did. Recorded here because this is the only place that sees writes (D690).
         for bound in &mut self.textures {
@@ -3889,6 +3913,15 @@ impl Model for Wavefront<'_> {
         self.builder
             .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
         value
+    }
+
+    fn note_scalar_copy(&mut self, destination: u32, source: u32) {
+        let word = self
+            .still_seeded(source, 1)
+            .or_else(|| self.scalar_copies.get(&source).copied());
+        if let Some(word) = word {
+            self.scalar_copies.insert(destination, word);
+        }
     }
 
     fn write_m0(&mut self, value: Id) {
