@@ -3,7 +3,7 @@
 //!
 //! The command-buffer object's construction, binding and reset are implemented as obSCEne measured
 //! them (`reports/report-1791275954.txt` lines 8674-8876, `166-agc/ampr-apr-file-read`, REQ a5b1);
-//! the `Apr` file-read calls are declared and not.
+//! `sceAmprAprCommandBufferReadFile` adds its read to a queue installed from above (D782).
 //!
 //! Every arity is `6`, the trampoline's full capture, not a claim about how many arguments a
 //! function takes: a wrong arity only degrades a trace, while a wrong name is unreachable.
@@ -15,6 +15,8 @@ use orbistoun_mem::guest;
 guest_module! {
     "libSceAmpr" {
         "sceAmprAprCommandBufferConstructor" => 6,
+        // (buffer, buffer + 0x18, buffer + 0x20, id, into, length) and the offset on the stack, as
+        // PPSA04263's wrapper calls it.
         "sceAmprAprCommandBufferReadFile" => 6,
         "sceAmprCommandBufferConstructor" => 6,
         "sceAmprCommandBufferReset" => 6,
@@ -38,6 +40,19 @@ const TOO_SMALL: u64 = 0x8002_0010;
 /// What an odd size answers (`ampr-sb40-size-0x401`): the kernel's `EINVAL`.
 const UNALIGNED: u64 = 0x8002_0016;
 
+/// Adds a file read to a command buffer, installed from above because the files a resolve named
+/// belong to `libkernel`'s asynchronous file path (D536): `(buffer, id, into, length, offset)` to
+/// whether it was added.
+type ReadQueue = fn(u64, u64, u64, u64, u64) -> bool;
+
+/// The installed queue, if anything installed one.
+static READ_QUEUE: std::sync::OnceLock<ReadQueue> = std::sync::OnceLock::new();
+
+/// Installs what `sceAmprAprCommandBufferReadFile` adds its reads with.
+pub fn on_read_file(queue: ReadQueue) {
+    let _ = READ_QUEUE.set(queue);
+}
+
 /// Implementations this module provides for `libSceAmpr`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
@@ -51,7 +66,33 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceAmprAprCommandBufferConstructor",
             apr_command_buffer_constructor,
         ),
+        (
+            "sceAmprAprCommandBufferReadFile",
+            apr_command_buffer_read_file,
+        ),
     ]
+}
+
+/// `sceAmprAprCommandBufferReadFile(buffer, buffer + 0x18, buffer + 0x20, id, into, length,
+/// offset)`: adds the read of `length` bytes from `offset` in the file a resolve gave the 32-bit
+/// `id`, into `into`, to the command buffer, and answers 0; the submit carries it out (D782,
+/// assumed: no probe on firmware 12.40 holds a real identifier). The shape is PPSA04263's wrapper,
+/// which passes two fields of the object after it and the offset as a seventh argument. An
+/// identifier no resolve gave, or no installed queue, answers the placeholder.
+fn apr_command_buffer_read_file(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let spilled = orbistoun_thunk::stack_arguments();
+    let offset = if spilled == 0 {
+        0
+    } else {
+        // SAFETY: the dispatch published this as the word above the return address the guest's
+        // call pushed, on the calling thread's live stack.
+        unsafe { guest::read_u64(spilled) }.unwrap_or_default()
+    };
+    let id = args[3] & u64::from(u32::MAX);
+    match READ_QUEUE.get() {
+        Some(queue) if queue(args[0], id, args[4], args[5], offset) => 0,
+        _ => u64::from(GuestError::InvalidArgument.as_raw()),
+    }
 }
 
 /// `sceAmprCommandBufferConstructor(obj, ...)`: zeroes the object's first 24 bytes and answers the

@@ -17,3 +17,10 @@ no index, so its resolve of `/app0/Media/ScriptingAssemblies.json` was refused, 
 file unread, il2cpp found none of its core types, and the title crashed. The user approved
 synthesising identifiers on 2026-10-09. A range of its own keeps a synthesised identifier from
 ever meeting one an index assigns.
+
+The files are read through the same identifiers. `sceAmprAprCommandBufferReadFile` adds a read -
+identifier, destination, length and file offset - to the command buffer it is handed, held beside
+it rather than encoded into it, and answers 0. `sceKernelAprSubmitCommandBufferAndGetResult`
+carries out every read the buffer holds, in order, before it answers 0, and
+`sceKernelAprWaitCommandBuffer` then has nothing to wait for and answers 0. A buffer holding no
+reads, which a title's own code encoded, is still refused: its encoding is not established.

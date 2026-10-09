@@ -138,3 +138,49 @@ fn set_buffer_binds_aligned_sizes_and_refuses_an_odd_one() {
         assert_eq!(obj[..], expected[..], "size {size:#x}");
     }
 }
+
+/// One queued read: `(buffer, id, into, length, offset)`.
+type Queued = (u64, u64, u64, u64, u64);
+
+/// What the installed queue was last handed, for the test below.
+static QUEUED: std::sync::Mutex<Vec<Queued>> = std::sync::Mutex::new(Vec::new());
+
+/// A queue that takes identifier 0xf9 only.
+fn queue(buffer: u64, id: u64, into: u64, length: u64, offset: u64) -> bool {
+    QUEUED
+        .lock()
+        .unwrap()
+        .push((buffer, id, into, length, offset));
+    id == 0xf9
+}
+
+/// PPSA04263's wrapper calls `ReadFile(cb, cb + 0x18, cb + 0x20, id, into, length)` with the offset
+/// as a seventh argument on the stack: the read is handed to the installed queue under the
+/// object's address, the identifier as 32 bits, and answers 0; one the queue refuses is refused
+/// (D782). A direct call publishes no stack, so the offset reads as 0.
+#[test]
+fn a_file_read_is_queued_under_its_command_buffer() {
+    ampr::on_read_file(queue);
+    let cb = 0x7400_0020_62b0;
+    let rc = call(
+        "sceAmprAprCommandBufferReadFile",
+        [
+            cb,
+            cb + 0x18,
+            cb + 0x20,
+            0xffff_ffff_0000_00f9,
+            0x15_59c0_0000,
+            0x15e,
+        ],
+    );
+    assert_eq!(rc, 0);
+    assert_eq!(
+        QUEUED.lock().unwrap().last().copied(),
+        Some((cb, 0xf9, 0x15_59c0_0000, 0x15e, 0))
+    );
+    let refused = call(
+        "sceAmprAprCommandBufferReadFile",
+        [cb, cb + 0x18, cb + 0x20, 0x0fff_0000, 0x15_59c0_0000, 0x15e],
+    );
+    assert_ne!(refused, 0);
+}

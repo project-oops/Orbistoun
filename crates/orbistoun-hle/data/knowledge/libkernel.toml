@@ -335,9 +335,10 @@ name = "sceKernelAprSubmitCommandBufferAndGetResult"
 arity = 6
 purpose = "Submits a command buffer of asynchronous file operations and reports the result."
 returns = "status"
-partial = "Reports and refuses. It prints the command buffer's header and, where the run mapped it, what the header's pointer addresses."
-known_by = "guest-observed"
+partial = "Carries out the reads sceAmprAprCommandBufferReadFile added to the buffer and answers 0 (D782). A buffer holding none - one a title's own code encoded, as PPSA03416's - is reported and refused: it prints the command buffer's header and, where the run mapped it, what the header's pointer addresses."
+known_by = "assumed"
 assumptions = [
+    "That a submit's reads complete before it answers, and that 0 is its answer for reads that did: no probe on firmware 12.40 can hold a real APR identifier (D782). PPSA04263 calls it as (buffer, 1, &word, &word, ..); what it writes through the two word pointers is not established, and nothing is written.",
     "The header's third and fourth words are a length and an address that match a mapping the guest made exactly - 0x100000 against a 0x740009200000..0x740009300000 direct-memory mapping - so they are a buffer and its size. Which of the first two words is the size, the command count and the current offset is not established; libSceAmpr exports GetSize, GetNumCommands and GetCurrentOffset, which says there are three such fields and not what order they sit in.",
     "The buffer that header points at is entirely zero at the moment of submission, while the header reports one command of twenty bytes. sceAmprAprCommandBufferReadFile is imported by this title and never called, so nothing is established about how a command reaches the buffer.",
 ]
@@ -349,9 +350,10 @@ name = "sceKernelAprWaitCommandBuffer"
 arity = 6
 purpose = "Waits for a submitted command buffer to complete."
 returns = "status"
-partial = "Reports and refuses."
-known_by = "guest-observed"
+partial = "Answers 0 once a submit has carried its reads out; before any has, reports and refuses."
+known_by = "assumed"
 assumptions = [
+    "That a submit leaves nothing to wait for, since it completes its reads before answering (D782). PPSA04263 calls it as (0, 0, ..) after a submit.",
     "The name was a bare hash. The guest's own wrapper prints waitCommandBufferCompletion with whatever this answers, and forcing three unnamed imports to distinct values in one run identified which of them the wrapper reports. The name follows the transformation its sibling wrapper demonstrates and is confirmed by the hash agreeing, which is the only confirmation there is.",
     "Arity six is the trampoline's full capture. Nothing is established about which argument names the buffer.",
 ]

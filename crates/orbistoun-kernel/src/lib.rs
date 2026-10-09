@@ -6809,13 +6809,19 @@ fn resolve_paths(
 /// How many paths one call reports, so a title resolving thousands does not flood the log.
 const MOST_PATHS_REPORTED: u64 = 16;
 
-/// `sceKernelAprSubmitCommandBufferAndGetResult(buffer, ...)`: reported, not answered.
+/// `sceKernelAprSubmitCommandBufferAndGetResult(buffer, ...)`: carries out the reads
+/// `sceAmprAprCommandBufferReadFile` added to `buffer` and answers 0 (D782, assumed); a buffer
+/// holding none, or a read that cannot be carried out, is reported and not answered.
 ///
 /// Prints the command buffer's header. The platform exports `sceAmprCommandBufferGetSize`,
 /// `GetNumCommands` and `GetCurrentOffset`, so the first three words are a size, a count and an
 /// offset in an unknown order; they are printed unlabelled.
 fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let buffer = args[0];
+    if let Some(reads) = apr::carry_out(buffer) {
+        tracing::debug!("carried out the {reads} read(s) command buffer {buffer:#x} held");
+        return OK;
+    }
     let words: Vec<String> = (0..8)
         // SAFETY: an address the guest passed for this call, valid by its contract.
         .filter_map(|i| unsafe { guest::read_u64(buffer + i * 8) })
@@ -6888,12 +6894,21 @@ fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from(GuestError::Unimplemented.as_raw())
 }
 
-/// `sceKernelAprWaitCommandBuffer(...)`: reported, not answered.
+/// `sceKernelAprWaitCommandBuffer(...)`: 0 once a submit has carried its reads out, since a
+/// submit completes before it answers and so leaves nothing to wait for (D782, assumed);
+/// reported and not answered before any has.
 ///
 /// The guest's own wrapper prints `waitCommandBufferCompletion error=%d` with whatever this
 /// returns.
-fn apr_wait_command_buffer(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    tracing::warn!("the guest waited on an asynchronous file command buffer");
+fn apr_wait_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if apr::any_carried_out() {
+        return OK;
+    }
+    tracing::warn!(
+        "the guest waited on an asynchronous file command buffer ({:#x}, {:#x}) before any submit was carried out",
+        args[0],
+        args[1]
+    );
     u64::from(GuestError::Unimplemented.as_raw())
 }
 /// Reads the last resolved file into the buffer a command header names.
@@ -6917,7 +6932,7 @@ fn deliver_resolved_file(buffer: u64) {
     };
     // The length shares a word with the count above it, so only the low half is the size.
     let most = most & 0xFFFF_FFFF;
-    match apr::deliver(&path, into, most) {
+    match apr::deliver(&path, 0, into, most) {
         Some(got) => {
             tracing::info!("delivered {got} byte(s) of {path} into {into:#x} (up to {most:#x})");
         }

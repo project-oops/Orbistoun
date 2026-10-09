@@ -1606,6 +1606,17 @@ fn install_reporting(
     orbistoun_kernel::apr::on_index_lookup(look_up_in_index);
     orbistoun_kernel::apr::on_file_size(guest_file_size);
     orbistoun_kernel::apr::on_file_stat(orbistoun_fs::metadata::stat_into);
+    orbistoun_gpu::ampr::on_read_file(|buffer, id, into, length, offset| {
+        orbistoun_kernel::apr::queue_read(
+            buffer,
+            orbistoun_kernel::apr::Read {
+                id,
+                into,
+                length,
+                offset,
+            },
+        )
+    });
 
     let armed = experiments
         .watchpoints()
@@ -3248,15 +3259,20 @@ fn guest_file_size(guest_path: &str) -> Option<u64> {
     data.is_file().then_some(data.len())
 }
 
-/// Reads a guest path into guest memory, for the asynchronous file path's experiment.
+/// Reads a guest path from `offset` into guest memory, for the asynchronous file path.
 ///
 /// Bounded by what the caller says it has room for and by what the file holds: filling more than
 /// the guest's buffer would corrupt its neighbour.
-fn read_guest_file(guest_path: &str, address: u64, most: u64) -> Option<usize> {
+fn read_guest_file(guest_path: &str, offset: u64, address: u64, most: u64) -> Option<usize> {
     let handle = orbistoun_fs::open::open(guest_path)?;
     let at = usize::try_from(address).ok()?;
     let room = usize::try_from(most).ok()?;
-    if at == 0 || room == 0 {
+    let from = i64::try_from(offset).ok()?;
+    if at == 0
+        || room == 0
+        || orbistoun_fs::open::seek(handle, orbistoun_fs::open::From::Start, from).is_none()
+    {
+        orbistoun_fs::open::close(handle);
         return None;
     }
     // SAFETY: the guest supplied this address in a structure it built, and the caller checked it

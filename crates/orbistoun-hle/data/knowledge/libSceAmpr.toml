@@ -55,3 +55,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261006T1510Z-apr1 and -rw01, reports/hardware/20261007-082134-eboot.obs.log lines 7568-7674 (166-agc/ampr-apr-file-read, apr-cb-ctor-3ptr)"
 found_in = ["PPSA25872-app0", "PPSA21564-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceAmprAprCommandBufferReadFile"
+arity = 6
+purpose = "Adds a read of part of a resolved file to an APR command buffer: (buffer, buffer + 0x18, buffer + 0x20, id, into, length) with the file offset as a seventh argument on the stack."
+returns = "status"
+edge_cases = [
+    "The shape is PPSA04263's wrapper at image+0x1bf080, which takes (buffer, id, into, length, offset) and passes two fields of the object after it. Its first call reads 0x15e bytes from 0x302200 - a 512-byte block boundary inside the 0x302800-byte /app0/ps5/audio/audio_rel.rpf, its index entry 0xf9 - into 0x1559c00000.",
+    "orbistoun keeps the read beside the buffer and carries it out when the buffer is submitted, answering 0; an identifier no resolve gave answers the placeholder.",
+]
+known_by = "assumed"
+assumptions = ["That the read lands at submission and that 0 is the answer: no probe on firmware 12.40 can hold a real APR identifier, and an unbound buffer measured 0x80020016 (D782)."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-09"

@@ -12,8 +12,9 @@ use std::sync::{Mutex, OnceLock};
 
 /// Reads a guest path into guest memory, installed by a layer that can reach the filesystem.
 ///
-/// `(guest_path, address, most)` to how many bytes arrived.
-type Reader = fn(&str, u64, u64) -> Option<usize>;
+/// `(guest_path, offset, address, most)` to how many bytes arrived: `most` bytes from `offset`
+/// into the file, fewer where the file ends first.
+type Reader = fn(&str, u64, u64, u64) -> Option<usize>;
 
 /// The installed reader, if anything installed one.
 static READER: OnceLock<Reader> = OnceLock::new();
@@ -47,12 +48,83 @@ pub(crate) fn last_resolved() -> Option<String> {
     resolved().lock().ok()?.first().cloned()
 }
 
-/// Reads `path` into `[address, address + most)`, answering how many bytes arrived.
+/// Reads `path` from `offset` into `[address, address + most)`, answering how many bytes arrived.
 ///
 /// [`None`] when nothing installed a reader, which is a different finding from a file that read
 /// zero bytes.
-pub(crate) fn deliver(path: &str, address: u64, most: u64) -> Option<usize> {
-    READER.get().and_then(|read| read(path, address, most))
+pub(crate) fn deliver(path: &str, offset: u64, address: u64, most: u64) -> Option<usize> {
+    READER
+        .get()
+        .and_then(|read| read(path, offset, address, most))
+}
+
+/// One read a command buffer holds, as `sceAmprAprCommandBufferReadFile` was asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Read {
+    /// The identifier a resolve gave the file.
+    pub id: u64,
+    /// Where in guest memory the bytes go.
+    pub into: u64,
+    /// How many bytes.
+    pub length: u64,
+    /// Where in the file they start.
+    pub offset: u64,
+}
+
+/// The reads each command buffer holds, by the buffer object's address, until it is submitted.
+///
+/// Held here rather than encoded into the guest's buffer: the encoding the platform uses is
+/// unmeasured, and the guest only hands the object back to be submitted (D782).
+fn queued() -> &'static Mutex<std::collections::BTreeMap<u64, Vec<Read>>> {
+    static QUEUED: OnceLock<Mutex<std::collections::BTreeMap<u64, Vec<Read>>>> = OnceLock::new();
+    QUEUED.get_or_init(|| Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Whether any submit has carried its reads out.
+static CARRIED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a submit has carried reads out, so a wait has nothing outstanding to wait for.
+pub(crate) fn any_carried_out() -> bool {
+    CARRIED_OUT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Adds a read to the command buffer at `buffer`; `false`, and nothing added, for an identifier
+/// no resolve gave.
+pub fn queue_read(buffer: u64, read: Read) -> bool {
+    let Some(path) = path_of(read.id) else {
+        return false;
+    };
+    tracing::debug!(
+        "{buffer:#x} queues {:#x} byte(s) from {:#x} of {path} into {:#x}",
+        read.length,
+        read.offset,
+        read.into
+    );
+    queued()
+        .lock()
+        .map(|mut held| held.entry(buffer).or_default().push(read))
+        .is_ok()
+}
+
+/// Carries out every read the command buffer at `buffer` holds, in the order they were added, and
+/// empties it: how many it carried out, or [`None`] when it held none or one could not be read in
+/// full.
+pub(crate) fn carry_out(buffer: u64) -> Option<usize> {
+    let reads = queued().lock().ok()?.remove(&buffer)?;
+    CARRIED_OUT.store(true, std::sync::atomic::Ordering::Relaxed);
+    for read in &reads {
+        let path = path_of(read.id)?;
+        let got = deliver(&path, read.offset, read.into, read.length)?;
+        if (got as u64) < read.length {
+            tracing::warn!(
+                "{path}: {got} of {} bytes from {:#x} arrived",
+                read.length,
+                read.offset
+            );
+            return None;
+        }
+    }
+    Some(reads.len())
 }
 
 /// Looks a guest path up in the title's index, answering an identifier and a size.
@@ -195,6 +267,43 @@ mod tests {
         super::remember(130, "/app0/Media/level0");
         assert_eq!(super::path_of(130).as_deref(), Some("/app0/Media/level0"));
         assert_eq!(super::path_of(0x7777_7777), None);
+    }
+
+    /// A test file of 0x40 bytes, each its own offset, read as the installed reader reads.
+    fn counting_file(path: &str, offset: u64, address: u64, most: u64) -> Option<usize> {
+        if path != "/app0/ps5/audio/audio_rel.rpf" {
+            return None;
+        }
+        let bytes: Vec<u8> = (offset..0x40.min(offset + most)).map(|b| b as u8).collect();
+        // SAFETY: the test's own buffer, `most` bytes at least.
+        unsafe { orbistoun_mem::guest::write_bytes(address, &bytes) }.then_some(bytes.len())
+    }
+
+    /// A read added to a command buffer lands, from its offset, only when the buffer is carried
+    /// out, which empties it; an identifier no resolve gave is not added (D782).
+    #[test]
+    fn a_queued_read_lands_when_its_buffer_is_carried_out() {
+        super::on_file_read(counting_file);
+        super::remember(0xf9, "/app0/ps5/audio/audio_rel.rpf");
+        let mut into = [0xa5_u8; 8];
+        let read = super::Read {
+            id: 0xf9,
+            into: into.as_mut_ptr() as u64,
+            length: 4,
+            offset: 0x10,
+        };
+        assert!(super::queue_read(0x7400_0020_62b0, read));
+        assert_eq!(into, [0xa5; 8], "nothing read before the submit");
+        assert_eq!(super::carry_out(0x7400_0020_62b0), Some(1));
+        assert_eq!(into, [0x10, 0x11, 0x12, 0x13, 0xa5, 0xa5, 0xa5, 0xa5]);
+        assert_eq!(super::carry_out(0x7400_0020_62b0), None, "emptied");
+        assert!(!super::queue_read(
+            1,
+            super::Read {
+                id: 0x0fff_0000,
+                ..read
+            }
+        ));
     }
 
     /// Writes one marker word where a stat was asked for, for the test below.
