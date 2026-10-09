@@ -19,7 +19,7 @@ use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
 use orbistoun_translate::wavefront::{
     Assembly, GeometryInputs, TableBase, TableWord, TextureSource, USER_DATA_STAGE_WORDS, UserData,
-    WINDOW_SPACE_SCALE,
+    WINDOW_SPACE_SCALE, WindowSpace,
 };
 use orbistoun_translate::{Strategy, Width, translate_with_user_data};
 
@@ -93,7 +93,7 @@ const fn stage_salt(stage: Stage) -> u64 {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct ForDraw {
     geometry: Option<GeometryInputs>,
-    window_space: bool,
+    window_space: WindowSpace,
     buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
     flat_twins: Option<FlatTwins>,
     saturated: [[bool; 2]; 2],
@@ -154,10 +154,10 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
         ^ formats
         ^ twins
         ^ saturated
-        ^ if for_draw.window_space {
-            0x5749_4e44_5350_4345
-        } else {
-            0
+        ^ match for_draw.window_space {
+            WindowSpace::Clip => 0,
+            WindowSpace::Divided => 0x5749_4e44_5350_4345,
+            WindowSpace::Undivided => 0x5749_4e44_554e_4456,
         }
 }
 
@@ -539,7 +539,7 @@ enum Unprepared {
 type FormatWords = std::sync::Arc<[orbistoun_translate::draw_buffers::BufferSource]>;
 
 /// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
-type PlainKey = (u32, u64, bool, u32);
+type PlainKey = (u32, u64, WindowSpace, u32);
 
 /// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
 /// the reason they gave; what each geometry made; and the refusals already recorded.
@@ -1106,7 +1106,7 @@ impl Pipeline {
             pixel_inputs: None,
             compute: Some(inputs),
             geometry: None,
-            window_space: false,
+            window_space: WindowSpace::Clip,
             per_invocation: None,
             // Its buffers are bound on their own where traced (D746).
             draw_buffers: true,
@@ -2052,11 +2052,9 @@ impl Pipeline {
                     Some(geometry.first_vertex),
                 ]);
             }
-            // A window-space draw's primitive shader writes its position differently (D731).
-            let window_space = crate::registers::position_space(|register| {
-                sweep.latest(draw.packet_offset, register)
-            }) == crate::registers::PositionSpace::Window;
-            written.push(Some(u32::from(window_space)));
+            // A window-space draw's primitive shader writes its position differently (D731, D780).
+            let window_space = window_space_at(&mut sweep, draw.packet_offset);
+            written.push(Some(window_space as u32));
             // The vertex stage's user data, which names the buffers whose formats a format load
             // converts by (D738).
             let vertex_words = stage_user_data(&mut sweep, draw.packet_offset, 0);
@@ -2136,7 +2134,7 @@ impl Pipeline {
         let mut by_geometry = ByGeometry::default();
         for &candidate in candidates {
             let key = (candidate.stage as u32, candidate.address);
-            let plain = self.plain_key(candidate.stage, candidate.address, false);
+            let plain = self.plain_key(candidate.stage, candidate.address, WindowSpace::Clip);
             match self.prepare_candidate(candidate, (memory, ForDraw::default()), submission) {
                 Ok(resource) => {
                     by_geometry.plain.insert(plain, Some(resource));
@@ -2214,7 +2212,7 @@ impl Pipeline {
     /// The key a module prepared for no particular draw is held under in a submission: its stage,
     /// address and position space, and the user-data count it was translated for, since a stream
     /// can give one program two counts.
-    fn plain_key(&self, stage: ShaderStage, address: u64, window_space: bool) -> PlainKey {
+    fn plain_key(&self, stage: ShaderStage, address: u64, window_space: WindowSpace) -> PlainKey {
         let count = match stage {
             ShaderStage::Vertex => self.user_data[0].count,
             ShaderStage::Fragment => self.user_data[1].count,
@@ -2263,7 +2261,7 @@ impl Pipeline {
         let Some(&fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
             return saturated;
         };
-        let plain = self.plain_key(ShaderStage::Fragment, fragment.address, false);
+        let plain = self.plain_key(ShaderStage::Fragment, fragment.address, WindowSpace::Clip);
         if let std::collections::btree_map::Entry::Vacant(entry) = by_geometry.plain.entry(plain) {
             entry.insert(
                 self.prepare_candidate(fragment, (memory, ForDraw::default()), submission)
@@ -2304,7 +2302,7 @@ impl Pipeline {
             &impl GuestMemory,
             &Result<GeometryInputs, String>,
             &[ChunkPlan],
-            bool,
+            WindowSpace,
             &[u32; USER_DATA_WORDS],
         ),
         (by_geometry, chunked): (&mut ByGeometry, &mut Vec<ResourceId>),
@@ -2508,14 +2506,18 @@ impl Pipeline {
         (memory, geometry, window_space, words): (
             &impl GuestMemory,
             &Result<GeometryInputs, String>,
-            bool,
+            WindowSpace,
             &[u32; USER_DATA_WORDS],
         ),
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
     ) -> Option<ResourceId> {
         // Only the primitive shader writes a position.
-        let window_space = window_space && candidate.stage == ShaderStage::Vertex;
+        let window_space = if candidate.stage == ShaderStage::Vertex {
+            window_space
+        } else {
+            WindowSpace::Clip
+        };
         let key = (candidate.stage as u32, candidate.address);
         // A draw that gives attributes flat twins prepares both stages for them (D742), and one
         // whose samplers clamp to half a border its pixel shader (D743).
@@ -2628,7 +2630,7 @@ impl Pipeline {
             &impl GuestMemory,
             Option<Result<GeometryInputs, String>>,
             String,
-            bool,
+            WindowSpace,
         ),
         buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
         by_geometry: &mut ByGeometry,
@@ -3153,6 +3155,16 @@ fn instruction_text(
     ))
 }
 
+/// The space a draw's primitive shader writes its position in, from `PA_CL_VTE_CNTL` at the draw
+/// at `at` (D731, D780).
+fn window_space_at(sweep: &mut crate::registers::RegisterSweep<'_>, at: u32) -> WindowSpace {
+    match crate::registers::position_space(|register| sweep.latest(at, register)) {
+        crate::registers::PositionSpace::Window => WindowSpace::Divided,
+        crate::registers::PositionSpace::WindowUndivided => WindowSpace::Undivided,
+        _ => WindowSpace::Clip,
+    }
+}
+
 /// A stage's user-data words as they stand at `at`, the stage by its index in
 /// [`USER_DATA_REGISTERS`]; a word the stream never wrote reads zero.
 fn stage_user_data(
@@ -3261,7 +3273,8 @@ fn push_geometry_commands(
                 crate::registers::PositionSpace::Clip => {
                     viewport_transform_from(|register| sweep.latest(at, register))
                 }
-                crate::registers::PositionSpace::Window => Some(ViewportTransform {
+                crate::registers::PositionSpace::Window
+                | crate::registers::PositionSpace::WindowUndivided => Some(ViewportTransform {
                     x_scale: WINDOW_SPACE_SCALE,
                     x_offset: 0.0,
                     y_scale: WINDOW_SPACE_SCALE,
@@ -4269,7 +4282,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             pixel_inputs: None,
             compute: None,
             geometry: None,
-            window_space: false,
+            window_space: WindowSpace::Clip,
             per_invocation: None,
             draw_buffers: false,
             buffer_formats: None,
@@ -4285,7 +4298,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             pixel_inputs: None,
             compute: None,
             geometry: None,
-            window_space: false,
+            window_space: WindowSpace::Clip,
             per_invocation: None,
             draw_buffers: false,
             buffer_formats: None,

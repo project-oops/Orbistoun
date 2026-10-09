@@ -2056,6 +2056,9 @@ pub enum PositionSpace {
     Clip,
     /// Window space, in radeonsi's form (D731).
     Window,
+    /// Window space before the divide (D780): every field zero - no scale or offset, and x, y and
+    /// z divided by `W` by the hardware.
+    WindowUndivided,
     /// The x/y terms off in some other form, with the value that asked for it.
     Unmodelled(u32),
 }
@@ -2067,6 +2070,8 @@ pub fn position_space(mut last: impl FnMut(u32) -> Option<u32>) -> PositionSpace
         Some(value) if value & VTE_XY_ENABLES != VTE_XY_ENABLES => {
             if value & VTE_FIELDS == VTE_WINDOW_SPACE {
                 PositionSpace::Window
+            } else if value & VTE_FIELDS == 0 {
+                PositionSpace::WindowUndivided
             } else {
                 PositionSpace::Unmodelled(value)
             }
@@ -3427,6 +3432,9 @@ mod tests {
             PositionSpace::Unmodelled(0x430),
             "not pre-divided"
         );
+        // Every field zero: window space the hardware divides by `W` (D780), PPSA02664's
+        // fullscreen passes.
+        assert_eq!(with(Some(0)), PositionSpace::WindowUndivided);
     }
 
     /// The vertex program is read from `PGM_LO/HI_ES`, not `PGM_LO/HI_VS`: on this generation the

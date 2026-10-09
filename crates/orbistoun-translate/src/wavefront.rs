@@ -402,7 +402,7 @@ pub struct UserData {
     /// module then writes the clip-space position that, under the viewport [`WINDOW_SPACE_SCALE`]
     /// names, lands on the same pixel.
     #[serde(default)]
-    pub window_space: bool,
+    pub window_space: WindowSpace,
     /// Whether a primitive shader runs one invocation per lane (D760), and the host's subgroup width
     /// it runs on: a workgroup of the wave's width, each invocation one lane, its masks built and
     /// its lanes read by subgroup ballot and shuffle where the subgroup holds the whole wave, and
@@ -547,6 +547,32 @@ pub fn reads_buffer_formats(decode: &Decode, encodings: &EncodingTable) -> bool 
 /// exact; and large enough that every position on a target of up to `S` pixels lies inside the
 /// clip volume.
 pub const WINDOW_SPACE_SCALE: f32 = 8192.0;
+
+/// The space a primitive shader's position export is in, as the draw's `PA_CL_VTE_CNTL` says.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WindowSpace {
+    /// Clip space, mapped through the viewport transform.
+    #[default]
+    Clip,
+    /// Window space in radeonsi's form (D731): x, y and z already divided, the fourth component
+    /// `1/W`.
+    Divided,
+    /// Window space before the divide (D780): `PA_CL_VTE_CNTL` zero - no scale or offset, and the
+    /// hardware divides x, y and z by the fourth component, `W`, to reach the pixel and its depth.
+    Undivided,
+}
 
 /// What the geometry engine hands a primitive shader for a draw one subgroup holds whole (D730):
 /// the draw's vertices, one per vertex thread from `first_vertex`, and its primitives of three
@@ -1453,7 +1479,7 @@ pub struct Wavefront<'a> {
     rectangles: Option<RectangleCopies>,
     /// Whether a mesh module's position export is in window space (D731); see
     /// [`UserData::window_space`].
-    window_space: bool,
+    window_space: WindowSpace,
     /// Each draw buffer's descriptor's fourth word at the draw, by slot (D738).
     buffer_formats: Option<BufferFormats>,
     /// The primitive a mesh module assembles. Read only at [`Stage::Mesh`].
@@ -3083,6 +3109,20 @@ impl<'a> Wavefront<'a> {
         ]
     }
 
+    /// The clip-space position that lands an undivided window-space one on its pixel (D780):
+    /// `(X, Y, Z, W)`, whose pixel the hardware takes as `(X / W, Y / W)` and depth as `Z / W`,
+    /// becomes `(X / S, Y / S, Z, W)` for `S` the [`WINDOW_SPACE_SCALE`] the draw's viewport scales
+    /// by. Vulkan divides by `W` and scales by `S`, giving back the same pixel and depth.
+    fn undivided_window_to_clip(&mut self, [x, y, depth, w]: [Id; 4]) -> [Id; 4] {
+        let inverse_scale = self.float_constant(WINDOW_SPACE_SCALE.recip());
+        [
+            self.float_binary(op::FMUL, x, inverse_scale),
+            self.float_binary(op::FMUL, y, inverse_scale),
+            depth,
+            w,
+        ]
+    }
+
     /// One 32-bit float operation on two float values.
     fn float_binary(&mut self, operation: u16, lhs: Id, rhs: Id) -> Id {
         let result = self.builder.id();
@@ -3176,10 +3216,10 @@ impl Model for Wavefront<'_> {
 
     fn write_mesh_position(&mut self, lane: u32, components: [Id; 4]) -> Option<()> {
         let mesh = self.mesh.clone()?;
-        let components = if self.window_space {
-            self.window_to_clip(components)
-        } else {
-            components
+        let components = match self.window_space {
+            WindowSpace::Clip => components,
+            WindowSpace::Divided => self.window_to_clip(components),
+            WindowSpace::Undivided => self.undivided_window_to_clip(components),
         };
         let slot = self.lane_slot(lane);
         let member = Self::constant(self, 0);

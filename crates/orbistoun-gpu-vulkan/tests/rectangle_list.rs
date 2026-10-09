@@ -229,7 +229,7 @@ fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
 #[test]
 fn a_window_space_rectangle_covers_the_pixels_its_corners_name() {
     use orbistoun_gpu_vulkan::framebuffer::draw_mesh_over_viewport;
-    use orbistoun_translate::wavefront::{UserData, WINDOW_SPACE_SCALE};
+    use orbistoun_translate::wavefront::{UserData, WINDOW_SPACE_SCALE, WindowSpace};
     if !device_or_skip("a_window_space_rectangle_covers_the_pixels_its_corners_name") {
         return;
     }
@@ -246,7 +246,7 @@ fn a_window_space_rectangle_covers_the_pixels_its_corners_name() {
         (Stage::Mesh, MeshPrimitive::Rectangles),
         Window::default(),
         UserData {
-            window_space: true,
+            window_space: WindowSpace::Divided,
             ..UserData::default()
         },
     )
@@ -290,6 +290,80 @@ fn a_window_space_rectangle_covers_the_pixels_its_corners_name() {
                     pixels.at(x, y),
                     Some(expected),
                     "pixel ({x}, {y}) with 1/W {reciprocal_w}"
+                );
+            }
+        }
+    }
+}
+
+/// Undivided window-space positions (D780): with `PA_CL_VTE_CNTL` zero - no scale or offset, and x,
+/// y and z not divided by `W` before they reach the hardware - the pixel is the position divided by
+/// its fourth component. Corners at pixels `(2, 1)`, `(2, 5)` and `(6, 1)` given multiplied by `W`
+/// cover exactly the pixels `2..6` by `1..5`, for `W` one and two alike.
+#[test]
+fn an_undivided_window_space_rectangle_covers_the_pixels_its_corners_name() {
+    use orbistoun_gpu_vulkan::framebuffer::draw_mesh_over_viewport;
+    use orbistoun_translate::wavefront::{UserData, WINDOW_SPACE_SCALE, WindowSpace};
+    if !device_or_skip("an_undivided_window_space_rectangle_covers_the_pixels_its_corners_name") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let decoded = decode_program(&primitive_shader(), &encodings, &operands);
+    let module = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Auto,
+            width: Width::default(),
+        },
+        (Stage::Mesh, MeshPrimitive::Rectangles),
+        Window::default(),
+        UserData {
+            window_space: WindowSpace::Undivided,
+            ..UserData::default()
+        },
+    )
+    .expect("translates with undivided window-space positions")
+    .module;
+    let fragment = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+    let viewport = orbistoun_gpu::ViewportTransform {
+        x_scale: WINDOW_SPACE_SCALE,
+        x_offset: 0.0,
+        y_scale: WINDOW_SPACE_SCALE,
+        y_offset: 0.0,
+        depth: orbistoun_gpu::DepthMapping::IDENTITY,
+    };
+    for w in [1.0f32, 2.0] {
+        let corners = [[2.0f32, 1.0], [2.0, 5.0], [6.0, 1.0]];
+        let mut memory = vec![0u32; 64];
+        for (vertex, at) in [0usize, 12, 24].into_iter().enumerate() {
+            let [x, y] = corners[vertex];
+            for (component, value) in [x * w, y * w, 0.0, w].into_iter().enumerate() {
+                memory[at + component] = value.to_bits();
+            }
+        }
+        let (pixels, _) = draw_mesh_over_viewport(
+            &module,
+            &fragment,
+            [0.0, 0.0, 1.0, 1.0],
+            (8, 6),
+            &memory,
+            viewport,
+        )
+        .expect("the undivided window-space draw ran");
+        for y in 0..6 {
+            for x in 0..8 {
+                let inside = (2..6).contains(&x) && (1..5).contains(&y);
+                let expected = if inside {
+                    [0, 255, 0, 255]
+                } else {
+                    [0, 0, 255, 255]
+                };
+                assert_eq!(
+                    pixels.at(x, y),
+                    Some(expected),
+                    "pixel ({x}, {y}) with W {w}"
                 );
             }
         }

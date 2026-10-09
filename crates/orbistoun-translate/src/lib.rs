@@ -756,7 +756,7 @@ mod tests {
                     pixel_inputs: None,
                     compute: None,
                     geometry: None,
-                    window_space: false,
+                    window_space: crate::wavefront::WindowSpace::Clip,
                     per_invocation: None,
                     draw_buffers: false,
                     buffer_formats: None,
