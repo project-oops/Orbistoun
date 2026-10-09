@@ -81,7 +81,8 @@ type Sizer = fn(&str) -> Option<u64>;
 /// The installed sizer, if anything installed one.
 static SIZER: OnceLock<Sizer> = OnceLock::new();
 
-/// Installs what [`synthesise`] asks for a file's size.
+/// Installs what the identifiers synthesised for files outside the index (D782) ask for a file's
+/// size.
 pub fn on_file_size(sizer: Sizer) {
     let _ = SIZER.set(sizer);
 }
