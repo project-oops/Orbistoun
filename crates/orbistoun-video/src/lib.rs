@@ -697,6 +697,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             font::font_create_library_with_edition,
         ),
         ("sceFontDestroyLibrary", font::font_destroy_library),
+        ("sceFontSupportSystemFonts", font::font_support_system_fonts),
+        (
+            "sceFontSupportExternalFonts",
+            font::font_support_external_fonts,
+        ),
         ("sceVideoOutOpen", video_out_open),
         ("sceVideoOutClose", video_out_close),
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),

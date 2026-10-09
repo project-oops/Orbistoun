@@ -55,3 +55,31 @@ known_by = "measured"
 cites = "obSCEne REQ-20261007T0850Z-fm02, reports/hardware/20261007-102530-eboot.obs.log lines 4379-4409 (130-layout/font-create-library-ft)"
 found_in = []
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceFontSupportSystemFonts"
+arity = 1
+purpose = "Sets up a font library to open the system's fonts: (library)."
+edge_cases = [
+    "MEASURED (130-layout/font-create-library-ft, a library made by sceFontCreateLibraryWithEdition): rc 0x0, and exactly one pointer written into the library, at +0xa0; asked again on the same library it answers 0x80460021 and changes nothing.",
+    "MEASURED (200-census/libSceFont/sceFontSupportSystemFonts): a null library answers 0x80460004.",
+    "orbistoun stores a pointer to a zeroed block the library owns (D151) and answers as measured. PPSA21564 asserts on a non-zero answer at FontSystem.cpp:74.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-fm04 and REQ-cn08, reports/hardware/20261009-151440-eboot.obs.log, 130-layout/font-create-library-ft."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceFontSupportExternalFonts"
+arity = 3
+purpose = "Sets up a font library to open fonts the title supplies: (library, 0, 0)."
+edge_cases = [
+    "MEASURED (130-layout/font-create-library-ft): rc 0x0, and exactly one pointer written into the library, at +0xa8; asked again it answers 0x80460021 and changes nothing.",
+    "MEASURED (200-census/libSceFont/sceFontSupportExternalFonts): a null library answers 0x80460004.",
+    "orbistoun stores a pointer to a zeroed block the library owns (D151) and answers as measured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-fm04 and REQ-cn08, reports/hardware/20261009-151440-eboot.obs.log, 130-layout/font-create-library-ft."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-09"

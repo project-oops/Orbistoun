@@ -57,3 +57,48 @@ fn a_library_is_selected_created_and_destroyed_as_measured() {
     assert_eq!(create(0), 0x8046_0002, "`arm3-null-mem`");
     assert_eq!(library, 0, "written 0 first");
 }
+
+/// `sceFontSupportSystemFonts(library)` and `sceFontSupportExternalFonts(library, 0, 0)` each store
+/// a pointer in the library - at `+0xa0` and `+0xa8` - and answer 0; asked again on the same library
+/// they answer `0x80460021` and change nothing; a null library answers `0x80460004` (REQ-fm04,
+/// `reports/hardware/20261009-151440-eboot.obs.log`, `130-layout/font-create-library-ft`).
+#[test]
+fn font_support_is_set_up_once_per_library_as_measured() {
+    let selection = call("sceFontSelectLibraryFt", [0, 0, 0, 0, 0, 0]);
+    let mut memory = [0_u8; 0x40];
+    let mut library = 0_u64;
+    let out = std::ptr::addr_of_mut!(library) as usize as u64;
+    assert_eq!(
+        call(
+            "sceFontCreateLibraryWithEdition",
+            [memory.as_mut_ptr() as usize as u64, selection, 0, out, 0, 0],
+        ),
+        0
+    );
+    let word = |at: u64| {
+        // SAFETY: inside the library block the create answered.
+        unsafe { std::ptr::read((library + at) as usize as *const u64) }
+    };
+    assert_eq!(
+        call("sceFontSupportSystemFonts", [library, 0, 0, 0, 0, 0]),
+        0
+    );
+    let system = word(0xa0);
+    assert_ne!(system, 0, "a pointer at +0xa0");
+    assert_eq!(word(0xa8), 0, "external not yet");
+    assert_eq!(
+        call("sceFontSupportExternalFonts", [library, 0, 0, 0, 0, 0]),
+        0
+    );
+    assert_ne!(word(0xa8), 0, "a pointer at +0xa8");
+    assert_eq!(
+        call("sceFontSupportSystemFonts", [library, 0, 0, 0, 0, 0]),
+        0x8046_0021
+    );
+    assert_eq!(
+        call("sceFontSupportExternalFonts", [library, 0, 0, 0, 0, 0]),
+        0x8046_0021
+    );
+    assert_eq!(word(0xa0), system, "the second call changed nothing");
+    assert_eq!(call("sceFontSupportSystemFonts", [0; 6]), 0x8046_0004);
+}

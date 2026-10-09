@@ -26,6 +26,10 @@ guest_module! {
         "sceFontCreateLibraryWithEdition" => 4,
         // (&library)
         "sceFontDestroyLibrary" => 1,
+        // (library)
+        "sceFontSupportSystemFonts" => 1,
+        // (library, 0, 0)
+        "sceFontSupportExternalFonts" => 3,
     }
 }
 
@@ -124,6 +128,47 @@ pub(crate) fn font_create_library_with_edition(args: &[u64; GUEST_ARG_REGISTERS]
     // SAFETY: as above.
     unsafe { guest::write_u64(out, library) };
     OK
+}
+
+/// What a support call answers on a library it has already set up (`0x80460021`, measured).
+const ALREADY_SUPPORTED: u64 = 0x8046_0021;
+/// What a support call answers for a null library (`0x80460004`, the census's zero arguments).
+const NO_LIBRARY: u64 = 0x8046_0004;
+/// Where the library holds the system fonts' support object, and the external fonts'.
+const SYSTEM_SUPPORT_AT: u64 = 0xa0;
+const EXTERNAL_SUPPORT_AT: u64 = 0xa8;
+
+/// Sets up one kind of font support on a library: a pointer to a support object stored at `slot`
+/// and 0 answered, or `0x80460021` and nothing changed when the slot already holds one. As
+/// REQ-fm04 measured on a real library (`20261009-151440-eboot.obs.log`, five bytes changed at
+/// `+0xa0` or `+0xa8`, a repeat refused). The object is the library's own, a zeroed block here
+/// (D151).
+fn support_fonts(library: u64, slot: u64) -> u64 {
+    if library == 0 {
+        return NO_LIBRARY;
+    }
+    // SAFETY: the guest's library block, read through the checked accessor.
+    match unsafe { guest::read_u64(library + slot) } {
+        Some(0) => {}
+        Some(_) => return ALREADY_SUPPORTED,
+        None => return NO_LIBRARY,
+    }
+    let Some(object) = zeroed_block(LIBRARY_BYTES) else {
+        return u64::from(orbistoun_core::GuestError::NoMemory.as_raw());
+    };
+    // SAFETY: as above, the slot just read.
+    unsafe { guest::write_u64(library + slot, object) };
+    OK
+}
+
+/// `sceFontSupportSystemFonts(library)`: the system fonts' support, at `+0xa0`.
+pub(crate) fn font_support_system_fonts(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    support_fonts(args[0], SYSTEM_SUPPORT_AT)
+}
+
+/// `sceFontSupportExternalFonts(library, 0, 0)`: the external fonts' support, at `+0xa8`.
+pub(crate) fn font_support_external_fonts(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    support_fonts(args[0], EXTERNAL_SUPPORT_AT)
 }
 
 /// `sceFontDestroyLibrary(&library)`: clears `library` and answers 0 (`arm4-destroy`). The block
