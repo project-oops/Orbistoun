@@ -87,6 +87,8 @@ pub mod sysmodule {
             "sceSysmoduleLoadModule" => 1,
             "sceSysmoduleUnloadModule" => 1,
             "sceSysmoduleIsLoaded" => 1,
+            // An address, flags, and the block to fill: libkernel's unwind query (D778).
+            "sceSysmoduleGetModuleInfoForUnwind" => 3,
         }
     }
 }
@@ -628,6 +630,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             send_system_notification_with_text,
         ),
         ("sceSysmoduleLoadModule", sysmodule_load_module),
+        (
+            "sceSysmoduleGetModuleInfoForUnwind",
+            orbistoun_kernel::get_module_info_for_unwind,
+        ),
         ("sceSysmoduleUnloadModule", sysmodule_unload_module),
         ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
         ("sceAppInstUtilInitialize", app_inst_util_initialize),

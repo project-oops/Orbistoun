@@ -6134,8 +6134,8 @@ mod unwind_block {
 ///
 /// Answers `0` with the block filled. A block stating less than its full size, or an address in no
 /// placed module, is refused with the placeholder; the unwinder then searches the frames
-/// registered with it, as it does on a miss.
-fn get_module_info_for_unwind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// registered with it, as it does on a miss. `libSceSysmodule`'s spelling answers the same (D778).
+pub fn get_module_info_for_unwind(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (address, out) = (args[0], args[2]);
     let refused = u64::from(GuestError::Unimplemented.as_raw());
     // SAFETY: an address the guest passed for this call, valid by its contract.

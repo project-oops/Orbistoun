@@ -32,3 +32,15 @@ purpose = "Unloads a system module the guest loaded by id."
 returns = "status"
 known_by = "assumed"
 found_on = "2026-09-01"
+
+[[function]]
+name = "sceSysmoduleGetModuleInfoForUnwind"
+arity = 3
+purpose = "The unwind tables of the module holding an address: (address, flags, info), the libkernel query sceKernelGetModuleInfoForUnwind answers, under libSceSysmodule's name (D778)."
+returns = "status"
+edge_cases = ["Answers exactly as sceKernelGetModuleInfoForUnwind does, the block and the refusals alike (D768)."]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The same query as libkernel's of the same name; nothing on the target has compared them."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-09"
