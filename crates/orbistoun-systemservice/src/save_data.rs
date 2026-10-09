@@ -2,8 +2,9 @@
 //!
 //! `sceSaveDataInitialize3` answers as obSCEne measured it through a static import (`-d7a1`, sweep
 //! 20260927-204316, check `130-layout/savedata-layout`), and `sceSaveDataSetupSaveDataMemory2` as
-//! `-5d20` measured it (sweep 20260928-100713, check `130-layout/savedata-memory-5d20`). The other
-//! names are declared and unserved.
+//! `-5d20` measured it (sweep 20260928-100713, check `130-layout/savedata-memory-5d20`), and
+//! `sceSaveDataGetSaveDataMemory2` before set-up as the census measured it. The other names are
+//! declared and unserved.
 //!
 //! The other arities are `6`, the trampoline's full capture, not a claim about how many arguments
 //! a function takes: a wrong arity only degrades a trace, while a wrong name is unreachable.
@@ -89,9 +90,36 @@ pub(crate) fn setup_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
     }
 }
 
+/// What `sceSaveDataGetSaveDataMemory2` answered on a console with no save-data memory set up, with
+/// every argument a buffer and with every argument zero, writing none of them (obSCEne census
+/// `200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2`, `20261009-151440-eboot.obs.log`).
+const READ_BEFORE_SET_UP: u64 = 0x809f_0001;
+
+/// What `sceSaveDataGetSaveDataMemory2` answers, or `None` where nothing measured it: a read after
+/// set-up is unmeasured (REQ-20261009T1930Z-sd01 asks).
+fn get_answer(set_up: bool) -> Option<u64> {
+    (!set_up).then_some(READ_BEFORE_SET_UP)
+}
+
+/// `sceSaveDataGetSaveDataMemory2(get)`: refused with `0x809f0001` before save-data memory is set
+/// up, as measured, writing nothing; after set-up the placeholder.
+pub(crate) fn get_save_data_memory2(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    get_answer(MEMORY_SET_UP.load(Ordering::Acquire))
+        .unwrap_or_else(|| u64::from(GuestError::Unimplemented.as_raw()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{initialize3, setup_save_data_memory2};
+
+    /// Before save-data memory is set up, a read answers `0x809f0001` (obSCEne census
+    /// `200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2`); after it, the answer is
+    /// unmeasured and refused with the placeholder.
+    #[test]
+    fn a_read_before_set_up_is_refused_as_measured() {
+        assert_eq!(super::get_answer(false), Some(0x809f_0001));
+        assert_eq!(super::get_answer(true), None);
+    }
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
     /// The first set-up after initialisation answers `0` and writes nothing; every later one answers

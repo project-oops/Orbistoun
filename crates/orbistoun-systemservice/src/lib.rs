@@ -632,105 +632,112 @@ fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Implementations this crate provides, by symbol name. Names rather than hashes, so the table can
 /// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[
-        (
-            "_ZN3sce4Json11InitializerC1Ev",
-            json2::initializer_construct,
-        ),
-        (
-            "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE",
-            json2::initializer_initialize,
-        ),
-        (
-            "_ZN3sce4Json11Initializer9terminateEv",
-            json2::initializer_terminate,
-        ),
-        (
-            "_ZN3sce4Json12MemAllocatorC2Ev",
-            json2::mem_allocator_construct,
-        ),
-        ("sceUserServiceInitialize", user_service_initialize),
-        ("sceUserServiceTerminate", user_service_terminate),
-        (
-            "sceUserServiceGetInitialUser",
-            user_service_get_initial_user,
-        ),
-        (
-            "sceUserServiceGetLoginUserIdList",
-            user_service_get_login_user_id_list,
-        ),
-        ("sceUserServiceGetUserName", user_service_get_user_name),
-        ("sceUserServiceGetAgeLevel", user_service_get_age_level),
-        (
-            "sceUserServiceGetForegroundUser",
-            user_service_get_foreground_user,
-        ),
-        (
-            "sceUserServiceGetAccessibilityVibration",
-            user_service_get_accessibility,
-        ),
-        (
-            "sceUserServiceGetAccessibilityTriggerEffect",
-            user_service_get_accessibility,
-        ),
-        (
-            "sceSystemServiceGetNoticeScreenSkipFlag",
-            system_service_get_notice_screen_skip_flag,
-        ),
-        (
-            "sceUserServiceGetGamePresets",
-            user_service_get_game_presets,
-        ),
-        ("sceUserServiceGetEvent", user_service_get_event),
-        ("sceSystemServiceGetStatus", get_status),
-        ("sceSystemServiceReceiveEvent", receive_event),
-        (
-            "sceSystemServiceGetHdrToneMapLuminance",
-            get_hdr_tone_map_luminance,
-        ),
-        ("sceErrorDialogInitialize", error_dialog_initialize),
-        ("sceSystemServiceParamGetInt", param_get_int),
-        ("sceSystemServiceHideSplashScreen", hide_splash_screen),
-        (
-            "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet",
-            disable_notice_screen_skip_flag_auto_set,
-        ),
-        ("sceSystemServiceGetAppIdOfBigApp", get_app_id_of_big_app),
-        ("sceSystemServiceGetMainAppTitleId", get_main_app_title_id),
-        ("sceSystemServiceIsAppSuspended", is_app_suspended),
-        ("sceSystemServiceKillApp", kill_app),
-        ("sceSystemServiceNavigateToGoHome", navigate_to_go_home),
-        ("sceSystemServicePowerTick", power_tick),
-        (
-            "sceSysUtilSendSystemNotificationWithText",
-            send_system_notification_with_text,
-        ),
-        ("sceSysmoduleLoadModule", sysmodule_load_module),
-        (
-            "sceSysmoduleGetModuleInfoForUnwind",
-            orbistoun_kernel::get_module_info_for_unwind,
-        ),
-        ("sceSysmoduleUnloadModule", sysmodule_unload_module),
-        ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
-        ("sceAppInstUtilInitialize", app_inst_util_initialize),
-        ("sceAppInstUtilTerminate", app_inst_util_terminate),
-        ("sceAppInstUtilAppInstallAll", app_inst_util_app_install_all),
-        ("Wudg3Xe3heE", app_inst_util_app_install_all),
-        ("sceSystemServiceLaunchWebBrowser", launch_web_browser),
-        (
-            "sceLncUtilGetAppIdOfRunningBigApp",
-            lnc_util_get_app_id_of_running_big_app,
-        ),
-        ("sceLncUtilGetAppTitleId", lnc_util_get_app_title_id),
-        ("sceLncUtilSuspendApp", lnc_util_suspend_app),
-        ("sceLncUtilKillApp", lnc_util_kill_app),
-        ("sceSaveDataInitialize3", save_data::initialize3),
-        (
-            "sceSaveDataSetupSaveDataMemory2",
-            save_data::setup_save_data_memory2,
-        ),
-    ]
+    IMPLEMENTATIONS
 }
+
+/// The list [`implementations`] answers.
+const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
+    (
+        "_ZN3sce4Json11InitializerC1Ev",
+        json2::initializer_construct,
+    ),
+    (
+        "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE",
+        json2::initializer_initialize,
+    ),
+    (
+        "_ZN3sce4Json11Initializer9terminateEv",
+        json2::initializer_terminate,
+    ),
+    (
+        "_ZN3sce4Json12MemAllocatorC2Ev",
+        json2::mem_allocator_construct,
+    ),
+    ("sceUserServiceInitialize", user_service_initialize),
+    ("sceUserServiceTerminate", user_service_terminate),
+    (
+        "sceUserServiceGetInitialUser",
+        user_service_get_initial_user,
+    ),
+    (
+        "sceUserServiceGetLoginUserIdList",
+        user_service_get_login_user_id_list,
+    ),
+    ("sceUserServiceGetUserName", user_service_get_user_name),
+    ("sceUserServiceGetAgeLevel", user_service_get_age_level),
+    (
+        "sceUserServiceGetForegroundUser",
+        user_service_get_foreground_user,
+    ),
+    (
+        "sceUserServiceGetAccessibilityVibration",
+        user_service_get_accessibility,
+    ),
+    (
+        "sceUserServiceGetAccessibilityTriggerEffect",
+        user_service_get_accessibility,
+    ),
+    (
+        "sceSystemServiceGetNoticeScreenSkipFlag",
+        system_service_get_notice_screen_skip_flag,
+    ),
+    (
+        "sceUserServiceGetGamePresets",
+        user_service_get_game_presets,
+    ),
+    ("sceUserServiceGetEvent", user_service_get_event),
+    ("sceSystemServiceGetStatus", get_status),
+    ("sceSystemServiceReceiveEvent", receive_event),
+    (
+        "sceSystemServiceGetHdrToneMapLuminance",
+        get_hdr_tone_map_luminance,
+    ),
+    ("sceErrorDialogInitialize", error_dialog_initialize),
+    ("sceSystemServiceParamGetInt", param_get_int),
+    ("sceSystemServiceHideSplashScreen", hide_splash_screen),
+    (
+        "sceSystemServiceDisableNoticeScreenSkipFlagAutoSet",
+        disable_notice_screen_skip_flag_auto_set,
+    ),
+    ("sceSystemServiceGetAppIdOfBigApp", get_app_id_of_big_app),
+    ("sceSystemServiceGetMainAppTitleId", get_main_app_title_id),
+    ("sceSystemServiceIsAppSuspended", is_app_suspended),
+    ("sceSystemServiceKillApp", kill_app),
+    ("sceSystemServiceNavigateToGoHome", navigate_to_go_home),
+    ("sceSystemServicePowerTick", power_tick),
+    (
+        "sceSysUtilSendSystemNotificationWithText",
+        send_system_notification_with_text,
+    ),
+    ("sceSysmoduleLoadModule", sysmodule_load_module),
+    (
+        "sceSysmoduleGetModuleInfoForUnwind",
+        orbistoun_kernel::get_module_info_for_unwind,
+    ),
+    ("sceSysmoduleUnloadModule", sysmodule_unload_module),
+    ("sceSysmoduleIsLoaded", sysmodule_is_loaded),
+    ("sceAppInstUtilInitialize", app_inst_util_initialize),
+    ("sceAppInstUtilTerminate", app_inst_util_terminate),
+    ("sceAppInstUtilAppInstallAll", app_inst_util_app_install_all),
+    ("Wudg3Xe3heE", app_inst_util_app_install_all),
+    ("sceSystemServiceLaunchWebBrowser", launch_web_browser),
+    (
+        "sceLncUtilGetAppIdOfRunningBigApp",
+        lnc_util_get_app_id_of_running_big_app,
+    ),
+    ("sceLncUtilGetAppTitleId", lnc_util_get_app_title_id),
+    ("sceLncUtilSuspendApp", lnc_util_suspend_app),
+    ("sceLncUtilKillApp", lnc_util_kill_app),
+    ("sceSaveDataInitialize3", save_data::initialize3),
+    (
+        "sceSaveDataGetSaveDataMemory2",
+        save_data::get_save_data_memory2,
+    ),
+    (
+        "sceSaveDataSetupSaveDataMemory2",
+        save_data::setup_save_data_memory2,
+    ),
+];
 
 #[cfg(test)]
 mod tests {
