@@ -228,6 +228,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAudioOutGetPortState", audio_out_get_port_state),
         ("sceAudioOutSetVolume", audio_out_set_volume),
         ("sceAjmInitialize", ajm::ajm_initialize),
+        ("sceAjmModuleRegister", ajm::ajm_module_register),
+        ("sceAjmFinalize", ajm::ajm_finalize),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
     ]
 }

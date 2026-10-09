@@ -13,3 +13,30 @@ known_by = "measured"
 cites = "obSCEne REQ-cn10 and REQ-aj01, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls; reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAjm/sceAjmInitialize."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceAjmModuleRegister"
+arity = 3
+purpose = "Registers a codec with an audio codec job manager context: (ctx, codec, 0)."
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 1, on context 0x15): codecs 0, 1, 2 and 3 each answered 0x0 the first time and 0x80930009 on a repeat.",
+    "orbistoun answers the same for a live context; a context never issued or already finalised, and codecs past 3, are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T1430Z-aj01, reports/hardware/20261009-215800-eboot.log lines 4282-4290."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA25872-app0"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "sceAjmFinalize"
+arity = 1
+purpose = "Ends an audio codec job manager context: (ctx)."
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 1): 0x0 for context 0x15 and for 0x16.",
+    "orbistoun answers 0 for a live context and ends it, dropping its registrations; any other context is unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T1430Z-aj01, reports/hardware/20261009-215800-eboot.log lines 4291-4297."
+found_on = "2026-10-09"
