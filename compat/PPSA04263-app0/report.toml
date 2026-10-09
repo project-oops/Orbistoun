@@ -6,7 +6,7 @@ master_version = "01.00"
 
 [reproduce]
 module_sha256 = "e9fb70c05d1f2ac4fd220f50fb0dfb26e79f2f1ddae2b7d65d7bfcb1f1c3108d"
-limit_seconds = 20
+limit_seconds = 120
 frame_every = 30
 sheet_frames = 10
 frames = "local"
@@ -17,17 +17,17 @@ frames = "local"
 
 [status]
 reach = "entered"
-outcome = "image+0x19676d7"
-imports = 78
-calls = 38813
-standing = 99
+outcome = "image+0x2bf156c"
+imports = 148
+calls = 68036
+standing = 100
 default_return = "unimplemented"
-unanswered = 3
-limit_seconds = 20
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
-link_plan = "19f92dc4726302a2"
-link_plan_stored = "new"
+unanswered = 5
+limit_seconds = 120
+build = "v0.1.0 - 51cfb81"
+measured_on = "2026-10-09"
+link_plan = "7a9afb165e73b6f2"
+link_plan_stored = "match"
 
 [experiment]
 reach = "entered"

@@ -30,9 +30,9 @@ out of date.
 | PPSA25872-app0 | flipped | 308 | 8,873,808 | 100% | `ran to the time limit` | `c80e1ee97b5382f3` new |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
+| PPSA04263-app0 | entered | 148 | 68,036 | 100% | `image+0x2bf156c` | `7a9afb165e73b6f2` match |
 | PPSA21564-app0 | entered | 103 | 505,299 | 100% | `image+0x2990db` | `e14140f4ef1f171b` new |
 | MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
-| PPSA04263-app0 | entered | 78 | 38,813 | 99% | `image+0x19676d7` | `19f92dc4726302a2` new |
 | MCUB00001 | entered | 67 | 50,348 | 100% | `ran to the time limit` | `ecc399008f7c33ff` new |
 | GCTS00001 | entered | 65 | 28,019 | 100% | `image+0x1b67c9` | `91f982d1d31cf359` new |
 | DRIP00001 | entered | 62 | 63,336 | 100% | `ran to the time limit` | `5e02052f2e0b06cd` new |
@@ -90,9 +90,9 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1126 / 968 |
+| Functions declared / implemented | 1151 / 993 |
 | Declared in a library that serves nothing | 54 across 9 libraries - names written down, no implementation |
-| Recorded behaviours | 996 - 398 published, 152 measured, 124 guest-observed, 305 assumed |
+| Recorded behaviours | 1021 - 398 published, 177 measured, 124 guest-observed, 305 assumed |
 | Open questions a hardware probe could settle | 882 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
