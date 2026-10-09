@@ -14,6 +14,8 @@ out of date.
 | PPSA28061-app0 | presented | 157 | 566,231 | 100% | `ran to the time limit` | `76feb9bce01fde24` match |
 | STKT00001 | presented | 149 | 7,557,561 | 100% | `ran to the time limit` | `e9c3927fc3b26eb7` match |
 | CRFT00001 | presented | 106 | 345,461 | 100% | `ran to the time limit` | `5ec4c46ef3083591` match |
+| TSHP00001 | presented | 72 | 3,421,974 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` match |
+| SOHK00001 | presented | 72 | 4,303,539 | 100% | `ran to the time limit` | `b1a48bbb026652be` new |
 | OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
 | BGII00001 | presented | 55 | 6,267,850 | 100% | `ran to the time limit` | `135e110d3e230943` new |
 | BUGD00001 | presented | 55 | 88,848,677 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` new |
@@ -88,9 +90,9 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1125 / 967 |
+| Functions declared / implemented | 1126 / 968 |
 | Declared in a library that serves nothing | 54 across 9 libraries - names written down, no implementation |
-| Recorded behaviours | 995 - 398 published, 151 measured, 124 guest-observed, 305 assumed |
+| Recorded behaviours | 996 - 398 published, 152 measured, 124 guest-observed, 305 assumed |
 | Open questions a hardware probe could settle | 882 |
 | Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 

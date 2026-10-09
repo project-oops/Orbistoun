@@ -5,6 +5,8 @@ PPSA99980              presented  215 imports (206 answered)     416694 calls  1
 PPSA28061-app0         presented  157 imports (150 answered)     566231 calls  100% standing   ran to the time limit
 STKT00001              presented  149 imports (144 answered)    7557561 calls  100% standing   ran to the time limit
 CRFT00001              presented  106 imports (100 answered)     345461 calls  100% standing   ran to the time limit
+TSHP00001              presented   72 imports (68 answered)    3421974 calls  100% standing   ran to the time limit
+SOHK00001              presented   72 imports (67 answered)    4303539 calls  100% standing   ran to the time limit
 OPSY00001              presented   65 imports (57 answered)      23006 calls  100% standing   ran to the time limit
 BGII00001              presented   55 imports (47 answered)    6267850 calls  100% standing   ran to the time limit
 BUGD00001              presented   55 imports (47 answered)   88848677 calls  100% standing   ran to the time limit

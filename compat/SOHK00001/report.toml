@@ -1,0 +1,31 @@
+[title]
+id = "SOHK00001"
+name = "Ship of Harkinian"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "060d1fd242e2dcb73e5483ad8fcbe1dd6946fe7066dad3c86674fe3233b7606b"
+limit_seconds = 120
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 72
+calls = 4303539
+standing = 100
+default_return = "unimplemented"
+frames = 1147
+unanswered = 5
+limit_seconds = 120
+build = "v0.1.0 - 06f66d3"
+measured_on = "2026-10-09"
+link_plan = "b1a48bbb026652be"
+link_plan_stored = "new"

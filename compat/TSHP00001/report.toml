@@ -1,0 +1,31 @@
+[title]
+id = "TSHP00001"
+name = "2 Ship 2 Harkinian"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "28dc00fa7003619e761f0e742b99e584ef032112e3320a3ce9b18984e5b3347f"
+limit_seconds = 120
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 72
+calls = 3421974
+standing = 100
+default_return = "unimplemented"
+frames = 817
+unanswered = 4
+limit_seconds = 120
+build = "v0.1.0 - 06f66d3"
+measured_on = "2026-10-09"
+link_plan = "3ef8c8d01946b36b"
+link_plan_stored = "match"
