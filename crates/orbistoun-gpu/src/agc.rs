@@ -283,22 +283,33 @@ const VGT_PRIMITIVE_TYPE_OFFSET: u32 = 0x242;
 /// `VGT_GS_OUT_PRIM_TYPE`'s context offset (`gfx103.json`), named at `prim_state + 0x8`.
 const VGT_GS_OUT_PRIM_TYPE_OFFSET: u32 = 0x29b;
 
+/// The bytes of `prim_state` a title copies into an indirect register load: two `(offset, value)`
+/// pairs (D781).
+const PRIM_STATE_LIST_BYTES: usize = 0x10;
+/// The bytes of `sec_state` a title copies into an indirect register load: thirty-two pairs, the
+/// whole distance to the `prim_state` beside it on PPSA02664's stack (D781).
+const SEC_STATE_LIST_BYTES: usize = 0x100;
+
 /// `sceAgcCreatePrimState(prim_state, sec_state, null, vs, topology)`.
 ///
 /// Fills the two register lists as `166-agc/create-prim-state` measured them, and returns `0`.
 /// `sec_state` holds user-config `(offset, value)` pairs: `GE_USER_VGPR_EN` named at `+0x8`, and
 /// `VGT_PRIMITIVE_TYPE` at `+0x10` with the topology (arg4) in the low five bits of `+0x14`, which a
 /// title copies into an indirect register load. `prim_state` names `VGT_GS_OUT_PRIM_TYPE` at `+0x8`
-/// with the output primitive at `+0xc`, for a topology the measurement called. The bytes measured
-/// zero are left as the guest prepared them, since a zeroed buffer cannot tell a zero written from
-/// one never touched; so is the output primitive of an unmeasured topology.
+/// with the output primitive at `+0xc`, for a topology the measurement called. Each list is written
+/// whole, every byte the measurement did not name zero (D781), so no pair a title copies carries
+/// what it left in the buffer; the output primitive of an unmeasured topology stays zero.
 fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (prim_state, sec_state, topology) = (args[0], args[1], args[4] as u32);
     if prim_state == 0 || sec_state == 0 {
         return BAD_ARGUMENT;
     }
-    // SAFETY: `sec_state` is the guest-owned 64-byte secondary-state buffer; `+0x8` and `+0x10`
-    // are dwords in it.
+    // SAFETY: `sec_state` is the guest-owned buffer the call fills, at least as long as the list a
+    // title copies out of it.
+    unsafe { guest::write_bytes(sec_state, &[0; SEC_STATE_LIST_BYTES]) };
+    // SAFETY: as above, for `prim_state`.
+    unsafe { guest::write_bytes(prim_state, &[0; PRIM_STATE_LIST_BYTES]) };
+    // SAFETY: `+0x8` and `+0x10` are dwords of `sec_state`'s list.
     unsafe {
         guest::write_u32(sec_state.wrapping_add(0x8), PRIM_STATE_UC_FIRST);
     }
@@ -1521,35 +1532,63 @@ mod tests {
         );
     }
 
-    /// Primitive topology lands in the low five bits of `sec_state + 0x14`, create then update:
-    /// `DI_PT_TRILIST` (4) then `DI_PT_POINTLIST` (1), with the surrounding bits preserved.
+    /// The create writes both register lists whole (D781): over buffers full of stale bytes, as a
+    /// title's uninitialised stack hands them over, every pair is the measured one or `(0, 0)` -
+    /// `(0x262, 0)` and `(0x242 VGT_PRIMITIVE_TYPE, topology)` among thirty-two in `sec_state`, and
+    /// `(0, 0)` then `(0x29b VGT_GS_OUT_PRIM_TYPE, 2)` - triangles - in `prim_state`. What lies past
+    /// the lists is not touched.
     #[test]
-    fn prim_state_records_topology_in_sec_state() {
-        let mut prim = [0u8; 64];
-        let mut sec = [0u8; 64];
-        // Poison the high bits of the topology dword to prove read-modify-write preserves them.
-        sec[0x14..0x18].copy_from_slice(&0xabcd_ffe0u32.to_le_bytes());
-
+    fn prim_state_lists_hold_only_measured_pairs() {
+        let mut prim = [0xa5u8; 0x20];
+        let mut sec = [0xa5u8; 0x110];
         let mut args = [0u64; GUEST_ARG_REGISTERS];
         args[0] = prim.as_mut_ptr() as u64;
         args[1] = sec.as_mut_ptr() as u64;
         args[4] = 4; // DI_PT_TRILIST
 
         assert_eq!(create_prim_state(&args), OK);
-        // The register lists the measured create fills (`166-agc/create-prim-state`): the user-config
-        // pairs `(0x262, _)` and `(0x242 VGT_PRIMITIVE_TYPE, topology)` in `sec_state`, and the
-        // context pair `(0x29b VGT_GS_OUT_PRIM_TYPE, 2)` - triangles - in `prim_state`.
-        let word =
-            |bytes: &[u8], at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        assert_eq!((word(&sec, 0x8), word(&sec, 0x10)), (0x262, 0x242));
-        assert_eq!((word(&prim, 0x8), word(&prim, 0xc)), (0x29b, 2));
-        let after_create = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
-        assert_eq!(after_create & 0x1f, 4, "topology is DI_PT_TRILIST");
-        assert_eq!(
-            after_create & !0x1f,
-            0xabcd_ffe0,
-            "the other bits are preserved"
+        let pairs = |bytes: &[u8], count: usize| -> Vec<(u32, u32)> {
+            bytes[..count * 8]
+                .chunks(8)
+                .map(|pair| {
+                    (
+                        u32::from_le_bytes(pair[..4].try_into().unwrap()),
+                        u32::from_le_bytes(pair[4..].try_into().unwrap()),
+                    )
+                })
+                .collect()
+        };
+        let mut sec_expected = vec![(0, 0); 32];
+        sec_expected[1] = (0x262, 0);
+        sec_expected[2] = (0x242, 4);
+        assert_eq!(pairs(&sec, 32), sec_expected);
+        assert_eq!(pairs(&prim, 2), [(0, 0), (0x29b, 2)]);
+        assert!(
+            sec[0x100..].iter().all(|&byte| byte == 0xa5),
+            "past sec_state's list"
         );
+        assert!(
+            prim[0x10..].iter().all(|&byte| byte == 0xa5),
+            "past prim_state's list"
+        );
+    }
+
+    /// Primitive topology lands in the low five bits of `sec_state + 0x14`: the create writes
+    /// `DI_PT_TRILIST` (4), and the update `DI_PT_POINTLIST` (1) with the surrounding bits preserved.
+    #[test]
+    fn prim_state_records_topology_in_sec_state() {
+        let mut prim = [0u8; 64];
+        let mut sec = [0u8; 0x100];
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = prim.as_mut_ptr() as u64;
+        args[1] = sec.as_mut_ptr() as u64;
+        args[4] = 4; // DI_PT_TRILIST
+
+        assert_eq!(create_prim_state(&args), OK);
+        let after_create = u32::from_le_bytes(sec[0x14..0x18].try_into().unwrap());
+        assert_eq!(after_create, 4, "topology is DI_PT_TRILIST");
+        // Poison the high bits of the topology dword to prove read-modify-write preserves them.
+        sec[0x14..0x18].copy_from_slice(&(0xabcd_ffe0u32 | 4).to_le_bytes());
 
         args[2] = 1; // DI_PT_POINTLIST, arg2 for the update
         assert_eq!(update_prim_state(&args), OK);

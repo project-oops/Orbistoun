@@ -175,9 +175,9 @@ found_on = "2026-09-12"
 name = "sceAgcCreatePrimState"
 purpose = "Instantiates the primitive-state routing block and records the primitive topology in it."
 edge_cases = [
-    "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14, read-modify-write so the rest of the byte is preserved. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
+    "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
     "MEASURED (166-agc/create-prim-state, zeroed 64-byte buffers, eight topologies): sec_state's first 32 bytes are the words 0, 0, 0x262, 0, 0x242, topology, 0, 0 - user-config (offset, value) pairs GE_USER_VGPR_EN then VGT_PRIMITIVE_TYPE, which a title copies into an indirect register load with sceAgcSetUcRegIndirectPatchAddRegisters(patch, 3, sec_state); prim_state's are 0, 0, 0x29b, out, 0, 0, 0, 0 - VGT_GS_OUT_PRIM_TYPE with out 0 for topology 1, 1 for 2, 2 for 4, 5, 6 and 9, 3 for 7 and 4 for 17.",
-    "orbistoun writes the offsets 0x262, 0x242 and 0x29b, the topology bits, and the output primitive for those eight topologies. Bytes measured zero are left as the guest prepared them, since a zeroed buffer cannot tell a zero written from one never touched; so is the output primitive of a topology not measured.",
+    "orbistoun writes the offsets 0x262, 0x242 and 0x29b, the topology bits, and the output primitive for those eight topologies, over lists it first zeroes whole: sec_state's first 0x100 bytes and prim_state's first 0x10 (D781, assumed). PPSA02664 copies exactly those from uninitialised stack buffers into a SET_CONTEXT_REG_INDIRECT table, thirty-two pairs and two, so a byte left as the caller prepared it wrote an arbitrary context register. A topology not measured leaves the output primitive zero.",
 ]
 known_by = "measured"
 cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state; reports/hardware/20261007-113500-eboot.obs.log lines 10585-10616, section 166-agc/create-prim-state."
