@@ -479,7 +479,8 @@ impl VulkanBackend {
         // Texels one word each, or a four-word block for every four-by-four of them.
         let words = match encoding {
             orbistoun_gpu::TextureEncoding::Rgba8
-            | orbistoun_gpu::TextureEncoding::Float11_11_10 => (width as usize) * (height as usize),
+            | orbistoun_gpu::TextureEncoding::Float11_11_10
+            | orbistoun_gpu::TextureEncoding::Rgba8Srgb => (width as usize) * (height as usize),
             orbistoun_gpu::TextureEncoding::Bc3 => {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 4
             }

@@ -323,6 +323,10 @@ pub enum TextureEncoding {
     /// One word a texel, `10_11_11_FLOAT`'s packed unsigned floats as the guest holds them, which
     /// the host samples natively as `B10G11R11_UFLOAT_PACK32` (D774).
     Float11_11_10,
+    /// One word a texel, `8_8_8_8_SRGB`'s bytes as the guest holds them, which the host samples as
+    /// `R8G8B8A8_SRGB`: the colour channels decoded from sRGB to linear as they are read, as the
+    /// guest's own sampler decodes them.
+    Rgba8Srgb,
 }
 
 /// Something that can carry out [`RenderCommand`]s.

@@ -1501,6 +1501,8 @@ pub enum TexelFormat {
     Rgba32Uint,
     /// Three packed unsigned floats, eleven, eleven and ten bits, a texel a word (D774).
     Float11_11_10,
+    /// Four eight-bit channels, the colour ones sRGB-encoded, a texel a word.
+    Rgba8Srgb,
 }
 
 impl TexelFormat {
@@ -1508,7 +1510,7 @@ impl TexelFormat {
     #[must_use]
     pub const fn bytes(self) -> u32 {
         match self {
-            Self::Rgba8 | Self::Float11_11_10 => 4,
+            Self::Rgba8 | Self::Float11_11_10 | Self::Rgba8Srgb => 4,
             Self::R8 => 1,
             Self::Rgba32Uint => 16,
         }
@@ -3482,6 +3484,9 @@ const FORMAT_8_UNORM: u32 = 1;
 const FORMAT_BC3_UNORM: u32 = 173;
 /// `GFX10_FORMAT_10_11_11_FLOAT` (`gfx10-rsrc.json`, value 36): three packed unsigned floats.
 const FORMAT_10_11_11_FLOAT: u32 = 36;
+/// `GFX10_FORMAT_8_8_8_8_SRGB` (`gfx10-rsrc.json`, value 130): `8_8_8_8_UNORM` with the colour
+/// channels sRGB-encoded.
+const FORMAT_8_8_8_8_SRGB: u32 = 130;
 /// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
 const FORMAT_32_32_32_32_UINT: u32 = 75;
 
@@ -3732,7 +3737,7 @@ fn texture_from_words(
     }
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     match (descriptor.tiling, format) {
-        (SwizzleMode::Linear, TexelFormat::Rgba8) => {}
+        (SwizzleMode::Linear, TexelFormat::Rgba8 | TexelFormat::Rgba8Srgb) => {}
         // The tiled layouts modelled, each sampled as it is rendered (crate::tiling); a one-byte
         // linear image with no pitch of its own lies as its layout's chain places it.
         (tiling, _)
@@ -3821,16 +3826,26 @@ fn texture_from_words(
     Some(swizzled_texture(
         RenderCommand::BindTexture {
             slot,
-            hash,
+            hash: hash ^ u64::from(encoding_tag(texture_encoding(format))),
             texels: shared,
             width: descriptor.width,
             height: descriptor.height,
             sampling: crate::registers::TextureSampling::default(),
-            encoding: crate::backend::TextureEncoding::Rgba8,
+            encoding: texture_encoding(format),
         },
         format,
         selects,
     ))
+}
+
+/// What sets a texture read in an encoding other than `Rgba8` apart, in its cache entry and the
+/// content hash a backend keys its image by: the same bytes are a different image to sample.
+const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
+    match encoding {
+        crate::backend::TextureEncoding::Float11_11_10 => 1 << 22,
+        crate::backend::TextureEncoding::Rgba8Srgb => 1 << 17,
+        crate::backend::TextureEncoding::Rgba8 | crate::backend::TextureEncoding::Bc3 => 0,
+    }
 }
 
 /// A 2D texture's texel format and selects, when both are ones this samples exactly
@@ -3840,6 +3855,7 @@ fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelForm
         FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
         FORMAT_8_UNORM => TexelFormat::R8,
         FORMAT_10_11_11_FLOAT => TexelFormat::Float11_11_10,
+        FORMAT_8_8_8_8_SRGB => TexelFormat::Rgba8Srgb,
         _ => return None,
     };
     let selects = destination_selects(word3);
@@ -3873,6 +3889,11 @@ fn selects_exactly(format: TexelFormat, selects: [u32; 4]) -> bool {
     if format == TexelFormat::Float11_11_10 {
         return matches!(selects, [4, 5, 6, 7 | 1]);
     }
+    // An sRGB texel's colour channels are decoded where they lie, so they are read only as they
+    // are: a channel moved into another's place would be decoded, or not, as the wrong one.
+    if format == TexelFormat::Rgba8Srgb {
+        return selects == IDENTITY_SELECTS;
+    }
     selects.iter().all(|&select| match select {
         0 | 1 | SELECT_X => true,
         5..=7 => format == TexelFormat::Rgba8,
@@ -3885,6 +3906,7 @@ fn selects_exactly(format: TexelFormat, selects: [u32; 4]) -> bool {
 const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncoding {
     match format {
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
+        TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint => {
             crate::backend::TextureEncoding::Rgba8
         }
@@ -3930,9 +3952,10 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             let channels = match format {
                 // A draw's texture is never a sixteen-byte one: `sampled_format` reads no such
                 // format, so its arm is the four-byte one's.
-                TexelFormat::Rgba8 | TexelFormat::Rgba32Uint | TexelFormat::Float11_11_10 => {
-                    texel.to_le_bytes()
-                }
+                TexelFormat::Rgba8
+                | TexelFormat::Rgba32Uint
+                | TexelFormat::Float11_11_10
+                | TexelFormat::Rgba8Srgb => texel.to_le_bytes(),
                 TexelFormat::R8 => [texel.to_le_bytes()[0], 0, 0, 0xFF],
             };
             u32::from_le_bytes(selects.map(|select| pick(channels, select)))
@@ -4018,9 +4041,9 @@ fn read_tiled_texture(
         }
     };
     let encoding = texture_encoding(format);
-    // The packed-float read is its own entry, so the same bytes bound as `Rgba8` are never reused
-    // for it.
-    let float_tag = u32::from(encoding == crate::backend::TextureEncoding::Float11_11_10) << 22;
+    // A packed-float or sRGB read is its own entry, so the same bytes bound as `Rgba8` are never
+    // reused for it.
+    let float_tag = encoding_tag(encoding);
     let tag = layout_tag | tail_tag | float_tag | u32::from(cleared) << 29 | 1 << 28;
     let key = (surface.base, width, height, tag);
     if let Some(cached) = texels.get(&key)
@@ -5769,6 +5792,76 @@ mod tests {
             expected.as_slice(),
             "row-major after detiling"
         );
+    }
+
+    /// An `8_8_8_8_SRGB` texture - PPSA28061's notice-screen image - binds its words detiled and
+    /// untouched, for the host to decode from sRGB as it samples. The same bytes read as
+    /// `8_8_8_8_UNORM` are another image, so their content hashes differ; and a channel moved from
+    /// its place is not read, since the decode belongs to where it lies.
+    #[test]
+    fn an_srgb_texture_binds_its_words_for_the_host_to_decode() {
+        use super::{RenderCommand, read_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (table, texels, width, height) = (0x1000_u64, 0x1_0000_u64, 8u32, 4u32);
+        let image = |format: u32, word3: u32| {
+            let mut bytes = vec![0u8; 0xF000 + 0x1_0000];
+            let descriptor = [
+                (texels >> 8) as u32,
+                ((texels >> 40) as u32 & 0xff) | (format << 20) | (((width - 1) & 3) << 30),
+                ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+                word3,
+                0,
+                0,
+                0,
+                0,
+            ];
+            for (i, word) in descriptor.iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            for y in 0..height {
+                for x in 0..width {
+                    let at = (texels - table) as usize
+                        + crate::tiling::tiled_byte_offset_64kb_rx_bpp4_surface(x, y, width);
+                    bytes[at..at + 4].copy_from_slice(&(0x8040_2010 + y * 100 + x).to_le_bytes());
+                }
+            }
+            Memory(bytes)
+        };
+        let identity = (9_u32 << 28) | (27 << 20) | 0xfac;
+        let bind = |format, word3| {
+            read_texture(
+                table,
+                0,
+                &image(format, word3),
+                &mut super::TexelCache::new(),
+            )
+        };
+        let Some(RenderCommand::BindTexture {
+            texels: words,
+            encoding,
+            hash,
+            ..
+        }) = bind(130, identity)
+        else {
+            panic!("a tiled 8_8_8_8_SRGB texture binds");
+        };
+        assert_eq!(encoding, crate::backend::TextureEncoding::Rgba8Srgb);
+        let expected: Vec<u32> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| 0x8040_2010 + y * 100 + x))
+            .collect();
+        assert_eq!(words.as_ref(), expected.as_slice(), "row-major, untouched");
+        let Some(RenderCommand::BindTexture { hash: unorm, .. }) = bind(56, identity) else {
+            panic!("the same bytes as 8_8_8_8_UNORM bind");
+        };
+        assert_ne!(hash, unorm, "another image to the backend");
+        // Red and green exchanged.
+        assert!(bind(130, (9_u32 << 28) | (27 << 20) | 0xfa5).is_none());
     }
 
     #[test]

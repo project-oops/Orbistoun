@@ -1458,6 +1458,11 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
         orbistoun_gpu::TextureEncoding::Rgba8 => {
             (FORMAT, staged(texture.words, texture.width, coarse_level))
         }
+        // The same bytes, decoded from sRGB to linear as the host samples them.
+        orbistoun_gpu::TextureEncoding::Rgba8Srgb => (
+            vk::Format::R8G8B8A8_SRGB,
+            staged(texture.words, texture.width, coarse_level),
+        ),
         orbistoun_gpu::TextureEncoding::Float11_11_10 => {
             (vk::Format::B10G11R11_UFLOAT_PACK32, as_they_are())
         }
