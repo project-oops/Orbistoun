@@ -777,3 +777,30 @@ known_by = "assumed"
 assumptions = ["The encoding for a count above 0 - one SET_SH_REG per pair - follows Mesa's radeon_set_sh_reg on GFX10; REQ-cn01 asks for the bytes."]
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "0x71040c4df8235e1d"
+arity = 6
+purpose = "Builds the PS-input interpolant table for a shader pair: (record, vs, ps, 0, p4, p5), writing thirty-two SPI_PS_INPUT_CNTL (offset, value) pairs into record and answering 0."
+edge_cases = [
+    "MEASURED (200-census/libSceAgc/0x71040c4df8235e1d, -real arms): over a record seeded with the prim-state words 0xd75, 0x262/0x4000, 0x242/4 and zeros, with header-only vertex and pixel shaders, and again with no pixel shader, rc 0x0 and the record's first 64 bytes read (0x191 + i, i); p4 and p5 kept their 0xcc fill.",
+    "orbistoun writes the full 32-entry default table sceAgcCreateInterpolantMapping writes; a remap by the shaders' interpolants is not modelled. PPSA02664 calls it on an uninitialised stack record and copies 0x100 bytes of it into a SET_CONTEXT_REG_INDIRECT table.",
+    "MEASURED: the census's buffer and zero arguments fault (signals 10 and 11); orbistoun refuses a null record with the library's bad-argument code.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn04, reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAgc/0x71040c4df8235e1d; probe arm obscene src/probe/sections/census.c check_census_20."
+found_in = ["PPSA02664-app0", "PPSA03416", "PPSA21564"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "0x8a6f69da59a5b375"
+arity = 6
+purpose = "The interpolant-table builder PPSA28061 calls: (record, vs, ps, ptr, registers, 4), writing the same table as 0x71040c4df8235e1d and answering 0."
+edge_cases = [
+    "MEASURED (200-census/libSceAgc/0x8a6f69da59a5b375, call-real-shape): with a real passthrough vertex shader and a pixel shader, over a record filled with 0xcc, rc 0x0 and the record's first 64 bytes read (0x191 + i, i); ptr kept its 0xcc fill and the zeroed register table read zero (whether it was written is not established).",
+    "orbistoun writes the full 32-entry default table and nothing through ptr or registers.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn04, reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAgc/0x8a6f69da59a5b375; probe arm obscene src/probe/sections/census.c check_census_39."
+found_in = ["PPSA28061"]
+found_on = "2026-10-09"

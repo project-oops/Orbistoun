@@ -14,6 +14,10 @@ use orbistoun_hle::guest_module;
 guest_module! {
     "libSceAgc" {
         "0x7d86501b8094ef57" => 3,
+        // Unnamed interpolant-table builders: (record, vs, ps, 0, p4, p5) and
+        // (record, vs, ps, ptr, registers, 4), as PPSA02664, PPSA03416 and PPSA28061 call them.
+        "0x71040c4df8235e1d" => 6,
+        "0x8a6f69da59a5b375" => 6,
         "sceAgcAcbAcquireMem" => 6,
         "sceAgcAcbDispatchIndirect" => 6,
         "sceAgcAcbDmaData" => 6,
@@ -244,6 +248,31 @@ fn create_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: `mapping` is the guest-owned 256-byte out-buffer the call fills.
     unsafe { write_default_interpolants(mapping) };
     OK
+}
+
+/// `0x71040c4df8235e1d(record, vs, ps, 0, p4, p5)`, unnamed: writes the default PS-input
+/// interpolant table into `record` and answers `0`.
+///
+/// Measured (`200-census/libSceAgc/0x71040c4df8235e1d`, `20261008-142306-eboot.obs.log`): over a
+/// record seeded with prim-state words, with header-only shaders and with and without a pixel
+/// shader, the call answered `0x0`, the record's first 64 bytes read back as `(0x191 + i, i)`, and
+/// neither `p4` nor `p5` changed. The table is taken to be the 32 entries
+/// `sceAgcCreateInterpolantMapping` writes, the shape of the 0x100 bytes PPSA02664 copies out of
+/// it into an indirect register load; a remap by the shaders' interpolants is not modelled (D010).
+/// A null record is refused, as the census's zero-argument call faulted on hardware.
+fn interpolants_71040c4d(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    create_interpolant_mapping(args)
+}
+
+/// `0x8a6f69da59a5b375(record, vs, ps, ptr, registers, 4)`, unnamed: writes the default PS-input
+/// interpolant table into `record` and answers `0`.
+///
+/// Measured (`200-census/libSceAgc/0x8a6f69da59a5b375`, `20261008-142306-eboot.obs.log`): with a
+/// real passthrough vertex shader and a pixel shader, over a record filled with `0xcc`, the call
+/// answered `0x0` and the record's first 64 bytes read back as `(0x191 + i, i)`; `ptr` kept its
+/// fill and the zeroed register table stayed zero. Otherwise as [`interpolants_71040c4d`].
+fn interpolants_8a6f69da(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    create_interpolant_mapping(args)
 }
 
 /// `sceAgcUpdateInterpolantMapping(mapping, vs, ps)`.
@@ -1168,6 +1197,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 /// The list [`implementations`] answers.
 const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("0x7d86501b8094ef57", agc_packet_payload),
+    ("0x71040c4df8235e1d", interpolants_71040c4d),
+    ("0x8a6f69da59a5b375", interpolants_8a6f69da),
     ("sceAgcCreateShader", create_shader),
     ("sceAgcSuspendPoint", suspend_point),
     ("sceAgcCreateInterpolantMapping", create_interpolant_mapping),
@@ -1482,6 +1513,32 @@ mod tests {
         let mut b = [0u8; 8];
         b.copy_from_slice(&buf[off..off + 8]);
         u64::from_le_bytes(b)
+    }
+
+    /// The two unnamed builders a title hands `(record, vs, ps, ...)` write the same default table
+    /// over whatever the record held: the census rows show `(0x191 + i, i)` for the first eight
+    /// entries over a record seeded with prim-state words (`0x71040c4df8235e1d`) and over one filled
+    /// with `0xcc` (`0x8a6f69da59a5b375`), and the table is the 32 entries
+    /// `sceAgcCreateInterpolantMapping` writes.
+    #[test]
+    fn the_unnamed_builders_write_the_default_interpolant_table() {
+        for builder in [interpolants_71040c4d, interpolants_8a6f69da] {
+            let mut record = [0xccu8; 0x110];
+            let mut args = [0u64; GUEST_ARG_REGISTERS];
+            args[0] = record.as_mut_ptr() as u64;
+            assert_eq!(builder(&args), OK);
+            for i in 0..32u64 {
+                assert_eq!(
+                    read_le_u64(&record, (i * 8) as usize),
+                    (i << 32) | (0x191 + i)
+                );
+            }
+            assert!(
+                record[0x100..].iter().all(|&byte| byte == 0xcc),
+                "past the table"
+            );
+            assert_eq!(builder(&[0; GUEST_ARG_REGISTERS]), BAD_ARGUMENT);
+        }
     }
 
     /// The interpolant table is the measured `(i << 32) | (0x191 + i)`; its first two entries are
