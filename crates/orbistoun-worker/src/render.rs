@@ -366,13 +366,33 @@ fn report_perf(sink: Option<fn(&Event)>) {
     }
 }
 
+/// The scanout format PPSA28061 registers, whose memory its draws write as R, G, B, A (`8_8_8_8`
+/// sRGB, standard swap); the title shows correct colours on a console, so the display reads it in
+/// that order (D784).
+const SCANOUT_RGBA8: u64 = 0x8000_0000_2200_0000;
+
+/// An R, G, B, A word, unchanged.
+const fn as_rgba(word: u32) -> u32 {
+    word
+}
+
+/// How a scanout format's memory decodes to R, G, B, A, or `None` for a format not known.
+fn scanout_decoder(format: u64) -> Option<fn(u32) -> u32> {
+    match format {
+        SCANOUT_BGRA8 => Some(scanout_rgba),
+        SCANOUT_RGBA8 => Some(as_rgba),
+        _ => None,
+    }
+}
+
 /// Detiles a flipped buffer and streams it as a frame.
 fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Event), dir: &Path) {
     static REFUSED: std::sync::Once = std::sync::Once::new();
     let (width, height) = (shape.width, shape.height);
-    let Some(tiled) = (shape.format == SCANOUT_BGRA8 && shape.tiling == 0)
-        .then(|| read_scanout(address, width, height))
-        .flatten()
+    let decode = scanout_decoder(shape.format);
+    let Some((tiled, decode)) = decode
+        .filter(|_| shape.tiling == 0)
+        .and_then(|decode| Some((read_scanout(address, width, height)?, decode)))
     else {
         REFUSED.call_once(|| {
             tracing::warn!(
@@ -385,14 +405,9 @@ fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Even
     if tiled.len() < orbistoun_gpu::tiling::surface_words_64kb_rx_bpp4(width, height) {
         return;
     }
-    // B, G, R, A in memory to R, G, B, A, swapped as each texel is detiled.
-    let linear = orbistoun_gpu::tiling::detile_surface_64kb_rx_bpp4_mapped(
-        &tiled,
-        width,
-        height,
-        0,
-        scanout_rgba,
-    );
+    // The format's byte order to R, G, B, A, as each texel is detiled.
+    let linear =
+        orbistoun_gpu::tiling::detile_surface_64kb_rx_bpp4_mapped(&tiled, width, height, 0, decode);
     let bytes = zerocopy::IntoBytes::as_bytes(linear.as_slice());
     emit_presented((width, height), bytes, sink, dir);
 }
@@ -1165,6 +1180,19 @@ mod tests {
             !super::shows_directly(0x7400_2001_0000, shape, shown),
             "another buffer"
         );
+    }
+
+    /// A scanout read from memory decodes by its format's byte order: the SDK's as B, G, R, A, and
+    /// PPSA28061's `0x8000000022000000` as R, G, B, A, the order its draws write it in (D784); any
+    /// other format is not decoded.
+    #[test]
+    fn a_scanout_decodes_by_its_format_s_byte_order() {
+        let word = 0x8040_2010;
+        let sdk = super::scanout_decoder(0x8000_0000_0000_0000).expect("the SDK's format");
+        assert_eq!(sdk(word), 0x8010_2040, "red and blue trade places");
+        let rgba = super::scanout_decoder(0x8000_0000_2200_0000).expect("PPSA28061's format");
+        assert_eq!(rgba(word), word, "already R, G, B, A");
+        assert!(super::scanout_decoder(0x8000_0000_1100_0000).is_none());
     }
 
     /// For the SDK's targets, written in the alternate order and scanned out as B, G, R, A, the
