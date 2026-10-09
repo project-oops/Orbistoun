@@ -33,6 +33,10 @@ static DELIVERY: OnceLock<Delivery> = OnceLock::new();
 /// many answers were placeholders.
 static UNANSWERED: AtomicU32 = AtomicU32::new(0);
 
+/// Which identifiers those were, so a report names what to measure.
+static UNANSWERED_IDS: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
 /// Installs the console this run is answering for.
 ///
 /// Called once, before the guest starts. Later calls are ignored: the guest may already have
@@ -71,6 +75,9 @@ pub fn parameter(id: u32) -> Option<i32> {
         .answer(id, settings());
     if answer.is_none() {
         UNANSWERED.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut ids) = UNANSWERED_IDS.lock() {
+            ids.insert(id);
+        }
     }
     answer
 }
@@ -85,8 +92,17 @@ pub fn summarise() -> Option<String> {
     }
     let mut parts = Vec::new();
     if unanswered > 0 {
+        let ids = UNANSWERED_IDS.lock().map_or_else(
+            |_| String::new(),
+            |ids| {
+                ids.iter()
+                    .map(|id| format!("{id:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        );
         parts.push(format!(
-            "{unanswered} system parameter query(s) answered with a placeholder - nothing measured says what they are"
+            "{unanswered} system parameter query(s) answered with a placeholder - nothing measured says what they are ({ids})"
         ));
     }
     if !withheld.is_empty() {
@@ -121,5 +137,6 @@ mod tests {
 
         let said = super::summarise().expect("an unanswered query is worth reporting");
         assert!(said.contains("placeholder"), "{said}");
+        assert!(said.contains("0xdeadbeef"), "names the identifier: {said}");
     }
 }
