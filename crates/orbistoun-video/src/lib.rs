@@ -27,6 +27,8 @@ guest_module! {
         "sceVideoOutIsFlipPending" => 1,
         "sceVideoOutGetResolutionStatus" => 2,
         "sceVideoOutRegisterBuffers2" => 6,
+        // (handle, set).
+        "sceVideoOutUnregisterBuffers" => 2,
         // Declared at the trampoline's full arity 6 and not implemented, so the stub policy answers
         // them by name rather than as bare hashes.
         "sceVideoOutSetBufferAttribute2" => 6,
@@ -62,6 +64,10 @@ mod video_error {
     /// `200-census/libSceVideoOut/0x1643ec4c4a7c2230` `call-frame-arg0`; its meaning is not
     /// established.
     pub(super) const REFUSED: u64 = 0x8029_0001;
+    /// What `sceVideoOutUnregisterBuffers` answered for the set on screen. Measured:
+    /// `130-layout/video-out-unregister-buffers` `rc-unregister-active-set0`; the already-open
+    /// code's value.
+    pub(super) const BUSY: u64 = 0x8029_0009;
 }
 
 /// The shape of a registered buffer set, decoded from its attribute block.
@@ -317,6 +323,27 @@ fn video_out_register_buffers2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's attribute block, by the call's contract.
     let shape = unsafe { decode_attribute(attribute) };
     register_buffer_set(handle, start_index, &read, count, attribute, shape)
+}
+
+/// `sceVideoOutUnregisterBuffers(handle, set)`, as `130-layout/video-out-unregister-buffers`
+/// measured it (`20261009-151440-eboot.obs.log`): an unopened handle answers `0x8029000b`, a set
+/// nothing registered and a negative one `0x80290001`, and the set on screen `0x80290009`. A port
+/// holds one set, index 0, and a set that has flipped is the one on screen. Unregistering a set
+/// that never reached the screen is unmeasured and answers the placeholder.
+fn video_out_unregister_buffers(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, set) = (args[0], args[1] as u32);
+    port::with(handle, |p| {
+        if !p.open {
+            video_error::INVALID_HANDLE
+        } else if set != 0 || p.buffers.is_empty() {
+            video_error::REFUSED
+        } else if p.flips > 0 {
+            video_error::BUSY
+        } else {
+            u64::from(GuestError::Unimplemented.as_raw())
+        }
+    })
+    .unwrap_or(video_error::INVALID_HANDLE)
 }
 
 /// Bytes one `SceVideoOutBuffer` occupies: `{ data, metadata, reserved[2] }`, the buffer's address
@@ -706,6 +733,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceVideoOutClose", video_out_close),
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),
         ("sceVideoOutRegisterBuffers2", video_out_register_buffers2),
+        ("sceVideoOutUnregisterBuffers", video_out_unregister_buffers),
         (
             "sceVideoOutSetBufferAttribute2",
             video_out_set_buffer_attribute2,
@@ -1126,6 +1154,32 @@ mod tests {
             video_out_get_flip_status(&args([bogus, status_ptr, 0, 0])),
             video_error::INVALID_HANDLE
         );
+    }
+
+    /// `sceVideoOutUnregisterBuffers(handle, set)` as `130-layout/video-out-unregister-buffers`
+    /// measured it (`20261009-151440-eboot.obs.log`): an unopened handle `0x8029000b`, an unused set
+    /// and a negative one `0x80290001`, and the set on screen `0x80290009`.
+    #[test]
+    fn unregistering_buffers_is_refused_as_measured() {
+        let (_, unregister) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == "sceVideoOutUnregisterBuffers")
+            .expect("implemented");
+        let handle = open_on(17);
+        port::with(handle, |p| {
+            p.buffers = vec![0x1000, 0x2000];
+            p.flips = 1;
+        });
+        assert_eq!(
+            unregister(&args([port::FIRST + 9999, 0, 0, 0])),
+            0x8029_000b
+        );
+        assert_eq!(unregister(&args([handle, 1, 0, 0])), 0x8029_0001);
+        assert_eq!(
+            unregister(&args([handle, u64::from(u32::MAX), 0, 0])),
+            0x8029_0001
+        );
+        assert_eq!(unregister(&args([handle, 0, 0, 0])), 0x8029_0009);
     }
 
     /// A second open of the same output is refused with the already-open code `0x8029_0009`.

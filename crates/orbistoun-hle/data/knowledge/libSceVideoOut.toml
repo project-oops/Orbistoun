@@ -243,3 +243,16 @@ known_by = "measured"
 cites = "obSCEne REQ-cn07, reports/hardware/20261008-142306-eboot.obs.log lines 13588-13612."
 found_in = ["PPSA28061"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceVideoOutUnregisterBuffers"
+arity = 2
+purpose = "Releases a registered buffer set: (handle, set)."
+edge_cases = [
+    "MEASURED (130-layout/video-out-unregister-buffers): a handle naming no open port 0x8029000b; set 1, which nothing registered, 0x80290001; set -1 0x80290001; set 0, registered and on screen, 0x80290009.",
+    "orbistoun answers those four as measured; a port holds one set, index 0, and a set that has flipped is the one on screen. Unregistering a set that never reached the screen is unmeasured and answers the placeholder. oops-sdk's display close unregisters set 0 while it is still on screen, as SOHK00001 and TSHP00001 do at exit.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 4396-4401, 130-layout/video-out-unregister-buffers."
+found_in = ["SOHK00001", "TSHP00001"]
+found_on = "2026-10-09"
