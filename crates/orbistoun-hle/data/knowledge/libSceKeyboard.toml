@@ -2,18 +2,54 @@ library = "libSceKeyboard"
 
 [[function]]
 name = "sceKeyboardInit"
-found_in = ["PPSA02664-app0"]
+arity = 0
+purpose = "Initialises the keyboard library."
+returns = "status"
+edge_cases = [
+    "MEASURED (100-input/keyboard-and-media-gates, 101-input-ext/keyboard-lifecycle): answers 0x0.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 100-input/keyboard-and-media-gates and 101-input-ext/keyboard-lifecycle."
+found_in = ["PPSA02664-app0", "CRFT00001", "STKT00001", "SOHK00001", "TSHP00001", "NVRB00001"]
 found_on = "2026-09-03"
-note = "Called 3 time(s) across the recorded corpus. Measured: returns 0x0 (obSCEne REQ-20260926T2140Z-5c1e (sweep 20260927-153242, check 101-input-ext/keyboard-lifecycle), init rc). Unimplemented here until the keyboard a title reads is decided: the host's, as NetCtl reports the host's network."
 
 [[function]]
 name = "sceKeyboardOpen"
-found_in = ["PPSA02664-app0"]
+arity = 4
+purpose = "Opens the keyboard for a user: (user, type, index, param)."
+returns = "handle"
+edge_cases = [
+    "MEASURED: for the signed-in user with a null param a positive handle (0x16b0700, 0x16e0700, 0x1720700 in three passes - not a fixed value); a second open for the same user 0x80da0004; user -1 and a buffer's address 0x809b0001; every argument zero 0x809b0081.",
+    "orbistoun hands out a small positive handle (D151) and answers the refusals as measured; the keyboard is the host's (D783).",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 100-input/keyboard-and-media-gates, 101-input-ext/keyboard-lifecycle and 200-census/libSceKeyboard/sceKeyboardOpen."
+found_in = ["PPSA02664-app0", "CRFT00001", "STKT00001", "SOHK00001", "TSHP00001", "NVRB00001"]
 found_on = "2026-09-03"
-note = "Called 3 time(s) across the recorded corpus. Measured (obSCEne REQ-20260926T2140Z-5c1e (sweep 20260927-153242, check 101-input-ext/keyboard-lifecycle)): (user, 0, 0, NULL) answers a positive handle (0x1eb0700 in one pass, 0x1e60700 in another, so the value is not fixed); a second open for the same user 0x80da0004; user id -1 0x809b0001. sceKeyboardClose answers 0x0 on the handle and 0x80da0003 on -1."
 
 [[function]]
 name = "sceKeyboardReadState"
+arity = 2
+purpose = "Reads the keyboard's current state into a 96-byte record: (handle, state)."
+returns = "status"
+edge_cases = [
+    "MEASURED: 0x0 on an open handle with all 96 bytes written - 1 at 0x10 and 1 at 0x14, zeros elsewhere, from a remote control presenting itself as a keyboard; 0x80da0003 on handle -1.",
+    "orbistoun writes the record for the host keys held (D783): present at 0x10, the count at 0x14, USB HID usage codes at 0x20, the layout oops-sdk reads.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 100-input/keyboard-and-media-gates, 101-input-ext/kbd-read and keyboard-lifecycle."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Called 519 time(s) across the recorded corpus. Measured (obSCEne REQ-20260926T2140Z-5c1e (sweep 20260927-153242, check 101-input-ext/keyboard-lifecycle)): 0x80da0003 on handle -1; 0x0 on an open handle, with a 96-byte record holding 1 at +0x10 (connected, per oops-sdk keyboard.c) and 1 at +0x14 and zeros elsewhere (the last 32 bytes dumped by -5f0c, sweep 20260927-185507, tail-nonzero-bytes 0x0). The arm was meant to have no keyboard attached, but the probe console has a remote-control device attached that presents itself as a USB keyboard, so it does not show what an absent keyboard reads."
+
+[[function]]
+name = "sceKeyboardClose"
+arity = 1
+purpose = "Closes a keyboard handle: (handle)."
+returns = "status"
+edge_cases = [
+    "MEASURED (101-input-ext/keyboard-lifecycle): 0x0 on the open handle; 0x80da0003 on -1; 0xffffffff on the refused second open's 0x80da0004.",
+    "orbistoun answers 0 for the open handle and frees it, 0x80da0003 for -1; any other handle is unmeasured in general and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 101-input-ext/keyboard-lifecycle."
+found_on = "2026-10-09"

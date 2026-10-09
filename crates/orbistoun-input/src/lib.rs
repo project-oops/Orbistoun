@@ -211,30 +211,34 @@ fn pad_read(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `scePadReadExt` is declared but not served: nothing has measured it, and binding it to the
 /// same body on its name alone is a guess.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[
-        ("scePadInit", pad_init),
-        ("sceImeUpdate", ime::update),
-        ("sceImeKeyboardOpen", ime::keyboard_open),
-        ("sceImeKeyboardClose", ime::keyboard_close),
-        ("n3kSX62fgNo", pad_census_nid),
-        // Both spellings, as for `scePadOpen`.
-        ("scePadReadState", pad_read_state),
-        ("scePadReadStateExt", pad_read_state),
-        ("scePadRead", pad_read),
-        // Both spellings, served by one function: the library exports both and nothing here tells them
-        // apart.
-        ("scePadOpen", pad_open),
-        ("scePadOpenExt", pad_open),
-        ("scePadClose", pad_close),
-        ("scePadDisconnectDevice", pad_close),
-        ("scePadIsValidHandle", pad_is_valid_handle),
-        ("scePadSetVibration", pad_discard),
-        ("scePadSetVibrationForce", pad_discard),
-        ("scePadSetLightBar", pad_discard),
-        ("scePadGetHandle", pad_refused_to_this_process),
-        ("scePadSetProcessPrivilege", pad_refused_to_this_process),
-    ]
+    static ALL: std::sync::OnceLock<Vec<(&'static str, GuestFn)>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| [OWN, keyboard::implementations()].concat())
 }
+
+/// This file's own implementations; [`implementations`] adds the keyboard's.
+const OWN: &[(&str, GuestFn)] = &[
+    ("scePadInit", pad_init),
+    ("sceImeUpdate", ime::update),
+    ("sceImeKeyboardOpen", ime::keyboard_open),
+    ("sceImeKeyboardClose", ime::keyboard_close),
+    ("n3kSX62fgNo", pad_census_nid),
+    // Both spellings, as for `scePadOpen`.
+    ("scePadReadState", pad_read_state),
+    ("scePadReadStateExt", pad_read_state),
+    ("scePadRead", pad_read),
+    // Both spellings, served by one function: the library exports both and nothing here tells them
+    // apart.
+    ("scePadOpen", pad_open),
+    ("scePadOpenExt", pad_open),
+    ("scePadClose", pad_close),
+    ("scePadDisconnectDevice", pad_close),
+    ("scePadIsValidHandle", pad_is_valid_handle),
+    ("scePadSetVibration", pad_discard),
+    ("scePadSetVibrationForce", pad_discard),
+    ("scePadSetLightBar", pad_discard),
+    ("scePadGetHandle", pad_refused_to_this_process),
+    ("scePadSetProcessPrivilege", pad_refused_to_this_process),
+];
 
 /// libScePad's NID `0xda809fad5f12799f`, which PPSA28061 calls: answers `0` and writes nothing,
 /// with every argument a buffer and with every argument zero, as obSCEne's census measured it
@@ -345,6 +349,7 @@ mod tests {
                     .imports
                     .iter()
                     .chain(super::ime::MODULE.imports)
+                    .chain(super::keyboard::MODULE.imports)
                     .any(|i| i.name == *name),
                 "{name} is served but not declared"
             );

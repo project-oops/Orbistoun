@@ -358,7 +358,8 @@ fn user_service_get_user_name(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 ///
 /// One accessor, so `sceUserServiceGetInitialUser` and `sceUserServiceGetLoginUserIdList` cannot
 /// disagree and have a title key save data and session on different users.
-fn signed_in_user() -> u32 {
+#[must_use]
+pub fn signed_in_user() -> u32 {
     // A machine with a deleted signed-in user answers the placeholder (D346).
     console::settings()
         .current()

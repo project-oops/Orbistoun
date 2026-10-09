@@ -2921,6 +2921,8 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-core",
  "orbistoun-hle",
+ "orbistoun-mem",
+ "orbistoun-systemservice",
  "serde",
  "toml 0.8.23",
 ]
