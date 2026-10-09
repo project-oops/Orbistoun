@@ -1105,3 +1105,27 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, check 166-agc/cb-nop-getsize."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "0x0a4e469ba741de7d"
+purpose = "An unnamed libSceAgc call PPSA21564 makes 31 times during set-up: (u64, u64, u64, 0, ...)."
+edge_cases = [
+    "MEASURED (200-census/libSceAgc/0x0a4e469ba741de7d, NID fd5Bp5tGTgo): 0x8a6c0008 with every argument a buffer, with the real shape over 0xa5-filled records, with shader objects sceAgcCreateShader had just made, and with the vertex shader alone; nothing written in any. All arguments zero faulted (signal 11).",
+    "No success path has been measured, so it is not implemented.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T1130Z-cn11, reports/hardware/20261009-205500-complete.log lines 16996-17017."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "0xe486fe61994e8976"
+purpose = "An unnamed libSceAgc call PPSA21564 makes 31 times beside 0x0a4e469ba741de7d: (ptr, u64, u64, u64, u64, 0)."
+edge_cases = [
+    "MEASURED (200-census/libSceAgc/0xe486fe61994e8976, NID dolOmWH+huQ): 0x8a6c0008 with shader objects sceAgcCreateShader had just made and with the vertex shader alone; nothing written.",
+    "No success path has been measured, so it is not implemented.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T1130Z-cn11, reports/hardware/20261009-205500-complete.log, 200-census/libSceAgc/0xe486fe61994e8976."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-09"

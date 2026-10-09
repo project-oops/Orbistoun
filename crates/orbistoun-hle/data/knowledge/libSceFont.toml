@@ -83,3 +83,16 @@ known_by = "measured"
 cites = "obSCEne REQ-fm04 and REQ-cn08, reports/hardware/20261009-151440-eboot.obs.log, 130-layout/font-create-library-ft."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceFontAttachDeviceCacheBuffer"
+purpose = "Attaches a glyph cache buffer to a font library: (library, 0, size)."
+returns = "status"
+edge_cases = [
+    "MEASURED (130-layout/font-create-library-ft, after the library's create and both support calls): size 0x100000 answered 0x80460010 after one 0x100000-byte allocation through the font memory's callbacks; size 0 answered 0x80460002 with no allocation; a repeat 0x80460010. The library's 0x100 bytes were unchanged by each.",
+    "PPSA21564 makes the same call, (library, 0, 0x100000), and asserts (FontSystem.cpp:78) on anything but 0, yet runs on a console, so the probe's set-up differs from the title's; REQ-20261009T2120Z-fm06 asks for the title's memory shape. Unimplemented here until then.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T1530Z-fm05, reports/hardware/20261009-205500-complete.log lines 8121-8141."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-09"
