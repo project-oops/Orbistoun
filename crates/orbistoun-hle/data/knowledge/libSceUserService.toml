@@ -47,3 +47,17 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12280-12296, check 200-census/libSceUserService/sceUserServiceGetEvent."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceUserServiceGetAgeLevel"
+arity = 2
+purpose = "Reads a user's age level: (user, out)."
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 3): for the signed-in user 0x1ea2f4d9 it answered 0x80960002 and wrote none of a 0x40-byte out buffer filled with 0xa5. What that code means is not established.",
+    "MEASURED (200-census/libSceUserService/sceUserServiceGetAgeLevel): user 0 and a buffer's address as the user answered 0x80960009 and changed nothing.",
+    "orbistoun answers 0x80960002 for its signed-in user and 0x80960009 for any other value, writing nothing. PPSA02664 and PPSA03416 call it twice during set-up as (user, out).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-cn10, reports/hardware/20261009-104652-eboot.obs.log, 070-user/oneshot-setup-calls and 200-census/libSceUserService/sceUserServiceGetAgeLevel."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-09"

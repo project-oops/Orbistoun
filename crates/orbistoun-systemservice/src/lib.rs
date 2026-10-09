@@ -519,6 +519,26 @@ fn user_service_get_game_presets(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// What `sceUserServiceGetAgeLevel` answers for the signed-in user. Measured; its meaning is not
+/// established.
+const AGE_LEVEL_SIGNED_IN: u64 = 0x8096_0002;
+/// What it answers for a value that is not a user: 0 and a buffer's address, the census's zero and
+/// buffer arguments.
+const AGE_LEVEL_NOT_A_USER: u64 = 0x8096_0009;
+
+/// `sceUserServiceGetAgeLevel(user, out)`: for the signed-in user answers `0x80960002` and writes
+/// none of `out` (obSCEne `070-user/oneshot-setup-calls` arm 3, a 0x40-byte buffer filled with
+/// `0xa5`, `20261009-104652-eboot.obs.log`); for anything else `0x80960009`, as the census's zero
+/// and buffer arguments were answered. Another user than the signed-in one is taken as not a user,
+/// as [`user_service_get_game_presets`] takes it.
+fn user_service_get_age_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == u64::from(signed_in_user()) {
+        AGE_LEVEL_SIGNED_IN
+    } else {
+        AGE_LEVEL_NOT_A_USER
+    }
+}
+
 /// `sceUserServiceGetInitialUser(out)` - the user a title should start as.
 fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
@@ -601,6 +621,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             user_service_get_login_user_id_list,
         ),
         ("sceUserServiceGetUserName", user_service_get_user_name),
+        ("sceUserServiceGetAgeLevel", user_service_get_age_level),
         (
             "sceUserServiceGetGamePresets",
             user_service_get_game_presets,
