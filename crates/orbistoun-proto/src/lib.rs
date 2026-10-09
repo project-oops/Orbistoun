@@ -116,6 +116,9 @@ pub enum Request {
     Input {
         /// One state per configured port, in port order.
         pads: Vec<orbistoun_input::PadState>,
+        /// The host keys held that no pad port binds, as USB HID usages (D783).
+        #[serde(default)]
+        keys: Vec<u16>,
     },
     /// Starts capturing what the title reads from its pad into `to`, or stops with `None` (D721).
     /// Sent only when somebody asks.

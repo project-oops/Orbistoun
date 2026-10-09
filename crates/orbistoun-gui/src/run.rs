@@ -37,10 +37,11 @@ pub(crate) struct InFlight {
     /// The same shape as the stopper, but it tells the title something and leaves it
     /// running, where the stopper ends the process.
     control: Receiver<orbistoun_worker::Control>,
-    /// What was last sent to the guest, so an unchanged pad sends nothing.
+    /// What was last sent to the guest, so unchanged input sends nothing: the pads and the held
+    /// keys.
     ///
     /// Held per run, because a new run starts knowing nothing and must be told again.
-    last_sent: std::cell::RefCell<Option<Vec<orbistoun_input::PadState>>>,
+    last_sent: std::cell::RefCell<Option<SentInput>>,
     /// Kept once received, so repeated actions do not race an empty channel.
     control_held: std::cell::RefCell<Option<orbistoun_worker::Control>>,
     /// Each frame the guest presents, as it is presented.
@@ -146,25 +147,33 @@ impl InFlight {
             .is_some_and(|control| control.play_input(script).is_ok())
     }
 
-    /// Tells the running title what the pads are doing.
+    /// Tells the running title what the pads are doing and which host keys are held (D783).
     ///
     /// Answers whether anything was sent: `false` when the state has not changed.
-    pub(crate) fn input(&self, pads: &[orbistoun_input::PadState]) -> bool {
-        // Only when it changes: input is a level, so an unchanged pad needs no message (D345).
-        if self.last_sent.borrow().as_deref() == Some(pads) {
+    pub(crate) fn input(&self, pads: &[orbistoun_input::PadState], keys: &[u16]) -> bool {
+        // Only when it changes: input is a level, so unchanged input needs no message (D345).
+        if self
+            .last_sent
+            .borrow()
+            .as_ref()
+            .is_some_and(|(p, k)| p.as_slice() == pads && k.as_slice() == keys)
+        {
             return false;
         }
         let sent = self
             .control_held
             .borrow()
             .as_ref()
-            .is_some_and(|control| control.input(pads).is_ok());
+            .is_some_and(|control| control.input(pads, keys).is_ok());
         if sent {
-            *self.last_sent.borrow_mut() = Some(pads.to_vec());
+            *self.last_sent.borrow_mut() = Some((pads.to_vec(), keys.to_vec()));
         }
         sent
     }
 }
+
+/// The pads and held keys last sent to a run.
+type SentInput = (Vec<orbistoun_input::PadState>, Vec<u16>);
 
 /// What a run does with pad input beyond the window's own (D721): a script to play and a
 /// file to capture into, each from the run's entry and chosen on the toolbar before launch.

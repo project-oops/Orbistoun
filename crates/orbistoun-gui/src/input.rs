@@ -33,6 +33,8 @@ pub(crate) struct Frame {
     pub(crate) just_pressed: u32,
     /// How far through a hold the shell button is, for drawing.
     pub(crate) hold_progress: f32,
+    /// The host keys held that no pad port binds, as USB HID usages (D783).
+    pub(crate) keys: Vec<u16>,
 }
 
 impl Reader {
@@ -68,7 +70,9 @@ impl Reader {
             self.previous[index] = state.pressed();
         }
 
+        let keys = ctx.input(|input| unbound_usages(&held(input), pads));
         Frame {
+            keys,
             pads: states,
             shell: press,
             hold_progress: self.shell.hold_progress(),
@@ -164,6 +168,113 @@ pub(crate) fn unresolved(pads: &Pads) -> Vec<String> {
     bad
 }
 
+/// A key's USB HID usage code, as a keyboard reports it (USB HID Usage Tables, keyboard page 0x07),
+/// or `None` for a key a keyboard record has no code for here.
+fn usage(key: egui::Key) -> Option<u16> {
+    Some(match key {
+        egui::Key::A => 0x04,
+        egui::Key::B => 0x05,
+        egui::Key::C => 0x06,
+        egui::Key::D => 0x07,
+        egui::Key::E => 0x08,
+        egui::Key::F => 0x09,
+        egui::Key::G => 0x0a,
+        egui::Key::H => 0x0b,
+        egui::Key::I => 0x0c,
+        egui::Key::J => 0x0d,
+        egui::Key::K => 0x0e,
+        egui::Key::L => 0x0f,
+        egui::Key::M => 0x10,
+        egui::Key::N => 0x11,
+        egui::Key::O => 0x12,
+        egui::Key::P => 0x13,
+        egui::Key::Q => 0x14,
+        egui::Key::R => 0x15,
+        egui::Key::S => 0x16,
+        egui::Key::T => 0x17,
+        egui::Key::U => 0x18,
+        egui::Key::V => 0x19,
+        egui::Key::W => 0x1a,
+        egui::Key::X => 0x1b,
+        egui::Key::Y => 0x1c,
+        egui::Key::Z => 0x1d,
+        egui::Key::Num1 => 0x1e,
+        egui::Key::Num2 => 0x1f,
+        egui::Key::Num3 => 0x20,
+        egui::Key::Num4 => 0x21,
+        egui::Key::Num5 => 0x22,
+        egui::Key::Num6 => 0x23,
+        egui::Key::Num7 => 0x24,
+        egui::Key::Num8 => 0x25,
+        egui::Key::Num9 => 0x26,
+        egui::Key::Num0 => 0x27,
+        egui::Key::Enter => 0x28,
+        egui::Key::Escape => 0x29,
+        egui::Key::Backspace => 0x2a,
+        egui::Key::Tab => 0x2b,
+        egui::Key::Space => 0x2c,
+        egui::Key::Minus => 0x2d,
+        egui::Key::Equals => 0x2e,
+        egui::Key::OpenBracket => 0x2f,
+        egui::Key::CloseBracket => 0x30,
+        egui::Key::Backslash => 0x31,
+        egui::Key::Semicolon => 0x33,
+        egui::Key::Backtick => 0x35,
+        egui::Key::Comma => 0x36,
+        egui::Key::Period => 0x37,
+        egui::Key::Slash => 0x38,
+        egui::Key::F1 => 0x3a,
+        egui::Key::F2 => 0x3b,
+        egui::Key::F3 => 0x3c,
+        egui::Key::F4 => 0x3d,
+        egui::Key::F5 => 0x3e,
+        egui::Key::F6 => 0x3f,
+        egui::Key::F7 => 0x40,
+        egui::Key::F8 => 0x41,
+        egui::Key::F9 => 0x42,
+        egui::Key::F10 => 0x43,
+        egui::Key::F11 => 0x44,
+        egui::Key::F12 => 0x45,
+        egui::Key::Insert => 0x49,
+        egui::Key::Home => 0x4a,
+        egui::Key::PageUp => 0x4b,
+        egui::Key::Delete => 0x4c,
+        egui::Key::End => 0x4d,
+        egui::Key::PageDown => 0x4e,
+        egui::Key::ArrowRight => 0x4f,
+        egui::Key::ArrowLeft => 0x50,
+        egui::Key::ArrowDown => 0x51,
+        egui::Key::ArrowUp => 0x52,
+        _ => return None,
+    })
+}
+
+/// The usages of the held keys no keyboard-driven port binds: a key bound to a pad button or
+/// stick is the pad's, so one press never reaches a title twice (D783).
+fn unbound_usages(held: &[egui::Key], pads: &Pads) -> Vec<u16> {
+    let bound: Vec<egui::Key> = pads
+        .ports
+        .iter()
+        .filter(|port| matches!(port.source, Source::Keyboard))
+        .flat_map(|port| port.keys.values().chain(port.axes.values()))
+        .filter_map(|name| egui::Key::from_name(name))
+        .collect();
+    held.iter()
+        .filter(|key| !bound.contains(key))
+        .filter_map(|&key| usage(key))
+        .take(orbistoun_input::keyboard::MOST_KEYS)
+        .collect()
+}
+
+/// The keys held this frame, in egui's order.
+fn held(input: &egui::InputState) -> Vec<egui::Key> {
+    egui::Key::ALL
+        .iter()
+        .copied()
+        .filter(|&key| input.key_down(key))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use orbistoun_input::{Button, Pads};
@@ -173,6 +284,25 @@ mod tests {
     fn the_default_layout_names_keys_this_window_understands() {
         let unresolved = super::unresolved(&Pads::default());
         assert!(unresolved.is_empty(), "{unresolved:?}");
+    }
+
+    /// A held key reaches the keyboard as its USB HID usage, unless a keyboard port binds it to the
+    /// pad, so one press never reaches a title twice (D783).
+    #[test]
+    fn held_keys_reach_the_keyboard_unless_a_pad_port_binds_them() {
+        assert_eq!(super::usage(egui::Key::A), Some(0x04));
+        assert_eq!(super::usage(egui::Key::Num1), Some(0x1e));
+        assert_eq!(super::usage(egui::Key::Num0), Some(0x27));
+        assert_eq!(super::usage(egui::Key::Enter), Some(0x28));
+        assert_eq!(super::usage(egui::Key::ArrowUp), Some(0x52));
+        assert_eq!(super::usage(egui::Key::F12), Some(0x45));
+
+        let mut pads = Pads::default();
+        pads.ports[0].keys.insert(Button::South, "Q".to_owned());
+        let held = [egui::Key::Q, egui::Key::A, egui::Key::Space];
+        let keys = super::unbound_usages(&held, &pads);
+        assert!(!keys.contains(&0x14), "Q is the pad's: {keys:?}");
+        assert!(keys.contains(&0x2c), "space is the keyboard's: {keys:?}");
     }
 
     /// A name that is not a key is reported, with enough to find it.

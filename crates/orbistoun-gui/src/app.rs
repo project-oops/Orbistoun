@@ -329,7 +329,9 @@ impl App {
                     }
                 })
                 .collect();
-            in_flight.input(&seen);
+            // A title without focus is handed no keys, as it is handed a neutral pad.
+            let keys = if neutral { Vec::new() } else { frame.keys };
+            in_flight.input(&seen, &keys);
         }
 
         // Set every frame rather than at launch, because a run ends on its own.

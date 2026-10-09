@@ -75,7 +75,10 @@ pub fn serve<R: BufRead + Send + 'static, W: Write>(
                 Ok(Some(Request::Shell { action })) => shell_action(action),
                 // Same reason: input arrives while a run is in flight. It replies with nothing, so
                 // the output stream keeps one writer.
-                Ok(Some(Request::Input { pads })) => orbistoun_input::latest::arrived(&pads),
+                Ok(Some(Request::Input { pads, keys })) => {
+                    orbistoun_input::latest::arrived(&pads);
+                    orbistoun_input::keyboard::set_held(&keys);
+                }
                 // The toolbar's input capture and playback (D721), mid-run, with no reply.
                 Ok(Some(Request::CaptureInput { to })) => capture_input(to.as_deref()),
                 Ok(Some(Request::PlayInput { script })) => play_input(script.as_deref()),
@@ -2954,7 +2957,7 @@ impl Control {
     ///
     /// When the pipe is gone, which is the ordinary race between a run ending and somebody
     /// still holding a controller.
-    pub fn input(&self, pads: &[orbistoun_input::PadState]) -> io::Result<()> {
+    pub fn input(&self, pads: &[orbistoun_input::PadState], keys: &[u16]) -> io::Result<()> {
         let mut stdin = self
             .stdin
             .lock()
@@ -2963,6 +2966,7 @@ impl Control {
             &mut *stdin,
             &Request::Input {
                 pads: pads.to_vec(),
+                keys: keys.to_vec(),
             },
         )
     }
@@ -3409,7 +3413,10 @@ mod tests {
             Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
             },
-            Request::Input { pads: vec![held] },
+            Request::Input {
+                pads: vec![held],
+                keys: Vec::new(),
+            },
             Request::Shutdown,
         ]);
 
