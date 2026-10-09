@@ -270,6 +270,7 @@ guest_module! {
         "_open" => 3,
         "_close" => 1,
         "_read" => 3,
+        "_write" => 3,
         "_fcntl" => 3,
         // Thread calls with no vendor-named twin, written under their POSIX names in
         // `orbistoun-kernel` beside the thread registry (D367).
@@ -377,6 +378,7 @@ const DELEGATED: &[(&str, &str)] = &[
     ("_open", "sceKernelOpen"),
     ("_close", "sceKernelClose"),
     ("_read", "sceKernelRead"),
+    ("_write", "sceKernelWrite"),
     ("_fcntl", "fcntl"),
     ("pthread_detach", "pthread_detach"),
     // `pthread_sigmask` is `sigprocmask` for the calling thread, which on a threaded FreeBSD process
@@ -898,6 +900,16 @@ mod tests {
                 delegate.map(|f| f as usize),
                 "{posix} is {vendor}"
             );
+        }
+    }
+
+    /// FreeBSD's underscored file spellings, which its C library calls so that a program
+    /// replacing `open` does not break `fopen`, are served, `_write` among them.
+    #[test]
+    fn freebsd_underscored_file_spellings_are_served() {
+        let served = super::implementations();
+        for name in ["_open", "_close", "_read", "_write"] {
+            assert!(served.iter().any(|(n, _)| *n == name), "{name} is served");
         }
     }
 

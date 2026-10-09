@@ -3273,3 +3273,14 @@ known_by = "published"
 cites = "POSIX.1-2008 recvmsg(2)."
 found_on = "2026-09-27"
 
+
+[[function]]
+name = "_write"
+arity = 3
+purpose = "The underscored spelling of `write`, served by the same vendor twin as `_read`'s sibling."
+returns = "count"
+edge_cases = ["FreeBSD's own underscored spelling, which its C library uses internally so a program replacing the public name does not break the library's own calls. PPSA21564 imports it from libkernel."]
+known_by = "assumed"
+assumptions = ["That the underscored and public spellings are one function on this platform, as they are on FreeBSD."]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-09"
