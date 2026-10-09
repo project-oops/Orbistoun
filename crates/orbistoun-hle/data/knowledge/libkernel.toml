@@ -2574,3 +2574,16 @@ known_by = "assumed"
 assumptions = ["That the stat is the one sceKernelStat writes for the same file: no probe on firmware 12.40 can hold a real APR identifier (D782)."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "_sceKernelRtldSetApplicationHeapAPI"
+arity = 1
+purpose = "Takes the title libc's table of heap functions at start-up: (table). Returns nothing."
+edge_cases = [
+    "MEASURED (035-libc/retail-start-libkernel): bound by link import, not by sceKernelDlsym (0x80020003 by name and by NID); with rax set to 0x1111 and then 0x2222 before the call, rax came back unchanged, so it returns nothing and the 0x39e70 an earlier pass read was residue; none of the eight table entries was called, and malloc afterwards came from the system heap.",
+    "orbistoun takes the call, writes nothing and calls nothing; the 0 it hands back is not read. PPSA04263's libc calls it once at start-up.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T1610Z-sp02, reports/hardware/20261009-215800-eboot.log lines 3051-3059."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-09"

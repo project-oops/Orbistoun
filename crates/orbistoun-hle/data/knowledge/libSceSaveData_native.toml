@@ -38,7 +38,8 @@ purpose = "Reads the title's save-data memory: (get)."
 returns = "status"
 edge_cases = [
     "MEASURED (200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2) on a console with no save-data memory set up: 0x809f0001 with every argument a buffer and with every argument zero, writing none of them.",
-    "orbistoun answers 0x809f0001 before set-up; a read after set-up is unmeasured and answers the placeholder (REQ-20261009T1930Z-sd01 asks). PPSA25872's Unity runtime reads its PlayerPrefs through it six times at start-up.",
+    "MEASURED after Initialize3(NULL) and a successful SetupSaveDataMemory2 (REQ-20261009T1930Z-sd01, reports/hardware/20261009-215800-eboot.log lines 6102-6107): for the signed-in user 0x809f0000 with the buffer and data block untouched, before and after a SetSaveDataMemory2 (which itself answered 0x809f0000); for user 1, 0x809f0011.",
+    "orbistoun answers 0x809f0001 before set-up and, after it, 0x809f0000 for the signed-in user and 0x809f0011 for any other, writing nothing. PPSA25872's Unity runtime reads its PlayerPrefs through it six times at start-up.",
 ]
 known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 13554-13564, 200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2."

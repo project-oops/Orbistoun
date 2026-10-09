@@ -130,6 +130,8 @@ guest_module! {
         "_is_signal_return" => 1,
         "sceKernelGetSanitizerMallocReplaceExternal" => 0,
         "sceKernelGetSanitizerNewReplaceExternal" => 0,
+        // (table): a title's libc hands its heap functions over at start-up; returns nothing.
+        "_sceKernelRtldSetApplicationHeapAPI" => 1,
         "sceKernelSetVirtualRangeName" => 3,
         "sceKernelAllocateMainDirectMemory" => 4,
         "sceKernelGetDirectMemorySize" => 0,
@@ -6257,6 +6259,14 @@ fn no_sanitizer_replacement(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// `_sceKernelRtldSetApplicationHeapAPI(table)`: returns nothing - `rax` came back as it went in,
+/// `0x1111` and `0x2222` - and called none of the eight table entries, the heap staying the
+/// system's (REQ-20261009T1610Z-sp02, `20261009-215800-eboot.log` 3051-3059). The 0 handed back is
+/// not read.
+fn set_application_heap_api(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 /// `__tls_get_addr(&{module, offset})`: the calling thread's address of a thread-local variable,
 /// as the ELF thread-local storage ABI's dynamic models read it (D763).
 ///
@@ -6566,6 +6576,10 @@ const TABLE: &[(&str, GuestFn)] = &[
     (
         "sceKernelGetSanitizerNewReplaceExternal",
         no_sanitizer_replacement,
+    ),
+    (
+        "_sceKernelRtldSetApplicationHeapAPI",
+        set_application_heap_api,
     ),
     ("sceKernelSetVirtualRangeName", set_virtual_range_name),
     ("mmap", mmap),
@@ -8842,6 +8856,21 @@ mod tests {
         // SAFETY: the block just handed out is readable.
         assert!(unsafe { super::guest::read_u64(out) }.is_some_and(|base| base != 0));
         assert!(direct::flexible_available() < before);
+    }
+
+    /// `_sceKernelRtldSetApplicationHeapAPI(table)` returns nothing and writes none of the table
+    /// (REQ-sp02: `rax` left as it was, no table entry called).
+    #[test]
+    fn the_application_heap_table_is_taken_and_nothing_is_written() {
+        let (_, f) = implementations()
+            .iter()
+            .find(|(n, _)| *n == "_sceKernelRtldSetApplicationHeapAPI")
+            .expect("implemented");
+        let mut table = [0xa5_u8; 0x40];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = table.as_mut_ptr() as u64;
+        let _ = f(&args);
+        assert!(table.iter().all(|&b| b == 0xa5), "nothing written");
     }
 
     /// A retail process has no sanitizer allocator to put in place of the title's (D765).

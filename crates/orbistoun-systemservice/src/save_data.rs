@@ -95,17 +95,31 @@ pub(crate) fn setup_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
 /// `200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2`, `20261009-151440-eboot.obs.log`).
 const READ_BEFORE_SET_UP: u64 = 0x809f_0001;
 
-/// What `sceSaveDataGetSaveDataMemory2` answers, or `None` where nothing measured it: a read after
-/// set-up is unmeasured (REQ-20261009T1930Z-sd01 asks).
-fn get_answer(set_up: bool) -> Option<u64> {
-    (!set_up).then_some(READ_BEFORE_SET_UP)
+/// What a read after set-up answered for the signed-in user, with nothing saved: `0x809f0000`
+/// (REQ-20261009T1930Z-sd01, `20261009-215800-eboot.log` 6102 and 6107, before and after a set).
+const NOTHING_SAVED: u64 = 0x809f_0000;
+
+/// What a read after set-up answered for user 1, which is no user (line 6105).
+const NOT_A_USER: u64 = 0x809f_0011;
+
+/// What `sceSaveDataGetSaveDataMemory2` answers for `user`: before set-up `0x809f0001`; after it,
+/// `0x809f0000` for the signed-in user, nothing having been saved, and `0x809f0011` for any other.
+fn get_answer(set_up: bool, user: u32) -> u64 {
+    if !set_up {
+        READ_BEFORE_SET_UP
+    } else if user == crate::signed_in_user() {
+        NOTHING_SAVED
+    } else {
+        NOT_A_USER
+    }
 }
 
-/// `sceSaveDataGetSaveDataMemory2(get)`: refused with `0x809f0001` before save-data memory is set
-/// up, as measured, writing nothing; after set-up the placeholder.
-pub(crate) fn get_save_data_memory2(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    get_answer(MEMORY_SET_UP.load(Ordering::Acquire))
-        .unwrap_or_else(|| u64::from(GuestError::Unimplemented.as_raw()))
+/// `sceSaveDataGetSaveDataMemory2(get)`: answers as [`get_answer`] decides for the user at `get`'s
+/// first word, writing nothing - the measured read left its buffer and data block as they were.
+pub(crate) fn get_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's request block, its first word the user by the call's contract.
+    let user = unsafe { guest::read_u32(args[0]) }.unwrap_or(u32::MAX);
+    get_answer(MEMORY_SET_UP.load(Ordering::Acquire), user)
 }
 
 #[cfg(test)]
@@ -113,12 +127,16 @@ mod tests {
     use super::{initialize3, setup_save_data_memory2};
 
     /// Before save-data memory is set up, a read answers `0x809f0001` (obSCEne census
-    /// `200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2`); after it, the answer is
-    /// unmeasured and refused with the placeholder.
+    /// `200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2`); after it, `0x809f0000` for
+    /// the signed-in user and `0x809f0011` for anyone else (REQ-sd01, `20261009-215800-eboot.log`
+    /// 6102-6107).
     #[test]
-    fn a_read_before_set_up_is_refused_as_measured() {
-        assert_eq!(super::get_answer(false), Some(0x809f_0001));
-        assert_eq!(super::get_answer(true), None);
+    fn a_read_answers_as_measured_before_and_after_set_up() {
+        let me = crate::signed_in_user();
+        let someone_else = me.wrapping_add(1);
+        assert_eq!(super::get_answer(false, me), 0x809f_0001);
+        assert_eq!(super::get_answer(true, me), 0x809f_0000);
+        assert_eq!(super::get_answer(true, someone_else), 0x809f_0011);
     }
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
