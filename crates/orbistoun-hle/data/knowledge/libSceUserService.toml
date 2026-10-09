@@ -87,3 +87,16 @@ known_by = "measured"
 cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 6."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceUserServiceGetForegroundUser"
+arity = 1
+purpose = "The user in the foreground: (out)."
+edge_cases = [
+    "MEASURED (200-census/libSceUserService/sceUserServiceGetForegroundUser): with the user 0x1ea2f4d9 signed in it answered 0x80960009 and left the slot as it was (0xffffffff); a null slot answered 0x80960005, and every argument a buffer 0x80960009.",
+    "orbistoun answers the same and writes nothing. oops-sdk's input then takes sceUserServiceGetInitialUser instead, as on the console.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 200-census/libSceUserService/sceUserServiceGetForegroundUser."
+found_in = ["CRFT00001"]
+found_on = "2026-10-09"

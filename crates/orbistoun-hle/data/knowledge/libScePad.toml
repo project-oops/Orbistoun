@@ -289,3 +289,29 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12306-12316, check 200-census/libScePad/0xda809fad5f12799f."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "scePadGetHandle"
+arity = 3
+purpose = "The handle of a pad a user already has open: (user, type, index)."
+edge_cases = [
+    "MEASURED (200-census/libScePad/scePadGetHandle): 0x80920008 with every argument a buffer, with every argument zero, and for the signed-in user 0x1ea2f4d9 port 0 both before scePadInit and after it.",
+    "orbistoun answers 0x80920008. oops-sdk's input falls back to scePadOpen on it, as on the console; CRFT00001 and the other oops-apps titles call it at start-up.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 200-census/libScePad/scePadGetHandle and 200-census/libSceUserService/sceUserServiceGetForegroundUser (pad-get-handle)."
+found_in = ["CRFT00001"]
+found_on = "2026-10-09"
+
+[[function]]
+name = "scePadSetProcessPrivilege"
+arity = 1
+purpose = "Sets the pad privilege of the calling process: (privilege)."
+edge_cases = [
+    "MEASURED (200-census/libScePad/scePadSetProcessPrivilege): 0x80920008 with every argument a buffer, with every argument zero, and for privilege 1.",
+    "orbistoun answers 0x80920008.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 200-census/libScePad/scePadSetProcessPrivilege."
+found_in = ["CRFT00001"]
+found_on = "2026-10-09"

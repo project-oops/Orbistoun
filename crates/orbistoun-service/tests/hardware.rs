@@ -20,6 +20,7 @@ const CLAIMED: &[&str] = &[
     "032-syncaddr/wake-with-no-waiter:sceKernelSyncOnAddressWake:returned",
     "130-layout/net-interfaces:getifaddrs:return_code",
     "130-layout/user-service:sceUserServiceGetInitialUser:return_code",
+    "130-layout/pad-controller:scePadGetHandle:handle",
     // The sync bounds the hardware measured: the semaphore count and the event-flag wait mode,
     // asserted below.
     "016-syncbounds/sema-count:sceKernelPollSema:need-0-of-empty",
@@ -1012,10 +1013,6 @@ const OUTSTANDING: &[(&str, &str)] = &[
     (
         "108-audiodec/symbols:sceAudiodecTerminate:unresolved",
         "the console resolves `sceAudiodecTerminate` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
-    ),
-    (
-        "130-layout/pad-controller:scePadGetHandle:handle",
-        "the console resolves `scePadGetHandle` and orbistoun does not declare it, so there is no implementation for a claim to check. **This is the finding, not the obstacle**: a symbol a console exports and this project has never heard of is a named gap rather than an unknown one, and the subsystem it belongs to is the unit of work (principle 6)",
     ),
     (
         "130-layout/user-service:sceUserServiceGetLoginUserIdList:return_code",
@@ -2765,5 +2762,18 @@ fn asking_where_the_stack_is_answers_the_measured_status() {
     assert_eq!(
         answered as u32, expected,
         "the console answered {expected:#x} for an address in its own stack"
+    );
+}
+
+/// `scePadGetHandle` answers the refusal the console gave for the signed-in user's first port.
+#[test]
+fn a_pad_handle_is_refused_as_on_the_console() {
+    let expected = measurement("130-layout/pad-controller:scePadGetHandle:handle")
+        .value()
+        .expect("a code is a number");
+    assert_eq!(
+        call("scePadGetHandle", [0x1ea2_f4d9, 0, 0, 0, 0, 0]),
+        expected,
+        "the console answered {expected:#x}"
     );
 }

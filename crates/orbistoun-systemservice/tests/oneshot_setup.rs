@@ -48,3 +48,20 @@ fn the_accessibility_getters_refuse_and_the_skip_flag_is_set() {
     assert_eq!(flag[0], 1);
     assert!(flag[1..].iter().all(|&b| b == 0xa5), "one byte written");
 }
+
+/// `sceUserServiceGetForegroundUser(&user)` answered `0x80960009` and left the slot as it was, with
+/// a user signed in; a null slot `0x80960005` (`200-census/libSceUserService/
+/// sceUserServiceGetForegroundUser`, `20261009-151440-eboot.obs.log`).
+#[test]
+fn there_is_no_foreground_user() {
+    let mut user = 0xffff_ffff_u32;
+    assert_eq!(
+        call(
+            "sceUserServiceGetForegroundUser",
+            &[std::ptr::addr_of_mut!(user) as u64]
+        ),
+        0x8096_0009
+    );
+    assert_eq!(user, 0xffff_ffff, "nothing written");
+    assert_eq!(call("sceUserServiceGetForegroundUser", &[0]), 0x8096_0005);
+}

@@ -46,6 +46,9 @@ guest_module! {
         "scePadReadStateExt" => 2,
         "scePadRead" => 3,
         "scePadReadExt" => 3,
+        // (user, type, index) and (privilege): both refused as measured.
+        "scePadGetHandle" => 3,
+        "scePadSetProcessPrivilege" => 1,
     }
 }
 
@@ -126,6 +129,16 @@ fn pad_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // The number is not recycled: reuse turns a stale handle into an access to the wrong pad.
     OK
+}
+
+/// What `scePadGetHandle` and `scePadSetProcessPrivilege` answered whatever they were passed,
+/// before `scePadInit` and after it (`200-census/libScePad/*`, `20261009-151440-eboot.obs.log`).
+const PAD_REFUSED_TO_THIS_PROCESS: u64 = PAD_ERROR_BASE as u64 | 0x08;
+
+/// `scePadGetHandle` and `scePadSetProcessPrivilege`: refused, as measured. oops-sdk's input
+/// falls back to `scePadOpen` on the refusal, as it does on the console.
+fn pad_refused_to_this_process(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    PAD_REFUSED_TO_THIS_PROCESS
 }
 
 /// Vibration and the light bar - accepted and discarded.
@@ -218,6 +231,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("scePadSetVibration", pad_discard),
         ("scePadSetVibrationForce", pad_discard),
         ("scePadSetLightBar", pad_discard),
+        ("scePadGetHandle", pad_refused_to_this_process),
+        ("scePadSetProcessPrivilege", pad_refused_to_this_process),
     ]
 }
 
@@ -230,6 +245,23 @@ fn pad_census_nid(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// `scePadGetHandle(user, 0, 0)` answered `0x80920008` before `scePadInit` and after it, and
+    /// `scePadSetProcessPrivilege(1)` the same, with every argument a buffer and with every
+    /// argument zero (`200-census/libScePad/*`, `20261009-151440-eboot.obs.log`).
+    #[test]
+    fn the_pad_handle_and_privilege_calls_refuse_as_measured() {
+        for name in ["scePadGetHandle", "scePadSetProcessPrivilege"] {
+            let (_, f) = super::implementations()
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name} is implemented"));
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            assert_eq!(f(&args), 0x8092_0008);
+            args[0] = 0x1ea2_f4d9;
+            args[1] = 1;
+            assert_eq!(f(&args), 0x8092_0008);
+        }
+    }
 
     /// The keyboard as REQ-ik01 measured it (`20261009-151440-eboot.obs.log`,
     /// `101-input-ext/ime-keyboard-lifecycle`): user `0xffffffff` is refused with `0x80bc0010`;

@@ -67,6 +67,8 @@ pub mod user {
             // layout) (D346).
             "sceUserServiceGetLoginUserIdList" => 1,
             "sceUserServiceGetAgeLevel" => 2,
+            // (user): there is none in the foreground, as measured.
+            "sceUserServiceGetForegroundUser" => 1,
             "sceUserServiceGetGamePresets" => 2,
             "sceUserServiceGetEvent" => 1,
             "sceUserServiceGetAccessibilityVibration" => 2,
@@ -541,6 +543,17 @@ fn user_service_get_age_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceUserServiceGetForegroundUser(&user)`: `0x80960009` with the slot left as it was, though a
+/// user was signed in, and `0x80960005` for a null slot (`200-census/libSceUserService/
+/// sceUserServiceGetForegroundUser`, `20261009-151440-eboot.obs.log`).
+fn user_service_get_foreground_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        USER_SERVICE_INVALID_ARGUMENT
+    } else {
+        AGE_LEVEL_NOT_A_USER
+    }
+}
+
 /// `sceUserServiceGetAccessibilityVibration(user, out)` and its trigger-effect twin: for the
 /// signed-in user each answered `0x80960002` and wrote none of a buffer filled `0xa5` (REQ-cn10
 /// arm 6, `20261009-151440-eboot.obs.log`), the code `sceUserServiceGetAgeLevel` answers. Another
@@ -648,6 +661,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceUserServiceGetUserName", user_service_get_user_name),
         ("sceUserServiceGetAgeLevel", user_service_get_age_level),
+        (
+            "sceUserServiceGetForegroundUser",
+            user_service_get_foreground_user,
+        ),
         (
             "sceUserServiceGetAccessibilityVibration",
             user_service_get_accessibility,
