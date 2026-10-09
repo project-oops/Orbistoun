@@ -758,6 +758,50 @@ fn an_event_flag_poll_with_no_result_pointer_still_answers() {
     call("sceKernelDeleteEventFlag", &[handle]);
 }
 
+/// Cancelling an event flag sets its pattern, releases every thread waiting on it with
+/// `ECANCELED`, and says how many there were; with nobody waiting it answers zero. PPSA03416's job
+/// workers wait on flags it cancels 576 times a run.
+#[test]
+fn cancelling_an_event_flag_releases_its_waiters() {
+    /// `ECANCELED` (85) in the kernel's vendor encoding.
+    const CANCELED: u64 = 0x8002_0055;
+    let flag = Slot::one();
+    let name = Name::new("jobs");
+    assert_eq!(
+        call(
+            "sceKernelCreateEventFlag",
+            &[flag.at(), name.at(), 0x20, 0, 0]
+        ),
+        OK
+    );
+    let handle = flag.read(0);
+    let waiter =
+        std::thread::spawn(move || call("sceKernelWaitEventFlag", &[handle, 1, 0x02, 0, 0]));
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let count = Slot::one();
+    assert_eq!(
+        call("sceKernelCancelEventFlag", &[handle, 0b0110, count.at()]),
+        OK
+    );
+    assert_eq!(waiter.join().expect("the waiter returns"), CANCELED);
+    assert_eq!(count.read(0) & 0xffff_ffff, 1, "one thread was waiting");
+    let result = Slot::one();
+    assert_eq!(
+        call(
+            "sceKernelPollEventFlag",
+            &[handle, 0b0110, 0x01, result.at(), 0]
+        ),
+        OK
+    );
+    assert_eq!(result.read(0), 0b0110, "the pattern the cancel set");
+    assert_eq!(
+        call("sceKernelCancelEventFlag", &[handle, 0, count.at()]),
+        OK
+    );
+    assert_eq!(count.read(0) & 0xffff_ffff, 0, "nobody left waiting");
+    call("sceKernelDeleteEventFlag", &[handle]);
+}
+
 /// Creating an event flag with nowhere to write the handle is refused.
 #[test]
 fn creating_an_event_flag_with_nowhere_to_put_it_is_refused() {

@@ -1080,6 +1080,21 @@ struct GuestEventFlag {
     name: String,
     bits: Mutex<u64>,
     changed: Condvar,
+    /// How many threads wait on it now, for a cancel to report.
+    waiting: AtomicU64,
+    /// How many times it has been cancelled: a waiter that sees this move was cancelled.
+    cancels: AtomicU64,
+}
+
+/// How an event-flag wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagWait {
+    /// The pattern was found; the bits at that moment, before any clear.
+    Found(u64),
+    /// The timeout elapsed first.
+    TimedOut,
+    /// The flag was cancelled while the thread waited.
+    Cancelled,
 }
 
 fn event_flags() -> &'static Mutex<BTreeMap<EventFlagHandle, Arc<GuestEventFlag>>> {
@@ -1097,6 +1112,8 @@ pub fn create_event_flag(initial: u64, name: &str) -> EventFlagHandle {
                 name: name.to_owned(),
                 bits: Mutex::new(initial),
                 changed: Condvar::new(),
+                waiting: AtomicU64::new(0),
+                cancels: AtomicU64::new(0),
             }),
         );
     }
@@ -1145,13 +1162,12 @@ pub fn event_flag_set(handle: EventFlagHandle, pattern: u64) -> Option<bool> {
     })
 }
 
-/// Blocks the calling thread until the pattern is set, or the timeout elapses.
+/// Blocks the calling thread until the pattern is set, the timeout elapses, or the flag is
+/// cancelled.
 ///
 /// The blocking sibling of [`event_flag_poll`]: `all` selects AND (every bit of the pattern) over
 /// OR (any bit); `clear_all` and `clear_pat` say what to clear on a match. `timeout` is [`None`] for
-/// an indefinite wait. Answers as the poll does, so a caller tells three cases apart - outer [`None`]
-/// for a handle naming nothing, inner [`None`] for a timeout, inner [`Some`] for the pattern found
-/// (before any clear).
+/// an indefinite wait. [`None`] for a handle naming nothing, otherwise how the wait ended.
 ///
 /// The thread parks on the [`Condvar`] that [`event_flag_set`] notifies. The `bits` lock is
 /// released across the wait, so a setter is never shut out.
@@ -1162,11 +1178,33 @@ pub fn event_flag_wait(
     clear_all: bool,
     clear_pat: bool,
     timeout: Option<Duration>,
-) -> Option<Option<u64>> {
+) -> Option<FlagWait> {
     // The Arc is cloned out with the table released, as in `with_event_flag`, so only this flag's
     // `bits` lock is involved in the wait.
     let found = event_flags().lock().ok()?.get(&handle).map(Arc::clone)?;
-    let mut bits = found.bits.lock().ok()?;
+    let bits = found.bits.lock().ok()?;
+    // Counted under the lock a cancel takes, so a cancel counts exactly the threads it releases.
+    let cancels = found.cancels.load(Ordering::SeqCst);
+    found.waiting.fetch_add(1, Ordering::SeqCst);
+    let answer = wait_on_flag(
+        &found,
+        bits,
+        (wanted, all),
+        (clear_all, clear_pat),
+        (timeout, cancels),
+    );
+    found.waiting.fetch_sub(1, Ordering::SeqCst);
+    answer
+}
+
+/// The body of [`event_flag_wait`], holding `bits`, from the cancel count it started at.
+fn wait_on_flag<'a>(
+    found: &'a GuestEventFlag,
+    mut bits: MutexGuard<'a, u64>,
+    (wanted, all): (u64, bool),
+    (clear_all, clear_pat): (bool, bool),
+    (timeout, cancels): (Option<Duration>, u64),
+) -> Option<FlagWait> {
     let matches = |value: u64| {
         if all {
             wanted != 0 && value & wanted == wanted
@@ -1176,6 +1214,9 @@ pub fn event_flag_wait(
     };
     let deadline = timeout.map(|d| Instant::now() + d);
     loop {
+        if found.cancels.load(Ordering::SeqCst) != cancels {
+            return Some(FlagWait::Cancelled);
+        }
         if matches(*bits) {
             let found_pattern = *bits;
             if clear_all {
@@ -1183,7 +1224,7 @@ pub fn event_flag_wait(
             } else if clear_pat {
                 *bits &= !wanted;
             }
-            return Some(Some(found_pattern));
+            return Some(FlagWait::Found(found_pattern));
         }
         // As in `cond_wait`: the handler runs unlocked, then the wait goes on (D652).
         if signal_pending() {
@@ -1199,16 +1240,34 @@ pub fn event_flag_wait(
             Some(when) => {
                 let now = Instant::now();
                 if now >= when {
-                    return Some(None);
+                    return Some(FlagWait::TimedOut);
                 }
                 let (next, timed_out) = found.changed.wait_timeout(bits, when - now).ok()?;
                 bits = next;
-                if timed_out.timed_out() && !matches(*bits) {
-                    return Some(None);
+                if timed_out.timed_out()
+                    && !matches(*bits)
+                    && found.cancels.load(Ordering::SeqCst) == cancels
+                {
+                    return Some(FlagWait::TimedOut);
                 }
             }
         }
     }
+}
+
+/// Cancels an event flag: sets its bits to `pattern` and releases every thread waiting on it,
+/// whose waits end [`FlagWait::Cancelled`]. Answers how many were waiting, or [`None`] for a
+/// handle naming nothing.
+pub fn event_flag_cancel(handle: EventFlagHandle, pattern: u64) -> Option<u64> {
+    with_event_flag(handle, |e| {
+        let mut bits = e.bits.lock().ok()?;
+        *bits = pattern;
+        let waiting = e.waiting.load(Ordering::SeqCst);
+        e.cancels.fetch_add(1, Ordering::SeqCst);
+        e.changed.notify_all();
+        Some(waiting)
+    })
+    .flatten()
 }
 
 /// Clears every bit outside `pattern`, which is what the interface clear does.
@@ -1665,7 +1724,7 @@ mod tests {
         assert_eq!(DELIVERED.load(Ordering::SeqCst), before + 3, "event flag");
         assert!(!waiter.is_finished(), "a signal is not a bit");
         assert_eq!(super::event_flag_set(f, 1), Some(true));
-        assert_eq!(waiter.join().ok(), Some(Some(Some(1))));
+        assert_eq!(waiter.join().ok(), Some(Some(super::FlagWait::Found(1))));
     }
 
     #[test]

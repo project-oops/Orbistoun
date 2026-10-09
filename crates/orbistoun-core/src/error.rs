@@ -89,6 +89,11 @@ pub mod errno {
     /// millisecond out.
     pub const TIMED_OUT: u32 = 60;
 
+    /// A wait ended because what it waited on was cancelled.
+    ///
+    /// Published: `ECANCELED` is 85 in the documented FreeBSD numbering (`sys/sys/errno.h`).
+    pub const CANCELED: u32 = 85;
+
     thread_local! {
         /// This thread's `errno`. A `thread_local` has an address stable for the life of the
         /// thread, and a guest thread is a host thread here, so it is the guest thread's own.

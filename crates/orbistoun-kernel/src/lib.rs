@@ -202,6 +202,8 @@ guest_module! {
         "_sigprocmask" => 3, "sceKernelUuidCreate" => 1,
         "sceKernelWaitEventFlag" => 5,
         "sceKernelSetEventFlag" => 2, "sceKernelClearEventFlag" => 2,
+        // The flag, the pattern it is left with, and where to count the released waiters.
+        "sceKernelCancelEventFlag" => 3,
         "sceKernelDeleteEventFlag" => 1,
         "sceKernelPollSema" => 2, "sceKernelSignalSema" => 2,
         "sceKernelWaitSema" => 3, "sceKernelDeleteSema" => 1,
@@ -3558,15 +3560,32 @@ fn kernel_wait_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
     };
     match outcome {
-        Some(bits) => {
+        sync::FlagWait::Found(bits) => {
             if result != 0 {
                 // SAFETY: an address the guest passed for this call, valid by its contract.
                 unsafe { guest::write_u64(result, bits) };
             }
             OK
         }
-        None => u64::from(GuestError::vendor(ETIMEDOUT).as_raw()),
+        sync::FlagWait::TimedOut => u64::from(GuestError::vendor(ETIMEDOUT).as_raw()),
+        sync::FlagWait::Cancelled => {
+            u64::from(GuestError::vendor(orbistoun_core::errno::CANCELED).as_raw())
+        }
     }
+}
+
+/// `sceKernelCancelEventFlag(flag, pattern, &waiters)`: sets the flag's bits to `pattern`,
+/// releases every thread waiting on it with `ECANCELED`, and writes how many there were to the
+/// optional 32-bit `waiters`. ESRCH for a handle naming nothing, as the family answers.
+fn kernel_cancel_event_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(waiting) = sync::event_flag_cancel(args[0], args[1]) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::NO_SUCH).as_raw());
+    };
+    if args[2] != 0 {
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u32(args[2], u32::try_from(waiting).unwrap_or(u32::MAX)) };
+    }
+    OK
 }
 
 /// `sceKernelSetEventFlag(flag, pattern)`.
@@ -6453,6 +6472,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelPollEventFlag", kernel_poll_event_flag),
     ("sceKernelWaitEventFlag", kernel_wait_event_flag),
     ("sceKernelSetEventFlag", kernel_set_event_flag),
+    ("sceKernelCancelEventFlag", kernel_cancel_event_flag),
     ("sceKernelClearEventFlag", kernel_clear_event_flag),
     ("sceKernelDeleteEventFlag", kernel_delete_event_flag),
     ("sceKernelPollSema", kernel_poll_sema),

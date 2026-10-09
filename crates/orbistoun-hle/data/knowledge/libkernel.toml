@@ -1344,6 +1344,23 @@ found_in = [
 found_on = "2026-08-29"
 
 [[function]]
+name = "sceKernelCancelEventFlag"
+arity = 3
+purpose = "Cancels an event flag: sceKernelCancelEventFlag(flag, pattern, &waiters) sets its bits to pattern, releases every thread waiting on it, whose waits answer ECANCELED, and writes how many were waiting to the optional 32-bit waiters."
+returns = "status"
+edge_cases = [
+    "A released wait answers ECANCELED (85) in the kernel's vendor encoding, 0x80020055.",
+    "A handle naming nothing answers ESRCH, as the rest of the event-flag family does.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = [
+    "The pattern, the release and the count follow the event-flag interface's published shape; nothing on the target has measured them.",
+    "The waiter count is written as 32 bits; unmeasured.",
+]
+found_on = "2026-10-09"
+
+[[function]]
 name = "sceKernelSetEventFlag"
 arity = 2
 purpose = "An event flag: a word of bits threads test and wait on."
