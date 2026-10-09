@@ -21,9 +21,9 @@ out of date.
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
+| PPSA25872-app0 | flipped | 308 | 8,873,808 | 100% | `ran to the time limit` | `c80e1ee97b5382f3` new |
 | PPSA03416-app0 | flipped | 224 | 470,362 | 100% | `image+0x3f8f0` | - |
 | PPSA02664-app0 | flipped | 224 | 418,362 | 100% | `image+0x3f8f0` | - |
-| PPSA25872-app0 | flipped | 216 | 404,136 | 100% | `the title's own modules+0xe3b20` | `2b0cfc83944ce04d` new |
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
 | PPSA21564-app0 | entered | 103 | 505,299 | 100% | `image+0x2990db` | `e14140f4ef1f171b` new |
