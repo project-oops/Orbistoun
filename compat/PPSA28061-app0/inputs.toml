@@ -1,0 +1,111 @@
+# PPSA28061 past its first notice screen, which waits on a button (D721, D736). Flips count from
+# guest entry; Cross then Options, pressed and released every forty flips from flip 200, so a
+# press lands on the notice whatever the host speed. Written by hand, not captured.
+
+[[step]]
+at_flip = 1
+
+[[step]]
+at_flip = 200
+buttons = ["south"]
+
+[[step]]
+at_flip = 203
+
+[[step]]
+at_flip = 240
+buttons = ["start"]
+
+[[step]]
+at_flip = 243
+
+[[step]]
+at_flip = 280
+buttons = ["south"]
+
+[[step]]
+at_flip = 283
+
+[[step]]
+at_flip = 320
+buttons = ["start"]
+
+[[step]]
+at_flip = 323
+
+[[step]]
+at_flip = 360
+buttons = ["south"]
+
+[[step]]
+at_flip = 363
+
+[[step]]
+at_flip = 400
+buttons = ["start"]
+
+[[step]]
+at_flip = 403
+
+[[step]]
+at_flip = 440
+buttons = ["south"]
+
+[[step]]
+at_flip = 443
+
+[[step]]
+at_flip = 480
+buttons = ["start"]
+
+[[step]]
+at_flip = 483
+
+[[step]]
+at_flip = 520
+buttons = ["south"]
+
+[[step]]
+at_flip = 523
+
+[[step]]
+at_flip = 560
+buttons = ["start"]
+
+[[step]]
+at_flip = 563
+
+[[step]]
+at_flip = 600
+buttons = ["south"]
+
+[[step]]
+at_flip = 603
+
+[[step]]
+at_flip = 640
+buttons = ["start"]
+
+[[step]]
+at_flip = 643
+
+[[step]]
+at_flip = 680
+buttons = ["south"]
+
+[[step]]
+at_flip = 683
+
+[[step]]
+at_flip = 720
+buttons = ["start"]
+
+[[step]]
+at_flip = 723
+
+[[step]]
+at_flip = 760
+buttons = ["south"]
+
+[[step]]
+at_flip = 763
