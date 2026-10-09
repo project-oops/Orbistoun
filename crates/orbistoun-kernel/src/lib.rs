@@ -171,6 +171,7 @@ guest_module! {
         "scePthreadCondInit" => 3, "scePthreadCondWait" => 2,
         // The condition, the mutex, and a relative span in microseconds.
         "scePthreadCondTimedwait" => 3,
+        "scePthreadYield" => 0,
         "scePthreadCondSignal" => 1, "scePthreadCondBroadcast" => 1,
         "scePthreadCondDestroy" => 1,
         "scePthreadRwlockInit" => 3, "scePthreadRwlockRdlock" => 1,
@@ -6417,6 +6418,7 @@ const TABLE: &[(&str, GuestFn)] = &[
         pthread_rwlockattr_settype_np,
     ),
     ("pthread_yield", pthread_yield),
+    ("scePthreadYield", pthread_yield),
     ("sched_yield", sched_yield),
     ("pthread_getconcurrency", pthread_getconcurrency),
     ("pthread_setconcurrency", pthread_setconcurrency),

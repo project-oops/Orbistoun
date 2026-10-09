@@ -1788,6 +1788,17 @@ assumptions = [
 found_on = "2026-10-08"
 
 [[function]]
+name = "scePthreadYield"
+arity = 0
+purpose = "Offers the processor to another thread: the vendor spelling of pthread_yield, answering 0."
+returns = "status"
+edge_cases = ["A hint by definition; handed to the host scheduler, as pthread_yield and sched_yield are."]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["Semantics follow the POSIX analogue of the same name, as for every scePthread spelling here; unmeasured."]
+found_on = "2026-10-09"
+
+[[function]]
 name = "scePthreadCondattrDestroy"
 arity = 1
 purpose = "Releases a condition-variable attribute object."

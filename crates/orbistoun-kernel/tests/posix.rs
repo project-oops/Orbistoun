@@ -496,6 +496,13 @@ fn a_guest_condition_variable_remembers_a_signal_that_arrived_early() {
     assert_eq!(call("scePthreadCondSignal", &[cond.at()]), INVALID);
 }
 
+/// The vendor spelling of `pthread_yield` yields and answers success, as the POSIX one does:
+/// PPSA03416 calls it 433 times in a run.
+#[test]
+fn the_vendor_yield_answers_success() {
+    assert_eq!(call("scePthreadYield", &[]), OK);
+}
+
 /// The vendor timed wait takes a relative span in microseconds, not POSIX's absolute deadline: it
 /// waits that long for a signal nobody sends, then answers the kernel's `ETIMEDOUT`; a signal
 /// owed is taken at once. PPSA03416 waits this way a million times and needs each to pass time.
