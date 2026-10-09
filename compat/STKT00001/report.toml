@@ -1,0 +1,31 @@
+[title]
+id = "STKT00001"
+name = "SuperTuxKart"
+content_version = "01.00"
+master_version = "01.00"
+
+[reproduce]
+module_sha256 = "3bd3fa9476ab28b201796f173a5675a3d5c8d7d91a41d28a8b2ddda8de7a0d5b"
+limit_seconds = 120
+frame_every = 30
+sheet_frames = 10
+frames = "local"
+
+[compat]
+
+[settings]
+
+[status]
+reach = "presented"
+outcome = "ran to the time limit"
+imports = 149
+calls = 7557561
+standing = 100
+default_return = "unimplemented"
+frames = 1352
+unanswered = 5
+limit_seconds = 120
+build = "v0.1.0 - eaf1938"
+measured_on = "2026-10-09"
+link_plan = "e9c3927fc3b26eb7"
+link_plan_stored = "match"
