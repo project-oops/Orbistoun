@@ -32,6 +32,8 @@ guest_module! {
         "sceVideoOutSetBufferAttribute2" => 6,
         // Arity 2: the port handle and the status the hardware fills.
         "sceVideoOutGetOutputStatus" => 2,
+        // Unnamed: (handle, which, p0, 0, 0, p1), as PPSA28061 calls it once a frame.
+        "0x1643ec4c4a7c2230" => 6,
     }
 }
 
@@ -56,6 +58,10 @@ mod video_error {
     pub(super) const ALREADY_OPEN: u64 = 0x8029_0009;
     /// A null where the call writes. Measured: `130-layout/video-out-output-status` `rc-null`.
     pub(super) const INVALID_VALUE: u64 = 0x8029_0002;
+    /// What `0x1643ec4c4a7c2230` answers for `which` 0 on an open handle. Measured:
+    /// `200-census/libSceVideoOut/0x1643ec4c4a7c2230` `call-frame-arg0`; its meaning is not
+    /// established.
+    pub(super) const REFUSED: u64 = 0x8029_0001;
 }
 
 /// The shape of a registered buffer set, decoded from its attribute block.
@@ -238,6 +244,24 @@ fn video_out_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }) {
         Some(()) => OK,
         None => video_error::INVALID_HANDLE,
+    }
+}
+
+/// `0x1643ec4c4a7c2230(handle, which, p0, _, _, p1)`, unnamed.
+///
+/// Measured on an open handle (`200-census/libSceVideoOut/0x1643ec4c4a7c2230`,
+/// `20261008-142306-eboot.obs.log`): `which` 1 answers zero and `which` 0 answers `0x8029_0001`,
+/// and neither writes the 128 bytes of either buffer it was handed. A value naming no port answers
+/// `0x8029_000b`, as the census's buffer and zero calls did. Any other `which` is unmeasured and
+/// answered as unimplemented.
+fn video_out_1643ec4c4a7c2230(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if port::with(args[0], |_| ()).is_none() {
+        return video_error::INVALID_HANDLE;
+    }
+    match args[1] {
+        1 => OK,
+        0 => video_error::REFUSED,
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
 
@@ -692,6 +716,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             video_out_get_resolution_status,
         ),
         ("sceVideoOutGetOutputStatus", video_out_get_output_status),
+        ("0x1643ec4c4a7c2230", video_out_1643ec4c4a7c2230),
     ]
 }
 
@@ -718,10 +743,10 @@ mod tests {
     }
     use super::{
         BufferShape, GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
-        video_out_get_flip_status, video_out_get_output_status, video_out_get_resolution_status,
-        video_out_is_flip_pending, video_out_open, video_out_register_buffers,
-        video_out_register_buffers2, video_out_set_buffer_attribute2, video_out_set_flip_rate,
-        video_out_submit_flip,
+        video_out_1643ec4c4a7c2230, video_out_get_flip_status, video_out_get_output_status,
+        video_out_get_resolution_status, video_out_is_flip_pending, video_out_open,
+        video_out_register_buffers, video_out_register_buffers2, video_out_set_buffer_attribute2,
+        video_out_set_flip_rate, video_out_submit_flip,
     };
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
@@ -1157,6 +1182,38 @@ mod tests {
             video_out_get_resolution_status(&args([port::FIRST + 9999, status_ptr, 0, 0])),
             0,
             "an unopened handle is refused"
+        );
+    }
+
+    /// `0x1643ec4c4a7c2230(handle, which, p0, 0, 0, p1)` as `200-census/libSceVideoOut/0x1643ec4c4a7c2230`
+    /// measured it on an open handle: `which` 1 answers zero, `which` 0 answers `0x8029_0001`,
+    /// neither writes its two buffers, and a value that names no port answers `0x8029_000b`.
+    #[test]
+    fn the_unnamed_output_query_answers_as_measured() {
+        let _guard = serial();
+        let handle = open_on(14);
+        assert!(handle >= port::FIRST, "a port opened");
+        let mut p0 = [0xccu8; 128];
+        let mut p1 = [0xccu8; 128];
+        let call = |which: u64, p0: &mut [u8; 128], p1: &mut [u8; 128]| {
+            video_out_1643ec4c4a7c2230(&[
+                handle,
+                which,
+                p0.as_mut_ptr() as u64,
+                0,
+                0,
+                p1.as_mut_ptr() as u64,
+            ])
+        };
+        assert_eq!(call(1, &mut p0, &mut p1), 0);
+        assert_eq!(call(0, &mut p0, &mut p1), 0x8029_0001);
+        assert!(
+            p0.iter().chain(&p1).all(|&byte| byte == 0xcc),
+            "neither buffer is written"
+        );
+        assert_eq!(
+            video_out_1643ec4c4a7c2230(&[0, 1, 0, 0, 0, 0]),
+            video_error::INVALID_HANDLE
         );
     }
 }
