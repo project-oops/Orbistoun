@@ -74,3 +74,69 @@ pub fn on_index_lookup(lookup: Lookup) {
 pub(crate) fn look_up(path: &str) -> Option<(u64, u64)> {
     LOOKUP.get().and_then(|look| look(path))
 }
+
+/// Answers the size of an existing regular guest file, installed from above like [`on_file_read`].
+type Sizer = fn(&str) -> Option<u64>;
+
+/// The installed sizer, if anything installed one.
+static SIZER: OnceLock<Sizer> = OnceLock::new();
+
+/// Installs what [`synthesise`] asks for a file's size.
+pub fn on_file_size(sizer: Sizer) {
+    let _ = SIZER.set(sizer);
+}
+
+/// The first identifier synthesised for a file outside the title's index (D782): a range of its
+/// own, so a synthesised identifier never meets one an index assigns.
+pub(crate) const SYNTHESISED_FIRST: u64 = 0x4000_0000;
+
+/// The paths given synthesised identifiers, in the order they were first asked for: the identifier
+/// is [`SYNTHESISED_FIRST`] plus the position.
+fn synthesised() -> &'static Mutex<Vec<String>> {
+    static SYNTHESISED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    SYNTHESISED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// An identifier and size for `path` when the index has none (D782): an existing file under
+/// `/app0/` gets one of its own, the same every time it is asked for, with its real size. Nothing
+/// for a path outside `/app0/`, which the hardware refuses, or for a file that does not exist.
+pub(crate) fn synthesise(path: &str) -> Option<(u64, u64)> {
+    if !path.starts_with("/app0/") {
+        return None;
+    }
+    let size = SIZER.get().and_then(|size_of| size_of(path))?;
+    let mut held = synthesised().lock().ok()?;
+    let position = if let Some(position) = held.iter().position(|known| known == path) {
+        position
+    } else {
+        held.push(path.to_owned());
+        held.len() - 1
+    };
+    Some((SYNTHESISED_FIRST + position as u64, size))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A test filesystem: one existing file and one directory.
+    fn size_of(path: &str) -> Option<u64> {
+        (path == "/app0/Media/ScriptingAssemblies.json").then_some(0x1b0)
+    }
+
+    /// An existing `/app0` file the index does not name gets an identifier of its own in the
+    /// synthesised range, with its real size, and the same one when asked again (D782); a missing
+    /// file or a path outside `/app0` gets none.
+    #[test]
+    fn a_file_outside_the_index_gets_a_stable_synthesised_identifier() {
+        super::on_file_size(size_of);
+        let first = super::synthesise("/app0/Media/ScriptingAssemblies.json");
+        let (id, size) = first.expect("an existing app0 file resolves");
+        assert!(id >= super::SYNTHESISED_FIRST, "in the synthesised range");
+        assert_eq!(size, 0x1b0);
+        assert_eq!(
+            super::synthesise("/app0/Media/ScriptingAssemblies.json"),
+            first
+        );
+        assert_eq!(super::synthesise("/app0/Media/missing.json"), None);
+        assert_eq!(super::synthesise("/data/ScriptingAssemblies.json"), None);
+    }
+}

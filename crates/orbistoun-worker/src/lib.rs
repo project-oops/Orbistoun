@@ -1604,6 +1604,7 @@ fn install_reporting(
     // file path is file I/O under a kernel name, and this crate owns both sibling subsystems.
     orbistoun_kernel::apr::on_file_read(read_guest_file);
     orbistoun_kernel::apr::on_index_lookup(look_up_in_index);
+    orbistoun_kernel::apr::on_file_size(guest_file_size);
 
     let armed = experiments
         .watchpoints()
@@ -3235,6 +3236,15 @@ fn look_up_in_index(guest_path: &str) -> Option<(u64, u64)> {
         .iter()
         .find(|e| e.path == guest_path)
         .map(|e| (e.id, e.size))
+}
+
+/// The size of an existing regular file at a guest path, for the identifiers the asynchronous file
+/// path synthesises (D782). Through the mount table, as the index is read, so asking does not put
+/// the file in the guest's descriptor table.
+fn guest_file_size(guest_path: &str) -> Option<u64> {
+    let host = orbistoun_fs::mount::resolve_existing(guest_path)?;
+    let data = std::fs::metadata(host).ok()?;
+    data.is_file().then_some(data.len())
 }
 
 /// Reads a guest path into guest memory, for the asynchronous file path's experiment.

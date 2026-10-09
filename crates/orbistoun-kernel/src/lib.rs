@@ -6762,7 +6762,9 @@ fn resolve_paths(
             // SAFETY: each entry of the guest's path array is a path under the call's contract.
             .map(|path| format!("{prefix}{}", unsafe { read_path(path) }))
             .unwrap_or_default();
-        let answer = apr::look_up(&path);
+        // The title's index first; an existing app0 file it does not name is given an identifier
+        // of its own (D782).
+        let answer = apr::look_up(&path).or_else(|| apr::synthesise(&path));
         let (id, size) = answer.map_or((u32::MAX, 0), |(id, size)| (id as u32, size));
         all_resolved &= answer.is_some();
         // Written per entry, at the measured widths.
