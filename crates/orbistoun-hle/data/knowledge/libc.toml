@@ -3724,3 +3724,12 @@ known_by = "published"
 cites = "ISO/IEC 9899:2011 K.3.5.3.6."
 assumptions = ["The published specification is the source. Annex K is optional and implementations differ; nothing on the target has confirmed that its build refuses rather than truncates, or that it calls no constraint handler that aborts."]
 found_on = "2026-10-10"
+
+[[function]]
+name = "ungetc"
+arity = 2
+purpose = "ISO/IEC 9899 7.21.7.10: c converted to unsigned char pushed back to be the next byte read, clearing end-of-file, and answered. Pushed-back bytes stack, the last pushed read first, as FreeBSD's __ungetc keeps them; each backs ftell up one byte and a seek discards them. EOF, or a stream naming no open file, answers EOF and pushes nothing."
+known_by = "published"
+cites = "ISO/IEC 9899 7.21.7.10; FreeBSD lib/libc/stdio/ungetc.c."
+assumptions = ["That more than one byte may be pushed back follows FreeBSD; ISO C guarantees only one. A stream wrapping a descriptor keeps no pushback here and refuses."]
+found_on = "2026-10-10"

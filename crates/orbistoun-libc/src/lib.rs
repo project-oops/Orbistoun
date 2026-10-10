@@ -219,7 +219,7 @@ guest_module! {
         "fclose" => 1,
         "fread" => 4,
         "fwrite" => 4,
-        "fgetc" => 1,
+        "fgetc" => 1, "ungetc" => 2,
         "fputc" => 2,
         "fseek" => 3,
         "ftell" => 1,
@@ -3636,6 +3636,23 @@ fn fgetc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `ungetc(c, stream)` - ISO/IEC 9899 7.21.7.10: `c` converted to `unsigned char` pushed back to
+/// be the next byte read, clearing end-of-file, and answered; `EOF`, or a stream naming no open
+/// file, answers `EOF` and pushes nothing. A stream wrapping a descriptor keeps no pushback, so it
+/// refuses too.
+fn ungetc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (c, stream) = (args[0] as i32, args[1]);
+    if c == -1 {
+        return EOF;
+    }
+    let byte = c as u8;
+    if orbistoun_fs::open::unread(stream, byte) {
+        u64::from(byte)
+    } else {
+        EOF
+    }
+}
+
 /// `fputc(c, stream)` - ISO/IEC 9899 7.21.7.3: writes `c` converted to `unsigned char` and answers
 /// it, or `EOF` when it could not be written. A stream that names no open file is the standard
 /// output or error, written as `fwrite` writes it.
@@ -3877,6 +3894,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("fread", fread),
         ("fwrite", fwrite),
         ("fgetc", fgetc),
+        ("ungetc", ungetc),
         ("fputc", fputc),
         ("fseek", fseek),
         ("ftell", ftell),

@@ -384,6 +384,37 @@ fn a_byte_at_a_time_reads_and_writes_as_c_specifies() {
     );
 }
 
+/// `ungetc` pushes a byte back to be read next, answering it as an unsigned char; `EOF` is
+/// refused and leaves the stream alone (ISO/IEC 9899 7.21.7.10).
+#[test]
+fn ungetc_pushes_a_byte_back_to_be_read_next() {
+    let dir = std::env::temp_dir().join("orbistoun-libc-stdio-ungetc");
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("one.bin"), [0x41]).expect("a sample file");
+    orbistoun_fs::mount::mount("/ungetctest", dir.clone());
+
+    let path = Buf::text("/ungetctest/one.bin");
+    let stream = call("fopen", &[path.at(), 0]);
+    assert_ne!(stream, 0, "opens");
+    assert_eq!(call("fgetc", &[stream]), 0x41);
+    assert_eq!(
+        call("ungetc", &[0x1ff, stream]),
+        0xff,
+        "converted to unsigned char"
+    );
+    assert_eq!(call("feof", &[stream]), 0);
+    assert_eq!(call("fgetc", &[stream]), 0xff, "read back next");
+    assert_eq!(call("fgetc", &[stream]), u64::MAX, "then the end");
+    assert_eq!(
+        call("ungetc", &[u64::from(u32::MAX), stream]),
+        u64::MAX,
+        "EOF is refused"
+    );
+    assert_eq!(call("fgetc", &[stream]), u64::MAX, "and pushed nothing");
+    assert_eq!(call("fclose", &[stream]), 0);
+    assert_eq!(call("ungetc", &[0x41, 0]), u64::MAX, "no stream refuses");
+}
+
 /// A System V `va_list` whose register half holds `words` from its start: `gp_offset` 0,
 /// `fp_offset` past the integer half, the overflow area empty (psABI 3.5.7).
 /// A `va_list` and the two areas it points into, kept alive together.

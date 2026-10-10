@@ -32,6 +32,11 @@ struct Open {
     ///
     /// Tracked rather than derived, because `feof` is asked after the read that ended the file.
     at_end: bool,
+    /// Bytes pushed back by `ungetc`, the next to be read last.
+    ///
+    /// A stack, as FreeBSD's `__ungetc` keeps them: ISO C 7.21.7.10 guarantees one and allows
+    /// more, and a later byte comes back first.
+    pushed_back: Vec<u8>,
 }
 
 /// Streams that are a descriptor rather than a file of their own.
@@ -136,6 +141,7 @@ pub fn open(guest_path: &str) -> Option<FileHandle> {
             file,
             path: guest_path.to_owned(),
             at_end: false,
+            pushed_back: Vec::new(),
         },
     );
     Some(handle)
@@ -166,6 +172,7 @@ pub fn create(guest_path: &str) -> Option<FileHandle> {
             file,
             path: guest_path.to_owned(),
             at_end: false,
+            pushed_back: Vec::new(),
         },
     );
     Some(handle)
@@ -185,7 +192,14 @@ pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
         // Whether the end had already been reached, which separates "this file is finished"
         // from "this read was cut short".
         let was_at_end = open.at_end;
-        let read = open.file.read(into).unwrap_or(0);
+        let mut read = 0;
+        while read < into.len()
+            && let Some(byte) = open.pushed_back.pop()
+        {
+            into[read] = byte;
+            read += 1;
+        }
+        read += open.file.read(&mut into[read..]).unwrap_or(0);
         // A short read is how the end announces itself, and `feof` is asked afterwards.
         if read < into.len() {
             open.at_end = true;
@@ -279,9 +293,13 @@ impl From {
 pub fn seek(handle: FileHandle, from: From, offset: i64) -> Option<u64> {
     use std::io::Seek as _;
     with(handle, |open| {
+        // Measured from the position `tell` reports, which the pushed-back bytes back up; and
+        // they are discarded, as ISO C 7.21.7.10 says a seek does.
+        let behind = open.pushed_back.len() as i64;
+        open.pushed_back.clear();
         let to = match from {
             From::Start => std::io::SeekFrom::Start(offset.max(0) as u64),
-            From::Current => std::io::SeekFrom::Current(offset),
+            From::Current => std::io::SeekFrom::Current(offset.saturating_sub(behind)),
             From::End => std::io::SeekFrom::End(offset),
         };
         let at = open.file.seek(to).unwrap_or(0);
@@ -293,10 +311,23 @@ pub fn seek(handle: FileHandle, from: From, offset: i64) -> Option<u64> {
     })
 }
 
-/// Where the read position is.
+/// Where the read position is: one byte earlier for each byte pushed back (ISO C 7.21.7.10).
 pub fn tell(handle: FileHandle) -> Option<u64> {
     use std::io::Seek as _;
-    with(handle, |open| open.file.stream_position().unwrap_or(0))
+    with(handle, |open| {
+        let at = open.file.stream_position().unwrap_or(0);
+        at.saturating_sub(open.pushed_back.len() as u64)
+    })
+}
+
+/// Pushes `byte` back onto a stream, to be the next read, and clears its end marker, as
+/// `ungetc` does (ISO C 7.21.7.10). Answers whether the handle named an open file.
+pub fn unread(handle: FileHandle, byte: u8) -> bool {
+    with(handle, |open| {
+        open.pushed_back.push(byte);
+        open.at_end = false;
+    })
+    .is_some()
 }
 
 /// Whether a read has hit the end.
@@ -333,7 +364,7 @@ pub fn close_all() {
 
 #[cfg(test)]
 mod tests {
-    use super::{From, at_end, close, open, path_of, read, seek, tell};
+    use super::{From, at_end, close, open, path_of, read, seek, tell, unread};
 
     /// Serialises the tests that touch the mount table.
     /// Mounts are process-global and the harness runs tests in parallel.
@@ -396,6 +427,38 @@ mod tests {
         assert_eq!(&buf, b"abcd");
         assert_eq!(tell(h), Some(4));
         assert!(close(h));
+    }
+
+    /// A byte pushed back is read next, the last pushed first, even one the file never held;
+    /// it backs the position up, clears the end marker, and a seek discards it.
+    #[test]
+    fn a_pushed_back_byte_is_read_next() {
+        let _guard = exclusively();
+        a_title_with("unread", b"ab");
+        let h = open("/app0/game.bin").expect("opens");
+        let mut buf = [0_u8; 4];
+        assert_eq!(read(h, &mut buf), Some(2));
+        assert_eq!(at_end(h), Some(true));
+        assert!(unread(h, b'x'));
+        assert!(unread(h, b'y'));
+        assert_eq!(at_end(h), Some(false), "ISO C 7.21.7.10 clears end-of-file");
+        assert_eq!(
+            tell(h),
+            Some(0),
+            "two bytes back from the end of a two-byte file"
+        );
+        assert_eq!(read(h, &mut buf), Some(2));
+        assert_eq!(&buf[..2], b"yx", "the last pushed comes back first");
+
+        assert!(unread(h, b'z'));
+        assert_eq!(seek(h, From::Start, 0), Some(0));
+        assert_eq!(read(h, &mut buf), Some(2));
+        assert_eq!(&buf[..2], b"ab", "the seek discarded the pushed-back byte");
+        assert!(
+            !unread(0xDEAD_0000, b'q'),
+            "a handle naming nothing refuses"
+        );
+        close(h);
     }
 
     /// Seeking to the end reports the file's size.
