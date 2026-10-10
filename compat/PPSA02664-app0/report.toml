@@ -24,17 +24,17 @@ frames = "local"
 [status]
 reach = "presented"
 outcome = "ran to the time limit"
-imports = 320
-calls = 7300943
+imports = 347
+calls = 7023435
 standing = 100
 default_return = "unimplemented"
-frames = 3427
-unanswered = 4
+frames = 3483
+unanswered = 18
 limit_seconds = 120
-build = "v0.1.0 - f06fca2"
-measured_on = "2026-10-09"
-link_plan = "f29b17e0ffb822c6"
-link_plan_stored = "new"
+build = "v0.1.0 - 456ecc8"
+measured_on = "2026-10-10"
+link_plan = "cb2697381f859e97"
+link_plan_stored = "mismatch"
 
 [experiment]
 reach = "flipped"
