@@ -233,6 +233,15 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAudioOut2Initialize", audio_out2::initialize),
         ("sceAudioOut2UserCreate", audio_out2::user_create),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
+        (
+            "sceAudioOut2ContextResetParam",
+            audio_out2::context_reset_param,
+        ),
+        (
+            "sceAudioOut2ContextQueryMemory",
+            audio_out2::context_query_memory,
+        ),
+        ("sceAudioOut2ContextCreate", audio_out2::context_create),
     ]
 }
 
@@ -240,8 +249,9 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
-    /// `sceAudioOut2UserDestroy` answers `0x80268010` for a user `sceAudioOut2UserCreate` made and for
-    /// 0 alike (REQ-cn10 arm 2, `20261009-151440-eboot.obs.log`).
+    /// `sceAudioOut2UserCreate` writes an 8-byte handle for the signed-in user and for `0xff`, and
+    /// `sceAudioOut2UserDestroy` answers 0 for a handle it made and `0x80268010` for 0 (REQ-ao04,
+    /// `20261010-231900-eboot.obs.log` 30-56, a fresh process; REQ-cn10 arm 2 for 0).
     #[test]
     fn an_audio_out2_user_is_created_for_the_signed_in_user_as_measured() {
         let user = u64::from(orbistoun_systemservice::signed_in_user());
@@ -254,11 +264,63 @@ mod tests {
             out[8..].iter().all(|&b| b == 0xa5),
             "exactly 8 bytes written"
         );
+        assert_eq!(call("sceAudioOut2UserDestroy", [handle, 0, 0, 0, 0, 0]), 0);
         assert_eq!(
-            call("sceAudioOut2UserDestroy", [handle, 0, 0, 0, 0, 0]),
-            0x8026_8010,
-            "the console refused to destroy the handle it made"
+            call("sceAudioOut2UserDestroy", [0, 0, 0, 0, 0, 0]),
+            0x8026_8010
         );
+        let mut primary = [0xa5_u8; 8];
+        let at = primary.as_mut_ptr() as u64;
+        assert_eq!(call("sceAudioOut2UserCreate", [0xff, at, 0, 0, 0, 0]), 0);
+        assert_ne!(primary, [0xa5; 8], "0xff names the primary user");
+    }
+
+    /// The context set-up PPSA04263 makes, as a fresh process answered it (REQ-ao04,
+    /// `20261010-231900-eboot.obs.log` 30-56): the reset parameters, the memory the title's
+    /// parameters need, and a context created in it.
+    #[test]
+    fn an_audio_out2_context_is_set_up_as_measured() {
+        let mut param = [0xa5_u8; 0x40];
+        let at = param.as_mut_ptr() as u64;
+        assert_eq!(
+            call("sceAudioOut2ContextResetParam", [at, 0, 0, 0, 0, 0]),
+            0
+        );
+        let word = |b: &[u8], i: usize| u32::from_le_bytes(b[i..i + 4].try_into().expect("four"));
+        assert_eq!(
+            (word(&param, 0), word(&param, 4), word(&param, 8)),
+            (8, 0, 0)
+        );
+        assert_eq!(
+            (word(&param, 0xc), word(&param, 0x10), word(&param, 0x14)),
+            (1, 0x100, 0)
+        );
+        assert!(
+            param[0x18..].iter().all(|&b| b == 0xa5),
+            "the title's block is 0x18 bytes"
+        );
+
+        for (i, value) in [4_u32, 0x48, 0, 2, 0x100, 1].into_iter().enumerate() {
+            param[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut size = [0xa5_u8; 8];
+        let size_at = size.as_mut_ptr() as u64;
+        assert_eq!(
+            call("sceAudioOut2ContextQueryMemory", [at, size_at, 0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(u64::from_le_bytes(size), 0x45698);
+
+        let mut context = [0xa5_u8; 8];
+        let context_at = context.as_mut_ptr() as u64;
+        assert_eq!(
+            call(
+                "sceAudioOut2ContextCreate",
+                [at, 0x1000, 0x45698, context_at, 0, 0]
+            ),
+            0
+        );
+        assert_eq!(context, [0; 8], "the console's first context is 0");
     }
 
     /// `sceAudioOut2Initialize` answers 0 the first time in a process and `0x80268004` every time

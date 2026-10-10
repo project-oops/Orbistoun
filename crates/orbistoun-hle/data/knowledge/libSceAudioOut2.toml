@@ -9,7 +9,6 @@ edge_cases = [
     "MEASURED in a process with no earlier audio use (after sceSysmoduleLoadModule 0x96 and 0x95 and sceSysmoduleIsLoaded 0xb4, PPSA04263's order): 0 with every argument zero, then 0x80268004 on a second call.",
     "MEASURED after a first call (REQ-ao02): 0x80268004 every time, with or without sceSysmoduleLoadModule(0x001c) and with a buffer in rdi, left untouched. 0x80268004 is the library already initialised.",
     "orbistoun answers 0 the first time in a process and 0x80268004 after.",
-    "UNRESOLVED: sceAudioOut2UserDestroy on the created handle answered 0 in the fresh process and 0x80268010 in REQ-ao02's; orbistoun keeps 0x80268010 until the two are reconciled.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261010T1320Z-ao03, reports/hardware/20261010-125000-eboot.obs.log lines 30-42 (000-boot/audioout2-fresh-process); REQ-20261010T1030Z-ao02, reports/hardware/20261010-115300-eboot.log lines 3590-3618."
@@ -23,10 +22,11 @@ purpose = "Creates an audio output user for a signed-in user: (user, out), writi
 returns = "status"
 edge_cases = [
     "MEASURED (070-user/oneshot-setup-calls arm 2): for the initial user, with a 0x40-byte out filled 0xa5, it answered 0 and changed exactly the first 8 bytes, to a heap-shaped handle (0x80067fbf0, then 0x80067fc10), both with the module 0x001c loaded and without it.",
-    "orbistoun writes a small non-zero handle (D151); any other user and a null out are unmeasured and answer the placeholder.",
+    "MEASURED (REQ-ao04, a fresh process): user 0xff answered 0 and the same handle as the initial user's id - 0xff names the primary user.",
+    "orbistoun writes a small non-zero handle (D151) for the signed-in user and for 0xff; any other user and a null out are unmeasured and answer the placeholder.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261009T2215Z-ao01, reports/hardware/20261010-100600-eboot.obs.log lines 2916-2938."
+cites = "obSCEne REQ-20261009T2215Z-ao01, reports/hardware/20261010-100600-eboot.obs.log lines 2916-2938; REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-10"
 
@@ -37,9 +37,52 @@ purpose = "Destroys an audio output user: (user)."
 edge_cases = [
     "MEASURED (070-user/oneshot-setup-calls arm 2): for the user sceAudioOut2UserCreate made (0x80268001) and for 0 alike it answered 0x80268010.",
     "MEASURED (REQ-ao01, 20261010-100600-eboot.obs.log): for the handle a successful sceAudioOut2UserCreate wrote, and for 0, it answered 0x80268010 again.",
-    "orbistoun answers 0x80268010 whatever it is handed.",
+    "MEASURED in a fresh process twice (REQ-ao03 and REQ-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)): for the handle UserCreate made in that process it answered 0. The mid-sweep 0x80268010 above came from processes where the library had been used before.",
+    "orbistoun answers 0 for a handle it gave in this process, once, and 0x80268010 for anything else.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 2."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceAudioOut2ContextResetParam"
+arity = 6
+purpose = "(param): writes the default context parameters and answers 0."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ao04): after Initialize in a fresh process, rc 0 and the block read u32 8 at +0x00, 1 at +0x0c, 0x100 at +0x10, every other byte to 0x40 zero.",
+    "orbistoun writes the 0x18 bytes those fields lie in: PPSA04263 passes a 0x18-byte block on its stack and runs on a console, so the zeros past 0x18 are not taken as the write. Whether the call writes further is unestablished.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceAudioOut2ContextQueryMemory"
+arity = 6
+purpose = "(param, size): the bytes a context with these parameters needs, written to size."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ao04): with the parameters PPSA04263 writes (u32 4, 0x48, 0, 2 then u64 0x100000100), rc 0 and size 0x45698.",
+    "orbistoun answers that parameter set only; any other is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceAudioOut2ContextCreate"
+arity = 6
+purpose = "(param, memory, size, context): creates a context in memory of the size ContextQueryMemory answered, writing its 8-byte handle to context."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ao04): with those parameters, 16-aligned memory of 0x45698 bytes, rc 0 and context 0 - the first context's handle is 0.",
+    "orbistoun answers the first context in a process so; a second context, other parameters or too little memory are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-11"
