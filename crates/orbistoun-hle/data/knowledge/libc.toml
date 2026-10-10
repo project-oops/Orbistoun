@@ -3506,3 +3506,105 @@ purpose = "Answers the argument vector pointer for the current process."
 returns = "pointer"
 known_by = "guest-observed"
 found_on = "2026-09-27"
+
+[[function]]
+name = "__isfinite"
+arity = 1
+known_by = "published"
+cites = "FreeBSD lib/msun/src/s_isfinite.c: 1 unless infinite or NaN."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "__isfinitef"
+arity = 1
+purpose = "single precision, beside __isfinite."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "__isinf"
+arity = 1
+known_by = "published"
+cites = "FreeBSD lib/libc/gen/isinf.c: 1 for either infinity, else 0."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "__isinff"
+arity = 1
+purpose = "single precision, beside __isinf."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "__isnan"
+arity = 1
+known_by = "published"
+cites = "FreeBSD lib/libc/gen/isnan.c: 1 for a NaN, else 0."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "__isnanf"
+arity = 1
+purpose = "single precision, beside __isnan."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "__powidf2"
+arity = 2
+purpose = "a to the integer power b, by compiler-rt's repeated squaring with the reciprocal taken last for a negative power (compiler-rt/lib/builtins/powidf2.c), so each product rounds where the guest's own builtin rounds it."
+known_by = "assumed"
+assumptions = ["Derived from the implementation's own documentation, which cites no published specification. Nothing on the target has confirmed it."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "atof"
+arity = 1
+known_by = "published"
+cites = "ISO/IEC 9899 7.22.1.1: strtod(text, NULL)."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "fgetc"
+arity = 1
+purpose = "ISO/IEC 9899 7.21.7.1: the next byte as an unsigned char converted to int, or EOF at the end, on an error, or for a stream that is not open."
+known_by = "published"
+cites = "ISO/IEC 9899"
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "fputc"
+arity = 2
+purpose = "ISO/IEC 9899 7.21.7.3: writes c converted to unsigned char and answers it, or EOF when it could not be written. A stream that names no open file is the standard output or error, written as fwrite writes it."
+known_by = "published"
+cites = "ISO/IEC 9899"
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "nextafter"
+arity = 2
+purpose = "ISO/IEC 9899 7.12.11.3: the next representable value after x toward y; y when they are equal, and a NaN when either is."
+known_by = "published"
+cites = "ISO/IEC 9899"
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."

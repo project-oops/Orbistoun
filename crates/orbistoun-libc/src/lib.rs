@@ -214,6 +214,8 @@ guest_module! {
         "fclose" => 1,
         "fread" => 4,
         "fwrite" => 4,
+        "fgetc" => 1,
+        "fputc" => 2,
         "fseek" => 3,
         "ftell" => 1,
         "fseeko" => 3,
@@ -3500,6 +3502,39 @@ fn fwrite(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `fgetc(stream)` - ISO/IEC 9899 7.21.7.1: the next byte as an `unsigned char` converted to
+/// `int`, or `EOF` at the end, on an error, or for a stream that is not open.
+fn fgetc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let stream = args[0];
+    let mut byte = [0_u8; 1];
+    let read = if let Some(fd) = orbistoun_fs::open::wrapped_descriptor(stream) {
+        orbistoun_fs::descriptor::read(fd, &mut byte)
+    } else {
+        orbistoun_fs::open::read(stream, &mut byte)
+    };
+    match read {
+        Some(1) => u64::from(byte[0]),
+        _ => EOF,
+    }
+}
+
+/// `fputc(c, stream)` - ISO/IEC 9899 7.21.7.3: writes `c` converted to `unsigned char` and answers
+/// it, or `EOF` when it could not be written. A stream that names no open file is the standard
+/// output or error, written as `fwrite` writes it.
+fn fputc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let byte = [args[0] as u8];
+    let mut forwarded = [0_u64; GUEST_ARG_REGISTERS];
+    forwarded[0] = byte.as_ptr() as u64;
+    forwarded[1] = 1;
+    forwarded[2] = 1;
+    forwarded[3] = args[1];
+    if fwrite(&forwarded) == 1 {
+        u64::from(byte[0])
+    } else {
+        EOF
+    }
+}
+
 /// `fseek(stream, offset, whence)`.
 fn fseek(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (stream, offset, whence) = (args[0], args[1] as i64, args[2]);
@@ -3723,6 +3758,8 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("fclose", fclose),
         ("fread", fread),
         ("fwrite", fwrite),
+        ("fgetc", fgetc),
+        ("fputc", fputc),
         ("fseek", fseek),
         ("ftell", ftell),
         // POSIX's `off_t` spellings. `off_t` and `long` are both 64 bits on this data model, so they

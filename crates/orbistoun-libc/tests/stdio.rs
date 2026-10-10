@@ -359,3 +359,27 @@ fn a_mounted_file_can_be_opened_read_and_positioned() {
     assert_eq!(call("fclose", &[stream]), 0, "and it closes once");
     assert_eq!(call("fclose", &[stream]), EOF, "but not twice");
 }
+
+/// `fgetc` reads one byte as an unsigned char and answers `EOF` at the end; `fputc` writes one and
+/// answers it (ISO/IEC 9899 7.21.7.1, 7.21.7.3).
+#[test]
+fn a_byte_at_a_time_reads_and_writes_as_c_specifies() {
+    let dir = std::env::temp_dir().join("orbistoun-libc-stdio-bytes");
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("two.bin"), [0x41, 0xff]).expect("a sample file");
+    orbistoun_fs::mount::mount("/bytetest", dir.clone());
+
+    let path = Buf::text("/bytetest/two.bin");
+    let stream = call("fopen", &[path.at(), 0]);
+    assert_ne!(stream, 0, "opens");
+    assert_eq!(call("fgetc", &[stream]), 0x41);
+    assert_eq!(call("fgetc", &[stream]), 0xff, "an unsigned char, not -1");
+    assert_eq!(call("fgetc", &[stream]), u64::MAX, "EOF at the end");
+    assert_eq!(call("fclose", &[stream]), 0);
+    assert_eq!(call("fgetc", &[0]), u64::MAX, "no stream is EOF");
+    assert_eq!(
+        call("fputc", &[0x141, 0]),
+        0x41,
+        "the byte written, as an unsigned char"
+    );
+}
