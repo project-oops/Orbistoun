@@ -72,6 +72,19 @@ impl Wanted {
 ///
 /// Reference: ISO C `sscanf`; POSIX.1-2008 `sscanf(3)`.
 fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    scan(args, false)
+}
+
+/// `sscanf_s(input, format, ...)` - C11 K.3.5.3.4: [`sscanf`], with each `%s` and `%c`
+/// destination followed by its size. A string that does not fit with its terminator, or a
+/// character given no room, is a matching failure: a non-empty destination is left empty and
+/// the scan ends there (K.3.5.3.2).
+fn sscanf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    scan(args, true)
+}
+
+/// The scanner behind both: `sized` is whether `%s` and `%c` take a size.
+fn scan(args: &[u64; GUEST_ARG_REGISTERS], sized: bool) -> u64 {
     // SAFETY: guest-supplied strings under the identity mapping.
     let (Some(input), Some(format)) =
         (unsafe { guest_str(args[0]) }, unsafe { guest_str(args[1]) })
@@ -103,21 +116,7 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if suppress {
             format.next();
         }
-        let mut width = 0_usize;
-        while let Some(&digit) = format.peek() {
-            if !digit.is_ascii_digit() {
-                break;
-            }
-            width = width
-                .saturating_mul(10)
-                .saturating_add(usize::from(digit - b'0'));
-            format.next();
-        }
-        let mut long = false;
-        while matches!(format.peek(), Some(b'l' | b'h' | b'z' | b'j' | b't' | b'L')) {
-            long |= format.peek() == Some(&b'l');
-            format.next();
-        }
+        let (width, long) = width_and_length(&mut format);
 
         let Some(conversion) = format.next() else {
             return assigned;
@@ -149,6 +148,14 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             }
             destination
         };
+        let room = if sized && !suppress && matches!(wanted, Wanted::String | Wanted::Character) {
+            let Some(size) = destinations.next() else {
+                return 0;
+            };
+            Some(usize::try_from(size).unwrap_or(usize::MAX))
+        } else {
+            None
+        };
 
         let taken = match wanted {
             // Reads nothing and is not an assignment (ISO C 7.21.6.2p12).
@@ -164,8 +171,9 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
                 continue;
             }
             Wanted::Float => scan_float(input, at, width, destination, suppress, long),
+            Wanted::Character if room == Some(0) => None,
             Wanted::Character => scan_character(input, at, destination, suppress),
-            Wanted::String => scan_string(input, at, width, destination, suppress),
+            Wanted::String => scan_string(input, at, width, destination, suppress, room),
             Wanted::Integer(base) | Wanted::Unsigned(base) => scan_number(
                 input,
                 at,
@@ -185,6 +193,27 @@ fn sscanf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     }
     assigned
+}
+
+/// A conversion's maximum field width (zero for none) and whether its length modifiers include
+/// `l`, consumed from the format.
+fn width_and_length(format: &mut std::iter::Peekable<impl Iterator<Item = u8>>) -> (usize, bool) {
+    let mut width = 0_usize;
+    while let Some(&digit) = format.peek() {
+        if !digit.is_ascii_digit() {
+            break;
+        }
+        width = width
+            .saturating_mul(10)
+            .saturating_add(usize::from(digit - b'0'));
+        format.next();
+    }
+    let mut long = false;
+    while matches!(format.peek(), Some(b'l' | b'h' | b'z' | b'j' | b't' | b'L')) {
+        long |= format.peek() == Some(&b'l');
+        format.next();
+    }
+    (width, long)
 }
 
 /// What a conversion letter reads, or `None` for one this does not.
@@ -218,6 +247,7 @@ fn scan_string(
     width: usize,
     destination: u64,
     suppress: bool,
+    room: Option<usize>,
 ) -> Option<usize> {
     let mut end = at;
     while end < input.len() && !input[end].is_ascii_whitespace() {
@@ -227,6 +257,14 @@ fn scan_string(
         end += 1;
     }
     if end == at {
+        return None;
+    }
+    if let Some(room) = room
+        && end - at >= room
+    {
+        if room > 0 {
+            write_bytes(destination, &[0]);
+        }
         return None;
     }
     if !suppress {
@@ -570,7 +608,11 @@ fn name(table: &[&'static str], index: i32) -> Option<&'static str> {
 
 /// Implementations this module provides, by symbol name.
 pub(crate) fn implementations() -> &'static [(&'static str, GuestFn)] {
-    &[("sscanf", sscanf), ("strftime", strftime)]
+    &[
+        ("sscanf", sscanf),
+        ("sscanf_s", sscanf_s),
+        ("strftime", strftime),
+    ]
 }
 
 #[cfg(test)]
@@ -604,6 +646,59 @@ mod tests {
         let end = name.iter().position(|b| *b == 0).expect("terminated");
         assert_eq!(&name[..end], b"PORT");
         assert_eq!(port, 2121);
+    }
+
+    /// `sscanf_s` takes a size after each `%s` and `%c` destination; a string that does not
+    /// fit with its terminator empties the destination and ends the scan (C11 K.3.5.3.2).
+    #[test]
+    fn sscanf_s_takes_a_size_after_each_string_destination() {
+        let mut port = 0_i32;
+        let mut name = [0xAA_u8; 8];
+        let matched = call(
+            "sscanf_s",
+            [
+                c"PORT 2121".as_ptr() as u64,
+                c"%s %d".as_ptr() as u64,
+                name.as_mut_ptr() as u64,
+                5,
+                std::ptr::addr_of_mut!(port) as u64,
+                0,
+            ],
+        );
+        assert_eq!(matched, 2, "both conversions assigned");
+        assert_eq!(&name[..5], b"PORT\0");
+        assert_eq!(port, 2121);
+
+        let mut letter = 0_u8;
+        let matched = call(
+            "sscanf_s",
+            [
+                c"x".as_ptr() as u64,
+                c"%c".as_ptr() as u64,
+                std::ptr::addr_of_mut!(letter) as u64,
+                1,
+                0,
+                0,
+            ],
+        );
+        assert_eq!(matched, 1);
+        assert_eq!(letter, b'x');
+
+        let mut small = [0xAA_u8; 8];
+        let matched = call(
+            "sscanf_s",
+            [
+                c"PORT 2121".as_ptr() as u64,
+                c"%s %d".as_ptr() as u64,
+                small.as_mut_ptr() as u64,
+                4,
+                std::ptr::addr_of_mut!(port) as u64,
+                0,
+            ],
+        );
+        assert_eq!(matched, 0, "four characters and a terminator need five");
+        assert_eq!(small[0], 0, "the destination is left empty");
+        assert_eq!(small[1], 0xAA, "and nothing else written");
     }
 
     /// A literal in the format must match, and stops the scan where it does not.

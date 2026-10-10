@@ -3751,3 +3751,12 @@ known_by = "published"
 cites = "ISO/IEC 9899 7.21.9.3; FreeBSD lib/libc/stdio/fsetpos.c."
 assumptions = ["Only the first eight bytes of fpos_t are written or read: FreeBSD's fpos_t is the 64-bit offset itself and Dinkumware's struct begins with it. Which layout the target uses is unestablished, and neither needs more for a guest that only hands the value back."]
 found_on = "2026-10-10"
+
+[[function]]
+name = "sscanf_s"
+arity = 6
+purpose = "C11 K.3.5.3.4: sscanf, with each %s and %c destination followed by its size. A string that does not fit with its terminator, or a character given no room, is a matching failure: a non-empty destination is left empty and the scan ends there."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 K.3.5.3.4, K.3.5.3.2."
+assumptions = ["The published specification is the source. Annex K is optional and implementations differ; nothing on the target has confirmed the size is read as rsize_t after each destination, or that a too-small destination calls no constraint handler that aborts. As for sscanf, destinations past the sixth argument are refused."]
+found_on = "2026-10-10"

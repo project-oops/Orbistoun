@@ -142,7 +142,7 @@ guest_module! {
         "time" => 1, "sleep" => 1, "usleep" => 1, "nanosleep" => 2,
         "kill" => 2,
         // Parsing a formatted string, and rendering a time.
-        "sscanf" => 6, "strftime" => 4,
+        "sscanf" => 6, "sscanf_s" => 6, "strftime" => 4,
         "getenv" => 1, "setenv" => 3, "unsetenv" => 1, "getcwd" => 2, "perror" => 1, "strerror_r" => 3,
         // The file calls that change a directory. Declared here, where FreeBSD puts them, and
         // implemented in `orbistoun-fs`, where the mount model lives (D367).
