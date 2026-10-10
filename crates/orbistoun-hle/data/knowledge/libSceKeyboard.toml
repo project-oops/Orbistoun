@@ -19,7 +19,8 @@ arity = 4
 purpose = "Opens the keyboard for a user: (user, type, index, param)."
 returns = "handle"
 edge_cases = [
-    "MEASURED: for the signed-in user with a null param a positive handle (0x16b0700, 0x16e0700, 0x1720700 in three passes - not a fixed value); a second open for the same user 0x80da0004; user -1 and a buffer's address 0x809b0001; every argument zero 0x809b0081.",
+    "MEASURED: for the signed-in user with a null param a positive handle (0x16b0700, 0x16e0700, 0x1720700 in three passes - not a fixed value); a second open for the same user at the same index (0) 0x80da0004; user -1 and a buffer's address 0x809b0001; every argument zero 0x809b0081.",
+    "MEASURED (oops-apps' Craft hardware capture of 2026-10-06, oops-sdk keyboard.c): the same user opens index 0 and then index 1 and gets two handles (22939392, 23004929). orbistoun gives indices 0 and 1 a handle each and refuses a repeat at an open index; a higher index is unmeasured.",
     "orbistoun hands out a small positive handle (D151) and answers the refusals as measured; the keyboard is the host's (D783).",
 ]
 known_by = "measured"

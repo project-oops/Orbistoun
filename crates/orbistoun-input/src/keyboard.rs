@@ -42,14 +42,22 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 const NOT_A_USER: u64 = 0x809b_0001;
 /// What an open with every argument zero answered.
 const ZERO_ARGUMENTS: u64 = 0x809b_0081;
-/// What a second open for a user who already has the keyboard open answered.
+/// What a second open of an index the user already has open answered.
 const ALREADY_OPEN: u64 = 0x80da_0004;
 /// What a read or a close of handle `-1` answered.
 const BAD_HANDLE: u64 = 0x80da_0003;
 
-/// The handle an open hands out: small and positive, not an address (D151). The console's were
-/// large and varied between runs (`0x16b0700`, `0x1720700`), so no value of them is a contract.
-const HANDLE: u32 = 1;
+/// How many keyboard indices a user can hold open: 0 and 1, both opened by oops-sdk on a console
+/// (Craft's hardware capture of 2026-10-06, handles `22939392` and `23004929`). A higher index is
+/// unmeasured.
+const INDICES: usize = 2;
+
+/// The handle an open of `index` hands out: small and positive, not an address (D151). The
+/// console's were large and varied between runs (`0x16b0700`, `0x1720700`), so no value of them is
+/// a contract.
+const fn handle_for(index: usize) -> u64 {
+    index as u64 + 1
+}
 
 /// Bytes of the state record a read writes, all of them, as measured.
 const RECORD_BYTES: usize = 96;
@@ -62,8 +70,8 @@ const KEYS_AT: usize = 0x20;
 /// How many held keys the record has room for.
 pub const MOST_KEYS: usize = 16;
 
-/// Which user, if any, has the keyboard open.
-static OPEN_FOR: Mutex<Option<u32>> = Mutex::new(None);
+/// Which indices the signed-in user has open.
+static OPEN: Mutex<[bool; INDICES]> = Mutex::new([false; INDICES]);
 
 /// The host keys held now, as USB HID usage codes.
 static HELD: Mutex<Vec<u16>> = Mutex::new(Vec::new());
@@ -83,8 +91,9 @@ fn init(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// `sceKeyboardOpen(user, type, index, param)`: the signed-in user gets a handle; a second open for
-/// them `0x80da0004`; every argument zero `0x809b0081`; any other user `0x809b0001`, as measured.
+/// `sceKeyboardOpen(user, type, index, param)`: the signed-in user gets a handle for index 0 or 1;
+/// a second open of an index already open `0x80da0004`; every argument zero `0x809b0081`; any
+/// other user `0x809b0001`, as measured. A higher index is unmeasured and answers the placeholder.
 fn open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args.iter().take(4).all(|&a| a == 0) {
         return ZERO_ARGUMENTS;
@@ -93,19 +102,26 @@ fn open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if user != orbistoun_systemservice::signed_in_user() {
         return NOT_A_USER;
     }
-    let Ok(mut open_for) = OPEN_FOR.lock() else {
+    let Ok(index) = usize::try_from(args[2] as u32) else {
         return u64::from(GuestError::Unimplemented.as_raw());
     };
-    if open_for.is_some() {
+    if index >= INDICES {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let Ok(mut open) = OPEN.lock() else {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    if open[index] {
         return ALREADY_OPEN;
     }
-    *open_for = Some(user);
-    u64::from(HANDLE)
+    open[index] = true;
+    handle_for(index)
 }
 
-/// Whether `handle` is the open keyboard's.
-fn is_open(handle: u64) -> bool {
-    handle as u32 == HANDLE && OPEN_FOR.lock().is_ok_and(|o| o.is_some())
+/// The index `handle` was handed out for, if it is open.
+fn open_index(handle: u64) -> Option<usize> {
+    let index = (0..INDICES).find(|&i| handle_for(i) == u64::from(handle as u32))?;
+    OPEN.lock().ok()?.get(index).copied()?.then_some(index)
 }
 
 /// The 96-byte record for the keys held now: present, how many keys are down, and which.
@@ -128,7 +144,7 @@ fn read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if handle as u32 == u32::MAX {
         return BAD_HANDLE;
     }
-    if !is_open(handle) {
+    if open_index(handle).is_none() {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
     let held = HELD.lock().map(|h| h.clone()).unwrap_or_default();
@@ -140,25 +156,30 @@ fn read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceKeyboardClose(handle)`: the open keyboard's handle answers 0 and frees it for another open;
+/// `sceKeyboardClose(handle)`: an open handle answers 0 and frees its index for another open;
 /// handle `-1` answers `0x80da0003`, as measured. Any other handle is unmeasured.
 fn close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let handle = args[0];
     if handle as u32 == u32::MAX {
         return BAD_HANDLE;
     }
-    if !is_open(handle) {
+    let Some(index) = open_index(handle) else {
         return u64::from(GuestError::Unimplemented.as_raw());
-    }
-    if let Ok(mut open_for) = OPEN_FOR.lock() {
-        *open_for = None;
+    };
+    if let Ok(mut open) = OPEN.lock() {
+        open[index] = false;
     }
     0
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// The keyboard's open state is the process's, so the tests that open it take turns.
+    static TURN: Mutex<()> = Mutex::new(());
 
     fn call(name: &str, args: &[u64]) -> u64 {
         let (_, f) = super::implementations()
@@ -174,6 +195,9 @@ mod tests {
     /// keys in the record (D783).
     #[test]
     fn a_keyboard_opens_reads_the_host_keys_and_closes_as_measured() {
+        let _turn = TURN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let user = u64::from(orbistoun_systemservice::signed_in_user());
         assert_eq!(call("sceKeyboardInit", &[]), 0);
         assert_eq!(call("sceKeyboardOpen", &[0, 0, 0, 0]), 0x809b_0081);
@@ -211,5 +235,25 @@ mod tests {
         );
         assert_eq!(call("sceKeyboardClose", &[handle]), 0);
         super::set_held(&[]);
+    }
+
+    /// The same user opens index 0 and index 1 and gets two handles, as oops-sdk does on a console
+    /// (Craft's hardware capture of 2026-10-06); only a repeat at an index already open is refused.
+    #[test]
+    fn a_user_opens_a_second_index_as_oops_sdk_does_on_a_console() {
+        let _turn = TURN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let user = u64::from(orbistoun_systemservice::signed_in_user());
+        let first = call("sceKeyboardOpen", &[user, 0, 0, 0]);
+        let second = call("sceKeyboardOpen", &[user, 0, 1, 0]);
+        assert!(first as i32 > 0 && second as i32 > 0, "two handles");
+        assert_ne!(first, second);
+        assert_eq!(call("sceKeyboardOpen", &[user, 0, 1, 0]), 0x80da_0004);
+        let mut state = [0_u8; 96];
+        let at = state.as_mut_ptr() as u64;
+        assert_eq!(call("sceKeyboardReadState", &[second, at]), 0);
+        assert_eq!(call("sceKeyboardClose", &[second]), 0);
+        assert_eq!(call("sceKeyboardClose", &[first]), 0);
     }
 }

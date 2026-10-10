@@ -9,8 +9,8 @@ presenting itself as one)
 
 `libSceKeyboard` is served, and the keyboard a title opens is the host's, as the network a title
 asks about is the host's. `sceKeyboardInit` answers 0. `sceKeyboardOpen` gives the signed-in user a
-small positive handle, refuses a second open for them with `0x80da0004`, any other user with
-`0x809b0001` and all-zero arguments with `0x809b0081`. `sceKeyboardReadState` writes the whole
+small positive handle for keyboard index 0 or 1, refuses a second open of an index already open
+with `0x80da0004`, any other user with `0x809b0001` and all-zero arguments with `0x809b0081`. `sceKeyboardReadState` writes the whole
 96-byte record and answers 0: present at `0x10`, the count of keys down at `0x14`, and up to sixteen
 USB HID usage codes at `0x20`, the layout oops-sdk reads and SeaShell navigates by; handle `-1`
 answers `0x80da0003`. `sceKeyboardClose` frees the handle and answers 0, or `0x80da0003` for `-1`.
@@ -23,3 +23,7 @@ wiring follows this decision.
 **Why:** every oops-apps title opens the keyboard through oops-sdk at start-up - Craft,
 SuperTuxKart, Ship of Harkinian, TSHP and Neverball among them - and each was answered a
 placeholder. The user chose the host keyboard on 2026-10-09.
+
+**Amended 2026-10-10:** a user holds indices 0 and 1 at once. oops-sdk opens both for the same user
+on a console and gets two handles (Craft's hardware capture of 2026-10-06); the measured
+`0x80da0004` was a repeat at index 0.
