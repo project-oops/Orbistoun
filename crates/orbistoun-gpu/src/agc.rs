@@ -14,6 +14,8 @@ use orbistoun_hle::guest_module;
 guest_module! {
     "libSceAgc" {
         "0x7d86501b8094ef57" => 3,
+        // The index-type builder: (cb, flags, mode, 0), as PPSA25872's text calls it.
+        "0x6dd715e95973a4fc" => 4,
         // Unnamed interpolant-table builders: (record, vs, ps, 0, p4, p5) and
         // (record, vs, ps, ptr, registers, 4), as PPSA02664, PPSA03416 and PPSA28061 call them.
         "0x71040c4df8235e1d" => 6,
@@ -93,6 +95,8 @@ guest_module! {
         "sceAgcDcbWaitRegMem" => 6,
         "sceAgcDcbWaitUntilSafeForRendering" => 6,
         "sceAgcDcbWriteData" => 6,
+        // (packet, address)
+        "sceAgcWriteDataPatchSetAddressOrOffset" => 2,
         "sceAgcDmaDataPatchSetDstAddressOrOffset" => 6,
         "sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate" => 6,
         "sceAgcGetIsTrinityMode" => 0,
@@ -1210,6 +1214,137 @@ fn dcb_set_index_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     )
 }
 
+/// `0x6dd715e95973a4fc(cb, flags, mode, 0)`: the index-type `SET_UCONFIG_REG_INDEX`, the packet
+/// [`dcb_set_index_size`] writes, answering its address. Measured on the full 0x40-byte writer
+/// (`166-agc/builder-6dd715e95973a4fc`, `20261010-115300-eboot.log` 14205-14235): `(0, 0)` writes
+/// `0x400`, `(1, 1)` `0x441` and `(0, 2)` `0x480` - flags at bit 6 as `sceAgcDcbSetIndexSize`'s,
+/// mode 1 at bit 0 and mode 2 at bit 7. Any other pair, and a non-zero fourth argument, are
+/// unmeasured and refused. Out of space it calls the writer's callback; that path is the
+/// placeholder here, as for every builder.
+fn index_type_6dd715e9(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// The mode bits each measured mode wrote.
+    const MODE_BITS: [u32; 3] = [0, 0x1, 0x80];
+    let (flags, mode) = (args[1], args[2]);
+    let mode_bits = usize::try_from(mode)
+        .ok()
+        .and_then(|m| MODE_BITS.get(m).copied());
+    let (Some(mode_bits), 0..=1, 0) = (mode_bits, flags, args[3] as u32) else {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    };
+    let mut words = packet::build::set_index_size(0, flags as u32);
+    words[2] |= mode_bits;
+    dcb_append(args[0], &words)
+}
+
+/// `WRITE_DATA`'s destination field for each measured destination argument: 4 wrote `0x200` and 1
+/// wrote `0x40000000` (`166-agc/dcb-write-data`). Any other is unmeasured.
+fn write_data_destination(destination: u64) -> Option<u32> {
+    match destination {
+        4 => Some(0x0000_0200),
+        1 => Some(0x4000_0000),
+        _ => None,
+    }
+}
+
+/// The `WRITE_DATA` `sceAgcDcbWriteData(dcb, destination, cache_policy, address, data, count,
+/// stack0, confirm)` writes: header (body = 3 + count), control, the address's halves, then the
+/// data. The control word is the destination field ([`write_data_destination`]),
+/// `cache_policy << 25` (Mesa `sid.h` `WRITE_DATA_CACHE_POLICY`) and `confirm` at bit 20
+/// (`WRITE_DATA_WR_CONFIRM`), as the four measured calls wrote. `None` for an unmeasured
+/// destination, empty data, a first stack argument other than the 0 every call passed, or a
+/// `confirm` other than 0 or 1.
+fn write_data_packet(
+    destination: u64,
+    cache_policy: u64,
+    address: u64,
+    data: &[u32],
+    stack0: u64,
+    confirm: u64,
+) -> Option<Vec<u32>> {
+    /// `WRITE_DATA`'s opcode (Mesa `sid.h` `PKT3_WRITE_DATA`).
+    const WRITE_DATA: u8 = 0x37;
+    if data.is_empty() || stack0 != 0 || confirm > 1 || cache_policy > 3 {
+        return None;
+    }
+    let control =
+        write_data_destination(destination)? | (cache_policy as u32) << 25 | (confirm as u32) << 20;
+    let body = u32::try_from(data.len() + 3).ok()?;
+    let mut words = Vec::with_capacity(data.len() + 4);
+    words.push(packet::build::command_header(WRITE_DATA, body));
+    words.push(control);
+    words.push(address as u32);
+    words.push((address >> 32) as u32);
+    words.extend_from_slice(data);
+    Some(words)
+}
+
+/// The longest `WRITE_DATA` written: the counts called range to 0x20 dwords in PPSA25872's text.
+const MOST_WRITE_DATA_DWORDS: u64 = 0x100;
+
+/// `sceAgcDcbWriteData(dcb, destination, cache_policy, address, data, count, stack0, confirm)`:
+/// appends [`write_data_packet`] and answers its address. Its last two arguments are on the stack
+/// (every call site in PPSA25872 pushes them); a call reaching here without them is refused.
+fn dcb_write_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let refused = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    let (data, count) = (args[4], args[5] as u32);
+    let spilled = orbistoun_thunk::stack_arguments();
+    if spilled == 0 || data == 0 || count == 0 || u64::from(count) > MOST_WRITE_DATA_DWORDS {
+        return refused;
+    }
+    // SAFETY: the dispatch published `spilled` as the first stack argument's address on the
+    // calling thread's live stack; the second is the word above it.
+    let (Some(stack0), Some(confirm)) = (unsafe { guest::read_u64(spilled) }, unsafe {
+        guest::read_u64(spilled.wrapping_add(8))
+    }) else {
+        return refused;
+    };
+    let mut words = Vec::with_capacity(count as usize);
+    for i in 0..u64::from(count) {
+        // SAFETY: the guest's data, `count` dwords by the call's contract.
+        let Some(word) = (unsafe { guest::read_u32(data.wrapping_add(i * 4)) }) else {
+            return refused;
+        };
+        words.push(word);
+    }
+    match write_data_packet(args[1], args[2], args[3], &words, stack0, confirm) {
+        Some(packet) => dcb_append(args[0], &packet),
+        None => refused,
+    }
+}
+
+/// What `sceAgcWriteDataPatchSetAddressOrOffset` answered for a pointer that is not a packet
+/// (`166-agc/dcb-write-data`, the swapped call).
+const NOT_A_PACKET: u64 = 0x8a6c_000c;
+
+/// `sceAgcWriteDataPatchSetAddressOrOffset(packet, address)`: writes `address` into a
+/// `WRITE_DATA`'s destination dwords and answers 0, as measured. The measured refusal,
+/// `0x8a6c000c`, came from a call handed a heap word for the packet; refusing whatever does not
+/// begin with a `WRITE_DATA` header is the assumed rule that reproduces it.
+fn write_data_patch_set_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// `WRITE_DATA`'s opcode, at bits 8-15 of a type-3 header.
+    const WRITE_DATA: u32 = 0x37;
+    let (packet, address) = (args[0], args[1]);
+    if packet == 0 {
+        return NOT_A_PACKET;
+    }
+    // SAFETY: the guest's packet, whose header this reads.
+    let Some(header) = (unsafe { guest::read_u32(packet) }) else {
+        return NOT_A_PACKET;
+    };
+    if header >> 30 != 3 || (header >> 8) & 0xff != WRITE_DATA {
+        return NOT_A_PACKET;
+    }
+    // SAFETY: a `WRITE_DATA`'s destination dwords, the second and third after its header.
+    unsafe {
+        guest::write_u32(packet.wrapping_add(8), address as u32);
+    }
+    // SAFETY: as above, the high half.
+    unsafe {
+        guest::write_u32(packet.wrapping_add(12), (address >> 32) as u32);
+    }
+    OK
+}
+
 /// Implementations this crate provides for `libSceAgc`.
 ///
 /// `sceAgcCreateShader` and the shader-linkage calls (interpolant mapping, primitive state, shader
@@ -1273,6 +1408,12 @@ fn cb_nop_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The list [`implementations`] answers.
 const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("0x7d86501b8094ef57", agc_packet_payload),
+    ("0x6dd715e95973a4fc", index_type_6dd715e9),
+    ("sceAgcDcbWriteData", dcb_write_data),
+    (
+        "sceAgcWriteDataPatchSetAddressOrOffset",
+        write_data_patch_set_address,
+    ),
     ("0x71040c4df8235e1d", interpolants_71040c4d),
     ("0x8a6f69da59a5b375", interpolants_8a6f69da),
     ("sceAgcAcbAcquireMemGetSize", acb_acquire_mem_get_size),
@@ -1443,6 +1584,41 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `sceAgcDcbWriteData`'s packet for the four measured calls (`166-agc/dcb-write-data`,
+    /// `20261010-115300-eboot.log` 13916-13946): the header counts the body, arg 2 picks the
+    /// destination word, arg 3 is Mesa's `CACHE_POLICY` at bit 25 and the second stack argument
+    /// `WR_CONFIRM` at bit 20.
+    #[test]
+    fn write_data_packets_are_built_as_measured() {
+        let at = 0x0000_0007_eeff_b874;
+        assert_eq!(
+            write_data_packet(4, 0, 0, &[0x1122_3344], 0, 1),
+            Some(vec![0xc003_3700, 0x0010_0200, 0, 0, 0x1122_3344])
+        );
+        assert_eq!(
+            write_data_packet(4, 0, 0, &[0x1122_3344], 0, 0),
+            Some(vec![0xc003_3700, 0x0000_0200, 0, 0, 0x1122_3344])
+        );
+        assert_eq!(
+            write_data_packet(4, 2, at, &[0x1122_3344], 0, 1),
+            Some(vec![0xc003_3700, 0x0410_0200, 0xeeff_b874, 7, 0x1122_3344])
+        );
+        assert_eq!(
+            write_data_packet(1, 3, at, &[0x5566_7788, 0x99aa_bbcc], 0, 0),
+            Some(vec![
+                0xc004_3700,
+                0x4600_0000,
+                0xeeff_b874,
+                7,
+                0x5566_7788,
+                0x99aa_bbcc
+            ])
+        );
+        assert_eq!(write_data_packet(2, 0, 0, &[1], 0, 0), None, "unmeasured");
+        assert_eq!(write_data_packet(4, 0, 0, &[], 0, 0), None, "no data");
+        assert_eq!(write_data_packet(4, 0, 0, &[1], 1, 0), None, "unmeasured");
+    }
 
     /// The measured object model is what the handler writes: `*out` is the header address, `+0x10`
     /// the bytecode pointer, and the relative offsets (`+0x08`, `+0x20`, `+0x28`, `+0x30` and the

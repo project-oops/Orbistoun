@@ -1129,3 +1129,46 @@ known_by = "measured"
 cites = "obSCEne REQ-20261009T1130Z-cn11, reports/hardware/20261009-205500-complete.log, 200-census/libSceAgc/0xe486fe61994e8976."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "0x6dd715e95973a4fc"
+arity = 4
+purpose = "Writes the index-type SET_UCONFIG_REG_INDEX (the packet sceAgcDcbSetIndexSize writes): (cb, flags, mode, 0), answering the packet's address."
+edge_cases = [
+    "MEASURED on the full 0x40-byte writer {begin, end, cursor, end, callback, userdata, 0, 0}: (0, 0) wrote 0xc0017a00 0x20000243 0x400, (1, 1) 0x441 and (0, 2) 0x480, each 12 bytes, answering the old cursor; the callback was not called.",
+    "Flags sit at bit 6 as sceAgcDcbSetIndexSize's do, mode 1 at bit 0, mode 2 at bit 7. orbistoun writes those three pairs and refuses any other, and a non-zero fourth argument.",
+    "Out of space (begin, end and cursor zero) it called callback(writer, 3, userdata) - the dwords it needs - and answered 0. orbistoun answers the placeholder there, as for every builder.",
+    "PPSA25872's text reaches it through a forwarding thunk from two sites, setting (cb, byte, (x == 2) ? 2 : (x != 0), 0); -cn12 faulted because its writer object stopped at +0x20, where the callback lives.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1130Z-cn13, reports/hardware/20261010-115300-eboot.log lines 14205-14235 (166-agc/builder-6dd715e95973a4fc)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-10"
+
+[[function]]
+name = "sceAgcDcbWriteData"
+arity = 6
+purpose = "Writes a WRITE_DATA packet: (dcb, destination, cache_policy, address, data, count) with two more arguments on the stack (0, confirm); answers the packet's address."
+edge_cases = [
+    "MEASURED: (4, 0, 0, &value, 1, 0, 1) wrote 0xc0033700 0x00100200 0 0 value and advanced 0x14; with confirm 0 the control word was 0x00000200; (4, 2, address, &value, 1, 0, 1) 0x04100200 with the address's halves in dwords 2-3; (1, 3, address, &two, 2, 0, 0) 0xc0043700 0x46000000, advancing 0x18. Each answered the packet's address.",
+    "The control word is destination 4 -> 0x200 or 1 -> 0x40000000, cache_policy << 25 (Mesa sid.h WRITE_DATA_CACHE_POLICY) and confirm at bit 20 (WRITE_DATA_WR_CONFIRM). Any other destination, a first stack argument other than 0, and confirm above 1 are unmeasured and refused.",
+    "The two stack arguments are pushed at every one of PPSA25872's nine call sites; -wd01's six-argument call faulted.",
+    "MEASURED sceAgcDcbWriteDataGetSize: 0x10, 0x14 and 0x18 bytes for n 0, 1 and 2.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1210Z-wd02, reports/hardware/20261010-115300-eboot.log lines 13916-13946 (166-agc/dcb-write-data)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-10"
+
+[[function]]
+name = "sceAgcWriteDataPatchSetAddressOrOffset"
+arity = 2
+purpose = "Points a WRITE_DATA packet at a new destination: (packet, address), writing the address into its dwords 2-3."
+edge_cases = [
+    "MEASURED: on a WRITE_DATA packet it answered 0 with dwords 2-3 holding the address; with the arguments swapped - a heap word for the packet - 0x8a6c000c.",
+    "ASSUMED: orbistoun refuses with 0x8a6c000c whatever does not begin with a type-3 WRITE_DATA header, the rule that reproduces the measured refusal.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1210Z-wd02, reports/hardware/20261010-115300-eboot.log lines 13916-13946 (166-agc/dcb-write-data)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-10"

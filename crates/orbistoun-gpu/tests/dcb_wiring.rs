@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        83,
+        86,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -893,4 +893,58 @@ fn the_getsize_queries_answer_the_measured_sizes() {
             "a NOP of {n} dwords"
         );
     }
+}
+
+/// `0x6dd715e95973a4fc(cb, flags, mode, 0)` writes the index-type `SET_UCONFIG_REG_INDEX` and
+/// answers the packet's address, as measured (`166-agc/builder-6dd715e95973a4fc`,
+/// `20261010-115300-eboot.log` 14205-14235): `(0, 0)` `0x400`, `(1, 1)` `0x441`, `(0, 2)` `0x480`.
+/// An unmeasured mode is refused and writes nothing.
+#[test]
+fn the_unnamed_index_type_builder_writes_as_measured() {
+    for (flags, mode, value) in [(0, 0, 0x400_u32), (1, 1, 0x441), (0, 2, 0x480)] {
+        let w = Writer::new(0x100);
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        args[0] = w.handle();
+        args[1] = flags;
+        args[2] = mode;
+        let at = w.cursor();
+        assert_eq!(call("0x6dd715e95973a4fc", args), at, "the packet's address");
+        let words: Vec<u32> = w
+            .bytes()
+            .chunks(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(words, [0xc001_7a00, 0x2000_0243, value]);
+    }
+    let w = Writer::new(0x100);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[2] = 3;
+    assert_ne!(call("0x6dd715e95973a4fc", args), w.cursor());
+    assert_eq!(w.written(), 0, "an unmeasured mode writes nothing");
+}
+
+/// `sceAgcWriteDataPatchSetAddressOrOffset(packet, address)` puts `address` in a `WRITE_DATA`'s
+/// destination dwords and answers 0; handed something that is not such a packet it answers
+/// `0x8a6c000c` (`166-agc/dcb-write-data`, `20261010-115300-eboot.log` 13916-13946).
+#[test]
+fn a_write_data_destination_is_patched_as_measured() {
+    let mut packet: [u32; 5] = [0xc003_3700, 0x0010_0200, 0, 0, 0x1122_3344];
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = packet.as_mut_ptr() as u64;
+    args[1] = 0x0000_0007_eeff_b874;
+    assert_eq!(call("sceAgcWriteDataPatchSetAddressOrOffset", args), 0);
+    assert_eq!(
+        packet,
+        [0xc003_3700, 0x0010_0200, 0xeeff_b874, 7, 0x1122_3344]
+    );
+
+    let mut word: u64 = 0;
+    args[0] = std::ptr::addr_of_mut!(word) as u64;
+    args[1] = packet.as_mut_ptr() as u64;
+    assert_eq!(
+        call("sceAgcWriteDataPatchSetAddressOrOffset", args),
+        0x8a6c_000c
+    );
+    assert_eq!(word, 0, "nothing written through a refused call");
 }
