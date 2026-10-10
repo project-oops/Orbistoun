@@ -171,7 +171,7 @@ guest_module! {
         "qsort" => 4, "bsearch" => 5,
         // `setlocale` takes a category and a locale name; `clock` takes nothing; `setjmp` takes the
         // buffer it would save into.
-        "setlocale" => 2, "clock" => 0, "setjmp" => 1,
+        "setlocale" => 2, "clock" => 0, "setjmp" => 1, "localeconv" => 0,
         "memset" => 3,
         "memcpy" => 3,
         "memmove" => 3,
@@ -2230,6 +2230,35 @@ fn clock(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+/// `localeconv()` - ISO/IEC 9899 7.11.2.1: the "C" locale's `struct lconv`, which nothing here
+/// changes (`setlocale` keeps the "C" locale). `decimal_point` is ".", every other string member
+/// empty and every `char` member `CHAR_MAX`, as the standard fixes them for "C", laid out as
+/// FreeBSD's `<locale.h>` declares the structure: ten `char *` members, then fourteen `char`s.
+fn localeconv(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// `CHAR_MAX` for a signed eight-bit `char`, the value "C" gives every `char` member.
+    const CHAR_MAX: u8 = 127;
+    /// The structure's bytes: ten pointers and fourteen `char`s, padded to a pointer's alignment.
+    const LCONV_BYTES: usize = 96;
+    static DECIMAL_POINT: [u8; 2] = *b". ";
+    static EMPTY: [u8; 1] = [0];
+    static LCONV: std::sync::OnceLock<[u8; LCONV_BYTES]> = std::sync::OnceLock::new();
+    let lconv = LCONV.get_or_init(|| {
+        let mut bytes = [0_u8; LCONV_BYTES];
+        let empty = EMPTY.as_ptr() as u64;
+        for index in 0..10 {
+            let pointer = if index == 0 {
+                DECIMAL_POINT.as_ptr() as u64
+            } else {
+                empty
+            };
+            bytes[index * 8..index * 8 + 8].copy_from_slice(&pointer.to_le_bytes());
+        }
+        bytes[80..94].fill(CHAR_MAX);
+        bytes
+    });
+    lconv.as_ptr() as u64
+}
+
 /// `setjmp(env)` - zero, because this is the direct return.
 ///
 /// Saves nothing: a `longjmp` into this buffer would jump through uninitialised memory, and
@@ -3860,6 +3889,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("setlocale", setlocale),
         ("clock", clock),
         ("setjmp", setjmp),
+        ("localeconv", localeconv),
         ("rand", rand),
         ("srand", srand),
         ("strtok", strtok),

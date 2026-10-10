@@ -3678,3 +3678,13 @@ cites = "ISO/IEC 9899 7.21.6.13."
 assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
 found_on = "2026-10-10"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "localeconv"
+arity = 0
+purpose = """ISO/IEC 9899 7.11.2.1: the "C" locale's struct lconv, which nothing here changes (setlocale keeps the "C" locale). decimal_point is ".", every other string member empty and every char member CHAR_MAX, as the standard fixes them for "C", laid out as FreeBSD's <locale.h> declares the structure: ten char * members, then fourteen chars."""
+known_by = "published"
+cites = "ISO/IEC 9899 7.11.2.1; FreeBSD <locale.h> struct lconv."
+assumptions = ["That the target lays struct lconv out as FreeBSD does is assumed, as for struct tm.", "The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."

@@ -450,3 +450,25 @@ fn the_bounds_checked_stdio_calls_answer_as_annex_k_says() {
     );
     assert_eq!(call("printf_s", &[format.at(), 12]), 3);
 }
+
+/// `localeconv()` answers the "C" locale's `struct lconv` (ISO/IEC 9899 7.11.2.1): `decimal_point`
+/// ".", every other string empty, every `char` member `CHAR_MAX`, in FreeBSD's `<locale.h>` layout
+/// - ten string pointers, then fourteen `char`s.
+#[test]
+fn localeconv_answers_the_c_locale() {
+    let at = call("localeconv", &[]);
+    assert_ne!(at, 0);
+    let pointer = |index: u64| {
+        // SAFETY: the structure `localeconv` answered, eight bytes a pointer.
+        unsafe { std::ptr::read_unaligned((at + index * 8) as usize as *const u64) }
+    };
+    assert_eq!(read_string(pointer(0)), ".", "decimal_point");
+    for index in 1..10 {
+        assert_eq!(read_string(pointer(index)), "", "string member {index}");
+    }
+    for index in 0..14_u64 {
+        // SAFETY: the `char` members after the ten pointers.
+        let value = unsafe { std::ptr::read((at + 80 + index) as usize as *const u8) };
+        assert_eq!(value, 127, "char member {index} is CHAR_MAX");
+    }
+}
