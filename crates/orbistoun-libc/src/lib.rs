@@ -232,7 +232,7 @@ guest_module! {
         "ferror" => 1,
         "fflush" => 1,
         // The bounds-checked spelling of `snprintf`.
-        "snprintf_s" => 6,
+        "snprintf_s" => 6, "sprintf_s" => 6,
         // Declared as the full register set: the arity of a variadic function is a property of each
         // call, and under-declaring would truncate the arguments before the renderer saw them.
         "memalign" => 2,
@@ -1966,6 +1966,42 @@ fn snprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
     // The full length, as the interface reports, so a caller can detect truncation.
     rendered.len() as u64
+}
+
+/// `sprintf_s(dest, size, format, ...)` - C11 K.3.5.3.6.
+///
+/// Unlike [`snprintf_s`], a result that does not fit with its terminator is a runtime-constraint
+/// violation, not a truncation: the destination is left empty and zero answered. A null
+/// destination, a zero size or a null format is refused the same way.
+fn sprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let (dest, size, format) = (args[0], args[1], args[2]);
+    FORMAT_CALLS.fetch_add(1, Relaxed);
+    if dest == 0 || size == 0 {
+        return 0;
+    }
+    let rendered = if format == 0 {
+        None
+    } else {
+        // SAFETY: a guest-supplied string under the identity mapping, bounded.
+        let len = unsafe { c_len(format) };
+        // SAFETY: `c_len` established `len` readable bytes from `format`.
+        let template = unsafe { std::slice::from_raw_parts(ptr(format).cast_const(), len) };
+        render_format(template, &args[3..]).map_err(note_fault).ok()
+    };
+    let Some(text) = rendered.filter(|text| (text.len() as u64) < size) else {
+        // SAFETY: `dest` is non-null with at least one byte, per the size the guest passed.
+        unsafe { std::ptr::write(ptr(dest), 0) };
+        return 0;
+    };
+    orbistoun_core::said::note(&text);
+    // SAFETY: `text.len()` is below `size`, so the copy and its terminator fall inside the
+    // buffer the guest described.
+    unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), ptr(dest), text.len()) };
+    // SAFETY: one past the text, still inside the buffer by the same bound.
+    unsafe { std::ptr::write(ptr(dest.wrapping_add(text.len() as u64)), 0) };
+    text.len() as u64
 }
 
 /// `sprintf(dest, format, ...)` - unbounded.
@@ -3883,6 +3919,7 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("snprintf_s", snprintf_s),
         ("snprintf", snprintf_s),
         ("sprintf", sprintf),
+        ("sprintf_s", sprintf_s),
         ("strdup", strdup),
         ("strndup", strndup),
         ("strncat", strncat),
@@ -4085,6 +4122,7 @@ mod abi_constant_tests {
 mod tests {
     use super::{
         FormatFault, MODULE, implementations, render_format, render_registers, snprintf_s,
+        sprintf_s,
     };
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
@@ -4612,6 +4650,33 @@ mod tests {
         assert_eq!(snprintf_s(&args), 9, "reports what would have been written");
         assert_eq!(&buffer[..5], b"regi\0", "four bytes plus a terminator");
         assert_eq!(buffer[5], 0xAA, "and nothing beyond the size it was given");
+    }
+
+    /// `sprintf_s` writes what fits and answers its length, but a result that does not fit is
+    /// a runtime-constraint violation: an empty destination and zero, never a truncation.
+    #[test]
+    fn sprintf_s_refuses_rather_than_truncates() {
+        let format = b"region_%d\0";
+        let mut buffer = [0xAA_u8; 16];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = buffer.as_mut_ptr() as usize as u64;
+        args[1] = 10;
+        args[2] = format.as_ptr() as usize as u64;
+        args[3] = 47;
+        assert_eq!(sprintf_s(&args), 9);
+        assert_eq!(&buffer[..10], b"region_47\0");
+
+        args[1] = 9;
+        assert_eq!(
+            sprintf_s(&args),
+            0,
+            "nine characters and a terminator need ten"
+        );
+        assert_eq!(buffer[0], 0, "the destination is left empty");
+        assert_eq!(
+            buffer[10], 0xAA,
+            "and nothing past the size it was given changed"
+        );
     }
 
     #[test]

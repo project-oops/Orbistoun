@@ -3715,3 +3715,12 @@ known_by = "published"
 cites = "ISO/IEC 9899 7.29.6.4.2; FreeBSD lib/libc/locale/none.c _none_wcsnrtombs."
 assumptions = ["The target's C locale is taken to narrow and widen as FreeBSD's does (lib/libc/locale/none.c): each byte is the character of the same value, and a character above UCHAR_MAX does not narrow. Bytes above 0x7f are implementation-defined in ISO C; nothing on the target has confirmed it.", "wchar_t is 16 bits, as the target's clang defines it (see wcslen)."]
 found_on = "2026-10-10"
+
+[[function]]
+name = "sprintf_s"
+arity = 6
+purpose = "C11 K.3.5.3.6: the formatted text and its length when it fits with its terminator; a result that does not fit, a null destination, a zero size or a null format is a runtime-constraint violation, answered zero with the destination left empty rather than truncated."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 K.3.5.3.6."
+assumptions = ["The published specification is the source. Annex K is optional and implementations differ; nothing on the target has confirmed that its build refuses rather than truncates, or that it calls no constraint handler that aborts."]
+found_on = "2026-10-10"
