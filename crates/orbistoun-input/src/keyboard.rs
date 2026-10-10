@@ -5,7 +5,7 @@
 //! and the census, `20261009-151440-eboot.obs.log`). The keys a read reports are the host's, set
 //! through [`set_held`] by whichever shell owns a keyboard; a run with none reports a connected
 //! keyboard with nothing held. `sceKeyboardSetProcessPrivilege` and `sceKeyboardSetProcessFocus`
-//! are unmeasured and declared only.
+//! answer as `100-input/keyboard-privilege-focus` measured (`20261010-115300-eboot.log`).
 
 use std::sync::Mutex;
 
@@ -35,6 +35,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceKeyboardOpen", open),
         ("sceKeyboardReadState", read_state),
         ("sceKeyboardClose", close),
+        ("sceKeyboardSetProcessPrivilege", set_process_privilege),
+        ("sceKeyboardSetProcessFocus", set_process_focus),
     ]
 }
 
@@ -46,6 +48,11 @@ const ZERO_ARGUMENTS: u64 = 0x809b_0081;
 const ALREADY_OPEN: u64 = 0x80da_0004;
 /// What a read or a close of handle `-1` answered.
 const BAD_HANDLE: u64 = 0x80da_0003;
+/// What `sceKeyboardSetProcessPrivilege` answered for 1 and 0, and `sceKeyboardSetProcessFocus`
+/// for 1: `-1`, as a 32-bit return.
+const REFUSED: u64 = 0xffff_ffff;
+/// What `sceKeyboardSetProcessFocus(0)` answered.
+const BAD_PARAMETER: u64 = 0x80da_0001;
 
 /// How many keyboard indices a user can hold open: 0 and 1, both opened by oops-sdk on a console
 /// (Craft's hardware capture of 2026-10-06, handles `22939392` and `23004929`). A higher index is
@@ -124,12 +131,15 @@ fn open_index(handle: u64) -> Option<usize> {
     OPEN.lock().ok()?.get(index).copied()?.then_some(index)
 }
 
-/// The 96-byte record for the keys held now: present, how many keys are down, and which.
+/// The 96-byte record for the keys held now: present, how many keys are down, and which. With
+/// nothing held the length is 1 and no key is listed, as both console reads at rest wrote
+/// (`101-input-ext/keyboard-lifecycle`, `100-input/keyboard-privilege-focus`).
 fn record(held: &[u16]) -> [u8; RECORD_BYTES] {
     let mut out = [0_u8; RECORD_BYTES];
     out[CONNECTED_AT] = 1;
     let count = held.len().min(MOST_KEYS);
-    out[COUNT_AT..COUNT_AT + 4].copy_from_slice(&(count as u32).to_le_bytes());
+    let length = count.max(1);
+    out[COUNT_AT..COUNT_AT + 4].copy_from_slice(&(length as u32).to_le_bytes());
     for (i, key) in held.iter().take(count).enumerate() {
         out[KEYS_AT + i * 2..KEYS_AT + i * 2 + 2].copy_from_slice(&key.to_le_bytes());
     }
@@ -153,6 +163,25 @@ fn read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `sceKeyboardSetProcessPrivilege(privilege)`: `-1` for 1 and for 0, as measured; any other value
+/// is unmeasured.
+fn set_process_privilege(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match args[0] as u32 {
+        0 | 1 => REFUSED,
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// `sceKeyboardSetProcessFocus(focus)`: `-1` for 1 and `0x80da0001` for 0, as measured; any other
+/// value is unmeasured.
+fn set_process_focus(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match args[0] as u32 {
+        1 => REFUSED,
+        0 => BAD_PARAMETER,
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
 
@@ -219,6 +248,16 @@ mod tests {
         assert_eq!(call("sceKeyboardReadState", &[handle, at]), 0);
         assert_eq!(state[0x10], 1, "connected");
         assert_eq!(state[0x14..0x18], 2_u32.to_le_bytes(), "two keys down");
+        super::set_held(&[]);
+        assert_eq!(call("sceKeyboardReadState", &[handle, at]), 0);
+        assert_eq!(
+            state[0x14..0x18],
+            1_u32.to_le_bytes(),
+            "a length of 1 at rest, as both console reads wrote"
+        );
+        assert!(state[0x20..0x60].iter().all(|&b| b == 0), "no key held");
+        super::set_held(&[0x04, 0x2c]);
+        assert_eq!(call("sceKeyboardReadState", &[handle, at]), 0);
         assert_eq!(state[0x20..0x24], [0x04, 0, 0x2c, 0], "A and space");
         assert!(
             state[0x24..0x60].iter().all(|&b| b == 0),
@@ -235,6 +274,17 @@ mod tests {
         );
         assert_eq!(call("sceKeyboardClose", &[handle]), 0);
         super::set_held(&[]);
+    }
+
+    /// `sceKeyboardSetProcessPrivilege` answers -1 for 1 and 0; `sceKeyboardSetProcessFocus` -1 for 1
+    /// and `0x80da0001` for 0 (`100-input/keyboard-privilege-focus`, `20261010-115300-eboot.log`
+    /// 4227-4246).
+    #[test]
+    fn privilege_and_focus_answer_as_measured() {
+        assert_eq!(call("sceKeyboardSetProcessPrivilege", &[1]), 0xffff_ffff);
+        assert_eq!(call("sceKeyboardSetProcessPrivilege", &[0]), 0xffff_ffff);
+        assert_eq!(call("sceKeyboardSetProcessFocus", &[1]), 0xffff_ffff);
+        assert_eq!(call("sceKeyboardSetProcessFocus", &[0]), 0x80da_0001);
     }
 
     /// The same user opens index 0 and index 1 and gets two handles, as oops-sdk does on a console

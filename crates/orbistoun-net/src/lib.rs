@@ -73,6 +73,18 @@ mod tests {
         assert!(out.iter().all(|&b| b == 0xa5), "nothing written");
     }
 
+    /// `sceNpCheckCallback()` answers 0, as ten calls on the main thread and one on a second thread
+    /// did with no callback registered (`070-user/np-check-callback`, `20261010-115300-eboot.log`
+    /// 3540-3558).
+    #[test]
+    fn checking_for_callbacks_answers_zero() {
+        let (_, f) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == "sceNpCheckCallback")
+            .expect("implemented");
+        assert_eq!(f(&[0_u64; orbistoun_core::GUEST_ARG_REGISTERS]), 0);
+    }
+
     /// The measured codes are this base plus the ordinary BSD errno.
     #[test]
     fn the_measured_codes_are_this_base_plus_a_bsd_errno() {

@@ -35,7 +35,8 @@ purpose = "Reads the keyboard's current state into a 96-byte record: (handle, st
 returns = "status"
 edge_cases = [
     "MEASURED: 0x0 on an open handle with all 96 bytes written - 1 at 0x10 and 1 at 0x14, zeros elsewhere, from a remote control presenting itself as a keyboard; 0x80da0003 on handle -1.",
-    "orbistoun writes the record for the host keys held (D783): present at 0x10, the count at 0x14, USB HID usage codes at 0x20, the layout oops-sdk reads.",
+    "orbistoun writes the record for the host keys held (D783): present at 0x10, the length at 0x14, USB HID usage codes at 0x20, the layout oops-sdk reads.",
+    "MEASURED again at rest (100-input/keyboard-privilege-focus, 20261010-115300-eboot.log 4227-4246): 1 at 0x10 and 1 at 0x14 with no key listed. orbistoun writes a length of 1 with nothing held and the count of keys otherwise; the held case is unmeasured.",
 ]
 known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 100-input/keyboard-and-media-gates, 101-input-ext/kbd-read and keyboard-lifecycle."
@@ -54,3 +55,31 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 101-input-ext/keyboard-lifecycle."
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceKeyboardSetProcessPrivilege"
+arity = 1
+purpose = "Sets the process's keyboard privilege: (privilege)."
+returns = "status"
+edge_cases = [
+    "MEASURED after sceSysmoduleLoadModule(0x0106) and sceKeyboardInit: -1 (0xffffffff) for 1, for 0, and for 1 again; a later open and read were unaffected.",
+    "orbistoun answers -1 for 0 and 1; any other value is unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T0010Z-kb02, reports/hardware/20261010-115300-eboot.log lines 4227-4246 (100-input/keyboard-privilege-focus)."
+found_in = ["CRFT00001"]
+found_on = "2026-10-10"
+
+[[function]]
+name = "sceKeyboardSetProcessFocus"
+arity = 1
+purpose = "Sets whether the process has keyboard focus: (focus)."
+returns = "status"
+edge_cases = [
+    "MEASURED in the same arm: -1 (0xffffffff) for 1, 0x80da0001 for 0, and -1 for 1 again.",
+    "orbistoun answers those; any other value is unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T0010Z-kb02, reports/hardware/20261010-115300-eboot.log lines 4227-4246 (100-input/keyboard-privilege-focus)."
+found_in = ["CRFT00001"]
+found_on = "2026-10-10"

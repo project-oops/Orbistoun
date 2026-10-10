@@ -12,3 +12,17 @@ known_by = "measured"
 cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 7."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceNpCheckCallback"
+arity = 0
+purpose = "Runs the NP callbacks the caller registered, polled once a frame."
+returns = "status"
+edge_cases = [
+    "MEASURED: 0 on each of ten calls on the main thread and on a call from a second thread; no state callback ran (none registered).",
+    "orbistoun registers no NP callback, so there is none to run, and answers 0.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T0040Z-np01, reports/hardware/20261010-115300-eboot.log lines 3540-3558 (070-user/np-check-callback)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-10"
