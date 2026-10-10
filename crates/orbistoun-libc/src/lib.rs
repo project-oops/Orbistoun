@@ -23,6 +23,7 @@ pub mod said;
 mod scan;
 pub mod streams;
 mod varargs;
+mod wide;
 
 use orbistoun_hle::guest_module;
 
@@ -143,6 +144,7 @@ guest_module! {
         "kill" => 2,
         // Parsing a formatted string, and rendering a time.
         "sscanf" => 6, "sscanf_s" => 6, "strftime" => 4,
+        "vswprintf" => 4, "wprintf" => 6,
         "getenv" => 1, "setenv" => 3, "unsetenv" => 1, "getcwd" => 2, "perror" => 1, "strerror_r" => 3,
         // The file calls that change a directory. Declared here, where FreeBSD puts them, and
         // implemented in `orbistoun-fs`, where the mount model lives (D367).
@@ -3887,6 +3889,7 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
     all.extend_from_slice(locks::implementations());
     all.extend_from_slice(cxx::implementations());
     all.extend_from_slice(scan::implementations());
+    all.extend_from_slice(wide::implementations());
     // Implemented next to the mount model, and declared here because this is the library that
     // exports them (D367).
     all.extend_from_slice(orbistoun_fs::posix::implementations());

@@ -453,6 +453,14 @@ fn fgetpos_and_fsetpos_return_a_stream_to_where_it_was() {
     assert_ne!(call("fsetpos", &[stream, position.at()]), 0);
 }
 
+/// The wide formatted-output functions are reachable by name, as a resolved import is.
+#[test]
+fn the_wide_printers_are_in_the_table() {
+    for name in ["vswprintf", "wprintf"] {
+        let _ = implementation(name);
+    }
+}
+
 /// A System V `va_list` whose register half holds `words` from its start: `gp_offset` 0,
 /// `fp_offset` past the integer half, the overflow area empty (psABI 3.5.7).
 /// A `va_list` and the two areas it points into, kept alive together.

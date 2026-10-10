@@ -3760,3 +3760,21 @@ known_by = "published"
 cites = "ISO/IEC 9899:2011 K.3.5.3.4, K.3.5.3.2."
 assumptions = ["The published specification is the source. Annex K is optional and implementations differ; nothing on the target has confirmed the size is read as rsize_t after each destination, or that a too-small destination calls no constraint handler that aborts. As for sscanf, destinations past the sixth argument are refused."]
 found_on = "2026-10-10"
+
+[[function]]
+name = "vswprintf"
+arity = 4
+purpose = "ISO/IEC 9899 7.29.2.7: the wide rendering of format against the va_list written into ws and terminated, and its length in wide characters. Literal characters pass through, %ls and %lc are wide, %s and %c widen each byte (the C locale), and every other conversion renders as vsnprintf renders it. When n or more characters would be needed, or the format cannot be honoured, the answer is negative and ws holds what fits, terminated."
+known_by = "published"
+cites = "ISO/IEC 9899 7.29.2.7; FreeBSD lib/libc/locale/none.c."
+assumptions = ["wchar_t is 16 bits, as the target's clang defines it (see wcslen), and the C locale widens a byte to the character of the same value. What ws holds after an over-long rendering is unspecified by ISO C; keeping what fits, terminated, is assumed."]
+found_on = "2026-10-10"
+
+[[function]]
+name = "wprintf"
+arity = 6
+purpose = "ISO/IEC 9899 7.29.2.11: the wide rendering of format written to the standard output, each character narrowed to its byte in the C locale, and the number of wide characters answered. A character above 0xff has no byte there: nothing is written and the answer is negative with errno EILSEQ."
+known_by = "published"
+cites = "ISO/IEC 9899 7.29.2.11; FreeBSD lib/libc/locale/none.c _none_wcrtomb."
+assumptions = ["The C locale is the only one setlocale answers, so the standard output's byte encoding is FreeBSD's none encoding; the stream's orientation is not tracked."]
+found_on = "2026-10-10"
