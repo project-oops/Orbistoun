@@ -32,7 +32,6 @@ impl Text {
     }
 }
 
-/// A wide string, four bytes per character.
 /// A terminated wide string in the target's `wchar_t`, which is 16 bits wide.
 struct Wide(Vec<u16>);
 
@@ -483,6 +482,85 @@ fn wmemchr_finds_the_first_match_within_n_characters() {
     assert_eq!(call("wmemchr", &[text.at(), 0x263A, 2]), 0, "not within n");
     assert_eq!(call("wmemchr", &[text.at(), 0x41, 0]), 0, "n zero");
     assert_eq!(call("wmemchr", &[text.at(), 0x42, 5]), 0, "no match");
+}
+
+// Multibyte conversion, in the C locale `setlocale` always answers.
+
+/// Reads `n` wide characters at `at`.
+fn wide_at(at: u64, n: usize) -> Vec<u16> {
+    // SAFETY: a test's own buffer, at least `n` characters long.
+    unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u16>(at as usize), n) }
+        .to_vec()
+}
+
+/// `mbstowcs` widens each byte to one character, a byte above 0x7f included, terminates when
+/// there is room, and answers the count without the terminator; a null destination measures.
+#[test]
+fn mbstowcs_widens_each_byte_in_the_c_locale() {
+    let text = Text::raw(&[b'a', 0xE9, b'z']);
+    let out = Wide::new(&[0x4040; 5]);
+    assert_eq!(call("mbstowcs", &[out.at(), text.at(), 5]), 3);
+    assert_eq!(wide_at(out.at(), 5), [0x61, 0xE9, 0x7A, 0, 0x4040]);
+
+    let short = Wide::new(&[0x4040; 3]);
+    assert_eq!(call("mbstowcs", &[short.at(), text.at(), 2]), 2);
+    assert_eq!(
+        wide_at(short.at(), 3),
+        [0x61, 0xE9, 0x4040],
+        "no room to terminate"
+    );
+
+    assert_eq!(
+        call("mbstowcs", &[0, text.at(), 0]),
+        3,
+        "a null destination measures"
+    );
+}
+
+/// `wcstombs` narrows each character that fits a byte, refuses one that does not with
+/// `(size_t)-1` and `EILSEQ`, and measures through a null destination.
+#[test]
+fn wcstombs_narrows_and_refuses_what_a_byte_cannot_hold() {
+    let wide = Wide::new(&[0x61, 0xE9, 0x7A]);
+    let out = Text::raw(&[0x40; 5]);
+    assert_eq!(call("wcstombs", &[out.at(), wide.at(), 5]), 3);
+    assert_eq!(&out.0[..5], &[0x61, 0xE9, 0x7A, 0, 0x40]);
+    assert_eq!(call("wcstombs", &[0, wide.at(), 0]), 3);
+
+    let wider = Wide::new(&[0x61, 0x263A]);
+    let eilseq = orbistoun_hle::constants::abi_constant("errno", "EILSEQ").expect("harvested");
+    assert_eq!(call("wcstombs", &[out.at(), wider.at(), 5]), u64::MAX);
+    assert_eq!(i64::from(orbistoun_core::errno::get()), eilseq);
+    assert_eq!(
+        call("wcstombs", &[0, wider.at(), 0]),
+        u64::MAX,
+        "measuring too"
+    );
+}
+
+/// `wcsrtombs` moves the caller's source pointer: to null after the terminator, to the next
+/// character when the destination fills, to the offending character on `EILSEQ`.
+#[test]
+fn wcsrtombs_moves_the_source_pointer() {
+    let wide = Wide::new(&[0x61, 0x62]);
+    let out = Text::raw(&[0x40; 4]);
+    let mut source = wide.at();
+    let slot = std::ptr::from_mut(&mut source).expose_provenance() as u64;
+    assert_eq!(call("wcsrtombs", &[out.at(), slot, 4, 0]), 2);
+    assert_eq!(source, 0, "the terminator was converted");
+
+    source = wide.at();
+    assert_eq!(call("wcsrtombs", &[out.at(), slot, 1, 0]), 1);
+    assert_eq!(source, wide.at() + 2, "stopped one character in");
+
+    let wider = Wide::new(&[0x61, 0x263A]);
+    source = wider.at();
+    assert_eq!(call("wcsrtombs", &[out.at(), slot, 4, 0]), u64::MAX);
+    assert_eq!(
+        source,
+        wider.at() + 2,
+        "at the character a byte cannot hold"
+    );
 }
 
 /// A null wide string is length zero, not a fault.

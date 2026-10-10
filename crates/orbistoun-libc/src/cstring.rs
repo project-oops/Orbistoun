@@ -712,6 +712,102 @@ fn wcsncpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// `mbstowcs(dst, src, n)` - ISO/IEC 9899 7.22.8.1, in the C locale, the only one `setlocale`
+/// answers: each byte widens to the character of the same value, as FreeBSD's
+/// `lib/libc/locale/none.c` (`_none_mbsnrtowcs`) does. At most `n` characters are written, the
+/// terminator among them when it fits, and the count without it answered; a null `dst` answers
+/// the length.
+fn mbstowcs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (dst, src, n) = (args[0], args[1], args[2]);
+    // SAFETY: a guest-supplied string under the identity mapping, bounded.
+    let length = if src == 0 { 0 } else { unsafe { c_len(src) } };
+    if dst == 0 {
+        return length as u64;
+    }
+    // SAFETY: `c_len` established `length` readable bytes from `src`.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr(src).cast_const(), length) };
+    let room = usize::try_from(n).unwrap_or(usize::MAX);
+    let mut out = Vec::with_capacity(room.min(length + 1) * WIDE);
+    for &byte in bytes.iter().chain(&[0]).take(room) {
+        out.extend_from_slice(&u16::from(byte).to_le_bytes());
+    }
+    write_bytes(dst, &out);
+    length.min(room) as u64
+}
+
+/// The C locale's narrowing of the wide string at `src`: FreeBSD's `_none_wcsnrtombs`.
+///
+/// Answers the bytes written (or, with no `dst`, needed) without the terminator, and where the
+/// source stopped: `None` after the terminator, else the address of the next character. A
+/// character above `UCHAR_MAX` stops it with `EILSEQ` and `(size_t)-1`, at that character.
+fn narrow(dst: u64, src: u64, room: usize) -> (u64, Option<u64>) {
+    let mut written = 0_usize;
+    let mut out = Vec::new();
+    let mut at = src;
+    loop {
+        if dst != 0 && written == room {
+            write_bytes(dst, &out);
+            return (written as u64, Some(at));
+        }
+        let Ok(address) = usize::try_from(at) else {
+            break;
+        };
+        // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
+        // time so the scan cannot overrun a mapping by more than it reads.
+        let wide =
+            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u16>(address)) };
+        let Ok(byte) = u8::try_from(wide) else {
+            write_bytes(dst, &out);
+            let eilseq = orbistoun_hle::constants::abi_constant("errno", "EILSEQ")
+                .expect("EILSEQ is harvested");
+            orbistoun_core::errno::set(eilseq as i32);
+            return (u64::MAX, Some(at));
+        };
+        if dst != 0 {
+            out.push(byte);
+        }
+        if byte == 0 {
+            break;
+        }
+        written += 1;
+        at = at.saturating_add(WIDE as u64);
+    }
+    write_bytes(dst, &out);
+    (written as u64, None)
+}
+
+/// `wcstombs(dst, src, n)` - ISO/IEC 9899 7.22.8.2, in the C locale: [`narrow`] with the
+/// caller's pointer left alone.
+fn wcstombs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (dst, src, n) = (args[0], args[1], args[2]);
+    if src == 0 {
+        return 0;
+    }
+    narrow(dst, src, usize::try_from(n).unwrap_or(usize::MAX)).0
+}
+
+/// `wcsrtombs(dst, src, n, ps)` - ISO/IEC 9899 7.29.6.4.2, in the C locale, which keeps no
+/// shift state, so `ps` is not read. With a destination, `*src` moves to null after the
+/// terminator, to the next character when `n` bytes are written, or to a character a byte
+/// cannot hold; with none it is left alone, as `_none_wcsnrtombs` leaves it.
+fn wcsrtombs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (dst, slot, n) = (args[0], args[1], args[2]);
+    if slot == 0 {
+        return 0;
+    }
+    // SAFETY: a guest-supplied pointer to a pointer under the identity mapping.
+    let src = unsafe { std::ptr::read_unaligned(ptr(slot).cast::<u64>()) };
+    if src == 0 {
+        return 0;
+    }
+    let (answer, stopped) = narrow(dst, src, usize::try_from(n).unwrap_or(usize::MAX));
+    if dst != 0 {
+        // SAFETY: the same guest slot, which the caller gave for this to update.
+        unsafe { std::ptr::write_unaligned(ptr(slot).cast::<u64>(), stopped.unwrap_or(0)) };
+    }
+    answer
+}
+
 /// `_Stoul(text, end, base)` - the runtime's own name for `strtoul`.
 ///
 /// The platform's C runtime puts the conversion in `_Stoul` and makes `strtoul` a thin caller
@@ -790,6 +886,9 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("wcsncpy_s", wcsncpy_s),
         ("wcsrchr", wcsrchr),
         ("wmemchr", wmemchr),
+        ("mbstowcs", mbstowcs),
+        ("wcstombs", wcstombs),
+        ("wcsrtombs", wcsrtombs),
     ]
 }
 

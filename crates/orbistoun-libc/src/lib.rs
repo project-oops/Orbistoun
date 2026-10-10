@@ -126,6 +126,8 @@ guest_module! {
         "memcpy_s" => 4, "memmove_s" => 4, "memset_s" => 4,
         "strcat_s" => 3, "strncat_s" => 4, "strncpy_s" => 4, "wcsncpy_s" => 4,
         "wcsrchr" => 2, "wmemchr" => 3,
+        // C-locale multibyte conversion.
+        "mbstowcs" => 3, "wcstombs" => 3, "wcsrtombs" => 4,
         "snprintf" => 3, "sprintf" => 2,
         // The `va_list` forms. Fixed parameters only; the variadic half arrives through the list
         // (D364).
