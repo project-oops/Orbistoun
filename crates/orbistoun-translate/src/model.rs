@@ -2146,6 +2146,9 @@ pub fn instruction<M: Model + ?Sized>(
         if let Some(long) = sdwa_float_long_form(name) {
             return sdwa_float(model, instruction, long, word);
         }
+        if SDWA_FLOAT_UNARY.contains(&name) {
+            return sdwa_float_unary(model, instruction, word);
+        }
         return sdwa_integer(model, instruction, name, word);
     }
 
@@ -6108,6 +6111,10 @@ pub const SDWA_FLOAT: &[(&str, &str)] = &[
     ("v_mul_f32_e32", "v_mul_f32_e64"),
 ];
 
+/// The one-source float short-form instructions translated in their SDWA form over whole registers:
+/// the word's source negate and absolute value apply to the one source (RDNA ISA, SDWA).
+pub const SDWA_FLOAT_UNARY: &[&str] = &["v_rcp_f32_e32"];
+
 /// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
 fn sdwa_float_long_form(name: &str) -> Option<&'static str> {
     SDWA_FLOAT
@@ -6126,7 +6133,9 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
             .and_then(|index| encodings.encodings().get(usize::from(index)))
             .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
             .is_some_and(|name| {
-                SDWA_INTEGER.contains(&name) || sdwa_float_long_form(name).is_some()
+                SDWA_INTEGER.contains(&name)
+                    || SDWA_FLOAT_UNARY.contains(&name)
+                    || sdwa_float_long_form(name).is_some()
             })
 }
 
@@ -6177,6 +6186,48 @@ fn sdwa_float<M: Model + ?Sized>(
         (u32::from(*register), &sources),
         modifiers,
     )
+}
+
+/// A `SDWA_FLOAT_UNARY` instruction in its SDWA form: over whole registers, its one source under the
+/// word's negate (20) and absolute value (21). A select of part of a register, a sign extension, a
+/// destination part, the clamp (13) or the output multiplier (15:14) is refused.
+fn sdwa_float_unary<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    word: u32,
+) -> Result<(), TranslateError> {
+    let fields = SdwaFields::read(word);
+    let bit = |at: u32| word >> at & 1 != 0;
+    let plain = fields.select[0] == (SDWA_DWORD, false)
+        && fields.dst_sel == SDWA_DWORD
+        && !bit(13)
+        && word & (0x3 << 14) == 0;
+    let (Some(Operand::Vector(register)), true) = (instruction.operands.first(), plain) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a one-source float SDWA instruction selects part of a register, clamps or scales ",
+                "its result, or its destination is not a vector register"
+            ),
+        });
+    };
+    let source = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
+    let modifiers = Modifiers {
+        negate: [bit(20), false, false],
+        absolute: [bit(21), false, false],
+        clamp: false,
+        output_multiplier: 0,
+    };
+    let one = model.constant(ONE_F32);
+    for lane in running_lanes(model) {
+        let value = model.read_source(instruction, &source, lane)?;
+        let value = apply_modifiers(model, value, modifiers, 0);
+        // The reciprocal, as `v_rcp_f32` in its plain form computes it.
+        let quotient = model.f32_binary(op::FDIV, one, value);
+        model.write_vector_lane(u32::from(*register), lane, quotient);
+    }
+    model.count();
+    Ok(())
 }
 
 /// An instruction's SDWA modifier word, when it carries one.

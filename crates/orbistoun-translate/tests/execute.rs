@@ -5466,6 +5466,30 @@ fn a_float_sdwa_over_whole_registers_is_its_long_form() {
     assert_eq!(vector(&registers, 3), 0xc0c0_0000, "|-1.5| * -2.0 * 2");
 }
 
+/// A one-source float instruction in its SDWA form over whole registers takes the word's source
+/// absolute value and negate: PPSA03416's vertex shader takes the reciprocal of an absolute value
+/// through SDWA (`v_rcp_f32_sdwa v12, |v3|`, words 0x7e1854f9 0x00260603). 1 / |-4.0| is 0.25, and
+/// negated as well, -0.25.
+#[test]
+fn a_one_source_float_sdwa_takes_its_source_modifiers() {
+    const ABSOLUTE: u32 = 1 << 21;
+    const NEGATED: u32 = 1 << 20;
+    const WHOLE: u32 = SEL_DWORD << 8 | SEL_DWORD << 16;
+    if !device_or_skip("a_one_source_float_sdwa_takes_its_source_modifiers") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(3, (-4.0f32).to_bits()));
+    let rcp = |dst: u32| head("v_rcp_f32_e32") | (dst << 17) | SDWA_MARKER;
+    assert_eq!(rcp(12), 0x7e18_54f9, "PPSA03416's first word");
+    program.extend([rcp(1), 3 | WHOLE | ABSOLUTE]);
+    program.extend([rcp(2), 3 | WHOLE | ABSOLUTE | NEGATED]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 0.25f32.to_bits(), "1 / |-4.0|");
+    assert_eq!(vector(&registers, 2), (-0.25f32).to_bits(), "1 / -|-4.0|");
+}
+
 /// An SDWA source whose scalar flag is set names whatever the ordinary source encoding does, an
 /// inline float among them: PPSA28061's notice-screen pixel shader adds 0.5 through SDWA over
 /// whole registers (`v_add_f32_sdwa v5, 0.5, v2`, words 0x060a04f9 0x868606f0). 0.5 + 1.25 is 1.75.
