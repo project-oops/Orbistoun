@@ -216,7 +216,7 @@ fn audio_out_set_volume(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The audio implementations this crate provides.
 ///
-/// The `ajm` module contributes `sceAjmInitialize` and `audio_out2` `sceAudioOut2UserDestroy`;
+/// The `ajm` module contributes `sceAjmInitialize` and `audio_out2` its user create and destroy;
 /// `audio3d` and `audio_in` none.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
@@ -230,6 +230,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAjmInitialize", ajm::ajm_initialize),
         ("sceAjmModuleRegister", ajm::ajm_module_register),
         ("sceAjmFinalize", ajm::ajm_finalize),
+        ("sceAudioOut2UserCreate", audio_out2::user_create),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
     ]
 }
@@ -240,6 +241,25 @@ mod tests {
 
     /// `sceAudioOut2UserDestroy` answers `0x80268010` for a user `sceAudioOut2UserCreate` made and for
     /// 0 alike (REQ-cn10 arm 2, `20261009-151440-eboot.obs.log`).
+    #[test]
+    fn an_audio_out2_user_is_created_for_the_signed_in_user_as_measured() {
+        let user = u64::from(orbistoun_systemservice::signed_in_user());
+        let mut out = [0xa5_u8; 0x40];
+        let at = out.as_mut_ptr() as u64;
+        assert_eq!(call("sceAudioOut2UserCreate", [user, at, 0, 0, 0, 0]), 0);
+        let handle = u64::from_le_bytes(out[..8].try_into().expect("eight bytes"));
+        assert_ne!(handle, 0, "a handle");
+        assert!(
+            out[8..].iter().all(|&b| b == 0xa5),
+            "exactly 8 bytes written"
+        );
+        assert_eq!(
+            call("sceAudioOut2UserDestroy", [handle, 0, 0, 0, 0, 0]),
+            0x8026_8010,
+            "the console refused to destroy the handle it made"
+        );
+    }
+
     #[test]
     fn an_audio_out2_user_destroy_answers_as_measured() {
         assert_eq!(

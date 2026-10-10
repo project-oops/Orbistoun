@@ -1,11 +1,26 @@
 library = "libSceAudioOut2"
 
 [[function]]
+name = "sceAudioOut2UserCreate"
+arity = 2
+purpose = "Creates an audio output user for a signed-in user: (user, out), writing its 8-byte handle."
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls arm 2): for the initial user, with a 0x40-byte out filled 0xa5, it answered 0 and changed exactly the first 8 bytes, to a heap-shaped handle (0x80067fbf0, then 0x80067fc10), both with the module 0x001c loaded and without it.",
+    "orbistoun writes a small non-zero handle (D151); any other user and a null out are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261009T2215Z-ao01, reports/hardware/20261010-100600-eboot.obs.log lines 2916-2938."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-10"
+
+[[function]]
 name = "sceAudioOut2UserDestroy"
 arity = 1
 purpose = "Destroys an audio output user: (user)."
 edge_cases = [
     "MEASURED (070-user/oneshot-setup-calls arm 2): for the user sceAudioOut2UserCreate made (0x80268001) and for 0 alike it answered 0x80268010.",
+    "MEASURED (REQ-ao01, 20261010-100600-eboot.obs.log): for the handle a successful sceAudioOut2UserCreate wrote, and for 0, it answered 0x80268010 again.",
     "orbistoun answers 0x80268010 whatever it is handed.",
 ]
 known_by = "measured"

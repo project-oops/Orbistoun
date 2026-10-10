@@ -16,3 +16,4 @@ workspace = true
 orbistoun-core = { workspace = true }
 orbistoun-hle = { workspace = true }
 orbistoun-mem = { workspace = true }
+orbistoun-systemservice = { workspace = true }
