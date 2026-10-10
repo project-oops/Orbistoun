@@ -83,6 +83,8 @@ pub struct PlacedTitleModules {
     images: Vec<(String, Image)>,
     exports: BTreeMap<String, BTreeMap<u64, TitleExport>>,
     collisions: Vec<ExportCollision>,
+    /// The modules a title loads by path at run time, placed but not linked against (D515).
+    by_path: std::collections::BTreeSet<String>,
 }
 
 impl PlacedTitleModules {
@@ -98,6 +100,12 @@ impl PlacedTitleModules {
     /// text, so a module is not runnable until its protection is applied (D489).
     pub fn images_mut(&mut self) -> &mut [(String, Image)] {
         &mut self.images
+    }
+
+    /// Whether the module labelled `library` is one the title loads by path (D515).
+    #[must_use]
+    pub fn is_by_path(&self, library: &str) -> bool {
+        self.by_path.contains(library)
     }
 
     /// Everything the placed modules export, by library and then by hash.
@@ -127,6 +135,19 @@ impl PlacedTitleModules {
     /// platform imports.
     #[must_use]
     pub fn resolve(&self, imports: &[RawImport], libraries: &BTreeMap<u16, String>) -> Resolution {
+        self.resolve_for(false, imports, libraries)
+    }
+
+    /// [`Self::resolve`] for a module loaded by path when `by_path`: its imports also reach the
+    /// other modules loaded by path, its siblings, which are loaded along with it (D515).
+    #[must_use]
+    pub fn resolve_for(
+        &self,
+        by_path: bool,
+        imports: &[RawImport],
+        libraries: &BTreeMap<u16, String>,
+    ) -> Resolution {
+        let hidden = |library: &str| !by_path && self.by_path.contains(library);
         let mut out = Resolution::default();
         for import in imports {
             let found = match import.form {
@@ -136,14 +157,17 @@ impl PlacedTitleModules {
                     };
                     self.exports
                         .get(library)
+                        .filter(|_| !hidden(library))
                         .and_then(|by_nid| by_nid.get(&import.nid).map(|export| vec![export]))
                 }
                 // No attribution to narrow it, so every module is a candidate (D483).
                 NameForm::Plain => {
+                    // Not a module loaded by path: it is not there when the title is linked (D515).
                     let all: Vec<&TitleExport> = self
                         .exports
-                        .values()
-                        .filter_map(|by_nid| by_nid.get(&import.nid))
+                        .iter()
+                        .filter(|(library, _)| !hidden(library))
+                        .filter_map(|(_, by_nid)| by_nid.get(&import.nid))
                         .collect();
                     (!all.is_empty()).then_some(all)
                 }
@@ -311,6 +335,11 @@ pub(crate) fn place_all(
         images,
         exports,
         collisions,
+        by_path: modules
+            .iter()
+            .filter(|m| m.by_path)
+            .map(|m| m.library.clone())
+            .collect(),
     })
 }
 
@@ -363,6 +392,7 @@ mod tests {
             images: Vec::new(),
             exports,
             collisions: Vec::new(),
+            by_path: std::collections::BTreeSet::new(),
         }
     }
 
@@ -389,6 +419,25 @@ mod tests {
             binding: Binding::Global,
             name: format!("import{nid:#x}"),
         }
+    }
+
+    /// A module the title loads by path is not linked against: a plain import that it and another
+    /// module both export binds to the other, unambiguously, as on a console, where the plugin is
+    /// not loaded yet when the title is linked (D515).
+    #[test]
+    fn a_module_loaded_by_path_is_not_linked_against() {
+        let mut modules = indexed(&[
+            ("Gameplay", 0xAAAA, Kind::Function, 0x1000),
+            ("PSNCore", 0xAAAA, Kind::Function, 0x9000),
+        ]);
+        modules.by_path.insert("PSNCore".to_owned());
+        let resolved = modules.resolve(&[plain(7, 0xAAAA)], &BTreeMap::new());
+        assert!(resolved.ambiguous.is_empty(), "not ambiguous");
+        assert_eq!(resolved.addresses.get(&7), Some(&0x1000));
+        // A plugin's own imports do reach its sibling plugins, loaded along with it.
+        let libraries = BTreeMap::from([(0, "PSNCore".to_owned())]);
+        let from_plugin = modules.resolve_for(true, &[encoded(9, 0xAAAA, 0)], &libraries);
+        assert_eq!(from_plugin.addresses.get(&9), Some(&0x9000));
     }
 
     /// An import binds into the library it names, and not into another that shares a hash (D483).

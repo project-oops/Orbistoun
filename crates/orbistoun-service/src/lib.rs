@@ -1865,9 +1865,12 @@ impl Service {
         let (libraries, _modules) = self.module_tables(&bytes)?;
         let root = executable.parent().unwrap_or(Path::new("."));
         let wanted: Vec<String> = libraries.into_values().collect();
-        Ok(titlemodules::find(root, &wanted, |library| {
-            self.registry.declares_library(library)
-        }))
+        let is_platform = |library: &str| self.registry.declares_library(library);
+        let mut found = titlemodules::find(root, &wanted, is_platform);
+        // And every module it ships that nothing imports, which it may load by path (D515).
+        let by_path = titlemodules::loadable_by_path(root, &found, is_platform);
+        found.extend(by_path);
+        Ok(found)
     }
 
     /// Places the title's own modules and reports what they export.
@@ -2096,12 +2099,12 @@ impl Service {
         // Every module the title ships, not only the executable: a module can import from a sibling
         // module (D640). The slot offset is still needed to ask whether this project implements the
         // import, a question for the shared dispatch table.
-        for ((_, bytes), slot) in modules.iter().zip(slots) {
+        for ((label, bytes), slot) in modules.iter().zip(slots) {
             let mut bound = std::collections::BTreeMap::new();
             let container = orbistoun_elf::Container::parse(bytes)?;
             let imports = container.raw_imports(bytes, &self.hasher)?;
             let libraries = container.import_libraries(bytes)?;
-            let resolution = placed.resolve(&imports, &libraries);
+            let resolution = placed.resolve_for(placed.is_by_path(label), &imports, &libraries);
             let ambiguous: std::collections::BTreeSet<&str> = resolution
                 .ambiguous
                 .iter()

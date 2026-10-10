@@ -28,6 +28,9 @@ pub struct TitleModule {
     pub library: String,
     /// Where the file was found.
     pub path: PathBuf,
+    /// Whether nothing imports it and the title loads it by path at run time, so it is placed but
+    /// not linked against (D515).
+    pub by_path: bool,
 }
 
 /// Finds the file for each library name, under the title's own root.
@@ -82,6 +85,7 @@ pub fn find(
             out.push(TitleModule {
                 library: library.clone(),
                 path: (*path).clone(),
+                by_path: false,
             });
         }
     }
@@ -138,6 +142,46 @@ fn shipped_modules(root: &Path) -> BTreeMap<String, Vec<PathBuf>> {
     found
 }
 
+/// The modules the title ships that nothing imports: plugins it loads by path at run time, such as
+/// a Unity title's `Media/Plugins/`. Each is placed with the imported ones, so a later
+/// `sceKernelLoadStartModule` of its path finds it placed and its exports known (D515). Named by
+/// the file's stem. Not the package's module directory, whose libraries the platform's loader
+/// serves; not a platform library's name wherever it sits; not a module [`find`] already chose.
+#[must_use]
+pub fn loadable_by_path(
+    root: &Path,
+    found: &[TitleModule],
+    is_platform: impl Fn(&str) -> bool,
+) -> Vec<TitleModule> {
+    let in_package = |path: &PathBuf| {
+        path.parent().is_some_and(|dir| {
+            dir.parent() == Some(root)
+                && dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(PACKAGE_MODULES))
+        })
+    };
+    let mut out = Vec::new();
+    for paths in shipped_modules(root).values() {
+        let Some(path) = paths.iter().find(|p| !in_package(p)) else {
+            continue;
+        };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if is_platform(stem) || found.iter().any(|m| m.library.eq_ignore_ascii_case(stem)) {
+            continue;
+        }
+        out.push(TitleModule {
+            library: stem.to_owned(),
+            path: path.clone(),
+            by_path: true,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TitleModule, find};
@@ -153,6 +197,24 @@ mod tests {
             std::fs::write(&path, b"not really a module").expect("the file");
         }
         dir
+    }
+
+    /// A module the title ships but nothing imports - a plugin it loads by path at run time - is
+    /// placed too, so a later `sceKernelLoadStartModule` finds it; the package's own module
+    /// directory, platform libraries and modules already found are not.
+    #[test]
+    fn a_module_loaded_by_path_is_placed_too() {
+        let dir = title(&[
+            "Media/Modules/Il2CppUserAssemblies.prx",
+            "Media/Plugins/PSNCore.prx",
+            "Media/Plugins/SaveData.prx",
+            "sce_module/libSceFace.prx",
+            "fakelib/libSceAgc.sprx",
+        ]);
+        let found = find(dir.path(), &["Il2CppUserAssemblies".to_owned()], |_| false);
+        let extra = super::loadable_by_path(dir.path(), &found, |library| library == "libSceAgc");
+        let names: Vec<&str> = extra.iter().map(|m| m.library.as_str()).collect();
+        assert_eq!(names, ["PSNCore", "SaveData"]);
     }
 
     /// A module is found by the name that imports it, wherever the title put it; `Media/Modules/`
@@ -220,6 +282,7 @@ mod tests {
             vec![TitleModule {
                 library: "Il2cppUserAssemblies".to_owned(),
                 path: dir.path().join("Media/Modules/Il2cppUserAssemblies.prx"),
+                by_path: false,
             }]
         );
     }

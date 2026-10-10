@@ -1789,7 +1789,7 @@ pub fn start_needed_modules() -> (usize, u64) {
         if let Ok(mut started_before) = STARTED_BEFORE_ENTRY.lock() {
             started_before.push((library.clone(), handle));
         }
-        let count = initialisers.map_or(0, run_initialisers);
+        let count = initialisers.map_or(0, |found| run_initialisers(found, [0, 0, 0]));
         started(&library, handle, count);
         modules += 1;
         ran += count;
@@ -1825,7 +1825,7 @@ pub fn start_every_placed_module() -> (usize, u64) {
         if handle_started_before_entry(library).is_some() {
             continue;
         }
-        let count = run_initialisers(*initialisers);
+        let count = run_initialisers(*initialisers, [0, 0, 0]);
         started(library, u64::MAX, count);
         ran += count;
     }
@@ -1855,12 +1855,12 @@ fn initialisers_for(path: &str) -> Option<ModuleInitialisers> {
 /// Title modules export no `module_start` and carry `DT_INIT` and `DT_INIT_ARRAY`, the ELF
 /// mechanism that reaches a C++ module's static constructors. The order is `DT_INIT`, then the
 /// array in ascending order, as the System V ABI specifies.
-fn run_initialisers(initialisers: ModuleInitialisers) -> u64 {
+fn run_initialisers(initialisers: ModuleInitialisers, start: [u64; 3]) -> u64 {
     let mut ran = 0;
     if initialisers.init != 0 {
         // SAFETY: `DT_INIT` of a module this loader placed, relocated and protected
-        // executable - a function pointer the module itself declared, taking no arguments.
-        if unsafe { thread::call_guest(initialisers.init, [0, 0, 0]) }.is_some() {
+        // executable - a function pointer the module itself declared, handed the start's arguments.
+        if unsafe { thread::call_guest(initialisers.init, start) }.is_some() {
             ran += 1;
         }
     }
@@ -1877,12 +1877,33 @@ fn run_initialisers(initialisers: ModuleInitialisers) -> u64 {
         }
         // SAFETY: a pointer out of the module's own `DT_INIT_ARRAY`, which relocation has
         // written, into text this loader protected executable. The three arguments are the
-        // `(argc, argv, envp)` an init-array entry is permitted to take and may ignore.
-        if unsafe { thread::call_guest(entry, [0, 0, 0]) }.is_some() {
+        // program's `(argc, argv, envp)`, which an init-array entry may read or ignore.
+        if unsafe { thread::call_guest(entry, init_array_arguments()) }.is_some() {
             ran += 1;
         }
     }
     ran
+}
+
+/// What a module's `DT_INIT` is handed when `sceKernelLoadStartModule(path, args, argp, ..)` starts
+/// it: `(args, argp)`, the module's start arguments. Guest-observed: a Unity plugin's init entry
+/// reads a block at its second argument, sized 0x10 or 0x58, before anything else.
+fn start_arguments(call: &[u64; GUEST_ARG_REGISTERS]) -> [u64; 3] {
+    [call[1], call[2], 0]
+}
+
+/// The program's `argc`, `argv` and `environ`, from the process image written on the guest's stack.
+static MAIN_ARGUMENTS: OnceLock<[u64; 3]> = OnceLock::new();
+
+/// Records the program's `argc`, `argv` and `environ`, once, before the guest runs.
+pub fn on_main_arguments(count: u64, arguments: u64, environment: u64) {
+    let _ = MAIN_ARGUMENTS.set([count, arguments, environment]);
+}
+
+/// What an init-array entry is called with: the program's `argc`, `argv` and `environ`, as FreeBSD's
+/// runtime linker calls one (`rtld.c`, `call_init_pointer`); zeros before they are known.
+fn init_array_arguments() -> [u64; 3] {
+    MAIN_ARGUMENTS.get().copied().unwrap_or([0, 0, 0])
 }
 
 /// Every `/app0` module a guest asked to load and start that did not start, with its handle.
@@ -1895,6 +1916,23 @@ fn started_nothing(path: &str, handle: u64) {
     if let Ok(mut loads) = STARTED_NOTHING.lock() {
         loads.push((path.to_owned(), handle));
     }
+}
+
+/// The handle a module loaded by `path` got when it was first started at run time, placed or not.
+fn handle_started_at_run_time(path: &str) -> Option<u64> {
+    let found = |loads: &[(String, u64)]| {
+        loads
+            .iter()
+            .find(|(p, _)| p.eq_ignore_ascii_case(path))
+            .map(|(_, h)| *h)
+    };
+    let started = STARTED.lock().ok().and_then(|loads| {
+        loads
+            .iter()
+            .find(|(p, _, _)| p.eq_ignore_ascii_case(path))
+            .map(|(_, h, _)| *h)
+    });
+    started.or_else(|| STARTED_NOTHING.lock().ok().and_then(|loads| found(&loads)))
 }
 
 /// Every module that was started, and how many initialisers each ran.
@@ -5695,12 +5733,21 @@ fn load_start_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         if let Some(handle) = handle_started_before_entry(stem) {
             return handle;
         }
+        // Nor does one this kernel already started at run time: a title loads a plugin again for
+        // each call into it.
+        if let Some(handle) = handle_started_at_run_time(&path) {
+            return handle;
+        }
         let handle = NEXT_MODULE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The module is already placed, relocated and protected by `place_title_modules`, so starting it
         // runs its `DT_INIT` and `DT_INIT_ARRAY` (D515). A module the loader never recorded is reported
         // as unstarted.
         match initialisers_for(&path) {
-            Some(initialisers) => started(&path, handle, run_initialisers(initialisers)),
+            Some(initialisers) => started(
+                &path,
+                handle,
+                run_initialisers(initialisers, start_arguments(args)),
+            ),
             None => started_nothing(&path, handle),
         }
         return handle;
@@ -8856,6 +8903,43 @@ mod tests {
         // SAFETY: the block just handed out is readable.
         assert!(unsafe { super::guest::read_u64(out) }.is_some_and(|base| base != 0));
         assert!(direct::flexible_available() < before);
+    }
+
+    /// A module started by `sceKernelLoadStartModule(path, args, argp, ..)` has its `DT_INIT` called
+    /// with `(args, argp)`: a Unity plugin's reads the block at `argp` straight away.
+    #[test]
+    fn a_module_start_hands_its_arguments_to_the_init_entry() {
+        let mut call = [0_u64; GUEST_ARG_REGISTERS];
+        call[1] = 0x10;
+        call[2] = 0x6000_0080_0100;
+        assert_eq!(super::start_arguments(&call), [0x10, 0x6000_0080_0100, 0]);
+    }
+
+    /// An init-array entry is called with the program's `argc`, `argv` and `environ`, as FreeBSD's
+    /// runtime linker calls one (`rtld.c`, `call_init_pointer`), once they are known; zeros before.
+    #[test]
+    fn an_init_array_entry_gets_the_program_s_arguments() {
+        super::on_main_arguments(2, 0x6000_0080_0008, 0x6000_0080_0020);
+        assert_eq!(
+            super::init_array_arguments(),
+            [2, 0x6000_0080_0008, 0x6000_0080_0020]
+        );
+    }
+
+    /// A title module loaded by path a second time answers the handle its first load got and runs
+    /// nothing again, as a module started before entry does (D767): Unity loads a plugin again for
+    /// each call into it.
+    #[test]
+    fn a_module_loaded_twice_keeps_its_handle() {
+        let path = b"/app0/Media/Plugins/OnceOnly.prx ";
+        let mut result = 0_u32;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = path.as_ptr() as u64;
+        args[5] = std::ptr::addr_of_mut!(result) as u64;
+        let first = super::load_start_module(&args);
+        let second = super::load_start_module(&args);
+        assert!(first as i64 >= 0);
+        assert_eq!(second, first);
     }
 
     /// `_sceKernelRtldSetApplicationHeapAPI(table)` returns nothing and writes none of the table

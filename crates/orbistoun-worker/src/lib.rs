@@ -1651,8 +1651,16 @@ fn entry_arguments(
             }
         })
         .unwrap_or(argument);
+    // The process image is on the stack whatever the entry is handed: `argc`, the `argv` pointers
+    // and their null, then the environment's. A module's init-array entries are given them (D515).
+    let (count, arguments) = main_arguments(entry_stack);
+    orbistoun_kernel::on_main_arguments(
+        count,
+        arguments,
+        arguments.saturating_add(count.saturating_add(1) * 8),
+    );
     match argument {
-        process::EntryArgument::MainArguments => main_arguments(entry_stack),
+        process::EntryArgument::MainArguments => (count, arguments),
         process::EntryArgument::ImageAddress => (entry_stack, 0),
         process::EntryArgument::ZeroedBlock => (orbistoun_abi::enter::process_argument_block(), 0),
         process::EntryArgument::Sentinels => (orbistoun_abi::enter::sentinel_argument_block(), 0),
@@ -2288,6 +2296,9 @@ fn main_arguments(entry_stack: u64) -> (u64, u64) {
     let Ok(at) = usize::try_from(entry_stack) else {
         return (0, 0);
     };
+    if at == 0 {
+        return (0, 0);
+    }
     // SAFETY: `entry_stack` is the start of a process image this run just wrote inside a
     // mapped, writable guest stack, so its first word is initialised and readable.
     let argc = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u64>(at)) };
