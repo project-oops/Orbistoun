@@ -4356,10 +4356,13 @@ fn reserve_virtual_range(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     } else {
         hint
     };
-    if let Some(base) = checked_next_multiple_of(first, align) {
-        if space.reserve(base, len, protection).is_ok() {
-            reserved = Some(base);
-        }
+    // A hint this space already holds is passed over before reserving, so the fallback is not
+    // reported as a reservation the guest failed to make.
+    if let Some(base) = checked_next_multiple_of(first, align)
+        && space.validate(base, len, false).is_ok()
+        && space.reserve(base, len, protection).is_ok()
+    {
+        reserved = Some(base);
     }
     for _ in 0..CONFLICT_RETRIES {
         if reserved.is_some() {
@@ -7506,6 +7509,31 @@ mod tests {
             &small[8..],
             &console[8..24],
             "only what the declared size has room for"
+        );
+    }
+
+    /// A hint that is already held is passed over for a free range (D443), and that is not a
+    /// reservation the guest failed to make: nothing is recorded for the run report.
+    #[test]
+    fn a_held_hint_falls_back_without_recording_a_failure() {
+        let len = 0x10_0000;
+        let mut first: u64 = 0;
+        let at = std::ptr::from_mut(&mut first) as usize as u64;
+        assert_eq!(
+            super::reserve_virtual_range(&[at, len, 0, 0x4_0000, 0, 0]),
+            super::OK
+        );
+        let mut second: u64 = first;
+        let at = std::ptr::from_mut(&mut second) as usize as u64;
+        assert_eq!(
+            super::reserve_virtual_range(&[at, len, 0, 0x4_0000, 0, 0]),
+            super::OK
+        );
+        assert_ne!(second, first, "moved past the held hint");
+        assert!(
+            orbistoun_mem::last_reserve_failure()
+                .is_none_or(|failure| (failure.base, failure.len) != (first, len)),
+            "the held hint is not reported as a failed reservation"
         );
     }
 
