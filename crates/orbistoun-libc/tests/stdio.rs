@@ -383,3 +383,70 @@ fn a_byte_at_a_time_reads_and_writes_as_c_specifies() {
         "the byte written, as an unsigned char"
     );
 }
+
+/// A System V `va_list` whose register half holds `words` from its start: `gp_offset` 0,
+/// `fp_offset` past the integer half, the overflow area empty (psABI 3.5.7).
+/// A `va_list` and the two areas it points into, kept alive together.
+type VaListParts = (Box<[u64; 6]>, Box<[u64; 2]>, Box<[u64; 3]>);
+
+fn va_list(words: &[u64]) -> VaListParts {
+    let mut save = Box::new([0_u64; 6]);
+    save[..words.len()].copy_from_slice(words);
+    let overflow = Box::new([0_u64; 2]);
+    let list = Box::new([48_u64 << 32, overflow.as_ptr() as u64, save.as_ptr() as u64]);
+    (save, overflow, list)
+}
+
+/// `vsprintf` renders through a `va_list` with no bound (ISO/IEC 9899 7.21.6.13), and
+/// `vsnprintf_s` with one, terminated (C11 K.3.5.3.12).
+#[test]
+fn the_va_list_printers_render_their_arguments() {
+    let format = Buf::text("%d-%s");
+    let word = Buf::text("ok");
+    let (_save, _overflow, list) = va_list(&[42, word.at()]);
+    let dest = Buf::zeroed(32);
+    assert_eq!(
+        call("vsprintf", &[dest.at(), format.at(), list.as_ptr() as u64]),
+        5
+    );
+    assert_eq!(read_string(dest.at()), "42-ok");
+
+    let (_save, _overflow, list) = va_list(&[42, word.at()]);
+    let small = Buf::zeroed(4);
+    assert_eq!(
+        call(
+            "vsnprintf_s",
+            &[small.at(), 4, format.at(), list.as_ptr() as u64]
+        ),
+        5,
+        "the full length"
+    );
+    assert_eq!(read_string(small.at()), "42-", "truncated and terminated");
+}
+
+/// `fopen_s(&stream, path, mode)` (C11 K.3.5.2.1) writes the stream and answers 0, or writes null
+/// and answers non-zero; `printf_s` prints as `printf` does and answers the length (K.3.5.3.3).
+#[test]
+fn the_bounds_checked_stdio_calls_answer_as_annex_k_says() {
+    let dir = std::env::temp_dir().join("orbistoun-libc-stdio-annexk");
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("one.bin"), [7]).expect("a sample file");
+    orbistoun_fs::mount::mount("/annexk", dir);
+
+    let mut stream = 0xa5a5_u64;
+    let out = std::ptr::from_mut(&mut stream) as u64;
+    let path = Buf::text("/annexk/one.bin");
+    let mode = Buf::text("r");
+    assert_eq!(call("fopen_s", &[out, path.at(), mode.at()]), 0);
+    assert_ne!(stream, 0, "a stream");
+    assert_eq!(call("fgetc", &[stream]), 7);
+    let missing = Buf::text("/annexk/none.bin");
+    assert_ne!(call("fopen_s", &[out, missing.at(), mode.at()]), 0);
+    assert_eq!(stream, 0, "null written on failure");
+
+    let format = Buf::text(
+        "%d
+",
+    );
+    assert_eq!(call("printf_s", &[format.at(), 12]), 3);
+}

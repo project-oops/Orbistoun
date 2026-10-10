@@ -3638,3 +3638,43 @@ cites = "ISO C"
 assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
 found_on = "2026-10-10"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "fopen_s"
+arity = 3
+purpose = "C11 K.3.5.2.1: the stream [fopen] opens written through streamptr and 0 answered; on failure a null stream written and the errno [fopen] set answered, never zero. A null streamptr is refused with EINVAL."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 Annex K, K.3.5.2.1."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "printf_s"
+arity = 6
+purpose = "C11 K.3.5.3.3: [printf], which Annex K differs from only in refusing %n, a conversion this printer does not honour either."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 Annex K, K.3.5.3.3."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "vsnprintf_s"
+arity = 4
+purpose = "C11 K.3.5.3.12: [vsnprintf]'s output, truncated and terminated, and the full length answered. Annex K adds only runtime-constraint handlers, which a caller passing a valid buffer and format never invokes."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 Annex K, K.3.5.3.12."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "vsprintf"
+arity = 3
+purpose = "ISO/IEC 9899 7.21.6.13: [vsnprintf] with no bound, the caller having promised a buffer large enough."
+known_by = "published"
+cites = "ISO/IEC 9899 7.21.6.13."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."

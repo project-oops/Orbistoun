@@ -130,6 +130,7 @@ guest_module! {
         // The `va_list` forms. Fixed parameters only; the variadic half arrives through the list
         // (D364).
         "vsnprintf" => 4, "vprintf" => 2, "vfprintf" => 3,
+        "vsprintf" => 3, "vsnprintf_s" => 4,
         "vsprintf_s" => 4,
         // Breaking a `time_t` down and rendering it, as `asctime(localtime(&t))` does (D454).
         "localtime" => 1, "gmtime" => 1, "asctime" => 1,
@@ -212,6 +213,7 @@ guest_module! {
         // Stdio. Declaring a pointer-returning function lets the knowledge file say so, so an
         // unimplemented one answers null rather than an error code carried as a `FILE*` (D125).
         "fopen" => 2,
+        "fopen_s" => 3,
         "fclose" => 1,
         "fread" => 4,
         "fwrite" => 4,
@@ -235,6 +237,7 @@ guest_module! {
         "posix_memalign" => 3,
         "reallocalign" => 3,
         "printf" => 6,
+        "printf_s" => 6,
         // Declared because it must not return: the default stub returns into the trap a compiler
         // places after a `noreturn` call (D177).
         "abort" => 0,
@@ -2493,6 +2496,53 @@ fn vsnprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     rendered.len() as u64
 }
 
+/// `vsprintf(dest, format, ap)` - ISO/IEC 9899 7.21.6.13: [`vsnprintf`] with no bound, the caller
+/// having promised a buffer large enough.
+fn vsprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mut bounded = [0_u64; GUEST_ARG_REGISTERS];
+    bounded[0] = args[0];
+    bounded[1] = u64::MAX;
+    bounded[2] = args[1];
+    bounded[3] = args[2];
+    vsnprintf(&bounded)
+}
+
+/// `vsnprintf_s(dest, n, format, ap)` - C11 K.3.5.3.12: [`vsnprintf`]'s output, truncated and
+/// terminated, and the full length answered. Annex K adds only runtime-constraint handlers, which a
+/// caller passing a valid buffer and format never invokes.
+fn vsnprintf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    vsnprintf(args)
+}
+
+/// `printf_s(format, ...)` - C11 K.3.5.3.3: [`printf`], which Annex K differs from only in
+/// refusing `%n`, a conversion this printer does not honour either.
+fn printf_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    printf(args)
+}
+
+/// `fopen_s(streamptr, filename, mode)` - C11 K.3.5.2.1: the stream [`fopen`] opens written through
+/// `streamptr` and 0 answered; on failure a null stream written and the `errno` [`fopen`] set
+/// answered, never zero. A null `streamptr` is refused with `EINVAL`.
+fn fopen_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let out = args[0];
+    if out == 0 {
+        return u64::from(orbistoun_core::errno::INVALID);
+    }
+    let mut forwarded = [0_u64; GUEST_ARG_REGISTERS];
+    forwarded[0] = args[1];
+    forwarded[1] = args[2];
+    let stream = fopen(&forwarded);
+    // SAFETY: the guest's `FILE **`, eight bytes, by the call's contract.
+    unsafe { std::ptr::write_unaligned(ptr(out).cast::<u64>(), stream) };
+    if stream != 0 {
+        return OK;
+    }
+    match current_errno() {
+        0 => u64::from(orbistoun_core::errno::NO_ENTRY),
+        errno => u64::from(errno.unsigned_abs()),
+    }
+}
+
 /// `vprintf(format, ap)` - the `va_list` form of [`printf`], to the host's error stream.
 ///
 /// Reference: ISO C `vprintf`; POSIX.1-2008 `vprintf(3)`.
@@ -3792,6 +3842,10 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("malloc_usable_size", mspace_malloc_usable_size),
         ("printf", printf),
         ("vsnprintf", vsnprintf),
+        ("vsprintf", vsprintf),
+        ("vsnprintf_s", vsnprintf_s),
+        ("printf_s", printf_s),
+        ("fopen_s", fopen_s),
         ("vsprintf_s", vsprintf_s),
         ("vprintf", vprintf),
         ("vfprintf", vfprintf),
