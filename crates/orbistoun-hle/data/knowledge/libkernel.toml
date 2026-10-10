@@ -821,6 +821,7 @@ edge_cases = [
     "**errno 35 is EAGAIN, not EEXIST.** The sweep glossed it as EEXIST; EEXIST is 17 in this platform's own harvested headers. The number is the measurement and the name that came with it is not (D648).",
     "**Argument order is measured, not assumed.** An inverted call answers EINVAL on hardware, and PPSA25872's own handler begins cmp edi, 0x1e - it expects to be handed 30.",
     "The title imports it under the library name libkernel_unity; the console exports it from libkernel.",
+    "**SIGABRT is refused.** oops-apps' crash tracer installs for 11, 10, 4 and 6 in turn; on a console the first three answered 0 and 6 answered 0x80020016, EINVAL (Craft's hardware capture of 2026-10-06). Which other signals are refused is unmeasured.",
 ]
 known_by = "measured"
 cites = "obSCEne 030-thread/exception-handler, sweep 20260909-140114, payload leg: resolved at 0x800028660"

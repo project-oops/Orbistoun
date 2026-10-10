@@ -6035,8 +6035,12 @@ fn installed_handlers() -> &'static Mutex<std::collections::BTreeMap<u64, u64>> 
 /// installing again, with another handler or with null, answers `0x80020023` (errno 35). Null is
 /// not an uninstall, because the duplicate check comes first; `sceKernelRemoveExceptionHandler`
 /// is the way out. Argument order is measured: an inverted call answers `EINVAL`, and guest
-/// handlers expect to be handed 30 in `edi`.
+/// handlers expect to be handed 30 in `edi`. `SIGABRT` (6) is refused with `EINVAL`, as the
+/// console answered oops-apps' crash tracer, which had 11, 10 and 4 accepted beside it (Craft's
+/// hardware capture of 2026-10-06); which other signals it refuses is unmeasured.
 fn install_exception_handler(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// The signal the console was seen to refuse a handler for.
+    const REFUSED: u64 = 6;
     // Installed here rather than during setup: delivery matters only once a guest has a handler, a
     // `OnceLock` makes repeat calls free, and nothing can raise before something installs.
     sync::install_signal_delivery(sync::SignalDelivery {
@@ -6044,6 +6048,9 @@ fn install_exception_handler(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         deliver: deliver_pending_signal,
     });
     let (signum, handler) = (args[0], args[1]);
+    if signum == REFUSED {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    }
     let Ok(mut handlers) = installed_handlers().lock() else {
         return u64::from(GuestError::Unimplemented.as_raw());
     };
@@ -7510,6 +7517,22 @@ mod tests {
             &console[8..24],
             "only what the declared size has room for"
         );
+    }
+
+    /// A handler for `SIGABRT` (6) is refused with `EINVAL` (`0x80020016`) while `SIGILL` (4) is
+    /// accepted, as oops-apps' crash tracer was answered on a console (Craft's hardware capture of
+    /// 2026-10-06: 11, 10 and 4 answered 0, 6 answered -2147352554).
+    #[test]
+    fn an_abort_handler_is_refused_as_the_console_refuses_it() {
+        assert_eq!(
+            super::install_exception_handler(&args([6, 0x4000_0000_1000, 0, 0])),
+            0x8002_0016
+        );
+        assert_eq!(
+            super::install_exception_handler(&args([4, 0x4000_0000_1000, 0, 0])),
+            0
+        );
+        assert_eq!(super::remove_exception_handler(&args([4, 0, 0, 0])), 0);
     }
 
     /// A hint that is already held is passed over for a free range (D443), and that is not a
