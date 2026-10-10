@@ -2618,3 +2618,35 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/-eboot.log lines 6361-6389 (130-layout/query-memory-protection)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-10"
+
+[[function]]
+name = "sceKernelNanosleep"
+arity = 2
+purpose = "(request, remaining): sleeps for the struct timespec at request, moving the thread's logical clock by it, and writes remaining as zero when given, since nothing cuts a sleep short. A null request or a nanosecond field of a second or more answers 0x80020016."
+returns = "status"
+found_by = "generated"
+known_by = "published"
+cites = "POSIX.1-2008 nanosleep(3); FreeBSD sys/sys/timespec.h."
+assumptions = ["Fails in the vendor encoding (0x80020000 | errno) rather than -1 and errno, as the sceKernel names are measured to fail for open and close; nothing has measured this one's refusals."]
+found_on = "2026-10-10"
+
+[[function]]
+name = "sceKernelSleep"
+arity = 1
+purpose = "(seconds): sleeps that many whole seconds, moving the thread's logical clock by them, and answers 0."
+returns = "status"
+found_by = "generated"
+known_by = "published"
+cites = "POSIX.1-2008 sleep(3)."
+assumptions = ["The vendor name is taken to differ from sleep only in answering a status rather than the unslept seconds; nothing has measured it."]
+found_on = "2026-10-10"
+
+[[function]]
+name = "scePthreadExit"
+arity = 1
+purpose = "(value): pthread_exit under the vendor name - ends the program on the main thread, and parks any other thread, which never returns."
+found_by = "generated"
+known_by = "published"
+cites = "POSIX.1-2008 pthread_exit(3)."
+assumptions = ["The vendor name is taken to be pthread_exit itself, as scePthreadCreate and the other scePthread names are its twins."]
+found_on = "2026-10-10"

@@ -283,6 +283,9 @@ guest_module! {
         "posix_sigdelset" => 2,
         "posix_sigismember" => 2,
         "sceKernelUsleep" => 1,
+        "sceKernelNanosleep" => 2,
+        "sceKernelSleep" => 1,
+        "scePthreadExit" => 1,
         // Arity 2, read off the guest's calls: a clock identifier and a writable stack address.
         "sceKernelClockGettime" => 2,
         "sceKernelGettimeofday" => 2,
@@ -2855,6 +2858,53 @@ fn usleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     std::thread::sleep(how_long);
     // The clock advances by the slept span too, so a guest polling between sleeps sees time pass
     // the same way on every run (D582).
+    orbistoun_hle::clocks::advance(how_long.as_nanos());
+    OK
+}
+
+/// `sceKernelNanosleep(request, remaining)`: [`usleep`] for a `struct timespec`, the remainder
+/// written as zero when asked for, since nothing here cuts a sleep short.
+///
+/// The vendor twin of POSIX `nanosleep`: a null request, or a nanosecond field of a second or
+/// more, fails with `0x8002_0000 | EINVAL` rather than `-1` and `errno`, as the vendor names are
+/// measured to fail (`open`/`close` against `sceKernelOpen`/`sceKernelClose`).
+///
+/// Reference: POSIX.1-2008 `nanosleep(3)`; `struct timespec` from FreeBSD `sys/sys/timespec.h`.
+fn kernel_nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// A second, in the nanosecond field's units.
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+    let invalid = u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw());
+    let (request, remaining) = (args[0], args[1]);
+    if request == 0 {
+        return invalid;
+    }
+    // SAFETY: the guest's `struct timespec`, valid by the call's contract.
+    let seconds = unsafe { guest::read_u64(request) };
+    // SAFETY: its second field.
+    let nanos = unsafe { guest::read_u64(request.wrapping_add(8)) };
+    let (Some(seconds), Some(nanos)) = (seconds, nanos) else {
+        return invalid;
+    };
+    if nanos >= NANOS_PER_SECOND {
+        return invalid;
+    }
+    let how_long = std::time::Duration::new(seconds, nanos as u32);
+    std::thread::sleep(how_long);
+    orbistoun_hle::clocks::advance(how_long.as_nanos());
+    if remaining != 0 {
+        // SAFETY: the guest's remainder `struct timespec`, valid by the call's contract.
+        let zeroed = unsafe { guest::write_bytes(remaining, &[0; 16]) };
+        if !zeroed {
+            return invalid;
+        }
+    }
+    OK
+}
+
+/// `sceKernelSleep(seconds)`: [`usleep`] in whole seconds.
+fn kernel_sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let how_long = std::time::Duration::from_secs(u64::from(args[0] as u32));
+    std::thread::sleep(how_long);
     orbistoun_hle::clocks::advance(how_long.as_nanos());
     OK
 }
@@ -6467,6 +6517,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("pthread_detach", pthread_detach),
     ("pthread_setcancelstate", posix_pthread_setcancelstate),
     ("pthread_exit", pthread_exit),
+    ("scePthreadExit", pthread_exit),
     // POSIX thread-specific-data keys, served under their POSIX names via `orbistoun-posix` and
     // under their vendor twins', which take the same arguments (D453).
     ("pthread_key_create", pthread_key_create),
@@ -6807,6 +6858,8 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("posix_getpagesize", getpagesize),
     ("posix_usleep", usleep),
     ("sceKernelUsleep", usleep),
+    ("sceKernelNanosleep", kernel_nanosleep),
+    ("sceKernelSleep", kernel_sleep),
     ("sceKernelClockGettime", kernel_clock_gettime),
     ("sceKernelGettimeofday", kernel_gettimeofday),
     ("posix_sigemptyset", sigemptyset),
@@ -7721,6 +7774,40 @@ mod tests {
             (0xAAAA, 0xBBBB, 0xCCCC_CCCC),
             "nothing written"
         );
+    }
+
+    /// `sceKernelNanosleep` sleeps the requested span, moving this thread's logical clock by it, and
+    /// writes the remainder as zero; a nanosecond field of a second or more is refused in the
+    /// vendor encoding. `sceKernelSleep(0)` returns at once.
+    #[test]
+    fn the_vendor_sleeps_advance_the_clock_and_refuse_a_bad_timespec() {
+        std::thread::spawn(|| {
+            let request = [0_u64, 2_000_000];
+            let mut remaining = [7_u64, 7];
+            let before = orbistoun_hle::clocks::thread_time();
+            assert_eq!(
+                super::kernel_nanosleep(&args([
+                    request.as_ptr() as usize as u64,
+                    remaining.as_mut_ptr() as usize as u64,
+                    0,
+                    0
+                ])),
+                super::OK
+            );
+            if orbistoun_hle::clocks::repeats() {
+                assert_eq!(orbistoun_hle::clocks::thread_time(), before + 2_000_000);
+            }
+            assert_eq!(remaining, [0, 0]);
+            let bad = [0_u64, 1_000_000_000];
+            assert_eq!(
+                super::kernel_nanosleep(&args([bad.as_ptr() as usize as u64, 0, 0, 0])),
+                0x8002_0016
+            );
+            assert_eq!(super::kernel_nanosleep(&args([0, 0, 0, 0])), 0x8002_0016);
+            assert_eq!(super::kernel_sleep(&args([0, 0, 0, 0])), super::OK);
+        })
+        .join()
+        .expect("the sleeper runs");
     }
 
     /// A fresh reservation queries as uncommitted and inaccessible, so a guest fills it.
