@@ -3405,12 +3405,15 @@ fn fopen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         .unwrap_or("r");
     // Null rather than an error code: the caller reads this as a pointer (D125), and null
     // faults nearest the cause.
-    let handle = if mode.contains('w') || mode.contains('a') {
-        orbistoun_fs::open::create(&path)
-    } else {
-        orbistoun_fs::open::open(&path)
-    };
-    handle.unwrap_or(0)
+    if mode.contains('w') || mode.contains('a') {
+        return orbistoun_fs::open::create(&path).unwrap_or(0);
+    }
+    // A path nothing here holds is a missing file: `ENOENT`, as FreeBSD's `open(2)` answers and
+    // as a console reported to Mesa for a path it does not have, not whatever `errno` held.
+    orbistoun_fs::open::open(&path).unwrap_or_else(|| {
+        set_errno(i64::from(orbistoun_core::errno::NO_ENTRY));
+        0
+    })
 }
 
 /// `fclose(stream)`.

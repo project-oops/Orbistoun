@@ -291,11 +291,15 @@ fn a_read_that_cannot_be_expressed_is_refused() {
     );
 }
 
-/// A path under no mount opens nothing, and answers null rather than a code.
+/// A path under no mount opens nothing, and answers null rather than a code, with `errno`
+/// `ENOENT`: FreeBSD's `open(2)` for a missing path, and what Mesa printed for
+/// `/usr/share/libdrm/amdgpu.ids` in Craft on a console (2026-10-06).
 #[test]
 fn a_path_under_no_mount_opens_nothing() {
     let path = Buf::text("/nowhere0/definitely-not-here.bin");
+    orbistoun_core::errno::set(22);
     assert_eq!(call("fopen", &[path.at(), 0]), 0);
+    assert_eq!(orbistoun_core::errno::get(), 2, "ENOENT, not a stale errno");
     assert_eq!(call("fopen", &[0, 0]), 0, "a null path opens nothing");
 }
 
