@@ -102,20 +102,17 @@ fn strerror_answers_thread_local_storage_rather_than_a_value() {
     let message = call("strerror", &[2]);
     assert_ne!(message, 0, "there must be storage behind it");
 
-    let text = read_string(message);
-    assert!(!text.is_empty(), "and something readable in it");
-    assert!(
-        text.contains('2'),
-        "the message should name the number it was asked about: {text:?}"
-    );
-
-    // There is no message table, and the text says so.
-    assert!(text.contains("no message table"), "{text:?}");
+    // FreeBSD's text, as Mesa printed it for a missing file in Craft on a console (2026-10-06).
+    assert_eq!(read_string(message), "No such file or directory");
 
     // A different code gives a different message through the same address.
     let again = call("strerror", &[7]);
     assert_eq!(again, message, "one buffer per thread, reused");
-    assert!(read_string(again).contains('7'));
+    assert_eq!(read_string(again), "Argument list too long");
+
+    // A number the table does not hold says so, and names the number.
+    let unknown = read_string(call("strerror", &[9999]));
+    assert!(unknown.contains("9999"), "{unknown:?}");
 
     let theirs = std::thread::spawn(|| call("strerror", &[2]))
         .join()

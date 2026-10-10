@@ -148,7 +148,9 @@ sparse pattern. The commit is in the header of `crates/orbistoun-hle/data/abi-co
 `orbistoun-gen constants <checkout> --revision <commit>` into
 `crates/orbistoun-hle/data/abi-constants.toml`. No function bodies, no structure layouts, no
 expressions. These are FreeBSD's numbers, not the target's: each is `published` about
-FreeBSD and `assumed` about a guest, and the file says so at the top.
+FreeBSD and `assumed` about a guest, and the file says so at the top. The `errno.h` comments
+are the C library's error messages (`strerror`, `strerror_r`, `perror`); a console printed
+ENOENT's, "No such file or directory", to Mesa in Craft.
 
 **Checked.** Against independent measurements:
 

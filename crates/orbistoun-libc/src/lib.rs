@@ -2300,12 +2300,20 @@ fn printf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     rendered.len() as u64
 }
 
+/// The message for an error number: FreeBSD's, from the text `errno.h` gives each number
+/// ([`orbistoun_hle::constants::errno_message`]), or, for a number with none, a line naming it.
+fn error_message(number: i32) -> String {
+    orbistoun_hle::constants::errno_message(i64::from(number)).map_or_else(
+        || format!("error {number} (orbistoun has no message for it)"),
+        str::to_owned,
+    )
+}
+
 /// `strerror(errnum)` - a pointer to a message describing an error number.
 ///
-/// The platform's message table is not measured, so the text says what it is rather than
-/// imitating one. What matters is that the answer is a real, readable pointer, since callers
-/// print it unchecked. The buffer is per thread, so two guest threads reporting different
-/// failures do not overwrite each other's text.
+/// The text is [`error_message`]'s. What matters as much is that the answer is a real, readable
+/// pointer, since callers print it unchecked. The buffer is per thread, so two guest threads
+/// reporting different failures do not overwrite each other's text.
 ///
 /// Reference: POSIX.1-2008 `strerror(3)`.
 fn strerror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -2319,10 +2327,7 @@ fn strerror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 
     MESSAGE.with(|cell| {
-        let text = format!(
-            "error {} (orbistoun has no message table)\0",
-            args[0] as i32
-        );
+        let text = format!("{}\0", error_message(args[0] as i32));
         let bytes = text.as_bytes();
         let at = cell.get();
         let room = bytes.len().min(ROOM - 1);
@@ -2959,7 +2964,7 @@ fn perror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         }
     }
     let number = current_errno();
-    line.extend_from_slice(format!("error {number} (orbistoun has no message table)").as_bytes());
+    line.extend_from_slice(error_message(number).as_bytes());
     line.push(b'\n');
 
     // Guest output, not a log: the guest's own write, so it stays a direct write.
@@ -2976,7 +2981,7 @@ fn perror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Reference: POSIX.1-2008 `strerror_r(3)`.
 fn strerror_r(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (number, buffer, size) = (args[0] as i32, args[1], args[2]);
-    let text = format!("error {number} (orbistoun has no message table)\0");
+    let text = format!("{}\0", error_message(number));
     if buffer == 0 || size < text.len() as u64 {
         return FAILED;
     }

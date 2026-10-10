@@ -66,6 +66,49 @@ fn vendor() -> &'static toml::Table {
     })
 }
 
+/// The message for an error number: the text `errno.h` gives beside it, harvested with the number.
+///
+/// FreeBSD's `strerror` messages are those comments; a console printed ENOENT's, "No such file or
+/// directory", to Mesa in Craft (2026-10-06). `None` for a number the header does not define, for
+/// zero and the negative kernel-internal codes, and for `ELAST`, a bound rather than an error.
+#[must_use]
+pub fn errno_message(number: i64) -> Option<&'static str> {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static MESSAGES: OnceLock<HashMap<i64, &'static str>> = OnceLock::new();
+    MESSAGES
+        .get_or_init(|| {
+            let mut messages = HashMap::new();
+            let mut in_errno = false;
+            for line in include_str!("../data/abi-constants.toml").lines() {
+                if line.starts_with('[') {
+                    in_errno = line.trim() == "[errno]";
+                    continue;
+                }
+                if !in_errno || line.starts_with('#') {
+                    continue;
+                }
+                let Some((name, rest)) = line.split_once('=') else {
+                    continue;
+                };
+                let Some((value, text)) = rest.split_once('#') else {
+                    continue;
+                };
+                let (name, text) = (name.trim(), text.trim());
+                let Ok(value) = value.trim().parse::<i64>() else {
+                    continue;
+                };
+                if name == "ELAST" || value <= 0 || text.is_empty() {
+                    continue;
+                }
+                messages.entry(value).or_insert(text);
+            }
+            messages
+        })
+        .get(&number)
+        .copied()
+}
+
 /// The harvested table, parsed once.
 fn constants() -> &'static toml::Table {
     use std::sync::OnceLock;
@@ -75,4 +118,22 @@ fn constants() -> &'static toml::Table {
             .parse::<toml::Table>()
             .expect("the harvested constants must parse")
     })
+}
+
+#[cfg(test)]
+mod errno_message_tests {
+    /// The text beside each `errno.h` number is the message for it; `ELAST`, a bound and not an
+    /// error, names nothing.
+    #[test]
+    fn an_error_number_has_the_text_its_header_gives_it() {
+        assert_eq!(super::errno_message(2), Some("No such file or directory"));
+        assert_eq!(
+            super::errno_message(35),
+            Some("Resource temporarily unavailable")
+        );
+        assert_eq!(super::errno_message(97), Some("Integrity check failed"));
+        assert_eq!(super::errno_message(0), None);
+        assert_eq!(super::errno_message(-4), None, "a kernel-internal code");
+        assert_eq!(super::errno_message(9999), None);
+    }
 }
