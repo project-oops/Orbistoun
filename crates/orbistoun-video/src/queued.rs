@@ -138,6 +138,7 @@ pub fn post_end_of_pipe(context: u32) -> usize {
             fflags: 0,
             data: i64::from_ne_bytes(data.to_ne_bytes()),
             udata: 0,
+            display_nanos: 0,
         }
     })
 }

@@ -470,14 +470,13 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// on the CPU and one carried out from a command buffer (D728) share. The port's answer: `0`, or
 /// the bad-handle code.
 pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
-    if port::with(handle, |p| {
+    let Some(flips) = port::with(handle, |p| {
         p.flips += 1;
         p.last_flip = Some(buffer_index);
-    })
-    .is_none()
-    {
+        p.flips
+    }) else {
         return video_error::INVALID_HANDLE;
-    }
+    };
     // Record which port flipped, so a reader of the presented frame need not guess.
     port::note_flipped(handle);
     // The installed observer is handed the buffer the guest asked to scan out.
@@ -503,6 +502,9 @@ pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
         data: i64::from_ne_bytes(flip_arg.to_ne_bytes()) << 16,
         // Replaced by the registration's own word on delivery.
         udata: 0,
+        // The display's time at this flip: one refresh per flip, so a thread that waits on flips
+        // sees time pass at the display's rate whatever the host's pace (D786).
+        display_nanos: flips.saturating_mul(REFRESH_NANOS),
     };
     if std::env::var_os(orbistoun_env::FLIP_TO_ALL.name).is_some() {
         orbistoun_kernel::sync::post_event_everywhere(completion);
@@ -512,6 +514,10 @@ pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
     orbistoun_kernel::sync::post_event(handle, completion);
     OK
 }
+
+/// One display refresh at 60 Hz, in nanoseconds: what one flip stands for on the logical clock
+/// (D786). Assumed: the output's refresh rate and `sceVideoOutSetFlipRate`'s rates are unmeasured.
+const REFRESH_NANOS: u64 = 16_666_667;
 
 /// The filter a flip completion carries: `EVFILT_VIDEO_OUT`, read on hardware as -13 (obSCEne
 /// `-4e20`, `080-video/visual-flip`).

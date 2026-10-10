@@ -201,6 +201,9 @@ struct GuestSemaphore {
     /// The most the count may reach, so a signal past the ceiling can be refused.
     ceiling: u32,
     name: String,
+    /// The latest logical time a thread signalling it had, which a thread that takes from it moves
+    /// up to (D786).
+    signalled_at: AtomicU64,
 }
 
 impl GuestSemaphore {
@@ -210,6 +213,7 @@ impl GuestSemaphore {
             available: Condvar::new(),
             ceiling,
             name,
+            signalled_at: AtomicU64::new(0),
         }
     }
 
@@ -246,6 +250,8 @@ impl GuestSemaphore {
             return false;
         }
         *count -= need;
+        // Released by a signal: the taker has waited until its signaller's time (D786).
+        orbistoun_hle::clocks::advance_to(self.signalled_at.load(Ordering::Acquire));
         true
     }
 
@@ -271,6 +277,8 @@ impl GuestSemaphore {
             return false;
         }
         *count = raised;
+        self.signalled_at
+            .fetch_max(orbistoun_hle::clocks::thread_time(), Ordering::AcqRel);
         self.available.notify_all();
         true
     }
@@ -766,6 +774,10 @@ pub struct PendingEvent {
     pub data: i64,
     /// The opaque word the caller supplied when it registered.
     pub udata: u64,
+    /// The logical time the event stands for, in nanoseconds since the guest started, or 0 for an
+    /// event that carries none. A flip completion carries the display's time, and the thread whose
+    /// wait takes it moves its clock up to it (D786). Not part of what the guest reads.
+    pub display_nanos: u64,
 }
 
 /// How many bytes one delivered event occupies: the pre-FreeBSD-12 `struct kevent`.
@@ -1084,6 +1096,9 @@ struct GuestEventFlag {
     waiting: AtomicU64,
     /// How many times it has been cancelled: a waiter that sees this move was cancelled.
     cancels: AtomicU64,
+    /// The latest logical time a thread setting it had, which a waiter it releases moves up to
+    /// (D786).
+    set_at: AtomicU64,
 }
 
 /// How an event-flag wait ended.
@@ -1114,6 +1129,7 @@ pub fn create_event_flag(initial: u64, name: &str) -> EventFlagHandle {
                 changed: Condvar::new(),
                 waiting: AtomicU64::new(0),
                 cancels: AtomicU64::new(0),
+                set_at: AtomicU64::new(0),
             }),
         );
     }
@@ -1157,6 +1173,8 @@ pub fn event_flag_set(handle: EventFlagHandle, pattern: u64) -> Option<bool> {
             return false;
         };
         *bits |= pattern;
+        e.set_at
+            .fetch_max(orbistoun_hle::clocks::thread_time(), Ordering::AcqRel);
         e.changed.notify_all();
         true
     })
@@ -1219,6 +1237,8 @@ fn wait_on_flag<'a>(
         }
         if matches(*bits) {
             let found_pattern = *bits;
+            // Released by a set: the waiter has waited until its setter's time (D786).
+            orbistoun_hle::clocks::advance_to(found.set_at.load(Ordering::Acquire));
             if clear_all {
                 *bits = 0;
             } else if clear_pat {
@@ -1782,6 +1802,7 @@ mod tests {
             fflags: 0xdead_0001,
             data: -2,
             udata: 0x0102_0304_0506_0708,
+            display_nanos: 0,
         }
         .to_bytes();
 
@@ -1816,6 +1837,7 @@ mod tests {
             fflags: 0,
             data: 7,
             udata: 0,
+            display_nanos: 0,
         };
         assert_eq!(super::post_event(ident, event), 1, "one queue wanted it");
 
@@ -1837,6 +1859,7 @@ mod tests {
             fflags: 0,
             data: 0,
             udata: 0,
+            display_nanos: 0,
         };
         assert_eq!(
             super::post_event(ident, event),
@@ -1864,6 +1887,7 @@ mod tests {
                 data: 0,
                 // Deliberately wrong: the poster does not know this and must not decide it.
                 udata: 0xdead_dead,
+                display_nanos: 0,
             },
         );
         let delivered = super::take_events(queue, 1);
@@ -1890,6 +1914,7 @@ mod tests {
                     fflags: 0,
                     data,
                     udata: 0,
+                    display_nanos: 0,
                 },
             );
         }

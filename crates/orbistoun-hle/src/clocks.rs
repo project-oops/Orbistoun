@@ -99,6 +99,16 @@ pub fn advance(nanos: u128) {
     THREAD_NANOS.with(|now| now.set(now.get().saturating_add(nanos)));
 }
 
+/// Moves this thread's logical clock up to `nanos`, for a thread woken by something that happened
+/// at a known logical time: a display flip (D786). A thread already past it stays where it is. Does
+/// nothing under the host clock.
+pub fn advance_to(nanos: u64) {
+    if !logical() {
+        return;
+    }
+    THREAD_NANOS.with(|now| now.set(now.get().max(nanos)));
+}
+
 /// This thread's logical time now, without reading it (a reading moves it): what a thread it
 /// creates starts from.
 #[must_use]
@@ -278,5 +288,23 @@ mod tests {
             seconds < super::FIXED_EPOCH_SECONDS + 63_072_000,
             "the wall clock is far enough from its epoch to look like a real timestamp"
         );
+    }
+}
+
+#[cfg(test)]
+mod display_time_tests {
+    /// A thread handed a later time moves up to it, and a thread already past it stays where it
+    /// is: the clock never goes backwards (D786).
+    #[test]
+    fn a_thread_moves_up_to_a_later_time_and_never_back() {
+        std::thread::spawn(|| {
+            super::begin_thread_at(1_000);
+            super::advance_to(50_000_000);
+            assert_eq!(super::thread_time(), 50_000_000);
+            super::advance_to(20_000_000);
+            assert_eq!(super::thread_time(), 50_000_000, "never backwards");
+        })
+        .join()
+        .expect("the thread runs");
     }
 }

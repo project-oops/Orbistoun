@@ -3536,6 +3536,10 @@ fn kernel_wait_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // Nothing arrived within the caller's patience: a timeout, not success with nothing written.
         return u64::from(GuestError::vendor(ETIMEDOUT).as_raw());
     };
+    // A thread woken by a flip has waited until the display showed it (D786).
+    if let Some(latest) = events.iter().map(|event| event.display_nanos).max() {
+        orbistoun_hle::clocks::advance_to(latest);
+    }
     for (index, event) in events.iter().enumerate() {
         let at = args[1].saturating_add((index * sync::EVENT_BYTES) as u64);
         // SAFETY: an address the guest passed for this call, valid by its contract.
@@ -7517,6 +7521,87 @@ mod tests {
             &console[8..24],
             "only what the declared size has room for"
         );
+    }
+
+    /// A thread whose wait is handed a flip completion moves its logical clock up to the display time
+    /// the flip carries; an event that carries none leaves it where it was (D786).
+    #[test]
+    fn a_flip_wakes_its_waiter_at_the_displays_time() {
+        std::thread::spawn(|| {
+            orbistoun_hle::clocks::begin_thread_at(0);
+            let queue = super::sync::create_equeue("flip wait");
+            let ident = 0x0d16_0786;
+            assert!(super::sync::register_event(queue, ident));
+            let flip = super::sync::PendingEvent {
+                ident,
+                filter: -13,
+                flags: 0x20,
+                fflags: 0,
+                data: 0,
+                udata: 0,
+                display_nanos: 3 * 16_666_667,
+            };
+            assert_eq!(super::sync::post_event(ident, flip), 1);
+            let mut event = [0_u8; 0x20];
+            let mut count = 0_u32;
+            let out = event.as_mut_ptr() as u64;
+            let counted = std::ptr::from_mut(&mut count) as u64;
+            assert_eq!(
+                super::kernel_wait_equeue(&[queue, out, 1, counted, 0, 0]),
+                super::OK
+            );
+            assert_eq!(count, 1);
+            assert_eq!(orbistoun_hle::clocks::thread_time(), 3 * 16_666_667);
+        })
+        .join()
+        .expect("the thread runs");
+    }
+
+    /// A thread that takes from a semaphore moves its logical clock up to the latest time a thread
+    /// signalling it had, so a frame's display time reaches a thread that waits on the frame
+    /// through a semaphore (D786).
+    #[test]
+    fn a_semaphore_carries_its_signallers_time() {
+        let sema = super::sync::create_semaphore(0, 4, "frame");
+        std::thread::spawn(move || {
+            orbistoun_hle::clocks::begin_thread_at(5_000_000_000);
+            assert_eq!(super::sync::semaphore_signal(sema, 1), Some(true));
+        })
+        .join()
+        .expect("the signaller runs");
+        std::thread::spawn(move || {
+            orbistoun_hle::clocks::begin_thread_at(0);
+            assert_eq!(
+                super::sync::semaphore_wait(sema, 1, super::sync::Blocking::Never),
+                Some(true)
+            );
+            assert_eq!(orbistoun_hle::clocks::thread_time(), 5_000_000_000);
+        })
+        .join()
+        .expect("the waiter runs");
+    }
+
+    /// A thread whose event-flag wait matches moves its logical clock up to the latest time a thread
+    /// setting the flag had (D786).
+    #[test]
+    fn an_event_flag_carries_its_setters_time() {
+        let flag = super::sync::create_event_flag(0, "frame done");
+        std::thread::spawn(move || {
+            orbistoun_hle::clocks::begin_thread_at(7_000_000_000);
+            assert_eq!(super::sync::event_flag_set(flag, 0x4), Some(true));
+        })
+        .join()
+        .expect("the setter runs");
+        std::thread::spawn(move || {
+            orbistoun_hle::clocks::begin_thread_at(0);
+            assert_eq!(
+                super::sync::event_flag_wait(flag, 0x4, false, false, true, None),
+                Some(super::sync::FlagWait::Found(0x4))
+            );
+            assert_eq!(orbistoun_hle::clocks::thread_time(), 7_000_000_000);
+        })
+        .join()
+        .expect("the waiter runs");
     }
 
     /// A handler for `SIGABRT` (6) is refused with `EINVAL` (`0x80020016`) while `SIGILL` (4) is
