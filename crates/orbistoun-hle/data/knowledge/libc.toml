@@ -688,6 +688,7 @@ purpose = "Answers whether a path is there, and whether it may be written."
 edge_cases = [
     "The write bit is answered by the writable mount rather than by the host's permissions: that is the rule this emulator actually enforces, so it is the rule reported. A guest told it may write to the title directory and then refused would take its error path somewhere less useful.",
     "The read and execute bits are answered by existence, because everything a guest can reach through a mount it can read.",
+    "The root and every directory that holds a mount exist, as stat answers them: SuperTuxKart checks / first when it creates $HOME/.local/share one level at a time, and gave up on its config directory while / answered missing.",
 ]
 known_by = "published"
 cites = "POSIX.1-2008 access(2). W_OK from sys/sys/unistd.h, harvested, and cross-checked against the table by a test (D370)."

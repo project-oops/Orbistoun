@@ -150,10 +150,11 @@ fn access(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
         return FAILED;
     };
-    let Some(host) = mount::resolve_existing(&guest) else {
-        return FAILED;
-    };
-    if !host.exists() {
+    // The root, and a directory that holds a mount (`/system_data` above `/system_data/priv`),
+    // exist with no host directory behind them, as `stat` already answers.
+    let there = mount::is_directory(&guest)
+        || mount::resolve_existing(&guest).is_some_and(|host| host.exists());
+    if !there {
         return FAILED;
     }
     if args[1] & W_OK != 0 && !mount::is_writable(&guest) {
@@ -741,6 +742,14 @@ mod tests {
             "and it may not be written"
         );
         assert_ne!(call("access", &["/data/missing"], F_OK), 0);
+        // The root is a directory on every POSIX system, and is the first component a guest
+        // creating `$HOME/...` one level at a time checks (SuperTuxKart's FileManager).
+        assert_eq!(call("access", &["/"], F_OK), 0, "the root is there");
+        assert_ne!(
+            call("access", &["/"], super::W_OK),
+            0,
+            "and no mount makes it writable"
+        );
     }
 
     /// A positioned read does not move the descriptor's own position.
