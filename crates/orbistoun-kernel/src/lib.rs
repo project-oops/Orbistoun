@@ -198,6 +198,8 @@ guest_module! {
         // handle, a policy and a param pointer, and the two-argument pair a handle and one value.
         "scePthreadGetschedparam" => 3, "scePthreadSetschedparam" => 3,
         "scePthreadSetprio" => 2, "scePthreadRename" => 2,
+        // (thread, prio): the priority set, four bytes.
+        "scePthreadGetprio" => 2,
         "scePthreadCondattrDestroy" => 1, "pthread_setcancelstate" => 2,
         // `_sigprocmask` takes how, a set and an out-set. `sceKernelUuidCreate` takes only the
         // destination.
@@ -3443,6 +3445,20 @@ fn pthread_setprio(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `scePthreadGetprio(thread, prio)`: the priority [`pthread_setprio`] or
+/// [`pthread_setschedparam`] set, written four bytes wide as [`pthread_getschedparam`] writes it;
+/// a thread nobody set reads zero. An unissued thread or a null out-parameter is refused.
+fn pthread_getprio(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Some(record) = thread::record(args[0]) else {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    };
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if args[1] == 0 || !unsafe { guest::write_u32(args[1], record.requested_priority as u32) } {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    OK
+}
+
 /// `scePthreadRename(thread, name)`.
 ///
 /// The name is what a trace shows in place of a handle.
@@ -6569,6 +6585,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("scePthreadGetschedparam", pthread_getschedparam),
     ("scePthreadSetschedparam", pthread_setschedparam),
     ("scePthreadSetprio", pthread_setprio),
+    ("scePthreadGetprio", pthread_getprio),
     ("scePthreadRename", pthread_rename),
     ("_sigprocmask", sigprocmask),
     ("sceKernelUuidCreate", kernel_uuid_create),
@@ -7016,6 +7033,24 @@ mod tests {
             4,
         )
         .expect("the thread table accepted a registration")
+    }
+
+    /// `scePthreadGetprio(thread, &prio)` hands back the priority `scePthreadSetprio` set, four
+    /// bytes, as `scePthreadGetschedparam` hands it back; an unissued thread is refused.
+    #[test]
+    fn a_thread_s_priority_reads_back_what_was_set() {
+        let thread = a_thread("prio-reader");
+        assert_eq!(super::pthread_setprio(&args([thread, 700, 0, 0])), 0);
+        let mut prio = [0xa5_u8; 8];
+        let at = prio.as_mut_ptr() as u64;
+        let (_, get) = implementations()
+            .iter()
+            .find(|(n, _)| *n == "scePthreadGetprio")
+            .expect("implemented");
+        assert_eq!(get(&args([thread, at, 0, 0])), 0);
+        assert_eq!(prio[..4], 700_u32.to_le_bytes());
+        assert_eq!(prio[4..], [0xa5; 4], "four bytes");
+        assert_ne!(get(&args([0xdead_0000, at, 0, 0])), 0);
     }
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {

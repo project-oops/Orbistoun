@@ -2587,3 +2587,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261009T1610Z-sp02, reports/hardware/20261009-215800-eboot.log lines 3051-3059."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "scePthreadGetprio"
+arity = 2
+purpose = "Reads a thread's scheduling priority: (thread, prio)."
+returns = "status"
+edge_cases = [
+    "orbistoun writes the priority scePthreadSetprio or scePthreadSetschedparam stored, four bytes as scePthreadGetschedparam writes it, and answers 0; a thread nobody set reads zero; an unissued thread or a null out-parameter is refused with the placeholder.",
+    "PPSA04263 calls it once at start-up.",
+]
+known_by = "assumed"
+assumptions = ["That it reads back what scePthreadSetprio set, as its getschedparam twin does: homebrew cannot resolve it (030-thread/priority, 'scePthreadGetprio not resolved'), so it is unmeasured."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-10"
