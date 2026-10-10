@@ -230,6 +230,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAjmInitialize", ajm::ajm_initialize),
         ("sceAjmModuleRegister", ajm::ajm_module_register),
         ("sceAjmFinalize", ajm::ajm_finalize),
+        ("sceAudioOut2Initialize", audio_out2::initialize),
         ("sceAudioOut2UserCreate", audio_out2::user_create),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
     ]
@@ -258,6 +259,22 @@ mod tests {
             0x8026_8010,
             "the console refused to destroy the handle it made"
         );
+    }
+
+    /// `sceAudioOut2Initialize` answers 0 the first time in a process and `0x80268004` every time
+    /// after, writing nothing (REQ-ao03, `20261010-125000-eboot.obs.log` 30-42; REQ-ao02's rows,
+    /// taken after a first call, answered `0x80268004` throughout).
+    #[test]
+    fn audio_out2_initializes_once_per_process() {
+        let mut buffer = [0xa5_u8; 0x40];
+        let at = buffer.as_mut_ptr() as u64;
+        assert_eq!(call("sceAudioOut2Initialize", [0; 6]), 0);
+        assert_eq!(call("sceAudioOut2Initialize", [0; 6]), 0x8026_8004);
+        assert_eq!(
+            call("sceAudioOut2Initialize", [at, 0, 0, 0, 0, 0]),
+            0x8026_8004
+        );
+        assert!(buffer.iter().all(|&b| b == 0xa5), "nothing written");
     }
 
     #[test]

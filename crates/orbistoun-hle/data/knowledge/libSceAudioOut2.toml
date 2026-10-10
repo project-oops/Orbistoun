@@ -1,6 +1,22 @@
 library = "libSceAudioOut2"
 
 [[function]]
+name = "sceAudioOut2Initialize"
+arity = 6
+purpose = "Initialises the second-generation audio output library, once per process."
+returns = "status"
+edge_cases = [
+    "MEASURED in a process with no earlier audio use (after sceSysmoduleLoadModule 0x96 and 0x95 and sceSysmoduleIsLoaded 0xb4, PPSA04263's order): 0 with every argument zero, then 0x80268004 on a second call.",
+    "MEASURED after a first call (REQ-ao02): 0x80268004 every time, with or without sceSysmoduleLoadModule(0x001c) and with a buffer in rdi, left untouched. 0x80268004 is the library already initialised.",
+    "orbistoun answers 0 the first time in a process and 0x80268004 after.",
+    "UNRESOLVED: sceAudioOut2UserDestroy on the created handle answered 0 in the fresh process and 0x80268010 in REQ-ao02's; orbistoun keeps 0x80268010 until the two are reconciled.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1320Z-ao03, reports/hardware/20261010-125000-eboot.obs.log lines 30-42 (000-boot/audioout2-fresh-process); REQ-20261010T1030Z-ao02, reports/hardware/20261010-115300-eboot.log lines 3590-3618."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-10"
+
+[[function]]
 name = "sceAudioOut2UserCreate"
 arity = 2
 purpose = "Creates an audio output user for a signed-in user: (user, out), writing its 8-byte handle."

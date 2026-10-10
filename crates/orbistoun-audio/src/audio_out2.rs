@@ -1,10 +1,10 @@
 //! `libSceAudioOut2` - the second-generation audio output interface, beside `libSceAudioOut`.
 //!
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
-//! full capture, not a claim about the argument count. `sceAudioOut2UserCreate` and
-//! `sceAudioOut2UserDestroy` are implemented, as measured.
+//! full capture, not a claim about the argument count. `sceAudioOut2Initialize`,
+//! `sceAudioOut2UserCreate` and `sceAudioOut2UserDestroy` are implemented, as measured.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError};
 use orbistoun_hle::guest_module;
@@ -27,6 +27,24 @@ guest_module! {
         "sceAudioOut2UserCreate" => 2,
         // (user)
         "sceAudioOut2UserDestroy" => 1,
+    }
+}
+
+/// What `sceAudioOut2Initialize` answers once the process has initialised the library.
+const ALREADY_INITIALIZED: u64 = 0x8026_8004;
+
+/// Whether the process has initialised the library.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// `sceAudioOut2Initialize(...)`: 0 the first time in a process and `0x80268004` after, writing
+/// nothing, with every argument zero or a buffer in the first (REQ-ao03,
+/// `20261010-125000-eboot.obs.log` 30-42, a process with no earlier audio use; REQ-ao02's
+/// `20261010-115300-eboot.log` 3590-3618, after a first call, answered `0x80268004` throughout).
+pub(crate) fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if INITIALIZED.swap(true, Ordering::AcqRel) {
+        ALREADY_INITIALIZED
+    } else {
+        0
     }
 }
 
