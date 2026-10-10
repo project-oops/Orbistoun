@@ -4066,6 +4066,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::S4KbBpp16 => 1 << 20,
         crate::tiling::SurfaceLayout::S4Kb => 1 << 19,
         crate::tiling::SurfaceLayout::S4KbBpp8 => 1 << 18,
+        crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
