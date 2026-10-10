@@ -61,13 +61,13 @@ edge_cases = [
     "Zero is a stated placeholder, not a value. It is the answer least likely to send a guest somewhere surprising: read as an index it lands on the first entry, as a flag it reads as off, as a count it reads as none - all ordinary states a title must already handle. A non-zero guess would be picking a behaviour out of the air and calling it a default.",
     "Answers success rather than an error deliberately. A guest that checks the return skips whatever the setting was for; one that does not check reads the value regardless - which is why it must be written either way.",
     "Four bytes, not eight. The interface answers an int, and writing eight would corrupt whatever the guest put next to it, which on a stack is usually another local.",
+    "MEASURED (REQ-pg02, link-imported by NID): ids 1 to 5 answer 0 with 0x12, 1, 1, 0, 1 on a console set to English (UK) - 0x12 is that language's code; ids 1000, 1001 and 0x7fffffff answer 0x80a10003 leaving the out word untouched, and so does id 1 with a null out.",
+    "orbistoun answers ids 1 to 5 from the shipped measured table (orbistoun-shell data/system-parameters.toml), id 1 only while the machine's language is en-GB, and a null out with 0x80a10003. Any other id still takes the placeholder.",
+    "Not measured: ids 6 to 999 (orbistoun answers them the placeholder 0 with success), and whether ids 2 to 5 follow settings nothing here has varied.",
 ]
 found_by = "generated"
-known_by = "guest-observed"
-assumptions = [
-    "No parameter identifier is understood. Every one answers the same placeholder, chosen to be least harmful rather than because it is right.",
-    "Whether the call reports failure for an unknown parameter, rather than succeeding with a default, is unverified - and a guest could branch on the difference.",
-]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1500Z-pg02, reports/hardware/20261010-231900-eboot.obs.log lines 3050-3070 (070-user/oneshot-setup-calls)."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-08-21"
 note = "Name confirmed by hash against a real import out of a targeted sweep (D167)."

@@ -1311,7 +1311,7 @@ fn standing_service() -> Result<Service, Error> {
     orbistoun_core::machine::present(settings.machine.clone());
     orbistoun_systemservice::console::configure(
         settings,
-        orbistoun_shell::Parameters::empty(),
+        orbistoun_shell::Parameters::measured(),
         orbistoun_shell::Delivery::empty(),
     );
     Ok(Service::new(orbistoun_service::ServiceConfig {

@@ -160,7 +160,13 @@ fn write_word(address: u64, value: u64) -> bool {
 /// differs every run and leaves no placeholder in a trace. It answers `OK`: a guest that checks the
 /// return proceeds, and one that does not reads the written value either way.
 fn param_get_int(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    /// What a console answered for a null out-pointer (obSCEne REQ-pg02,
+    /// `20261010-231900-eboot.obs.log` 3070), the code it gave every refused identifier too.
+    const REFUSED: u64 = 0x80a1_0003;
     let out = args[1];
+    if out == 0 {
+        return REFUSED;
+    }
     // A measured answer if the machine has one, the placeholder otherwise; counted either way
     // (`console::summarise`). An identifier too large to be one takes the unmeasured path.
     let value = u32::try_from(args[0])
@@ -907,9 +913,11 @@ mod tests {
 
     #[test]
     fn a_request_with_nowhere_to_answer_is_refused() {
-        // A null destination is refused instead of faulting inside the emulator.
-        let args = [0_u64; GUEST_ARG_REGISTERS];
-        assert_ne!(param_get_int(&args), 0);
+        // A null destination is refused with the code a console answered for id 1 (obSCEne
+        // REQ-pg02, `20261010-231900-eboot.obs.log` 3070).
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 1;
+        assert_eq!(param_get_int(&args), 0x80a1_0003);
     }
 
     #[test]

@@ -1,0 +1,27 @@
+# What sceSystemServiceParamGetInt answers, per identifier, as a console answered it.
+#
+# Measured: obSCEne REQ-20261010T1500Z-pg02, reports/hardware/20261010-231900-eboot.obs.log
+# lines 3050-3070 (070-user/oneshot-setup-calls), firmware 12.40, the console set to English (UK).
+# An identifier absent here is unmeasured, and the guest is told the placeholder.
+
+# The language: 0x12 under English (UK). No other language's code is measured.
+[parameter.1]
+answer = "language"
+tag = "en-GB"
+value = 0x12
+
+[parameter.2]
+answer = "fixed"
+value = 1
+
+[parameter.3]
+answer = "fixed"
+value = 1
+
+[parameter.4]
+answer = "fixed"
+value = 0
+
+[parameter.5]
+answer = "fixed"
+value = 1

@@ -158,7 +158,7 @@ impl Settings {
 ///
 /// Every number here is measured: either a constant not tied to a setting, or an encoding
 /// that lets a setting drive the answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "answer", rename_all = "kebab-case")]
 pub enum Answer {
     /// A measured constant, independent of any setting.
@@ -176,6 +176,15 @@ pub enum Answer {
         south: i32,
         /// What the guest reads when the right face button confirms.
         east: i32,
+    },
+    /// The language, answered only under the one tag its code was measured for.
+    ///
+    /// A code for another language is not inferred from this one: the encoding is the vendor's.
+    Language {
+        /// The BCP 47 tag the console was set to when it was measured.
+        tag: String,
+        /// What the guest read under that tag.
+        value: i32,
     },
 }
 
@@ -197,6 +206,30 @@ impl Parameters {
         Self::default()
     }
 
+    /// The answers measured on a console, shipped in `data/system-parameters.toml`.
+    ///
+    /// # Panics
+    ///
+    /// When the shipped table does not parse, which its own test catches first.
+    #[must_use]
+    pub fn measured() -> Self {
+        /// The file's shape: TOML keys are strings, so the identifiers are parsed after.
+        #[derive(Deserialize)]
+        struct Shipped {
+            parameter: BTreeMap<String, Answer>,
+        }
+        let shipped: Shipped = toml::from_str(include_str!("../data/system-parameters.toml"))
+            .expect("the shipped system-parameters table must parse");
+        let mut table = Self::empty();
+        for (id, answer) in shipped.parameter {
+            let id = id
+                .parse()
+                .expect("each shipped parameter is keyed by its identifier");
+            table.set(id, answer);
+        }
+        table
+    }
+
     /// Records a measured answer.
     pub fn set(&mut self, id: u32, answer: Answer) {
         self.answers.insert(id, answer);
@@ -210,6 +243,7 @@ impl Parameters {
     pub fn answer(&self, id: u32, settings: &Settings) -> Option<i32> {
         match self.answers.get(&id)? {
             Answer::Fixed { value } => Some(*value),
+            Answer::Language { tag, value } => (settings.language == *tag).then_some(*value),
             Answer::Confirm { south, east } => Some(match settings.confirm {
                 ButtonAssignment::South => *south,
                 ButtonAssignment::East => *east,
@@ -261,6 +295,25 @@ mod tests {
             Some(1),
             "changing the setting changes what the title is told"
         );
+    }
+
+    /// The shipped table answers what a console answered (obSCEne REQ-pg02): the language follows
+    /// the setting and is answered only for the tag it was measured under, and ids 2 to 5 are
+    /// the constants the console gave.
+    #[test]
+    fn the_measured_table_answers_as_the_console_did() {
+        let table = Parameters::measured();
+        let english = Settings::default();
+        assert_eq!(english.language, "en-GB");
+        assert_eq!(table.answer(1, &english), Some(0x12));
+        let japanese = Settings {
+            language: "ja-JP".to_owned(),
+            ..Settings::default()
+        };
+        assert_eq!(table.answer(1, &japanese), None, "unmeasured under ja-JP");
+        let rest: Vec<_> = (2..=5).map(|id| table.answer(id, &english)).collect();
+        assert_eq!(rest, [Some(1), Some(1), Some(0), Some(1)]);
+        assert_eq!(table.answer(6, &english), None);
     }
 
     /// A measured constant is answered without reference to any setting.
