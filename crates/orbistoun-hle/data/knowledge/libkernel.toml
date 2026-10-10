@@ -2602,3 +2602,19 @@ known_by = "assumed"
 assumptions = ["That it reads back what scePthreadSetprio set, as its getschedparam twin does: homebrew cannot resolve it (030-thread/priority, 'scePthreadGetprio not resolved'), so it is unmeasured."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-10"
+
+[[function]]
+name = "sceKernelQueryMemoryProtection"
+arity = 4
+purpose = "(addr, start, end, prot): the bounds and protection of the region holding addr, each written through its out-pointer when that is not null; the region and protection sceKernelVirtualQuery reports."
+returns = "status"
+edge_cases = [
+    "MEASURED (130-layout/query-memory-protection): the image's text answers 0 with its segment's start and end and prot 4; data and bss answer prot 3; null out-pointers answer 0.",
+    "MEASURED: an address in no region answers 0x8002000d (EACCES) and writes none of start, end or prot.",
+    "PPSA04263 asks this of a mapping with start and end null and traps (int 0x41) on the placeholder it was answered before.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne reports/hardware/-eboot.log lines 6361-6389 (130-layout/query-memory-protection)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-10"

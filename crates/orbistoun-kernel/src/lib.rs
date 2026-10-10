@@ -116,6 +116,7 @@ guest_module! {
         // System V passes.
         "sceKernelReserveVirtualRange" => 4,
         "sceKernelVirtualQuery" => 4,
+        "sceKernelQueryMemoryProtection" => 4,
         "sceKernelMprotect" => 3,
         // The signal number and the handler: an inverted call answers EINVAL on the hardware, and a
         // guest's handler compares its first argument to 30.
@@ -4429,6 +4430,33 @@ fn virtual_query(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceKernelQueryMemoryProtection(addr, start, end, prot)`: the bounds and protection of the
+/// region holding `addr`, each written through its out-pointer when that is not null.
+///
+/// Measured (obSCEne `130-layout/query-memory-protection`): the image's text answers its segment's
+/// bounds and 4, its data and bss 3; null out-pointers answer 0; an address in no region answers
+/// `EACCES` (`0x8002000d`) with nothing written. The region and its protection are the ones
+/// [`virtual_query`] reports.
+fn query_memory_protection(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (addr, start, end, prot) = (args[0], args[1], args[2], args[3]);
+    let Some(region) = query_region(addr) else {
+        return u64::from(GuestError::vendor(orbistoun_core::errno::DENIED).as_raw());
+    };
+    // Each out-pointer is one the guest passed for this call; a null one is skipped.
+    // SAFETY: a non-null out-pointer the guest passed, valid by the call's contract.
+    let start_ok = start == 0 || unsafe { guest::write_u64(start, region.start) };
+    // SAFETY: as above.
+    let end_ok = end == 0 || unsafe { guest::write_u64(end, region.end) };
+    // SAFETY: as above.
+    let prot_ok = prot == 0 || unsafe { guest::write_u32(prot, region.protection) };
+    let written = start_ok && end_ok && prot_ok;
+    if written {
+        OK
+    } else {
+        u64::from(GuestError::vendor(orbistoun_core::errno::INVALID).as_raw())
+    }
+}
+
 /// How many bytes `SceKernelVirtualQueryInfo` is, as measured by obSCEne
 /// `020-memory/virtual-query-{mapped,text,stack}`.
 const VIRTUAL_QUERY_INFO_BYTES: usize = 72;
@@ -6633,6 +6661,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelMunmap", munmap),
     ("sceKernelReserveVirtualRange", reserve_virtual_range),
     ("sceKernelVirtualQuery", virtual_query),
+    ("sceKernelQueryMemoryProtection", query_memory_protection),
     ("sceKernelMprotect", mprotect),
     (
         "sceKernelInstallExceptionHandler",
@@ -7642,6 +7671,55 @@ mod tests {
             orbistoun_mem::last_reserve_failure()
                 .is_none_or(|failure| (failure.base, failure.len) != (first, len)),
             "the held hint is not reported as a failed reservation"
+        );
+    }
+
+    /// `sceKernelQueryMemoryProtection` writes the bounds and protection of the region holding an
+    /// address through whichever out-pointers are given, and refuses an address in no region with
+    /// `EACCES` and nothing written (obSCEne `130-layout/query-memory-protection`).
+    #[test]
+    fn a_protection_query_answers_the_region_and_refuses_a_gap() {
+        let mut slot: u64 = 0;
+        let out = std::ptr::from_mut(&mut slot) as usize as u64;
+        assert_eq!(
+            super::reserve_virtual_range(&[out, 0x10_0000, 0, 0x4_0000, 0, 0]),
+            super::OK
+        );
+        let (mut start, mut end, mut prot) = (0xAAAA_u64, 0xBBBB_u64, 0xCCCC_CCCC_u32);
+        let at = |p: *mut u64| p as usize as u64;
+        let prot_at = std::ptr::from_mut(&mut prot) as usize as u64;
+        assert_eq!(
+            super::query_memory_protection(&args([
+                slot + 0x1234,
+                at(&raw mut start),
+                at(&raw mut end),
+                prot_at
+            ])),
+            super::OK
+        );
+        assert_eq!((start, end), (slot, slot + 0x10_0000));
+        assert_eq!(prot, 0, "a bare reservation grants nothing");
+        assert_eq!(
+            super::query_memory_protection(&args([slot, 0, 0, 0])),
+            super::OK,
+            "null out-pointers are not an error"
+        );
+
+        let (mut start, mut end, mut prot) = (0xAAAA_u64, 0xBBBB_u64, 0xCCCC_CCCC_u32);
+        let prot_at = std::ptr::from_mut(&mut prot) as usize as u64;
+        assert_eq!(
+            super::query_memory_protection(&args([
+                0x0000_0000_0001_0000,
+                at(&raw mut start),
+                at(&raw mut end),
+                prot_at
+            ])),
+            0x8002_000d
+        );
+        assert_eq!(
+            (start, end, prot),
+            (0xAAAA, 0xBBBB, 0xCCCC_CCCC),
+            "nothing written"
         );
     }
 
