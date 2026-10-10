@@ -275,6 +275,11 @@ v_max3_f32 v200, s5, v9, v190
 v_max3_f32 v255, v12, s30, 64
 v_max3_f32 v9, -1, v77, v3
 v_max3_f32 v130, v88, 4, s101
+v_med3_f32 v3, v4, v5, v6
+v_med3_f32 v200, s5, v9, v190
+v_med3_f32 v255, v12, s30, 64
+v_med3_f32 v9, -1, v77, v3
+v_med3_f32 v130, v88, 4, s101
 v_min3_f32 v3, v4, v5, v6
 v_min3_f32 v200, s5, v9, v190
 v_min3_f32 v255, v12, s30, 64

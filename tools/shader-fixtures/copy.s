@@ -91,6 +91,7 @@ ds_read_u8 v5, v1 offset:4
 v_mad_u32_u16 v3, v4, v5, v6
 v_max3_f32 v3, v4, v5, v6
 v_min3_f32 v3, v4, v5, v6
+v_med3_f32 v3, v4, v5, v6
 v_cmp_lt_f32_e64 s[2:3], v4, v5
 v_cmp_gt_f32_e64 s[2:3], v4, v5
 v_cmp_neq_f32_e64 s[2:3], v4, v5

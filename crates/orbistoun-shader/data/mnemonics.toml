@@ -839,6 +839,11 @@ name = "v_max3_f32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 343
+name = "v_med3_f32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 351
 name = "v_div_fixup_f32"
 

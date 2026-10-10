@@ -202,6 +202,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_and_or_b32",
     "v_max3_f32",
     "v_min3_f32",
+    "v_med3_f32",
     "v_msad_u8",
     "v_readlane_b32",
     "v_permlane16_b32",
@@ -2304,7 +2305,9 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_msad_u8" => {
             integer_long_form(model, instruction, name)
         }
-        "v_max3_f32" | "v_min3_f32" => float_min_max_of_three(model, instruction, name),
+        "v_max3_f32" | "v_min3_f32" | "v_med3_f32" => {
+            float_min_max_of_three(model, instruction, name)
+        }
         "v_readlane_b32" => read_lane(model, instruction),
         "v_permlane16_b32" => permute_lanes_16(model, instruction),
         "v_perm_b32" => byte_permute(model, instruction),
@@ -7229,7 +7232,8 @@ fn masked_sum_of_differences<M: Model + ?Sized>(
 }
 
 /// `v_max3_f32` and `v_min3_f32`: the larger or smaller of three floats, each source with its
-/// absolute and negate flags, as two of `v_max_f32`'s or `v_min_f32`'s steps.
+/// absolute and negate flags, as two of `v_max_f32`'s or `v_min_f32`'s steps. `v_med3_f32`: the
+/// median, `max(min(a, b), min(max(a, b), c))` in the same steps (D785).
 fn float_min_max_of_three<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7254,8 +7258,15 @@ fn float_min_max_of_three<M: Model + ?Sized>(
             let value = model.read_source(instruction, operand, lane)?;
             *slot = apply_modifiers(model, value, modifiers, source);
         }
-        let pair = model.f32_ext_binary(extended, values[0], values[1]);
-        let value = model.f32_ext_binary(extended, pair, values[2]);
+        let value = if name == "v_med3_f32" {
+            let low = model.f32_ext_binary(GLSL_FMIN, values[0], values[1]);
+            let high = model.f32_ext_binary(GLSL_FMAX, values[0], values[1]);
+            let capped = model.f32_ext_binary(GLSL_FMIN, high, values[2]);
+            model.f32_ext_binary(GLSL_FMAX, low, capped)
+        } else {
+            let pair = model.f32_ext_binary(extended, values[0], values[1]);
+            model.f32_ext_binary(extended, pair, values[2])
+        };
         model.write_vector_lane(register, lane, value);
     }
     model.count();

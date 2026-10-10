@@ -6393,6 +6393,20 @@ fn the_culling_arithmetic_computes_as_published() {
         0,
         0,
     ));
+    program.extend(vop3(
+        "v_med3_f32",
+        1,
+        [VGPR_0 + 4, VGPR_0 + 5, VGPR_0 + 6],
+        0,
+        0,
+    ));
+    program.extend(vop3(
+        "v_med3_f32",
+        2,
+        [VGPR_0 + 6, VGPR_0 + 4, VGPR_0 + 5],
+        0,
+        0,
+    ));
     program.push(s_endpgm());
     let registers = run(&program);
     assert_eq!(
@@ -6402,6 +6416,12 @@ fn the_culling_arithmetic_computes_as_published() {
     );
     assert_eq!(vector(&registers, 7), 2.5f32.to_bits());
     assert_eq!(vector(&registers, 0), (-4.0f32).to_bits());
+    assert_eq!(vector(&registers, 1), 1.5f32.to_bits(), "the median");
+    assert_eq!(
+        vector(&registers, 2),
+        1.5f32.to_bits(),
+        "whatever the order"
+    );
 }
 
 /// `v_readlane_b32` reads one lane into a scalar, and `v_permlane16_b32` gives each lane of a row
