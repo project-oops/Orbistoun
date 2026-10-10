@@ -415,6 +415,44 @@ fn ungetc_pushes_a_byte_back_to_be_read_next() {
     assert_eq!(call("ungetc", &[0x41, 0]), u64::MAX, "no stream refuses");
 }
 
+/// `fgetpos` records where a stream is, in the first eight bytes of `fpos_t`, and `fsetpos`
+/// returns it there and discards a pushed-back byte (ISO/IEC 9899 7.21.9.1, 7.21.9.3).
+#[test]
+fn fgetpos_and_fsetpos_return_a_stream_to_where_it_was() {
+    let dir = std::env::temp_dir().join("orbistoun-libc-stdio-fpos");
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    std::fs::write(dir.join("abc.bin"), b"abc").expect("a sample file");
+    orbistoun_fs::mount::mount("/fpostest", dir.clone());
+
+    let path = Buf::text("/fpostest/abc.bin");
+    let stream = call("fopen", &[path.at(), 0]);
+    assert_ne!(stream, 0, "opens");
+    assert_eq!(call("fgetc", &[stream]), u64::from(b'a'));
+    let position = Buf::words(&[0xAAAA_AAAA; 4]);
+    assert_eq!(call("fgetpos", &[stream, position.at()]), 0);
+    assert_eq!(&position.bytes()[..8], &1_u64.to_le_bytes(), "one byte in");
+    assert_eq!(
+        &position.bytes()[8..],
+        &[0xAA; 8],
+        "and nothing past the offset touched"
+    );
+    assert_eq!(call("fgetc", &[stream]), u64::from(b'b'));
+    assert_eq!(call("ungetc", &[u64::from(b'z'), stream]), u64::from(b'z'));
+    assert_eq!(call("fsetpos", &[stream, position.at()]), 0);
+    assert_eq!(
+        call("fgetc", &[stream]),
+        u64::from(b'b'),
+        "back where it was, z discarded"
+    );
+    assert_eq!(call("fclose", &[stream]), 0);
+    assert_ne!(
+        call("fgetpos", &[stream, position.at()]),
+        0,
+        "a closed stream refuses"
+    );
+    assert_ne!(call("fsetpos", &[stream, position.at()]), 0);
+}
+
 /// A System V `va_list` whose register half holds `words` from its start: `gp_offset` 0,
 /// `fp_offset` past the integer half, the overflow area empty (psABI 3.5.7).
 /// A `va_list` and the two areas it points into, kept alive together.

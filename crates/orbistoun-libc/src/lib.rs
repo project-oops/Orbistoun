@@ -219,7 +219,7 @@ guest_module! {
         "fclose" => 1,
         "fread" => 4,
         "fwrite" => 4,
-        "fgetc" => 1, "ungetc" => 2,
+        "fgetc" => 1, "ungetc" => 2, "fgetpos" => 2, "fsetpos" => 2,
         "fputc" => 2,
         "fseek" => 3,
         "ftell" => 1,
@@ -3653,6 +3653,45 @@ fn ungetc(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `fgetpos(stream, pos)` - ISO/IEC 9899 7.21.9.1: where [`ftell`] says the stream is, written to
+/// the first eight bytes of `*pos`, and zero. Only those bytes are written: FreeBSD's `fpos_t` is
+/// the 64-bit offset itself and Dinkumware's struct begins with it, so either layout reads it
+/// back, and whatever follows in a larger one is left alone. A stream naming no open file
+/// answers -1 with `EBADF`, as FreeBSD's does.
+fn fgetpos(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (stream, pos) = (args[0], args[1]);
+    let Some(at) = orbistoun_fs::open::tell(stream).filter(|_| pos != 0) else {
+        return bad_stream();
+    };
+    // SAFETY: a guest-supplied `fpos_t` under the identity mapping; eight bytes is the smallest
+    // either layout above is.
+    unsafe { std::ptr::write_unaligned(ptr(pos).cast::<u64>(), at) };
+    OK
+}
+
+/// `fsetpos(stream, pos)` - ISO/IEC 9899 7.21.9.3: the stream returned to the offset
+/// [`fgetpos`] recorded, end-of-file cleared and any pushed-back byte discarded, and zero.
+fn fsetpos(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (stream, pos) = (args[0], args[1]);
+    if pos == 0 {
+        return bad_stream();
+    }
+    // SAFETY: as in `fgetpos`, the eight bytes it wrote.
+    let at = unsafe { std::ptr::read_unaligned(ptr(pos).cast::<u64>()) };
+    match orbistoun_fs::open::seek(stream, orbistoun_fs::open::From::Start, at as i64) {
+        Some(_) => OK,
+        None => bad_stream(),
+    }
+}
+
+/// -1 with `errno` `EBADF`: a stream call given a stream that is not open.
+fn bad_stream() -> u64 {
+    let ebadf =
+        orbistoun_hle::constants::abi_constant("errno", "EBADF").expect("EBADF is harvested");
+    set_errno(ebadf);
+    u64::MAX
+}
+
 /// `fputc(c, stream)` - ISO/IEC 9899 7.21.7.3: writes `c` converted to `unsigned char` and answers
 /// it, or `EOF` when it could not be written. A stream that names no open file is the standard
 /// output or error, written as `fwrite` writes it.
@@ -3895,6 +3934,8 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("fwrite", fwrite),
         ("fgetc", fgetc),
         ("ungetc", ungetc),
+        ("fgetpos", fgetpos),
+        ("fsetpos", fsetpos),
         ("fputc", fputc),
         ("fseek", fseek),
         ("ftell", ftell),

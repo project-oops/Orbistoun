@@ -3733,3 +3733,21 @@ known_by = "published"
 cites = "ISO/IEC 9899 7.21.7.10; FreeBSD lib/libc/stdio/ungetc.c."
 assumptions = ["That more than one byte may be pushed back follows FreeBSD; ISO C guarantees only one. A stream wrapping a descriptor keeps no pushback here and refuses."]
 found_on = "2026-10-10"
+
+[[function]]
+name = "fgetpos"
+arity = 2
+purpose = "ISO/IEC 9899 7.21.9.1: the stream's position, as ftell reports it, written to the first eight bytes of *pos, and zero; a stream naming no open file answers -1 with errno EBADF."
+known_by = "published"
+cites = "ISO/IEC 9899 7.21.9.1; FreeBSD lib/libc/stdio/fgetpos.c."
+assumptions = ["Only the first eight bytes of fpos_t are written or read: FreeBSD's fpos_t is the 64-bit offset itself and Dinkumware's struct begins with it. Which layout the target uses is unestablished, and neither needs more for a guest that only hands the value back."]
+found_on = "2026-10-10"
+
+[[function]]
+name = "fsetpos"
+arity = 2
+purpose = "ISO/IEC 9899 7.21.9.3: the stream returned to the offset fgetpos recorded, end-of-file cleared and pushed-back bytes discarded, and zero; a stream naming no open file answers -1 with errno EBADF."
+known_by = "published"
+cites = "ISO/IEC 9899 7.21.9.3; FreeBSD lib/libc/stdio/fsetpos.c."
+assumptions = ["Only the first eight bytes of fpos_t are written or read: FreeBSD's fpos_t is the 64-bit offset itself and Dinkumware's struct begins with it. Which layout the target uses is unestablished, and neither needs more for a guest that only hands the value back."]
+found_on = "2026-10-10"
