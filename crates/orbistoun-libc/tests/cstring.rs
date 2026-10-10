@@ -33,10 +33,11 @@ impl Text {
 }
 
 /// A wide string, four bytes per character.
-struct Wide(Vec<u32>);
+/// A terminated wide string in the target's `wchar_t`, which is 16 bits wide.
+struct Wide(Vec<u16>);
 
 impl Wide {
-    fn new(chars: &[u32]) -> Self {
+    fn new(chars: &[u16]) -> Self {
         let mut v = chars.to_vec();
         v.push(0);
         Self(v)
@@ -446,34 +447,40 @@ fn the_most_negative_value_wraps_instead_of_aborting() {
 
 // Wide strings.
 
-/// `wcslen` counts 32-bit characters, not bytes.
+/// `wcslen` counts 16-bit characters, not bytes: clang's PS5 target defines `wchar_t` as
+/// `unsigned short`.
 #[test]
 fn wcslen_counts_characters_rather_than_bytes() {
-    let text = Wide::new(&[u32::from(b'a'), u32::from(b'b'), 0x1F600]);
-    assert_eq!(call("wcslen", &[text.at()]), 3);
+    let text = Wide::new(&[u16::from(b'a'), u16::from(b'b'), 0xD83D, 0xDE00]);
+    assert_eq!(
+        call("wcslen", &[text.at()]),
+        4,
+        "a surrogate pair is two characters"
+    );
 
     let empty = Wide::new(&[]);
     assert_eq!(call("wcslen", &[empty.at()]), 0);
 }
 
-/// `wmemchr` finds the first wide character equal to `c` among the first `n`, comparing all 32
-/// bits and passing over zeros, and answers null past `n`, for `n` zero, and for no match.
+/// `wmemchr` finds the first wide character equal to `c` among the first `n`, stepping two
+/// bytes at a time and passing over zeros, and answers null past `n`, for `n` zero, and for no
+/// match.
 #[test]
 fn wmemchr_finds_the_first_match_within_n_characters() {
-    let text = Wide::new(&[0x41, 0, 0x1F600, 0x41, 0x1_0041]);
-    let at = |index: u64| text.at() + index * 4;
+    let text = Wide::new(&[0x41, 0, 0x263A, 0x41, 0x4100]);
+    let at = |index: u64| text.at() + index * 2;
     assert_eq!(call("wmemchr", &[text.at(), 0x41, 5]), at(0));
     assert_eq!(
-        call("wmemchr", &[text.at(), 0x1F600, 5]),
+        call("wmemchr", &[text.at(), 0x263A, 5]),
         at(2),
         "past a zero"
     );
     assert_eq!(
-        call("wmemchr", &[text.at(), 0x1_0041, 5]),
+        call("wmemchr", &[text.at(), 0x4100, 5]),
         at(4),
-        "all 32 bits compared"
+        "both bytes compared"
     );
-    assert_eq!(call("wmemchr", &[text.at(), 0x1F600, 2]), 0, "not within n");
+    assert_eq!(call("wmemchr", &[text.at(), 0x263A, 2]), 0, "not within n");
     assert_eq!(call("wmemchr", &[text.at(), 0x41, 0]), 0, "n zero");
     assert_eq!(call("wmemchr", &[text.at(), 0x42, 5]), 0, "no match");
 }

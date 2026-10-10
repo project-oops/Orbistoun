@@ -3357,7 +3357,7 @@ edge_cases = ["Measured on hardware: obSCEne `035-libc/wide-strings` reported fa
 found_by = "published-standard"
 known_by = "published"
 cites = "ISO C 7.29 (wchar.h)"
-assumptions = ["wchar_t is taken to be 32 bits, as it is on every FreeBSD-derived system. A 16-bit wchar_t would make this count double and nothing in a trace would say so."]
+assumptions = ["wchar_t is 16 bits: clang 21 with --target=x86_64-sie-ps5 defines __WCHAR_TYPE__ as unsigned short and __SIZEOF_WCHAR_T__ as 2 (clang/lib/Basic/Targets/OSTargets.h, the PS target sets WCharType to UnsignedShort). The earlier 32-bit reading is consistent with the hardware fail above; the probe has not been rerun since the change."]
 found_on = "2026-08-25"
 
 [[function]]
@@ -3375,7 +3375,7 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 name = "wcsncpy_s"
 arity = 4
 purpose = "[strncpy_s] in wide characters."
-edge_cases = ["Reference: ISO/IEC 9899:2011 K.3.9.2.1.1. s1max and n count wide characters, not bytes - the mistake that would make a bounds-checked function overrun by a factor of four."]
+edge_cases = ["Reference: ISO/IEC 9899:2011 K.3.9.2.1.1. s1max and n count wide characters, not bytes - the mistake that would make a bounds-checked function overrun by a factor of two."]
 known_by = "published"
 cites = "ISO/IEC 9899:2011 K.3.9.2.1.1."
 assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
@@ -3389,7 +3389,7 @@ purpose = "the address of the first of the n wide characters at s equal to c, or
 edge_cases = ["Reference: ISO/IEC 9899:2011 7.29.4.5.8. n counts wide characters, and a zero among them is an ordinary character, not a terminator."]
 known_by = "published"
 cites = "ISO/IEC 9899:2011 7.29.4.5.8."
-assumptions = ["The published specification is the source; wchar_t is taken as 32-bit, as on every FreeBSD-derived system. Nothing on the target has confirmed it."]
+assumptions = ["The published specification is the source; wchar_t is 16-bit, as the target's clang defines it (see wcslen), so c is compared at its low 16 bits."]
 found_on = "2026-09-27"
 note = "Derived from the implementation's doc comment."
 

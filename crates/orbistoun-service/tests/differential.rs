@@ -12,7 +12,23 @@ use orbistoun_hle::differential::{Argument, Case, Reference};
 
 /// Cases where orbistoun does not answer what the reference answered, and why. Fixing one is
 /// deleting its line here.
-const DIVERGES: &[(&str, &str)] = &[];
+const DIVERGES: &[(&str, &str)] = &[
+    ("wcslen/ascii", WCHAR_WIDTH),
+    ("wcslen/narrow-would-stop-early", WCHAR_WIDTH),
+    ("wcslen/above-ascii", WCHAR_WIDTH),
+    ("wcsrchr/last-of-two", WCHAR_WIDTH),
+    ("wcsrchr/at-the-end", WCHAR_WIDTH),
+    ("wcsrchr/the-terminator", WCHAR_WIDTH),
+    ("wcsrchr/above-ascii", WCHAR_WIDTH),
+    ("wcsncpy/pads-with-terminators", WCHAR_WIDTH),
+    ("wcsncpy/does-not-terminate", WCHAR_WIDTH),
+    ("wcsncpy/exact-fit", WCHAR_WIDTH),
+    ("wcsncpy/above-ascii", WCHAR_WIDTH),
+];
+
+/// Why every wide-character case diverges: the reference records 4-byte characters.
+const WCHAR_WIDTH: &str =
+    "glibc's wchar_t is 32 bits; the target's is 16 (clang's x86_64-sie-ps5 __SIZEOF_WCHAR_T__)";
 
 /// Reads the committed reference runs.
 fn references() -> Vec<Reference> {

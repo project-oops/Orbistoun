@@ -336,10 +336,11 @@ absolute!(abs, i32);
 absolute!(labs, i64);
 absolute!(llabs, i64);
 
-/// `wcslen(text)` - wide characters, which are four bytes here.
+/// `wcslen(text)` - wide characters, which are two bytes here.
 ///
-/// The target's `wchar_t` is 32-bit, as on every FreeBSD-derived system: an assumption, since
-/// a 16-bit `wchar_t` would double the count silently.
+/// The target's `wchar_t` is 16-bit: clang's `x86_64-sie-ps5` target defines `__WCHAR_TYPE__`
+/// as `unsigned short` and `__SIZEOF_WCHAR_T__` as 2, unlike FreeBSD's 32-bit `wchar_t`. A
+/// character outside the Basic Multilingual Plane is a surrogate pair and counts as two.
 fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     /// As many wide characters as the byte limit allows.
     const MAX_WIDE: u64 = 16 * 1024 * 1024;
@@ -349,12 +350,14 @@ fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     let mut count = 0;
     while count < MAX_WIDE {
-        let Ok(at) = usize::try_from(args[0].saturating_add(count.saturating_mul(4))) else {
+        let Ok(at) = usize::try_from(args[0].saturating_add(count.saturating_mul(WIDE as u64)))
+        else {
             break;
         };
         // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
         // time so the scan cannot overrun a mapping by more than it reads.
-        let wide = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u32>(at)) };
+        let wide =
+            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u16>(at)) };
         if wide == 0 {
             break;
         }
@@ -367,16 +370,16 @@ fn wcslen(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// or null.
 ///
 /// Reference: ISO/IEC 9899:2011 7.29.4.5.8. `n` counts wide characters, and a zero among them is
-/// an ordinary character, not a terminator; `c` is compared as a full 32-bit value, the target's
-/// `wchar_t` being 32-bit as on every FreeBSD-derived system.
+/// an ordinary character, not a terminator; `c` is a `wchar_t`, so its low 16 bits are compared,
+/// the target's `wchar_t` being 16-bit as [`wcslen`] establishes.
 fn wmemchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (text, wanted, count) = (args[0], args[1] as u32, args[2]);
+    let (text, wanted, count) = (args[0], args[1] as u16, args[2]);
     if text == 0 {
         return 0;
     }
     for index in 0..count {
         let Some(at) = index
-            .checked_mul(4)
+            .checked_mul(WIDE as u64)
             .and_then(|offset| text.checked_add(offset))
         else {
             return 0;
@@ -387,7 +390,7 @@ fn wmemchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         // SAFETY: a guest-supplied array of `n` wide characters under the identity mapping, read
         // one character at a time and never past the first match.
         let wide =
-            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(address)) };
+            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u16>(address)) };
         if wide == wanted {
             return at;
         }
@@ -398,26 +401,27 @@ fn wmemchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `wcsrchr(s, c)` - the address of the last wide character in `s` equal to `c`, or null.
 ///
 /// The terminator is part of the string, so `wcsrchr(s, 0)` answers a pointer to it, as the
-/// standard requires; `c` is compared as a full 32-bit value.
+/// standard requires; `c` is compared at the 16 bits of the target's `wchar_t`.
 fn wcsrchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     /// As many wide characters as the byte limit allows, matching `wcslen`.
     const MAX_WIDE: u64 = 16 * 1024 * 1024;
 
-    let (s, wanted) = (args[0], args[1] & 0xFFFF_FFFF);
+    let (s, wanted) = (args[0], args[1] as u16);
     if s == 0 {
         return 0;
     }
     let mut last = 0_u64;
     let mut count = 0_u64;
     while count < MAX_WIDE {
-        let address = s.saturating_add(count.saturating_mul(4));
+        let address = s.saturating_add(count.saturating_mul(WIDE as u64));
         let Ok(at) = usize::try_from(address) else {
             break;
         };
         // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
         // time so the scan cannot overrun a mapping by more than it reads.
-        let wide = unsafe { std::ptr::read(std::ptr::with_exposed_provenance::<u32>(at)) };
-        if u64::from(wide) == wanted {
+        let wide =
+            unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u16>(at)) };
+        if wide == wanted {
             last = address;
         }
         if wide == 0 {
@@ -428,8 +432,8 @@ fn wcsrchr(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     last
 }
 
-/// Wide characters are four bytes here, as [`wcslen`] establishes.
-const WIDE: usize = 4;
+/// Wide characters are two bytes here, as [`wcslen`] establishes.
+const WIDE: usize = 2;
 
 /// What an Annex K function answers when its runtime constraints are not met.
 ///
@@ -438,7 +442,7 @@ const WIDE: usize = 4;
 const CONSTRAINT_VIOLATION: u64 = orbistoun_core::errno::INVALID as u64;
 
 /// Reads at most `limit` wide characters of a guest string, stopping at its terminator.
-fn wide_bytes(address: u64, limit: usize) -> Vec<u32> {
+fn wide_bytes(address: u64, limit: usize) -> Vec<u16> {
     let mut out = Vec::new();
     if address == 0 {
         return out;
@@ -450,7 +454,7 @@ fn wide_bytes(address: u64, limit: usize) -> Vec<u32> {
         let at = base + index * WIDE;
         // SAFETY: a guest-supplied wide string under the identity mapping, read one character at a
         // time so a scan cannot overrun a mapping by more than it reads.
-        let value = unsafe { std::ptr::read_unaligned(at as *const u32) };
+        let value = unsafe { std::ptr::read_unaligned(at as *const u16) };
         if value == 0 {
             break;
         }
@@ -703,7 +707,7 @@ fn wcsncpy_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     for value in &source {
         out.extend_from_slice(&value.to_le_bytes());
     }
-    out.extend_from_slice(&0_u32.to_le_bytes());
+    out.extend_from_slice(&0_u16.to_le_bytes());
     write_bytes(s1, &out);
     0
 }
@@ -917,9 +921,9 @@ mod bounded_strings {
     /// `wcsncpy_s` counts wide characters, not bytes.
     #[test]
     fn wcsncpy_s_counts_wide_characters_not_bytes() {
-        let src: Box<[u32]> = vec![u32::from(b'a'), u32::from(b'b'), 0].into_boxed_slice();
+        let src: Box<[u16]> = vec![u16::from(b'a'), u16::from(b'b'), 0].into_boxed_slice();
         let src_at = src.as_ptr() as u64;
-        let dst: Box<[u32]> = vec![0_u32; 8].into_boxed_slice();
+        let dst: Box<[u16]> = vec![0_u16; 8].into_boxed_slice();
         let dst_at = dst.as_ptr() as u64;
         // Two characters plus a terminator need three; a limit of two must refuse.
         assert_ne!(
@@ -929,35 +933,35 @@ mod bounded_strings {
         );
         assert_eq!(call(wcsncpy_s, [dst_at, 3, src_at, 2]), 0);
         // SAFETY: the buffer above, which this test owns and sized at eight characters.
-        let written = unsafe { std::slice::from_raw_parts(dst_at as *const u32, 3) };
-        assert_eq!(written, [u32::from(b'a'), u32::from(b'b'), 0]);
+        let written = unsafe { std::slice::from_raw_parts(dst_at as *const u16, 3) };
+        assert_eq!(written, [u16::from(b'a'), u16::from(b'b'), 0]);
         drop(src);
     }
 
     /// `wcsncpy` pads with nulls and does not terminate a source that fills the field.
     #[test]
     fn wcsncpy_pads_but_does_not_terminate_a_full_field() {
-        let src: Box<[u32]> = vec![u32::from(b'a'), u32::from(b'b'), 0].into_boxed_slice();
+        let src: Box<[u16]> = vec![u16::from(b'a'), u16::from(b'b'), 0].into_boxed_slice();
         let src_at = src.as_ptr() as u64;
-        let dst: Box<[u32]> = vec![0xFFFF_FFFF_u32; 4].into_boxed_slice();
+        let dst: Box<[u16]> = vec![0xFFFF_u16; 4].into_boxed_slice();
         let dst_at = dst.as_ptr() as u64;
         call(wcsncpy, [dst_at, src_at, 4, 0]);
         // SAFETY: this test's own buffer, four characters wide.
-        let written = unsafe { std::slice::from_raw_parts(dst_at as *const u32, 4) };
+        let written = unsafe { std::slice::from_raw_parts(dst_at as *const u16, 4) };
         assert_eq!(
             written,
-            [u32::from(b'a'), u32::from(b'b'), 0, 0],
+            [u16::from(b'a'), u16::from(b'b'), 0, 0],
             "padded with nulls"
         );
 
-        let exact: Box<[u32]> = vec![0xFFFF_FFFF_u32; 2].into_boxed_slice();
+        let exact: Box<[u16]> = vec![0xFFFF_u16; 2].into_boxed_slice();
         let exact_at = exact.as_ptr() as u64;
         call(wcsncpy, [exact_at, src_at, 2, 0]);
         // SAFETY: as above, two characters wide.
-        let filled = unsafe { std::slice::from_raw_parts(exact_at as *const u32, 2) };
+        let filled = unsafe { std::slice::from_raw_parts(exact_at as *const u16, 2) };
         assert_eq!(
             filled,
-            [u32::from(b'a'), u32::from(b'b')],
+            [u16::from(b'a'), u16::from(b'b')],
             "no room left to terminate"
         );
         drop(src);
@@ -966,8 +970,8 @@ mod bounded_strings {
     /// Only the sign of `wcscmp` is defined, so that is all this asserts.
     #[test]
     fn wcscmp_orders_by_the_first_difference() {
-        let a: Box<[u32]> = vec![u32::from(b'a'), u32::from(b'b'), 0].into_boxed_slice();
-        let b: Box<[u32]> = vec![u32::from(b'a'), u32::from(b'c'), 0].into_boxed_slice();
+        let a: Box<[u16]> = vec![u16::from(b'a'), u16::from(b'b'), 0].into_boxed_slice();
+        let b: Box<[u16]> = vec![u16::from(b'a'), u16::from(b'c'), 0].into_boxed_slice();
         let (a_at, b_at) = (a.as_ptr() as u64, b.as_ptr() as u64);
         assert_eq!(call(wcscmp, [a_at, a_at, 0, 0]), 0);
         assert!((call(wcscmp, [a_at, b_at, 0, 0]) as i64) < 0);
