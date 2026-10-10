@@ -295,6 +295,80 @@ fn localtime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     fill_tm(broken_down(seconds))
 }
 
+/// Days from 1970-01-01 to a Gregorian date, month 1-12: Howard Hinnant's public-domain
+/// `days_from_civil`, the inverse of [`civil_from_days`].
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400; // [0, 399]
+    let mp = (month + 9) % 12; // March is 0
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// Writes a breakdown's nine `int` fields and a zero `tm_gmtoff` into the caller's `struct tm` at
+/// `tm`, leaving `tm_zone` as it was: a pointer this library does not own is not planted there.
+fn write_tm(tm: u64, fields: [i32; 9]) {
+    let Ok(base) = usize::try_from(tm) else {
+        return;
+    };
+    let base = std::ptr::with_exposed_provenance_mut::<u8>(base);
+    for (index, value) in fields.iter().enumerate() {
+        // SAFETY: field `index` of the caller's `struct tm`, at its FreeBSD offset, under the
+        // identity mapping.
+        unsafe { std::ptr::write_unaligned(base.wrapping_add(index * 4).cast::<i32>(), *value) };
+    }
+    // SAFETY: `tm_gmtoff`, the `long` at offset 40 of the same structure.
+    unsafe { std::ptr::write_unaligned(base.wrapping_add(40).cast::<i64>(), 0) };
+}
+
+/// Reads a guest `time_t`, or `None` for a null pointer.
+fn read_time(timer: u64) -> Option<i64> {
+    let at = usize::try_from(timer).ok().filter(|&at| at != 0)?;
+    // SAFETY: a guest-supplied `time_t*` under the identity mapping.
+    Some(unsafe { std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<i64>(at)) })
+}
+
+/// `gmtime_s(timer, result)` and `localtime_s(timer, result)` - C11 K.3.8.2.3 and K.3.8.2.4: the
+/// breakdown written into the caller's `struct tm` and `result` answered, or null for a null
+/// argument. Both are UTC (D454).
+fn breakdown_s(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (timer, result) = (args[0], args[1]);
+    let Some(seconds) = read_time(timer) else {
+        return 0;
+    };
+    if result == 0 {
+        return 0;
+    }
+    write_tm(result, broken_down(seconds));
+    result
+}
+
+/// `mktime(tm)` - ISO C 7.27.2.3: the `time_t` of a broken-down time, local time being UTC (D454),
+/// with every field normalised into range and `tm_wday`/`tm_yday` set, as the standard requires;
+/// `tm_isdst` comes back 0, since UTC has no daylight time. A null `tm` answers `(time_t)-1`.
+fn mktime(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Ok(base) = usize::try_from(args[0]) else {
+        return u64::MAX;
+    };
+    if base == 0 {
+        return u64::MAX;
+    }
+    let base = std::ptr::with_exposed_provenance::<u8>(base);
+    let field = |index: usize| {
+        // SAFETY: field `index` of the caller's `struct tm` under the identity mapping.
+        i64::from(unsafe { std::ptr::read_unaligned(base.wrapping_add(index * 4).cast::<i32>()) })
+    };
+    let (sec, min, hour, mday, mon, year) =
+        (field(0), field(1), field(2), field(3), field(4), field(5));
+    let year = 1_900 + year + mon.div_euclid(12);
+    let days = days_from_civil(year, mon.rem_euclid(12) + 1, 1) + mday - 1;
+    let seconds = days * 86_400 + hour * 3_600 + min * 60 + sec;
+    write_tm(args[0], broken_down(seconds));
+    seconds as u64
+}
+
 /// `asctime(tm)` - the fixed 26-character rendering of a `struct tm`.
 ///
 /// ISO C's format, `"Www Mmm%3d %02d:%02d:%02d %d\n"`, with the year as `1900 + tm_year`, into
@@ -364,12 +438,62 @@ pub(crate) fn implementations() -> &'static [(&'static str, GuestFn)] {
         // Guest local time is UTC, so `gmtime` and `localtime` are the same breakdown.
         ("gmtime", localtime),
         ("asctime", asctime),
+        ("gmtime_s", breakdown_s),
+        ("localtime_s", breakdown_s),
+        ("mktime", mktime),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    fn named(name: &str) -> fn(&[u64; GUEST_ARG_REGISTERS]) -> u64 {
+        super::implementations()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or_else(|| panic!("{name} is implemented"), |(_, f)| *f)
+    }
+
+    fn ints(tm: &[u8; 56]) -> [i32; 9] {
+        std::array::from_fn(|i| i32::from_le_bytes(tm[i * 4..i * 4 + 4].try_into().expect("four")))
+    }
+
+    /// `gmtime_s` and `localtime_s` (C11 K.3.8.2.3-4) break a `time_t` down into the caller's
+    /// `struct tm` and answer it, UTC both (D454); a null argument answers null. 2026-01-01
+    /// 00:00:00 UTC was a Thursday.
+    #[test]
+    fn the_bounds_checked_breakdowns_fill_the_callers_tm() {
+        let when: i64 = 1_767_225_600;
+        for name in ["gmtime_s", "localtime_s"] {
+            let mut tm = [0xa5_u8; 56];
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = std::ptr::from_ref(&when) as u64;
+            args[1] = tm.as_mut_ptr() as u64;
+            assert_eq!(named(name)(&args), args[1], "{name} answers the result");
+            assert_eq!(ints(&tm), [0, 0, 0, 1, 0, 126, 4, 0, 0], "{name}");
+            assert_eq!(tm[40..48], [0; 8], "{name}: no offset from UTC");
+            assert_eq!(tm[48..56], [0xa5; 8], "{name}: tm_zone left alone");
+            args[0] = 0;
+            assert_eq!(named(name)(&args), 0, "{name}: a null timer");
+        }
+    }
+
+    /// `mktime` (ISO C 7.27.2.3) answers the `time_t` of a broken-down UTC time and normalises
+    /// the fields it was given: 1 January 2026's 32nd day is 1 February, a Sunday.
+    #[test]
+    fn mktime_normalises_and_answers_the_time() {
+        let mut tm = [0_u8; 56];
+        for (i, v) in [0_i32, 0, 0, 32, 0, 126, 9, 9, -1].iter().enumerate() {
+            tm[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = tm.as_mut_ptr() as u64;
+        assert_eq!(named("mktime")(&args), 1_767_225_600 + 31 * 86_400);
+        assert_eq!(ints(&tm), [0, 0, 0, 1, 1, 126, 0, 31, 0]);
+        args[0] = 0;
+        assert_eq!(named("mktime")(&args), u64::MAX, "a null tm is (time_t)-1");
+    }
 
     /// Calls one of these with the given arguments.
     fn call(f: fn(&[u64; GUEST_ARG_REGISTERS]) -> u64, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {

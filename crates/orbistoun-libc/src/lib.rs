@@ -133,6 +133,7 @@ guest_module! {
         "vsprintf_s" => 4,
         // Breaking a `time_t` down and rendering it, as `asctime(localtime(&t))` does (D454).
         "localtime" => 1, "gmtime" => 1, "asctime" => 1,
+        "gmtime_s" => 2, "localtime_s" => 2, "mktime" => 1,
         // Time, and waiting, all POSIX-documented. `gettimeofday` and `clock_gettime` are
         // implemented here and declared in `libScePosix`, where a title imports them (D367).
         "time" => 1, "sleep" => 1, "usleep" => 1, "nanosleep" => 2,

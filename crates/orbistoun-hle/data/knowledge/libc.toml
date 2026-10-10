@@ -3608,3 +3608,33 @@ cites = "ISO/IEC 9899"
 assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
 found_on = "2026-10-10"
 note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "gmtime_s"
+arity = 2
+purpose = "C11 K.3.8.2.3 and K.3.8.2.4: the breakdown written into the caller's struct tm and result answered, or null for a null argument. Both are UTC (D454)."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 Annex K, K.3.8.2.3 (gmtime_s) and K.3.8.2.4 (localtime_s)."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "localtime_s"
+arity = 2
+purpose = "C11 K.3.8.2.3 and K.3.8.2.4: the breakdown written into the caller's struct tm and result answered, or null for a null argument. Both are UTC (D454)."
+known_by = "published"
+cites = "ISO/IEC 9899:2011 Annex K, K.3.8.2.3 (gmtime_s) and K.3.8.2.4 (localtime_s)."
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
+
+[[function]]
+name = "mktime"
+arity = 1
+purpose = "ISO C 7.27.2.3: the time_t of a broken-down time, local time being UTC (D454), with every field normalised into range and tm_wday/tm_yday set, as the standard requires; tm_isdst comes back 0, since UTC has no daylight time. A null tm answers (time_t)-1."
+known_by = "published"
+cites = "ISO C"
+assumptions = ["The published specification is the source. Nothing on the target has confirmed that this platform's build follows it, and the failure convention in particular is unestablished."]
+found_on = "2026-10-10"
+note = "Derived from the implementation's doc comment by `orbistoun-gen knowledge`."
