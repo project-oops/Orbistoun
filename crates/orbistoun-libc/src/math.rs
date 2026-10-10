@@ -406,6 +406,94 @@ fn sincos(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTER
     0
 }
 
+/// A classification helper's answer: 1 when it holds, 0 when not, as FreeBSD's return them.
+const fn holds(yes: bool) -> u64 {
+    if yes { 1 } else { 0 }
+}
+
+/// `__isnan(x)` - FreeBSD `lib/libc/gen/isnan.c`: 1 for a NaN, else 0.
+fn isnan(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    holds(arg(floats, 0).is_nan())
+}
+
+/// `__isnanf(x)` - single precision, beside `__isnan`.
+fn isnanf(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    holds(arg_f32(floats, 0).is_nan())
+}
+
+/// `__isinf(x)` - FreeBSD `lib/libc/gen/isinf.c`: 1 for either infinity, else 0.
+fn isinf(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    holds(arg(floats, 0).is_infinite())
+}
+
+/// `__isinff(x)` - single precision, beside `__isinf`.
+fn isinff(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    holds(arg_f32(floats, 0).is_infinite())
+}
+
+/// `__isfinite(x)` - FreeBSD `lib/msun/src/s_isfinite.c`: 1 unless infinite or NaN.
+fn isfinite(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    holds(arg(floats, 0).is_finite())
+}
+
+/// `__isfinitef(x)` - single precision, beside `__isfinite`.
+fn isfinitef(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    holds(arg_f32(floats, 0).is_finite())
+}
+
+/// `nextafter(x, y)` - ISO/IEC 9899 7.12.11.3: the next representable value after `x` toward
+/// `y`; `y` when they are equal, and a NaN when either is.
+fn nextafter(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    let (x, y) = (arg(floats, 0), arg(floats, 1));
+    let next = match x.partial_cmp(&y) {
+        None => x + y,
+        Some(std::cmp::Ordering::Equal) => y,
+        Some(order) => step_toward(x, order == std::cmp::Ordering::Less),
+    };
+    ret(next)
+}
+
+/// The representable value next to a finite or infinite `x`, upward or downward: one unit in the
+/// last place through the bit pattern, and from either zero the smallest subnormal of the
+/// direction's sign.
+fn step_toward(x: f64, upward: bool) -> f64 {
+    if x == 0.0 {
+        let smallest = f64::from_bits(1);
+        return if upward { smallest } else { -smallest };
+    }
+    let bits = x.to_bits();
+    // Away from zero is one more in the magnitude's bits, toward zero one less.
+    let away = (x > 0.0) == upward;
+    f64::from_bits(if away { bits + 1 } else { bits - 1 })
+}
+
+/// `atof(text)` - ISO/IEC 9899 7.22.1.1: `strtod(text, NULL)`.
+fn atof(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    let mut without_end = *ints;
+    without_end[1] = 0;
+    strtod(&without_end, floats)
+}
+
+/// `__powidf2(a, b)` - `a` to the integer power `b`, by compiler-rt's repeated squaring with the
+/// reciprocal taken last for a negative power (`compiler-rt/lib/builtins/powidf2.c`), so each
+/// product rounds where the guest's own builtin rounds it.
+fn powidf2(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
+    let (mut a, mut b) = (arg(floats, 0), ints[0] as i32);
+    let reciprocal = b < 0;
+    let mut r = 1.0_f64;
+    loop {
+        if b & 1 != 0 {
+            r *= a;
+        }
+        b /= 2;
+        if b == 0 {
+            break;
+        }
+        a *= a;
+    }
+    ret(if reciprocal { 1.0 / r } else { r })
+}
+
 /// Everything here, by symbol name.
 pub fn implementations() -> &'static [(&'static str, GuestFloatFn)] {
     &[
@@ -462,6 +550,15 @@ pub fn implementations() -> &'static [(&'static str, GuestFloatFn)] {
         ("logf", logf),
         ("strtod", strtod),
         ("strtof", strtof),
+        ("__isnan", isnan),
+        ("__isnanf", isnanf),
+        ("__isinf", isinf),
+        ("__isinff", isinff),
+        ("__isfinite", isfinite),
+        ("__isfinitef", isfinitef),
+        ("nextafter", nextafter),
+        ("atof", atof),
+        ("__powidf2", powidf2),
     ]
 }
 
@@ -556,5 +653,89 @@ mod bulk_ported {
         assert_eq!(f(1.5), 2.0);
         assert_eq!(f(2.5), 2.0);
         assert_eq!(f(-0.5), 0.0);
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::float_cmp,
+    reason = "each answer is exact by its definition - a classification, one step to the next representable value, compiler-rt's own product - so an epsilon would let a wrong answer through"
+)]
+mod documented_batch {
+    use super::{GUEST_ARG_REGISTERS, GUEST_FLOAT_REGISTERS};
+
+    fn call(name: &str, ints: [u64; 2], floats: [u64; 2]) -> u64 {
+        let (_, f) = super::implementations()
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("{name} is implemented"));
+        let mut i = [0_u64; GUEST_ARG_REGISTERS];
+        i[..2].copy_from_slice(&ints);
+        let mut d = [0_u64; GUEST_FLOAT_REGISTERS];
+        d[..2].copy_from_slice(&floats);
+        f(&i, &d)
+    }
+
+    /// FreeBSD's classification helpers answer 0 or 1, both signs of infinity alike
+    /// (`lib/libc/gen/isnan.c`, `isinf.c`; `lib/msun/src/s_isfinite.c`).
+    #[test]
+    fn the_classification_helpers_answer_as_freebsds() {
+        let d = |x: f64| [x.to_bits(), 0];
+        let f = |x: f32| [u64::from(x.to_bits()), 0];
+        assert_eq!(call("__isnan", [0; 2], d(f64::NAN)), 1);
+        assert_eq!(call("__isnan", [0; 2], d(1.0)), 0);
+        assert_eq!(call("__isinf", [0; 2], d(f64::NEG_INFINITY)), 1);
+        assert_eq!(call("__isinf", [0; 2], d(f64::MAX)), 0);
+        assert_eq!(call("__isfinite", [0; 2], d(f64::MAX)), 1);
+        assert_eq!(call("__isfinite", [0; 2], d(f64::NAN)), 0);
+        assert_eq!(call("__isnanf", [0; 2], f(f32::NAN)), 1);
+        assert_eq!(call("__isinff", [0; 2], f(f32::NEG_INFINITY)), 1);
+        assert_eq!(call("__isfinitef", [0; 2], f(f32::INFINITY)), 0);
+    }
+
+    /// `nextafter` steps one representable value toward its second argument, and answers the second
+    /// when they are equal (ISO/IEC 9899 7.12.11.3).
+    #[test]
+    fn nextafter_steps_once_toward_its_target() {
+        let step =
+            |x: f64, y: f64| f64::from_bits(call("nextafter", [0; 2], [x.to_bits(), y.to_bits()]));
+        assert_eq!(step(1.0, 2.0), 1.0 + f64::EPSILON);
+        assert_eq!(step(1.0, 0.0), 1.0 - f64::EPSILON / 2.0);
+        assert_eq!(
+            step(0.0, -1.0),
+            -f64::from_bits(1),
+            "the smallest subnormal"
+        );
+        assert_eq!(
+            step(-0.0, 0.0).to_bits(),
+            0.0f64.to_bits(),
+            "equal: the second"
+        );
+        assert!(step(f64::NAN, 1.0).is_nan());
+    }
+
+    /// `atof` is `strtod` with no end pointer (ISO/IEC 9899 7.22.1.1).
+    #[test]
+    fn atof_reads_a_number_as_strtod_does() {
+        let text = b"  -12.5e1xyz ";
+        let at = text.as_ptr() as u64;
+        assert_eq!(f64::from_bits(call("atof", [at, 0], [0; 2])), -125.0);
+    }
+
+    /// `__powidf2(a, b)` is compiler-rt's repeated squaring, a reciprocal taken last for a negative
+    /// power (`compiler-rt/lib/builtins/powidf2.c`).
+    #[test]
+    fn powidf2_squares_as_compiler_rt_does() {
+        let pow = |a: f64, b: i32| {
+            f64::from_bits(call(
+                "__powidf2",
+                [u64::from(b.cast_unsigned()), 0],
+                [a.to_bits(), 0],
+            ))
+        };
+        assert_eq!(pow(2.0, 10), 1024.0);
+        assert_eq!(pow(2.0, -2), 0.25);
+        assert_eq!(pow(3.0, 0), 1.0);
+        assert_eq!(pow(-1.5, 3), -3.375);
     }
 }

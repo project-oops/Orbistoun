@@ -116,6 +116,9 @@ guest_module! {
         "nearbyintf" => 1, "hypotf" => 2,
         "frexp" => 2, "ldexp" => 2, "ldexpf" => 2, "modf" => 2, "modff" => 2,
         "sincos" => 3,
+        // FreeBSD's classification helpers, `nextafter`, `atof` and compiler-rt's `__powidf2`.
+        "__isnan" => 1, "__isnanf" => 1, "__isinf" => 1, "__isinff" => 1,
+        "__isfinite" => 1, "__isfinitef" => 1, "nextafter" => 2, "atof" => 1, "__powidf2" => 2,
         // The bounded string functions: BSD's `strlcpy`/`strnstr`, and the C11 Annex K `_s` family
         // whose extra argument is the destination's size.
         "strlcpy" => 3, "strnstr" => 3,
