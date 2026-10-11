@@ -187,11 +187,8 @@ fn with<R>(handle: FileHandle, f: impl FnOnce(&mut Open) -> R) -> Option<R> {
 ///
 /// `None` when the handle names nothing.
 pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
-    use std::io::Read as _;
+    use std::io::{Read as _, Seek as _};
     let outcome = with(handle, |open| {
-        // Whether the end had already been reached, which separates "this file is finished"
-        // from "this read was cut short".
-        let was_at_end = open.at_end;
         let mut read = 0;
         while read < into.len()
             && let Some(byte) = open.pushed_back.pop()
@@ -199,14 +196,30 @@ pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
             into[read] = byte;
             read += 1;
         }
-        read += open.file.read(&mut into[read..]).unwrap_or(0);
+        // As `fread` does: until the request is met or the host has nothing more to give, since
+        // one host read may hand over less than it holds.
+        while read < into.len() {
+            match open.file.read(&mut into[read..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read += n,
+            }
+        }
         // A short read is how the end announces itself, and `feof` is asked afterwards.
         if read < into.len() {
             open.at_end = true;
         }
-        (read, was_at_end)
+        // Cut short only if the file still held bytes this read did not deliver: reaching the
+        // end is not a defect.
+        let left_unread = read < into.len()
+            && open
+                .file
+                .stream_position()
+                .ok()
+                .zip(open.file.metadata().ok())
+                .is_some_and(|(position, metadata)| position < metadata.len());
+        (read, left_unread)
     })?;
-    let (read, was_at_end) = outcome;
+    let (read, left_unread) = outcome;
     // Which file, and how much it asked for, for the opens record.
     if let Some(path) = path_of(handle) {
         crate::opened::note_read(&path, into.len(), read);
@@ -214,9 +227,7 @@ pub fn read(handle: FileHandle, into: &mut [u8]) -> Option<usize> {
     if let Ok(mut stats) = stats().lock() {
         stats.reads += 1;
         stats.bytes += read as u64;
-        // Counted only when the file was not already finished: reading to the end is not a
-        // defect.
-        if read < into.len() && !was_at_end {
+        if left_unread {
             stats.short += 1;
         }
     }
@@ -410,8 +421,8 @@ mod tests {
         assert_eq!(read(h, &mut buf), Some(0), "and nothing after it");
         assert_eq!(
             super::read_stats().short,
-            before + 1,
-            "only the first counts - the second was already at the end"
+            before,
+            "neither left a byte of the file unread"
         );
         close(h);
     }
