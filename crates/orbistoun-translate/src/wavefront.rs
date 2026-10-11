@@ -3656,11 +3656,9 @@ impl Model for Wavefront<'_> {
             // An inline float, named by the operand table. Its bits go into the register, as the
             // hardware holds them.
             Operand::Named(name) => {
-                let bits = name.parse::<f32>().map(f32::to_bits).map_err(|_| {
-                    TranslateError::Unsupported {
-                        offset: instruction.offset,
-                        detail: "named operand is not an inline float",
-                    }
+                let bits = model::inline_float_bits(name).ok_or(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: "named operand is not an inline float",
                 })?;
                 Ok(Self::constant(self, bits))
             }

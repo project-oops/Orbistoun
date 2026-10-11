@@ -93,6 +93,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_rndne_f32_e32",
     "v_floor_f32_e32",
     "v_fract_f32_e32",
+    "v_trunc_f32_e32",
     "v_bfrev_b32_e32",
     "v_cmpx_gt_f32_e32",
     "v_cmpx_eq_i32_e32",
@@ -195,6 +196,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_mac_f32_e32",
     "v_madak_f32",
     "v_madmk_f32",
+    "v_fmaak_f32",
+    "v_fmamk_f32",
     "v_mul_u32_u24_e32",
     "v_mad_u32_u16",
     "v_mad_i32_i24",
@@ -392,6 +395,23 @@ pub const VCC_LOW_HALF: &str = "vcc_lo";
 /// primitive mask through it, and a primitive shader its allocation counts. Held apart from the
 /// scalar file because its operand code (124) is past the last scalar register.
 pub const M0: &str = "m0";
+
+/// The operand table's name for `1 / (2 * pi)`, operand code 248.
+const INVERSE_TWO_PI: &str = "inv_2pi";
+
+/// The bits of `1 / (2 * pi)` as an inline constant holds them: the single-precision value LLVM
+/// encodes as operand 248 on `gfx1013` (`v_mov_b32 v0, 0x3e22f983` assembles to `0xf8`).
+const INVERSE_TWO_PI_F32: u32 = 0x3e22_f983;
+
+/// The bits an inline float operand named `name` holds, or `None` for a name that is not one: the
+/// decimal the operand table names, or [`INVERSE_TWO_PI`].
+#[must_use]
+pub fn inline_float_bits(name: &str) -> Option<u32> {
+    if name == INVERSE_TWO_PI {
+        return Some(INVERSE_TWO_PI_F32);
+    }
+    name.parse::<f32>().ok().map(f32::to_bits)
+}
 
 /// A lane mask, by whichever spelling reached the translator.
 ///
@@ -2204,7 +2224,7 @@ pub fn instruction<M: Model + ?Sized>(
             return sdwa_float(model, instruction, long, word);
         }
         if SDWA_FLOAT_UNARY.contains(&name) {
-            return sdwa_float_unary(model, instruction, word);
+            return sdwa_float_unary(model, instruction, name, word);
         }
         return sdwa_integer(model, instruction, name, word);
     }
@@ -2360,7 +2380,7 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
-        "v_madak_f32" | "v_madmk_f32" => multiply_add_constant(model, instruction, name),
+        _ if WITH_K.contains(&name) => multiply_add_constant(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
         "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_msad_u8" => {
             integer_long_form(model, instruction, name)
@@ -2470,7 +2490,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // cos, base-2 exp and base-2 log.
         "v_sqrt_f32_e32" | "v_rsq_f32_e32" | "v_sin_f32_e32" | "v_cos_f32_e32"
         | "v_exp_f32_e32" | "v_log_f32_e32" | "v_rndne_f32_e32" | "v_floor_f32_e32"
-        | "v_fract_f32_e32" => float_unary(model, instruction, name),
+        | "v_fract_f32_e32" | "v_trunc_f32_e32" => float_unary(model, instruction, name),
         "v_bfrev_b32_e32" => bit_reverse(model, instruction),
 
         _ => memory_instruction(model, instruction, name),
@@ -2725,6 +2745,31 @@ fn short_form_arithmetic<M: Model + ?Sized>(
     Ok(())
 }
 
+/// The `GLSL.std.450` instruction a one-source float instruction is, and whether its source is an
+/// angle in revolutions. `v_sin_f32` and `v_cos_f32` compute the sine or cosine of `2*pi * x`;
+/// `GLSL.std.450` Sin and Cos take radians, so the argument is scaled by 2*pi first.
+fn unary_float_extended(name: &str) -> Option<(u32, bool)> {
+    Some(match name {
+        "v_sqrt_f32_e32" => (GLSL_SQRT, false),
+        "v_rsq_f32_e32" => (GLSL_INVERSE_SQRT, false),
+        "v_sin_f32_e32" => (GLSL_SIN, true),
+        "v_cos_f32_e32" => (GLSL_COS, true),
+        "v_exp_f32_e32" => (GLSL_EXP2, false),
+        "v_log_f32_e32" => (GLSL_LOG2, false),
+        // Round to the nearest integer, a tie to the even one (`V_RNDNE_F32`).
+        "v_rndne_f32_e32" => (GLSL_ROUND_EVEN, false),
+        // Round toward negative infinity (`V_FLOOR_F32`); `V_FRACT_F32` subtracts that from its
+        // source.
+        "v_floor_f32_e32" | "v_fract_f32_e32" => (GLSL_FLOOR, false),
+        // Round toward zero (`V_TRUNC_F32`).
+        "v_trunc_f32_e32" => (GLSL_TRUNC, false),
+        _ => return None,
+    })
+}
+
+/// GLSL.std.450 instruction number for `Trunc`: the nearest integer no larger in magnitude.
+const GLSL_TRUNC: u32 = 3;
+
 /// GLSL.std.450 instruction number for `RoundEven`: to the nearest integer, a tie to the even one.
 const GLSL_ROUND_EVEN: u32 = 2;
 
@@ -2862,27 +2907,11 @@ fn float_unary<M: Model + ?Sized>(
         });
     };
     let register = u32::from(*register);
-    // The extended instruction, and whether the source is an angle in revolutions. `v_sin_f32` and
-    // `v_cos_f32` compute the sine or cosine of `2*pi * x`; `GLSL.std.450` Sin and Cos take
-    // radians, so the argument is scaled by 2*pi first.
-    let (extended, revolutions) = match name {
-        "v_sqrt_f32_e32" => (GLSL_SQRT, false),
-        "v_rsq_f32_e32" => (GLSL_INVERSE_SQRT, false),
-        "v_sin_f32_e32" => (GLSL_SIN, true),
-        "v_cos_f32_e32" => (GLSL_COS, true),
-        "v_exp_f32_e32" => (GLSL_EXP2, false),
-        "v_log_f32_e32" => (GLSL_LOG2, false),
-        // Round to the nearest integer, a tie to the even one (`V_RNDNE_F32`).
-        "v_rndne_f32_e32" => (GLSL_ROUND_EVEN, false),
-        // Round toward negative infinity (`V_FLOOR_F32`); `V_FRACT_F32` subtracts that from its
-        // source, below.
-        "v_floor_f32_e32" | "v_fract_f32_e32" => (GLSL_FLOOR, false),
-        _ => {
-            return Err(TranslateError::Unsupported {
-                offset: instruction.offset,
-                detail: "unknown unary float instruction",
-            });
-        }
+    let Some((extended, revolutions)) = unary_float_extended(name) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "unknown unary float instruction",
+        });
     };
     for lane in running_lanes(model) {
         let operand = model.read_source(instruction, source, lane)?;
@@ -6221,7 +6250,7 @@ pub const SDWA_FLOAT: &[(&str, &str)] = &[
 
 /// The one-source float short-form instructions translated in their SDWA form over whole registers:
 /// the word's source negate and absolute value apply to the one source (RDNA ISA, SDWA).
-pub const SDWA_FLOAT_UNARY: &[&str] = &["v_rcp_f32_e32"];
+pub const SDWA_FLOAT_UNARY: &[&str] = &["v_rcp_f32_e32", "v_log_f32_e32"];
 
 /// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
 fn sdwa_float_long_form(name: &str) -> Option<&'static str> {
@@ -6302,6 +6331,7 @@ fn sdwa_float<M: Model + ?Sized>(
 fn sdwa_float_unary<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    name: &str,
     word: u32,
 ) -> Result<(), TranslateError> {
     let fields = SdwaFields::read(word);
@@ -6327,12 +6357,16 @@ fn sdwa_float_unary<M: Model + ?Sized>(
         output_multiplier: 0,
     };
     let one = model.constant(ONE_F32);
+    let extended = unary_float_extended(name).map(|(extended, _)| extended);
     for lane in running_lanes(model) {
         let value = model.read_source(instruction, &source, lane)?;
         let value = apply_modifiers(model, value, modifiers, 0);
-        // The reciprocal, as `v_rcp_f32` in its plain form computes it.
-        let quotient = model.f32_binary(op::FDIV, one, value);
-        model.write_vector_lane(u32::from(*register), lane, quotient);
+        // What the plain form computes: the reciprocal, or the extended instruction.
+        let result = match extended {
+            Some(extended) => model.f32_ext_unary(extended, value),
+            None => model.f32_binary(op::FDIV, one, value),
+        };
+        model.write_vector_lane(u32::from(*register), lane, result);
     }
     model.count();
     Ok(())
@@ -7237,10 +7271,14 @@ fn scalar_select_64<M: Model + ?Sized>(
     Ok(())
 }
 
+/// The multiply-adds whose constant `K` is the word after the instruction.
+const WITH_K: [&str; 4] = ["v_madak_f32", "v_madmk_f32", "v_fmaak_f32", "v_fmamk_f32"];
+
 /// `v_madak_f32 d, a, b, K` (`a * b + K`) and `v_madmk_f32 d, a, K, b` (`a * K + b`): the legacy
 /// multiply-add of `v_mad_f32` with a constant from the literal word after the instruction (AMD's
 /// published RDNA instruction set, `V_MADAK_F32`, `V_MADMK_F32`). In the order the operands are
-/// written, both are `first * second + third`.
+/// written, both are `first * second + third`. `v_fmaak_f32` and `v_fmamk_f32` are the same shapes
+/// with the fused multiply-add of `v_fma_f32` (`V_FMAAK_F32`, `V_FMAMK_F32`), carried out as it is.
 fn multiply_add_constant<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7260,7 +7298,9 @@ fn multiply_add_constant<M: Model + ?Sized>(
     };
     // The constant is the third operand of `v_madak_f32` and the second of `v_madmk_f32`: the
     // instruction's second word, decoded as an immediate.
-    let (constant, sources) = if name == "v_madak_f32" {
+    let constant_last = matches!(name, "v_madak_f32" | "v_fmaak_f32");
+    let legacy = name.starts_with("v_mad");
+    let (constant, sources) = if constant_last {
         (third, [first, second])
     } else {
         (second, [first, third])
@@ -7276,10 +7316,16 @@ fn multiply_add_constant<M: Model + ?Sized>(
     for lane in running_lanes(model) {
         let a = model.read_source(instruction, sources[0], lane)?;
         let other = model.read_source(instruction, sources[1], lane)?;
-        let value = if name == "v_madak_f32" {
-            legacy_multiply_add(model, a, other, constant)
+        let (b, c) = if constant_last {
+            (other, constant)
         } else {
-            legacy_multiply_add(model, a, constant, other)
+            (constant, other)
+        };
+        let value = if legacy {
+            legacy_multiply_add(model, a, b, c)
+        } else {
+            let product = model.f32_binary(op::FMUL, a, b);
+            model.f32_binary(op::FADD, product, c)
         };
         model.write_vector_lane(register, lane, value);
     }
@@ -7970,8 +8016,9 @@ fn write_guarded<M: Model + ?Sized>(model: &mut M, address: Id, value: Id, lane:
 struct ImageAccess {
     /// First vector register the components land in.
     destination: u32,
-    /// First vector register of the coordinate.
-    address: u32,
+    /// The vector register holding each address register's worth of the access, in order:
+    /// consecutive from the first, or as an `NSA` encoding lists them.
+    addresses: [u32; MAX_ADDRESS_REGISTERS],
     /// First scalar register of the image descriptor.
     descriptor: u32,
     /// First scalar register of the sampler descriptor, when the instruction names one.
@@ -7999,9 +8046,17 @@ struct Halves {
 const IMAGE_A16: u32 = 1 << 30;
 const IMAGE_D16: u32 = 1 << 31;
 /// Fields of an image instruction's first word that change which registers it reads or writes:
-/// `NSA` (2:1) lists the address registers apart, `R128` (15) takes a four-register descriptor,
-/// and `TFE` (16) and `LWE` (17) return a status word beyond the components.
-const IMAGE_LAYOUT_FIELDS: u32 = 0x3 << 1 | 1 << 15 | 1 << 16 | 1 << 17;
+/// `R128` (15) takes a four-register descriptor, and `TFE` (16) and `LWE` (17) return a status
+/// word beyond the components.
+const IMAGE_LAYOUT_FIELDS: u32 = 1 << 15 | 1 << 16 | 1 << 17;
+
+/// `NSA` (2:1): how many dwords after the instruction's fixed eight bytes list its address
+/// registers apart, one byte each - the second address register in the first byte of the first,
+/// and so on (`aco_assembler.cpp:744-777`, `:813-821`). The first is the second word's `VADDR`.
+const IMAGE_NSA: (u32, u32) = (1, 0x3);
+
+/// The most address registers a translated access reads: two coordinates and a level.
+const MAX_ADDRESS_REGISTERS: usize = 3;
 
 /// Address registers a two-dimensional access uses, by instruction.
 ///
@@ -8011,6 +8066,36 @@ const IMAGE_LAYOUT_FIELDS: u32 = 0x3 << 1 | 1 << 15 | 1 << 16 | 1 << 17;
 const fn address_registers(levelled: bool, a16: bool) -> u32 {
     let elements: u32 = if levelled { 3 } else { 2 };
     if a16 { elements.div_ceil(2) } else { elements }
+}
+
+/// The vector register of each of an access's `used` address registers, the first `first`:
+/// consecutive, or for an `NSA` encoding the rest listed a byte each in the dwords after its fixed
+/// part. `None` when one would lie past the register file or a listed one is not in the
+/// instruction.
+fn address_list(
+    instruction: &Instruction,
+    first: u32,
+    used: u32,
+) -> Option<[u32; MAX_ADDRESS_REGISTERS]> {
+    let (shift, mask) = IMAGE_NSA;
+    let nsa_dwords = (instruction.word >> shift) & mask;
+    let mut addresses = [first; MAX_ADDRESS_REGISTERS];
+    for (index, slot) in (0..used).zip(addresses.iter_mut()).skip(1) {
+        *slot = if nsa_dwords == 0 {
+            first + index
+        } else {
+            let at = index - 1;
+            if at / 4 >= nsa_dwords {
+                return None;
+            }
+            let word = instruction.words.get(2 + (at / 4) as usize)?;
+            (word >> (8 * (at % 4))) & 0xff
+        };
+    }
+    addresses[..used as usize]
+        .iter()
+        .all(|&register| register < VECTOR_REGISTERS)
+        .then_some(addresses)
 }
 
 /// Registers `components` occupy: one each, or two to a register under `D16`.
@@ -8027,20 +8112,21 @@ const fn data_registers(components: u32, d16: bool) -> u32 {
 fn address_element<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    (address, a16): (u32, bool),
+    (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
     index: u32,
     lane: u32,
 ) -> Result<Id, TranslateError> {
+    let register = |at: u32| addresses[at as usize];
     if !a16 {
         return model.read_source(
             instruction,
-            &Operand::Vector(address_of(address + index)),
+            &Operand::Vector(address_of(register(index))),
             lane,
         );
     }
     let word = model.read_source(
         instruction,
-        &Operand::Vector(address_of(address + index / 2)),
+        &Operand::Vector(address_of(register(index / 2))),
         lane,
     )?;
     let shift = model.constant(16 * (index % 2));
@@ -8080,8 +8166,8 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     let d16 = second & IMAGE_D16 != 0;
     if instruction.word & IMAGE_LAYOUT_FIELDS != 0 {
         return Err(refuse(concat!(
-            "an image access with its address registers listed apart, a four-register ",
-            "descriptor, or a status word returned - which registers it uses is not modelled"
+            "an image access with a four-register descriptor, or a status word returned - which ",
+            "registers it uses is not modelled"
         )));
     }
     if a16 && !fetches && name != "image_store" {
@@ -8127,11 +8213,15 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     }
 
     // The address registers and the components coming back both have to fit.
-    let address = u32::from(*address);
+    let used = address_registers(levelled, a16);
+    let addresses = address_list(instruction, u32::from(*address), used).ok_or_else(|| {
+        refuse(concat!(
+            "an image access whose address registers run past the register file, or whose ",
+            "listed address registers are not all in the instruction"
+        ))
+    })?;
     let destination = u32::from(*destination);
-    if address + address_registers(levelled, a16) > VECTOR_REGISTERS
-        || destination + data_registers(mask.count_ones(), d16) > VECTOR_REGISTERS
-    {
+    if destination + data_registers(mask.count_ones(), d16) > VECTOR_REGISTERS {
         return Err(refuse(
             "a texture access runs past the end of the vector register file",
         ));
@@ -8139,7 +8229,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
 
     Ok(ImageAccess {
         destination,
-        address,
+        addresses,
         descriptor: u32::from(*descriptor),
         sampler,
         mask,
@@ -8231,7 +8321,7 @@ fn image_sample<M: Model + ?Sized>(
 
     let ImageAccess {
         destination,
-        address,
+        addresses,
         descriptor,
         sampler,
         mask,
@@ -8255,12 +8345,12 @@ fn image_sample<M: Model + ?Sized>(
 
     for lane in running_lanes(model) {
         // Two dimensions from consecutive elements; the dimensionality field was checked above.
-        let u = address_element(model, instruction, (address, a16), 0, lane)?;
-        let v = address_element(model, instruction, (address, a16), 1, lane)?;
+        let u = address_element(model, instruction, (&addresses, a16), 0, lane)?;
+        let v = address_element(model, instruction, (&addresses, a16), 1, lane)?;
         // The level, where the instruction takes one from a register: the last address element. A
         // fetch's level is an integer, a sample's a float.
         let level = if levelled {
-            let bits = address_element(model, instruction, (address, a16), 2, lane)?;
+            let bits = address_element(model, instruction, (&addresses, a16), 2, lane)?;
             if fetches { bits } else { model.as_float(bits) }
         } else if fetches {
             zero
@@ -8361,7 +8451,7 @@ fn image_store<M: Model + ?Sized>(
 
     let ImageAccess {
         destination: data,
-        address,
+        addresses,
         descriptor,
         mask,
         halves,
@@ -8381,8 +8471,8 @@ fn image_store<M: Model + ?Sized>(
     let zero = model.constant(0);
 
     for lane in running_lanes(model) {
-        let u = address_element(model, instruction, (address, a16), 0, lane)?;
-        let v = address_element(model, instruction, (address, a16), 1, lane)?;
+        let u = address_element(model, instruction, (&addresses, a16), 0, lane)?;
+        let v = address_element(model, instruction, (&addresses, a16), 1, lane)?;
 
         // The texel's components, taken in mask order from consecutive registers, so a hole in the
         // mask reads no register for that component. Under `D16` two halves share a register, the
@@ -8856,5 +8946,35 @@ fn memory<M: Model + ?Sized>(
             mnemonic: name.to_owned(),
             detail: NO_TRANSLATION,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use orbistoun_shader::{EncodingTable, OperandTable, decode};
+
+    /// An image access's address registers: consecutive from the first, or listed a byte each
+    /// after the fixed part. The listed form is the reference assembler's `image_sample_l v0,
+    /// [v2, v1, v0]` (`aco_assembler.cpp:813-821` lays them out so); the consecutive one its
+    /// `v[0:2]`.
+    #[test]
+    fn an_access_reads_its_listed_address_registers() {
+        let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+        let operands = OperandTable::builtin().expect("the shipped operand table");
+        let listed = [
+            0x0a, 0x01, 0x90, 0xf0, 0x02, 0x00, 0x61, 0x00, 0x01, 0x00, 0x00, 0x00,
+        ];
+        let consecutive = [0x08, 0x01, 0x90, 0xf0, 0x00, 0x00, 0x61, 0x00];
+        let first = |bytes: &[u8]| decode(bytes, &encodings, &operands).instructions[0].clone();
+        assert_eq!(super::address_list(&first(&listed), 2, 3), Some([2, 1, 0]));
+        assert_eq!(
+            super::address_list(&first(&consecutive), 0, 3),
+            Some([0, 1, 2])
+        );
+        assert_eq!(
+            super::address_list(&first(&listed[..8]), 2, 3),
+            None,
+            "a listed register the instruction does not hold"
+        );
     }
 }

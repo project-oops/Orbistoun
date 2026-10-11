@@ -214,6 +214,18 @@ v_madmk_f32 v255, -1, 0x12345678, v130
 v_madmk_f32 v9, 4, 0x87654321, v77
 v_madmk_f32 v130, v88, 0x7f7fffff, v255
 
+// ---- v_fmaak_f32 and v_fmamk_f32: their fused twins, the same shape --------------------------
+v_fmaak_f32 v3, v4, v5, 0xbdf0555d
+v_fmaak_f32 v200, s5, v9, 0x3e800000
+v_fmaak_f32 v255, -1, v130, 0x12345678
+v_fmaak_f32 v9, 4, v77, 0x87654321
+v_fmaak_f32 v130, v88, v255, 0x7f7fffff
+v_fmamk_f32 v3, v4, 0xbdf0555d, v5
+v_fmamk_f32 v200, s5, 0x3e800000, v9
+v_fmamk_f32 v255, -1, 0x12345678, v130
+v_fmamk_f32 v9, 4, 0x87654321, v77
+v_fmamk_f32 v130, v88, 0x7f7fffff, v255
+
 // ---- v_cmp_ge/le_f32_e32: VOPC compares into vcc ---------------------------------------
 v_cmp_ge_f32_e32 vcc, v4, v5
 v_cmp_ge_f32_e32 vcc, s5, v190
@@ -433,6 +445,9 @@ v_cmp_eq_i32_e32 vcc, 64, v66
 v_floor_f32_e32 v3, v1
 v_floor_f32_e32 v200, s7
 v_floor_f32_e32 v0, v255
+v_trunc_f32_e32 v8, v6
+v_trunc_f32_e32 v200, s7
+v_trunc_f32_e32 v0, v255
 s_cmp_eq_u32 s7, 4
 s_cmp_eq_u32 s100, s3
 s_cmp_eq_u32 -1, s55

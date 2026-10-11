@@ -609,6 +609,11 @@ name = "v_fract_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 33
+name = "v_trunc_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 35
 name = "v_rndne_f32_e32"
 
@@ -751,6 +756,16 @@ name = "v_add_co_ci_u32_e32"
 family = "VOP2"
 opcode = 43
 name = "v_fmac_f32_e32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 44
+name = "v_fmamk_f32"
+
+[[mnemonic]]
+family = "VOP2"
+opcode = 45
+name = "v_fmaak_f32"
 
 [[mnemonic]]
 family = "VOP2"

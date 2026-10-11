@@ -532,6 +532,26 @@ fn float_addition_produces_the_right_bits() {
     );
 }
 
+/// Operand 248 is `1 / (2 * pi)`, the bits LLVM assembles `0x3e22f983` to it on `gfx1013`:
+/// PPSA28061's scanline shader scales an angle by it (`v_mul_f32_e32 v9, inv_2pi, v9`). Multiplied
+/// by 1.0 it is those bits exactly, in both translations.
+#[test]
+fn the_inverse_two_pi_operand_is_its_float() {
+    const INLINE_INVERSE_TWO_PI: u32 = 248;
+    if !device_or_skip("the_inverse_two_pi_operand_is_its_float") {
+        return;
+    }
+    let program = [
+        v_mov_code(0, INLINE_ONE),
+        head("v_mul_f32_e32") | (2 << 17) | INLINE_INVERSE_TWO_PI,
+        s_endpgm(),
+    ];
+    for fidelity in [Fidelity::Lane, Fidelity::Wavefront] {
+        let registers = run_at(fidelity, &program);
+        assert_eq!(vector(&registers, 2), 0x3e22_f983, "{fidelity:?}");
+    }
+}
+
 /// Two floats pack into one register as halves, the first source low.
 ///
 /// 1.0 is `0x3c00` and 2.0 is `0x4000` as halves, both exact, so the packed word is
@@ -5594,6 +5614,30 @@ fn a_one_source_float_sdwa_takes_its_source_modifiers() {
     assert_eq!(vector(&registers, 2), (-0.25f32).to_bits(), "1 / -|-4.0|");
 }
 
+/// PPSA28061's scanline pixel shader takes a base-2 logarithm of an absolute value through SDWA
+/// (`v_log_f32_sdwa v12, |v12|`) and truncates toward zero (`v_trunc_f32_e32 v8, v6`): log2 |-8.0|
+/// is 3.0, and -2.75 truncates to -2.0.
+#[test]
+fn an_sdwa_logarithm_and_a_truncation() {
+    const ABSOLUTE: u32 = 1 << 21;
+    const WHOLE: u32 = SEL_DWORD << 8 | SEL_DWORD << 16;
+    if !device_or_skip("an_sdwa_logarithm_and_a_truncation") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(3, (-8.0f32).to_bits()));
+    program.extend(v_mov_literal(6, (-2.75f32).to_bits()));
+    program.extend([
+        head("v_log_f32_e32") | (1 << 17) | SDWA_MARKER,
+        3 | WHOLE | ABSOLUTE,
+    ]);
+    program.push(vop1_vv("v_trunc_f32_e32", 2, 6));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 3.0f32.to_bits(), "log2 |-8.0|");
+    assert_eq!(vector(&registers, 2), (-2.0f32).to_bits(), "trunc -2.75");
+}
+
 /// An SDWA source whose scalar flag is set names whatever the ordinary source encoding does, an
 /// inline float among them: PPSA28061's notice-screen pixel shader adds 0.5 through SDWA over
 /// whole registers (`v_add_f32_sdwa v5, 0.5, v2`, words 0x060a04f9 0x868606f0). 0.5 + 1.25 is 1.75.
@@ -6319,6 +6363,32 @@ fn a_multiply_add_takes_its_constant_from_the_literal_word() {
     // v_madmk_f32 v4, v1, 0.25, v2
     program.extend([
         head("v_madmk_f32") | (4 << 17) | (2 << 9) | (VGPR_0 + 1),
+        0.25f32.to_bits(),
+    ]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 6.5f32.to_bits());
+    assert_eq!(vector(&registers, 4), 3.5f32.to_bits());
+}
+
+/// `v_fmaak_f32` and `v_fmamk_f32` are the fused twins, the same shapes: the constant a word of the
+/// instruction. PPSA28061's pixel shader read its `v_fmaak_f32` constant as an instruction.
+#[test]
+fn a_fused_multiply_add_takes_its_constant_from_the_literal_word() {
+    if !device_or_skip("a_fused_multiply_add_takes_its_constant_from_the_literal_word") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 2.0f32.to_bits()));
+    program.extend(v_mov_literal(2, 3.0f32.to_bits()));
+    // v_fmaak_f32 v3, v1, v2, 0.5
+    program.extend([
+        head("v_fmaak_f32") | (3 << 17) | (2 << 9) | (VGPR_0 + 1),
+        0.5f32.to_bits(),
+    ]);
+    // v_fmamk_f32 v4, v1, 0.25, v2
+    program.extend([
+        head("v_fmamk_f32") | (4 << 17) | (2 << 9) | (VGPR_0 + 1),
         0.25f32.to_bits(),
     ]);
     program.push(s_endpgm());

@@ -87,6 +87,21 @@ fn an_image_instruction_is_as_long_as_the_assembler_made_it() {
     }
 }
 
+/// Each keeps every dword it occupies, so the address registers listed after the fixed part are
+/// there to be read: `[v2, v1, v0]`'s second and third in the third word's low bytes.
+#[test]
+fn an_image_instruction_keeps_its_listed_address_words() {
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(MEASURED[1].encoding, &encodings, &operands);
+    assert_eq!(
+        decoded.instructions[0].words,
+        [0xf090_010a, 0x0061_0002, 0x0000_0001],
+        "{}",
+        MEASURED[1].printed
+    );
+}
+
 /// A stream of them stays in step: four concatenated decode as four, at their offsets.
 #[test]
 fn a_stream_of_image_instructions_stays_in_step() {

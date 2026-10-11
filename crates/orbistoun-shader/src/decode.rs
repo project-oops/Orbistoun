@@ -34,6 +34,10 @@ pub struct Instruction {
     /// and absolute flags here. Surfaced raw because which bits mean what is a property of
     /// the sub-encoding, which the decoder does not model.
     pub second_word: Option<u32>,
+    /// Every dword the instruction occupies, in order, as far as the buffer holds them: the
+    /// words past its fixed part carry what no operand slot does, such as an image access's
+    /// further address registers.
+    pub words: Vec<u32>,
     /// Index into [`EncodingTable::encodings`], or `None` if unrecognised.
     pub encoding: Option<u16>,
     /// Opcode within its family. Meaningless when `encoding` is `None`.
@@ -171,6 +175,10 @@ fn decode_inner(
             second_word,
         } = recognise(bytes, offset, word, table, operands, &mut result);
 
+        let words: Vec<u32> = (offset..offset + length as usize)
+            .step_by(4)
+            .map_while(|at| read_word(bytes, at))
+            .collect();
         if offset + length as usize > bytes.len() {
             // The instruction claims to extend past the buffer. Record it and stop
             // rather than read whatever follows as instructions.
@@ -180,6 +188,7 @@ fn decode_inner(
                 length,
                 word,
                 second_word,
+                words,
                 encoding,
                 opcode,
                 operands: decoded_operands,
@@ -207,6 +216,7 @@ fn decode_inner(
             length,
             word,
             second_word,
+            words,
             encoding,
             opcode,
             operands: decoded_operands,
