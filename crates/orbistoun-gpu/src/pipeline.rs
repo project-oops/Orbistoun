@@ -834,6 +834,9 @@ pub struct Pipeline {
     carries_state: bool,
     /// That state: the last value each register was written, by the submissions carried so far.
     carried: BTreeMap<u32, u32>,
+    /// The wave widths in force at the draw whose shaders are being bound, while one is: a
+    /// submission may change them between draws.
+    draw_widths: Option<WaveWidths>,
     /// Each stage's user-data layout for the submission being prepared, vertex then fragment.
     user_data: [UserData; 2],
     /// Shader bytes, by content hash, to the resource holding the translation.
@@ -915,6 +918,7 @@ impl Pipeline {
             feeds_user_data: false,
             carries_state: false,
             carried: BTreeMap::new(),
+            draw_widths: None,
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
             decoded: BTreeMap::new(),
@@ -2035,8 +2039,6 @@ impl Pipeline {
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
         let mut previous_shaders = Vec::new();
         let mut previous_chunks: Vec<ResourceId> = Vec::new();
-        // A primitive shader's threads: a 64-lane wave, or half of one under wave32.
-        let lanes = 64 >> u32::from(submission.report.wave_widths.primitive_w32);
         let mut sampled_through_samplers = self.samples_through_samplers();
         for draw in draws {
             let mut written: Vec<Option<u32>> = shader_registers
@@ -2072,6 +2074,14 @@ impl Pipeline {
                 sampled_through_samplers,
                 &mut written,
             );
+            // The widths in force at this draw, which its shaders were compiled for: a submission
+            // may change them between draws.
+            let widths = crate::registers::wave_widths_from(|register| {
+                sweep.latest(draw.packet_offset, register)
+            });
+            self.draw_widths = Some(widths);
+            // A primitive shader's threads: a 64-lane wave, or half of one under wave32.
+            let lanes = 64 >> u32::from(widths.primitive_w32);
             let plans = geometry
                 .as_ref()
                 .map_or_else(|_| Vec::new(), |&whole| draw_chunks(draw, whole, lanes));
@@ -2122,6 +2132,7 @@ impl Pipeline {
             previous_shaders = shaders;
             previous_chunks = chunked;
         }
+        self.draw_widths = None;
         (per_draw, per_draw_chunks)
     }
 
@@ -2732,7 +2743,8 @@ impl Pipeline {
             candidate.stage,
             (
                 submission.report.primitive_topology,
-                submission.report.wave_widths,
+                // The draw's own widths where a draw is being bound, else the submission's.
+                self.draw_widths.unwrap_or(submission.report.wave_widths),
                 for_draw,
             ),
             memory,

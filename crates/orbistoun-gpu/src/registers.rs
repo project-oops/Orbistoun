@@ -2459,16 +2459,26 @@ pub struct WaveWidths {
 /// among the writes. Most-recent-write-wins.
 #[must_use]
 pub fn wave_widths_at(writes: &[RegisterWrite]) -> WaveWidths {
-    let latest = |register| {
+    wave_widths_from(|register| {
         writes
             .iter()
             .rev()
             .find(|write| write.register == register)
-            .map_or(0, |write| write.value)
-    };
+            .map(|write| write.value)
+    })
+}
+
+/// The stages' wave widths in force at a draw, reading each register's value through `last` - a
+/// [`RegisterSweep::latest`] for a caller walking draws in order. A register never written reads
+/// as Wave64.
+///
+/// Per draw, not per submission: radeonsi on GFX10 compiles a culling primitive shader as Wave64
+/// and the others as Wave32 (`si_state_shaders.cpp`, `si_determine_wave_size`), and rewrites
+/// `VGT_SHADER_STAGES_EN` between such draws within one submission.
+pub fn wave_widths_from(mut last: impl FnMut(u32) -> Option<u32>) -> WaveWidths {
     WaveWidths {
-        primitive_w32: latest(VGT_SHADER_STAGES_EN) & GS_W32_EN != 0,
-        pixel_w32: latest(SPI_PS_IN_CONTROL) & PS_W32_EN != 0,
+        primitive_w32: last(VGT_SHADER_STAGES_EN).unwrap_or(0) & GS_W32_EN != 0,
+        pixel_w32: last(SPI_PS_IN_CONTROL).unwrap_or(0) & PS_W32_EN != 0,
     }
 }
 
@@ -2835,6 +2845,37 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 
 #[cfg(test)]
 mod tests {
+    /// A draw's wave widths are the ones in force at it: radeonsi on GFX10 compiles a culling
+    /// primitive shader as Wave64 and the rest as Wave32 (`si_state_shaders.cpp`,
+    /// `si_determine_wave_size`), and rewrites `VGT_SHADER_STAGES_EN` between such draws in one
+    /// submission, so the submission's last write is not every draw's.
+    #[test]
+    fn a_draws_wave_widths_are_the_ones_in_force_at_it() {
+        use super::{
+            GS_W32_EN, PS_W32_EN, RegisterSweep, RegisterWrite, SPI_PS_IN_CONTROL,
+            VGT_SHADER_STAGES_EN, wave_widths_from,
+        };
+        let write = |packet_offset, register, value| RegisterWrite {
+            packet_offset,
+            register,
+            value,
+        };
+        let writes = [
+            write(0x10, VGT_SHADER_STAGES_EN, GS_W32_EN),
+            write(0x10, SPI_PS_IN_CONTROL, PS_W32_EN),
+            write(0x40, VGT_SHADER_STAGES_EN, 0),
+        ];
+        let mut sweep = RegisterSweep::new(&writes);
+        let at_first = wave_widths_from(|register| sweep.latest(0x20, register));
+        assert!(at_first.primitive_w32 && at_first.pixel_w32, "{at_first:?}");
+        let at_second = wave_widths_from(|register| sweep.latest(0x50, register));
+        assert!(
+            !at_second.primitive_w32,
+            "rewritten to Wave64 before the second draw"
+        );
+        assert!(at_second.pixel_w32, "the pixel stage's was not rewritten");
+    }
+
     /// `VGT_GS_OUT_PRIM_TYPE` reads 3 as the rectangle list radeonsi's blits draw (gfx103's
     /// `RECTLIST`), and 4 as the rectangle list `sceAgcCreatePrimState` names for topology 17
     /// (gfx11's `RECTLIST`, D755); 5 is not a primitive.
