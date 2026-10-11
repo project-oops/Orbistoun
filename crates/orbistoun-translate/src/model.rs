@@ -7090,7 +7090,14 @@ fn scalar_bit_mask<M: Model + ?Sized>(
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
     let (destination, width, offset) = three_operands(instruction)?;
-    let register = scalar_destination(instruction, destination)?;
+    // `m0` is state outside the register file: AGC's GDS-writing compute program forms its `m0`
+    // with `s_bfm_b32 m0, 2, 14`.
+    let to_m0 = matches!(destination, Operand::Named(named) if named == M0);
+    let register = if to_m0 {
+        0
+    } else {
+        scalar_destination(instruction, destination)?
+    };
     let width = model.read_source(instruction, width, 0)?;
     let offset = model.read_source(instruction, offset, 0)?;
     let five_bits = model.constant(31);
@@ -7100,7 +7107,11 @@ fn scalar_bit_mask<M: Model + ?Sized>(
     let bit = model.binary(op::SHIFT_LEFT_LOGICAL, one, width);
     let ones = model.binary(op::ISUB, bit, one);
     let mask = model.binary(op::SHIFT_LEFT_LOGICAL, ones, offset);
-    model.write_scalar(register, mask);
+    if to_m0 {
+        model.write_m0(mask);
+    } else {
+        model.write_scalar(register, mask);
+    }
     model.count();
     Ok(())
 }

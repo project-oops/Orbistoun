@@ -256,6 +256,22 @@ fn scalar_logic_into_m0_lands_in_m0() {
     assert_eq!(scalar(&registers, 5), 19, "got {registers:?}");
 }
 
+/// `s_bfm_b32` writing `m0` lands there: AGC's GDS-writing compute program forms its `m0` with
+/// `s_bfm_b32 m0, 2, 14` (PPSA25872's first dispatch), `3 << 14`.
+#[test]
+fn a_bit_mask_into_m0_lands_in_m0() {
+    if !device_or_skip("a_bit_mask_into_m0_lands_in_m0") {
+        return;
+    }
+    // Inline integers 2 and 14 are codes 130 and 142.
+    let registers = run(&[
+        sop2("s_bfm_b32", M0_CODE, 130, 142),
+        s_mov_code(5, M0_CODE),
+        s_endpgm(),
+    ]);
+    assert_eq!(scalar(&registers, 5), 3 << 14, "got {registers:?}");
+}
+
 /// `s_waitcnt` translates and changes no register.
 #[test]
 fn a_wait_instruction_translates_and_changes_nothing() {
