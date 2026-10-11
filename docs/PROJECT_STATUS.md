@@ -90,7 +90,7 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1196 / 1052 |
+| Functions declared / implemented | 1197 / 1053 |
 | Declared in a library that serves nothing | 47 across 7 libraries - names written down, no implementation |
 | Recorded behaviours | 1079 - 426 published, 207 measured, 122 guest-observed, 310 assumed |
 | Open questions a hardware probe could settle | 916 |
