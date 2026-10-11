@@ -5571,7 +5571,14 @@ fn format_buffer_store<M: Model + ?Sized>(
         .buffer_descriptor_format(slot)
         .ok_or(TranslateError::NeedsBufferFormats)?;
     let (format, selects, _) = descriptor_format(instruction, word3, channels)?;
-    if format.components() != channels as usize {
+    // More channels than the format has components writes the format's components, from the first
+    // channels (D790): Mesa stores an image buffer's four channels whatever its format
+    // (`ac_nir_to_llvm.c:2281-2293`). Fewer, or more through a packed format, is unmeasured.
+    let components = format.components();
+    let written = u32::try_from(components).unwrap_or(u32::MAX);
+    if components > channels as usize
+        || (components < channels as usize && !format.is_plain_words())
+    {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "a format store whose descriptor's format and channel count disagree",
@@ -5579,7 +5586,7 @@ fn format_buffer_store<M: Model + ?Sized>(
     }
     if selects
         .iter()
-        .take(channels as usize)
+        .take(components)
         .zip(4..)
         .any(|(&select, identity)| select != identity)
     {
@@ -5589,7 +5596,7 @@ fn format_buffer_store<M: Model + ?Sized>(
         });
     }
     if format.is_plain_words() {
-        buffer_access(model, instruction, false, channels)
+        buffer_access(model, instruction, false, written)
     } else {
         packed_buffer_memory(model, instruction, format, false)
     }

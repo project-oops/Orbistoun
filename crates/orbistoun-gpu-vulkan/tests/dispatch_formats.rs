@@ -40,6 +40,8 @@ const fn word3(code: u32) -> u32 {
 const FLOAT_32X4: u32 = 77;
 const UINT_32X4: u32 = 75;
 const UNORM_8X4: u32 = 56;
+/// `BUF_FMT_32_UINT`, with `DST_SEL_X` = X and the others `SQ_SEL_0`.
+const ONE_UINT: u32 = 0x0100_0004 | 20 << 12;
 
 const SOURCE: u64 = 0x4_0a60_0000;
 const DESTINATION: u64 = 0x4_1260_0000;
@@ -117,6 +119,41 @@ fn a_formatted_copy_moves_whole_word_elements() {
     .expect("dispatched");
     assert!(!done.escaped, "nothing left the bound buffers");
     assert_eq!(done.buffers[1], source, "the destination holds the copy");
+}
+
+/// A four-channel store through a one-component whole-word format writes the format's one component
+/// and leaves the rest of the element as it was (D790), as Mesa relies on when it stores an image
+/// buffer's four channels whatever the buffer's format (`ac_nir_to_llvm.c:2281-2293`). PPSA25872's
+/// fill program stores `xyzw` through a `32_UINT` descriptor whose selects are `X, 0, 0, 0`.
+#[test]
+fn a_store_writes_only_its_formats_components() {
+    match probe() {
+        Availability::Available { properties } => println!("device: {}", properties.device),
+        Availability::Unavailable { reason } => {
+            println!("SKIPPED - no device: {reason}");
+            return;
+        }
+    }
+    let module = translated(word3(UINT_32X4), ONE_UINT)
+        .expect("a store with more channels than its format has components translates");
+    let source: Vec<u32> = (0..ELEMENTS * 4).collect();
+    let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
+    let done = dispatch_guest_with_buffers(
+        &module,
+        &[0],
+        (&user_data(word3(UINT_32X4), ONE_UINT), [1, 1, 1]),
+        &DispatchImages::default(),
+        &[source, destination],
+    )
+    .expect("dispatched");
+    for (element, words) in done.buffers[1].chunks(4).enumerate() {
+        let first = u32::try_from(element * 4).expect("small");
+        assert_eq!(
+            words,
+            [first, 0xdead_beef, 0xdead_beef, 0xdead_beef],
+            "element {element}: x written, the rest untouched"
+        );
+    }
 }
 
 /// A load through a null descriptor - a fourth word of zero, as radv writes for a null vertex buffer
