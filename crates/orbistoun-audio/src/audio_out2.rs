@@ -1,9 +1,9 @@
 //! `libSceAudioOut2` - the second-generation audio output interface, beside `libSceAudioOut`.
 //!
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
-//! full capture, not a claim about the argument count. `sceAudioOut2Initialize`, the user calls and
-//! the context set-up (`ContextResetParam`, `ContextQueryMemory`, `ContextCreate`) are implemented,
-//! as measured.
+//! full capture, not a claim about the argument count. `sceAudioOut2Initialize`, the user calls, the
+//! context set-up (`ContextResetParam`, `ContextQueryMemory`, `ContextCreate`) and `PortCreate` are
+//! implemented, as measured.
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -23,7 +23,8 @@ guest_module! {
         "sceAudioOut2ContextQueryMemory" => 6,
         "sceAudioOut2ContextResetParam" => 6,
         "sceAudioOut2Initialize" => 6,
-        "sceAudioOut2PortCreate" => 6,
+        // (context, param, port)
+        "sceAudioOut2PortCreate" => 3,
         "sceAudioOut2PortDestroy" => 6,
         "sceAudioOut2PortSetAttributes" => 6,
         // (user, out)
@@ -172,6 +173,63 @@ pub(crate) fn context_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
     if unsafe { guest::write_u64(context, 0) } {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// The next port `sceAudioOut2PortCreate` gives: a fresh process's ports were numbered from 0 in the
+/// order they were made (REQ-ao05, `report-1791713884.txt` 54-99).
+static NEXT_PORT: AtomicU64 = AtomicU64::new(0);
+
+/// The port parameters whose creation is measured, as u32s from +0x00: 0, the channels shifted
+/// left by 8, the rate and 2, for 2 and 8 channels at 48000 Hz, with an 8-byte user handle at +0x10
+/// (REQ-ao05). PPSA04263 rounds a request for 6 channels up to 8 before it calls.
+const PORT_CHANNELS: [u32; 2] = [2, 8];
+const PORT_RATE: u32 = 48_000;
+
+/// Whether `param` holds port parameters as measured, for a user `sceAudioOut2UserCreate` gave.
+fn measured_port(param: u64) -> bool {
+    let mut words = [0_u32; 4];
+    for (i, word) in words.iter_mut().enumerate() {
+        // SAFETY: the guest's parameter block, by the call's contract.
+        match unsafe { guest::read_u32(param.wrapping_add(i as u64 * 4)) } {
+            Some(value) => *word = value,
+            None => return false,
+        }
+    }
+    // SAFETY: the same block's user handle, at +0x10.
+    let Some(user) = (unsafe { guest::read_u64(param.wrapping_add(0x10)) }) else {
+        return false;
+    };
+    let [first, layout, rate, fourth] = words;
+    let known_user = USERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&user);
+    first == 0
+        && PORT_CHANNELS
+            .iter()
+            .any(|&channels| layout == channels << 8)
+        && rate == PORT_RATE
+        && fourth == 2
+        && known_user
+}
+
+/// `sceAudioOut2PortCreate(context, param, port)`: on the context `sceAudioOut2ContextCreate` made,
+/// with measured parameters, writes the next port number to the 8-byte `port` and answers 0
+/// (REQ-ao05, `report-1791713884.txt` 54-99: 2 channels then 8 gave ports 0 and 1). Other
+/// parameters, contexts and users are unmeasured and answer the placeholder.
+pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (context, param, port) = (args[0], args[1], args[2]);
+    let made = CONTEXT_MADE.load(Ordering::Acquire);
+    if !made || context != 0 || param == 0 || port == 0 || !measured_port(param) {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let number = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
+    if unsafe { guest::write_u64(port, number) } {
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())

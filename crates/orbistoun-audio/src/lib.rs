@@ -242,6 +242,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             audio_out2::context_query_memory,
         ),
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
+        ("sceAudioOut2PortCreate", audio_out2::port_create),
     ]
 }
 
@@ -321,6 +322,42 @@ mod tests {
             0
         );
         assert_eq!(context, [0; 8], "the console's first context is 0");
+
+        // Its ports (REQ-ao05, `report-1791713884.txt` 54-99): 2 channels then 8, for a user
+        // `UserCreate(0xff)` gave, numbered from 0.
+        let mut user = [0_u8; 8];
+        let user_at = user.as_mut_ptr() as u64;
+        assert_eq!(
+            call("sceAudioOut2UserCreate", [0xff, user_at, 0, 0, 0, 0]),
+            0
+        );
+        let mut ports = Vec::new();
+        for channels in [2_u32, 8] {
+            let mut block = [0_u8; 0x40];
+            block[4..8].copy_from_slice(&(channels << 8).to_le_bytes());
+            block[8..12].copy_from_slice(&48_000_u32.to_le_bytes());
+            block[12..16].copy_from_slice(&2_u32.to_le_bytes());
+            block[16..24].copy_from_slice(&user);
+            let mut port = [0xa5_u8; 8];
+            let args = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
+            assert_eq!(
+                call("sceAudioOut2PortCreate", args),
+                0,
+                "{channels} channels"
+            );
+            ports.push(u64::from_le_bytes(port));
+        }
+        assert_eq!(ports, [0, 1]);
+        // Six channels, which the title rounds up to eight before it calls, is unmeasured.
+        let mut block = [0_u8; 0x40];
+        block[4..8].copy_from_slice(&(6_u32 << 8).to_le_bytes());
+        block[8..12].copy_from_slice(&48_000_u32.to_le_bytes());
+        block[12..16].copy_from_slice(&2_u32.to_le_bytes());
+        block[16..24].copy_from_slice(&user);
+        let mut port = [0xa5_u8; 8];
+        let unmeasured = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
+        assert_ne!(call("sceAudioOut2PortCreate", unmeasured), 0);
+        assert_eq!(port, [0xa5; 8], "an unmeasured call writes nothing");
     }
 
     /// `sceAudioOut2Initialize` answers 0 the first time in a process and `0x80268004` every time

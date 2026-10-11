@@ -86,3 +86,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceAudioOut2PortCreate"
+arity = 3
+purpose = "(context, param, port): opens an output port on a context for a user, writing its 8-byte number to port."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ao05): in a fresh process after the context set-up and UserCreate(0xff), with param u32 0, channels << 8, 48000, 2 and the user handle at +0x10, rc 0 and port 0 for 2 channels, then port 1 for 8; the block was unchanged.",
+    "orbistoun numbers a process's ports from 0 for those parameters on the context ContextCreate made; other channel counts, rates, contexts and users are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261011T0010Z-ao05, reports/hardware/report-1791713884.txt lines 54-99 (000-boot/audioout2-fresh-process)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-11"
