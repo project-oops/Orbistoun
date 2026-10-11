@@ -77,6 +77,32 @@ pub fn descriptor_extent(words: [u32; 4], reads: DescriptorReads) -> Result<u64,
     Ok(scalar.max(vector))
 }
 
+/// The bytes of the `length` at `address` that guest memory holds: all of them, or the longest
+/// mapped run of whole words from `address` (D795). `None` when not even a word is mapped there.
+fn mapped_prefix(memory: &impl GuestMemory, address: u64, length: usize) -> Option<&[u8]> {
+    if let Some(bytes) = memory.read(address, length) {
+        return Some(bytes);
+    }
+    // A mapping holds a contiguous run, so a readable prefix is found by halving: `held` is
+    // readable (or zero), `past` is not.
+    let (mut held, mut past) = (0_usize, length);
+    while past - held > 4 {
+        let middle = (held + (past - held) / 2) & !3;
+        if middle <= held {
+            break;
+        }
+        if memory.read(address, middle).is_some() {
+            held = middle;
+        } else {
+            past = middle;
+        }
+    }
+    if held == 0 {
+        return None;
+    }
+    memory.read(address, held)
+}
+
 /// The most bytes one draw buffer binds; a descriptor naming more is refused rather than read.
 const MOST_BYTES: u64 = 256 << 20;
 
@@ -124,14 +150,15 @@ impl BufferCache {
         }
         // Marked before the bytes are hashed, so a write racing the hash is seen next time.
         let since = orbistoun_mem::watch::mark(address, span);
-        let bytes = memory.read(address, length).ok_or(concat!(
-            "a draw buffer's range is not wholly mapped guest memory, so the bytes its reads ",
-            "reach are not there to bind (D733)"
+        let bytes = mapped_prefix(memory, address, length).ok_or(concat!(
+            "a draw buffer's range has no guest memory mapped at its base, so the bytes its ",
+            "reads reach are not there to bind (D733)"
         ))?;
-        // Whole words, the tail past the range zero: the module never reads a word the range
-        // does not start.
+        // Whole words, the tail past the bytes held zero: the module never reads a word the range
+        // does not start. Only to the word the held bytes end in, so a range cut at its mapping
+        // (D795) is not filled out with zeros the guest never wrote.
         let mut padded = bytes.to_vec();
-        padded.resize(length.div_ceil(4) * 4, 0);
+        padded.resize(bytes.len().div_ceil(4) * 4, 0);
         let mut hasher = crate::ContentHasher::new(padded.len() / 4);
         hasher.bytes(&padded);
         let buffer = DrawBuffer {
@@ -673,6 +700,31 @@ mod cache_tests {
 mod tests {
     use super::descriptor_extent;
     use orbistoun_translate::draw_buffers::DescriptorReads;
+
+    /// A range running past the guest memory that holds it binds the part held (D795): mesa-cube's
+    /// vertex buffer starts eight bytes into its mapping and its records run eight bytes past it.
+    /// Nothing mapped at the base is still refused.
+    #[test]
+    fn a_range_past_its_mapping_binds_the_part_mapped() {
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let memory = Memory((0..0x100_u32).map(|byte| byte as u8).collect());
+        let mut cache = super::BufferCache::default();
+        let bound = cache
+            .read(0x1008, 0x100, &memory)
+            .expect("the mapped part binds");
+        assert_eq!(bound.bytes.len(), 0xf8, "up to the mapping's end");
+        assert_eq!(bound.bytes[0], 8, "from the range's base");
+        assert!(
+            cache.read(0x2000, 0x10, &memory).is_err(),
+            "nothing mapped there"
+        );
+    }
 
     /// radeonsi's raw out-of-bounds mode, in a descriptor's fourth word: `OOB_SELECT` 3 in bits
     /// 29:28 (Mesa `gfx10-rsrc.json`, `SQ_BUF_RSRC_WORD3`), as its fast-path constant buffer has.
