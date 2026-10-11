@@ -588,8 +588,12 @@ impl GuestCp<'_> {
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
             // The registers as submitted: the tables read then, not what the guest has since
             // written to them.
-            let prepared =
-                pipeline.submit(&bytes, Queue::Draw, &[], &whole.tables.over(&self.memory));
+            let prepared = pipeline.submit(
+                &bytes,
+                Queue::Draw,
+                &[],
+                &whole.tables.over(&SettledReads(&self.memory)),
+            );
             keep_new_translations(pipeline);
             prepared
         };
@@ -2476,6 +2480,28 @@ impl MappedRegions {
     }
 }
 
+/// Guest memory as a submission's preparation reads it - its shaders, textures and buffers - with
+/// every earlier write settled first: a frame still pending on the device for a target the read
+/// overlaps is written back as a flip writes it (D714), and a copy deferred over the read is
+/// carried out (D719). The
+/// hardware ran the earlier submission before this one read, so a texture drawn into by one is
+/// what the next samples. Only the reads that overlap pay for it; the many submissions a frame
+/// draws into one target never read that target while preparing.
+struct SettledReads<'m>(&'m MappedRegions);
+
+impl GuestMemory for SettledReads<'_> {
+    fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+        let span = length as u64;
+        // Settled as a flip settles it - deferred onto the target's own pages where it can be
+        // (D719) - and then carried out by this read, with any other copy over it.
+        if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, span)) {
+            let _ = write_back_at_this_flip();
+        }
+        carry_out_overlapping(address, span);
+        self.0.read(address, length)
+    }
+}
+
 impl GuestMemory for MappedRegions {
     fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
         if length == 0 || !self.contains(address, length) {
@@ -2697,7 +2723,7 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
         live.as_mut()
             .map(|pipeline| {
-                let submission = pipeline.submit(&bytes, Queue::Draw, &[], &memory);
+                let submission = pipeline.submit(&bytes, Queue::Draw, &[], &SettledReads(&memory));
                 keep_new_translations(pipeline);
                 submission
             })
@@ -3762,6 +3788,59 @@ mod tests {
 
     /// A flipped frame reaches memory when something reads it, and not before (D719).
     ///
+    /// A submission's preparation reads guest memory with earlier writes settled: a read that
+    /// misses the target a frame is pending for leaves it pending, and one that reaches it writes the
+    /// frame back first, so a texture one submission drew is what the next samples. mesa-cube
+    /// builds its checkerboard's levels this way, and read zeros.
+    #[test]
+    fn a_read_while_preparing_settles_a_frame_pending_over_it() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestMemory, MappedRegions, SettledReads, Written,
+        };
+        use fake::frame;
+        use std::sync::Arc;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        allow_writes_to(base, span as u64);
+        fake::install();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            target,
+            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        let before = memory.to_vec();
+        let regions = MappedRegions::current();
+        let reads = SettledReads(&regions);
+
+        let _ = reads.read(base + span as u64, 4);
+        assert!(
+            super::pending_target().is_some(),
+            "a read elsewhere leaves it"
+        );
+
+        let _ = reads.read(base, 4);
+        assert!(super::pending_target().is_none(), "written back");
+        let mut expected = super::words_of(&before);
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            memory,
+            zerocopy::IntoBytes::as_bytes(expected.as_slice()),
+            "memory holds the frame before the read returns"
+        );
+    }
+
     /// The flip leaves memory as it was and keeps a snapshot; the first read carries it out, and
     /// memory then holds the frame tiled over what it held. A flip followed by a fill covering the
     /// whole target never reads its snapshot, and memory holds the fill.

@@ -805,6 +805,22 @@ fn write_failed_submission(submission: &Submission) {
     write_submission(submission, "failed");
 }
 
+/// What a bound texture holds, at a glance: its first texel and how many distinct texels it has, a
+/// texture of one value - nothing written to it - reading as `1 distinct`. Counted over at most
+/// the first 4096 texels, so a large texture costs no more to list than a small one.
+fn texel_summary(texels: &[u32]) -> String {
+    const COUNTED: usize = 4096;
+    let counted = &texels[..texels.len().min(COUNTED)];
+    let distinct: std::collections::BTreeSet<u32> = counted.iter().copied().collect();
+    let first = texels.first().copied().unwrap_or(0);
+    let bound = if texels.len() > COUNTED {
+        " in the first 4096"
+    } else {
+        ""
+    };
+    format!("first {first:#010x}, {} distinct{bound}", distinct.len())
+}
+
 /// One command of a dumped submission. Addresses and resource ids read best in hexadecimal and
 /// sizes in decimal, so the commands that carry a size name it in pixels.
 fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
@@ -813,8 +829,12 @@ fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
             slot,
             width,
             height,
+            texels,
             ..
-        } => format!("BindTexture {{ slot {slot}, {width}x{height} }}"),
+        } => format!(
+            "BindTexture {{ slot {slot}, {width}x{height}, {} }}",
+            texel_summary(texels)
+        ),
         orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } => {
             draw_buffers_line(*stage, buffers)
         }
