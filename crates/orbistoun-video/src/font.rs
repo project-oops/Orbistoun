@@ -30,6 +30,8 @@ guest_module! {
         "sceFontSupportSystemFonts" => 1,
         // (library, 0, 0)
         "sceFontSupportExternalFonts" => 3,
+        // (library, 0, size)
+        "sceFontAttachDeviceCacheBuffer" => 3,
     }
 }
 
@@ -125,8 +127,94 @@ pub(crate) fn font_create_library_with_edition(args: &[u64; GUEST_ARG_REGISTERS]
     let Some(library) = zeroed_block(LIBRARY_BYTES) else {
         return u64::from(orbistoun_core::GuestError::NoMemory.as_raw());
     };
+    libraries()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(library, Library { memory, cache: 0 });
     // SAFETY: as above.
     unsafe { guest::write_u64(out, library) };
+    OK
+}
+
+/// What a library was created over, and the cache buffer attached to it.
+#[derive(Debug, Clone, Copy)]
+struct Library {
+    /// The font memory object it was created over.
+    memory: u64,
+    /// The block [`font_attach_device_cache_buffer`] took for it, or 0.
+    cache: u64,
+}
+
+/// Every library created, by its address.
+fn libraries() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, Library>> {
+    static LIBRARIES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<u64, Library>>,
+    > = std::sync::OnceLock::new();
+    LIBRARIES.get_or_init(Default::default)
+}
+
+/// A font memory object's callback in slot `slot` of its interface (malloc 0, free 1, realloc 2,
+/// calloc 3, as obSCEne built the interface for REQ-fm08), and the context it is called with: the
+/// interface and the context lie at `+24` and `+16`, where [`font_memory_init`] puts them.
+fn memory_callback(memory: u64, slot: u64) -> Option<(u64, u64)> {
+    // SAFETY: the guest's font memory object, read through the checked accessor.
+    let interface = unsafe { guest::read_u64(memory + 24) }?;
+    // SAFETY: as above.
+    let context = unsafe { guest::read_u64(memory + 16) }?;
+    // SAFETY: the interface the guest handed `sceFontMemoryInit`, read through the checked accessor.
+    let callback = unsafe { guest::read_u64(interface + slot * 8) }?;
+    (callback != 0).then_some((callback, context))
+}
+
+/// What attaching answers for a cache buffer it could not have: the allocation failed, or the size
+/// is past what is measured to succeed (`attach-size-2mb-rc`).
+const NO_CACHE_MEMORY: u64 = 0x8046_0010;
+/// The largest cache buffer measured to attach: 1 MiB, as PPSA21564 asks for.
+const MEASURED_CACHE_BYTES: u64 = 0x10_0000;
+
+/// `sceFontAttachDeviceCacheBuffer(library, 0, size)`: takes `size` bytes from the font memory's
+/// malloc callback, sets the library's byte `+8` and answers 0 for any block the callback hands
+/// back - ordinary 16-aligned heap memory and direct memory alike - and `0x80460010` when it hands
+/// back null (REQ-fm09, `20261011-083754-eboot.obs.log` 4953-4974). A null library answers
+/// `0x80460004` and a 2 MiB size `0x80460010` (REQ-fm09); size 0 answers `0x80460002` (REQ-fm05).
+/// A size between 1 and 2 MiB is unmeasured and refused as 2 MiB is.
+pub(crate) fn font_attach_device_cache_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (library, size) = (args[0], args[2]);
+    if library == 0 {
+        return NO_LIBRARY;
+    }
+    if size == 0 {
+        return INVALID_ARGUMENT;
+    }
+    if size > MEASURED_CACHE_BYTES {
+        return NO_CACHE_MEMORY;
+    }
+    let Some(created) = libraries()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&library)
+        .copied()
+    else {
+        return NO_LIBRARY;
+    };
+    let Some((malloc, context)) = memory_callback(created.memory, 0) else {
+        return NO_CACHE_MEMORY;
+    };
+    // SAFETY: the guest's own allocator, which it handed `sceFontMemoryInit` to call.
+    let block =
+        unsafe { orbistoun_kernel::thread::call_guest(malloc, [context, size, 0]) }.unwrap_or(0);
+    if block == 0 {
+        return NO_CACHE_MEMORY;
+    }
+    // SAFETY: the library block this module made, byte `+8` within it.
+    unsafe { guest::write_bytes(library + 8, &[1]) };
+    if let Some(entry) = libraries()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(&library)
+    {
+        entry.cache = block;
+    }
     OK
 }
 
@@ -171,9 +259,22 @@ pub(crate) fn font_support_external_fonts(args: &[u64; GUEST_ARG_REGISTERS]) -> 
     support_fonts(args[0], EXTERNAL_SUPPORT_AT)
 }
 
-/// `sceFontDestroyLibrary(&library)`: clears `library` and answers 0 (`arm4-destroy`). The block
-/// is not reused.
+/// `sceFontDestroyLibrary(&library)`: clears `library` and answers 0 (`arm4-destroy`), handing an
+/// attached cache buffer back through the font memory's free callback (`freed-on-destroy 1`,
+/// REQ-fm09). The block is not reused.
 pub(crate) fn font_destroy_library(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's library pointer, read through the checked accessor.
+    let library = unsafe { guest::read_u64(args[0]) }.unwrap_or(0);
+    let created = libraries()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&library);
+    if let Some(created) = created.filter(|created| created.cache != 0)
+        && let Some((free, context)) = memory_callback(created.memory, 1)
+    {
+        // SAFETY: the guest's own allocator's free, handed the block its malloc gave.
+        unsafe { orbistoun_kernel::thread::call_guest(free, [context, created.cache, 0]) };
+    }
     // SAFETY: the guest's library pointer, cleared through the checked accessor.
     unsafe { guest::write_u64(args[0], 0) };
     OK

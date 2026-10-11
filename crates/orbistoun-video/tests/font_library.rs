@@ -102,3 +102,90 @@ fn font_support_is_set_up_once_per_library_as_measured() {
     assert_eq!(word(0xa0), system, "the second call changed nothing");
     assert_eq!(call("sceFontSupportSystemFonts", [0; 6]), 0x8046_0004);
 }
+
+/// What the attach test's malloc callback hands out: a 1 MiB block, or nothing.
+static BLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How many times the malloc callback was asked, and the last size.
+static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The font memory interface's malloc, `(context, size)`, as the guest's would be.
+extern "sysv64" fn malloc(_context: u64, size: u64) -> u64 {
+    ASKED.store(size, std::sync::atomic::Ordering::SeqCst);
+    BLOCK.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// `sceFontAttachDeviceCacheBuffer(library, 0, size)` takes its block from the font memory's
+/// malloc callback and answers 0 for any block it is given, ordinary heap memory included, setting
+/// the library's byte `+8`; `0x80460010` when the callback answers null or the size is 2 MiB, and
+/// `0x80460004` for a null library (REQ-fm09, `reports/hardware/20261011-083754-eboot.obs.log`
+/// 4953-4974; size 0 answers `0x80460002`, REQ-fm05).
+#[test]
+fn a_cache_buffer_attaches_from_the_memory_interface_as_measured() {
+    use std::sync::atomic::Ordering;
+    let selection = call("sceFontSelectLibraryFt", [0, 0, 0, 0, 0, 0]);
+    let interface: [u64; 4] = [
+        malloc as extern "sysv64" fn(u64, u64) -> u64 as usize as u64,
+        0,
+        0,
+        0,
+    ];
+    let mut memory = [0_u8; 0x40];
+    let memory_at = memory.as_mut_ptr() as usize as u64;
+    assert_eq!(
+        call(
+            "sceFontMemoryInit",
+            [
+                memory_at,
+                0,
+                0x80_0000,
+                interface.as_ptr() as usize as u64,
+                0x77,
+                0
+            ],
+        ),
+        0
+    );
+    let mut library = 0_u64;
+    let out = std::ptr::addr_of_mut!(library) as usize as u64;
+    assert_eq!(
+        call(
+            "sceFontCreateLibraryWithEdition",
+            [memory_at, selection, 0, out, 0, 0]
+        ),
+        0
+    );
+    let attach = |library: u64, size: u64| {
+        call(
+            "sceFontAttachDeviceCacheBuffer",
+            [library, 0, size, 0, 0, 0],
+        )
+    };
+
+    assert_eq!(attach(0, 0x10_0000), 0x8046_0004, "null library");
+    assert_eq!(attach(library, 0), 0x8046_0002, "size 0");
+    assert_eq!(attach(library, 0x20_0000), 0x8046_0010, "2 MiB");
+
+    BLOCK.store(0, Ordering::SeqCst);
+    assert_eq!(
+        attach(library, 0x10_0000),
+        0x8046_0010,
+        "the callback answered null"
+    );
+    assert_eq!(
+        ASKED.load(Ordering::SeqCst),
+        0x10_0000,
+        "asked for the size"
+    );
+
+    let heap = vec![0_u8; 0x10_0010];
+    BLOCK.store(heap.as_ptr() as usize as u64 + 0x10, Ordering::SeqCst);
+    assert_eq!(
+        attach(library, 0x10_0000),
+        0,
+        "an ordinary 16-aligned heap block"
+    );
+    // SAFETY: the library block the create answered.
+    let attached = unsafe { std::ptr::read((library + 8) as usize as *const u8) };
+    assert_eq!(attached, 1, "byte +8 set");
+    drop(heap);
+}

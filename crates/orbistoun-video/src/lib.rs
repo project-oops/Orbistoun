@@ -730,6 +730,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             font::font_create_library_with_edition,
         ),
         ("sceFontDestroyLibrary", font::font_destroy_library),
+        (
+            "sceFontAttachDeviceCacheBuffer",
+            font::font_attach_device_cache_buffer,
+        ),
         ("sceFontSupportSystemFonts", font::font_support_system_fonts),
         (
             "sceFontSupportExternalFonts",
