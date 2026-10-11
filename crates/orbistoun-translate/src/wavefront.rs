@@ -1594,6 +1594,8 @@ pub struct Wavefront<'a> {
     /// The draw's bound buffers, and the slot each traced access reads, by the access's offset
     /// (D733). `None` for a module that reads through none.
     draw_buffers: Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)>,
+    /// The global data share, declared on the first access to it (D789).
+    global_share: Option<buffer::StorageBuffer>,
     /// Scalar registers the program filled with a plain copy of one still holding a user-data word,
     /// and that word: a descriptor moved out of its user data is still read from there.
     scalar_copies: BTreeMap<u32, u32>,
@@ -1987,6 +1989,65 @@ fn declare_user_data_source(
 /// the draw buffers it reads, and whether it exports depth ([`exports_depth`]).
 type StageContext<'b> = (Window, UserData, &'b crate::draw_buffers::DrawBuffers, bool);
 
+impl Wavefront<'_> {
+    /// A pointer to the global data share's word at `byte_address`, declaring the share at
+    /// [`orbistoun_spirv::GDS_BINDING`] on first use (D789). A compute module only: the other
+    /// stages' entry points would have to name it, and none reaches it yet.
+    fn global_share_word(
+        &mut self,
+        instruction: &Instruction,
+        byte_address: Id,
+    ) -> Result<Id, TranslateError> {
+        if self.stage != Stage::Compute {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a global data share (GDS) access outside a compute program",
+            });
+        }
+        let u32_type = self.u32_type;
+        let share = if let Some(share) = self.global_share {
+            share
+        } else {
+            let words = self.builder.id();
+            self.builder.declare(
+                op::CONSTANT,
+                &[u32_type.0, words.0, orbistoun_spirv::GDS_WORDS],
+            );
+            let share = buffer::declare(
+                &mut self.builder,
+                u32_type,
+                words,
+                orbistoun_spirv::GDS_BINDING,
+            );
+            self.global_share = Some(share);
+            share
+        };
+        let two = Self::constant(self, 2);
+        let mask = Self::constant(self, orbistoun_spirv::GDS_WORDS - 1);
+        let zero = Self::constant(self, 0);
+        let b = &mut self.builder;
+        let shifted = b.id();
+        b.function(
+            op::SHIFT_RIGHT_LOGICAL,
+            &[u32_type.0, shifted.0, byte_address.0, two.0],
+        );
+        let index = b.id();
+        b.function(op::BITWISE_AND, &[u32_type.0, index.0, shifted.0, mask.0]);
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                share.element_ptr.0,
+                pointer.0,
+                share.buffer.0,
+                zero.0,
+                index.0,
+            ],
+        );
+        Ok(pointer)
+    }
+}
+
 impl<'a> Wavefront<'a> {
     /// Prepares the module and sets every lane active.
     pub fn new(encodings: &'a EncodingTable, width: Width) -> Self {
@@ -2137,6 +2198,7 @@ impl<'a> Wavefront<'a> {
             reads_geometry_input: false,
             draw_data: None,
             draw_buffers,
+            global_share: None,
             scalar_copies: BTreeMap::new(),
         };
 
@@ -3952,6 +4014,51 @@ impl Model for Wavefront<'_> {
 
     fn instructions(&self) -> usize {
         self.translated
+    }
+
+    fn read_global_share(
+        &mut self,
+        instruction: &Instruction,
+        (byte_address, in_range): (Id, Id),
+    ) -> Result<Id, TranslateError> {
+        let pointer = self.global_share_word(instruction, byte_address)?;
+        let u32_type = self.u32_type;
+        let zero = Self::constant(self, 0);
+        let b = &mut self.builder;
+        let value = b.id();
+        b.function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        let chosen = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, chosen.0, in_range.0, value.0, zero.0],
+        );
+        Ok(chosen)
+    }
+
+    fn write_global_share(
+        &mut self,
+        instruction: &Instruction,
+        (byte_address, in_range): (Id, Id),
+        value: Id,
+        lane: u32,
+    ) -> Result<(), TranslateError> {
+        if self.lane_known(lane) == Some(false) {
+            return Ok(());
+        }
+        let pointer = self.global_share_word(instruction, byte_address)?;
+        let active = self.lane_active(lane);
+        let store = self.both(active, in_range);
+        // A branch rather than a select of the old word: other workgroups write the share at the
+        // same time, so a lane that does not store writes nothing back.
+        let b = &mut self.builder;
+        let (write, merge) = (b.id(), b.id());
+        b.function(op::SELECTION_MERGE, &[merge.0, 0]);
+        b.function(op::BRANCH_CONDITIONAL, &[store.0, write.0, merge.0]);
+        b.function(op::LABEL, &[write.0]);
+        b.function(op::STORE, &[pointer.0, value.0]);
+        b.function(op::BRANCH, &[merge.0]);
+        b.function(op::LABEL, &[merge.0]);
+        Ok(())
     }
 
     /// Reads one word of the local data share.

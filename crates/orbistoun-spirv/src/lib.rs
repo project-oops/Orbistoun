@@ -1476,6 +1476,40 @@ pub const STORAGE_IMAGE_BINDING: u32 = 3;
 /// The open-toolchain GL context's second texture unit samples one.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
 
+/// Which binding a compute module reaches the global data share at: six, after the draw data
+/// (D789). Declared only by a module that accesses it.
+pub const GDS_BINDING: u32 = 6;
+
+/// The global data share's words: 64 KiB, a modelled capacity (D789, assumed) above the 48 KiB
+/// PPSA25872's program declares in `m0`. An access past it is dropped, as one past `m0` is.
+pub const GDS_WORDS: u32 = 0x4000;
+
+/// Whether `module` declares a variable at `binding` of descriptor set zero: an `OpDecorate ...
+/// Binding binding` beside an `OpDecorate ... DescriptorSet 0` on the same target.
+#[must_use]
+pub fn declares_binding(module: &[u32], binding: u32) -> bool {
+    let mut at = 5;
+    let (mut bound, mut in_set_zero) = (Vec::new(), Vec::new());
+    while at < module.len() {
+        let count = (module[at] >> 16) as usize;
+        if count == 0 {
+            break;
+        }
+        if module[at] & 0xffff == u32::from(op::DECORATE)
+            && let Some(&[target, kind, value]) = module.get(at + 1..at + 4)
+        {
+            if kind == decoration::BINDING && value == binding {
+                bound.push(target);
+            }
+            if kind == decoration::DESCRIPTOR_SET && value == 0 {
+                in_set_zero.push(target);
+            }
+        }
+        at += count;
+    }
+    bound.iter().any(|target| in_set_zero.contains(target))
+}
+
 /// Which binding a mesh module reads its per-draw user data from: five (D718). One host dispatch
 /// carries a run of guest draws, one workgroup each, and each workgroup reads
 /// [`DRAW_DATA_STRIDE_WORDS`] words at `workgroup * stride`.

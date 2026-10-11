@@ -5085,24 +5085,66 @@ fn the_local_share_is_not_addressed_through_the_memory_window() {
     );
 }
 
-/// A local-data-share instruction with its GDS bit set (bit 17 of the first word on GFX10,
-/// `aco_assembler.cpp:513`) addresses the global data share, which is not modelled: it is refused
-/// by name rather than carried out on the workgroup's local share. PPSA25872's first dispatch ends
-/// with `ds_write_b32 v0, v1 gds` (`0xd8360000`).
+/// `ds_write_b32` / `ds_read_b32` with the GDS bit (bit 17 of the first word on GFX10,
+/// `aco_assembler.cpp:513`) at `address`, as `[first, second]` words.
+fn gds(words: [u32; 2]) -> [u32; 2] {
+    [words[0] | 1 << 17, words[1]]
+}
+
+/// The global data share keeps a word an access within `m0`'s size stores, and a load reads it
+/// back (D789). For a GDS access `m0` is the share's size in bytes: LLVM sets it from the
+/// function's `amdgpu-gds-size` (`s_movk_i32 m0, 0x100` for 256), and PPSA25872's first dispatch
+/// sets `0xc000` with `s_bfm_b32 m0, 2, 14`.
 #[test]
-fn a_global_data_share_access_is_refused_not_run_on_the_local_share() {
-    let table = EncodingTable::builtin().expect("encodings");
-    let operands = OperandTable::builtin().expect("operands");
-    let mut program = ds_write(0, 1, 0).to_vec();
-    program[0] |= 1 << 17;
+fn the_global_data_share_keeps_a_word_within_m0() {
+    if !device_or_skip("the_global_data_share_keeps_a_word_within_m0") {
+        return;
+    }
+    let mut program = vec![
+        s_mov_inline(M0_CODE, 64),
+        v_mov_inline(0, 8),
+        v_mov_inline(1, 37),
+    ];
+    program.extend(gds(ds_write(0, 1, 0)));
+    program.extend(gds(ds_read(2, 0, 0)));
+    // Past m0: byte 64 of a 64-byte share is dropped, and reads zero.
+    program.push(v_mov_inline(3, 64));
+    program.push(v_mov_inline(4, 11));
+    program.extend(gds(ds_write(3, 4, 0)));
+    program.extend(gds(ds_read(5, 3, 0)));
     program.push(s_endpgm());
-    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let decoded = decode(&bytes, &table, &operands);
-    let refused = translate(&decoded, &table, Strategy::default()).expect_err("refused");
-    assert!(
-        format!("{refused:?}").contains("global data share"),
-        "refused by name: {refused:?}"
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 2),
+        37,
+        "within m0; registers were {registers:?}"
     );
+    assert_eq!(
+        vector(&registers, 5),
+        0,
+        "past m0; registers were {registers:?}"
+    );
+}
+
+/// The global data share outlives a dispatch: a word one stores, the next reads (D789).
+#[test]
+fn the_global_data_share_outlives_a_dispatch() {
+    if !device_or_skip("the_global_data_share_outlives_a_dispatch") {
+        return;
+    }
+    let mut store = vec![
+        s_mov_inline(M0_CODE, 64),
+        v_mov_inline(0, 20),
+        v_mov_inline(1, 55),
+    ];
+    store.extend(gds(ds_write(0, 1, 0)));
+    store.push(s_endpgm());
+    run(&store);
+    let mut load = vec![s_mov_inline(M0_CODE, 64), v_mov_inline(0, 20)];
+    load.extend(gds(ds_read(2, 0, 0)));
+    load.push(s_endpgm());
+    let registers = run(&load);
+    assert_eq!(vector(&registers, 2), 55, "registers were {registers:?}");
 }
 
 /// A masked write does not reach the local share.

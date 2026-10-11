@@ -807,6 +807,36 @@ pub trait Model {
     /// represent it, so this and its write are fallible.
     fn read_local(&mut self, word_index: Id) -> Result<Id, TranslateError>;
 
+    /// Reads the global data share's word at `byte_address`, or zero where `in_range` is false
+    /// (D789). Refused by a model with no global data share.
+    fn read_global_share(
+        &mut self,
+        instruction: &Instruction,
+        (byte_address, in_range): (Id, Id),
+    ) -> Result<Id, TranslateError> {
+        let _ = (byte_address, in_range);
+        Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a global data share (GDS) access in a model with no global data share",
+        })
+    }
+
+    /// Writes `value` to the global data share's word at `byte_address` for `lane`, only where the
+    /// lane is active and `in_range` holds (D789). Refused by a model with no global data share.
+    fn write_global_share(
+        &mut self,
+        instruction: &Instruction,
+        (byte_address, in_range): (Id, Id),
+        value: Id,
+        lane: u32,
+    ) -> Result<(), TranslateError> {
+        let _ = (byte_address, in_range, value, lane);
+        Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a global data share (GDS) access in a model with no global data share",
+        })
+    }
+
     /// Writes one word of the local data share, honouring the execution mask.
     fn write_local(&mut self, word_index: Id, value: Id, lane: u32) -> Result<(), TranslateError>;
 
@@ -1090,6 +1120,15 @@ pub trait Model {
             &[u32_type.0, value.0, condition.0, one.0, zero.0],
         );
         b.function(op::STORE, &[pointer.0, value.0]);
+    }
+
+    /// Whether both of two booleans hold.
+    fn both(&mut self, left: Id, right: Id) -> Id {
+        let bool_type = self.bool_type();
+        let b = self.builder();
+        let result = b.id();
+        b.function(op::LOGICAL_AND, &[bool_type.0, result.0, left.0, right.0]);
+        result
     }
 
     /// Whether either of two booleans holds.
@@ -2508,6 +2547,9 @@ fn memory_instruction<M: Model + ?Sized>(
         // The GDS bit (17 on GFX10, `aco_assembler.cpp:513`) points the access at the global data
         // share, shared by every wave and kept between dispatches; carried out on the local share it
         // would vanish with the workgroup.
+        "ds_write_b32" | "ds_read_b32" if instruction.word & DS_GDS != 0 => {
+            local_share(model, instruction, name)
+        }
         name if name.starts_with("ds_") && instruction.word & DS_GDS != 0 => {
             Err(TranslateError::Unsupported {
                 offset: instruction.offset,
@@ -4700,10 +4742,23 @@ fn local_share<M: Model + ?Sized>(
     };
     let register = u32::from(*register);
 
+    // The GDS bit sends the access to the global data share (D789).
+    let global = instruction.word & DS_GDS != 0;
     for lane in running_lanes(model) {
         let base = model.read_source(instruction, address, lane)?;
         let byte_offset = model.constant(offset);
         let byte_address = model.add(base, byte_offset);
+        if global {
+            let in_range = within_global_share(model, byte_address);
+            if reading {
+                let value = model.read_global_share(instruction, (byte_address, in_range))?;
+                model.write_vector_lane(register, lane, value);
+            } else {
+                let value = model.read_source(instruction, destination, lane)?;
+                model.write_global_share(instruction, (byte_address, in_range), value, lane)?;
+            }
+            continue;
+        }
         let index = model.local_word_index(byte_address);
 
         if reading {
@@ -4720,6 +4775,19 @@ fn local_share<M: Model + ?Sized>(
 
 /// `ds_read_b32`.
 const DS_READ: &str = "ds_read_b32";
+
+/// Whether a global-data-share word at `byte_address` lies within the share `m0` declares: for a
+/// GDS access `m0` is the share's size in bytes, as LLVM sets it from `amdgpu-gds-size` (D789). A
+/// word reaching past it is dropped by a store and reads zero.
+fn within_global_share<M: Model + ?Sized>(model: &mut M, byte_address: Id) -> Id {
+    let size = model.read_m0();
+    let four = model.constant(4);
+    let end = model.add(byte_address, four);
+    // An address within four bytes of the top wraps `end` below it, and is out of range.
+    let no_wrap = model.compare(op::UGREATER_THAN_EQUAL, end, byte_address);
+    let fits = model.compare(op::UGREATER_THAN_EQUAL, size, end);
+    model.both(no_wrap, fits)
+}
 
 /// `ds_write2_b32 address, a, b offset0 offset1` and `ds_read2_b32 d, address offset0 offset1`: two
 /// words at the address plus each eight-bit offset in words (AMD's published RDNA instruction set,

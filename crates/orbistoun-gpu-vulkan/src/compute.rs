@@ -230,6 +230,63 @@ pub(crate) fn for_this_device(words: &[u32]) -> std::borrow::Cow<'_, [u32]> {
     }
 }
 
+/// The process's global data share (D789): one zeroed buffer, created with the session and bound
+/// to every compute module that declares [`orbistoun_spirv::GDS_BINDING`]. Its memory lives as
+/// long as the process.
+static GLOBAL_SHARE: std::sync::OnceLock<vk::Buffer> = std::sync::OnceLock::new();
+
+/// The global data share as one compute pipeline binds it: the buffer, where its module declares
+/// [`orbistoun_spirv::GDS_BINDING`] (D789).
+struct GlobalShare(Option<vk::Buffer>);
+
+impl GlobalShare {
+    /// The share for `module`: none where it does not declare the binding, and an error where it
+    /// does and the session could not create the share.
+    fn for_module(module: &[u32]) -> Result<Self, DispatchError> {
+        if !orbistoun_spirv::declares_binding(module, orbistoun_spirv::GDS_BINDING) {
+            return Ok(Self(None));
+        }
+        GLOBAL_SHARE
+            .get()
+            .copied()
+            .map(|buffer| Self(Some(buffer)))
+            .ok_or(DispatchError::Vulkan(
+                "the global data share",
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ))
+    }
+
+    /// The set-zero binding it adds to the pipeline's layout.
+    fn layout_binding(&self) -> Option<vk::DescriptorSetLayoutBinding<'static>> {
+        self.0.map(|_| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(orbistoun_spirv::GDS_BINDING)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        })
+    }
+
+    /// Points `set`'s binding at the share.
+    fn write(&self, device: &ash::Device, set: vk::DescriptorSet) {
+        let Some(share) = self.0 else {
+            return;
+        };
+        let info = [vk::DescriptorBufferInfo::default()
+            .buffer(share)
+            .offset(0)
+            .range(vk::WHOLE_SIZE)];
+        let write = [vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(orbistoun_spirv::GDS_BINDING)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&info)];
+        // SAFETY: the set is live, the share lives as long as the process, and the slices outlive
+        // the call.
+        unsafe { device.update_descriptor_sets(&write, &[]) };
+    }
+}
+
 /// Builds a compute pipeline bound to one storage buffer at set 0, binding 0, with `buffers` - a
 /// dispatch's traced buffers (D746) - as set 1 where it has any.
 fn build_pipeline(
@@ -265,6 +322,9 @@ fn build_pipeline(
     ];
     // The images a guest dispatch reads and writes, at the bindings its module names them.
     bindings.extend(images.layout_bindings());
+    // The global data share, where the module reaches it (D789).
+    let global_share = GlobalShare::for_module(&module)?;
+    bindings.extend(global_share.layout_binding());
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     // SAFETY: the create info outlives the call.
     let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
@@ -303,7 +363,7 @@ fn build_pipeline(
     let mut pool_sizes = vec![
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(2),
+            .descriptor_count(2 + u32::from(global_share.0.is_some())),
     ];
     pool_sizes.extend(images.pool_sizes());
     let pool_info = vk::DescriptorPoolCreateInfo::default()
@@ -342,6 +402,7 @@ fn build_pipeline(
     ];
     // SAFETY: the write refers to a live set and a live buffer, and the slices outlive the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
+    global_share.write(device, sets[0]);
     images.write(device, sets[0]);
 
     Ok(BoundPipeline {
@@ -463,6 +524,17 @@ impl Session {
         let queue = unsafe { device.get_device_queue(family, 0) };
         let properties = Self::properties(&instance, physical, &wanted_features, mesh_enabled);
         crate::pipeline_cache::open(&instance, physical, &device);
+        // The global data share, zeroed once and kept for the process (D789).
+        let gds_words = orbistoun_spirv::GDS_WORDS as usize;
+        if let Ok((buffer, _memory)) = create_host_buffer(
+            &instance,
+            physical,
+            &device,
+            (gds_words * 4) as vk::DeviceSize,
+            gds_words,
+        ) {
+            let _ = GLOBAL_SHARE.set(buffer);
+        }
 
         Ok(Self {
             instance,
