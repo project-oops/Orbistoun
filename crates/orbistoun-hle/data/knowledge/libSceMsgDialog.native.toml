@@ -15,3 +15,60 @@ known_by = "measured"
 cites = "obSCEne 130-layout/common-dialog, reports/hardware klog-leg obs.log line 1956."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceMsgDialogOpen"
+arity = 1
+purpose = "(param): opens a message dialog."
+returns = "status"
+edge_cases = [
+    "PPSA02664's PSNCore.prx opens a user-message dialog (base size 0x30, message 'Please, connect ...') and, answered the placeholder, terminates and retries it every second.",
+    "orbistoun shows nothing and answers 0, the dialog running (D791); before initialising or while one runs it answers the placeholder.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shell's answer (D791): obSCEne could not bind libSceMsgDialog to measure it (REQ-md01, twice)."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceMsgDialogUpdateStatus"
+arity = 0
+purpose = "Advances the dialog and answers its state."
+returns = "count"
+edge_cases = [
+    "orbistoun answers none 0, initialised 1, running 2 or finished 3; a running dialog is reported running once and then finished (D791).",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The state codes are the common dialog's status enumeration as public SDK headers give it, not measured (D791)."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceMsgDialogGetResult"
+arity = 1
+purpose = "(result): the finished dialog's result."
+returns = "status"
+edge_cases = [
+    "orbistoun writes result 0 at +0x04 and the OK button, 1, at +0x08 for a finished dialog and answers 0; before it finishes, the placeholder (D791).",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The result layout and the OK button's id are from public SDK headers, not measured (D791)."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceMsgDialogTerminate"
+arity = 0
+purpose = "Ends the message dialog."
+returns = "status"
+edge_cases = [
+    "orbistoun answers 0 and returns the dialog to none; the next is initialised again (D791).",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The shell's answer (D791), unmeasured."]
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"
