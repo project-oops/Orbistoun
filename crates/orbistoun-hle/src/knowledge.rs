@@ -93,6 +93,14 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceNpWebApi2.toml"),
     ),
     (
+        "libSceNpGameIntent",
+        include_str!("../data/knowledge/libSceNpGameIntent.toml"),
+    ),
+    (
+        "libSceNpUniversalDataSystem",
+        include_str!("../data/knowledge/libSceNpUniversalDataSystem.toml"),
+    ),
+    (
         "libSceAppContent",
         include_str!("../data/knowledge/libSceAppContent.toml"),
     ),

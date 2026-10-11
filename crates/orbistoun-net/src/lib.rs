@@ -14,7 +14,9 @@ pub mod host;
 pub mod http;
 pub mod http2;
 pub mod netctl;
+pub mod npgameintent;
 pub mod npmanager;
+pub mod npuds;
 pub mod npwebapi2;
 pub mod pool;
 pub mod socket;
@@ -38,6 +40,8 @@ pub fn implementations() -> &'static [(&'static str, orbistoun_core::GuestFn)] {
             ssl::implementations(),
             netctl::implementations(),
             npmanager::implementations(),
+            npgameintent::implementations(),
+            npuds::implementations(),
         ]
         .concat()
     })
@@ -83,6 +87,36 @@ mod tests {
             .find(|(n, _)| *n == "sceNpCheckCallback")
             .expect("implemented");
         assert_eq!(f(&[0_u64; orbistoun_core::GUEST_ARG_REGISTERS]), 0);
+    }
+
+    /// `sceNpGameIntentInitialize` and `sceNpUniversalDataSystemInitialize` answer 0 with
+    /// PPSA02664's parameter blocks and leave them as they were (REQ-np02, two sweeps:
+    /// `20261011-083754-eboot.obs.log` 2933-2960, `20261011-1791715554-eboot.obs.log` 2987-3014).
+    #[test]
+    fn the_np_set_up_calls_answer_as_measured() {
+        let find = |name: &str| {
+            super::implementations()
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, f)| *f)
+                .expect("implemented")
+        };
+        let mut intent = [0_u8; 0x28];
+        intent[0] = 0x28;
+        let before = intent;
+        let mut args = [0_u64; orbistoun_core::GUEST_ARG_REGISTERS];
+        args[0] = intent.as_mut_ptr() as u64;
+        assert_eq!(find("sceNpGameIntentInitialize")(&args), 0);
+        assert_eq!(intent, before, "the block is left as it was");
+
+        let mut uds = [0_u8; 0x20];
+        uds[0] = 0x10;
+        uds[8..16].copy_from_slice(&0x40000_u64.to_le_bytes());
+        uds[24] = 0x10;
+        let before = uds;
+        args[0] = uds.as_mut_ptr() as u64;
+        assert_eq!(find("sceNpUniversalDataSystemInitialize")(&args), 0);
+        assert_eq!(uds, before, "the block is left as it was");
     }
 
     /// The measured codes are this base plus the ordinary BSD errno.

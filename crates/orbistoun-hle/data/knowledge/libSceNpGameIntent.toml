@@ -1,0 +1,15 @@
+library = "libSceNpGameIntent"
+
+[[function]]
+name = "sceNpGameIntentInitialize"
+arity = 1
+purpose = "(param): sets up game intents for the process."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-np02, two sweeps): after sceSysmoduleLoadModule(0x011c), with param a 0x28-byte block, u64 0x28 (its size) at +0x00 and the rest zero - as PPSA02664's PSNCore.prx passes it - rc 0 and the block unchanged.",
+    "orbistoun answers 0 and writes nothing; a null param is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1900Z-np02, reports/hardware/20261011-083754-eboot.obs.log lines 2933-2960 and 20261011-1791715554-eboot.obs.log lines 2987-3014 (070-user/ppsa02664-np-setup)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"

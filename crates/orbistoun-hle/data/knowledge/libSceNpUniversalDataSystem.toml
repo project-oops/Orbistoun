@@ -1,0 +1,15 @@
+library = "libSceNpUniversalDataSystem"
+
+[[function]]
+name = "sceNpUniversalDataSystemInitialize"
+arity = 1
+purpose = "(param): sets up the universal data system with the memory size param names."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-np02, two sweeps): after sceSysmoduleLoadModule(0x0105), with param u64 0x10 (its size), u64 0x40000, a pointer and u64 0x10 - as PPSA02664's PSNCore.prx passes it - rc 0 and the block unchanged.",
+    "orbistoun answers 0 and writes nothing; a null param is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261010T1900Z-np02, reports/hardware/20261011-083754-eboot.obs.log lines 2933-2960 and 20261011-1791715554-eboot.obs.log lines 2987-3014 (070-user/ppsa02664-np-setup)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"

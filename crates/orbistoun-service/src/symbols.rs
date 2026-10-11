@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 50] {
+pub(crate) fn modules() -> [ModuleDesc; 52] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -60,7 +60,9 @@ pub(crate) fn modules() -> [ModuleDesc; 50] {
         orbistoun_net::http::MODULE,
         orbistoun_net::http2::MODULE,
         orbistoun_net::netctl::MODULE,
+        orbistoun_net::npgameintent::MODULE,
         orbistoun_net::npmanager::MODULE,
+        orbistoun_net::npuds::MODULE,
         orbistoun_net::npwebapi2::MODULE,
         orbistoun_net::socket::MODULE,
         orbistoun_net::ssl::MODULE,
