@@ -6428,7 +6428,7 @@ fn set_application_heap_api(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The callbacks libc hands the kernel at start-up for a thread's end: its thread-local destructors,
 /// how many `atexit` handlers it holds, and where to report them.
 ///
-/// Kept, not called: a guest thread here ends by parking (see [`pthread_exit`]), so nothing runs
+/// Kept, not called: a guest thread here ends by parking (see `pthread_exit`), so nothing runs
 /// a thread's destructors yet. What the hooks are for is FreeBSD's `__cxa_thread_atexit` path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadHooks {
