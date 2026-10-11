@@ -38,8 +38,16 @@ pub(crate) fn frame_image(dir: &Path, event: &Event) -> Result<egui::ColorImage,
             bytes.len()
         ));
     }
+    // Shown as the display shows it: opaque, the alpha a title leaves in its buffer never reaching
+    // the screen (D796).
     Ok(match format {
-        FrameFormat::Rgba8 => egui::ColorImage::from_rgba_unmultiplied([w, h], &bytes),
+        FrameFormat::Rgba8 => {
+            let colour: Vec<u8> = bytes
+                .chunks_exact(4)
+                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect();
+            egui::ColorImage::from_rgb([w, h], &colour)
+        }
     })
 }
 
@@ -68,7 +76,20 @@ mod tests {
         );
     }
 
-    /// A region of the wrong size is refused before `from_rgba_unmultiplied` can panic on it.
+    /// A pixel's alpha never reaches the screen (D796): one a title left at zero shows its colour,
+    /// opaque, as the console's display shows it.
+    #[test]
+    fn a_frame_is_shown_opaque_whatever_its_alpha() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // PPSA28061's logo blue, alpha zero, then black, alpha zero.
+        let bytes = vec![0, 0, 0xe0, 0, 0, 0, 0, 0];
+        let event = write_frame(dir.path(), 4, 2, 1, FrameFormat::Rgba8, &bytes).expect("write");
+        let image = super::frame_image(dir.path(), &event).expect("image");
+        assert_eq!(image.pixels[0], egui::Color32::from_rgb(0, 0, 0xe0));
+        assert_eq!(image.pixels[1], egui::Color32::from_rgb(0, 0, 0));
+    }
+
+    /// A region of the wrong size is refused before an image is built from it.
     #[test]
     fn a_region_of_the_wrong_size_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
