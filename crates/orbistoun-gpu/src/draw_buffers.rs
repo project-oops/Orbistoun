@@ -543,10 +543,14 @@ pub fn bind_draw_buffers(
                     modules[at] = Some(*shader);
                 }
             }
-            RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } => {
-                // The lanes a primitive shader's draw runs as vertices (D758).
+            RenderCommand::Draw { .. }
+            | RenderCommand::DrawIndexed { .. }
+            | RenderCommand::DrawChunks { .. } => {
+                // The lanes a primitive shader's draw runs as vertices (D758): a split draw's
+                // chunks run as many as its full ones (D787).
                 let vertices = match &command {
-                    RenderCommand::Draw { vertices, .. } => *vertices,
+                    RenderCommand::Draw { vertices, .. }
+                    | RenderCommand::DrawChunks { vertices, .. } => *vertices,
                     RenderCommand::DrawIndexed { indices, .. } => *indices,
                     _ => 0,
                 };

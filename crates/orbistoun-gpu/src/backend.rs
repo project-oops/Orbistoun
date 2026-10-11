@@ -201,6 +201,23 @@ pub enum RenderCommand {
         /// First vertex.
         first_vertex: u32,
     },
+    /// A non-indexed draw split into chunks one wave holds (D741), carried as one command (D787):
+    /// chunk `i` is the [`RenderCommand::Draw`] of `vertices` vertices (`last` for the final one)
+    /// from `first_vertex + i * stride`. [`RenderCommand::chunk_draws`] gives those draws.
+    DrawChunks {
+        /// How many chunks.
+        chunks: u32,
+        /// The vertices each chunk but the last draws.
+        vertices: u32,
+        /// The vertices the last chunk draws.
+        last: u32,
+        /// Number of instances, every chunk alike.
+        instances: u32,
+        /// The first chunk's first vertex.
+        first_vertex: u32,
+        /// How far each chunk's first vertex lies past the one before.
+        stride: u32,
+    },
     /// Draw using the bound index buffer.
     DrawIndexed {
         /// Indices per instance.
@@ -228,6 +245,29 @@ pub enum RenderCommand {
         /// Value the guest associated with this point.
         label: u64,
     },
+}
+
+impl RenderCommand {
+    /// The draws a [`RenderCommand::DrawChunks`] stands for, in order (D787); a command that is not
+    /// one yields nothing.
+    pub fn chunk_draws(&self) -> impl Iterator<Item = Self> + '_ {
+        let (chunks, vertices, last, instances, first_vertex, stride) = match *self {
+            Self::DrawChunks {
+                chunks,
+                vertices,
+                last,
+                instances,
+                first_vertex,
+                stride,
+            } => (chunks, vertices, last, instances, first_vertex, stride),
+            _ => (0, 0, 0, 0, 0, 0),
+        };
+        (0..chunks).map(move |i| Self::Draw {
+            vertices: if i + 1 == chunks { last } else { vertices },
+            instances,
+            first_vertex: first_vertex.wrapping_add(i.wrapping_mul(stride)),
+        })
+    }
 }
 
 /// One buffer a draw reads through (D733): the guest's bytes from where its descriptor or base

@@ -1314,6 +1314,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",
         RenderCommand::DrawIndexed { .. } => "DrawIndexed",
+        RenderCommand::DrawChunks { .. } => "DrawChunks",
         RenderCommand::Dispatch { .. } => "Dispatch",
         RenderCommand::Fence { .. } => "Fence",
     }

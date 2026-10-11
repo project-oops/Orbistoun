@@ -1432,16 +1432,18 @@ impl Pipeline {
         span(Span::PrepareTextures, || {
             self.bind_resources(&mut submission, memory);
         });
+        // Every chunk a draw is carried out as, as D741 counted them (D787).
         submission.report.draws = submission
             .commands
             .iter()
-            .filter(|command| {
-                matches!(
-                    command,
-                    RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. }
-                )
+            .map(|command| match command {
+                RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } => 1,
+                RenderCommand::DrawChunks { chunks, .. } => {
+                    usize::try_from(*chunks).unwrap_or(usize::MAX)
+                }
+                _ => 0,
             })
-            .count();
+            .sum();
 
         submission
     }
@@ -3357,13 +3359,57 @@ fn draw_command(draw: &DrawCall, index_type: Option<u32>) -> RenderCommand {
     }
 }
 
-/// A chunked draw's chunks (D741), each binding its own primitive shader and drawing its indices.
+/// A non-indexed draw's chunks as one [`RenderCommand::DrawChunks`] (D787): every chunk counts
+/// from its first vertex through one module, the starts evenly spaced and every chunk but the last
+/// the same size. `None` where they are not, and the chunks travel separately.
+fn as_draw_chunks(chunks: &[Chunk], instances: u32) -> Option<RenderCommand> {
+    let firsts: Vec<u32> = chunks
+        .iter()
+        .map(|chunk| match chunk.index_buffer {
+            IndexBuffer::Counting { first } => Some(first),
+            IndexBuffer::Guest { .. } => None,
+        })
+        .collect::<Option<_>>()?;
+    let (first, second, last) = (chunks.first()?, chunks.get(1)?, chunks.last()?);
+    let stride = firsts[1].checked_sub(firsts[0])?;
+    let even = firsts.iter().enumerate().all(|(i, &at)| {
+        u32::try_from(i).ok().and_then(|i| i.checked_mul(stride)) == at.checked_sub(firsts[0])
+    });
+    let same = chunks.iter().all(|chunk| chunk.vertex == first.vertex)
+        && chunks[..chunks.len() - 1]
+            .iter()
+            .all(|chunk| chunk.indices == second.indices);
+    (even && same).then(|| RenderCommand::DrawChunks {
+        chunks: u32::try_from(chunks.len()).unwrap_or(u32::MAX),
+        vertices: first.indices,
+        last: last.indices,
+        instances,
+        first_vertex: firsts[0],
+        stride,
+    })
+}
+
+/// A chunked draw's chunks (D741): one [`RenderCommand::DrawChunks`] where they count from their
+/// first vertices (D787), else each binding its own primitive shader and drawing its indices.
 fn push_chunks(
     commands: &mut Vec<RenderCommand>,
     chunks: &[Chunk],
     instances: u32,
     bound: &mut Vec<(ShaderStage, ResourceId)>,
 ) {
+    if let Some(draw) = as_draw_chunks(chunks, instances) {
+        let shader = (ShaderStage::Vertex, chunks[0].vertex);
+        if !bound.contains(&shader) {
+            bound.retain(|(stage, _)| *stage != ShaderStage::Vertex);
+            bound.push(shader);
+            commands.push(RenderCommand::BindShader {
+                stage: shader.0,
+                shader: shader.1,
+            });
+        }
+        commands.push(draw);
+        return;
+    }
     for chunk in chunks {
         let shader = (ShaderStage::Vertex, chunk.vertex);
         if !bound.contains(&shader) {
@@ -3554,7 +3600,11 @@ fn bind_textures(
                 fragment = Some(*shader);
                 stale = true;
             }
-            RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. } if stale => {
+            RenderCommand::Draw { .. }
+            | RenderCommand::DrawIndexed { .. }
+            | RenderCommand::DrawChunks { .. }
+                if stale =>
+            {
                 stale = false;
                 let slots = fragment
                     .and_then(|module| sources.get(&module))
@@ -6931,6 +6981,70 @@ mod tests {
                 (32, 30, guest(0x1000 + 60)),
                 (10, 8, guest(0x1000 + 120)),
             ]
+        );
+    }
+
+    /// A non-indexed split draw travels as one command (D787) that names the chunks D741 drew
+    /// separately, and expands back into exactly those draws; an indexed draw's chunks, each with
+    /// its own index range, stay separate.
+    #[test]
+    fn a_split_draw_travels_as_one_command_and_expands_to_its_chunks() {
+        use super::{Chunk, IndexBuffer, push_chunks};
+        use crate::backend::{RenderCommand, ShaderStage};
+        let module = ResourceId(7);
+        let counting = |first, indices| Chunk {
+            vertex: module,
+            indices,
+            index_buffer: IndexBuffer::Counting { first },
+        };
+        let chunks = [counting(10, 63), counting(73, 63), counting(136, 33)];
+        let mut commands = Vec::new();
+        push_chunks(&mut commands, &chunks, 2, &mut Vec::new());
+        assert_eq!(
+            commands,
+            [
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Vertex,
+                    shader: module,
+                },
+                RenderCommand::DrawChunks {
+                    chunks: 3,
+                    vertices: 63,
+                    last: 33,
+                    instances: 2,
+                    first_vertex: 10,
+                    stride: 63,
+                },
+            ]
+        );
+        let draw = |vertices, first_vertex| RenderCommand::Draw {
+            vertices,
+            instances: 2,
+            first_vertex,
+        };
+        assert_eq!(
+            commands[1].chunk_draws().collect::<Vec<_>>(),
+            [draw(63, 10), draw(63, 73), draw(33, 136)]
+        );
+
+        let guest = |address| Chunk {
+            vertex: module,
+            indices: 32,
+            index_buffer: IndexBuffer::Guest { address, bytes: 2 },
+        };
+        let mut indexed = Vec::new();
+        push_chunks(
+            &mut indexed,
+            &[guest(0x1000), guest(0x1040)],
+            1,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            indexed
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::DrawIndexed { .. }))
+                .count(),
+            2
         );
     }
 

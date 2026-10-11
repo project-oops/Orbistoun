@@ -30,6 +30,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",
         RenderCommand::DrawIndexed { .. } => "DrawIndexed",
+        RenderCommand::DrawChunks { .. } => "DrawChunks",
         RenderCommand::Dispatch { .. } => "Dispatch",
         RenderCommand::Fence { .. } => "Fence",
     }
@@ -118,14 +119,27 @@ pub fn drive(
         }
         let span = if matches!(
             command,
-            RenderCommand::Draw { .. } | RenderCommand::DrawIndexed { .. }
+            RenderCommand::Draw { .. }
+                | RenderCommand::DrawIndexed { .. }
+                | RenderCommand::DrawChunks { .. }
         ) {
             crate::perf::Span::DrawCommand
         } else {
             crate::perf::Span::StateCommand
         };
-        match crate::perf::span(span, || backend.execute(command)) {
-            Ok(()) => outcome.executed += 1,
+        // A split draw is carried out as the chunks it names (D787), each the draw it stands for
+        // and counted as one.
+        let result = match command {
+            RenderCommand::DrawChunks { chunks, .. } => command
+                .chunk_draws()
+                .try_for_each(|draw| {
+                    crate::perf::span(crate::perf::Span::DrawCommand, || backend.execute(&draw))
+                })
+                .map(|()| usize::try_from(*chunks).unwrap_or(usize::MAX)),
+            _ => crate::perf::span(span, || backend.execute(command)).map(|()| 1),
+        };
+        match result {
+            Ok(executed) => outcome.executed += executed,
             Err(BackendError::Unsupported { command }) => {
                 outcome.refused += 1;
                 *refusals.entry(command).or_default() += 1;
