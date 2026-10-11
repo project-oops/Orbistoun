@@ -31,4 +31,6 @@ orbistoun-mem = { workspace = true }
 orbistoun-thunk = { workspace = true }
 
 [dev-dependencies]
+# Registering a module, to see which NID a declared name links to.
+orbistoun-nid = { workspace = true }
 tempfile = { workspace = true }

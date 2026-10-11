@@ -21,7 +21,18 @@ guest_module! {
         "sceAmprCommandBufferConstructor" => 6,
         "sceAmprCommandBufferReset" => 6,
         "sceAmprCommandBufferSetBuffer" => 6,
+        // Known by NID only: answers the kernel's EINVAL and writes nothing, with every argument a
+        // buffer and with every argument zero (obSCEne census, `200-census/libSceAmpr/0xb5866f7aedc94e43`).
+        "0xb5866f7aedc94e43" => 6,
     }
+}
+
+/// libSceAmpr's NID `0xb5866f7aedc94e43`, which PPSA28061 calls once: answers [`UNALIGNED`], the
+/// kernel's `EINVAL`, and writes nothing, with every argument a buffer and with every argument zero,
+/// as obSCEne's census measured it (`200-census/libSceAmpr/0xb5866f7aedc94e43`, sweep
+/// 20261007-113500).
+fn census_invalid(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    UNALIGNED
 }
 
 /// How many leading bytes of the object the constructor zeroes (`ctor-obj`, `extent 24`).
@@ -56,6 +67,7 @@ pub fn on_read_file(queue: ReadQueue) {
 /// Implementations this module provides for `libSceAmpr`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("0xb5866f7aedc94e43", census_invalid),
         (
             "sceAmprCommandBufferConstructor",
             command_buffer_constructor,
@@ -152,4 +164,35 @@ fn command_buffer_set_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// it was - the bound buffer and its size kept.
 fn command_buffer_reset(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
+}
+
+#[cfg(test)]
+mod tests {
+    /// The NID-only call links to the NID the guest imports and answers what the census measured,
+    /// whatever it is passed.
+    #[test]
+    fn the_census_nid_links_and_answers_as_measured() {
+        let mut registry = orbistoun_hle::Registry::new(
+            orbistoun_nid::NidHasher::new(*b"test-suffix"),
+            orbistoun_hle::StubPolicy::default(),
+        );
+        registry.register(super::MODULE);
+        assert!(
+            registry
+                .resolve(orbistoun_nid::Nid::from_raw(0xb586_6f7a_edc9_4e43))
+                .is_some()
+        );
+        let (_, answer) = super::implementations()
+            .iter()
+            .find(|(name, _)| *name == "0xb5866f7aedc94e43")
+            .expect("implemented");
+        assert_eq!(
+            answer(&[0; orbistoun_core::GUEST_ARG_REGISTERS]),
+            0x8002_0016
+        );
+        assert_eq!(
+            answer(&[0xa1; orbistoun_core::GUEST_ARG_REGISTERS]),
+            0x8002_0016
+        );
+    }
 }

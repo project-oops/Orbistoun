@@ -2709,3 +2709,16 @@ known_by = "assumed"
 assumptions = ["The name says which field it reads; that it reads the kevent field at +0x08 as an int is assumed from D560's layout, not measured."]
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "0x7ad80543eef3176c"
+arity = 6
+purpose = "A kernel call known by NID only, which PPSA28061 makes once."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, check 200-census/libkernel/0x7ad80543eef3176c): 0x80020009 with every argument a poisoned buffer and with every argument zero, and no buffer written. orbistoun answers it so; what the call is for is not established.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12156-12170, check 200-census/libkernel/0x7ad80543eef3176c."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-11"

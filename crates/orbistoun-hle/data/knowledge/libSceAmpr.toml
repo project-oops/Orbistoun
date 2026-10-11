@@ -69,3 +69,16 @@ known_by = "assumed"
 assumptions = ["That the read lands at submission and that 0 is the answer: no probe on firmware 12.40 can hold a real APR identifier, and an unbound buffer measured 0x80020016 (D782)."]
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "0xb5866f7aedc94e43"
+arity = 6
+purpose = "An Ampr call known by NID only, which PPSA28061 makes once."
+returns = "status"
+edge_cases = [
+    "Measured (obSCEne census, check 200-census/libSceAmpr/0xb5866f7aedc94e43): 0x80020016 with every argument a poisoned buffer and with every argument zero, and no buffer written. orbistoun answers it so; what the call is for is not established.",
+]
+known_by = "measured"
+cites = "obSCEne reports/hardware/report-1791727748.txt lines 14928-14945, check 200-census/libSceAmpr/0xb5866f7aedc94e43."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-11"

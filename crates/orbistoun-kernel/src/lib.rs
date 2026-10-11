@@ -91,6 +91,9 @@ pub mod sync_on_address {
 
 guest_module! {
     "libkernel" {
+        // Known by NID only: answers 0x80020009 and writes nothing, with every argument a buffer
+        // and with every argument zero (obSCEne census, `200-census/libkernel/0x7ad80543eef3176c`).
+        "0x7ad80543eef3176c" => 6,
         // (object, op, value, uaddr, uaddr2): FreeBSD's futex and lock primitive.
         "_umtx_op" => 5,
         "sceKernelAllocateDirectMemory" => 6,
@@ -6560,6 +6563,14 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     TABLE
 }
 
+/// libkernel's NID `0x7ad80543eef3176c`, which PPSA28061 calls once: answers the kernel's
+/// `EBADF` and writes nothing, with every argument a buffer and with every argument zero, as
+/// obSCEne's census measured it (`200-census/libkernel/0x7ad80543eef3176c`, sweep
+/// 20261007-113500).
+fn census_bad_descriptor(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0x8002_0009
+}
+
 /// Implementations a stub may call directly, past the call trace (D734), by symbol name. Each is
 /// also in [`implementations`], which answers whenever a diagnostic names the import.
 pub fn leaves() -> &'static [(&'static str, orbistoun_core::LeafFn)] {
@@ -6581,6 +6592,7 @@ extern "sysv64" fn leaf_process_time_counter(
 
 /// Every implementation, as one table; [`implementations`] is the interface other crates call.
 const TABLE: &[(&str, GuestFn)] = &[
+    ("0x7ad80543eef3176c", census_bad_descriptor),
     ("sceKernelDirectMemoryQuery", direct_memory_query),
     ("sceKernelGetSystemSwVersion", get_system_sw_version),
     ("sceKernelDlsym", dlsym),
@@ -7192,6 +7204,28 @@ fn deliver_resolved_file(buffer: u64) {
 
 #[cfg(test)]
 mod tests {
+    /// The NID-only call links to the NID the guest imports and answers what the census measured,
+    /// whatever it is passed.
+    #[test]
+    fn the_census_nid_links_and_answers_as_measured() {
+        let mut registry = orbistoun_hle::Registry::new(
+            orbistoun_nid::NidHasher::new(*b"test-suffix"),
+            orbistoun_hle::StubPolicy::default(),
+        );
+        registry.register(super::MODULE);
+        assert!(
+            registry
+                .resolve(orbistoun_nid::Nid::from_raw(0x7ad8_0543_eef3_176c))
+                .is_some()
+        );
+        let (_, answer) = implementations()
+            .iter()
+            .find(|(name, _)| *name == "0x7ad80543eef3176c")
+            .expect("implemented");
+        assert_eq!(answer(&[0; GUEST_ARG_REGISTERS]), 0x8002_0009);
+        assert_eq!(answer(&[0xa1; GUEST_ARG_REGISTERS]), 0x8002_0009);
+    }
+
     /// `sceKernelGetEventFilter` answers a delivered event's filter, sign-extended: the `i16` at
     /// `+0x08` of `struct kevent` (D560).
     #[test]

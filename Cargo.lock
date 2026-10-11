@@ -2855,6 +2855,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-kernel",
  "orbistoun-mem",
+ "orbistoun-nid",
  "orbistoun-shader",
  "orbistoun-thunk",
  "orbistoun-translate",
