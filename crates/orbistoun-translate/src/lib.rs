@@ -762,6 +762,7 @@ mod tests {
                     buffer_formats: None,
                     flat_twins: None,
                     saturated: [[false; 2]; 2],
+                    local_words: None,
                 },
             )
         };

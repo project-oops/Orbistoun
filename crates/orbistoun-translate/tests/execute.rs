@@ -5043,6 +5043,32 @@ fn the_local_share_offset_is_not_ignored() {
     );
 }
 
+/// The local share is addressed from zero, not through the guest-memory window: its words are
+/// its own, so two words 512 bytes apart - past the harness window's 64 words - hold two values.
+/// radeonsi's culling primitive shader keeps 28 bytes a vertex in it, up to byte 1792.
+#[test]
+fn the_local_share_is_not_addressed_through_the_memory_window() {
+    if !device_or_skip("the_local_share_is_not_addressed_through_the_memory_window") {
+        return;
+    }
+    let mut program = v_mov_literal(0, 0x200).to_vec();
+    program.push(v_mov_inline(1, 37));
+    program.extend(ds_write(0, 1, 0));
+    program.push(v_mov_inline(3, 0));
+    program.push(v_mov_inline(4, 11));
+    program.extend(ds_write(3, 4, 0));
+    program.extend(ds_read(2, 0, 0));
+    program.extend(ds_read(5, 3, 0));
+    program.push(s_endpgm());
+
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        (vector(&registers, 2), vector(&registers, 5)),
+        (37, 11),
+        "byte 0x200 and byte 0 are two words; registers were {registers:?}"
+    );
+}
+
 /// A masked write does not reach the local share.
 #[test]
 fn a_masked_write_does_not_reach_the_local_share() {

@@ -1117,6 +1117,7 @@ impl Pipeline {
             buffer_formats: formats,
             flat_twins: None,
             saturated: UNSATURATED,
+            local_words: state.local_words,
         };
         let key = content_hash(program)
             // The formats are compiled in, so a dispatch through other formats is another module.
@@ -1154,7 +1155,8 @@ impl Pipeline {
                 content_hash(zerocopy::IntoBytes::as_bytes(shape.as_flattened())) | 1
             })
             ^ u64::from(integer_images[0]) << 62
-            ^ u64::from(integer_images[1]) << 63;
+            ^ u64::from(integer_images[1]) << 63
+            ^ local_words_salt(state.local_words);
         Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()
         } else {
@@ -2214,6 +2216,7 @@ impl Pipeline {
             {
                 held.count = at_draw.count;
                 held.dx10_clamp = at_draw.dx10_clamp;
+                held.local_words = at_draw.local_words;
             }
             written.extend(self.user_data.iter().map(|layout| Some(layout.count)));
         }
@@ -2993,7 +2996,7 @@ impl Pipeline {
             ^ primitive_salt(primitive)
             ^ window_salt(self.window)
             ^ width_salt
-            ^ (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
+            ^ layout_salt(user_data)
             ^ crate::pixel_inputs::salt(user_data)
             ^ for_draw_salt(for_draw)
             ^ if user_data.draw_buffers {
@@ -4395,6 +4398,9 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
         last(register).map_or(0, |value| (value >> 1) & 0x1f | (value >> 27 & 1) << 5)
     };
     let counts = [count(RSRC2_REGISTERS[0]), count(RSRC2_REGISTERS[1])];
+    // The geometry program's local data share, from its `RSRC2`'s `LDS_SIZE`. The pixel stage's
+    // `RSRC2` holds `EXTRA_LDS_SIZE` there instead, which no translated pixel shader reads.
+    let local_words = local_words_of(last(RSRC2_REGISTERS[0]), GS_LDS_SIZE);
     // `DX10_CLAMP`, bit 21 of the stage's `RSRC1` (Mesa `S_00B848_DX10_CLAMP`): what an output
     // clamp does with a NaN. `None` when the stream set no `RSRC1`.
     let mut dx10_clamp = |register: u32| last(register).map(|value| value & DX10_CLAMP_BIT != 0);
@@ -4417,6 +4423,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             buffer_formats: None,
             flat_twins: None,
             saturated: UNSATURATED,
+            local_words,
         },
         UserData {
             first_register: 0,
@@ -4433,8 +4440,39 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             buffer_formats: None,
             flat_twins: None,
             saturated: UNSATURATED,
+            local_words: None,
         },
     ]
+}
+
+/// The local share's size is declared in the module, so a program declaring another size is
+/// another module; none declared salts nothing, which keeps the keys of modules made before.
+fn local_words_salt(words: Option<u32>) -> u64 {
+    words.map_or(0, |words| {
+        content_hash(&words.to_le_bytes()).rotate_left(23) | 1
+    })
+}
+
+/// What a draw stage's module key takes from its user-data layout: where its words land, how many,
+/// and the local share it declares.
+fn layout_salt(user_data: UserData) -> u64 {
+    (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
+        ^ local_words_salt(user_data.local_words)
+}
+
+/// `LDS_SIZE` of `SPI_SHADER_PGM_RSRC2_GS`, as `(first bit, bits)`: bits 19-26 (`gfx103.json`).
+const GS_LDS_SIZE: (u32, u32) = (19, 8);
+
+/// The words of local data share a stage's `RSRC2` declares: its `LDS_SIZE` field, `(first bit,
+/// bits)`, counts 512-byte blocks from GFX7 (`ac_shader_encode_lds_size`). `None` where the stream
+/// wrote no `RSRC2` or declared none.
+pub(crate) fn local_words_of(rsrc2: Option<u32>, (shift, bits): (u32, u32)) -> Option<u32> {
+    /// One 512-byte block, in words.
+    const BLOCK_WORDS: u32 = 512 / 4;
+    rsrc2
+        .map(|value| (value >> shift) & ((1 << bits) - 1))
+        .filter(|&blocks| blocks != 0)
+        .map(|blocks| blocks * BLOCK_WORDS)
 }
 
 /// The most words a window placed from a shader's base spans (D711): 256 KiB, four times the largest
@@ -5665,6 +5703,7 @@ mod tests {
                 },
                 width: Width::Wave64,
                 dx10_clamp: None,
+                local_words: None,
                 groups: [1, 1, 1],
             }
         };
@@ -6202,6 +6241,27 @@ mod tests {
         ]);
         assert_eq!(layouts[0].count, 32);
         assert_eq!(layouts[1].count, 35, "the low five bits beside it");
+    }
+
+    /// The geometry program's local share is what its `RSRC2_GS` declares: `LDS_SIZE`, bits 19-26
+    /// (`gfx103.json`), in 512-byte blocks (`ac_shader_encode_lds_size`); none declared is none.
+    /// The pixel stage's field there is `EXTRA_LDS_SIZE`, not its own share.
+    #[test]
+    fn the_geometry_program_s_local_share_is_its_rsrc2_s() {
+        let write = |register, value| crate::registers::RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let layouts = super::user_data_layouts(&[
+            write(super::RSRC2_REGISTERS[0], 4 << 19 | 12 << 1),
+            write(super::RSRC2_REGISTERS[1], 4 << 19),
+        ]);
+        assert_eq!(layouts[0].local_words, Some(512), "four 512-byte blocks");
+        assert_eq!(layouts[0].count, 12, "the user registers beside it");
+        assert_eq!(layouts[1].local_words, None);
+        let undeclared = super::user_data_layouts(&[write(super::RSRC2_REGISTERS[0], 12 << 1)]);
+        assert_eq!(undeclared[0].local_words, None);
     }
 
     /// The backend's user-data block and the translator's share one layout: size and each stage's

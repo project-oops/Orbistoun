@@ -51,6 +51,8 @@ mod rsrc2 {
     pub(super) const TGID_X_EN: u32 = 7;
     pub(super) const TG_SIZE_EN: u32 = 1 << 10;
     pub(super) const TIDIG_COMP_CNT_SHIFT: u32 = 11;
+    /// `LDS_SIZE`, bits 15-23, as `(first bit, bits)`.
+    pub(super) const LDS_SIZE: (u32, u32) = (15, 9);
     pub(super) const EXCP_EN_MSB: u32 = 0x3 << 13;
     pub(super) const EXCP_EN: u32 = 0x7F << 24;
 }
@@ -71,6 +73,8 @@ pub struct DispatchState {
     pub width: Width,
     /// `DX10_CLAMP`, when `COMPUTE_PGM_RSRC1` was written.
     pub dx10_clamp: Option<bool>,
+    /// The local data share `COMPUTE_PGM_RSRC2`'s `LDS_SIZE` declares, in words.
+    pub local_words: Option<u32>,
     /// How many groups run, in each dimension.
     pub groups: [u32; 3],
 }
@@ -222,6 +226,7 @@ pub fn state_at(
             Width::Wave64
         },
         dx10_clamp: latest(PGM_RSRC1).map(|word| word & DX10_CLAMP != 0),
+        local_words: crate::pipeline::local_words_of(Some(rsrc2_word), rsrc2::LDS_SIZE),
         groups,
     })
 }
@@ -411,6 +416,17 @@ mod tests {
         );
         assert_eq!(state.width, Width::Wave64);
         assert_eq!(state.dx10_clamp, Some(true));
+        assert_eq!(state.local_words, None, "the clear declares no local share");
+    }
+
+    /// A dispatch's local share is what `COMPUTE_PGM_RSRC2`'s `LDS_SIZE`, bits 15-23, declares, in
+    /// 512-byte blocks (`ac_shader_encode_lds_size`): all nine bits of it.
+    #[test]
+    fn a_dispatch_s_local_share_is_its_rsrc2_s() {
+        let mut writes = clear_writes();
+        writes.push(write(PGM_RSRC2, 0x98 | 0x101 << 15));
+        let state = state_at(&writes, 0x100, [1, 1, 1], 0x45).expect("readable");
+        assert_eq!(state.local_words, Some(0x101 * 128));
     }
 
     /// The AGC library's dispatch (initiator `0x41`, start not forced) on a queue that never wrote

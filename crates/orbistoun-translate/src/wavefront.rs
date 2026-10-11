@@ -100,10 +100,11 @@ struct BoundTexture {
     disturbed: bool,
 }
 
-/// Words of local data share a translated module provides.
+/// Words of local data share a translated module provides when its stage declares none
+/// ([`UserData::local_words`]).
 ///
-/// A placeholder: the real size is declared per dispatch by the guest. Large enough for tests and
-/// cheap.
+/// A placeholder, large enough for tests and cheap. A radeonsi culling primitive shader keeps 28
+/// bytes a vertex, 1792 for a wave of 64, so a program's own declaration is what sizes a draw's.
 const LOCAL_WORDS: u32 = 256;
 
 /// The register files, once declared.
@@ -430,6 +431,11 @@ pub struct UserData {
     /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
     #[serde(default)]
     pub saturated: [[bool; 2]; 2],
+    /// The local data share the stage's program declares, in words: its `RSRC2`'s `LDS_SIZE`, in
+    /// the 512-byte units radeonsi encodes it in (`ac_shader_encode_lds_size`). `None` when the
+    /// stream declared none, and then the module provides [`LOCAL_WORDS`].
+    #[serde(default)]
+    pub local_words: Option<u32>,
 }
 
 /// Each attribute a pixel shader reads both interpolated and flat, with the flat location the draw
@@ -1293,11 +1299,18 @@ impl RectangleCopies {
     }
 }
 
+/// The words of local data share a module declares for a stage that declares `declared`: that
+/// many, or [`LOCAL_WORDS`] where it declares none, rounded up to a power of two so an index is
+/// masked into range ([`Model::local_word_index`]).
+fn local_share_words(declared: Option<u32>) -> u32 {
+    declared.unwrap_or(LOCAL_WORDS).max(1).next_power_of_two()
+}
+
 /// Declares the local data share: workgroup storage the lanes of a wavefront exchange values
 /// through.
 fn declare_local_share(
     b: &mut Builder,
-    u32_type: Id,
+    (u32_type, words): (Id, u32),
     local_count: Id,
     local_array: Id,
     local_array_ptr: Id,
@@ -1305,7 +1318,7 @@ fn declare_local_share(
     local: Id,
 ) {
     // No initialiser: workgroup storage cannot have one, and the guest's is uninitialised too.
-    b.declare(op::CONSTANT, &[u32_type.0, local_count.0, LOCAL_WORDS]);
+    b.declare(op::CONSTANT, &[u32_type.0, local_count.0, words]);
     b.declare(op::TYPE_ARRAY, &[local_array.0, u32_type.0, local_count.0]);
     b.declare(
         op::TYPE_POINTER,
@@ -1493,6 +1506,8 @@ pub struct Wavefront<'a> {
     /// Carried rather than a constant so a test can widen the window and reach addresses the
     /// default cannot hold.
     memory_words: u32,
+    /// How many words of local data share the module declares ([`local_share_words`]).
+    local_words: u32,
     builder: Builder,
     encodings: &'a EncodingTable,
     /// How many lanes the wave has, as its masks hold them: the lanes one invocation simulates
@@ -1835,7 +1850,7 @@ impl Reserved {
 fn declare_state(
     b: &mut Builder,
     ids: &Reserved,
-    modelled: u32,
+    (modelled, local_words): (u32, Option<u32>),
     window: Window,
 ) -> (Files, buffer::StorageBuffer, buffer::StorageBuffer) {
     let u32_type = ids.u32_type;
@@ -1853,7 +1868,7 @@ fn declare_state(
 
     declare_local_share(
         b,
-        u32_type,
+        (u32_type, local_share_words(local_words)),
         ids.local_count,
         ids.local_array,
         ids.local_array_ptr,
@@ -2034,7 +2049,8 @@ impl<'a> Wavefront<'a> {
             (stage, primitive),
             &mesh_reserved,
         );
-        let (files, observation, guest_memory) = declare_state(&mut b, &ids, modelled, window);
+        let (files, observation, guest_memory) =
+            declare_state(&mut b, &ids, (modelled, user_data.local_words), window);
         let lane_ids =
             per_lane.map(|shape| PerLane::declare(&mut b, (u32_type, ids.local_ptr), shape));
         let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
@@ -2083,6 +2099,7 @@ impl<'a> Wavefront<'a> {
             builder: b,
             encodings,
             memory_words: window.words(),
+            local_words: local_share_words(user_data.local_words),
             lanes: per_lane.map_or_else(|| simulated_lanes(stage, width), |(lanes, _)| lanes),
             modelled,
             exchange: lane_ids.and_then(|lane| lane.exchange),
@@ -3386,6 +3403,10 @@ impl Model for Wavefront<'_> {
 
     fn memory_base(&self) -> u32 {
         self.memory_base
+    }
+
+    fn local_words(&self) -> u32 {
+        self.local_words
     }
 
     fn memory_high(&self) -> u32 {
@@ -4960,6 +4981,79 @@ mod per_lane_tests {
         // ds_write_b32 v0, v1; ds_write_b8 v0, v1
         assert!(per_lane(&[0xd834_0000, 0x0000_0100, END]));
         assert!(per_lane(&[0xd878_0000, 0x0000_0100, END]));
+    }
+}
+
+#[cfg(test)]
+mod local_share_tests {
+    use super::{MeshPrimitive, Stage, UserData, Window};
+    use crate::{Fidelity, Strategy, Width};
+    use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+
+    /// The words of the workgroup array a module declares for its local data share: the length of
+    /// the array its one `Workgroup` variable points at.
+    fn declared_words(local_words: Option<u32>) -> u32 {
+        const END: u32 = 0xbf81_0000;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let decode = decode_program(&END.to_le_bytes(), &encodings, &operands);
+        let module = crate::translate_with_user_data(
+            &decode,
+            &encodings,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                local_words,
+                ..UserData::default()
+            },
+        )
+        .expect("translates")
+        .module;
+        // Instructions after the five-word header: the opcode in the low half of each first word,
+        // the word count in the high half.
+        let mut instructions = Vec::new();
+        let mut at = 5;
+        while at < module.len() {
+            let count = (module[at] >> 16) as usize;
+            instructions.push((module[at] & 0xFFFF, &module[at + 1..at + count]));
+            at += count;
+        }
+        let find = |opcode: u32, result: Option<u32>, at: usize| {
+            instructions
+                .iter()
+                .find(|(op, operands)| {
+                    *op == opcode && result.is_none_or(|id| operands.get(at) == Some(&id))
+                })
+                .map(|(_, operands)| *operands)
+                .expect("declared")
+        };
+        let (variable, pointer, array, constant) = (
+            u32::from(orbistoun_spirv::op::VARIABLE),
+            u32::from(orbistoun_spirv::op::TYPE_POINTER),
+            u32::from(orbistoun_spirv::op::TYPE_ARRAY),
+            u32::from(orbistoun_spirv::op::CONSTANT),
+        );
+        let shared = instructions
+            .iter()
+            .find(|(op, operands)| *op == variable && operands.get(2) == Some(&super::WORKGROUP))
+            .map(|(_, operands)| operands[0])
+            .expect("a workgroup variable");
+        let pointed_at = find(pointer, Some(shared), 0)[2];
+        let length = find(array, Some(pointed_at), 0)[2];
+        find(constant, Some(length), 1)[2]
+    }
+
+    /// The local share is as large as the stage declares: radeonsi's culling primitive shader keeps
+    /// 28 bytes a vertex, 1792 for a wave of 64, past the 1 KiB a module provides when nothing
+    /// declares a size, and a write past an array's end is undefined.
+    #[test]
+    fn the_local_share_is_as_large_as_the_stage_declares() {
+        assert_eq!(declared_words(Some(512)), 512);
+        assert_eq!(declared_words(None), super::LOCAL_WORDS);
     }
 }
 

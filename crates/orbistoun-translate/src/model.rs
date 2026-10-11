@@ -982,6 +982,24 @@ pub trait Model {
     /// can widen the window.
     fn memory_words(&self) -> u32;
 
+    /// How many words of local data share this module declares: a power of two, so masking keeps an
+    /// index legal. One for a model with no share, whose accesses refuse.
+    fn local_words(&self) -> u32 {
+        1
+    }
+
+    /// Turns a local-data-share byte address into a word index.
+    ///
+    /// The share is the workgroup's own storage from address zero, not guest memory, so the
+    /// guest-memory window ([`Self::word_index`]) has no part in it. Masked to the declared words,
+    /// so the index is always legal: an out-of-range workgroup access is undefined in SPIR-V.
+    fn local_word_index(&mut self, address: Id) -> Id {
+        let two = self.constant(2);
+        let limit = self.constant(self.local_words() - 1);
+        let shifted = self.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
+        self.binary(op::BITWISE_AND, shifted, limit)
+    }
+
     /// The high thirty-two bits of the window's guest address, which an exact access's address
     /// must share.
     fn memory_high(&self) -> u32 {
@@ -4674,7 +4692,7 @@ fn local_share<M: Model + ?Sized>(
         let base = model.read_source(instruction, address, lane)?;
         let byte_offset = model.constant(offset);
         let byte_address = model.add(base, byte_offset);
-        let index = model.word_index(byte_address);
+        let index = model.local_word_index(byte_address);
 
         if reading {
             let value = model.read_local(index)?;
@@ -4740,7 +4758,7 @@ fn local_share_pair<M: Model + ?Sized>(
         for (offset, register) in offsets.into_iter().zip(registers) {
             let offset = model.constant(offset);
             let byte_address = model.add(base, offset);
-            let index = model.word_index(byte_address);
+            let index = model.local_word_index(byte_address);
             if reading {
                 let value = model.read_local(index)?;
                 model.write_vector_lane(register, lane, value);
@@ -4796,7 +4814,7 @@ fn local_share_merge<M: Model + ?Sized>(
         let base = model.read_source(instruction, address, lane)?;
         let offset = model.constant(offset);
         let byte_address = model.add(base, offset);
-        let index = model.word_index(byte_address);
+        let index = model.local_word_index(byte_address);
         let within = model.binary(op::BITWISE_AND, byte_address, three);
         let shift = model.binary(op::IMUL, within, eight);
         // One invocation per lane (D760): a write merges indivisibly, keeping other lanes' bytes.
