@@ -520,7 +520,21 @@ fn vertex_id_primitive_shader() -> Vec<u32> {
 /// [`vertex_id_primitive_shader`] translated for a wave of `width` lanes, one invocation per lane
 /// when `per_invocation` (D760).
 fn vertex_id_primitive_shader_at(width: Width, per_invocation: Option<u32>) -> Vec<u32> {
-    use orbistoun_translate::wavefront::{Assembly, GeometryInputs, IndexWidth};
+    vertex_id_primitive_shader_with(
+        width,
+        per_invocation,
+        Some(orbistoun_translate::wavefront::IndexWidth::Bits32),
+    )
+}
+
+/// [`vertex_id_primitive_shader_at`] for a draw with `indices`, or none: a non-indexed draw counts
+/// its vertex ids up from the first vertex its draw words carry (D761).
+fn vertex_id_primitive_shader_with(
+    width: Width,
+    per_invocation: Option<u32>,
+    indices: Option<orbistoun_translate::wavefront::IndexWidth>,
+) -> Vec<u32> {
+    use orbistoun_translate::wavefront::{Assembly, GeometryInputs};
     let words: [u32; 38] = [
         // A raw descriptor over user-data word 0 with sixteen bytes; four words into s[8:11],
         // through the bound buffer at slot 0, so the index buffer is slot 1.
@@ -594,13 +608,13 @@ fn vertex_id_primitive_shader_at(width: Width, per_invocation: Option<u32>) -> V
                 vertices: 0,
                 primitives: 0,
                 assembly: Assembly::List,
-                indices: Some(IndexWidth::Bits32),
+                indices,
                 passthrough: false,
             }),
             ..UserData::default()
         },
     )
-    .expect("the indexed primitive shader translates")
+    .expect("the primitive shader translates")
     .module
 }
 
@@ -707,6 +721,85 @@ fn indexed_chunks_each_read_their_own_vertex_ids() {
         "ids 3 to 5: {second:?}"
     );
     assert!(near(second[1], 128), "green from slot 0: {second:?}");
+}
+
+/// Chunks of a non-indexed draw count their vertex ids up from the first vertex each carries in its
+/// draw words (D741, D761): the chunk from 3 colours the centre by ids 3 to 5, as the indexed
+/// chunk reading 3, 4 and 5 from its index buffer does.
+#[test]
+fn non_indexed_chunks_count_from_their_first_vertex() {
+    if !device_or_skip("non_indexed_chunks_count_from_their_first_vertex") {
+        return;
+    }
+    let mesh = vertex_id_primitive_shader_with(Width::Wave64, None, None);
+    let mut backend = VulkanBackend::new();
+    let pixel = orbistoun_spirv::passthrough_fragment_module();
+    for (id, words) in [(TRIANGLE, &mesh), (PIXEL, &pixel)] {
+        backend
+            .ensure_resident(id, Resource::Shader(words))
+            .expect("resident");
+    }
+    backend
+        .ensure_resident(
+            TARGET,
+            Resource::RenderTarget {
+                width: 16,
+                height: 16,
+                encoding: orbistoun_gpu::TargetEncoding::Unorm8,
+            },
+        )
+        .expect("target resident");
+    let mut words = [0u32; orbistoun_gpu::USER_DATA_WORDS];
+    words[0] = 0x0010_0000;
+    let commands = [
+        RenderCommand::SetRenderTargets {
+            colour: vec![TARGET],
+            depth: None,
+        },
+        RenderCommand::SetUserData {
+            stage: ShaderStage::Vertex,
+            words,
+        },
+        RenderCommand::BindShader {
+            stage: ShaderStage::Vertex,
+            shader: TRIANGLE,
+        },
+        RenderCommand::BindShader {
+            stage: ShaderStage::Fragment,
+            shader: PIXEL,
+        },
+        RenderCommand::BindDrawBuffers {
+            stage: ShaderStage::Vertex,
+            buffers: vec![colour_buffer([0.0, 0.5, 0.0, 0.0])],
+        },
+        RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        },
+        RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 3,
+        },
+    ];
+    for command in &commands {
+        backend.execute(command).expect("the command runs");
+    }
+    let centre = backend
+        .last_frame()
+        .expect("a frame")
+        .at(8, 8)
+        .expect("the centre");
+    let red = ((0.5 * 3.0 + 0.25 * 4.0 + 0.25 * 5.0) / 8.0 * 255.0) as i32;
+    assert!(
+        (i32::from(centre[0]) - red).abs() <= 3,
+        "ids 3 to 5 over ids 0 to 2: {centre:?}"
+    );
+    assert!(
+        (i32::from(centre[1]) - 128).abs() <= 3,
+        "green from slot 0: {centre:?}"
+    );
 }
 
 /// A primitive shader run one invocation per lane (D760) draws what one invocation simulating the
