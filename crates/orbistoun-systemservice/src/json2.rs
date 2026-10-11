@@ -20,6 +20,12 @@ use orbistoun_mem::guest;
 guest_module! {
     "libSceJson2" {
         "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE" => 6,
+        // (this, param)
+        "_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E" => 2,
+        // (this)
+        "_ZN3sce4Json14InitParameter2C1Ev" => 1,
+        // (this, allocator, pass-through word)
+        "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv" => 3,
         "_ZN3sce4Json11InitializerC1Ev" => 6,
         "_ZN3sce4Json11Initializer9terminateEv" => 6,
         "_ZN3sce4Json12MemAllocatorC2Ev" => 6,
@@ -73,6 +79,42 @@ fn virtual_at(allocator: u64, slot: u64) -> Option<u64> {
     let vtable = unsafe { guest::read_u64(allocator) }?;
     // SAFETY: as above.
     unsafe { guest::read_u64(vtable + slot) }.filter(|&entry| entry != 0)
+}
+
+/// The bytes an `InitParameter2` holds once constructed: `0x28`, zero but for the word `2` at
+/// `+0x18` (`arm2-init`, `param-after`, which the constructor and `setAllocator` left; the rest of
+/// the probe's `0xcc` fill past `0x28` untouched).
+const INIT_PARAMETER2_BYTES: usize = 0x28;
+const INIT_PARAMETER2_WORD_AT: usize = 0x18;
+const INIT_PARAMETER2_WORD: u32 = 2;
+
+/// `InitParameter2::InitParameter2()`: writes the constructed block (`arm2-init`).
+pub(crate) fn init_parameter2_construct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let mut block = [0_u8; INIT_PARAMETER2_BYTES];
+    block[INIT_PARAMETER2_WORD_AT..INIT_PARAMETER2_WORD_AT + 4]
+        .copy_from_slice(&INIT_PARAMETER2_WORD.to_le_bytes());
+    // SAFETY: the guest's object, by the constructor's contract.
+    if unsafe { guest::write_bytes(args[0], &block) } {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `InitParameter2::setAllocator(MemAllocator*, void*)`: the allocator at `+0` and the word every
+/// allocation is passed at `+8` (`arm2-init`, `param-after`: the probe's allocator and
+/// `0x12345678` there).
+pub(crate) fn init_parameter2_set_allocator(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (this, allocator, pass) = (args[0], args[1], args[2]);
+    // SAFETY: the guest's object, by the call's contract; written through checked accessors.
+    let wrote_allocator = unsafe { guest::write_u64(this, allocator) };
+    // SAFETY: as above.
+    let wrote_pass = unsafe { guest::write_u64(this + PASS_THROUGH_AT, pass) };
+    if wrote_allocator && wrote_pass {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
 }
 
 /// `Initializer::initialize(const InitParameter*)`: the twelve measured allocations through the

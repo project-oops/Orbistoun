@@ -654,6 +654,18 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         json2::initializer_initialize,
     ),
     (
+        "_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E",
+        json2::initializer_initialize,
+    ),
+    (
+        "_ZN3sce4Json14InitParameter2C1Ev",
+        json2::init_parameter2_construct,
+    ),
+    (
+        "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv",
+        json2::init_parameter2_set_allocator,
+    ),
+    (
         "_ZN3sce4Json11Initializer9terminateEv",
         json2::initializer_terminate,
     ),

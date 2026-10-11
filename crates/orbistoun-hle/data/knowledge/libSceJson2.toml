@@ -55,3 +55,41 @@ known_by = "measured"
 cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init, base-obj-after)"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
+
+[[function]]
+name = "_ZN3sce4Json14InitParameter2C1Ev"
+purpose = "Constructs an InitParameter2 in place."
+returns = "status"
+edge_cases = [
+    "MEASURED, with setAllocator after it: the block is 0x28 bytes, zero but for the allocator at +0, the setAllocator word at +8 and 2 at +0x18; the probe's 0xcc fill past 0x28 untouched.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne report-1791727748.txt rows 5624-5640 (130-layout/json2-init, arm2-init, param-after)"
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv"
+purpose = "Sets the allocator an InitParameter2 hands to initialize, and the word passed with every allocation."
+returns = "status"
+edge_cases = [
+    "MEASURED: the allocator at +0 and the second argument at +8 (the probe's allocator and 0x12345678 in param-after).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne report-1791727748.txt rows 5624-5640 (130-layout/json2-init, arm2-init, param-after)"
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E"
+purpose = "Starts the JSON library from an InitParameter2, as the InitParameter form does."
+returns = "status"
+edge_cases = [
+    "Assumed (D793): read as the InitParameter form reads its block - allocator at +0, word at +8, the twelve measured allocations, 0x80848111 on a second call. The probe handed an InitParameter2 block to the InitParameter form, which answered 0; this form itself is unmeasured.",
+]
+found_by = "static"
+known_by = "assumed"
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-11"

@@ -52,6 +52,9 @@ const CONSTRUCT: &str = "_ZN3sce4Json11InitializerC1Ev";
 const INITIALIZE: &str = "_ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE";
 const TERMINATE: &str = "_ZN3sce4Json11Initializer9terminateEv";
 const ALLOCATOR: &str = "_ZN3sce4Json12MemAllocatorC2Ev";
+const PARAM2: &str = "_ZN3sce4Json14InitParameter2C1Ev";
+const SET_ALLOCATOR: &str = "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv";
+const INITIALIZE2: &str = "_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E";
 
 /// The twelve sizes `initialize` asked for, in order (`arm2-init`, `alloc-size-0`..`-11`).
 const MEASURED_SIZES: [u64; 12] = [
@@ -75,16 +78,24 @@ fn the_initializer_runs_its_measured_lifecycle_through_the_guests_allocator() {
         deallocate as extern "sysv64" fn(u64, u64, u64) -> u64 as usize as u64,
     ];
     let allocator: [u64; 2] = [vtable.as_ptr() as usize as u64, 0];
-    let param: [u64; 8] = [
-        allocator.as_ptr() as usize as u64,
-        0x1234_5678,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ];
+    // The block as `arm2-init` built it: the constructor, then `setAllocator(allocator,
+    // 0x12345678)`, leaving `param-after` - allocator, word, zero, `2` at +0x18 - in 0x28 bytes.
+    let mut param = [0xcc_u8; 0x40];
+    let block = param.as_mut_ptr() as usize as u64;
+    assert_eq!(call(PARAM2, at(block)), 0);
+    let mut set = at(block);
+    set[1] = allocator.as_ptr() as usize as u64;
+    set[2] = 0x1234_5678;
+    assert_eq!(call(SET_ALLOCATOR, set), 0);
+    let mut expected = [0_u8; 0x28];
+    expected[..8].copy_from_slice(&set[1].to_le_bytes());
+    expected[8..16].copy_from_slice(&0x1234_5678_u64.to_le_bytes());
+    expected[0x18] = 2;
+    assert_eq!(param[..0x28], expected, "`param-after`");
+    assert!(
+        param[0x28..].iter().all(|&b| b == 0xcc),
+        "nothing past 0x28"
+    );
 
     let mut object = [0xcc_u8; 0x40];
     let this = object.as_mut_ptr() as usize as u64;
@@ -98,6 +109,11 @@ fn the_initializer_runs_its_measured_lifecycle_through_the_guests_allocator() {
     let mut args = at(this);
     args[1] = param.as_ptr() as usize as u64;
     assert_eq!(call(INITIALIZE, args), 0, "`arm2-init` rc 0x0");
+    assert_eq!(
+        call(INITIALIZE2, args),
+        0x8084_8111,
+        "the InitParameter2 form is the same initialize (D793)"
+    );
     assert_eq!(object[0], 1, "`obj-written 01`");
     assert!(object[1..].iter().all(|&b| b == 0xcc));
     {
