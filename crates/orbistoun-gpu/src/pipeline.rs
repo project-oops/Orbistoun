@@ -121,6 +121,9 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
                 Assembly::Strip { provoking_last } => {
                     0x5354_0000_0000_0000 ^ u64::from(provoking_last)
                 }
+                Assembly::Quads { provoking_last } => {
+                    0x5155_0000_0000_0000 ^ u64::from(provoking_last)
+                }
             }
     });
     let formats = for_draw.buffer_formats.map_or(0, |formats| {
@@ -588,6 +591,12 @@ const DI_PT_LINELIST: u32 = 2;
 const DI_PT_LINESTRIP: u32 = 3;
 /// `DI_PT_TRISTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json`): triangles sharing vertices in a strip.
 const DI_PT_TRISTRIP: u32 = 6;
+/// `DI_PT_QUADSTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx10.json:811`): quads sharing an edge in a strip,
+/// seeded as the triangle strip over the same vertices (D797).
+const DI_PT_QUADSTRIP: u32 = 20;
+/// `DI_PT_QUADLIST` (enum `VGT_DI_PRIM_TYPE`, `gfx10.json:810`): quads of four vertices each, seeded
+/// two triangles a quad (D798).
+const DI_PT_QUADLIST: u32 = 19;
 /// `PA_SU_SC_MODE_CNTL` (`gfx103.json`, context dword `0x205`) and its `PROVOKING_VTX_LAST`, bit 19.
 const PA_SU_SC_MODE_CNTL: u32 = 0xA205;
 /// See [`PA_SU_SC_MODE_CNTL`].
@@ -642,6 +651,22 @@ fn draw_geometry(
             },
             vertices.saturating_sub(2),
         ),
+        // Its whole quads, two triangles each, as Mesa splits them (D798).
+        Some(DI_PT_QUADLIST) => (
+            Assembly::Quads {
+                provoking_last: latest(PA_SU_SC_MODE_CNTL)
+                    .is_some_and(|value| value & PROVOKING_VTX_LAST != 0),
+            },
+            vertices / 4 * 2,
+        ),
+        // Its whole quads, two triangles each: an odd last vertex closes none (D797).
+        Some(DI_PT_QUADSTRIP) => (
+            Assembly::Strip {
+                provoking_last: latest(PA_SU_SC_MODE_CNTL)
+                    .is_some_and(|value| value & PROVOKING_VTX_LAST != 0),
+            },
+            (vertices & !1).saturating_sub(2),
+        ),
         _ => {
             return Err(format!(
                 "the draw's input primitive {topology:?} is not a list or strip of triangles or lines, whose geometry-engine inputs are the ones seeded"
@@ -688,6 +713,8 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
         Assembly::Strip { .. } => lanes.saturating_sub(2) & !1,
         Assembly::LineList => lanes / 2,
         Assembly::LineStrip => lanes.saturating_sub(1),
+        // Whole quads: four vertices, two triangles each.
+        Assembly::Quads { .. } => lanes / 4 * 2,
     };
     if per_chunk == 0 {
         return Vec::new();
@@ -701,7 +728,8 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
             let primitives = per_chunk.min(whole.primitives - start);
             let first_index = match whole.assembly {
                 Assembly::List => start * 3,
-                Assembly::LineList => start * 2,
+                // A line's two vertices, and a quad's four for its two triangles.
+                Assembly::LineList | Assembly::Quads { .. } => start * 2,
                 Assembly::Strip { .. } | Assembly::LineStrip => start,
             };
             let index_buffer = match (whole.indices, index_address) {
@@ -6918,6 +6946,51 @@ mod tests {
             assert_eq!(
                 super::draw_geometry(&draw, registers).map(|g| g.passthrough),
                 Ok(passthrough)
+            );
+        }
+    }
+
+    /// Quads are seeded as triangles: a quad list two a whole quad (D798), a quad strip as the
+    /// triangle strip over its whole quads (D797).
+    #[test]
+    fn quads_are_seeded_as_triangles() {
+        use super::{VGT_PRIMITIVE_TYPE, draw_geometry};
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = |vertices, instances| DrawCall {
+            packet_offset: 0,
+            instances,
+            kind: DrawKind::Auto { vertices },
+        };
+        let registers = |topology: u32, _stages: u32, _offset: u32| {
+            move |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(topology),
+                _ => None,
+            }
+        };
+        // A quad list is two triangles a whole quad (D798): ten vertices are two quads.
+        assert_eq!(
+            draw_geometry(&draw(10, 1), registers(super::DI_PT_QUADLIST, 0, 0))
+                .map(|g| (g.primitives, g.assembly)),
+            Ok((
+                4,
+                super::Assembly::Quads {
+                    provoking_last: false
+                }
+            ))
+        );
+        // A quad strip is the triangle strip over its whole quads (D797): eight vertices are three
+        // quads, six triangles, and a ninth closes none.
+        for (vertices, triangles) in [(8, 6), (9, 6), (4, 2), (3, 0)] {
+            assert_eq!(
+                draw_geometry(&draw(vertices, 1), registers(super::DI_PT_QUADSTRIP, 0, 0))
+                    .map(|g| (g.primitives, g.assembly)),
+                Ok((
+                    triangles,
+                    super::Assembly::Strip {
+                        provoking_last: false
+                    }
+                )),
+                "{vertices} vertices"
             );
         }
     }

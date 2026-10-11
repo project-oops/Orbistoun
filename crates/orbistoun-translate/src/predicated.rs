@@ -505,6 +505,8 @@ impl Model for Predicated<'_> {
             }
             // The m0 register read back as a source: whatever the shader last wrote.
             Operand::Named(name) if name == model::M0 => Ok(self.read_m0()),
+            // The condition code read as a word, as `s_mul_i32 d, 1.0, src_scc` turns it into a float.
+            Operand::Named(name) if name == model::SRC_SCC => Ok(self.read_condition_word()),
             // An inline float, named by the operand table. Its bits go into the register,
             // as a register holds bits.
             Operand::Named(name) => {

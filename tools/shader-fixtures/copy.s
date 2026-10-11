@@ -16,6 +16,8 @@
 // ---- The coordinate, in sixteen-bit halves ----------------------------------------
 s_mul_i32 s16, s16, s4
 v_pk_mad_u16 v0, s16, s0, v0
+// mesa-demos' vertex shader turns the condition code into a float, reading it as a source.
+s_mul_i32 s5, 1.0, src_scc
 // Mesa's pixel shaders pack a 32-bit result into a half with the mixed-precision multiply-adds.
 v_fma_mix_f32 v8, s0, v0, v0 op_sel_hi:[0,0,1]
 v_fma_mixlo_f16 v8, s0, v0, v0 op_sel_hi:[0,0,1]

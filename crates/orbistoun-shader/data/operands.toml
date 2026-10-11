@@ -166,6 +166,15 @@ last = 248
 kind = "named"
 name = "inv_2pi"
 
+# The scalar condition code read as a word, zero or one: `src_scc` to the reference assembler,
+# which encodes `s_mul_i32 s5, 1.0, src_scc` with this code in its second source.
+
+[[operand_code]]
+first = 253
+last = 253
+kind = "named"
+name = "src_scc"
+
 # ---- Literal ----------------------------------------------------------------
 #
 # The instruction is four bytes longer and the value is the dword that follows. The

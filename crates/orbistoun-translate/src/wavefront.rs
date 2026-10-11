@@ -679,6 +679,13 @@ pub enum Assembly {
     LineList,
     /// A strip of lines: primitive `i` is vertices `i`, `i + 1`.
     LineStrip,
+    /// A list of quads, two triangles each (D798): quad `q` is vertices `4q` to `4q + 3`, split as
+    /// Mesa splits one for its provoking convention (`u_indices_gen.py:129-136`) - `(0, 1, 3)` and
+    /// `(1, 2, 3)` under the last-vertex convention, `(0, 1, 2)` and `(0, 2, 3)` under the first.
+    Quads {
+        /// Whether the last vertex is the provoking one.
+        provoking_last: bool,
+    },
 }
 
 impl Assembly {
@@ -698,6 +705,15 @@ impl Assembly {
             // A line has two vertices; the third index is not read.
             Self::LineList => [2 * i, 2 * i + 1, 0],
             Self::LineStrip => [i, i + 1, 0],
+            Self::Quads { provoking_last } => {
+                let base = i / 2 * 4;
+                match (i % 2 == 0, provoking_last) {
+                    (true, true) => [base, base + 1, base + 3],
+                    (false, true) => [base + 1, base + 2, base + 3],
+                    (true, false) => [base, base + 1, base + 2],
+                    (false, false) => [base, base + 2, base + 3],
+                }
+            }
         }
     }
 
@@ -710,6 +726,7 @@ impl Assembly {
             Self::Strip { .. } => primitives + 2,
             Self::LineList => primitives * 2,
             Self::LineStrip => primitives + 1,
+            Self::Quads { .. } => primitives.div_ceil(2) * 4,
         }
     }
 }
@@ -2416,6 +2433,25 @@ impl<'a> Wavefront<'a> {
                 [start, second, zero]
             }
             Assembly::LineStrip => [at, next, zero],
+            // A quad's two triangles, as `vertices_of` splits them (D798).
+            Assembly::Quads { provoking_last } => {
+                let quad = self.binary(op::SHIFT_RIGHT_LOGICAL, at, one);
+                let four = self.constant(4);
+                let base = self.binary(op::IMUL, quad, four);
+                let parity = self.binary(op::BITWISE_AND, at, one);
+                let odd = self.compare(op::INOT_EQUAL, parity, zero);
+                let plus = |model: &mut Self, by: Id| model.binary(op::IADD, base, by);
+                let (b1, b2, b3) = (plus(self, one), plus(self, two), plus(self, three));
+                if provoking_last {
+                    let first = self.select(odd, b1, base);
+                    let second = self.select(odd, b2, b1);
+                    [first, second, b3]
+                } else {
+                    let second = self.select(odd, b2, b1);
+                    let third = self.select(odd, b3, b2);
+                    [base, second, third]
+                }
+            }
             // An odd triangle of a strip swaps two of its vertices, as `vertices_of` does.
             Assembly::Strip { provoking_last } => {
                 let parity = self.binary(op::BITWISE_AND, at, one);
@@ -2530,6 +2566,13 @@ impl<'a> Wavefront<'a> {
             }
             Assembly::Strip { .. } => saturating_less(self, 2),
             Assembly::LineStrip => saturating_less(self, 1),
+            // Whole quads, two triangles each.
+            Assembly::Quads { .. } => {
+                let two = self.constant(2);
+                let quads = self.binary(op::SHIFT_RIGHT_LOGICAL, vertices, two);
+                let one = self.constant(1);
+                self.binary(op::SHIFT_LEFT_LOGICAL, quads, one)
+            }
         }
     }
 
@@ -3653,6 +3696,8 @@ impl Model for Wavefront<'_> {
             // The m0 register read back as a source: whatever the shader last wrote.
             // Uniform across the wavefront, like every scalar.
             Operand::Named(name) if name == model::M0 => Ok(self.read_m0()),
+            // The condition code read as a word, as `s_mul_i32 d, 1.0, src_scc` turns it into a float.
+            Operand::Named(name) if name == model::SRC_SCC => Ok(self.read_condition_word()),
             // An inline float, named by the operand table. Its bits go into the register, as the
             // hardware holds them.
             Operand::Named(name) => {
@@ -5301,6 +5346,26 @@ mod wave32_mask_tests {
 
 #[cfg(test)]
 mod assembly_tests {
+    /// A quad list's quad is two triangles, split as Mesa splits one for each provoking convention
+    /// (D798): `(0, 1, 3)`, `(1, 2, 3)` with the last vertex provoking, `(0, 1, 2)`, `(0, 2, 3)`
+    /// with the first; the next quad starts four vertices on.
+    #[test]
+    fn a_quad_is_two_triangles_split_for_its_provoking_vertex() {
+        use super::Assembly;
+        let last = Assembly::Quads {
+            provoking_last: true,
+        };
+        let first = Assembly::Quads {
+            provoking_last: false,
+        };
+        assert_eq!(last.vertices_of(0), [0, 1, 3]);
+        assert_eq!(last.vertices_of(1), [1, 2, 3]);
+        assert_eq!(first.vertices_of(0), [0, 1, 2]);
+        assert_eq!(first.vertices_of(1), [0, 2, 3]);
+        assert_eq!(last.vertices_of(2), [4, 5, 7], "the second quad");
+        assert_eq!(first.vertices_for(6), 12, "three quads");
+    }
+
     /// A strip's triangles take overlapping vertices, each odd one reversed in the rotation that
     /// keeps the provoking vertex where the convention looks: `i + 2` last, or `i` first.
     #[test]

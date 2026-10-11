@@ -399,6 +399,9 @@ pub const VCC_LOW_HALF: &str = "vcc_lo";
 /// scalar file because its operand code (124) is past the last scalar register.
 pub const M0: &str = "m0";
 
+/// The operand table's name for the scalar condition code read as a source, operand code 253.
+pub const SRC_SCC: &str = "src_scc";
+
 /// The operand table's name for `1 / (2 * pi)`, operand code 248.
 const INVERSE_TWO_PI: &str = "inv_2pi";
 
@@ -1129,6 +1132,15 @@ pub trait Model {
 
     /// How many guest instructions have been translated so far.
     fn instructions(&self) -> usize;
+
+    /// The scalar condition code as a source reads it: the word it is held as, zero or one.
+    fn read_condition_word(&mut self) -> Id {
+        let (u32_type, pointer) = (self.u32_type(), self.condition_code());
+        let b = self.builder();
+        let value = b.id();
+        b.function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        value
+    }
 
     /// Stores a boolean into the scalar condition code, widened to a word because the code lives in
     /// a private variable and a boolean has no defined size in a storage class.

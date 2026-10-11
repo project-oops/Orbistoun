@@ -6545,6 +6545,31 @@ fn an_unsigned_scalar_equality_sets_the_condition_code() {
     assert_eq!(scalar(&registers, 4), 0, "1 != 0xffffffff");
 }
 
+/// The condition code read as a source (`src_scc`, operand 253) is its word, zero or one: mesa-demos'
+/// vertex shader turns it into a float with `s_mul_i32 s5, 1.0, src_scc`.
+#[test]
+fn the_condition_code_reads_as_a_word() {
+    const SRC_SCC: u32 = 253;
+    const INLINE_ONE_F32: u32 = 242;
+    if !device_or_skip("the_condition_code_reads_as_a_word") {
+        return;
+    }
+    let program = [
+        s_cmp_i32("s_cmp_eq_u32", 128 + 1, 128 + 1),
+        sop2("s_mul_i32", 5, INLINE_ONE_F32, SRC_SCC),
+        s_cmp_i32("s_cmp_eq_u32", 128 + 1, 128),
+        sop2("s_mul_i32", 6, INLINE_ONE_F32, SRC_SCC),
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(
+        scalar(&registers, 5),
+        1.0f32.to_bits(),
+        "1.0 times a set code"
+    );
+    assert_eq!(scalar(&registers, 6), 0, "times a clear one");
+}
+
 /// A DS instruction: `offset0`/`offset` in the first word's low bits, `offset1` above, then the
 /// address, two data registers and the destination in the second word.
 fn ds(name: &str, offsets: [u32; 2], [address, data0, data1, destination]: [u32; 4]) -> [u32; 2] {
