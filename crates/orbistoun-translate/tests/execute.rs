@@ -6346,6 +6346,18 @@ fn the_local_share_takes_pairs_bytes_and_ors() {
     assert_eq!(vector(&registers, 6), 0xab, "byte 5 alone");
 }
 
+/// radeonsi's NGG culling sums its waves' packed counts as `v_msad_u8 d, 0, packed, 0`
+/// (ac_nir.c:846): every non-zero byte of the second source, summed, since the hardware's
+/// second source is the reference that masks (aco_select_nir_alu.cpp:3303).
+#[test]
+fn a_masked_sum_with_a_zero_first_source_sums_the_second() {
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 0x0001_0203));
+    program.extend(vop3("v_msad_u8", 2, [128, VGPR_0 + 1, 128], 0, 0));
+    program.push(s_endpgm());
+    assert_eq!(vector(&run(&program), 2), 1 + 2 + 3);
+}
+
 /// The culling shader's integer and float arithmetic: a sixteen-bit multiply-add of the low halves,
 /// a 24-bit signed one, the low product word, and-or, NIR's masked byte sum, and three-way
 /// min and max.
@@ -6396,8 +6408,10 @@ fn the_culling_arithmetic_computes_as_published() {
     assert_eq!(vector(&registers, 7), (0xffff_0003 & 0x0001_0005) | 7);
 
     let mut program = Vec::new();
-    program.extend(v_mov_literal(0, 0x0003_0510)); // reference: bytes 0x10, 0x05, 0x03, 0
-    program.extend(v_mov_literal(1, 0x0901_0718)); // source: 0x18, 0x07, 0x01, 0x09
+    // The mask is the second source's: ACO hands NIR's `msad_4x8` reference to the hardware as
+    // its second source (`swap_srcs`, aco_select_nir_alu.cpp:3303), so a zero byte there is skipped.
+    program.extend(v_mov_literal(0, 0x0901_0718)); // first source: 0x18, 0x07, 0x01, 0x09
+    program.extend(v_mov_literal(1, 0x0003_0510)); // second, the mask: 0x10, 0x05, 0x03, 0
     program.extend(v_mov_literal(2, 7));
     program.extend(vop3("v_msad_u8", 3, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
     program.extend(v_mov_literal(4, 1.5f32.to_bits()));
@@ -6436,8 +6450,9 @@ fn the_culling_arithmetic_computes_as_published() {
     assert_eq!(
         vector(&registers, 3),
         7 + 8 + 2 + 2,
-        "the zero byte is masked"
+        "the second source's zero byte is masked"
     );
+
     assert_eq!(vector(&registers, 7), 2.5f32.to_bits());
     assert_eq!(vector(&registers, 0), (-4.0f32).to_bits());
     assert_eq!(vector(&registers, 1), 1.5f32.to_bits(), "the median");

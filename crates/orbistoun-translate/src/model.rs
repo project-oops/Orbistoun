@@ -7177,8 +7177,9 @@ fn multiply_add_constant<M: Model + ?Sized>(
 /// - `v_mad_i32_i24 d, a, b, c`: the sign-extended low 24 bits multiplied, plus `c`.
 /// - `v_mul_lo_u32 d, a, b`: the product's low 32 bits.
 /// - `v_and_or_b32 d, a, b, c`: `(a & b) | c`.
-/// - `v_msad_u8 d, a, b, c`: `c` plus, for each byte of `a` that is not zero, its absolute
-///   difference from `b`'s (NIR's `msad_4x8`, `nir_constant_expressions.py:413`).
+/// - `v_msad_u8 d, a, b, c`: `c` plus, for each byte of `b` that is not zero, its absolute
+///   difference from `a`'s - NIR's `msad_4x8` (`nir_constant_expressions.py:413`) with its
+///   reference as the second source, as ACO emits it (`aco_select_nir_alu.cpp:3303`).
 fn integer_long_form<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -7246,7 +7247,11 @@ fn integer_long_form<M: Model + ?Sized>(
                 let both = model.binary(op::BITWISE_AND, a, b);
                 model.binary(op::BITWISE_OR, both, c)
             }
-            _ => masked_sum_of_differences(model, a, b, c),
+            // The hardware's second source is the reference whose zero bytes are skipped: ACO
+            // hands NIR's `msad_4x8` reference over as `b` (`swap_srcs`,
+            // aco_select_nir_alu.cpp:3303), and radeonsi's culling sums packed counts as
+            // `v_msad_u8 d, 0, packed, 0` (ac_nir.c:846).
+            _ => masked_sum_of_differences(model, b, a, c),
         };
         model.write_vector_lane(register, lane, value);
     }
