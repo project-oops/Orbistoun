@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        86,
+        87,
         concat!(
             "the wired builder count changed - update the count in the agc.rs module ",
             "documentation to match, then update this number"
@@ -593,6 +593,27 @@ fn a_packed_register_entry_unpacks_into_the_packet() {
             0x00, 0x69, 0x01, 0xc0, 0x00, 0x02, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12
         ],
         "header, then offset 0x200, then the value"
+    );
+}
+
+/// `sceAgcDcbSetShRegisterDirect` packs its entry the same way: a console wrote header
+/// `0xc0017600`, offset 8 and value `0x12345678`, twelve bytes, for `(0x12345678 << 32) | 8`
+/// (obSCEne `166-agc/dcb-set-sh-reg-direct`, `20261011-002100-eboot.obs.log` 11592-11598).
+#[test]
+fn a_sh_register_entry_unpacks_into_the_packet() {
+    let w = Writer::new(0x400);
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = w.handle();
+    args[1] = (0x1234_5678u64 << 32) | 0x8;
+
+    let at = w.cursor();
+    assert_eq!(call("sceAgcDcbSetShRegisterDirect", args), at);
+    assert_eq!(
+        w.bytes(),
+        &[
+            0x00, 0x76, 0x01, 0xc0, 0x08, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12
+        ],
+        "header, then offset 8, then the value"
     );
 }
 

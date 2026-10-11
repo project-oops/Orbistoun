@@ -90,6 +90,7 @@ guest_module! {
         "sceAgcDcbSetNumInstances" => 6,
         "sceAgcDcbSetShRegistersIndirect" => 6,
         "sceAgcDcbSetUcRegisterDirect" => 6,
+        "sceAgcDcbSetShRegisterDirect" => 6,
         "sceAgcDcbSetUcRegistersIndirect" => 6,
         "sceAgcDcbStallCommandBufferParser" => 6,
         "sceAgcDcbWaitRegMem" => 6,
@@ -596,6 +597,17 @@ fn dcb_set_cx_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn dcb_set_uc_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (offset, value) = unpack_register_entry(args[1]);
     dcb_append(args[0], &packet::build::set_uconfig_register(offset, value))
+}
+
+/// `sceAgcDcbSetShRegisterDirect(dcb, (value << 32) | offset)`: a one-value `SET_SH_REG`. Measured
+/// (`166-agc/dcb-set-sh-reg-direct`, `20261011-002100-eboot.obs.log` 11592-11598): header
+/// `0xc0017600`, the offset, the value, twelve bytes.
+fn dcb_set_sh_register_direct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (offset, value) = unpack_register_entry(args[1]);
+    dcb_append(
+        args[0],
+        &packet::build::set_sh_register_range(offset, &[value]),
+    )
 }
 
 /// `sceAgcDcbSetCxRegistersIndirect(dcb, ...)` - reserves the packet a title patches and hands
@@ -1491,6 +1503,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceAgcDcbSetIndexBuffer", dcb_set_index_buffer),
     ("sceAgcDcbSetCxRegisterDirect", dcb_set_cx_register_direct),
     ("sceAgcDcbSetUcRegisterDirect", dcb_set_uc_register_direct),
+    ("sceAgcDcbSetShRegisterDirect", dcb_set_sh_register_direct),
     (
         "sceAgcDcbSetCxRegistersIndirect",
         dcb_set_cx_registers_indirect,
