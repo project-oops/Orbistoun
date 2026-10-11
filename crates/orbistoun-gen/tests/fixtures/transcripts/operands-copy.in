@@ -39,6 +39,23 @@ v_pack_b32_f16 v255, v12, s30
 v_pack_b32_f16 v9, -1, v77
 v_pack_b32_f16 v130, v88, 4
 
+// ---- v_fma_mix_f32, v_fma_mixlo_f16, v_fma_mixhi_f16: VOP3P, three sources -------------
+v_fma_mix_f32 v0, s16, s0, v0
+v_fma_mix_f32 v200, v5, v9, v190
+v_fma_mix_f32 v255, v12, s30, v44
+v_fma_mix_f32 v9, -1, v77, s101
+v_fma_mix_f32 v130, v88, 4, v240
+v_fma_mixlo_f16 v0, s16, s0, v0
+v_fma_mixlo_f16 v200, v5, v9, v190
+v_fma_mixlo_f16 v255, v12, s30, v44
+v_fma_mixlo_f16 v9, -1, v77, s101
+v_fma_mixlo_f16 v130, v88, 4, v240
+v_fma_mixhi_f16 v0, s16, s0, v0
+v_fma_mixhi_f16 v200, v5, v9, v190
+v_fma_mixhi_f16 v255, v12, s30, v44
+v_fma_mixhi_f16 v9, -1, v77, s101
+v_fma_mixhi_f16 v130, v88, 4, v240
+
 // ---- v_pk_mad_u16: VOP3P, three sources ------------------------------------------------
 v_pk_mad_u16 v0, s16, s0, v0
 v_pk_mad_u16 v200, v5, v9, v190

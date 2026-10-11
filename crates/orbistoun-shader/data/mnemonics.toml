@@ -953,6 +953,21 @@ opcode = 11
 name = "v_pk_sub_u16"
 
 [[mnemonic]]
+family = "VOP3P"
+opcode = 32
+name = "v_fma_mix_f32"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 33
+name = "v_fma_mixlo_f16"
+
+[[mnemonic]]
+family = "VOP3P"
+opcode = 34
+name = "v_fma_mixhi_f16"
+
+[[mnemonic]]
 family = "VOPC"
 opcode = 1
 name = "v_cmp_lt_f32_e32"

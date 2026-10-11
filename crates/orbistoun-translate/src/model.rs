@@ -222,6 +222,9 @@ pub const SUPPORTED: &[&str] = &[
     "v_lshlrev_b16",
     "v_pack_b32_f16",
     "v_pk_mad_u16",
+    "v_fma_mix_f32",
+    "v_fma_mixlo_f16",
+    "v_fma_mixhi_f16",
     "v_pk_lshlrev_b16",
     "v_pk_sub_u16",
     "v_pk_add_u16",
@@ -2380,7 +2383,7 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // A shift then an or, as radeonsi packs a primitive's vertex indices.
         "v_lshl_or_b32" => shift_or(model, instruction),
-        _ if WITH_K.contains(&name) => multiply_add_constant(model, instruction, name),
+        _ if MULTIPLY_ADDS.contains(&name) => multiply_add_family(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
         "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_msad_u8" => {
             integer_long_form(model, instruction, name)
@@ -6802,6 +6805,137 @@ fn packed_selects(instruction: &Instruction) -> Result<[[bool; 3]; 2], Translate
     Ok([low, high])
 }
 
+/// The mixed-precision multiply-adds.
+const MIXED: [&str; 3] = ["v_fma_mix_f32", "v_fma_mixlo_f16", "v_fma_mixhi_f16"];
+
+/// Every multiply-add [`multiply_add_family`] carries out.
+const MULTIPLY_ADDS: [&str; 7] = [
+    "v_madak_f32",
+    "v_madmk_f32",
+    "v_fmaak_f32",
+    "v_fmamk_f32",
+    "v_fma_mix_f32",
+    "v_fma_mixlo_f16",
+    "v_fma_mixhi_f16",
+];
+
+/// A multiply-add with its constant `K` the word after it, or a mixed-precision one ([`MIXED`]).
+fn multiply_add_family<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    if MIXED.contains(&name) {
+        mixed_multiply_add(model, instruction, name)
+    } else {
+        multiply_add_constant(model, instruction, name)
+    }
+}
+
+/// `v_fma_mix_f32 d, a, b, c`, `v_fma_mixlo_f16` and `v_fma_mixhi_f16`: the fused multiply-add
+/// `a * b + c` over sources each a single-precision float or a half widened to one, as ACO
+/// encodes them (`aco_ir.h:1589-1599`, `aco_print_ir.cpp:1054-1063`): `op_sel_hi` - the second
+/// word's 28:27 for the first two sources, the first word's bit 14 for the third - makes a source a
+/// half, and `op_sel` (the first word's 13:11) takes its high half rather than its low. The VOP3P
+/// negation fields are the mix's modifiers: the first word's 10:8 the absolute value of each
+/// source, the second word's 31:29 its negation, applied in that order. Bit 15 clamps the result
+/// to `[0, 1]`. `v_fma_mix_f32` writes the float; `v_fma_mixlo_f16` and `v_fma_mixhi_f16` narrow
+/// it to a half, rounded to nearest, into the low or high half of the destination, keeping the
+/// other half. The rounding mode a shader may set around a mix is not modelled.
+fn mixed_multiply_add<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let [destination, first, second_source, third] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a mixed-precision multiply-add does not have four operands",
+        });
+    };
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a mixed-precision multiply-add's destination is not a vector register",
+        });
+    };
+    let word = instruction.word;
+    let second = instruction.second_word.unwrap_or(0);
+    let half = [
+        second >> 27 & 1 != 0,
+        second >> 28 & 1 != 0,
+        word >> 14 & 1 != 0,
+    ];
+    let high = [11, 12, 13].map(|bit| word >> bit & 1 != 0);
+    let modifiers = Modifiers {
+        negate: [29, 30, 31].map(|bit| second >> bit & 1 != 0),
+        absolute: [8, 9, 10].map(|bit| word >> bit & 1 != 0),
+        clamp: false,
+        output_multiplier: 0,
+    };
+    let clamp = if word >> 15 & 1 != 0 {
+        let Some(nan_to_zero) = model.dx10_clamp() else {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "this instruction clamps its result to [0, 1], and what that does to a NaN ",
+                    "is the stage's DX10_CLAMP mode, which this translation was not given"
+                ),
+            });
+        };
+        Some(nan_to_zero)
+    } else {
+        None
+    };
+    let register = u32::from(*register);
+    let sources = [first, second_source, third];
+    for lane in running_lanes(model) {
+        let mut read = [None; 3];
+        for (index, source) in sources.iter().enumerate() {
+            let raw = model.read_source(instruction, source, lane)?;
+            let value = if half[index] {
+                let shift = model.constant(if high[index] { 16 } else { 0 });
+                let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, raw, shift);
+                let mask = model.constant(0xFFFF);
+                let field = model.binary(op::BITWISE_AND, shifted, mask);
+                model.half_to_float_bits(field)
+            } else {
+                raw
+            };
+            read[index] = Some(apply_modifiers(model, value, modifiers, index));
+        }
+        let [Some(a), Some(b), Some(c)] = read else {
+            unreachable!("every source was read above");
+        };
+        let product = model.f32_binary(op::FMUL, a, b);
+        let value = model.f32_binary(op::FADD, product, c);
+        let value = match clamp {
+            Some(nan_to_zero) => clamp_unit(model, value, nan_to_zero),
+            None => value,
+        };
+        let value = if name == "v_fma_mix_f32" {
+            value
+        } else {
+            let narrowed = model.float_bits_to_half(value);
+            let old = model.read_source(instruction, destination, lane)?;
+            let (kept, placed) = if name == "v_fma_mixlo_f16" {
+                (model.constant(0xFFFF_0000), narrowed)
+            } else {
+                let sixteen = model.constant(16);
+                (
+                    model.constant(0x0000_FFFF),
+                    model.binary(op::SHIFT_LEFT_LOGICAL, narrowed, sixteen),
+                )
+            };
+            let kept = model.binary(op::BITWISE_AND, old, kept);
+            model.binary(op::BITWISE_OR, kept, placed)
+        };
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
 /// `v_pk_mad_u16 d, a, b, c`: in each half of the result, the product of `a` and `b`'s selected
 /// halves plus `c`'s, wrapping at sixteen bits (AMD's published RDNA instruction set). The low
 /// result takes the halves `op_sel` picks and the high one those `op_sel_hi` picks.
@@ -7270,9 +7404,6 @@ fn scalar_select_64<M: Model + ?Sized>(
     model.count();
     Ok(())
 }
-
-/// The multiply-adds whose constant `K` is the word after the instruction.
-const WITH_K: [&str; 4] = ["v_madak_f32", "v_madmk_f32", "v_fmaak_f32", "v_fmamk_f32"];
 
 /// `v_madak_f32 d, a, b, K` (`a * b + K`) and `v_madmk_f32 d, a, K, b` (`a * K + b`): the legacy
 /// multiply-add of `v_mad_f32` with a constant from the literal word after the instruction (AMD's

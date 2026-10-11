@@ -5773,6 +5773,69 @@ fn vop3p(name: &str, dst: u32, sources: [u32; 3], op_sel: u32, op_sel_hi: u32) -
     ]
 }
 
+/// The mixed-precision multiply-adds Mesa's pixel shaders pack their results with: a source is a
+/// half where `op_sel_hi` says so, its high half where `op_sel` does; the first word's 10:8 take a
+/// source's absolute value and the second word's 31:29 negate it; the `lo` and `hi` forms narrow
+/// the result into one half of the destination and keep the other.
+#[test]
+fn a_mixed_precision_multiply_add_reads_and_writes_halves() {
+    if !device_or_skip("a_mixed_precision_multiply_add_reads_and_writes_halves") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 2.0f32.to_bits()));
+    // 3.0 as a half, in the high half.
+    program.extend(v_mov_literal(2, 0x4200_0000));
+    program.extend(v_mov_literal(4, 0.5f32.to_bits()));
+    program.extend(v_mov_literal(5, 0xabcd_0000));
+    program.extend(v_mov_literal(6, 0x0000_1234));
+    program.extend(v_mov_literal(7, (-2.0f32).to_bits()));
+    // 2.0 * (the high half of v2, 3.0) + 0.5
+    program.extend(vop3p(
+        "v_fma_mix_f32",
+        3,
+        [VGPR_0 + 1, VGPR_0 + 2, VGPR_0 + 4],
+        0b010,
+        0b010,
+    ));
+    // 2.0 * 2.0 + 2.0 into the low half
+    program.extend(vop3p(
+        "v_fma_mixlo_f16",
+        5,
+        [VGPR_0 + 1, VGPR_0 + 1, VGPR_0 + 1],
+        0,
+        0,
+    ));
+    // 2.0 * 2.0 - 2.0 into the high half
+    let [first, second] = vop3p(
+        "v_fma_mixhi_f16",
+        6,
+        [VGPR_0 + 1, VGPR_0 + 1, VGPR_0 + 1],
+        0,
+        0,
+    );
+    program.extend([first, second | 1 << 31]);
+    // |-2.0| * 2.0 + 0.5
+    let [first, second] = vop3p(
+        "v_fma_mix_f32",
+        0,
+        [VGPR_0 + 7, VGPR_0 + 1, VGPR_0 + 4],
+        0,
+        0,
+    );
+    program.extend([first | 1 << 8, second]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 6.5f32.to_bits(), "a half source");
+    assert_eq!(vector(&registers, 5), 0xabcd_4600, "6.0 into the low half");
+    assert_eq!(vector(&registers, 6), 0x4000_1234, "2.0 into the high half");
+    assert_eq!(
+        vector(&registers, 0),
+        4.5f32.to_bits(),
+        "an absolute source"
+    );
+}
+
 /// ACO's image-copy coordinate arithmetic, on register halves: `v_pk_mad_u16` multiplies and adds
 /// each half, its halves picked by `op_sel` and `op_sel_hi`; `v_add_nc_u16` wraps at sixteen bits
 /// and writes only the half its destination select names; `v_lshlrev_b16` shifts a source's high

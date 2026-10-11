@@ -79,8 +79,9 @@ fn permitted_families(mnemonic: &str) -> &'static [&'static str] {
         &["SMEM"]
     } else if mnemonic.starts_with("s_") {
         &["SOP1", "SOP2", "SOPC", "SOPK", "SOPP", "SMEM"]
-    } else if mnemonic.starts_with("v_pk_") {
-        // The packed sixteen-bit operations have an encoding of their own.
+    } else if mnemonic.starts_with("v_pk_") || mnemonic.starts_with("v_fma_mix") {
+        // The packed sixteen-bit operations have an encoding of their own, and the
+        // mixed-precision multiply-adds share it.
         &["VOP3P"]
     } else if mnemonic.starts_with("v_") {
         &["VOP1", "VOP2", "VOPC", "VOP3", "VINTRP"]
