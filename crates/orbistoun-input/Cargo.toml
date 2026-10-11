@@ -21,5 +21,7 @@ orbistoun-systemservice = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+# Registering the module, to see which NID a declared name links to.
+orbistoun-nid = { workspace = true }
 # Round-tripping a mapping, which is how it reaches the settings file.
 toml = { workspace = true }

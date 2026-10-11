@@ -32,7 +32,7 @@ guest_module! {
         "scePadInit" => 0,
         // Known by NID only: answers `0` and writes nothing, whatever it is passed (obSCEne
         // census, `200-census/libScePad/0xda809fad5f12799f`, sweep 20261007-113500).
-        "n3kSX62fgNo" => 0,
+        "0xda809fad5f12799f" => 0,
         "scePadOpen" => 4,
         "scePadOpenExt" => 4,
         "scePadClose" => 1,
@@ -221,7 +221,7 @@ const OWN: &[(&str, GuestFn)] = &[
     ("sceImeUpdate", ime::update),
     ("sceImeKeyboardOpen", ime::keyboard_open),
     ("sceImeKeyboardClose", ime::keyboard_close),
-    ("n3kSX62fgNo", pad_census_nid),
+    ("0xda809fad5f12799f", pad_census_nid),
     // Both spellings, as for `scePadOpen`.
     ("scePadReadState", pad_read_state),
     ("scePadReadStateExt", pad_read_state),
@@ -309,12 +309,28 @@ mod tests {
         assert_eq!(call("sceImeUpdate", [0; GUEST_ARG_REGISTERS]), 0x80bc_0002);
     }
 
+    /// The NID-only call links to the NID the guest imports: a name in `0x` hex is taken as the NID
+    /// itself, where any other spelling is hashed as a symbol name and links to nothing called.
+    #[test]
+    fn the_census_nid_links_to_the_nid_the_guest_imports() {
+        let mut registry = orbistoun_hle::Registry::new(
+            orbistoun_nid::NidHasher::new(*b"test-suffix"),
+            orbistoun_hle::StubPolicy::default(),
+        );
+        registry.register(super::MODULE);
+        assert!(
+            registry
+                .resolve(orbistoun_nid::Nid::from_raw(0xda80_9fad_5f12_799f))
+                .is_some()
+        );
+    }
+
     /// The NID-only call answers `0` whatever it is passed, as measured.
     #[test]
     fn the_census_nid_answers_zero() {
         let (_, f) = super::implementations()
             .iter()
-            .find(|(name, _)| *name == "n3kSX62fgNo")
+            .find(|(name, _)| *name == "0xda809fad5f12799f")
             .expect("implemented");
         assert_eq!(f(&[0; GUEST_ARG_REGISTERS]), 0);
         assert_eq!(f(&[0xa1; GUEST_ARG_REGISTERS]), 0);

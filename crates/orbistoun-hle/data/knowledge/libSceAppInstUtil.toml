@@ -31,7 +31,7 @@ found_in = ["OPSY00001"]
 found_on = "2026-09-27"
 
 [[function]]
-name = "Wudg3Xe3heE"
+name = "0xe185b777dd60e75a"
 arity = 3
 purpose = "Encoded NID entry point for package installation."
 returns = "status"

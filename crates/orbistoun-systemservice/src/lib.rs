@@ -107,7 +107,7 @@ pub mod app_inst_util {
             "sceAppInstUtilInitialize" => 1,
             "sceAppInstUtilTerminate" => 0,
             "sceAppInstUtilAppInstallAll" => 3,
-            "Wudg3Xe3heE" => 3,
+            "0xe185b777dd60e75a" => 3,
         }
     }
 }
@@ -739,7 +739,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceAppInstUtilInitialize", app_inst_util_initialize),
     ("sceAppInstUtilTerminate", app_inst_util_terminate),
     ("sceAppInstUtilAppInstallAll", app_inst_util_app_install_all),
-    ("Wudg3Xe3heE", app_inst_util_app_install_all),
+    ("0xe185b777dd60e75a", app_inst_util_app_install_all),
     ("sceSystemServiceLaunchWebBrowser", launch_web_browser),
     (
         "sceLncUtilGetAppIdOfRunningBigApp",
@@ -765,6 +765,23 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
 mod tests {
     use super::{MAX_USER_NAME, UNKNOWN_PARAMETER, implementations, param_get_int};
     use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// The NID-only installer entry links to the NID the guest imports: a name in `0x` hex is taken
+    /// as the NID itself, where any other spelling is hashed as a symbol name and links to nothing
+    /// called.
+    #[test]
+    fn the_installer_nid_links_to_the_nid_the_guest_imports() {
+        let mut registry = orbistoun_hle::Registry::new(
+            orbistoun_nid::NidHasher::new(*b"test-suffix"),
+            orbistoun_hle::StubPolicy::default(),
+        );
+        registry.register(super::app_inst_util::MODULE);
+        assert!(
+            registry
+                .resolve(orbistoun_nid::Nid::from_raw(0xe185_b777_dd60_e75a))
+                .is_some()
+        );
+    }
 
     /// Arguments for a name request against a real buffer.
     fn name_call(user: u64, buffer: &mut [u8], size: u64) -> [u64; GUEST_ARG_REGISTERS] {

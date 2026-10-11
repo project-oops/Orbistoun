@@ -2924,6 +2924,7 @@ dependencies = [
  "orbistoun-core",
  "orbistoun-hle",
  "orbistoun-mem",
+ "orbistoun-nid",
  "orbistoun-systemservice",
  "serde",
  "toml 0.8.23",
@@ -3197,6 +3198,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-kernel",
  "orbistoun-mem",
+ "orbistoun-nid",
  "orbistoun-shell",
 ]
 
