@@ -20,6 +20,7 @@ pub mod random;
 pub mod remoteplay;
 pub mod rtc;
 pub mod save_data;
+pub mod share;
 pub mod web_browser_dialog;
 
 pub mod console;

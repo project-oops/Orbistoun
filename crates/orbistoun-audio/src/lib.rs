@@ -243,6 +243,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
         ("sceAudioOut2PortCreate", audio_out2::port_create),
+        (
+            "sceAudioOut2GetSpeakerArrayMemorySize",
+            audio_out2::get_speaker_array_memory_size,
+        ),
     ]
 }
 
@@ -358,6 +362,17 @@ mod tests {
         let unmeasured = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
         assert_ne!(call("sceAudioOut2PortCreate", unmeasured), 0);
         assert_eq!(port, [0xa5; 8], "an unmeasured call writes nothing");
+    }
+
+    /// `sceAudioOut2GetSpeakerArrayMemorySize` answers the measured byte counts (REQ-ao06,
+    /// `report-1791727748.txt` 92-124), and the placeholder for an unmeasured shape.
+    #[test]
+    fn the_speaker_array_size_is_as_measured() {
+        let size = |a, b, c| call("sceAudioOut2GetSpeakerArrayMemorySize", [a, b, c, 0, 0, 0]);
+        assert_eq!(size(8, 0, 1), 0xae00, "PPSA04263's shape");
+        assert_eq!(size(2, 0, 1), 0xad40);
+        assert_eq!(size(8, 0, 0), 0x2e0);
+        assert_eq!(size(4, 0, 1), 0xf7ff_0001, "unmeasured");
     }
 
     /// `sceAudioOut2Initialize` answers 0 the first time in a process and `0x80268004` every time

@@ -2,8 +2,8 @@
 //!
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
 //! full capture, not a claim about the argument count. `sceAudioOut2Initialize`, the user calls, the
-//! context set-up (`ContextResetParam`, `ContextQueryMemory`, `ContextCreate`) and `PortCreate` are
-//! implemented, as measured.
+//! context set-up (`ContextResetParam`, `ContextQueryMemory`, `ContextCreate`), `PortCreate` and
+//! `GetSpeakerArrayMemorySize` are implemented, as measured.
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -22,6 +22,8 @@ guest_module! {
         "sceAudioOut2ContextPush" => 6,
         "sceAudioOut2ContextQueryMemory" => 6,
         "sceAudioOut2ContextResetParam" => 6,
+        // (speakers, height, order)
+        "sceAudioOut2GetSpeakerArrayMemorySize" => 3,
         "sceAudioOut2Initialize" => 6,
         // (context, param, port)
         "sceAudioOut2PortCreate" => 3,
@@ -234,4 +236,30 @@ pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
     }
+}
+
+/// The bytes `sceAudioOut2GetSpeakerArrayMemorySize` answered for each argument triple measured,
+/// the same twice each (REQ-ao06, `report-1791727748.txt` 92-124, link-bound in a fresh process
+/// after the context, user and an 8-channel port were made). PPSA04263 asks for `(8, 0, 1)`.
+const SPEAKER_ARRAY_SIZES: [([u32; 3], u64); 6] = [
+    ([8, 0, 1], 0xae00),
+    ([2, 0, 1], 0xad40),
+    ([6, 0, 1], 0xada0),
+    ([8, 1, 1], 0xb380),
+    ([8, 0, 0], 0x2e0),
+    ([8, 0, 2], 0xae00),
+];
+
+/// `sceAudioOut2GetSpeakerArrayMemorySize(a, b, c)`: the bytes a speaker array of that shape needs,
+/// answered in `rax` (not a status). Answered for the measured triples only; any other is
+/// unmeasured and answers the placeholder.
+pub(crate) fn get_speaker_array_memory_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let asked = [args[0] as u32, args[1] as u32, args[2] as u32];
+    SPEAKER_ARRAY_SIZES
+        .iter()
+        .find(|(triple, _)| *triple == asked)
+        .map_or(
+            u64::from(GuestError::Unimplemented.as_raw()),
+            |(_, size)| *size,
+        )
 }

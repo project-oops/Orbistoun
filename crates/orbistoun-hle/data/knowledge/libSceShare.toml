@@ -1,0 +1,28 @@
+library = "libSceShare"
+
+[[function]]
+name = "sceShareInitialize"
+arity = 3
+purpose = "(size, priority, cpu_mask): starts the process's share service."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-sh01, link-bound): in a fresh process with (0x20000, 0x2bc, 0x1fff), the first call answered 0 (before sysmodule 0x10f was loaded); after sysmodules 0x96, 0xa9 and 0x10f, two more calls answered 0x8196000d each.",
+    "orbistoun answers 0 the first time in a process and 0x8196000d after, until sceShareTerminate.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261011T0900Z-sh01 via REQ-20261011T1310Z-lk01, reports/hardware/report-1791727748.txt lines 3717-3729 (070-user/share-initialize)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceShareTerminate"
+arity = 0
+purpose = "Stops the process's share service."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-sh01, link-bound): 0 after the initialise calls above.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261011T0900Z-sh01 via REQ-20261011T1310Z-lk01, reports/hardware/report-1791727748.txt lines 3717-3729 (070-user/share-initialize)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-11"

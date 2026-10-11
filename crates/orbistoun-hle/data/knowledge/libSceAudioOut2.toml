@@ -100,3 +100,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T0010Z-ao05, reports/hardware/report-1791713884.txt lines 54-99 (000-boot/audioout2-fresh-process)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceAudioOut2GetSpeakerArrayMemorySize"
+arity = 3
+purpose = "(speakers, height, order): the bytes a speaker array of that shape needs, answered in rax."
+returns = "count"
+edge_cases = [
+    "MEASURED (REQ-ao06, link-bound, fresh process after the context, user and an 8-channel port): (8,0,1) 0xae00, (2,0,1) 0xad40, (6,0,1) 0xada0, (8,1,1) 0xb380, (8,0,0) 0x2e0, (8,0,2) 0xae00, each the same twice.",
+    "orbistoun answers those triples; any other is unmeasured and answers the placeholder. PPSA04263 asks for (8,0,1) and allocates what it is told.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261011T1130Z-ao06 via REQ-20261011T1310Z-lk01, reports/hardware/report-1791727748.txt lines 92-124 (000-boot/audioout2-fresh-process)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-11"
