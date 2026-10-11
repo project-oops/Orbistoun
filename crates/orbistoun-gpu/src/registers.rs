@@ -1395,7 +1395,11 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
             base,
             pipe_aligned: attrib3 & ATTRIB3_DCC_PIPE_ALIGNED != 0,
         },
-        surface: u64::from(last(CB_COLOR0_BASE)? & !0xFF) << 8,
+        // The extension's eight bits sit above the base's thirty-two, both in 256-byte units, as
+        // [`colour_target_at`] reads them; an unwritten extension reads as zero.
+        surface: (u64::from(last(CB_COLOR0_BASE)? & !0xFF)
+            | u64::from(last(CB_COLOR0_BASE_EXT).unwrap_or(0) & 0xFF) << 32)
+            << 8,
         extent: decode_colour_target_extent(attrib2),
         levels: (attrib2 >> 28) + 1,
         single_slice,
@@ -4164,6 +4168,15 @@ mod tests {
                 single_slice: true,
                 single_sample: true,
             })
+        );
+        // The surface's high address bits are `CB_COLOR0_BASE_EXT`'s: PPSA25872's target lies at
+        // `0x7400_16f9_0000`, its keys beside it at `0x7400_1781_0000`.
+        let mut high = craft.clone();
+        high.push(write(0xA318, 0x0016_f900));
+        high.push(write(0xA390, 0x74));
+        assert_eq!(
+            colour_target_dcc_at(&high).map(|dcc| dcc.surface),
+            Some(0x7400_16f9_0000)
         );
         let mut plain = craft.clone();
         plain.push(write(0xA31C, 0x0002_8028));
