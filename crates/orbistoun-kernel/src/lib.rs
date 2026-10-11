@@ -19,7 +19,7 @@ pub mod sync;
 pub mod thread;
 pub mod tls;
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
@@ -133,6 +133,9 @@ guest_module! {
         "sceKernelGetSanitizerNewReplaceExternal" => 0,
         // (table): a title's libc hands its heap functions over at start-up; returns nothing.
         "_sceKernelRtldSetApplicationHeapAPI" => 1,
+        "_sceKernelSetThreadDtors" => 1,
+        "_sceKernelSetThreadAtexitCount" => 1,
+        "_sceKernelSetThreadAtexitReport" => 1,
         "sceKernelSetVirtualRangeName" => 3,
         "sceKernelAllocateMainDirectMemory" => 4,
         "sceKernelGetDirectMemorySize" => 0,
@@ -6422,6 +6425,56 @@ fn set_application_heap_api(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// The callbacks libc hands the kernel at start-up for a thread's end: its thread-local destructors,
+/// how many `atexit` handlers it holds, and where to report them.
+///
+/// Kept, not called: a guest thread here ends by parking (see [`pthread_exit`]), so nothing runs
+/// a thread's destructors yet. What the hooks are for is FreeBSD's `__cxa_thread_atexit` path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadHooks {
+    /// `_sceKernelSetThreadDtors`'s callback.
+    pub dtors: u64,
+    /// `_sceKernelSetThreadAtexitCount`'s callback.
+    pub atexit_count: u64,
+    /// `_sceKernelSetThreadAtexitReport`'s callback.
+    pub atexit_report: u64,
+}
+
+/// The hooks registered so far.
+static THREAD_HOOKS: Mutex<ThreadHooks> = Mutex::new(ThreadHooks {
+    dtors: 0,
+    atexit_count: 0,
+    atexit_report: 0,
+});
+
+/// The thread hooks libc has registered.
+#[must_use]
+pub fn thread_hooks() -> ThreadHooks {
+    *THREAD_HOOKS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records one hook and answers 0, as each answered for a null and a valid callback (obSCEne
+/// `060-module/libc-startup-hooks`, `20260927-084607-eboot.log` 4566-4571).
+fn set_thread_hook(set: impl FnOnce(&mut ThreadHooks)) -> u64 {
+    set(&mut THREAD_HOOKS.lock().unwrap_or_else(PoisonError::into_inner));
+    OK
+}
+
+/// `_sceKernelSetThreadDtors(callback)`: see [`ThreadHooks`].
+fn set_thread_dtors(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    set_thread_hook(|hooks| hooks.dtors = args[0])
+}
+
+/// `_sceKernelSetThreadAtexitCount(callback)`: see [`ThreadHooks`].
+fn set_thread_atexit_count(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    set_thread_hook(|hooks| hooks.atexit_count = args[0])
+}
+
+/// `_sceKernelSetThreadAtexitReport(callback)`: see [`ThreadHooks`].
+fn set_thread_atexit_report(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    set_thread_hook(|hooks| hooks.atexit_report = args[0])
+}
+
 /// `__tls_get_addr(&{module, offset})`: the calling thread's address of a thread-local variable,
 /// as the ELF thread-local storage ABI's dynamic models read it (D763).
 ///
@@ -6739,6 +6792,9 @@ const TABLE: &[(&str, GuestFn)] = &[
         "_sceKernelRtldSetApplicationHeapAPI",
         set_application_heap_api,
     ),
+    ("_sceKernelSetThreadDtors", set_thread_dtors),
+    ("_sceKernelSetThreadAtexitCount", set_thread_atexit_count),
+    ("_sceKernelSetThreadAtexitReport", set_thread_atexit_report),
     ("sceKernelSetVirtualRangeName", set_virtual_range_name),
     ("mmap", mmap),
     ("sceKernelMmap", mmap),
@@ -7808,6 +7864,20 @@ mod tests {
         })
         .join()
         .expect("the sleeper runs");
+    }
+
+    /// libc's thread start-up hooks answer 0, null or not, and the callbacks given are kept
+    /// (obSCEne `060-module/libc-startup-hooks`, `20260927-084607-eboot.log` 4566-4571).
+    #[test]
+    fn the_libc_thread_hooks_answer_as_measured() {
+        assert_eq!(super::set_thread_dtors(&args([0, 0, 0, 0])), 0);
+        assert_eq!(
+            super::set_thread_dtors(&args([0x4000_0000_1000, 0, 0, 0])),
+            0
+        );
+        assert_eq!(super::thread_hooks().dtors, 0x4000_0000_1000);
+        assert_eq!(super::set_thread_atexit_count(&args([0, 0, 0, 0])), 0);
+        assert_eq!(super::set_thread_atexit_report(&args([0, 0, 0, 0])), 0);
     }
 
     /// A fresh reservation queries as uncommitted and inaccessible, so a guest fills it.

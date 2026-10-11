@@ -2650,3 +2650,48 @@ known_by = "published"
 cites = "POSIX.1-2008 pthread_exit(3)."
 assumptions = ["The vendor name is taken to be pthread_exit itself, as scePthreadCreate and the other scePthread names are its twins."]
 found_on = "2026-10-10"
+
+[[function]]
+name = "_sceKernelSetThreadDtors"
+arity = 1
+purpose = "(callback): one of the hooks libc registers at start-up for a thread's end; kept and 0 answered."
+returns = "status"
+edge_cases = [
+    "MEASURED: answered 0x0 for a null callback and for a valid one.",
+    "orbistoun keeps the callback (orbistoun_kernel::thread_hooks) but nothing calls it: a guest thread here ends by parking, so its thread-local destructors and atexit handlers are not run.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne 060-module/libc-startup-hooks, reports/hardware/20260927-084607-eboot.log lines 4561-4571."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "_sceKernelSetThreadAtexitCount"
+arity = 1
+purpose = "(callback): one of the hooks libc registers at start-up for a thread's end; kept and 0 answered."
+returns = "status"
+edge_cases = [
+    "MEASURED: answered 0x0 for a zero argument.",
+    "orbistoun keeps the callback (orbistoun_kernel::thread_hooks) but nothing calls it: a guest thread here ends by parking, so its thread-local destructors and atexit handlers are not run.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne 060-module/libc-startup-hooks, reports/hardware/20260927-084607-eboot.log lines 4561-4571."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "_sceKernelSetThreadAtexitReport"
+arity = 1
+purpose = "(callback): one of the hooks libc registers at start-up for a thread's end; kept and 0 answered."
+returns = "status"
+edge_cases = [
+    "MEASURED: answered 0x0 for a null callback.",
+    "orbistoun keeps the callback (orbistoun_kernel::thread_hooks) but nothing calls it: a guest thread here ends by parking, so its thread-local destructors and atexit handlers are not run.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne 060-module/libc-startup-hooks, reports/hardware/20260927-084607-eboot.log lines 4561-4571."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-11"
