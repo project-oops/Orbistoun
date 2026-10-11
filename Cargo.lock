@@ -2853,6 +2853,7 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-core",
  "orbistoun-hle",
+ "orbistoun-kernel",
  "orbistoun-mem",
  "orbistoun-shader",
  "orbistoun-thunk",

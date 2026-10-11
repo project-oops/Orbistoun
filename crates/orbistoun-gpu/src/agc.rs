@@ -446,6 +446,44 @@ mod dcb {
     pub(super) const CUR: u64 = 0x10;
     /// The limit a builder checks a packet against before writing it.
     pub(super) const LIMIT: u64 = 0x18;
+    /// The overflow callback, called as `(writer, dwords, context)` when a packet does not fit.
+    pub(super) const OVERFLOW: u64 = 0x20;
+    /// The context the overflow callback is handed.
+    pub(super) const OVERFLOW_CONTEXT: u64 = 0x28;
+}
+
+/// Where a packet of `length` bytes goes in the writer at `dcb`: its cursor, when the packet fits
+/// below the limit. When it does not, the writer's overflow callback is asked for room, as
+/// `(writer, dwords, context)`, and the cursor and limit are read again if it answers true in `al`
+/// (D788). `None` when there is no callback, it refuses, or it leaves too little room.
+fn room(dcb: u64, length: u64) -> Option<u64> {
+    let fits = || {
+        // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and
+        // the limit are quadwords at its `+0x10` and `+0x18`, the offsets the hardware reads.
+        let cur = unsafe { guest::read_u64(dcb.wrapping_add(dcb::CUR)) }.unwrap_or(0);
+        // SAFETY: the same handle, the adjacent field.
+        let limit = unsafe { guest::read_u64(dcb.wrapping_add(dcb::LIMIT)) }.unwrap_or(0);
+        (cur != 0 && limit != 0 && cur.wrapping_add(length) <= limit).then_some(cur)
+    };
+    if let Some(cur) = fits() {
+        return Some(cur);
+    }
+    // SAFETY: the same handle's callback field.
+    let callback = unsafe { guest::read_u64(dcb.wrapping_add(dcb::OVERFLOW)) }.unwrap_or(0);
+    if callback == 0 {
+        return None;
+    }
+    // SAFETY: the same handle's context field.
+    let context = unsafe { guest::read_u64(dcb.wrapping_add(dcb::OVERFLOW_CONTEXT)) }.unwrap_or(0);
+    // SAFETY: `callback` is the function the guest installed in its own writer for exactly this
+    // call, and the writer and context are what the guest put beside it.
+    let answer =
+        unsafe { orbistoun_kernel::thread::call_guest(callback, [dcb, length / 4, context]) }?;
+    // A bool answer: only `al` is defined.
+    if answer as u8 == 0 {
+        return None;
+    }
+    fits()
 }
 
 // A builder returns the address of the packet it just wrote.
@@ -460,22 +498,17 @@ mod dcb {
 /// The effectful half that [`crate::packet::build`] does not have: the encoders there are pure,
 /// and this places what they produce.
 ///
-/// Refuses rather than overruns. When a packet does not fit, the real library calls the overflow
-/// callback at `+0x20`; calling a guest callback from a shim is unmeasured, so this answers the
-/// placeholder instead, which cannot be mistaken for a firmware code (D670).
+/// Refuses rather than overruns: a packet that does not fit asks the writer's overflow callback
+/// for room ([`room`], D788), and one it gets none for answers the placeholder, which cannot be
+/// mistaken for a firmware code (D670).
 fn dcb_append(dcb: u64, words: &[u32]) -> u64 {
     if dcb == 0 || words.is_empty() {
         return BAD_ARGUMENT;
     }
-    // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and the
-    // limit are quadwords at its `+0x10` and `+0x18`, the offsets the hardware reads.
-    let cur = unsafe { guest::read_u64(dcb.wrapping_add(dcb::CUR)) }.unwrap_or(0);
-    // SAFETY: the same handle, the adjacent field.
-    let limit = unsafe { guest::read_u64(dcb.wrapping_add(dcb::LIMIT)) }.unwrap_or(0);
     let length = words.len() as u64 * 4;
-    if cur == 0 || limit == 0 || cur.wrapping_add(length) > limit {
+    let Some(cur) = room(dcb, length) else {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
-    }
+    };
     for (i, word) in words.iter().enumerate() {
         // SAFETY: every offset written is below `length`, and `cur + length <= limit` was checked
         // above, so each dword lands inside the guest's own command buffer.
@@ -493,15 +526,10 @@ fn dcb_append_spanning(dcb: u64, words: &[u32], dwords: usize) -> u64 {
     if dcb == 0 || words.is_empty() || words.len() > dwords {
         return BAD_ARGUMENT;
     }
-    // SAFETY: `dcb` is the guest-owned writer handle the guest passed in arg0; the cursor and the
-    // limit are quadwords at its `+0x10` and `+0x18`, the offsets the hardware reads.
-    let cur = unsafe { guest::read_u64(dcb.wrapping_add(dcb::CUR)) }.unwrap_or(0);
-    // SAFETY: the same handle, the adjacent field.
-    let limit = unsafe { guest::read_u64(dcb.wrapping_add(dcb::LIMIT)) }.unwrap_or(0);
     let length = dwords as u64 * 4;
-    if cur == 0 || limit == 0 || cur.wrapping_add(length) > limit {
+    let Some(cur) = room(dcb, length) else {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
-    }
+    };
     for (i, word) in words.iter().enumerate() {
         // SAFETY: every offset written is below `length`, and `cur + length <= limit` was checked
         // above, so each dword lands inside the guest's own command buffer.

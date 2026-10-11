@@ -9,7 +9,7 @@
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_gpu::agc;
 
-/// `GuestError::Unimplemented` - what the overflow path answers, since it is not implemented.
+/// `GuestError::Unimplemented` - what a builder answers when it gets no room.
 const UNIMPLEMENTED: u64 = 0xf7ff_0001;
 /// The measured `libSceAgc` code for a refused argument.
 const BAD_ARGUMENT: u64 = 0x8a6c_000a;
@@ -669,8 +669,66 @@ fn a_register_run_with_no_values_is_reserved_for_the_guest_to_fill() {
     assert_eq!(payload, at + 8);
 }
 
-/// A packet that does not fit is refused and nothing is written. The real library calls the
-/// overflow callback; this answers the placeholder instead of writing past the buffer.
+/// What the overflow callback below was asked, and the chunk it hands out.
+static ASKED: std::sync::Mutex<Option<(u64, u64, u64)>> = std::sync::Mutex::new(None);
+static CHUNK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An overflow callback as PPSA25872's is shaped (D788): `(writer, dwords, context)`, installing a
+/// chunk as the writer's buffer and answering a bool.
+extern "sysv64" fn hand_out_a_chunk(writer: *mut u64, dwords: u32, context: u64) -> u8 {
+    *ASKED.lock().expect("lock") = Some((writer as u64, u64::from(dwords), context));
+    let chunk = CHUNK.load(std::sync::atomic::Ordering::SeqCst);
+    if chunk == 0 {
+        return 0;
+    }
+    // SAFETY: `writer` is the test's own seven-quadword handle, passed through unchanged, and
+    // nothing else touches it during the call.
+    let fields = unsafe { std::slice::from_raw_parts_mut(writer, 4) };
+    fields.copy_from_slice(&[chunk, chunk + 64, chunk, chunk + 64]);
+    1
+}
+
+/// A writer with no room asks its overflow callback at `+0x20` for some, with the packet's length
+/// in dwords and the context at `+0x28`, and writes the packet where the callback put the cursor
+/// (D788): PPSA25872 builds into a writer whose cursor and limit start at zero. A callback that
+/// answers false leaves the packet refused.
+#[test]
+fn an_empty_writer_asks_its_overflow_callback_for_room() {
+    let mut chunk = vec![0u8; 64].into_boxed_slice();
+    let mut fields = Box::new([0u64; 7]);
+    fields[4] = hand_out_a_chunk as *const () as u64;
+    fields[5] = 0x1234_5678;
+    let handle = fields.as_mut_ptr() as u64;
+    let mut args = [0u64; GUEST_ARG_REGISTERS];
+    args[0] = handle;
+    args[1] = 1;
+
+    CHUNK.store(0, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        call("sceAgcCbNop", args),
+        UNIMPLEMENTED,
+        "a callback that answers false"
+    );
+    assert_eq!(fields[2], 0, "nothing written");
+
+    let at = chunk.as_mut_ptr() as u64;
+    CHUNK.store(at, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        call("sceAgcCbNop", args),
+        at,
+        "the packet's address, in the chunk"
+    );
+    assert_eq!(*ASKED.lock().expect("lock"), Some((handle, 1, 0x1234_5678)));
+    assert_eq!(
+        chunk[..4],
+        0xffff_1000_u32.to_le_bytes(),
+        "the NOP, written there"
+    );
+    assert_eq!(fields[2], at + 4, "the cursor moved past it");
+}
+
+/// A packet that does not fit, in a writer with no overflow callback, is refused and nothing is
+/// written.
 #[test]
 fn a_full_buffer_is_refused_rather_than_overrun() {
     let w = Writer::new(4); // room for a header and not one dword more

@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 orbistoun-core = { workspace = true }
 orbistoun-hle = { workspace = true }
+orbistoun-kernel = { workspace = true }
 orbistoun-shader = { workspace = true }
 orbistoun-translate = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
