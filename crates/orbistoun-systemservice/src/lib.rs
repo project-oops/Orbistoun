@@ -737,6 +737,8 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("sceLncUtilSuspendApp", lnc_util_suspend_app),
     ("sceLncUtilKillApp", lnc_util_kill_app),
     ("sceSaveDataInitialize3", save_data::initialize3),
+    ("sceSaveDataMount3", save_data::mount3),
+    ("sceSaveDataUmount2", save_data::umount2),
     (
         "sceSaveDataGetSaveDataMemory2",
         save_data::get_save_data_memory2,

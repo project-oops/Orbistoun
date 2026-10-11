@@ -164,6 +164,16 @@ pub fn is_hidden(root: &Path, host: &Path) -> bool {
     })
 }
 
+/// Forgets the mount at `guest_prefix` and that it was writable, leaving every other mount.
+pub fn unmount(guest_prefix: &str) {
+    if let Ok(mut writable) = writable().lock() {
+        writable.remove(guest_prefix);
+    }
+    if let Ok(mut mounts) = mounts().lock() {
+        mounts.remove(guest_prefix);
+    }
+}
+
 /// Forgets every mount.
 pub fn clear() {
     if let Ok(mut hidden) = hidden().lock() {

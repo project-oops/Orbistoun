@@ -45,3 +45,32 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 13554-13564, 200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceSaveDataMount3"
+arity = 2
+purpose = "(param, result): mounts a save at a mount point the result names."
+returns = "status"
+edge_cases = [
+    "PPSA03416's SaveData.prx fills param: +0x00 the user, +0x08 a pointer to the directory name, +0x10 the block count, +0x20 the mode ((flags & ~3) | 1), +0x28 0xffffffff; it zeroes result and reads +0x10 (u64) and +0x1c (u32) after.",
+    "orbistoun mounts the directory of that name under the title's /data/savedata at /savedata0 (D792): created when the mode has bit 2 (4), otherwise 0x809f0008 for a save that does not exist; writable only with bit 1 (2). result takes the mount point at +0x00, 0 at +0x10 and 1 at +0x1c when the mount created the save.",
+]
+found_by = "generated"
+known_by = "assumed"
+assumptions = ["The mode bits, the result layout and the not-found code are the SDK's as public headers give them, not measured: obSCEne could not bind Mount3 from a homebrew process (REQ-sm02). Chosen by the user on 2026-10-11 (D792)."]
+found_in = ["PPSA03416-app0"]
+found_on = "2026-10-11"
+
+[[function]]
+name = "sceSaveDataUmount2"
+arity = 2
+purpose = "(mode, mount point): releases a mounted save."
+returns = "status"
+edge_cases = [
+    "orbistoun releases /savedata0 and answers 0; any other mount point, or none mounted, answers the placeholder (D792).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["The shell's answer (D792), unmeasured."]
+found_in = ["PPSA03416-app0"]
+found_on = "2026-10-11"
