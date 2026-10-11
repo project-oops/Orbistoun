@@ -5085,6 +5085,26 @@ fn the_local_share_is_not_addressed_through_the_memory_window() {
     );
 }
 
+/// A local-data-share instruction with its GDS bit set (bit 17 of the first word on GFX10,
+/// `aco_assembler.cpp:513`) addresses the global data share, which is not modelled: it is refused
+/// by name rather than carried out on the workgroup's local share. PPSA25872's first dispatch ends
+/// with `ds_write_b32 v0, v1 gds` (`0xd8360000`).
+#[test]
+fn a_global_data_share_access_is_refused_not_run_on_the_local_share() {
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let mut program = ds_write(0, 1, 0).to_vec();
+    program[0] |= 1 << 17;
+    program.push(s_endpgm());
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let refused = translate(&decoded, &table, Strategy::default()).expect_err("refused");
+    assert!(
+        format!("{refused:?}").contains("global data share"),
+        "refused by name: {refused:?}"
+    );
+}
+
 /// A masked write does not reach the local share.
 #[test]
 fn a_masked_write_does_not_reach_the_local_share() {

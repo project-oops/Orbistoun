@@ -2505,6 +2505,18 @@ fn memory_instruction<M: Model + ?Sized>(
         }
         name if name.starts_with("buffer_") => buffer_memory(model, instruction, name),
         name if name.starts_with("tbuffer_") => typed_buffer_memory(model, instruction, name),
+        // The GDS bit (17 on GFX10, `aco_assembler.cpp:513`) points the access at the global data
+        // share, shared by every wave and kept between dispatches; carried out on the local share it
+        // would vanish with the workgroup.
+        name if name.starts_with("ds_") && instruction.word & DS_GDS != 0 => {
+            Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "a global data share (GDS) access is not modelled; carried out on the ",
+                    "local share it would be lost when the workgroup ends"
+                ),
+            })
+        }
         "ds_write_b32" | "ds_read_b32" => {
             local_share(model, instruction, name)?;
             model.after_local_access();
@@ -4772,6 +4784,9 @@ fn local_share_pair<M: Model + ?Sized>(
     model.count();
     Ok(())
 }
+
+/// A local-data-share instruction's GDS bit, 17 of its first word on GFX10 (`aco_assembler.cpp:513`).
+const DS_GDS: u32 = 1 << 17;
 
 /// The local-data-share accesses that merge into a word: `ds_write_b8 address, data offset` stores
 /// the data's low byte at its byte, `ds_read_u8 d, address offset` reads one byte zero-extended,
