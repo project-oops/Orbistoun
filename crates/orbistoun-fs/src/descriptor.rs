@@ -43,6 +43,9 @@ enum Target {
     Queue(crate::kqueue::Registrations),
     /// A device: a stream with no host file behind it (D389).
     Device(crate::device::Device),
+    /// A directory with no host directory behind it: the root, or one that holds a mount
+    /// (`mount::is_directory`). Read through its listing, never as a file.
+    Directory,
 }
 
 /// Open descriptors above the standard streams.
@@ -79,6 +82,14 @@ pub fn open(guest_path: &str) -> Option<u64> {
         return insert(Target::Device(device));
     }
     let Some(host) = crate::mount::resolve_existing(guest_path) else {
+        // The root, or a directory that holds a mount, is there with no host directory behind
+        // it, and FreeBSD opens any directory read-only.
+        if crate::mount::is_directory(guest_path) {
+            crate::opened::note(guest_path);
+            let fd = insert(Target::Directory)?;
+            crate::dirent::note_directory(fd, guest_path);
+            return Some(fd);
+        }
         // A path nothing here holds, recorded (D387).
         crate::wanted::note(guest_path);
         return None;
@@ -170,7 +181,7 @@ pub(crate) fn with_queue<T>(
     let mut table = table().lock().ok()?;
     match table.get_mut(&fd)? {
         Target::Queue(held) => Some(act(held)),
-        Target::File(_) | Target::Socket(_) | Target::Device(_) => None,
+        Target::File(_) | Target::Socket(_) | Target::Device(_) | Target::Directory => None,
     }
 }
 
@@ -202,7 +213,7 @@ pub(crate) fn with_socket<T>(
     let mut table = table().lock().ok()?;
     match table.get_mut(&fd)? {
         Target::Socket(socket) => Some(act(socket)),
-        Target::File(_) | Target::Queue(_) | Target::Device(_) => None,
+        Target::File(_) | Target::Queue(_) | Target::Device(_) | Target::Directory => None,
     }
 }
 
@@ -227,8 +238,8 @@ fn read_unrecorded(fd: u64, into: &mut [u8]) -> Option<usize> {
     if let Some(target) = table.get_mut(&fd) {
         return match target {
             // Nothing is read from a queue: `kevent` takes its events, and `read` on one fails
-            // on the platform too.
-            Target::Queue(_) => None,
+            // on the platform too. A directory is read through its listing, not as a file.
+            Target::Queue(_) | Target::Directory => None,
             Target::Device(device) => Some(device.read(into)),
             Target::File(file) => Some(file.read(into).unwrap_or(0)),
             // A socket reads as a file does, so `read` and `recv` are the same to everything
@@ -568,7 +579,7 @@ pub fn write(fd: u64, bytes: &[u8]) -> Option<usize> {
             Target::Socket(crate::socket::Socket::Datagram { socket, .. }) => {
                 socket.send(bytes).ok()
             }
-            // A queue, or a descriptor that names nothing: not writable here.
+            // A queue, a directory, or a descriptor that names nothing: not writable here.
             _ => None,
         };
     }
@@ -719,7 +730,7 @@ pub fn duplicate_into(from: u64, to: u64) -> bool {
         // A queue is not duplicated: two descriptors onto one registration set is a sharing
         // model nothing here has. A device is not duplicated: two descriptors draining one log
         // would each get half of it.
-        Some(Target::Queue(_) | Target::Device(_)) | None => None,
+        Some(Target::Queue(_) | Target::Device(_) | Target::Directory) | None => None,
     };
     let Some(copy) = copy else {
         return false;
@@ -779,7 +790,7 @@ pub fn facts(fd: u64) -> Option<std::fs::Metadata> {
     let table = table().lock().ok()?;
     match table.get(&fd)? {
         Target::File(file) => file.metadata().ok(),
-        Target::Socket(_) | Target::Queue(_) | Target::Device(_) => None,
+        Target::Socket(_) | Target::Queue(_) | Target::Device(_) | Target::Directory => None,
     }
 }
 
@@ -859,8 +870,8 @@ pub fn readable(fd: u64) -> bool {
         // A device is ready when it has something waiting.
         Some(Target::Device(device)) => device.readable(),
         // A queue is never reported ready: nothing here nests one kqueue inside another, and
-        // saying yes would wake a guest for nothing.
-        Some(Target::Queue(_)) | None => false,
+        // saying yes would wake a guest for nothing. A directory is not read as a stream.
+        Some(Target::Queue(_) | Target::Directory) | None => false,
     }
 }
 
@@ -881,8 +892,8 @@ pub fn writable(fd: u64) -> bool {
             )
         }
         Some(Target::Device(device)) => device.writable(),
-        // Nothing is written to a queue.
-        Some(Target::Queue(_)) | None => false,
+        // Nothing is written to a queue or a directory.
+        Some(Target::Queue(_) | Target::Directory) | None => false,
     }
 }
 
@@ -949,7 +960,7 @@ pub fn set_nonblocking(fd: u64, wanted: bool) -> bool {
         },
         // A device answers immediately or not at all, so the setting is accepted and changes
         // nothing.
-        Some(Target::File(_) | Target::Queue(_) | Target::Device(_)) => true,
+        Some(Target::File(_) | Target::Queue(_) | Target::Device(_) | Target::Directory) => true,
         None => false,
     }
 }
@@ -965,7 +976,7 @@ pub fn duplicate_above(from: u64, floor: u64) -> Option<u64> {
             Target::File(file) => file.try_clone().ok().map(Target::File),
             Target::Socket(socket) => duplicate_socket(socket),
             // As with `dup2`: no shared registration sets, and no log drained by two.
-            Target::Queue(_) | Target::Device(_) => None,
+            Target::Queue(_) | Target::Device(_) | Target::Directory => None,
         }?
     };
     let mut table = table().lock().ok()?;
@@ -1043,6 +1054,24 @@ mod tests {
             "a real descriptor, above the standard streams"
         );
         assert!(!is_standard(fd));
+        assert!(close(fd));
+    }
+
+    /// The root opens too, though no host directory stands behind it: FreeBSD opens any directory
+    /// read-only, and oops-sdk's `oops_fs_exists` asks whether a path is there by opening it. Its
+    /// listing names the mounts below it, and nothing reads from it as a file.
+    #[test]
+    fn the_root_opens_and_lists_its_mounts() {
+        let _guard = exclusively();
+        a_title_with("root-open", b"x");
+        let fd = open("/").expect("the root opens to a descriptor");
+        assert!(fd >= FIRST_FILE);
+        let mut byte = [0_u8; 1];
+        assert_ne!(
+            read(fd, &mut byte),
+            Some(1),
+            "a directory is not read as a file"
+        );
         assert!(close(fd));
     }
 
