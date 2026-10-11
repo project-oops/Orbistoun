@@ -1180,7 +1180,7 @@ purpose = "(dcb, (value << 32) | offset): writes one value into one shader regis
 edge_cases = [
     "MEASURED (166-agc/dcb-set-sh-reg-direct): for (0x12345678 << 32) | 8 the packet read header 0xc0017600, offset 8, value 0x12345678 - type 3, opcode 0x76, three dwords - the cursor advanced 12 bytes and the answer was non-null.",
 ]
-found_by = "generated"
+found_by = "static"
 known_by = "measured"
 cites = "obSCEne 166-agc/dcb-set-sh-reg-direct, reports/hardware/20261011-002100-eboot.obs.log lines 11592-11598."
 found_in = ["PPSA04263-app0", "PPSA28061-app0"]
