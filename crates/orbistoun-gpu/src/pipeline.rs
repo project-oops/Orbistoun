@@ -3745,7 +3745,7 @@ fn user_data_texture(
         user.get(start..start.checked_add(count)?)
     };
     let descriptor: [u32; 8] = words_from(first, 8)?.try_into().ok()?;
-    if descriptor.iter().all(|&word| word == 0) {
+    if is_null_image(&descriptor) {
         return Some(null_texture(source.slot));
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
@@ -3764,12 +3764,23 @@ fn user_data_texture(
     Some(bound)
 }
 
-/// Whether the image descriptor at `at` is all zero: a texture unit nothing bound, as RADV writes a
-/// null descriptor (`radv_write_image_descriptor`, `memset(dst, 0, size)`).
+/// Whether the image descriptor at `at` is null, as [`is_null_image`] reads one.
 fn is_null_descriptor(at: u64, memory: &impl GuestMemory) -> bool {
-    memory
-        .read(at, 32)
-        .is_some_and(|bytes| bytes.iter().all(|&b| b == 0))
+    memory.read(at, 32).is_some_and(|bytes| {
+        let mut words = [0_u32; 8];
+        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+            *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        is_null_image(&words)
+    })
+}
+
+/// Whether an image descriptor is null and samples as zero (D794): its second word zero, as Mesa
+/// tests for one (`ac_nir_lower_resinfo.c:20-24`), and every destination select `SQ_SEL_0`, so a
+/// sample returns zero whatever its other words hold. An all-zero descriptor, as RADV writes for a
+/// texture unit nothing bound (`radv_write_image_descriptor`, `memset(dst, 0, size)`), is one.
+fn is_null_image(words: &[u32; 8]) -> bool {
+    words[1] == 0 && destination_selects(words[3]) == [0; 4]
 }
 
 /// What an all-zero image descriptor samples as: zero in every channel. Its `DST_SEL_X` .. `_W` are
@@ -5129,6 +5140,68 @@ mod tests {
             Some((1, vec![0], 1, 1)),
             "one texel, every channel zero"
         );
+    }
+
+    /// A descriptor Mesa calls null - its second word zero - with every select `SQ_SEL_0` binds the
+    /// null texture whatever its other words hold (D794); with a select that reads the texel it
+    /// stays unbound. The words are PPSA28061's: user data 9 to 16 of a pixel shader that blends a
+    /// second texture by a factor of zero.
+    #[test]
+    fn a_null_descriptor_with_zero_selects_reads_zero() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        struct Memory;
+        impl super::GuestMemory for Memory {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let bind = |word3: u32| {
+            let shader = ResourceId(1);
+            let mut words = [0u32; super::USER_DATA_WORDS];
+            words[9..17]
+                .copy_from_slice(&[0, 0, 0x80_0eb0, word3, 0x1_2255, 0x4000, 0x26e0, 0x7400]);
+            let sources = std::collections::BTreeMap::from([(
+                shader,
+                vec![TextureSource {
+                    slot: 0,
+                    table_offset: None,
+                    table: TableBase::default(),
+                    sampler_offset: None,
+                    user_data: Some(9),
+                    sampler_user_data: Some(17),
+                    saturated: [false; 2],
+                }],
+            )]);
+            let mut commands = vec![
+                RenderCommand::SetUserData {
+                    stage: ShaderStage::Fragment,
+                    words,
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader,
+                },
+                RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                },
+            ];
+            let mut unbound = 0;
+            bind_textures(
+                &mut commands,
+                (&sources, &mut super::TexelCache::new()),
+                &Memory,
+                (&mut unbound, &mut None),
+            );
+            let texels = commands.iter().find_map(|command| match command {
+                RenderCommand::BindTexture { texels, .. } => Some(texels.to_vec()),
+                _ => None,
+            });
+            (unbound, texels)
+        };
+        assert_eq!(bind(0x6000), (0, Some(vec![0])), "every select SQ_SEL_0");
+        assert_eq!(bind(0x6000 | 4), (1, None), "X reads the texel");
     }
 
     /// A slot nothing binds is counted and the first is described - the slot, where its

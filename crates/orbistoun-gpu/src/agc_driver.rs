@@ -461,6 +461,33 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
     None
 }
 
+/// The first draw segment a run refused, as prepared, so the worker can list its commands beside
+/// the refusal: the last submission is often not the one that stopped.
+fn refused_submission() -> &'static Mutex<Option<Submission>> {
+    static REFUSED: OnceLock<Mutex<Option<Submission>>> = OnceLock::new();
+    REFUSED.get_or_init(|| Mutex::new(None))
+}
+
+/// Passes `drawn` through, keeping `submission` when it was refused and none was kept before.
+fn keeping_refused(submission: &Submission, drawn: Result<(), String>) -> Result<(), String> {
+    if drawn.is_err() {
+        refused_submission()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(|| submission.clone());
+    }
+    drawn
+}
+
+/// The first draw segment the run refused, as prepared, if one was; taking it empties the store.
+#[must_use]
+pub fn take_refused_submission() -> Option<Submission> {
+    refused_submission()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 /// Why the most recent draw segment was not carried out, for the run report.
 fn draw_refusal() -> &'static Mutex<Option<String>> {
     static REFUSAL: Mutex<Option<String>> = Mutex::new(None);
@@ -491,7 +518,7 @@ impl GuestCp<'_> {
             .submission
             .ok_or("no submission is being carried out")?;
         if segment.whole {
-            return self.draw_into_target(whole);
+            return keeping_refused(whole, self.draw_into_target(whole));
         }
         // A segment that draws into more than one colour target is drawn a run at a time, each run
         // into its own target.
@@ -572,7 +599,8 @@ impl GuestCp<'_> {
                 .entry(*id)
                 .or_insert_with(|| module.clone());
         }
-        self.draw_into_target(&prepared)
+        let drawn = self.draw_into_target(&prepared);
+        keeping_refused(&prepared, drawn)
     }
 
     /// Leaves every block of a DCC target stored uncompressed, with its key saying so, before its
@@ -3333,6 +3361,29 @@ mod tests {
             0,
             "a null out-parameter is harmless"
         );
+    }
+
+    /// The first refused segment is kept, a later one does not replace it, a drawn one is not
+    /// kept, and taking it empties the store.
+    #[test]
+    fn the_first_refused_segment_is_kept() {
+        let _serial = serial();
+        let _ = super::take_refused_submission();
+        let first = super::Submission {
+            guest_memory_base: 1,
+            ..super::Submission::default()
+        };
+        let second = super::Submission {
+            guest_memory_base: 2,
+            ..super::Submission::default()
+        };
+        assert!(super::keeping_refused(&second, Ok(())).is_ok());
+        assert!(super::take_refused_submission().is_none(), "a drawn one");
+        assert!(super::keeping_refused(&first, Err("no".to_owned())).is_err());
+        assert!(super::keeping_refused(&second, Err("no".to_owned())).is_err());
+        let kept = super::take_refused_submission().map(|s| s.guest_memory_base);
+        assert_eq!(kept, Some(1), "the first");
+        assert!(super::take_refused_submission().is_none());
     }
 
     /// These tests share the process-global region and last-submission stores, the last-written

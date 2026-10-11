@@ -882,6 +882,13 @@ fn write_submission(submission: &Submission, name: &str) {
         submission.guest_memory_base,
         submission.guest_memory.len()
     );
+    for failure in &submission.report.failures {
+        let _ = writeln!(
+            text,
+            "its {} shader at {:#x} was not prepared: {}",
+            failure.stage, failure.address, failure.reason
+        );
+    }
     let _ = writeln!(
         text,
         "{}",
@@ -928,6 +935,9 @@ pub fn render_and_log_last_submission() -> Option<Event> {
     log_execution();
     let submission = orbistoun_gpu::agc_driver::take_last_submission()?;
     write_submission(&submission, "last");
+    if let Some(refused) = orbistoun_gpu::agc_driver::take_refused_submission() {
+        write_submission(&refused, "refused");
+    }
     // A submission whose draws already ran at submit has its frame; drawing it again would
     // blend it over itself.
     let ran = orbistoun_gpu::agc_driver::execution()
