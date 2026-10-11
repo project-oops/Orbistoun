@@ -404,7 +404,7 @@ const INVERSE_TWO_PI: &str = "inv_2pi";
 const INVERSE_TWO_PI_F32: u32 = 0x3e22_f983;
 
 /// The bits an inline float operand named `name` holds, or `None` for a name that is not one: the
-/// decimal the operand table names, or [`INVERSE_TWO_PI`].
+/// decimal the operand table names, or `inv_2pi`.
 #[must_use]
 pub fn inline_float_bits(name: &str) -> Option<u32> {
     if name == INVERSE_TWO_PI {
