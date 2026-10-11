@@ -3,7 +3,11 @@
 **Status:** decided
 **Date:** 2026-10-10
 **known_by:** assumed (the refresh: 60 Hz, one refresh per flip; `sceVideoOutSetFlipRate`'s rates
-and the output's refresh are unmeasured)
+are unmeasured). The output's refresh has since been measured close to it: two
+`sceVideoOutGetVblankStatus` samples nine vblanks apart read 150,151 us between them, 16.683 ms a
+vblank (59.94 Hz), on a console's own output mode (obSCEne `130-layout/video-out-vblank-status`,
+`20261011-002100-eboot.obs.log` 4836-4856). The 0.1% difference is below anything a frame's pacing
+shows, so the constant stays at 60 Hz.
 
 A flip completion carries the display's logical time: the port's flip count times one 60 Hz
 refresh. A thread whose `sceKernelWaitEqueue` takes it moves its logical clock up to that time.
