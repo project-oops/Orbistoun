@@ -198,6 +198,8 @@ guest_module! {
         // Arity 2 for both, read off the guest's calls: the third register holds a leftover.
         "sceKernelCreateEqueue" => 2, "sceKernelAddUserEventEdge" => 2,
         "sceKernelWaitEqueue" => 5,
+        // (event): one delivered event's filter.
+        "sceKernelGetEventFilter" => 1,
         // Arities read off the guest's calls: Get takes a handle and two adjacent out-parameters, Set a
         // handle, a policy and a param pointer, and the two-argument pair a handle and one value.
         "scePthreadGetschedparam" => 3, "scePthreadSetschedparam" => 3,
@@ -3420,6 +3422,21 @@ fn kernel_create_equeue(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     OK
+}
+
+/// `sceKernelGetEventFilter(event)`: the filter of an event [`kernel_wait_equeue`] delivered, the
+/// `i16` at `+0x08` of FreeBSD's `struct kevent` (D560), answered as an `int`. Its name says which
+/// field it reads; that it reads it this way is assumed. A null event answers the placeholder.
+fn kernel_get_event_filter(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's delivered event, by the call's contract; read through the checked
+    // accessor.
+    match unsafe { guest::read_u32(args[0].wrapping_add(0x08)) } {
+        Some(word) => i64::from((word & 0xffff) as u16 as i16) as u64,
+        None => u64::from(GuestError::Unimplemented.as_raw()),
+    }
 }
 
 /// `sceKernelAddUserEventEdge(equeue, identifier)`.
@@ -6728,6 +6745,7 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("sceKernelCreateEqueue", kernel_create_equeue),
     ("sceKernelAddUserEventEdge", kernel_add_user_event_edge),
     ("sceKernelWaitEqueue", kernel_wait_equeue),
+    ("sceKernelGetEventFilter", kernel_get_event_filter),
     ("scePthreadGetschedparam", pthread_getschedparam),
     ("scePthreadSetschedparam", pthread_setschedparam),
     ("scePthreadSetprio", pthread_setprio),
@@ -7174,6 +7192,24 @@ fn deliver_resolved_file(buffer: u64) {
 
 #[cfg(test)]
 mod tests {
+    /// `sceKernelGetEventFilter` answers a delivered event's filter, sign-extended: the `i16` at
+    /// `+0x08` of `struct kevent` (D560).
+    #[test]
+    fn an_events_filter_is_read_from_its_kevent() {
+        let event = super::sync::PendingEvent {
+            ident: 7,
+            filter: -14,
+            flags: 0,
+            fflags: 0,
+            data: 0,
+            udata: 0,
+            display_nanos: 0,
+        }
+        .to_bytes();
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = event.as_ptr() as u64;
+        assert_eq!(super::kernel_get_event_filter(&args) as i64, -14);
+    }
 
     /// Makes a thread this crate has issued, for the calls that check a handle.
     fn a_thread(name: &str) -> u64 {
