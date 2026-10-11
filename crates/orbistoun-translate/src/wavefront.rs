@@ -433,7 +433,7 @@ pub struct UserData {
     pub saturated: [[bool; 2]; 2],
     /// The local data share the stage's program declares, in words: its `RSRC2`'s `LDS_SIZE`, in
     /// the 512-byte units radeonsi encodes it in (`ac_shader_encode_lds_size`). `None` when the
-    /// stream declared none, and then the module provides [`LOCAL_WORDS`].
+    /// stream declared none, and then the module provides a fixed 1 KiB.
     #[serde(default)]
     pub local_words: Option<u32>,
 }
