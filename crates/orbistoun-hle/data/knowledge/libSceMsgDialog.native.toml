@@ -1,0 +1,17 @@
+library = "libSceMsgDialog.native"
+
+[[function]]
+name = "sceMsgDialogInitialize"
+arity = 6
+purpose = "Initialises the message dialog, once per process."
+returns = "status"
+edge_cases = [
+    "MEASURED (130-layout/common-dialog, the klog leg's obs.log line 1956): resolved, and the call answered 0x0 in a process where sceCommonDialogInitialize had already been called (it answered 0x80b80002 there).",
+    "PPSA02664 calls it at start-up and, answered the placeholder, retried it 36 times in two minutes.",
+    "orbistoun answers 0 the first time in a process; a second call is unmeasured and answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne 130-layout/common-dialog, reports/hardware klog-leg obs.log line 1956."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-11"

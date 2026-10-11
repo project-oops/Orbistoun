@@ -142,6 +142,7 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     // libSceCommonDialog: `sceCommonDialogInitialize` answers 0, as the guest observes on hardware.
     // Registered beside its declaration, as the Agc modules are.
     all.extend_from_slice(orbistoun_systemservice::common_dialog::implementations());
+    all.extend_from_slice(orbistoun_systemservice::msg_dialog::implementations());
     // libSceRandom: random bytes for a title's arc4random, a fixed-seed stream so runs compare.
     all.extend_from_slice(orbistoun_systemservice::random::implementations());
     // libSceRtc: the real-time clock's tick, the host's wall clock from year one (D776).
@@ -525,10 +526,6 @@ mod knowledge_tests {
         (
             "libSceImeDialog",
             "declared as 5 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
-        ),
-        (
-            "libSceMsgDialog.native",
-            "declared as 4 name(s) and nothing else, read out of a real import table. Nothing is implemented: what the declaration buys is that a guest reaching this interface is named and counted rather than dying on an unresolved import (D505).",
         ),
         (
             "libSceRemoteplay",

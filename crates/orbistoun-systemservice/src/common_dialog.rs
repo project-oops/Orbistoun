@@ -15,16 +15,41 @@ guest_module! {
 /// Successful initialisation, as the guest reads it.
 const OK: u64 = 0;
 
-/// `sceCommonDialogInitialize()` - starts the common-dialog subsystem. Answers `0`.
-///
-/// Guest-observed: titles call it at startup, test the sign of the return and exit on a negative
-/// one. The library is not linked into a title process by default, so its return cannot be
-/// measured in that context. There is no out-parameter; the guest consumes only the sign.
-fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
+/// What a second initialisation in the same process answers: already initialised.
+const ALREADY_INITIALIZED: u64 = 0x80b8_0002;
+
+/// Whether the process has initialised the common dialog.
+static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `sceCommonDialogInitialize()` - starts the common-dialog subsystem: `0` the first time in a
+/// process and `0x80b80002` after, as a console answered two calls in one process (obSCEne
+/// `130-layout/common-dialog`, `20260923-dcb-extent-eboot.obs.log` 6399-6400). There is no
+/// out-parameter.
+pub(crate) fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if INITIALIZED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        ALREADY_INITIALIZED
+    } else {
+        OK
+    }
 }
 
 /// Implementations this module provides for `libSceCommonDialog`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[("sceCommonDialogInitialize", initialize)]
+}
+
+#[cfg(test)]
+mod tests {
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    /// The first initialisation in a process answers 0 and every later one `0x80b80002`, the
+    /// already-initialised code (obSCEne `130-layout/common-dialog`: `return_code 0x0`, then
+    /// `return_code_2 0x80b80002`).
+    #[test]
+    fn the_common_dialog_initialises_once_per_process() {
+        let args = [0_u64; GUEST_ARG_REGISTERS];
+        assert_eq!(super::initialize(&args), 0);
+        assert_eq!(super::initialize(&args), 0x80b8_0002);
+        assert_eq!(super::initialize(&args), 0x80b8_0002);
+    }
 }
