@@ -1519,6 +1519,33 @@ fn a_comparison_produces_a_mask_that_narrows_who_writes() {
     );
 }
 
+/// A compare in its SDWA form takes scalar sources from its modifier word and writes the register
+/// pair bits 14:8 name when bit 15 is set: PPSA02664's vertex shader does `v_cmp_neq_f32_sdwa s0,
+/// 0, s71` (words 0x7c1a8ef9 0x86868080). 0 against 1.0 is unequal in every lane, 0 against 0 in
+/// none, and the pair, anded into `exec`, says which lanes write.
+#[test]
+fn an_sdwa_compare_writes_the_pair_its_word_names() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_compare_writes_the_pair_its_word_names") {
+        return;
+    }
+    // src0 inline zero (128, scalar), dst s[4:5], both selects DWORD, src1 scalar s6.
+    let sdwa = 128 | 4 << 8 | 1 << 15 | 6 << 16 | 1 << 23 | 6 << 24 | 1 << 31;
+    let compare = head("v_cmp_neq_f32_e32") | (6 << 9) | SDWA_MARKER;
+    for (s6, expected) in [(242, 63), (128, 0)] {
+        let program = [
+            sop1("s_mov_b32", 6, s6),
+            compare,
+            sdwa,
+            s_logic_b64("s_and_b64", 126, 126, 4),
+            v_mov_inline(2, 63),
+            s_endpgm(),
+        ];
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        assert_eq!(vector(&registers, 2), expected, "s6 code {s6}");
+    }
+}
+
 /// A float comparison compares floats, not their bits.
 #[test]
 fn a_comparison_compares_floats_not_the_bits() {

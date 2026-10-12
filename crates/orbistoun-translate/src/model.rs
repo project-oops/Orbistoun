@@ -2241,6 +2241,9 @@ pub fn instruction<M: Model + ?Sized>(
         if SDWA_FLOAT_UNARY.contains(&name) {
             return sdwa_float_unary(model, instruction, name, word);
         }
+        if SDWA_COMPARE.contains(&name) {
+            return sdwa_compare(model, instruction, name, word);
+        }
         return sdwa_integer(model, instruction, name, word);
     }
 
@@ -6267,6 +6270,90 @@ pub const SDWA_FLOAT: &[(&str, &str)] = &[
 /// the word's source negate and absolute value apply to the one source (RDNA ISA, SDWA).
 pub const SDWA_FLOAT_UNARY: &[&str] = &["v_rcp_f32_e32", "v_log_f32_e32"];
 
+/// The short-form float compares translated in their SDWA form over whole registers.
+pub const SDWA_COMPARE: &[&str] = &[
+    "v_cmp_lt_f32_e32",
+    "v_cmp_eq_f32_e32",
+    "v_cmp_le_f32_e32",
+    "v_cmp_gt_f32_e32",
+    "v_cmp_ge_f32_e32",
+    "v_cmp_neq_f32_e32",
+];
+
+/// A compare in its SDWA form, as ACO encodes one (`aco_assembler.cpp`, its SDWA emission): the
+/// sources from the modifier word - the first's code in 7:0, scalar where bit 23 says, the second
+/// the instruction's own, scalar where bit 31 says - each negated (20, 28) and made absolute (21,
+/// 29) as the word says; the answer into `vcc`, or, where bit 15 is set, into the scalar register
+/// pair bits 14:8 name. Over whole registers only: a select of part of one, or the clamp (13), is
+/// refused.
+fn sdwa_compare<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    word: u32,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let fields = SdwaFields::read(word);
+    let whole = fields
+        .select
+        .iter()
+        .all(|&select| select == (SDWA_DWORD, false));
+    if !whole || word >> 13 & 1 != 0 {
+        return Err(refuse(
+            "an SDWA compare selects part of a register or clamps, which is not translated",
+        ));
+    }
+    let (opcode, floats) = op_for_compare(instruction, name)?;
+    let Some(Operand::Vector(vsrc1)) = instruction.operands.get(2) else {
+        return Err(refuse(
+            "an SDWA compare's second source is not its register field",
+        ));
+    };
+    let sources = [
+        sdwa_operand(instruction, fields.src0, fields.src0_scalar)?,
+        sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?,
+    ];
+    let bit = |at: u32| word >> at & 1 != 0;
+    let modifiers = Modifiers {
+        negate: [bit(20), bit(28), false],
+        absolute: [bit(21), bit(29), false],
+        clamp: false,
+        output_multiplier: 0,
+    };
+    let zero = model.constant(0);
+    let mut halves = (zero, zero);
+    for lane in 0..model.modelled_lanes() {
+        let mut sides = [zero, zero];
+        for (index, (side, operand)) in sides.iter_mut().zip(&sources).enumerate() {
+            let value = model.read_source(instruction, operand, lane)?;
+            let value = apply_modifiers(model, value, modifiers, index);
+            *side = if floats { model.as_float(value) } else { value };
+        }
+        let condition = model.compare(opcode, sides[0], sides[1]);
+        halves = model.set_lane_bit(halves, lane, condition);
+    }
+    if bit(15) {
+        let register = word >> 8 & 0x7f;
+        let words = if model.lanes() > 32 { 2 } else { 1 };
+        if register + words > SCALAR_REGISTERS {
+            return Err(refuse(
+                "an SDWA compare's destination is not a scalar register pair this translates",
+            ));
+        }
+        model.write_scalar(register, halves.0);
+        if words == 2 {
+            model.write_scalar(register + 1, halves.1);
+        }
+    } else {
+        model.write_lane_mask(VCC_LOW_HALF, halves.0, halves.1)?;
+    }
+    model.count();
+    Ok(())
+}
+
 /// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
 fn sdwa_float_long_form(name: &str) -> Option<&'static str> {
     SDWA_FLOAT
@@ -6287,6 +6374,7 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
             .is_some_and(|name| {
                 SDWA_INTEGER.contains(&name)
                     || SDWA_FLOAT_UNARY.contains(&name)
+                    || SDWA_COMPARE.contains(&name)
                     || sdwa_float_long_form(name).is_some()
             })
 }
