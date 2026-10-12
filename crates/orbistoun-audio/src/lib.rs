@@ -112,7 +112,7 @@ const fn channels_for(selector: u64) -> u8 {
 const S16_SELECTORS: [u64; 2] = [0, 1];
 
 /// Where an output port's samples go once the guest hands them over: a host device, at guest
-/// semantics - a port, its channel count, and samples at [`SERVED_FREQUENCY`].
+/// semantics - a port, its channel count, and samples at the served rate, `SERVED_FREQUENCY`.
 #[derive(Debug, Clone, Copy)]
 pub struct Sink {
     /// Plays one chunk of interleaved samples on a port. Answers how long the port should wait
