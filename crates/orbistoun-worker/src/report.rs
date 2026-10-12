@@ -2364,6 +2364,28 @@ fn tail_of_recorded() -> Vec<TracedCall> {
         .collect()
 }
 
+/// The named object a waiting call's first argument is, where it is one the kernel issued: a
+/// semaphore or event flag handle, or - for a lock call - a mapped guest lock word holding a lock's
+/// handle (D806). Nothing is read for any other call, whose first argument may be no address.
+fn waited_on(call: &str, first: u64) -> Option<String> {
+    use orbistoun_kernel::sync;
+    if let Ok(handle) = i32::try_from(first)
+        && let Some(name) = sync::semaphore_name_of(handle)
+    {
+        return Some(format!("semaphore {name:?} {first:#x}"));
+    }
+    if let Some(name) = sync::event_flag_name_of(first) {
+        return Some(format!("event flag {name:?} {first:#x}"));
+    }
+    if !call.contains("utex_lock") || !orbistoun_thunk::is_mapped(first) {
+        return None;
+    }
+    // SAFETY: a lock call's first argument, inside a span the run published as readable guest
+    // memory.
+    let word = unsafe { orbistoun_mem::guest::read_u64(first) }?;
+    sync::name_of(word).map(|name| format!("lock {name:?} {word:#x}"))
+}
+
 /// Every guest thread, joined against the calls still in the recorded window.
 ///
 /// The thread registry knows names and handles, the ring knows what was called on which host
@@ -2386,8 +2408,14 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
                 last_sequence: newest.map(|call| call.sequence),
                 inside: inside
                     .iter()
-                    .find(|&&(host, _)| record.host != 0 && host == record.host)
-                    .map(|&(_, index)| labelled(index as usize)),
+                    .find(|&&(host, ..)| record.host != 0 && host == record.host)
+                    .map(|&(_, index, first)| {
+                        let call = labelled(index as usize);
+                        match waited_on(&call, first) {
+                            Some(object) => format!("{call} on {object}"),
+                            None => call,
+                        }
+                    }),
             }
         })
         .collect()

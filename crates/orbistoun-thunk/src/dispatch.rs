@@ -1470,7 +1470,9 @@ unsafe extern "sysv64" fn on_guest_call(
     // The dispatch is split out so every answer leaves through one point, where the return below is
     // recorded; `handler` is handed over rather than looked up again. `INSIDE` brackets exactly the
     // handler, so an implementation asking what it is inside gets its own thread's answer (D621).
-    let outer = enter_import(index);
+    // SAFETY: the trampoline's contract: `args` points to the saved argument registers.
+    let first = unsafe { args.read() };
+    let outer = enter_import(index, first);
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
@@ -1488,16 +1490,16 @@ unsafe extern "sysv64" fn on_guest_call(
 /// both ends of the call would then name the first thread's slot. A call of its own computes it
 /// afresh on whichever thread is running.
 #[inline(never)]
-fn enter_import(index: u64) -> u32 {
+fn enter_import(index: u64, first: u64) -> (u32, u64) {
     let entered = (index as u32).wrapping_add(1);
-    publish_inside(entered);
-    INSIDE.with(|inside| inside.replace(entered))
+    let outer_first = publish_inside(entered, first);
+    (INSIDE.with(|inside| inside.replace(entered)), outer_first)
 }
 
 /// Puts back what `enter_import` answered, on the thread running now.
 #[inline(never)]
-fn leave_import(outer: u32) {
-    publish_inside(outer);
+fn leave_import((outer, outer_first): (u32, u64)) {
+    publish_inside(outer, outer_first);
     INSIDE.with(|inside| inside.set(outer));
 }
 
@@ -1510,6 +1512,9 @@ static PUBLISHED_HOST: [AtomicU64; PUBLISHED_THREADS] =
 /// The import each published thread is inside, plus one, as [`INSIDE`] holds it on that thread.
 static PUBLISHED_INSIDE: [AtomicU32; PUBLISHED_THREADS] =
     [const { AtomicU32::new(0) }; PUBLISHED_THREADS];
+/// The first argument of that call: the object a waiting call waits on (D806).
+static PUBLISHED_FIRST: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
 /// The next slot a thread claims.
 static PUBLISHED_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1518,10 +1523,11 @@ thread_local! {
     static PUBLISHED_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Publishes what this thread is inside, so another thread - the report - can say what a quiet
-/// thread is blocked in (D806). One relaxed store a call end, and a slot claimed on a thread's
+/// Publishes what this thread is inside and the call's first argument, so another thread - the
+/// report - can say what a quiet thread is blocked in and on what (D806), answering the first
+/// argument published before. Two relaxed stores a call end, and a slot claimed on a thread's
 /// first call.
-fn publish_inside(value: u32) {
+fn publish_inside(value: u32, first: u64) -> u64 {
     let slot = PUBLISHED_SLOT.with(|slot| {
         if slot.get() == 0 {
             let claimed = PUBLISHED_CLAIMED.fetch_add(1, Ordering::Relaxed);
@@ -1535,12 +1541,16 @@ fn publish_inside(value: u32) {
     if let Some(published) = PUBLISHED_INSIDE.get(slot) {
         published.store(value, Ordering::Relaxed);
     }
+    PUBLISHED_FIRST
+        .get(slot)
+        .map_or(0, |published| published.swap(first, Ordering::Relaxed))
 }
 
-/// Every host thread that is inside an import now, and the import's index: what a thread blocked
-/// in a call is blocked in, however long ago it made the call (D806).
+/// Every host thread that is inside an import now, the import's index and the call's first
+/// argument: what a thread blocked in a call is blocked in and on, however long ago it made the
+/// call (D806).
 #[must_use]
-pub fn threads_inside() -> Vec<(u64, u32)> {
+pub fn threads_inside() -> Vec<(u64, u32, u64)> {
     let claimed = PUBLISHED_CLAIMED
         .load(Ordering::Relaxed)
         .min(PUBLISHED_THREADS);
@@ -1550,7 +1560,8 @@ pub fn threads_inside() -> Vec<(u64, u32)> {
             let index = PUBLISHED_INSIDE[slot]
                 .load(Ordering::Relaxed)
                 .checked_sub(1)?;
-            (host != 0).then_some((host, index))
+            let first = PUBLISHED_FIRST[slot].load(Ordering::Relaxed);
+            (host != 0).then_some((host, index, first))
         })
         .collect()
 }
@@ -1816,13 +1827,13 @@ mod tests {
     #[test]
     fn a_thread_inside_a_call_is_published() {
         let (inside, after) = std::thread::spawn(|| {
-            let outer = super::enter_import(4242);
+            let outer = super::enter_import(4242, 0x5e2d_0000_0040);
             let host = super::host_thread();
-            let inside = super::threads_inside().contains(&(host, 4242));
+            let inside = super::threads_inside().contains(&(host, 4242, 0x5e2d_0000_0040));
             super::leave_import(outer);
             let after = super::threads_inside()
                 .iter()
-                .any(|&(thread, _)| thread == host);
+                .any(|&(thread, ..)| thread == host);
             (inside, after)
         })
         .join()
