@@ -455,6 +455,21 @@ pub struct RegisterSweep<'a> {
 /// Registers the sweep's table covers directly.
 const SWEEP_REGISTERS: usize = 1 << 16;
 
+/// A sweep that has taken nothing in.
+const NOT_REACHED: u32 = u32::MAX;
+
+/// Whether `write` is in force at the packet at byte `at`: made in that packet or an earlier one.
+///
+/// A packet writes registers or runs a command, never both, so a command's own offset holds no
+/// write of the stream's; what does sit there is the state the submissions before it left, which
+/// stands at offset zero ahead of the stream's first packet (D737). A command at offset zero - a
+/// stream that opens with a draw, as a frame continued across command buffers does - runs on
+/// exactly that state.
+#[must_use]
+pub const fn in_force_at(write: &RegisterWrite, at: u32) -> bool {
+    write.packet_offset <= at
+}
+
 /// No write to a register yet, in a [`SweepTable`].
 const UNWRITTEN: u32 = u32::MAX;
 
@@ -511,15 +526,16 @@ impl<'a> RegisterSweep<'a> {
         Self {
             writes,
             next: 0,
-            reached: 0,
+            // Nothing taken in yet, not even what is in force at the first packet.
+            reached: NOT_REACHED,
             table: SweepTable::take(),
             beyond: BTreeMap::new(),
         }
     }
 
-    /// The latest write to each of `registers` made in packets before `before`, in the order they
-    /// were made. Asked in increasing order this is one pass over the stream; asked out of order it
-    /// starts again, so it is never wrong, only slower.
+    /// The latest write to each of `registers` in force at the packet at `before`, in the order they
+    /// were made ([`in_force_at`]). Asked in increasing order this is one pass over the stream;
+    /// asked out of order it starts again, so it is never wrong, only slower.
     pub fn before_among(
         &mut self,
         before: u32,
@@ -537,7 +553,8 @@ impl<'a> RegisterSweep<'a> {
             .collect()
     }
 
-    /// The value of the latest write to `register` in packets before `before`, if there was one.
+    /// The value of the latest write to `register` in force at the packet at `before`, if there was
+    /// one ([`in_force_at`]).
     ///
     /// What a per-draw lookup wants when it reads registers one at a time: the answer without
     /// gathering, sorting and rescanning a list per draw.
@@ -554,19 +571,19 @@ impl<'a> RegisterSweep<'a> {
         }
     }
 
-    /// Takes in every write made before `before`.
+    /// Takes in every write in force at the packet at `before`.
     fn advance(&mut self, before: u32) {
         if before == self.reached {
             return;
         }
-        if before < self.reached {
+        if self.reached != NOT_REACHED && before < self.reached {
             self.next = 0;
             self.table.clear();
             self.beyond.clear();
         }
         self.reached = before;
         while let Some(write) = self.writes.get(self.next) {
-            if write.packet_offset >= before {
+            if !in_force_at(write, before) {
                 break;
             }
             // A stream of more writes than a table index holds keeps the rest beside it, as it does
@@ -605,7 +622,7 @@ pub fn shader_candidates_before(
 ) -> Vec<ShaderCandidate> {
     let earlier: Vec<RegisterWrite> = writes
         .iter()
-        .filter(|write| write.packet_offset < before)
+        .filter(|write| in_force_at(write, before))
         .copied()
         .collect();
     shader_candidates(&earlier, vocabulary)
@@ -2039,7 +2056,7 @@ pub fn viewport_transform_at(writes: &[RegisterWrite], before: u32) -> Option<Vi
         writes
             .iter()
             .rev()
-            .find(|w| w.register == register && w.packet_offset < before)
+            .find(|w| w.register == register && in_force_at(w, before))
             .map(|w| w.value)
     })
 }
@@ -2849,6 +2866,38 @@ pub fn decode_image_descriptor(words: [u32; 8]) -> ImageDescriptor {
 
 #[cfg(test)]
 mod tests {
+
+    /// State carried in from the submissions before stands at offset zero, and a command at offset
+    /// zero - a stream that opens with a draw - runs on it (D737); a later write in the stream is
+    /// not in force before its packet.
+    #[test]
+    fn a_command_at_offset_zero_runs_on_the_carried_state() {
+        use super::{RegisterSweep, RegisterWrite, in_force_at};
+        let carried = RegisterWrite {
+            packet_offset: 0,
+            register: 0x2C8C,
+            value: 0x3bc8_09c0,
+        };
+        let later = RegisterWrite {
+            packet_offset: 0x18,
+            register: 0x2C8C,
+            value: 0x1234,
+        };
+        let writes = [carried, later];
+        let mut sweep = RegisterSweep::new(&writes);
+        assert_eq!(
+            sweep.latest(0, 0x2C8C),
+            Some(0x3bc8_09c0),
+            "the draw at byte 0"
+        );
+        assert_eq!(
+            sweep.latest(0xb8, 0x2C8C),
+            Some(0x1234),
+            "the draw after the write"
+        );
+        assert!(in_force_at(&carried, 0));
+        assert!(!in_force_at(&later, 0));
+    }
     /// A draw's wave widths are the ones in force at it: radeonsi on GFX10 compiles a culling
     /// primitive shader as Wave64 and the rest as Wave32 (`si_state_shaders.cpp`,
     /// `si_determine_wave_size`), and rewrites `VGT_SHADER_STAGES_EN` between such draws in one
@@ -3015,10 +3064,14 @@ mod tests {
         let mut sweep = RegisterSweep::new(&writes);
         assert_eq!(
             sweep.latest(0, 0xA1E0),
-            None,
-            "a write in the packet itself is not before it"
+            Some(1),
+            "a write at offset zero is in force there, as carried state is (D737)"
         );
-        assert_eq!(sweep.latest(8, 0xA1E0), Some(1));
+        assert_eq!(
+            sweep.latest(7, 0xA1E0),
+            Some(1),
+            "not the write a packet later"
+        );
         assert_eq!(sweep.latest(9, 0xA1E0), Some(3));
         assert_eq!(sweep.latest(9, 0x2C8C), Some(2));
         assert_eq!(sweep.latest(13, 0x1_0005), Some(4));
@@ -3468,7 +3521,7 @@ mod tests {
             (960.0, 960.0, -540.0, 540.0)
         );
         assert!(
-            viewport_transform_at(&writes, 8).is_none(),
+            viewport_transform_at(&writes, 7).is_none(),
             "not before the writes"
         );
         writes.push(RegisterWrite {
@@ -3560,12 +3613,17 @@ mod tests {
         let walked = walk(&bytes);
         let writes = register_writes(&walked, &bytes, &vocabulary());
         let second_bind = walked.packets[1].offset;
-        let between = shader_candidates_before(&writes, &vocabulary(), second_bind);
+        // Where a draw between the two would sit: past the first, before the second.
+        let between = shader_candidates_before(&writes, &vocabulary(), second_bind - 1);
         assert_eq!(between.len(), 1);
         assert_eq!(between[0].address, 0x0000_0111_1111_1100, "the first bind");
         let after = shader_candidates_before(&writes, &vocabulary(), u32::MAX);
         assert_eq!(after[0].address, 0x0000_0222_2222_2200, "the second bind");
-        assert!(shader_candidates_before(&writes, &vocabulary(), 0).is_empty());
+        assert_eq!(
+            shader_candidates_before(&writes, &vocabulary(), 0)[0].address,
+            0x0000_0111_1111_1100,
+            "the bind at offset zero is in force there"
+        );
     }
 
     #[test]

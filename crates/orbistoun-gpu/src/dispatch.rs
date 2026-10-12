@@ -128,7 +128,7 @@ pub fn state_at(
         writes
             .iter()
             .rev()
-            .find(|w| w.packet_offset < packet_offset && w.register == register)
+            .find(|w| crate::registers::in_force_at(w, packet_offset) && w.register == register)
             .map(|w| w.value)
     };
     check_initiator(initiator_word, &latest)?;
