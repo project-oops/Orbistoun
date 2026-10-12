@@ -1,0 +1,77 @@
+# PPSA02664 with a controller connected from its first flip, as the console has one: a pad
+# delivered with nothing held sets the record's connected flag (D713). South is pressed and
+# released every forty flips from flip 400, so a press lands on whatever the title waits on.
+# Written by hand, not captured.
+
+[[step]]
+at_flip = 1
+
+[[step]]
+at_flip = 400
+buttons = ["south"]
+
+[[step]]
+at_flip = 403
+
+[[step]]
+at_flip = 440
+buttons = ["south"]
+
+[[step]]
+at_flip = 443
+
+[[step]]
+at_flip = 480
+buttons = ["south"]
+
+[[step]]
+at_flip = 483
+
+[[step]]
+at_flip = 520
+buttons = ["south"]
+
+[[step]]
+at_flip = 523
+
+[[step]]
+at_flip = 560
+buttons = ["south"]
+
+[[step]]
+at_flip = 563
+
+[[step]]
+at_flip = 600
+buttons = ["south"]
+
+[[step]]
+at_flip = 603
+
+[[step]]
+at_flip = 640
+buttons = ["south"]
+
+[[step]]
+at_flip = 643
+
+[[step]]
+at_flip = 680
+buttons = ["south"]
+
+[[step]]
+at_flip = 683
+
+[[step]]
+at_flip = 720
+buttons = ["south"]
+
+[[step]]
+at_flip = 723
+
+[[step]]
+at_flip = 760
+buttons = ["south"]
+
+[[step]]
+at_flip = 763

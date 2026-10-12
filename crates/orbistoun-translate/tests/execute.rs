@@ -5670,6 +5670,42 @@ fn an_sdwa_source_can_be_an_inline_float() {
     assert_eq!(vector(&registers, 5), 1.75f32.to_bits());
 }
 
+/// An SDWA second source with its scalar flag (bit 31 of the modifier word) set names the scalar
+/// space, a lane mask's half among it: PPSA02664's pixel shader multiplies by `vcc_lo` through SDWA
+/// (`v_mul_f32_sdwa v15, s31, vcc_lo`, words 0x101ed4f9 0x8686061f). 2.0 times 2.0 is 4.0.
+#[test]
+fn an_sdwa_source_can_be_a_lane_mask_half() {
+    const VCC_LO: u32 = 106;
+    const INLINE_TWO_F32: u32 = 244;
+    if !device_or_skip("an_sdwa_source_can_be_a_lane_mask_half") {
+        return;
+    }
+    let [head_word, sdwa] = vop2_sdwa(
+        "v_mul_f32_e32",
+        5,
+        VCC_LO,
+        Sdwa {
+            src0: 3,
+            src0_scalar: true,
+            src0_sel: SEL_DWORD,
+            src0_sext: false,
+            src1_sel: SEL_DWORD,
+            src1_sext: false,
+            dst_sel: SEL_DWORD,
+            dst_unused: 0,
+        },
+    );
+    let program = [
+        sop1("s_mov_b32", 3, INLINE_TWO_F32),
+        sop1("s_mov_b32", VCC_LO, INLINE_TWO_F32),
+        head_word,
+        sdwa | 1 << 31,
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 5), 4.0f32.to_bits());
+}
+
 /// radeonsi's index packing, as its blit primitive shader writes it: `v_lshlrev_b32_sdwa v2, 10,
 /// v0 src1_sel:WORD_1` then `v_or_b32_sdwa v0, v0, v2 src0_sel:WORD_0`, turning two 16-bit
 /// indices into ten-bit fields. Then a byte into a preserved destination, and a sign-extended

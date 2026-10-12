@@ -6459,13 +6459,23 @@ fn sdwa_operand(
         128..=192 => Ok(Operand::Integer(i64::from(code) - 128)),
         193..=208 => Ok(Operand::Integer(192 - i64::from(code))),
         // The rest of the scalar space is the ordinary source encoding's, so the solved operand
-        // table names it; an inline float is read by its name like any other, and a special
-        // register stays refused.
+        // table names it, and a name is read as the ordinary source reads it: an inline float, a
+        // lane mask's half (`v_mul_f32_sdwa v15, s31, vcc_lo`), `m0` or the condition code. A
+        // name no source reads stays refused.
         _ => match sdwa_operand_table().map(|table| table.classify(code, None)) {
-            Some(Operand::Named(name)) if name.parse::<f32>().is_ok() => Ok(Operand::Named(name)),
+            Some(Operand::Named(name)) if sdwa_readable_name(&name) => Ok(Operand::Named(name)),
             _ => Err(refuse),
         },
     }
+}
+
+/// Whether a named operand is one an SDWA source reads as the ordinary source path does.
+fn sdwa_readable_name(name: &str) -> bool {
+    inline_float_bits(name).is_some()
+        || lane_mask_name(name).is_some()
+        || lane_mask_high_name(name).is_some()
+        || name == M0
+        || name == SRC_SCC
 }
 
 /// The solved operand table, parsed once for the SDWA sources that name its constants.
