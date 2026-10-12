@@ -13,7 +13,7 @@ indexes the reference.
 - [features/running.md](features/running.md) - running a title and reading the result.
 - [features/inspector.md](features/inspector.md) - the live call trace and HLE resolution inspector.
 - [features/memory.md](features/memory.md) - the guest virtual memory layout and register viewer.
-- [features/graphics.md](features/graphics.md) - Vulkan settings, shader lowering and detiling.
+- [features/graphics.md](features/graphics.md) - the path from a guest's command buffers to the window, the performance overlay, and what it does not handle yet.
 - [features/controllers.md](features/controllers.md) - controller and keyboard mapping.
 - [features/naming.md](features/naming.md) - why imports show as hashes, and how names are recovered.
 - [features/paths.md](features/paths.md) - where Orbistoun reads and writes, and portable mode.

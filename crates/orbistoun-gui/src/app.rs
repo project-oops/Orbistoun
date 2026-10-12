@@ -1740,7 +1740,7 @@ const DOCS: &[oops_docs::Doc] = &[
     oops_docs::Doc::new(
         "graphics",
         "Graphics Settings",
-        "PM4 command-stream decode and shader translation to SPIR-V; presentation not implemented yet",
+        "PM4 command-stream decode, shader translation to SPIR-V, and the flipped frame in the window",
         include_str!("../../../docs/features/graphics.md"),
     ),
     oops_docs::Doc::new(

@@ -26,10 +26,11 @@ pub struct CallTrace {
     pub frames: u64,
     /// Whether the buffer the guest last flipped held bytes it had written.
     ///
-    /// Separates `presented` from `flipped`. The worker reads the last-flipped buffer back
-    /// after the run and sets this when its head differs from the zero a fresh allocation
-    /// holds. `status_of` awards `Reach::Presented` only when it is set; it defaults false,
-    /// so an unwritten or unreadable buffer stays at `flipped`.
+    /// Separates `presented` from `flipped`. Set when a frame orbistoun drew was written back
+    /// into the buffer the guest flipped and held a non-zero byte, or, in a run that drew
+    /// nothing, when any byte across the whole flipped frame in guest memory is not zero (see
+    /// [`Self::presented_by`]). `status_of` awards `Reach::Presented` only when it is set; it
+    /// defaults false, so an unwritten or unreadable buffer stays at `flipped`.
     #[serde(default)]
     pub frame_written: bool,
     /// What put the frame in the flipped buffer, when [`Self::frame_written`] is set:

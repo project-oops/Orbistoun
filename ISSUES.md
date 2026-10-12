@@ -43,7 +43,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 ## Kernel, libraries and filesystem
 
 - `libkernel::0x6abac2f3dc6f8cee` (a region allocator: size in arg1, alignment in arg3, header at region end) has no implementation.
-- `libc::0x92f57c2dc704346f`, the `printf`-format libc function, `0x53bbd82b51d172db` and `0x7d86501b8094ef57` are unnamed; dispatch them by NID.
+- `libc::0x92f57c2dc704346f` and the `printf`-format libc function are unnamed; dispatch them by NID, as `0x53bbd82b51d172db` and `0x7d86501b8094ef57` already are.
 - `sceKernelGetModuleInfo` is refused because its layout is unmeasured; `110-modules/names` fails with a placeholder.
 - The `015-sync/machine-kind` conformance check fails.
 - About 37 argument counts across the subsystem crates are provisional.
@@ -57,7 +57,6 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Input and interface
 
-- Live input is not mapped onto pad bytes; the at-rest image is written on every read.
 - A host gamepad is read on Windows only; on Linux and macOS a gamepad port reports a neutral
   pad, since the gamepad library links the system's libudev there. Every pad handle reads
   port 0.

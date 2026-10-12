@@ -91,17 +91,17 @@ fn console_frame(target_capture: &str) -> Vec<[u8; 4]> {
         .collect()
 }
 
-/// The hardware's triangle is reproduced pixel-exact; only the clear colour differs.
+/// The hardware's triangle is reproduced pixel-exact, over the target's prior contents.
 ///
 /// Walks the triangle DCB through `Pipeline::submit` with the two shaders served at their guest
 /// addresses, drives the submission through a `VulkanBackend`, and compares `last_frame()` with the
-/// detiled hardware target. The drawn pixels are checked at the hardware's own texels, so a shader
-/// that coloured them differently or geometry that placed them elsewhere fails. The uncovered field
-/// is the backend's black, not the target's prior clear, and that difference is asserted. Skips
-/// with no device.
+/// detiled hardware target. The target is seeded with the console's clear word first. The drawn
+/// pixels are checked at the hardware's own texels, so a shader that coloured them differently or
+/// geometry that placed them elsewhere fails, and every texel the console left undrawn must still
+/// hold that clear word. Skips with no device.
 #[test]
 fn the_console_triangle_frame_is_reproduced_pixel_exact() {
-    if !device_or_skip("the_console_triangle_is_reproduced_pixel_exact_over_a_black_clear") {
+    if !device_or_skip("the_console_triangle_frame_is_reproduced_pixel_exact") {
         return;
     }
 

@@ -1,7 +1,7 @@
 //! The current generation's graphics interface - `libSceAgc` and `libSceAgcDriver`.
 //!
 //! Every name is read from a real guest's import table or measured on hardware (the
-//! shader-linkage builders). Every arity is 6, the trampoline's full capture, not a claim: a wrong
+//! shader-linkage builders); the few entries no name is known for are declared by NID. Every arity is 6, the trampoline's full capture, not a claim: a wrong
 //! arity only degrades a trace, while a wrong name matches no import.
 //!
 //! The command builders write packets through the writer handle in `arg0`, as fully measured

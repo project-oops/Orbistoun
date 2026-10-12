@@ -43,7 +43,7 @@ name = "sceVideoOutConfigureOutput"
 purpose = "Configures an output port's mode."
 edge_cases = [
     "The guest passes the port handle 0x1 - the one this crate's own sceVideoOutOpen answered - then registers buffers and submits a flip (D562).",
-    "A setter, not a filler, which is why it is implemented where sceVideoOutSetBufferAttribute2 beside it is not: nothing here promises to write into the caller's memory, so reporting success promises nothing it does not do.",
+    "A setter, not a filler: nothing here promises to write into the caller's memory, so reporting success promises nothing it does not do.",
 ]
 known_by = "guest-observed"
 assumptions = [
