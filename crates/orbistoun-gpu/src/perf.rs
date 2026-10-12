@@ -278,11 +278,14 @@ pub enum Span {
     /// A frame still on the device written back because command-processor work touched its target
     /// before the flip (D714).
     SettlePending,
+    /// Within [`Self::PrepareShaders`]: the reconciled shaders prepared and bound before any draw;
+    /// the rest of it is each draw's own.
+    ShadersUpFront,
 }
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 51] = [
+    pub const ALL: [Self; 52] = [
         Self::SubmitCall,
         Self::CommandProcessor,
         Self::RunDraws,
@@ -334,6 +337,7 @@ impl Span {
         Self::WriteBackChanges,
         Self::WriteBackGuest,
         Self::SettlePending,
+        Self::ShadersUpFront,
     ];
 
     /// What to call it in the report.
@@ -390,6 +394,7 @@ impl Span {
             Self::WriteBackChanges => "write back: changes",
             Self::WriteBackGuest => "write back: guest",
             Self::SettlePending => "settle pending frame",
+            Self::ShadersUpFront => "shaders: up front",
         }
     }
 }

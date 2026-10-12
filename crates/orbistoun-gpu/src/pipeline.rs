@@ -872,6 +872,14 @@ pub struct Pipeline {
     cache: BTreeMap<u64, Cached>,
     /// The bytes each shader address decoded to, end-of-program included.
     decoded: BTreeMap<u64, Vec<u8>>,
+    /// Whether a primitive shader runs one invocation per lane (D760), by its bytes' content hash:
+    /// the answer reads the whole decoded program, and a shader already translated is bound again
+    /// at every submission without its decode.
+    per_lane: BTreeMap<u64, bool>,
+    /// Shaders whose translation, keyed as [`Self::cache`] is, found it needs a draw's geometry
+    /// (D730), with their bytes and the reason: tried before every draw is bound, at every
+    /// submission, and a whole translation each time to reach the same answer.
+    needs_geometry: BTreeMap<u64, (Vec<u8>, String)>,
     /// The constant base each vertex program address formed, with the program bytes it was found
     /// in.
     bases: BTreeMap<u64, (Vec<u8>, Option<u64>)>,
@@ -957,6 +965,8 @@ impl Pipeline {
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
             decoded: BTreeMap::new(),
+            per_lane: BTreeMap::new(),
+            needs_geometry: BTreeMap::new(),
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
             memory_readers: BTreeMap::new(),
@@ -2189,6 +2199,7 @@ impl Pipeline {
         memory: &impl GuestMemory,
         submission: &mut Submission,
     ) -> ByGeometry {
+        let _binding = crate::perf::SpanGuard::start(crate::perf::Span::ShadersUpFront);
         let mut by_geometry = ByGeometry::default();
         for &candidate in candidates {
             let key = (candidate.stage as u32, candidate.address);
@@ -2439,7 +2450,7 @@ impl Pipeline {
     /// host recorded one, for any shader but a rectangle list's and one whose lanes exchange in a
     /// way a ballot, shuffle or workgroup memory cannot stand in for. `None` for every other module.
     fn per_lane_subgroup(
-        &self,
+        &mut self,
         (stage, primitive): (Stage, MeshPrimitive),
         (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
     ) -> Option<u32> {
@@ -2447,13 +2458,21 @@ impl Pipeline {
             return None;
         }
         let subgroup = crate::host_subgroup()?;
-        let fits = decoded.map_or_else(
-            || {
-                let again = decode_program(shader, &self.encodings, &self.operands);
-                orbistoun_translate::wavefront::runs_per_lane(&again, &self.encodings)
-            },
-            |decoded| orbistoun_translate::wavefront::runs_per_lane(decoded, &self.encodings),
-        );
+        let hash = content_hash(shader);
+        // A function of the bytes, so kept by their content hash, as the translation cache is.
+        let fits = if let Some(&fits) = self.per_lane.get(&hash) {
+            fits
+        } else {
+            let fits = decoded.map_or_else(
+                || {
+                    let again = decode_program(shader, &self.encodings, &self.operands);
+                    orbistoun_translate::wavefront::runs_per_lane(&again, &self.encodings)
+                },
+                |decoded| orbistoun_translate::wavefront::runs_per_lane(decoded, &self.encodings),
+            );
+            self.per_lane.insert(hash, fits);
+            fits
+        };
         fits.then_some(subgroup)
     }
 
@@ -3104,7 +3123,7 @@ impl Pipeline {
         {
             kept.clone()
         } else {
-            let kept = self.translate_now(address, shader, decoded, &context)?;
+            let kept = self.translate_remembering(key, (address, shader, decoded), &context)?;
             if let Some(store) = self.store.as_mut() {
                 store.insert(key, kept.clone());
             }
@@ -3130,6 +3149,27 @@ impl Pipeline {
                 .map(|warning| format!("the shader at {address:#x}: {warning}"))
                 .collect(),
         })
+    }
+
+    /// [`Self::translate_now`], answering at once for a shader already found under `key` to need a
+    /// draw's geometry (D730), and remembering one found to now.
+    fn translate_remembering(
+        &mut self,
+        key: u64,
+        (address, shader, decoded): (u64, &[u8], Option<&orbistoun_shader::Decode>),
+        context: &crate::translations::Context,
+    ) -> Result<crate::translations::Kept, PrepareFailure> {
+        if let Some((bytes, reason)) = self.needs_geometry.get(&key)
+            && bytes.as_slice() == shader
+        {
+            return Err(PrepareFailure::NeedsGeometry(reason.clone()));
+        }
+        let translated = self.translate_now(address, shader, decoded, context);
+        if let Err(PrepareFailure::NeedsGeometry(reason)) = &translated {
+            self.needs_geometry
+                .insert(key, (shader.to_vec(), reason.clone()));
+        }
+        translated
     }
 
     /// Translates a shader whose bytes are known, decoding them again when the caller has no
