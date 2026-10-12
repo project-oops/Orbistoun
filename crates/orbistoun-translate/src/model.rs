@@ -206,6 +206,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_max3_f32",
     "v_min3_f32",
     "v_med3_f32",
+    "v_cubeid_f32",
+    "v_cubesc_f32",
+    "v_cubetc_f32",
+    "v_cubema_f32",
     "v_msad_u8",
     "v_readlane_b32",
     "v_permlane16_b32",
@@ -2405,9 +2409,8 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_msad_u8" => {
             integer_long_form(model, instruction, name)
         }
-        "v_max3_f32" | "v_min3_f32" | "v_med3_f32" => {
-            float_min_max_of_three(model, instruction, name)
-        }
+        _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
+        _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
         "v_permlane16_b32" => permute_lanes_16(model, instruction),
         "v_perm_b32" => byte_permute(model, instruction),
@@ -6928,6 +6931,17 @@ fn packed_selects(instruction: &Instruction) -> Result<[[bool; 3]; 2], Translate
 /// The mixed-precision multiply-adds.
 const MIXED: [&str; 3] = ["v_fma_mix_f32", "v_fma_mixlo_f16", "v_fma_mixhi_f16"];
 
+/// The three-way float minimum, maximum and median [`float_min_max_of_three`] carries out.
+const FLOATS_OF_THREE: [&str; 3] = ["v_max3_f32", "v_min3_f32", "v_med3_f32"];
+
+/// The cube-map face instructions [`cube_face`] carries out.
+const CUBE_FACES: [&str; 4] = [
+    "v_cubeid_f32",
+    "v_cubesc_f32",
+    "v_cubetc_f32",
+    "v_cubema_f32",
+];
+
 /// Every multiply-add [`multiply_add_family`] carries out.
 const MULTIPLY_ADDS: [&str; 7] = [
     "v_madak_f32",
@@ -7739,6 +7753,93 @@ fn float_min_max_of_three<M: Model + ?Sized>(
             let pair = model.f32_ext_binary(extended, values[0], values[1]);
             model.f32_ext_binary(extended, pair, values[2])
         };
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
+/// The cube-map face instructions over a direction `(x, y, z)`, each source with its absolute and
+/// negate flags (D810): the major axis is z if its magnitude is at least x's and y's, else y if at
+/// least x's, else x. `v_cubeid_f32` is the face, 0 to 5 as a float, odd for a negative axis;
+/// `v_cubema_f32` twice the major component; `v_cubesc_f32` and `v_cubetc_f32` the face's two
+/// coordinates, as NIR's `cube_amd` gives them.
+fn cube_face<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let modifiers = Modifiers::read(instruction, false)?;
+    let [Operand::Vector(register), first, second, third] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a cube-map face instruction does not have a vector destination and three sources",
+        });
+    };
+    let register = u32::from(*register);
+    let magnitude = model.constant(0x7FFF_FFFF);
+    let sign = model.constant(0x8000_0000);
+    let zero = model.constant(0);
+    let zero_f = model.as_float(zero);
+    for lane in running_lanes(model) {
+        let mut values = [Id(0); 3];
+        for (source, (slot, operand)) in values.iter_mut().zip([first, second, third]).enumerate() {
+            let value = model.read_source(instruction, operand, lane)?;
+            *slot = apply_modifiers(model, value, modifiers, source);
+        }
+        let [x, y, z] = values;
+        let mut absolute = [Id(0); 3];
+        for (slot, value) in absolute.iter_mut().zip(values) {
+            let bits = model.binary(op::BITWISE_AND, value, magnitude);
+            *slot = model.as_float(bits);
+        }
+        let [ax, ay, az] = absolute;
+        let z_over_x = model.compare(op::FORD_GREATER_THAN_EQUAL, az, ax);
+        let z_over_y = model.compare(op::FORD_GREATER_THAN_EQUAL, az, ay);
+        let z_major = model.both(z_over_x, z_over_y);
+        let y_major = model.compare(op::FORD_GREATER_THAN_EQUAL, ay, ax);
+        let mut negative = [Id(0); 3];
+        for (slot, value) in negative.iter_mut().zip(values) {
+            let float = model.as_float(value);
+            *slot = model.compare(op::FORD_LESS_THAN, float, zero_f);
+        }
+        let flip = |model: &mut M, value: Id| model.binary(op::BITWISE_XOR, value, sign);
+        // Each axis's answer, then the chain: z over y over x.
+        let [on_x, on_y, on_z] = match name {
+            "v_cubeid_f32" => [0.0f32, 2.0, 4.0].map(|face| {
+                let positive = model.constant(face.to_bits());
+                let negative_face = model.constant((face + 1.0).to_bits());
+                (positive, negative_face)
+            }),
+            "v_cubema_f32" => {
+                let two = model.constant(2.0f32.to_bits());
+                [x, y, z].map(|value| {
+                    let doubled = model.f32_binary(op::FMUL, value, two);
+                    (doubled, doubled)
+                })
+            }
+            "v_cubesc_f32" => {
+                let (minus_z, minus_x) = (flip(model, z), flip(model, x));
+                [(minus_z, z), (x, x), (x, minus_x)]
+            }
+            _ => {
+                let (minus_y, minus_z) = (flip(model, y), flip(model, z));
+                [(minus_y, minus_y), (z, minus_z), (minus_y, minus_y)]
+            }
+        }
+        .into_iter()
+        .zip(negative)
+        .map(|((when_positive, when_negative), below)| {
+            pick(model, below, when_negative, when_positive)
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a cube-map face instruction did not produce one answer per axis",
+        })?;
+        let not_z = pick(model, y_major, on_y, on_x);
+        let value = pick(model, z_major, on_z, not_z);
         model.write_vector_lane(register, lane, value);
     }
     model.count();

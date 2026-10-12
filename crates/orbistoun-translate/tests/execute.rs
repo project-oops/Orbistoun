@@ -7224,3 +7224,66 @@ fn the_condition_masks_high_half_is_a_scalar_register() {
     assert_eq!(scalar(&registers, 0), 6, "vcc_hi read back");
     assert_eq!(scalar(&registers, 1), 7, "vcc_lo kept");
 }
+
+/// The cube-map face instructions PPSA03416's pixel shader uses (VOP3 opcodes 324 to 327): for a
+/// direction on each of the six faces, the face id, the two face coordinates and twice the major
+/// component, as NIR's `cube_amd` defines them; on a tie z wins over y and y over x (D810). The
+/// negate flag on the third source turns +z into -z.
+#[test]
+fn the_cube_instructions_pick_the_face_and_its_coordinates() {
+    if !device_or_skip("the_cube_instructions_pick_the_face_and_its_coordinates") {
+        return;
+    }
+    // (x, y, z) -> (id, sc, tc, ma)
+    let cases: [([f32; 3], [f32; 4]); 8] = [
+        ([1.0, 0.5, -0.25], [0.0, 0.25, -0.5, 2.0]),
+        ([-1.0, 0.5, 0.25], [1.0, 0.25, -0.5, -2.0]),
+        ([0.5, 2.0, -1.0], [2.0, 0.5, -1.0, 4.0]),
+        ([0.5, -2.0, -1.0], [3.0, 0.5, 1.0, -4.0]),
+        ([0.5, 1.0, 3.0], [4.0, 0.5, -1.0, 6.0]),
+        ([0.5, 1.0, -3.0], [5.0, -0.5, -1.0, -6.0]),
+        ([1.0, 1.0, 1.0], [4.0, 1.0, -1.0, 2.0]),
+        ([1.0, -1.0, 0.5], [3.0, 1.0, -0.5, -2.0]),
+    ];
+    let names = [
+        "v_cubeid_f32",
+        "v_cubesc_f32",
+        "v_cubetc_f32",
+        "v_cubema_f32",
+    ];
+    for ([x, y, z], expected) in cases {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, x.to_bits()));
+        program.extend(v_mov_literal(1, y.to_bits()));
+        program.extend(v_mov_literal(2, z.to_bits()));
+        for (n, name) in (3..).zip(names) {
+            program.extend(vop3(name, n, [VGPR_0, VGPR_0 + 1, VGPR_0 + 2], 0, 0));
+        }
+        program.extend(vop3(
+            "v_cubeid_f32",
+            7,
+            [VGPR_0, VGPR_0 + 1, VGPR_0 + 2],
+            0,
+            0b100,
+        ));
+        program.push(s_endpgm());
+        let registers = run(&program);
+        for (n, (name, want)) in (3..).zip(names.iter().zip(expected)) {
+            assert_eq!(
+                vector(&registers, n),
+                want.to_bits(),
+                "{name} of ({x}, {y}, {z})"
+            );
+        }
+        let flipped = if expected[0] >= 4.0 {
+            9.0 - expected[0]
+        } else {
+            expected[0]
+        };
+        assert_eq!(
+            vector(&registers, 7),
+            flipped.to_bits(),
+            "id of ({x}, {y}, -{z})"
+        );
+    }
+}

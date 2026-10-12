@@ -284,3 +284,27 @@ v_mac_f32_e64 v100, v200, v130
 v_mac_f32_e64 v255, s30, v12
 v_mac_f32_e64 v9, 1.0, v77
 v_mac_f32_e64 v130, v88, s101
+// The cube-map face selection ACO emits for a cube coordinate (nir_op_cube_amd,
+// aco_select_nir_alu.cpp: v_cubema, v_cubesc, v_cubetc and v_cubeid over the same three
+// sources), which PPSA03416's pixel shader uses (VOP3 opcodes 324 to 327). Varied vector,
+// scalar and inline sources, and registers spread across the file.
+v_cubeid_f32 v2, v4, v6, v8
+v_cubeid_f32 v100, v200, v130, v12
+v_cubeid_f32 v255, s30, v12, v77
+v_cubeid_f32 v9, 1.0, v77, s101
+v_cubeid_f32 v130, v88, s101, -2.0
+v_cubesc_f32 v2, v4, v6, v8
+v_cubesc_f32 v100, v200, v130, v12
+v_cubesc_f32 v255, s30, v12, v77
+v_cubesc_f32 v9, 1.0, v77, s101
+v_cubesc_f32 v130, v88, s101, -2.0
+v_cubetc_f32 v2, v4, v6, v8
+v_cubetc_f32 v100, v200, v130, v12
+v_cubetc_f32 v255, s30, v12, v77
+v_cubetc_f32 v9, 1.0, v77, s101
+v_cubetc_f32 v130, v88, s101, -2.0
+v_cubema_f32 v2, v4, v6, v8
+v_cubema_f32 v100, v200, v130, v12
+v_cubema_f32 v255, s30, v12, v77
+v_cubema_f32 v9, 1.0, v77, s101
+v_cubema_f32 v130, v88, s101, -2.0
