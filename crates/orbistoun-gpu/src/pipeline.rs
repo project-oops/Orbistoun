@@ -5995,10 +5995,8 @@ mod tests {
             &mut by_geometry,
             &mut Submission::default(),
         );
-        assert_eq!(
-            saturated,
-            [[true, false], [false; 2], [false; 2], [false; 2]]
-        );
+        assert_eq!(saturated[0], [true, false]);
+        assert!(saturated[1..].iter().all(|slot| *slot == [false; 2]));
     }
 
     /// A dispatch whose buffers no window spans binds each on its own (D746): STKT00001's copy,

@@ -1480,11 +1480,23 @@ pub const STORAGE_IMAGE_BINDING: u32 = 3;
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
 
 /// Which binding each of a pixel shader's sampled images is bound at, by slot: [`TEXTURE_BINDING`],
-/// [`SECOND_TEXTURE_BINDING`], then seven and eight, after the global data share's binding (D690).
-pub const TEXTURE_BINDINGS: [u32; MAX_TEXTURES] = [TEXTURE_BINDING, SECOND_TEXTURE_BINDING, 7, 8];
+/// [`SECOND_TEXTURE_BINDING`], then seven onwards, after the global data share's binding (D690).
+pub const TEXTURE_BINDINGS: [u32; MAX_TEXTURES] = {
+    let mut bindings = [0; MAX_TEXTURES];
+    bindings[0] = TEXTURE_BINDING;
+    bindings[1] = SECOND_TEXTURE_BINDING;
+    let mut slot = 2;
+    while slot < MAX_TEXTURES {
+        bindings[slot] = 5 + slot as u32;
+        slot += 1;
+    }
+    bindings
+};
 
-/// How many sampled images a pixel shader may read: four, one binding each (D690).
-pub const MAX_TEXTURES: usize = 4;
+/// How many sampled images a pixel shader may read, one binding each (D690): sixteen, the sampled
+/// images and the samplers one stage may reach on every Vulkan device (the required minimum of
+/// `maxPerStageDescriptorSampledImages` and `maxPerStageDescriptorSamplers`).
+pub const MAX_TEXTURES: usize = 16;
 
 /// Which binding a compute module reaches the global data share at: six, after the draw data
 /// (D789). Declared only by a module that accesses it.

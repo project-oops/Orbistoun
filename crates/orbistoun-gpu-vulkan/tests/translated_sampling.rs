@@ -811,6 +811,86 @@ fn a_third_texture_from_the_descriptor_table_translates_at_slot_two() {
     ));
 }
 
+/// Five textures from the descriptor table translate, the fifth at slot four and binding nine:
+/// PPSA03416's pixel shaders sample more than four (D690). Sixteen slots are bound, the sampled
+/// images and samplers a stage may reach on every Vulkan device.
+#[test]
+fn a_fifth_texture_from_the_descriptor_table_translates_at_binding_nine() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load_x8 = |dst: u32, offset: u32| {
+        let (family, opcode) = encodings
+            .find_by_name("s_load_dwordx8")
+            .expect("the target has s_load_dwordx8");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    let units = [
+        (IMAGE_DESCRIPTOR, 0x00),
+        (20, 0x40),
+        (28, 0x80),
+        (36, 0xc0),
+        (44, 0x100),
+    ];
+    for (unit, offset) in units {
+        for word in s_load_x8(unit, offset) {
+            bytes.extend(word.to_le_bytes());
+        }
+    }
+    let words = image_sample_words(39);
+    for (unit, _) in units {
+        let from_unit = (words[1] & !(0x1F << 16)) | ((unit / 4) << 16);
+        for word in [words[0], from_unit] {
+            bytes.extend(word.to_le_bytes());
+        }
+    }
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("five textures from the table translate");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| (source.slot, source.table_offset))
+            .collect::<Vec<_>>(),
+        [
+            (0, Some(0x00)),
+            (1, Some(0x40)),
+            (2, Some(0x80)),
+            (3, Some(0xc0)),
+            (4, Some(0x100))
+        ]
+    );
+    assert_eq!(orbistoun_spirv::TEXTURE_BINDINGS[4], 9);
+    assert!(orbistoun_spirv::declares_binding(&translated.module, 9));
+}
+
 /// One register group loaded with two descriptors in turn, each sampled after its load, is two
 /// textures, each at the offset of the load that reached its sample: ACO reuses the registers for a
 /// pixel shader's second texture (CRFT00001's `sampler` and `sky_sampler`).
@@ -1017,7 +1097,11 @@ fn a_half_border_clamp_holds_a_coordinate_past_the_edge_at_half_the_border() {
         (Stage::Fragment, MeshPrimitive::default()),
         Window::default(),
         UserData {
-            saturated: [[true; 2], [false; 2], [false; 2], [false; 2]],
+            saturated: {
+                let mut saturated = [[false; 2]; orbistoun_spirv::MAX_TEXTURES];
+                saturated[0] = [true; 2];
+                saturated
+            },
             ..UserData::default()
         },
     )

@@ -1766,7 +1766,7 @@ impl Wavefront<'_> {
         let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
         if slot as usize >= MAX_TEXTURES {
             return Err(
-                "this shader reads more than four textures, and four bindings exist (D690)",
+                "this shader reads more than sixteen textures, and sixteen bindings exist (D690)",
             );
         }
         let user_data = self.resident_descriptor(descriptor)?;
