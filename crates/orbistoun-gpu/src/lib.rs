@@ -191,10 +191,7 @@ pub use registers::{
     target_mask_at,
 };
 pub use render::{FrameOutcome, drive};
-pub use tiling::{
-    DetileError, Surface, SurfaceError, detile_64kb_rx_bpp4, detile_colour_target, detile_image,
-    detile_texture, tiled_byte_offset_64kb_rx_bpp4,
-};
+pub use tiling::{DetileError, detile_64kb_rx_bpp4, tiled_byte_offset_64kb_rx_bpp4};
 
 use orbistoun_hle::guest_module;
 

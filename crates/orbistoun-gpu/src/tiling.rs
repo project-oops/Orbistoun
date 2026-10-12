@@ -8,13 +8,9 @@
 //! in-block swizzle with row-major 64 KiB blocks. [`SurfaceLayout::of`] names every mode and
 //! element size modelled - `64KB_R_X`, `4KB_D_X`, `64KB_D_X`, `64KB_S`, `4KB_S` and `LINEAR` at
 //! the sizes it lists - and the run path detiles through it; any other mode is refused by name.
-//! [`detile_colour_target`], [`detile_texture`] and [`detile_image`] are the older single-mode
-//! path, 32-bpp `64KB_R_X` only, kept for the measured-pixel tests they carry and called by
-//! nothing else. Block-compressed data needs no decode, since Vulkan consumes it natively.
+//! Block-compressed data needs no decode, since Vulkan consumes it natively.
 
-use crate::registers::{
-    ImageDescriptor, RegisterWrite, SwizzleMode, colour_swizzle_mode_at, colour_target_at,
-};
+use crate::registers::SwizzleMode;
 
 /// The byte offset of texel `(x, y)` within a 64 KiB `R_X` tile, for a four-byte (`R8G8B8A8`-class)
 /// element - the `64KB_R_X` swizzle for a 32-bpp surface.
@@ -586,12 +582,6 @@ pub enum DetileError {
         /// Words actually supplied.
         got_words: usize,
     },
-    /// The surface's format is not one the 32-bpp swizzle applies to - the element is a different
-    /// size, or a size this does not model - so detiling it would read across or within elements.
-    UnsupportedFormat {
-        /// The GFX10 `IMG_FORMAT` code the descriptor carried.
-        format: u32,
-    },
 }
 
 impl std::fmt::Display for DetileError {
@@ -607,10 +597,6 @@ impl std::fmt::Display for DetileError {
             } => write!(
                 f,
                 "tiled data is {got_words} words, swizzle needs {needed_words} to reach every texel"
-            ),
-            Self::UnsupportedFormat { format } => write!(
-                f,
-                "image format {format} is not a 32-bpp format the measured swizzle applies to"
             ),
         }
     }
@@ -662,193 +648,6 @@ pub fn detile_64kb_rx_bpp4(
         }
     }
     Ok(linear)
-}
-
-/// Bytes per texel for a GFX10 `IMG_FORMAT` code, or `None` for one whose element size this does
-/// not model.
-///
-/// The codes are `GFX10_FORMAT_*` (`src/amd/registers/gfx10-rsrc.json` in oops-mesa), laid out in
-/// ascending element size: `1..=6` one byte, `7..=19` two, `20..=61` four, `62..=71` eight,
-/// `72..=74` twelve, `75..=77` sixteen; `128`/`129`/`130` are the `8`/`8_8`/`8_8_8_8` sRGB
-/// variants. Every other code (packed 16-bit, depth, subsampled, FMASK, block-compressed) is
-/// refused rather than sized from its name, since a wrong size mis-reads every texel.
-fn element_bytes(format: u32) -> Option<u32> {
-    match format {
-        1..=6 | 128 => Some(1),   // single 8-bit channel, and 8_SRGB
-        7..=19 | 129 => Some(2),  // 16-bit or 8_8, and 8_8_SRGB
-        20..=61 | 130 => Some(4), // the 32-bpp block, and 8_8_8_8_SRGB
-        62..=71 => Some(8),
-        72..=74 => Some(12),
-        75..=77 => Some(16),
-        _ => None,
-    }
-}
-
-/// The element size the measured `64KB_R_X` swizzle is defined for: four bytes, 32 bpp.
-const MEASURED_ELEMENT_BYTES: u32 = 4;
-
-/// A thin wrapper over [`detile_64kb_rx_bpp4`] that takes the extent from the descriptor. It
-/// refuses a format that is not 32 bpp (`element_bytes`); confirming the tiling mode is
-/// `64KB_R_X` is the caller's job.
-///
-/// # Errors
-///
-/// [`DetileError::UnsupportedFormat`] for a non-32-bpp format, else [`detile_64kb_rx_bpp4`]'s
-/// refusals.
-pub fn detile_image(descriptor: &ImageDescriptor, tiled: &[u32]) -> Result<Vec<u32>, DetileError> {
-    if element_bytes(descriptor.format) != Some(MEASURED_ELEMENT_BYTES) {
-        return Err(DetileError::UnsupportedFormat {
-            format: descriptor.format,
-        });
-    }
-    detile_64kb_rx_bpp4(tiled, descriptor.width, descriptor.height)
-}
-
-/// A detiled surface - a colour target or a texture - its pixels laid out linearly, row-major.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Surface {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// `width * height` pixels, row-major.
-    pub pixels: Vec<u32>,
-}
-
-/// Why a surface could not be detiled out of a guest-memory window.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SurfaceError {
-    /// The base or extent was not set - a colour target whose stream wrote neither.
-    Incomplete,
-    /// The tiling mode is one orbistoun does not detile - linear, or a mode it does not model.
-    UnsupportedTiling(SwizzleMode),
-    /// The target's base is not inside the guest-memory window given.
-    OutsideWindow {
-        /// The surface's base address.
-        base: u64,
-        /// The address the guest slice's first word sits at.
-        window_base: u64,
-        /// How many words the window holds.
-        window_words: usize,
-    },
-    /// The detile refused: the surface is larger than one block, or the window is too short for it.
-    Detile(DetileError),
-}
-
-impl std::fmt::Display for SurfaceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Incomplete => write!(f, "the surface's base or extent was not set"),
-            Self::UnsupportedTiling(mode) => {
-                write!(f, "tiling mode {mode:?} is not one orbistoun detiles")
-            }
-            Self::OutsideWindow {
-                base,
-                window_base,
-                window_words,
-            } => write!(
-                f,
-                "surface base {base:#x} is outside the guest window at {window_base:#x} ({window_words} words)"
-            ),
-            Self::Detile(inner) => write!(f, "detile refused: {inner}"),
-        }
-    }
-}
-
-impl std::error::Error for SurfaceError {}
-
-/// Detiles a surface out of a guest-memory window, given its base, extent and tiling mode.
-///
-/// The shared core of [`detile_colour_target`] and [`detile_texture`]: the base is mapped into
-/// `guest`, whose first word sits at `window_base`, and [`detile_64kb_rx_bpp4`] unswizzles it. Any
-/// mode but `64KB_R_X`, including linear, is refused (D010). The caller ensures a 32-bpp format.
-fn detile_surface(
-    base: u64,
-    width: u32,
-    height: u32,
-    tiling: SwizzleMode,
-    guest: &[u32],
-    window_base: u64,
-) -> Result<Surface, SurfaceError> {
-    if tiling != SwizzleMode::Tiled64KbRX {
-        return Err(SurfaceError::UnsupportedTiling(tiling));
-    }
-
-    let outside = SurfaceError::OutsideWindow {
-        base,
-        window_base,
-        window_words: guest.len(),
-    };
-    let offset_bytes = base
-        .checked_sub(window_base)
-        .ok_or_else(|| outside.clone())?;
-    let offset_words = usize::try_from(offset_bytes / 4).map_err(|_| outside.clone())?;
-    let words = guest.get(offset_words..).ok_or(outside)?;
-
-    let pixels = detile_64kb_rx_bpp4(words, width, height).map_err(SurfaceError::Detile)?;
-    Ok(Surface {
-        width,
-        height,
-        pixels,
-    })
-}
-
-/// Detiles colour buffer zero out of a guest-memory window, reading its base, extent and tiling
-/// mode from the register writes.
-///
-/// [`colour_target_at`] gives the base and size and [`colour_swizzle_mode_at`] the tiling; then
-/// `detile_surface` maps the base into `guest` (first word at `window_base`) and unswizzles it.
-///
-/// # Errors
-///
-/// [`SurfaceError::Incomplete`] when the stream set no base or extent, else `detile_surface`'s
-/// refusals (a tiling not modelled, a base outside the window, or a detile refusal).
-pub fn detile_colour_target(
-    writes: &[RegisterWrite],
-    guest: &[u32],
-    window_base: u64,
-) -> Result<Surface, SurfaceError> {
-    let target = colour_target_at(writes).ok_or(SurfaceError::Incomplete)?;
-    let mode = colour_swizzle_mode_at(writes).ok_or(SurfaceError::Incomplete)?;
-    detile_surface(
-        target.base,
-        target.width,
-        target.height,
-        mode,
-        guest,
-        window_base,
-    )
-}
-
-/// Detiles a texture out of a guest-memory window, from its decoded descriptor.
-///
-/// The texture analog of [`detile_colour_target`]: an [`ImageDescriptor`] carries the base, extent,
-/// format and tiling (`crate::registers::decode_image_descriptor`). A non-32-bpp format is refused
-/// before the window is touched, since a different element size is a different swizzle.
-///
-/// # Errors
-///
-/// [`SurfaceError::Detile`]`(`[`DetileError::UnsupportedFormat`]`)` for a non-32-bpp format;
-/// otherwise `UnsupportedTiling` unless the descriptor's tiling is `64KB_R_X`, else the window and
-/// detile refusals. It never returns `Incomplete`: a descriptor always carries base and extent.
-pub fn detile_texture(
-    descriptor: &ImageDescriptor,
-    guest: &[u32],
-    window_base: u64,
-) -> Result<Surface, SurfaceError> {
-    if element_bytes(descriptor.format) != Some(MEASURED_ELEMENT_BYTES) {
-        return Err(SurfaceError::Detile(DetileError::UnsupportedFormat {
-            format: descriptor.format,
-        }));
-    }
-    detile_surface(
-        descriptor.base,
-        descriptor.width,
-        descriptor.height,
-        descriptor.tiling,
-        guest,
-        window_base,
-    )
 }
 
 /// Texels per side of a 32-bpp `4KB_D_X` block: 4 KiB of four-byte texels, 32 x 32.
@@ -1809,12 +1608,11 @@ mod tests {
     }
 
     use super::{
-        DetileError, SurfaceError, detile_64kb_rx_bpp4, detile_colour_target,
-        detile_surface_64kb_rx_bpp4, detile_texture, surface_words_64kb_rx_bpp4,
+        DetileError, detile_64kb_rx_bpp4, detile_surface_64kb_rx_bpp4, surface_words_64kb_rx_bpp4,
         tile_surface_64kb_rx_bpp4, tiled_byte_offset_64kb_rx_bpp4 as offset,
         tiled_byte_offset_64kb_rx_bpp4_surface as at,
     };
-    use crate::registers::{ImageDescriptor, RegisterWrite, SwizzleMode};
+    use crate::registers::SwizzleMode;
 
     /// A pipe-bank XOR moves every texel within its block by the XOR shifted to the 256-byte pipe
     /// interleave (`gfx10addrlib.cpp:4786-4849`: `blkOffset ^ (pipeBankXor << 8)`), and the two
@@ -1918,175 +1716,18 @@ mod tests {
         assert!(tile_surface_64kb_rx_bpp4(&[0; 10], 300, 150, &mut whole).is_err());
     }
 
-    /// Register writes setting colour buffer zero's base (256-byte units), extent and tiling.
-    fn target_writes(base_256b: u32, attrib2: u32, attrib3: u32) -> Vec<RegisterWrite> {
-        let write = |register, value| RegisterWrite {
-            packet_offset: 0,
-            register,
-            value,
-        };
-        // CB_COLOR0_BASE 0xA318, CB_COLOR0_ATTRIB2 0xA3B0, CB_COLOR0_ATTRIB3 0xA3B8.
-        vec![
-            write(0xA318, base_256b),
-            write(0xA3B0, attrib2),
-            write(0xA3B8, attrib3),
-        ]
-    }
-
-    /// The bridge reads base, extent and tiling from the stream and detiles the surface, with the
-    /// base-to-window offset applied: the measured pixel at tiled byte 4348 comes back at linear
-    /// index `15*64+15`.
+    /// The run path's layout places the hardware-measured texel: a 64 x 64 32-bpp `64KB_R_X`
+    /// surface detiled through [`super::SurfaceLayout`] puts tiled byte 4348 at texel `(15, 15)`,
+    /// and nowhere else.
     #[test]
-    fn detile_colour_target_reads_the_stream_and_places_the_measured_pixel() {
+    fn the_run_path_layout_places_the_measured_pixel() {
         const RED: u32 = 0xff00_00ff;
-        // Base 0x2000e0000; window starts 0x400 bytes (256 words) earlier, so the surface is at
-        // word offset 256 in the guest slice.
-        let base = 0x2_000e_0000u64;
-        let window_base = base - 0x400;
-        let writes = target_writes(0x0200_0e00, 0x000f_c03f, 0x08c6_c000);
-        let mut guest = vec![0u32; 256 + 4096];
-        guest[256 + 4348 / 4] = RED; // the measured tiled byte, in the surface at offset 256
-
-        let surface = detile_colour_target(&writes, &guest, window_base).expect("detiles");
-        assert_eq!((surface.width, surface.height), (64, 64));
-        assert_eq!(
-            surface.pixels[(15 * 64 + 15) as usize],
-            RED,
-            "texel (15,15)"
-        );
-        assert_eq!(surface.pixels.iter().filter(|&&p| p == RED).count(), 1);
-    }
-
-    /// A stream missing the base or the extent is refused as incomplete.
-    #[test]
-    fn detile_colour_target_refuses_incomplete_state() {
-        let write = |register, value| RegisterWrite {
-            packet_offset: 0,
-            register,
-            value,
-        };
-        // Extent and tiling set, but no base.
-        let writes = vec![write(0xA3B0, 0x000f_c03f), write(0xA3B8, 0x08c6_c000)];
-        assert_eq!(
-            detile_colour_target(&writes, &[0u32; 4096], 0),
-            Err(SurfaceError::Incomplete)
-        );
-    }
-
-    /// A tiling mode orbistoun does not detile is refused by name, not read with the wrong swizzle.
-    #[test]
-    fn detile_colour_target_refuses_a_mode_it_does_not_model() {
-        // ATTRIB3 = 0 -> COLOR_SW_MODE 0 -> linear, which the detile does not handle.
-        let writes = target_writes(0x0200_0e00, 0x000f_c03f, 0x0000_0000);
-        assert_eq!(
-            detile_colour_target(&writes, &[0u32; 4096], 0x2_000e_0000),
-            Err(SurfaceError::UnsupportedTiling(SwizzleMode::Linear))
-        );
-    }
-
-    /// A base below the window is refused, not read from a negative offset.
-    #[test]
-    fn detile_colour_target_refuses_a_base_outside_the_window() {
-        let writes = target_writes(0x0200_0e00, 0x000f_c03f, 0x08c6_c000);
-        // Window starts *after* the base, so the base is not in it.
-        let window_base = 0x2_000e_0000u64 + 0x1000;
-        match detile_colour_target(&writes, &[0u32; 4096], window_base) {
-            Err(SurfaceError::OutsideWindow { base, .. }) => assert_eq!(base, 0x2_000e_0000),
-            other => panic!("expected an outside-window refusal, got {other:?}"),
-        }
-    }
-
-    /// A tiled texture detiles from its descriptor: the measured pixel at byte 4348 comes back at
-    /// linear index `15*64+15`.
-    #[test]
-    fn detile_texture_reads_the_descriptor_and_places_the_measured_pixel() {
-        const RED: u32 = 0xff00_00ff;
-        let base = 0x2_000e_0000u64;
-        let window_base = base - 0x400;
-        let descriptor = ImageDescriptor {
-            base,
-            width: 64,
-            height: 64,
-            format: 56, // GFX10_FORMAT_8_8_8_8_UNORM, a 32-bpp format
-            tiling: SwizzleMode::Tiled64KbRX,
-            pipe_bank_xor: 0,
-            levels: 1,
-            base_level: 0,
-            last_level: 0,
-            compression: None,
-        };
-        let mut guest = vec![0u32; 256 + 4096];
-        guest[256 + 4348 / 4] = RED;
-
-        let surface = detile_texture(&descriptor, &guest, window_base).expect("detiles");
-        assert_eq!((surface.width, surface.height), (64, 64));
-        assert_eq!(
-            surface.pixels[(15 * 64 + 15) as usize],
-            RED,
-            "texel (15,15)"
-        );
-        assert_eq!(surface.pixels.iter().filter(|&&p| p == RED).count(), 1);
-    }
-
-    /// A linear texture is refused by its mode, not detiled with the tiled swizzle.
-    #[test]
-    fn detile_texture_refuses_a_linear_descriptor() {
-        let descriptor = ImageDescriptor {
-            base: 0x2_000e_0000,
-            width: 64,
-            height: 64,
-            format: 56, // GFX10_FORMAT_8_8_8_8_UNORM, a 32-bpp format
-            tiling: SwizzleMode::Linear,
-            pipe_bank_xor: 0,
-            levels: 1,
-            base_level: 0,
-            last_level: 0,
-            compression: None,
-        };
-        assert_eq!(
-            detile_texture(&descriptor, &[0u32; 4096], 0x2_000e_0000),
-            Err(SurfaceError::UnsupportedTiling(SwizzleMode::Linear))
-        );
-    }
-
-    /// A non-32-bpp texture is refused before the window is touched, not detiled with the 32-bpp
-    /// swizzle: a `16_16_16_16` surface would have every texel read across elements.
-    #[test]
-    fn detile_texture_refuses_a_non_32_bpp_format() {
-        let descriptor = ImageDescriptor {
-            base: 0x2_000e_0000,
-            width: 64,
-            height: 64,
-            format: 71, // GFX10_FORMAT_16_16_16_16_FLOAT, eight bytes per texel
-            tiling: SwizzleMode::Tiled64KbRX,
-            pipe_bank_xor: 0,
-            levels: 1,
-            base_level: 0,
-            last_level: 0,
-            compression: None,
-        };
-        assert_eq!(
-            detile_texture(&descriptor, &[0u32; 4096], 0x2_000e_0000),
-            Err(SurfaceError::Detile(DetileError::UnsupportedFormat {
-                format: 71
-            })),
-        );
-    }
-
-    /// The element-size decode agrees with the cited `GFX10_FORMAT` table at each size boundary,
-    /// and a block-compressed code is refused rather than sized.
-    #[test]
-    fn the_format_element_size_matches_the_cited_table() {
-        use super::element_bytes;
-        assert_eq!(element_bytes(56), Some(4), "8_8_8_8_UNORM");
-        assert_eq!(element_bytes(50), Some(4), "2_10_10_10_UNORM");
-        assert_eq!(element_bytes(36), Some(4), "10_11_11_FLOAT");
-        assert_eq!(element_bytes(19), Some(2), "8_8_SINT, just below the block");
-        assert_eq!(element_bytes(62), Some(8), "32_32_UINT, just above it");
-        assert_eq!(element_bytes(71), Some(8), "16_16_16_16_FLOAT");
-        assert_eq!(element_bytes(130), Some(4), "8_8_8_8_SRGB");
-        assert_eq!(element_bytes(169), None, "BC1_UNORM is refused, not sized");
-        assert_eq!(element_bytes(0), None, "INVALID is refused");
+        let layout = super::SurfaceLayout::of(SwizzleMode::Tiled64KbRX).expect("modelled");
+        let mut tiled = vec![0u32; layout.words(64, 64)];
+        tiled[4348 / 4] = RED;
+        let linear = layout.detile_mapped(&tiled, 64, 64, 0, |texel| texel);
+        assert_eq!(linear[15 * 64 + 15], RED, "texel (15,15)");
+        assert_eq!(linear.iter().filter(|&&p| p == RED).count(), 1);
     }
 
     /// The hardware-measured byte and a second point obSCEne's tiler computes.
