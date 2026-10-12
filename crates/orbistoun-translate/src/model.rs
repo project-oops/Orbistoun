@@ -6280,6 +6280,7 @@ const SDWA_MARKER: u32 = 249;
 /// over the selected parts, and none of them has the float modifiers SDWA also carries.
 pub const SDWA_INTEGER: &[&str] = &[
     "v_mov_b32_e32",
+    "v_cndmask_b32_e32",
     "v_add_nc_u32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
@@ -6732,6 +6733,11 @@ fn sdwa_integer<M: Model + ?Sized>(
         _ => None,
     };
     let low_five = model.constant(31);
+    // A select reads its mask, `vcc` in the short form, a bit a lane.
+    let mask = match (name, instruction.operands.get(3)) {
+        ("v_cndmask_b32_e32", Some(mask)) => Some(lane_mask_source(model, instruction, mask)?),
+        _ => None,
+    };
     for lane in running_lanes(model) {
         let a = model.read_source(instruction, &first, lane)?;
         let a = sdwa_select(model, instruction, a, fields.select[0])?;
@@ -6742,28 +6748,13 @@ fn sdwa_integer<M: Model + ?Sized>(
             }
             None => a,
         };
-        let result = match name {
-            "v_mov_b32_e32" => a,
-            "v_add_nc_u32_e32" => model.binary(op::IADD, a, b),
-            "v_or_b32_e32" => model.binary(op::BITWISE_OR, a, b),
-            "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, a, b),
-            "v_and_b32_e32" => model.binary(op::BITWISE_AND, a, b),
-            // The reversed shifts: the amount is the first source.
-            "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" => {
-                let amount = model.binary(op::BITWISE_AND, a, low_five);
-                let shift = if name == "v_lshlrev_b32_e32" {
-                    op::SHIFT_LEFT_LOGICAL
-                } else {
-                    op::SHIFT_RIGHT_LOGICAL
-                };
-                model.binary(shift, b, amount)
+        let result = match (name, mask) {
+            // A set bit picks the second source, as the short form's does.
+            ("v_cndmask_b32_e32", Some((low, high))) => {
+                let bit = model.lane_bit(low, high, lane);
+                pick(model, bit, b, a)
             }
-            _ => {
-                return Err(TranslateError::Unsupported {
-                    offset: instruction.offset,
-                    detail: "no SDWA translation for this instruction",
-                });
-            }
+            (name, _) => sdwa_integer_operation(model, instruction, name, (a, b), low_five)?,
         };
         let old = model.read_source(
             instruction,
@@ -6775,6 +6766,40 @@ fn sdwa_integer<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// The operation of an `SDWA_INTEGER` instruction other than a select, over its two sources'
+/// selected parts.
+fn sdwa_integer_operation<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    (a, b): (Id, Id),
+    low_five: Id,
+) -> Result<Id, TranslateError> {
+    Ok(match name {
+        "v_mov_b32_e32" => a,
+        "v_add_nc_u32_e32" => model.binary(op::IADD, a, b),
+        "v_or_b32_e32" => model.binary(op::BITWISE_OR, a, b),
+        "v_xor_b32_e32" => model.binary(op::BITWISE_XOR, a, b),
+        "v_and_b32_e32" => model.binary(op::BITWISE_AND, a, b),
+        // The reversed shifts: the amount is the first source.
+        "v_lshlrev_b32_e32" | "v_lshrrev_b32_e32" => {
+            let amount = model.binary(op::BITWISE_AND, a, low_five);
+            let shift = if name == "v_lshlrev_b32_e32" {
+                op::SHIFT_LEFT_LOGICAL
+            } else {
+                op::SHIFT_RIGHT_LOGICAL
+            };
+            model.binary(shift, b, amount)
+        }
+        _ => {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "no SDWA translation for this instruction",
+            });
+        }
+    })
 }
 
 /// `op_sel`, bits 14:11 of a long-form vector instruction's first word: for each source and then

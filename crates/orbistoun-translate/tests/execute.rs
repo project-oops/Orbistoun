@@ -5683,6 +5683,43 @@ fn an_sdwa_logarithm_and_a_truncation() {
     assert_eq!(vector(&registers, 2), (-2.0f32).to_bits(), "trunc -2.75");
 }
 
+/// `v_cndmask_b32` in its SDWA form over whole registers picks its second source where the lane's
+/// `vcc` bit is set and its first where it is clear, as the short form does: PPSA03416's fragment
+/// shaders select between an inline zero and a register so (`0x0213e4f9 0x86860680`).
+#[test]
+fn an_sdwa_select_picks_by_vcc() {
+    if !device_or_skip("an_sdwa_select_picks_by_vcc") {
+        return;
+    }
+    let whole = Sdwa {
+        src0: 128,
+        src0_scalar: true,
+        src0_sel: SEL_DWORD,
+        src0_sext: false,
+        src1_sel: SEL_DWORD,
+        src1_sext: false,
+        dst_sel: SEL_DWORD,
+        dst_unused: 0,
+    };
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 5));
+    program.push(v_mov_inline(5, 1));
+    // v_cmp_ne_i32_e32 vcc, 2, v5: set.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 2));
+    program.extend(vop2_sdwa("v_cndmask_b32_e32", 3, 1, whole));
+    // v_cmp_ne_i32_e32 vcc, 1, v5: clear.
+    program.push(head("v_cmp_ne_i32_e32") | (5 << 9) | (128 + 1));
+    program.extend(vop2_sdwa("v_cndmask_b32_e32", 4, 1, whole));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 3), 5, "a set bit picks the register");
+    assert_eq!(
+        vector(&registers, 4),
+        0,
+        "a clear bit picks the inline zero"
+    );
+}
+
 /// `v_ashrrev_i32_e32` shifts its second source right by the low five bits of its first, the sign
 /// carried in (VOP2 opcode 24, as PPSA03416's fragment shaders use it): `0x80000010` by 4 is
 /// `0xf8000001`, by 36 the same, and a positive word shifts in zeros.
