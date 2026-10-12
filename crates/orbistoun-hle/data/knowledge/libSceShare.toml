@@ -26,3 +26,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T0900Z-sh01 via REQ-20261011T1310Z-lk01, reports/hardware/report-1791727748.txt lines 3717-3729 (070-user/share-initialize)."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceShareRegisterContentEventCallback"
+arity = 1
+purpose = "(callbacks): registers a block of content-event callbacks, two function pointers then zeros."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-sh02, 070-user/share-initialize, report-1791758178.txt lines 3856-3879, link-bound after sceShareInitialize): the first call with a 0x30-byte block answered 0x0 and left it untouched; neither callback was called in the two seconds watched; a second call with the same block answered 0x81960002.",
+    "orbistoun answers 0 the first time after initialisation and 0x81960002 after, writing nothing and calling nothing; before initialisation or with a null block it is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261011T1430Z-sh02, reports/hardware/report-1791758178.txt lines 3856-3879 (070-user/share-initialize)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-12"
