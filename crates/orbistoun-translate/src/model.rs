@@ -220,6 +220,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
+    "v_ashrrev_i32_e32",
     "v_lshl_add_u32",
     "v_lshl_or_b32",
     "v_perm_b32",
@@ -2502,6 +2503,7 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_mul_f32_e32"
         | "v_lshlrev_b32_e32"
         | "v_lshrrev_b32_e32"
+        | "v_ashrrev_i32_e32"
         | "v_add_nc_u32_e32"
         | "v_subrev_nc_u32_e32"
         | "v_fmac_f32_e32"
@@ -2736,6 +2738,13 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             // Logical, not arithmetic: the guest has a separate `v_ashrrev_i32` for the
             // sign-propagating shift.
             "v_lshrrev_b32_e32" => model.binary(op::SHIFT_RIGHT_LOGICAL, rhs, lhs),
+            // The sign-propagating shift, by the low five bits of the first source as the RDNA
+            // instruction set gives `D = S1 >> S0[4:0]`.
+            "v_ashrrev_i32_e32" => {
+                let low_five = model.constant(31);
+                let amount = model.binary(op::BITWISE_AND, lhs, low_five);
+                model.binary(op::SHIFT_RIGHT_ARITHMETIC, rhs, amount)
+            }
             // Float. `v_subrev_f32` reverses its operands, as its name says and its encoding does
             // not. `v_fmac_f32` accumulates into its destination, read through the ordinary source
             // path because the destination names a vector register.

@@ -144,4 +144,7 @@ s_andn2_b32 s54, s54, exec_lo
 // ---- The copy itself: a load and a store, sixteen-bit address and data ------------
 image_load v[6:7], v5, s[8:15] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
 image_store v[6:7], v8, s[24:31] dmask:0xf dim:SQ_RSRC_IMG_2D unorm a16 d16
+// An arithmetic shift right, operands reversed, as PPSA03416's fragment shaders sign-extend
+// a packed field (VOP2 opcode 24).
+v_ashrrev_i32_e32 v18, 4, v10
 s_endpgm

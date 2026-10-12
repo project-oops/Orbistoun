@@ -709,6 +709,11 @@ name = "v_lshrrev_b32_e32"
 
 [[mnemonic]]
 family = "VOP2"
+opcode = 24
+name = "v_ashrrev_i32_e32"
+
+[[mnemonic]]
+family = "VOP2"
 opcode = 26
 name = "v_lshlrev_b32_e32"
 

@@ -5683,6 +5683,33 @@ fn an_sdwa_logarithm_and_a_truncation() {
     assert_eq!(vector(&registers, 2), (-2.0f32).to_bits(), "trunc -2.75");
 }
 
+/// `v_ashrrev_i32_e32` shifts its second source right by the low five bits of its first, the sign
+/// carried in (VOP2 opcode 24, as PPSA03416's fragment shaders use it): `0x80000010` by 4 is
+/// `0xf8000001`, by 36 the same, and a positive word shifts in zeros.
+#[test]
+fn the_arithmetic_shift_carries_the_sign_by_five_bits_of_its_count() {
+    if !device_or_skip("the_arithmetic_shift_carries_the_sign_by_five_bits_of_its_count") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 4));
+    program.extend(v_mov_literal(1, 0x8000_0010));
+    program.extend(v_mov_literal(2, 36));
+    program.extend(v_mov_literal(3, 0x7000_0010));
+    program.push(vop2_vv("v_ashrrev_i32_e32", 4, 0, 1));
+    program.push(vop2_vv("v_ashrrev_i32_e32", 5, 2, 1));
+    program.push(vop2_vv("v_ashrrev_i32_e32", 6, 0, 3));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 4), 0xf800_0001);
+    assert_eq!(
+        vector(&registers, 5),
+        0xf800_0001,
+        "the count's low five bits"
+    );
+    assert_eq!(vector(&registers, 6), 0x0700_0001);
+}
+
 /// An SDWA source whose scalar flag is set names whatever the ordinary source encoding does, an
 /// inline float among them: PPSA28061's notice-screen pixel shader adds 0.5 through SDWA over
 /// whole registers (`v_add_f32_sdwa v5, 0.5, v2`, words 0x060a04f9 0x868606f0). 0.5 + 1.25 is 1.75.

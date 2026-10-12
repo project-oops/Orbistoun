@@ -520,3 +520,11 @@ s_lshl3_add_u32 s7, s99, s40
 s_lshl4_add_u32 s64, s88, s3
 s_lshl4_add_u32 s11, s10, s77
 s_lshl1_add_u32 vcc_hi, s5, 7
+// ---- v_ashrrev_i32: VOP2, the shift count in the shared source field --------------
+// PPSA03416's fragment shaders (VOP2 opcode 24). Varied vector, scalar and inline sources,
+// and registers spread across the file.
+v_ashrrev_i32_e32 v18, 4, v10
+v_ashrrev_i32_e32 v255, s101, v200
+v_ashrrev_i32_e32 v7, -1, v130
+v_ashrrev_i32_e32 v100, v3, v254
+v_ashrrev_i32_e32 v1, 31, v77
