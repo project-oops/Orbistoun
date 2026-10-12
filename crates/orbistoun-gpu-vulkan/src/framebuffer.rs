@@ -1489,7 +1489,8 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
         // Hardware BC1 decodes the one-bit alpha a three-colour block selects, as `RGBA` does.
         orbistoun_gpu::TextureEncoding::Bc1Srgb => (vk::Format::BC1_RGBA_SRGB_BLOCK, as_they_are()),
         // A depth target's depths as the host attachment held them (D817).
-        orbistoun_gpu::TextureEncoding::DepthFloat => (vk::Format::D32_SFLOAT, as_they_are()),
+        orbistoun_gpu::TextureEncoding::DepthFloat
+        | orbistoun_gpu::TextureEncoding::DepthCompare => (vk::Format::D32_SFLOAT, as_they_are()),
     }
 }
 
@@ -1592,7 +1593,7 @@ fn create_texture(
     // SAFETY: mapped immediately above and no pointer into it is used after this.
     unsafe { device.unmap_memory(staging_memory) };
 
-    let (aspect, depth) = texture_aspect(texture.encoding);
+    let (aspect, compare) = texture_aspect(texture.encoding);
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(view_type)
@@ -1607,7 +1608,7 @@ fn create_texture(
     let view = unsafe { device.create_image_view(&view_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_image_view(texture)", e))?;
 
-    let sampler_info = sampler_info(sampling, levels, depth);
+    let sampler_info = sampler_info(sampling, levels, compare);
     // SAFETY: the create info outlives the call and the device is live.
     let sampler = unsafe { device.create_sampler(&sampler_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_sampler", e))?;
@@ -1627,13 +1628,13 @@ fn create_texture(
     })
 }
 
-/// The aspect a texture in `encoding` is read through, and whether it is a depth, sampled through a
-/// compare (D817).
+/// The aspect a texture in `encoding` is read through, and whether it is sampled through a compare
+/// (D817).
 fn texture_aspect(encoding: orbistoun_gpu::TextureEncoding) -> (vk::ImageAspectFlags, bool) {
-    if encoding == orbistoun_gpu::TextureEncoding::DepthFloat {
-        (vk::ImageAspectFlags::DEPTH, true)
-    } else {
-        (vk::ImageAspectFlags::COLOR, false)
+    match encoding {
+        orbistoun_gpu::TextureEncoding::DepthCompare => (vk::ImageAspectFlags::DEPTH, true),
+        orbistoun_gpu::TextureEncoding::DepthFloat => (vk::ImageAspectFlags::DEPTH, false),
+        _ => (vk::ImageAspectFlags::COLOR, false),
     }
 }
 

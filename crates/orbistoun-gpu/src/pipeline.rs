@@ -3817,9 +3817,12 @@ fn table_texture(
     if is_null_descriptor(at, memory) {
         return Some(null_texture(source.slot, source.cube));
     }
-    // A depth compare samples a depth target, which is not in guest memory to read (D817).
+    // A depth surface is a depth target, which is not in guest memory to read (D817).
+    if let Some(depth) = depth_texture(at, source, sampler_at, memory) {
+        return Some(depth);
+    }
     if source.compare {
-        return depth_texture(at, (source.slot, source.saturated), sampler_at, memory);
+        return None;
     }
     let mut bound = read_texture(at, source.slot, memory, texels)?;
     if let Some(sampler_at) = sampler_at {
@@ -3841,8 +3844,8 @@ fn table_texture(
 /// would not be the image its module declares.
 fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
     match bound {
-        // A depth compare samples a flat depth target (D816, D817).
-        RenderCommand::BindDepthTexture { .. } => source.compare && !source.cube,
+        // A depth target is sampled flat, compared or not (D816, D817).
+        RenderCommand::BindDepthTexture { .. } => !source.cube,
         RenderCommand::BindTexture { faces, .. } => {
             (*faces == CUBE_FACES) == source.cube && !source.compare
         }
@@ -3909,9 +3912,15 @@ fn user_data_texture(
             )
         })
     };
-    // A depth compare samples a depth target, which is not in guest memory to read (D817).
+    // A depth surface is a depth target, which is not in guest memory to read (D817): a sampler
+    // named and unreadable binds nothing.
+    if !matches!(named, Some(None))
+        && let Some(depth) = depth_texture_from(descriptor, source, named.flatten())
+    {
+        return Some(depth);
+    }
     if source.compare {
-        return depth_texture_from(descriptor, (source.slot, source.saturated), named.flatten());
+        return None;
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
     if let Some(decoded) = named {
@@ -4007,11 +4016,11 @@ const DEPTH_SWIZZLES: [u32; 5] = [4, 8, 16, 20, 24];
 /// `X24_8_32_FLOAT` (146), `GFX10_FORMAT` in `gfx10-rsrc.json`.
 const DEPTH_IMAGE_FORMATS: [u32; 3] = [7, 22, 146];
 
-/// What a depth-compare source whose descriptor is at `at` samples: [`depth_texture_from`] its
-/// words and the sampler at `sampler_at`.
+/// What a source whose descriptor is at `at` samples, when that is a depth target:
+/// [`depth_texture_from`] its words and the sampler at `sampler_at`, which must be readable.
 fn depth_texture(
     at: u64,
-    shape: (u32, [bool; 2]),
+    source: &TextureSource,
     sampler_at: Option<u64>,
     memory: &impl GuestMemory,
 ) -> Option<RenderCommand> {
@@ -4020,18 +4029,24 @@ fn depth_texture(
     for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
         *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
-    depth_texture_from(words, shape, read_sampler(sampler_at?, memory))
+    let sampling = match sampler_at {
+        Some(at) => Some(read_sampler(at, memory)?),
+        None => None,
+    };
+    depth_texture_from(words, source, sampling)
 }
 
-/// What a depth-compare source samples (D817): the depth target at the descriptor's address, when
-/// the descriptor is a flat depth surface - a depth swizzle and a depth format - and its sampler
-/// was read and is one the module's coordinates were saturated for (D743). [`None`] otherwise, so
-/// the draw is refused rather than compared against something else.
+/// What a source samples when its descriptor is a flat depth surface - a depth swizzle and a depth
+/// format (D817): the depth target at the descriptor's address, compared where the module compares
+/// and its depth read uncompared otherwise. A compare needs its sampler; an uncompared read with
+/// none named is point-sampled at the edge. The sampler must be one the module's coordinates were
+/// saturated for (D743). [`None`] for any other descriptor, or a sampler that cannot be honoured.
 fn depth_texture_from(
     words: [u32; 8],
-    (slot, saturated): (u32, [bool; 2]),
+    source: &TextureSource,
     sampling: Option<crate::registers::TextureSampling>,
 ) -> Option<RenderCommand> {
+    let (slot, saturated, compare) = (source.slot, source.saturated, source.compare);
     let descriptor = decode_image_descriptor(words);
     let depth_tiled =
         matches!(descriptor.tiling, SwizzleMode::Other(mode) if DEPTH_SWIZZLES.contains(&mode));
@@ -4041,14 +4056,19 @@ fn depth_texture_from(
     {
         return None;
     }
-    let sampling = sampling?;
-    if sampling.saturated() != saturated {
+    let sampling = match sampling {
+        Some(sampling) => sampling,
+        None if !compare => crate::registers::TextureSampling::CLAMPED_POINT,
+        None => return None,
+    };
+    if sampling.saturated() != saturated || source.cube {
         return None;
     }
     Some(RenderCommand::BindDepthTexture {
         slot,
         target: crate::depth::depth_target_id_at(descriptor.base),
         sampling,
+        compare,
     })
 }
 
@@ -4176,7 +4196,8 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         | crate::backend::TextureEncoding::Bc3Srgb
         | crate::backend::TextureEncoding::Bc6hUfloat => 0,
         // Never read from guest memory, so never in the cache (D817).
-        crate::backend::TextureEncoding::DepthFloat => 1 << 23,
+        crate::backend::TextureEncoding::DepthFloat
+        | crate::backend::TextureEncoding::DepthCompare => 1 << 23,
     }
 }
 
@@ -5655,8 +5676,8 @@ mod tests {
 
     /// A depth compare's texture is the depth target at its descriptor's address, named rather than
     /// read (D817): PPSA03416's shadow map, `16_UNORM` in `64KB_Z_X` at 0x7400d6e50000, sampled with
-    /// a sampler comparing less-than. A sample that does not compare reads it as a texture, which a
-    /// depth swizzle refuses.
+    /// a sampler comparing less-than. A sample that does not compare reads the same target, its
+    /// depth, uncompared: PPSA03416's pixel shaders read their depth surface so.
     #[test]
     fn a_depth_compare_samples_the_depth_target_at_its_address() {
         use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
@@ -5729,7 +5750,8 @@ mod tests {
                     slot,
                     target,
                     sampling,
-                } => Some((*slot, *target, sampling.depth_compare)),
+                    compare,
+                } => Some((*slot, *target, sampling.depth_compare, *compare)),
                 _ => None,
             });
             (unbound, bound)
@@ -5738,10 +5760,27 @@ mod tests {
             bind(true),
             (
                 0,
-                Some((2, crate::depth::depth_target_id_at(0x7400_d6e5_0000), 1))
+                Some((
+                    2,
+                    crate::depth::depth_target_id_at(0x7400_d6e5_0000),
+                    1,
+                    true
+                ))
             )
         );
-        assert_eq!(bind(false), (1, None), "not a compare: read, and refused");
+        assert_eq!(
+            bind(false),
+            (
+                0,
+                Some((
+                    2,
+                    crate::depth::depth_target_id_at(0x7400_d6e5_0000),
+                    1,
+                    false
+                ))
+            ),
+            "not a compare: the depth, uncompared"
+        );
     }
 
     /// A depth compare whose descriptor and sampler are in the user data names the depth target too
@@ -5783,6 +5822,7 @@ mod tests {
             slot,
             target,
             sampling,
+            ..
         }) = bound
         else {
             panic!("{bound:?}");

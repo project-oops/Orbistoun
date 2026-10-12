@@ -22,5 +22,6 @@ samples a depth texture through the same surface address it rendered it at
   and read only by orbistoun, whose correctness no oracle checks.
 - Sampling the placeholder: a shadow everywhere or nowhere, a plausible wrong frame.
 
-A descriptor naming an address no depth target was drawn at is left unbound, and its draw
+A sample that does not compare reads the same target's depth, uncompared, as `.r`: Vulkan ignores
+`OpTypeImage`'s Depth operand, so a plain sample of the depth view returns the depth. A descriptor naming an address no depth target was drawn at is left unbound, and its draw
 refused.

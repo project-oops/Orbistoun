@@ -493,7 +493,8 @@ impl VulkanBackend {
             orbistoun_gpu::TextureEncoding::Rgba8
             | orbistoun_gpu::TextureEncoding::Float11_11_10
             | orbistoun_gpu::TextureEncoding::Rgba8Srgb
-            | orbistoun_gpu::TextureEncoding::DepthFloat => (width as usize) * (height as usize),
+            | orbistoun_gpu::TextureEncoding::DepthFloat
+            | orbistoun_gpu::TextureEncoding::DepthCompare => (width as usize) * (height as usize),
             orbistoun_gpu::TextureEncoding::Bc3
             | orbistoun_gpu::TextureEncoding::Bc3Srgb
             | orbistoun_gpu::TextureEncoding::Bc6hUfloat => {
@@ -542,6 +543,7 @@ impl VulkanBackend {
             slot,
             target,
             sampling,
+            compare,
         } = command
         else {
             return Ok(());
@@ -578,7 +580,11 @@ impl VulkanBackend {
             texels,
             width,
             height,
-            encoding: orbistoun_gpu::TextureEncoding::DepthFloat,
+            encoding: if compare {
+                orbistoun_gpu::TextureEncoding::DepthCompare
+            } else {
+                orbistoun_gpu::TextureEncoding::DepthFloat
+            },
             hash,
             sampling,
             faces: 1,

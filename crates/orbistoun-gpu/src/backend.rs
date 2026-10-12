@@ -176,10 +176,10 @@ pub enum RenderCommand {
         /// +x, -x, +y, -y, +z, -z, which the host samples through a cube view (D811).
         faces: u32,
     },
-    /// A depth target the draws that follow sample by a depth compare, at a texture slot (D817):
-    /// the attachment the backend keeps under `target`, as the draws before left it, compared
-    /// through `sampling`'s `depth_compare`. Never read from guest memory, where a depth target is
-    /// never written.
+    /// A depth target the draws that follow sample, at a texture slot (D817): the attachment the
+    /// backend keeps under `target`, as the draws before left it - compared through `sampling`'s
+    /// `depth_compare` where `compare` says, its depth read as it is otherwise. Never read from
+    /// guest memory, where a depth target is never written.
     BindDepthTexture {
         /// Which of the fragment module's textures this is.
         slot: u32,
@@ -187,6 +187,8 @@ pub enum RenderCommand {
         target: ResourceId,
         /// How the draws sample it, from the sampler descriptor the pixel shader names.
         sampling: crate::registers::TextureSampling,
+        /// Whether the draws compare a reference against it, or read its depth.
+        compare: bool,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).
@@ -394,9 +396,11 @@ pub enum TextureEncoding {
     /// `R8G8B8A8_SRGB`: the colour channels decoded from sRGB to linear as they are read, as the
     /// guest's own sampler decodes them.
     Rgba8Srgb,
-    /// One word a texel, a depth as an `f32`'s bits, which the host samples as `D32_SFLOAT` through
-    /// a compare: a depth target read back from the backend's own attachment (D817).
+    /// One word a texel, a depth as an `f32`'s bits, which the host samples as `D32_SFLOAT`: a depth
+    /// target read back from the backend's own attachment, its depth read as it is (D817).
     DepthFloat,
+    /// [`Self::DepthFloat`] sampled through a compare by the sampler's function (D817).
+    DepthCompare,
 }
 
 /// Something that can carry out [`RenderCommand`]s.
