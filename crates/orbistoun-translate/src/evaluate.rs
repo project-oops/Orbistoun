@@ -808,8 +808,56 @@ impl<'a> Concrete<'a> {
                     .wrapping_add(u64::from(soffset))
                     & !3
             });
+        if name.starts_with("s_buffer_load_dword") {
+            self.buffer_load(destination, (base, *offset, soffset), words, read);
+            return;
+        }
         for step in 0..words {
             let value = address.and_then(|address| read(address + 4 * step as u64));
+            if let Some(slot) = self.scalars.get_mut(destination + step) {
+                *slot = value;
+            }
+        }
+    }
+
+    /// `s_buffer_load_dword*` through the buffer descriptor at scalar `base`: the words at its base
+    /// address plus the offsets, each read where it lies within the descriptor's record count - in
+    /// bytes with no stride, in strides with one, as the translator's scalar buffer load bounds it
+    /// (radeonsi `si_state.c:3506-3527`) - and zero past it. Unknown where the descriptor or the
+    /// scalar offset is.
+    fn buffer_load(
+        &mut self,
+        destination: usize,
+        (base, offset, soffset): (usize, i64, Option<u32>),
+        words: usize,
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) {
+        let descriptor = [0, 1, 2].map(|word| self.scalars.get(base + word).copied().flatten());
+        let place = match (descriptor, soffset) {
+            ([Some(low), Some(high), Some(records)], Some(soffset)) => {
+                let address = (u64::from(high & 0xffff) << 32) | u64::from(low);
+                let stride = u64::from(high >> 16 & 0x3fff);
+                let limit = if stride == 0 {
+                    u64::from(records)
+                } else {
+                    u64::from(records) * stride
+                };
+                let start = u64::try_from(offset)
+                    .ok()
+                    .map(|offset| (offset + u64::from(soffset)) & !3);
+                start.map(|start| (address, start, limit))
+            }
+            _ => None,
+        };
+        for step in 0..words {
+            let value = place.and_then(|(address, start, limit)| {
+                let at = start + 4 * step as u64;
+                if at + 4 <= limit {
+                    read(address + at)
+                } else {
+                    Some(0)
+                }
+            });
             if let Some(slot) = self.scalars.get_mut(destination + step) {
                 *slot = value;
             }
@@ -891,9 +939,91 @@ impl<'a> Concrete<'a> {
     /// Forgets the scalars a vector instruction writes: a scalar or mask destination in its first
     /// two operands (a compare's mask, a carry-out, a lane read), and the execution mask for a
     /// compare into it.
+    /// A float compare whose sources are all uniform - scalar registers and constants - gives
+    /// every lane the same answer, so its mask is zero where it is false and the execution mask
+    /// where it is true (the lanes that compare): kept where those are known (D753). The compare's
+    /// SDWA form names its sources and its destination pair in its modifier word, as ACO encodes
+    /// them; its long form names them as operands, with no modifier. `false` where the compare is
+    /// not one of these, and nothing is then written.
+    fn uniform_compare(&mut self, instruction: &Instruction, name: &str) -> bool {
+        let Some(compare) = float_compare(name) else {
+            return false;
+        };
+        let (sources, destination) = if instruction.word & 0x1ff == SDWA_SOURCE {
+            let Some(word) = instruction.second_word else {
+                return false;
+            };
+            // Whole registers only, and no clamp: anything else is not a plain compare.
+            if word >> 16 & 0xf != 6 || word >> 24 & 0xf != 6 || word >> 13 & 1 != 0 {
+                return false;
+            }
+            if word >> 20 & 0x3 != 0
+                || word >> 28 & 0x3 != 0
+                || word >> 23 & 1 == 0
+                || word >> 31 == 0
+            {
+                return false;
+            }
+            let destination = if word >> 15 & 1 != 0 {
+                (word >> 8 & 0x7f) as usize
+            } else {
+                VCC
+            };
+            ([word & 0xff, instruction.word >> 9 & 0xff], destination)
+        } else {
+            return false;
+        };
+        let [Some(first), Some(second)] = sources.map(|code| self.uniform_source(code)) else {
+            self.forget(destination, 2);
+            return true;
+        };
+        let (first, second) = (f32::from_bits(first), f32::from_bits(second));
+        let holds = compare(first, second);
+        let (low, high) = if holds {
+            (self.scalars[EXEC], self.scalars[EXEC + 1])
+        } else {
+            (Some(0), Some(0))
+        };
+        if destination + 1 < SCALAR_CODES {
+            self.scalars[destination] = low;
+            self.scalars[destination + 1] = high;
+        }
+        true
+    }
+
+    /// The value a uniform source code names, where the host knows it: a scalar register, an
+    /// inline integer or an inline float.
+    fn uniform_source(&self, code: u32) -> Option<u32> {
+        match code {
+            0..=127 => self.scalars[code as usize],
+            128..=192 => Some(code - 128),
+            193..=208 => Some((192_i32 - code as i32) as u32),
+            240..=248 => {
+                let names = [
+                    "0.5", "-0.5", "1.0", "-1.0", "2.0", "-2.0", "4.0", "-4.0", "inv_2pi",
+                ];
+                model::inline_float_bits(names[(code - 240) as usize])
+            }
+            _ => None,
+        }
+    }
+
     fn forget_vector_writes(&mut self, instruction: &Instruction, name: &str) {
+        if name.starts_with("v_cmp")
+            && !name.starts_with("v_cmpx")
+            && self.uniform_compare(instruction, name)
+        {
+            return;
+        }
         for operand in instruction.operands.iter().take(2) {
             self.forget_operand(Some(operand));
+        }
+        // A compare's SDWA form writes the pair its modifier word names, not the condition mask.
+        if instruction.word & 0x1ff == SDWA_SOURCE
+            && let Some(word) = instruction.second_word
+            && word >> 15 & 1 != 0
+        {
+            self.forget((word >> 8 & 0x7f) as usize, 2);
         }
         if name.starts_with("v_cmpx") {
             self.forget(EXEC, 2);
@@ -918,6 +1048,22 @@ impl<'a> Concrete<'a> {
             _ => {}
         }
     }
+}
+
+/// The first-source code that marks an instruction's SDWA form.
+const SDWA_SOURCE: u32 = 0xf9;
+
+/// The comparison a short-form float compare makes, ordered but for `neq`, which a NaN satisfies.
+fn float_compare(name: &str) -> Option<fn(f32, f32) -> bool> {
+    Some(match name {
+        "v_cmp_lt_f32_e32" => |a, b| a < b,
+        "v_cmp_eq_f32_e32" => |a, b| a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal),
+        "v_cmp_le_f32_e32" => |a, b| a <= b,
+        "v_cmp_gt_f32_e32" => |a, b| a > b,
+        "v_cmp_ge_f32_e32" => |a, b| a >= b,
+        "v_cmp_neq_f32_e32" => |a, b| a.partial_cmp(&b) != Some(std::cmp::Ordering::Equal),
+        _ => return None,
+    })
 }
 
 /// The register code of a lane mask's low half, by any spelling of it.
@@ -1307,6 +1453,62 @@ mod tests {
         let scalars = scalar_prefix(&known, &encodings, end, (8, &[]), &mut |_| None)
             .expect("a branch on a known mask");
         assert_eq!((scalars[4], scalars[5]), (None, Some(7)));
+    }
+
+    /// A compare of two uniform sources in its SDWA form writes a uniform mask (D753): zero where
+    /// it is false, the execution mask where it is true. `s_mov_b32 exec_lo, 3; s_mov_b32 exec_hi,
+    /// 0` then `v_cmp_neq_f32_sdwa s[4:5], 0, s8`: the draw's first user-data word 0 leaves s4 zero,
+    /// and 1.0 leaves it the mask, 3.
+    #[test]
+    fn a_uniform_compare_writes_a_uniform_mask() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // src0 inline zero, scalar; dst s[4:5]; both selects DWORD; src1 scalar s8.
+        let sdwa = 128 | 4 << 8 | 1 << 15 | 6 << 16 | 1 << 23 | 6 << 24 | 1 << 31;
+        let bytes: Vec<u8> = [0xbefe_0383_u32, 0xbeff_0380, 0x7c1a_10f9, sdwa, 0xbf81_0000]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let end = decode.instructions.last().expect("s_endpgm").offset;
+        for (first, s4) in [(0_u32, Some(0)), (1.0f32.to_bits(), Some(3))] {
+            let scalars = scalar_prefix(&decode, &encodings, end, (8, &[first]), &mut |_| None)
+                .expect("a straight-line prefix");
+            assert_eq!(scalars[4], s4, "first user-data word {first:#x}");
+        }
+    }
+
+    /// A scalar buffer load reads through the descriptor its base names, within the record count:
+    /// a 16-byte buffer at 0x1000 gives `s_buffer_load_dword s4, s[8:11], 0x4` its second word, and
+    /// `s5` at 0x10, past the records, reads zero.
+    #[test]
+    fn a_scalar_buffer_load_reads_within_its_records() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = [
+            0xf420_0104_u32,
+            0xfa00_0004,
+            0xf420_0144,
+            0xfa00_0010,
+            0xbf8c_c07f,
+            0xbf81_0000,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let end = decode.instructions.last().expect("s_endpgm").offset;
+        let memory = BTreeMap::from([(0x1004_u64, 0xabcd), (0x1010, 0x1234)]);
+        let scalars = scalar_prefix(
+            &decode,
+            &encodings,
+            end,
+            (8, &[0x1000, 0, 16, 0x0002_0fac]),
+            &mut |address| memory.get(&address).copied(),
+        )
+        .expect("a straight-line prefix");
+        assert_eq!(scalars[4], Some(0xabcd), "within the records");
+        assert_eq!(scalars[5], Some(0), "past them");
     }
 
     /// A value the host cannot know stays unknown: the execution mask at entry, and so anything
