@@ -42,5 +42,5 @@ orbistoun-cli compat reproduce PPSA03416-app0
 | Title build | `6da7bfd8f5672b1c78fb1fd470b7ed25178dc3934f30db0e32416d7243f3c400` |
 | Limit | 120 s |
 | Frames | one kept every 30 flips; 10 shown, evenly across the run |
-| Input | _none - the run takes no input_ |
+| Input | [`inputs.toml`](../../compat/PPSA03416-app0/inputs.toml) |
 | Clock | logical (D582, D735) |
