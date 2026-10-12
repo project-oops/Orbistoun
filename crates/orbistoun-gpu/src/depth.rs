@@ -142,8 +142,15 @@ pub fn depth_target_at(writes: &[RegisterWrite]) -> Option<DepthTarget> {
 /// (bit 63) and shaders' (counting up from one); an address in 256-byte units fits in 40 bits.
 #[must_use]
 pub const fn depth_target_id(target: &DepthTarget) -> ResourceId {
+    depth_target_id_at(target.base)
+}
+
+/// [`depth_target_id`] of the depth target whose surface is at `base`: what a texture descriptor
+/// naming the same address samples (D817).
+#[must_use]
+pub const fn depth_target_id_at(base: u64) -> ResourceId {
     const DEPTH_NAMESPACE: u64 = 1 << 62;
-    ResourceId(DEPTH_NAMESPACE | ((target.base >> 8) & 0xFF_FFFF_FFFF))
+    ResourceId(DEPTH_NAMESPACE | ((base >> 8) & 0xFF_FFFF_FFFF))
 }
 
 /// `DB_RENDER_CONTROL`'s clear enables: the draw writes the clear value rather than its own.

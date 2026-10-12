@@ -136,9 +136,12 @@ impl DepthAttachment {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            // TRANSFER_DST for the clear it is created with.
+            // TRANSFER_DST for the clear it is created with, TRANSFER_SRC for a depth compare's
+            // read (D817).
             .usage(
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
             )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
@@ -170,6 +173,142 @@ impl DepthAttachment {
             width,
             height,
         })
+    }
+
+    /// Its depth, one `f32` a texel, row-major, as the device holds it (D817): what a depth compare
+    /// samples. Every draw recorded before is carried out first, and the image is left in the
+    /// attachment layout a depth pass expects.
+    ///
+    /// # Errors
+    ///
+    /// When there is no device or a Vulkan call fails.
+    pub(crate) fn read_depth(&self) -> Result<Vec<u32>, DispatchError> {
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (instance, physical, device) = (&session.instance, session.physical, &session.device);
+        let texels = self.width as usize * self.height as usize;
+        let size = u64::from(self.width) * u64::from(self.height) * 4;
+        let (buffer, memory) = crate::framebuffer::create_host_buffer(
+            instance,
+            physical,
+            device,
+            size,
+            vk::BufferUsageFlags::TRANSFER_DST,
+        )?;
+        let recorded = crate::framebuffer::one_shot(&session, |device, command| {
+            self.record_depth_copy(device, command, buffer);
+        });
+        let words = recorded.and_then(|()| {
+            // SAFETY: the allocation backs a host-visible, coherent buffer of `size` bytes the
+            // finished copy wrote, and nothing else holds a mapping of it.
+            let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
+                .map_err(|e| DispatchError::Vulkan("map_memory(depth read)", e))?
+                .cast::<u32>();
+            let mut words = vec![0_u32; texels];
+            // SAFETY: the mapping covers `texels` words and the vector is that long; a fresh
+            // mapping and a new vector cannot overlap.
+            unsafe { std::ptr::copy_nonoverlapping(mapped, words.as_mut_ptr(), texels) };
+            // SAFETY: mapped immediately above and no pointer into it is used after this.
+            unsafe { device.unmap_memory(memory) };
+            Ok(words)
+        });
+        // SAFETY: created above on this device, idle once the one-shot finished, destroyed once.
+        unsafe { device.destroy_buffer(buffer, None) };
+        // SAFETY: as above; the buffer bound to it is destroyed.
+        unsafe { device.free_memory(memory, None) };
+        words
+    }
+
+    /// Records [`Self::read_depth`]'s copy of the depth aspect into `buffer`, from and back to
+    /// the attachment layout a depth pass leaves it in.
+    fn record_depth_copy(
+        &self,
+        device: &ash::Device,
+        command: vk::CommandBuffer,
+        buffer: vk::Buffer,
+    ) {
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(aspects(self.format))
+            .level_count(1)
+            .layer_count(1);
+        let barrier = |old, new, src_access, dst_access| {
+            [vk::ImageMemoryBarrier::default()
+                .src_access_mask(src_access)
+                .dst_access_mask(dst_access)
+                .old_layout(old)
+                .new_layout(new)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(self.image)
+                .subresource_range(range)]
+        };
+        let attachment_access = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        let fragment_tests = vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS;
+        let to_source = barrier(
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            attachment_access,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        // Depth alone: both formats this crate renders to copy their depth aspect out as one
+        // `f32` a texel.
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                    .layer_count(1),
+            )
+            .image_extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+        let to_attachment = barrier(
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            vk::AccessFlags::TRANSFER_READ,
+            attachment_access,
+        );
+        // SAFETY: recording is open, the image is live, and a depth pass leaves it in the
+        // attachment layout this barrier names.
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command,
+                fragment_tests,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_source,
+            );
+        }
+        // SAFETY: recording is open, the image is in TRANSFER_SRC_OPTIMAL by the barrier above,
+        // and the buffer holds the depth aspect's `width * height` four-byte texels.
+        unsafe {
+            device.cmd_copy_image_to_buffer(
+                command,
+                self.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[region],
+            );
+        }
+        // SAFETY: recording is open and the image is in TRANSFER_SRC_OPTIMAL for the copy.
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command,
+                vk::PipelineStageFlags::TRANSFER,
+                fragment_tests,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_attachment,
+            );
+        }
     }
 
     /// Its view, which a framebuffer over it names.
@@ -594,6 +733,25 @@ mod tests {
     fn state(values: &[(u32, u32)]) -> DepthStencilState {
         depth_stencil_from(|register| values.iter().find(|(r, _)| *r == register).map(|(_, v)| *v))
             .expect("DB_DEPTH_CONTROL is written")
+    }
+
+    /// An attachment's depths read back as the device holds them, one `f32` a texel (D817): one
+    /// made cleared to a quarter reads a quarter everywhere.
+    #[test]
+    fn an_attachment_reads_back_its_depths() {
+        if crate::compute::session().is_err() {
+            eprintln!("skipping: no device");
+            return;
+        }
+        let clear = DepthClear {
+            depth: Some(0.25),
+            stencil: None,
+        };
+        let attachment =
+            super::DepthAttachment::create(5, 3, Some(clear)).expect("the attachment is made");
+        let read = attachment.read_depth().expect("the depths read back");
+        attachment.destroy();
+        assert_eq!(read, vec![0.25f32.to_bits(); 15]);
     }
 
     /// A depth test on with writes and `LESS` maps to Vulkan's; no state is no test.

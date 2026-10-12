@@ -296,6 +296,9 @@ pub struct VulkanBackend {
     /// Clears asked of each depth target and not yet carried out; the next draw on it starts with
     /// them.
     depth_clears: BTreeMap<ResourceId, depth::DepthClear>,
+    /// Each depth target's depths as last read back for a depth compare (D817), with their hash;
+    /// a draw on the target drops them, so the next compare reads what it drew.
+    depth_reads: BTreeMap<ResourceId, (std::sync::Arc<[u32]>, u64)>,
     /// The guest's clip-to-pixel transform for the next draw: the latest `SetViewportTransform`;
     /// `None` maps clip space over the whole attachment the host's way.
     viewport_transform: Option<orbistoun_gpu::ViewportTransform>,
@@ -364,6 +367,7 @@ impl VulkanBackend {
             cull: None,
             depths: BTreeMap::new(),
             depth_clears: BTreeMap::new(),
+            depth_reads: BTreeMap::new(),
             viewport_transform: None,
             guest_memory: Vec::new(),
             guest_memory_generation: 0,
@@ -488,7 +492,8 @@ impl VulkanBackend {
         let face_words = match encoding {
             orbistoun_gpu::TextureEncoding::Rgba8
             | orbistoun_gpu::TextureEncoding::Float11_11_10
-            | orbistoun_gpu::TextureEncoding::Rgba8Srgb => (width as usize) * (height as usize),
+            | orbistoun_gpu::TextureEncoding::Rgba8Srgb
+            | orbistoun_gpu::TextureEncoding::DepthFloat => (width as usize) * (height as usize),
             orbistoun_gpu::TextureEncoding::Bc3
             | orbistoun_gpu::TextureEncoding::Bc3Srgb
             | orbistoun_gpu::TextureEncoding::Bc6hUfloat => {
@@ -525,6 +530,59 @@ impl VulkanBackend {
             });
         };
         *texture = bound;
+        Ok(())
+    }
+
+    /// Binds the depth target a [`RenderCommand::BindDepthTexture`] names at its slot (D817): its
+    /// attachment's depth as the draws before left it, read back once per drawing onto it and
+    /// sampled through a compare by the sampler's function. A target this backend never drew is
+    /// refused, so the draw is not compared against a placeholder.
+    fn bind_depth_texture(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        let &RenderCommand::BindDepthTexture {
+            slot,
+            target,
+            sampling,
+        } = command
+        else {
+            return Ok(());
+        };
+        let Some(attachment) = self.depths.get(&target) else {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "BindDepthTexture of a depth target this backend never drew",
+            });
+        };
+        let (width, height) = attachment.extent();
+        let (texels, hash) = if let Some((read, hash)) = self.depth_reads.get(&target) {
+            (std::sync::Arc::clone(read), *hash)
+        } else {
+            let read: std::sync::Arc<[u32]> = attachment
+                .read_depth()
+                .map_err(|e| BackendError::Device(format!("depth read: {e:?}")))?
+                .into();
+            let hash = orbistoun_gpu::content_hash(&read);
+            self.depth_reads
+                .insert(target, (std::sync::Arc::clone(&read), hash));
+            (read, hash)
+        };
+        let Some(texture) = usize::try_from(slot)
+            .ok()
+            .and_then(|slot| self.textures.get_mut(slot))
+        else {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "BindDepthTexture beyond the last texture slot",
+            });
+        };
+        *texture = Some(BoundTexture {
+            texels,
+            width,
+            height,
+            encoding: orbistoun_gpu::TextureEncoding::DepthFloat,
+            hash,
+            sampling,
+            faces: 1,
+        });
         Ok(())
     }
 
@@ -1157,6 +1215,10 @@ impl VulkanBackend {
             self.refused += 1;
             return Err(BackendError::Unsupported { command: what });
         }
+        // A draw on a depth target changes what a compare of it reads (D817).
+        if let Some(id) = self.current_depth {
+            self.depth_reads.remove(&id);
+        }
         // The bound depth target's attachment, sized to the colour target, and the clear it starts
         // from; a depth state with no exact Vulkan form is refused like a blend state.
         let (depth, depth_clear) = match self.current_depth {
@@ -1318,6 +1380,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetViewportTransform(_) => "SetViewportTransform",
         RenderCommand::SetUserData { .. } => "SetUserData",
         RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
@@ -1426,6 +1489,7 @@ impl RenderBackend for VulkanBackend {
             }
             // The guest's own texels, sampled by the draws that follow.
             RenderCommand::BindTexture { .. } => self.bind_texture(command),
+            RenderCommand::BindDepthTexture { .. } => self.bind_depth_texture(command),
             RenderCommand::BindDrawBuffers { stage, buffers } => {
                 self.bind_draw_buffers(*stage, buffers)
             }

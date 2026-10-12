@@ -26,6 +26,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetCull(_) => "SetCull",
         RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
         RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",

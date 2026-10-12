@@ -3776,27 +3776,7 @@ fn bind_textures(
                         .map(|offset| table + u64::from(offset));
                     let bound = read
                         .entry((at, source.slot, sampler_at, source.saturated))
-                        .or_insert_with(|| {
-                            if is_null_descriptor(at, memory) {
-                                return Some(null_texture(source.slot, source.cube));
-                            }
-                            let mut bound = read_texture(at, source.slot, memory, texels)?;
-                            // A sampler the module named is read and honoured; one that cannot be
-                            // honoured exactly leaves the texture unbound, so the draw is refused
-                            // rather than sampled some other way.
-                            if let Some(sampler_at) = sampler_at {
-                                let decoded = read_sampler(sampler_at, memory)?;
-                                // A half-border clamp is honoured only by a module that saturates
-                                // the coordinates it names (D743).
-                                if decoded.saturated() != source.saturated {
-                                    return None;
-                                }
-                                if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
-                                    *sampling = decoded;
-                                }
-                            }
-                            Some(bound)
-                        })
+                        .or_insert_with(|| table_texture(source, (at, sampler_at), memory, texels))
                         .clone();
                     let bound = bound.filter(|bound| shaped_for(bound, source));
                     // A texture the module samples and nothing binds draws the backend's
@@ -3817,17 +3797,50 @@ fn bind_textures(
     *commands = out;
 }
 
+/// What a source whose descriptor is in a table binds: the null texture for a null descriptor, the
+/// depth target a compare names (D817), or the texture read at `at` under the sampler at
+/// `sampler_at`. A sampler the module named is read and honoured; one that cannot be honoured
+/// exactly leaves the texture unbound, so the draw is refused rather than sampled some other way.
+fn table_texture(
+    source: &TextureSource,
+    (at, sampler_at): (u64, Option<u64>),
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    if is_null_descriptor(at, memory) {
+        return Some(null_texture(source.slot, source.cube));
+    }
+    // A depth compare samples a depth target, which is not in guest memory to read (D817).
+    if source.compare {
+        return depth_texture(at, (source.slot, source.saturated), sampler_at, memory);
+    }
+    let mut bound = read_texture(at, source.slot, memory, texels)?;
+    if let Some(sampler_at) = sampler_at {
+        let decoded = read_sampler(sampler_at, memory)?;
+        // A half-border clamp is honoured only by a module that saturates the coordinates it
+        // names (D743).
+        if decoded.saturated() != source.saturated {
+            return None;
+        }
+        if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
+            *sampling = decoded;
+        }
+    }
+    Some(bound)
+}
+
 /// Whether a texture read for `source` is the shape its module samples: a cube's six faces for a
 /// module that samples a cube, one image otherwise (D811). Bound the other way, the host's view
 /// would not be the image its module declares.
 fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
-    let faces = match bound {
-        RenderCommand::BindTexture { faces, .. } => *faces,
-        _ => return false,
-    };
-    // A depth texture compared against a reference is not yet read for the host (D816): its draw
-    // is refused rather than handed a texture that samples otherwise.
-    (faces == CUBE_FACES) == source.cube && !source.compare
+    match bound {
+        // A depth compare samples a flat depth target (D816, D817).
+        RenderCommand::BindDepthTexture { .. } => source.compare && !source.cube,
+        RenderCommand::BindTexture { faces, .. } => {
+            (*faces == CUBE_FACES) == source.cube && !source.compare
+        }
+        _ => false,
+    }
 }
 
 /// An unbound slot whose descriptor is in the user data from word `first`, described.
@@ -3959,6 +3972,50 @@ const SAMPLED_AS_RENDERED: [SwizzleMode; 5] = [
     SwizzleMode::Linear,
 ];
 
+/// The swizzle modes a depth surface is stored under: addrlib's `ADDR_SW_4KB_Z` (4),
+/// `ADDR_SW_64KB_Z` (8), `ADDR_SW_64KB_Z_T` (16), `ADDR_SW_4KB_Z_X` (20) and `ADDR_SW_64KB_Z_X`
+/// (24), `addrtypes.h`.
+const DEPTH_SWIZZLES: [u32; 5] = [4, 8, 16, 20, 24];
+
+/// The image formats a depth target is sampled as: `16_UNORM` (7), `32_FLOAT` (22) and
+/// `X24_8_32_FLOAT` (146), `GFX10_FORMAT` in `gfx10-rsrc.json`.
+const DEPTH_IMAGE_FORMATS: [u32; 3] = [7, 22, 146];
+
+/// What a depth-compare source at `at` samples (D817): the depth target at the descriptor's
+/// address, when the descriptor is a flat depth surface - a depth swizzle and a depth format - and
+/// its sampler is read and is one the module's coordinates were saturated for (D743). [`None`]
+/// otherwise, so the draw is refused rather than compared against something else.
+fn depth_texture(
+    at: u64,
+    (slot, saturated): (u32, [bool; 2]),
+    sampler_at: Option<u64>,
+    memory: &impl GuestMemory,
+) -> Option<RenderCommand> {
+    let bytes = memory.read(at, 32)?;
+    let mut words = [0_u32; 8];
+    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    let descriptor = decode_image_descriptor(words);
+    let depth_tiled =
+        matches!(descriptor.tiling, SwizzleMode::Other(mode) if DEPTH_SWIZZLES.contains(&mode));
+    if !depth_tiled
+        || !DEPTH_IMAGE_FORMATS.contains(&descriptor.format)
+        || words[3] >> 28 != IMAGE_TYPE_2D
+    {
+        return None;
+    }
+    let sampling = read_sampler(sampler_at?, memory)?;
+    if sampling.saturated() != saturated {
+        return None;
+    }
+    Some(RenderCommand::BindDepthTexture {
+        slot,
+        target: crate::depth::depth_target_id_at(descriptor.base),
+        sampling,
+    })
+}
+
 /// [`read_texture`] for a descriptor's eight words already in hand.
 fn texture_from_words(
     words: [u32; 8],
@@ -4081,6 +4138,8 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         | crate::backend::TextureEncoding::Bc1Srgb
         | crate::backend::TextureEncoding::Bc3Srgb
         | crate::backend::TextureEncoding::Bc6hUfloat => 0,
+        // Never read from guest memory, so never in the cache (D817).
+        crate::backend::TextureEncoding::DepthFloat => 1 << 23,
     }
 }
 
@@ -5511,6 +5570,97 @@ mod tests {
             (0, Some([TextureWrap::ClampHalfBorder; 2])),
             "saturated: bound as the sampler says"
         );
+    }
+
+    /// A depth compare's texture is the depth target at its descriptor's address, named rather than
+    /// read (D817): PPSA03416's shadow map, `16_UNORM` in `64KB_Z_X` at 0x7400d6e50000, sampled with
+    /// a sampler comparing less-than. A sample that does not compare reads it as a texture, which a
+    /// depth swizzle refuses.
+    #[test]
+    fn a_depth_compare_samples_the_depth_target_at_its_address() {
+        use super::{RenderCommand, ShaderStage, TableBase, TextureSource, bind_textures};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let image: [u32; 8] = [
+            0x00d6_e500,
+            0xc070_0074,
+            0x03ff_c3ff,
+            0x9180_0924,
+            0,
+            0x0070_0000,
+            0,
+            0,
+        ];
+        // Clamped to the edge, both filters linear, `DEPTH_COMPARE_FUNC` less (1).
+        let sampler = [2 | 2 << 3 | 1 << 12, 0, 1 << 20 | 1 << 22, 0];
+        let mut bytes = vec![0u8; 0x40];
+        for (i, word) in image.iter().chain(&sampler).enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let memory = Memory(bytes);
+        let shader = ResourceId(7);
+        let mut words = [0u32; super::USER_DATA_WORDS];
+        words[0] = 0x1000;
+        let bind = |compare: bool| {
+            let sources = std::collections::BTreeMap::from([(
+                shader,
+                vec![TextureSource {
+                    slot: 2,
+                    table_offset: Some(0),
+                    table: TableBase::default(),
+                    sampler_offset: Some(0x20),
+                    user_data: None,
+                    sampler_user_data: None,
+                    cube: false,
+                    compare,
+                    saturated: [false; 2],
+                }],
+            )]);
+            let mut commands = vec![
+                RenderCommand::SetUserData {
+                    stage: ShaderStage::Fragment,
+                    words,
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader,
+                },
+                RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                },
+            ];
+            let mut unbound = 0;
+            bind_textures(
+                &mut commands,
+                (&sources, &mut super::TexelCache::new()),
+                &memory,
+                (&mut unbound, &mut None),
+            );
+            let bound = commands.iter().find_map(|command| match command {
+                RenderCommand::BindDepthTexture {
+                    slot,
+                    target,
+                    sampling,
+                } => Some((*slot, *target, sampling.depth_compare)),
+                _ => None,
+            });
+            (unbound, bound)
+        };
+        assert_eq!(
+            bind(true),
+            (
+                0,
+                Some((2, crate::depth::depth_target_id_at(0x7400_d6e5_0000), 1))
+            )
+        );
+        assert_eq!(bind(false), (1, None), "not a compare: read, and refused");
     }
 
     /// A `BC3_UNORM` texture in `64KB_S` is bound as its blocks, detiled row-major, for the host to

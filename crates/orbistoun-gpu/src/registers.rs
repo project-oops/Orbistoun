@@ -2648,6 +2648,10 @@ pub struct TextureSampling {
     /// The most an anisotropic filter stretches its footprint, a power of two up to sixteen; one
     /// for a filter that is not anisotropic (D775).
     pub anisotropy: u8,
+    /// How a depth-compare sample compares its reference with the texel: `SQ_IMG_SAMP_WORD0`'s
+    /// `DEPTH_COMPARE_FUNC` (bits 14:12, `gfx10-rsrc.json`), `SQ_TEX_DEPTH_COMPARE` 0-7, never to
+    /// always, in `VkCompareOp`'s order (`radv_tex_compare`). Read only by a compare (D817).
+    pub depth_compare: u8,
 }
 
 impl TextureSampling {
@@ -2660,6 +2664,7 @@ impl TextureSampling {
         mip: MipFilter::Nearest,
         border: BorderColour::TransparentBlack,
         anisotropy: 1,
+        depth_compare: 0,
     };
 
     /// Which coordinates, across then down, the shader saturates before sampling: those a
@@ -2738,6 +2743,7 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         mip,
         border,
         anisotropy,
+        depth_compare: ((words[0] >> 12) & 0x7) as u8,
     })
 }
 
