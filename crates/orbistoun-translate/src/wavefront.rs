@@ -1720,10 +1720,22 @@ impl Wavefront<'_> {
     pub fn texture_sources(&self) -> Vec<TextureSource> {
         self.textures
             .iter()
-            .map(|bound| TextureSource {
+            .map(|bound| {
+                // An image held in user data has no table of its own: its source names its
+                // sampler's, where the sampler was loaded from one.
+                let table = bound
+                    .source
+                    .user_data
+                    .and(bound.sampler)
+                    .and_then(|sampler| self.sampler_table(sampler))
+                    .unwrap_or(bound.source.table);
+                (bound, table)
+            })
+            .map(|(bound, table)| TextureSource {
+                table,
                 sampler_offset: bound
                     .sampler
-                    .and_then(|sampler| self.sampler_offset(sampler, bound.source.table)),
+                    .and_then(|sampler| self.sampler_offset(sampler, table)),
                 sampler_user_data: bound
                     .sampler
                     .and_then(|sampler| self.resident_sampler(sampler)),
@@ -1731,6 +1743,15 @@ impl Wavefront<'_> {
                 ..bound.source
             })
             .collect()
+    }
+
+    /// The one table a sampler descriptor starting at scalar register `sampler` was loaded from.
+    fn sampler_table(&self, sampler: u32) -> Option<TableBase> {
+        let loads = self.descriptor_loads.1.get(&sampler)?;
+        match loads.iter().collect::<Vec<_>>().as_slice() {
+            [(Some(from), _)] => Some(*from),
+            _ => None,
+        }
     }
 
     /// Where a sampler descriptor starting at scalar register `sampler` was loaded from in `table`:
@@ -4671,9 +4692,10 @@ fn descriptor_table_loads(
                 [
                     Operand::Scalar(destination),
                     Operand::Scalar(base),
-                    Operand::Immediate(offset),
+                    offset @ (Operand::Immediate(_) | Operand::Named(_)),
                 ],
-            ) => {
+            ) if offset_or_null(offset).is_some() => {
+                let offset = offset_or_null(offset).unwrap_or_default();
                 // Eight words is an image descriptor, four a sampler descriptor, kept apart so a
                 // sampler's load is never taken for an image's. Sixteen are two image descriptors
                 // side by side, as a compiler merges two adjacent eight-word loads.
@@ -4687,7 +4709,7 @@ fn descriptor_table_loads(
                 forget_live(&mut live.loads, *destination, width);
                 let image = matches!(name, "s_load_dwordx8" | "s_load_dwordx16");
                 if let Some(into) = into
-                    && let Ok(offset) = u32::try_from(*offset)
+                    && let Ok(offset) = u32::try_from(offset)
                 {
                     let at = |register: u16| held.get(usize::from(register)).copied().flatten();
                     let table = at(*base)
@@ -4867,6 +4889,17 @@ type ReachingLoads = BTreeMap<u32, (Option<TableBase>, u32)>;
 /// Descriptor loads by the first register they fill: the table each was loaded from (when the
 /// program formed its address from user data or constants) and the byte offset.
 type DescriptorLoads = BTreeMap<u32, std::collections::BTreeSet<(Option<TableBase>, u32)>>;
+
+/// A scalar load's offset operand: its immediate, or zero where it names only the null scalar
+/// offset, as a load with neither an immediate nor a register offset is written
+/// (`s_load_dwordx4 s[64:67], s[28:29], null`).
+fn offset_or_null(operand: &Operand) -> Option<i64> {
+    match operand {
+        Operand::Immediate(offset) => Some(*offset),
+        Operand::Named(name) if name == "null" => Some(0),
+        _ => None,
+    }
+}
 
 /// Every attribute the shader interpolates, in order and without repeats, with how it is read.
 ///

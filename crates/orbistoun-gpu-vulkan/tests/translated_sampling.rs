@@ -955,6 +955,79 @@ fn one_image_through_two_samplers_takes_two_slots() {
     );
 }
 
+/// An image held in user data sampled through a sampler loaded from the descriptor table names the
+/// sampler's table and offset: PPSA03416's shadow-map shaders keep the image in user data and load
+/// the sampler from `s[28:29]`, one at 0x10 and one at no offset at all (`s_load_dwordx4 s[64:67],
+/// s[28:29], null`).
+#[test]
+fn a_user_data_image_names_its_samplers_table() {
+    use orbistoun_translate::wavefront::{TableBase, TableWord};
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let (family, opcode) = encodings
+        .find_by_name("s_load_dwordx4")
+        .expect("the target has s_load_dwordx4");
+    let encoding = encodings
+        .encodings()
+        .iter()
+        .find(|e| e.name == family)
+        .expect("its family");
+    for offset in [0x10_u32, 0] {
+        let mut bytes = Vec::new();
+        for channel in 0u32..2 {
+            let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+            bytes.extend(word.to_le_bytes());
+        }
+        // s_load_dwordx4 s[12:15], s[28:29], offset - the second word's soffset field null.
+        let load = [
+            encoding.value
+                | (opcode << encoding.opcode.shift)
+                | (SAMPLER_DESCRIPTOR << 6)
+                | (28 / 2),
+            0xfa00_0000 | offset,
+        ];
+        for word in load
+            .into_iter()
+            .chain([0xBF8C_C07F])
+            .chain(image_sample_words(39))
+        {
+            bytes.extend(word.to_le_bytes());
+        }
+        bytes.extend(0xBF81_0000u32.to_le_bytes());
+        let decoded = decode(&bytes, &encodings, &operands);
+        let translated = orbistoun_translate::translate_with_user_data(
+            &decoded,
+            &encodings,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::Wave64,
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                first_register: 0,
+                count: 32,
+                ..UserData::default()
+            },
+        )
+        .expect("the sample translates");
+        let source = translated.textures.first().expect("one texture");
+        assert_eq!(
+            (source.user_data, source.sampler_offset, source.table),
+            (
+                Some(IMAGE_DESCRIPTOR),
+                Some(offset),
+                TableBase {
+                    low: TableWord::UserData(28),
+                    high: TableWord::UserData(29),
+                }
+            ),
+            "offset {offset:#x}"
+        );
+    }
+}
+
 /// One register group loaded with two descriptors in turn, each sampled after its load, is two
 /// textures, each at the offset of the load that reached its sample: ACO reuses the registers for a
 /// pixel shader's second texture (CRFT00001's `sampler` and `sky_sampler`).

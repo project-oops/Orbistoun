@@ -3886,19 +3886,29 @@ fn user_data_texture(
     if is_null_image(&descriptor) {
         return Some(null_texture(source.slot, source.cube));
     }
+    // The sampler the module named, read: beside the image in the user data, or loaded from the
+    // table the source names. [`None`] where it named none, and `Some(None)` where it cannot be read.
+    let named = if let Some(sampler) = source.sampler_user_data {
+        Some(
+            words_from(sampler, 4)
+                .and_then(|words| <[u32; 4]>::try_from(words).ok())
+                .and_then(|words| crate::registers::decode_sampler_descriptor(words).ok()),
+        )
+    } else {
+        source.sampler_offset.map(|offset| {
+            read_sampler(
+                table_address(source.table, user) + u64::from(offset),
+                memory,
+            )
+        })
+    };
     // A depth compare samples a depth target, which is not in guest memory to read (D817).
     if source.compare {
-        let sampling = source
-            .sampler_user_data
-            .and_then(|sampler| words_from(sampler, 4))
-            .and_then(|words| <[u32; 4]>::try_from(words).ok())
-            .and_then(|words| crate::registers::decode_sampler_descriptor(words).ok());
-        return depth_texture_from(descriptor, (source.slot, source.saturated), sampling);
+        return depth_texture_from(descriptor, (source.slot, source.saturated), named.flatten());
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
-    if let Some(sampler) = source.sampler_user_data {
-        let words: [u32; 4] = words_from(sampler, 4)?.try_into().ok()?;
-        let decoded = crate::registers::decode_sampler_descriptor(words).ok()?;
+    if let Some(decoded) = named {
+        let decoded = decoded?;
         // A half-border clamp is honoured only by a module that saturates the coordinates it names
         // (D743).
         if decoded.saturated() != source.saturated {
@@ -5728,6 +5738,68 @@ mod tests {
         assert_eq!(
             (slot, target, sampling.depth_compare),
             (2, crate::depth::depth_target_id_at(0x7400_d8ed_0000), 3)
+        );
+    }
+
+    /// A depth compare whose descriptor is in the user data and whose sampler was loaded from the
+    /// table names the depth target, compared as the table's sampler says: PPSA03416's shadow-map
+    /// shaders load the sampler from `s[28:29]` + 0x10.
+    #[test]
+    fn a_user_data_depth_compare_reads_its_sampler_from_the_table() {
+        use super::{RenderCommand, TableBase, TableWord, TextureSource, user_data_texture};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0_u8; 0x20];
+        for (i, word) in [2_u32 | 2 << 3 | 6 << 12, 0, 1 << 20 | 1 << 22, 0]
+            .iter()
+            .enumerate()
+        {
+            bytes[0x10 + i * 4..0x14 + i * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let mut user = [0_u32; 32];
+        user[28] = 0x1000;
+        user[8..16].copy_from_slice(&[
+            0x00d6_f900,
+            0xc070_0074,
+            0x03ff_c3ff,
+            0x9180_0924,
+            0,
+            0x0070_0000,
+            0,
+            0,
+        ]);
+        let source = TextureSource {
+            slot: 2,
+            table_offset: None,
+            table: TableBase {
+                low: TableWord::UserData(28),
+                high: TableWord::UserData(29),
+            },
+            sampler_offset: Some(0x10),
+            user_data: Some(8),
+            sampler_user_data: None,
+            cube: false,
+            compare: true,
+            saturated: [false; 2],
+        };
+        let bound = user_data_texture(
+            &source,
+            8,
+            &user,
+            &Memory(bytes),
+            &mut super::TexelCache::new(),
+        );
+        let Some(RenderCommand::BindDepthTexture { sampling, .. }) = bound else {
+            panic!("{bound:?}");
+        };
+        assert_eq!(
+            sampling.depth_compare, 6,
+            "greater-or-equal, from the table"
         );
     }
 
