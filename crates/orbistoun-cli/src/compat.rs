@@ -341,40 +341,68 @@ fn rank_preview(
         "the run to rank was not a preview: it answered {}",
         preview.conditions.default_return
     );
-    let reached = orbistoun_report::trace::status_of(preview, String::new());
     let answered: Vec<String> = preview
         .stubbed_imports()
         .iter()
         .filter_map(|c| c.label.split_once("::").map(|(_, name)| name.to_owned()))
         .collect();
+    // Every run from here stops at the preview's own call count rather than on the clock, so two
+    // differ by what was refused and not by how fast the host ran them.
+    let budget = preview.total_calls.max(1);
+    let run = |withheld: Option<&str>| -> Result<Option<orbistoun_overrides::Status>> {
+        match withheld {
+            // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+            Some(name) => unsafe { std::env::set_var(orbistoun_env::WITHHOLD.name, name) },
+            // SAFETY: as above.
+            None => unsafe { std::env::remove_var(orbistoun_env::WITHHOLD.name) },
+        }
+        let before = crate::run::trace_stamp(module);
+        run_with_budget(service, title, dir, symbols_db, budget)?;
+        Ok(
+            orbistoun_report::trace::wrote_a_trace(before, crate::run::trace_stamp(module))
+                .then(|| previous_trace(module))
+                .flatten()
+                .map(|trace| orbistoun_report::trace::status_of(&trace, String::new())),
+        )
+    };
+    // The preview twice more, refusing nothing, under the budget: what it reaches, and how far two
+    // runs of it differ with nothing changed - the margin a rerun must clear to count.
+    let mut baselines = Vec::with_capacity(2);
+    for i in 1..=2 {
+        println!();
+        println!("== baseline {i}/2 {title}, refusing nothing, {budget} calls");
+        baselines.push(run(None)?.context("a baseline run left no trace")?);
+    }
+    baselines.sort_by(orbistoun_overrides::Status::reach_against);
+    let (reference, highest) = (&baselines[0], &baselines[1]);
+    anyhow::ensure!(
+        reference.reach == highest.reach,
+        "two runs of the preview reached {} and {}: refusals cannot be ranked against that",
+        reach_line(reference),
+        reach_line(highest)
+    );
+    let spread = highest.imports - reference.imports;
     println!();
     println!(
-        "ranking {} zero answer(s) against the preview's {}: one rerun each, refusing it again",
+        "ranking {} zero answer(s) against the preview's {} (runs of it differ by {spread} import(s)): one rerun each, refusing it again",
         answered.len(),
-        reach_line(&reached)
+        reach_line(reference)
     );
     let mut reruns = Vec::with_capacity(answered.len());
     for (i, name) in answered.iter().enumerate() {
         println!();
         println!("== {}/{} {title}, refusing {name}", i + 1, answered.len());
-        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
-        unsafe { std::env::set_var(orbistoun_env::WITHHOLD.name, name) };
-        let before = crate::run::trace_stamp(module);
-        run_as_recorded(service, title, dir, symbols_db)?;
-        let rerun = orbistoun_report::trace::wrote_a_trace(before, crate::run::trace_stamp(module))
-            .then(|| previous_trace(module))
-            .flatten()
-            .map(|trace| orbistoun_report::trace::status_of(&trace, String::new()));
-        reruns.push((name.clone(), rerun));
+        reruns.push((name.clone(), run(Some(name))?));
     }
     // SAFETY: as above; no worker is running.
     unsafe { std::env::remove_var(orbistoun_env::WITHHOLD.name) };
 
-    let ranked = rank_reruns(&reached, reruns);
+    let mut ranked = rank_reruns(reference, spread, reruns);
+    ranked.calls = budget;
     println!();
     println!(
         "{title}: what the preview's {} rested on",
-        reach_line(&reached)
+        reach_line(reference)
     );
     for (heading, names) in [
         ("depended on", &ranked.depended),
@@ -398,19 +426,28 @@ fn reach_line(status: &orbistoun_overrides::Status) -> String {
     format!("{} at {} imports", status.reach.label(), status.imports)
 }
 
-/// Sorts a preview's reruns, each by the function it refused, against the preview they came from.
+/// Sorts a preview's reruns, each by the function it refused, against the lower of two runs of the
+/// preview that refused nothing.
 ///
-/// A rerun that left no trace ended the worker before it could write one, which is a dependence
-/// too, and the furthest set back of all.
+/// Imports within `spread` of it - how far those two runs differed - count as the same reach, so a
+/// rerun is ranked only by what refusing changed. A rerun that left no trace ended the worker
+/// before it could write one, which is a dependence too, and the furthest set back of all.
 fn rank_reruns(
     preview: &orbistoun_overrides::Status,
+    spread: usize,
     reruns: Vec<(String, Option<orbistoun_overrides::Status>)>,
 ) -> orbistoun_overrides::PreviewDependence {
     use std::cmp::Ordering;
+    let against = |r: &orbistoun_overrides::Status| match r.reach_against(preview) {
+        Ordering::Greater if r.imports <= preview.imports + spread && r.reach == preview.reach => {
+            Ordering::Equal
+        }
+        other => other,
+    };
     let mut depended: Vec<(Option<orbistoun_overrides::Status>, String)> = Vec::new();
     let (mut unneeded, mut harmful) = (Vec::new(), Vec::new());
     for (name, rerun) in reruns {
-        match rerun.as_ref().map(|r| (r.reach_against(preview), r)) {
+        match rerun.as_ref().map(|r| (against(r), r)) {
             Some((Ordering::Equal, _)) => unneeded.push(name),
             Some((Ordering::Greater, r)) => harmful.push(format!("{name}: {}", reach_line(r))),
             Some((Ordering::Less, _)) | None => depended.push((rerun, name)),
@@ -434,6 +471,8 @@ fn rank_reruns(
         unneeded,
         harmful,
         preview: reach_line(preview),
+        spread,
+        calls: 0,
         build: orbistoun_env::build::line(),
         measured_on: orbistoun_nid::today(),
     }
@@ -584,6 +623,21 @@ fn run_as_recorded(
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
 ) -> Result<(orbistoun_overrides::Reproduce, std::path::PathBuf)> {
+    run_with_budget(service, title, dir, symbols_db, 0)
+}
+
+/// [`run_as_recorded`], ended by a call budget instead of the clock when `calls` is not zero.
+///
+/// The budget is the deterministic limit: two runs of one build stop at the same call, so what
+/// they reached differs only by what changed between them. The record's time limit is doubled
+/// as a backstop, so the budget, not the clock, is what ends a run that keeps calling.
+fn run_with_budget(
+    service: &orbistoun_service::Service,
+    title: &str,
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+    calls: u64,
+) -> Result<(orbistoun_overrides::Reproduce, std::path::PathBuf)> {
     let record = load_compat(dir, title)?;
     let Some(reproduce) = record.reproduce else {
         anyhow::bail!(
@@ -623,10 +677,15 @@ fn run_as_recorded(
             reproduce.frame_every.to_string(),
         );
     }
+    let limit = if calls == 0 {
+        reproduce.limit_seconds
+    } else {
+        reproduce.limit_seconds.saturating_mul(2)
+    };
     crate::run::cmd_run(
         &module,
-        reproduce.limit_seconds,
-        0,
+        limit,
+        calls,
         None,
         (symbols_db, inputs.is_file().then_some(inputs.as_path())),
         (false, false),
@@ -1177,12 +1236,16 @@ mod tests {
         flipped.reach = orbistoun_overrides::Reach::Flipped;
         let ranked = super::rank_reruns(
             &preview,
+            3,
             vec![
                 ("sceA".to_owned(), Some(reach(200, 9))),
                 ("sceB".to_owned(), Some(reach(261, 7))),
                 ("sceC".to_owned(), None),
                 ("sceD".to_owned(), Some(reach(103, 9))),
                 ("sceE".to_owned(), Some(flipped)),
+                // Within the three imports two runs of the preview differed by: nothing changed.
+                ("sceF".to_owned(), Some(reach(264, 9))),
+                ("sceG".to_owned(), Some(reach(265, 9))),
             ],
         );
         assert_eq!(
@@ -1193,8 +1256,15 @@ mod tests {
                 "sceA: entered at 200 imports",
             ]
         );
-        assert_eq!(ranked.unneeded, ["sceB"]);
-        assert_eq!(ranked.harmful, ["sceE: flipped at 261 imports"]);
+        assert_eq!(ranked.unneeded, ["sceB", "sceF"]);
+        assert_eq!(
+            ranked.harmful,
+            [
+                "sceE: flipped at 261 imports",
+                "sceG: entered at 265 imports"
+            ]
+        );
+        assert_eq!(ranked.spread, 3);
         assert_eq!(ranked.preview, "entered at 261 imports");
     }
 
