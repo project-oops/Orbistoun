@@ -1,0 +1,33 @@
+library = "libScePlayGo"
+
+[[function]]
+name = "scePlayGoInitialize"
+arity = 1
+purpose = "(param): starts PlayGo, param a pointer to a work block and its size."
+returns = "status"
+edge_cases = [
+    "NOT MEASURABLE (REQ-pg01): libScePlayGo binds in no probe leg on a non-retail eboot, by link or by name.",
+    "GUEST-OBSERVED (D815): PPSA21564 calls it at start-up with a 0x200000-byte work block, asserts the answer is 0 (PlayGo.cpp line 111) and traps if not; the retail title runs on the console, so the console answers 0 there. When scePlayGoOpen then fails, the title takes its content as fully installed, the state it also reaches when one chunk is listed.",
+    "orbistoun answers 0 for a parameter block, writing nothing; a null block answers the placeholder.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "PPSA21564 image+0x10866f4..0x10866ce, 0x108678e; obSCEne REQ-20261012T1251Z-pg01."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "scePlayGoTerminate"
+arity = 0
+purpose = "(): ends PlayGo."
+returns = "status"
+edge_cases = [
+    "NOT MEASURABLE (REQ-pg01).",
+    "GUEST-OBSERVED (D815): PPSA21564 terminates after initialising when scePlayGoOpen fails, and asserts the answer is 0 (PlayGo.cpp line 127), trapping if not.",
+    "orbistoun answers 0 once after scePlayGoInitialize; otherwise the placeholder.",
+]
+found_by = "static"
+known_by = "guest-observed"
+cites = "PPSA21564 image+0x1086987..0x10869eb; obSCEne REQ-20261012T1251Z-pg01."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-12"

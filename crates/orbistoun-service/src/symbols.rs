@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 54] {
+pub(crate) fn modules() -> [ModuleDesc; 55] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -69,6 +69,7 @@ pub(crate) fn modules() -> [ModuleDesc; 54] {
         orbistoun_systemservice::app_content::MODULE,
         orbistoun_systemservice::common_dialog::MODULE,
         orbistoun_systemservice::content_export::MODULE,
+        orbistoun_systemservice::play_go::MODULE,
         orbistoun_systemservice::coredump::MODULE,
         orbistoun_systemservice::error_dialog::MODULE,
         orbistoun_systemservice::json2::MODULE,
@@ -150,6 +151,7 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     all.extend_from_slice(orbistoun_systemservice::share::implementations());
     all.extend_from_slice(orbistoun_systemservice::remoteplay::implementations());
     all.extend_from_slice(orbistoun_systemservice::content_export::implementations());
+    all.extend_from_slice(orbistoun_systemservice::play_go::implementations());
     // libSceRandom: random bytes for a title's arc4random, a fixed-seed stream so runs compare.
     all.extend_from_slice(orbistoun_systemservice::random::implementations());
     // libSceRtc: the real-time clock's tick, the host's wall clock from year one (D776).
