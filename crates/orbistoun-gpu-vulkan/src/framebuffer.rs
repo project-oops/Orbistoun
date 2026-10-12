@@ -1310,6 +1310,8 @@ struct Texture {
     height: u32,
     /// How many levels it has: two where the image is big enough for a second, one otherwise.
     levels: u32,
+    /// Its layers: one, or a cube's six faces seen through a cube view (D811).
+    faces: u32,
 }
 
 /// The texture bound when a caller does not ask for one: a single opaque white texel, the smallest
@@ -1328,6 +1330,8 @@ pub(crate) struct TextureWords<'a> {
     pub(crate) height: Option<u32>,
     /// What the words are.
     pub(crate) encoding: orbistoun_gpu::TextureEncoding,
+    /// How many faces the words hold one after another: 1, or a cube's 6 (D811).
+    pub(crate) faces: u32,
 }
 
 impl<'a> TextureWords<'a> {
@@ -1341,6 +1345,7 @@ impl<'a> TextureWords<'a> {
             width,
             height: None,
             encoding: orbistoun_gpu::TextureEncoding::Rgba8,
+            faces: 1,
         }
     }
 }
@@ -1454,7 +1459,11 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
         height: texture.height.unwrap_or(1),
         levels: 1,
     };
+    // A cube's faces follow one another, each its full extent: staged as they are, its height
+    // the one it was given.
+    let flat = texture.faces <= 1;
     match texture.encoding {
+        orbistoun_gpu::TextureEncoding::Rgba8 if !flat => (FORMAT, as_they_are()),
         orbistoun_gpu::TextureEncoding::Rgba8 => {
             (FORMAT, staged(texture.words, texture.width, coarse_level))
         }
@@ -1467,6 +1476,9 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
             (vk::Format::B10G11R11_UFLOAT_PACK32, as_they_are())
         }
         orbistoun_gpu::TextureEncoding::Bc3 => (vk::Format::BC3_UNORM_BLOCK, as_they_are()),
+        orbistoun_gpu::TextureEncoding::Bc6hUfloat => {
+            (vk::Format::BC6H_UFLOAT_BLOCK, as_they_are())
+        }
         // Hardware BC1 decodes the one-bit alpha a three-colour block selects, as `RGBA` does.
         orbistoun_gpu::TextureEncoding::Bc1Srgb => (vk::Format::BC1_RGBA_SRGB_BLOCK, as_they_are()),
     }
@@ -1493,7 +1505,18 @@ fn create_texture(
         height,
         levels,
     } = staged;
+    // A cube is six layers of one image, made cube-compatible so a cube view can see them.
+    let faces = texture.faces.max(1);
+    let (flags, view_type) = if faces == CUBE_FACES {
+        (
+            vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            vk::ImageViewType::CUBE,
+        )
+    } else {
+        (vk::ImageCreateFlags::empty(), vk::ImageViewType::TYPE_2D)
+    };
     let info = vk::ImageCreateInfo::default()
+        .flags(flags)
         .image_type(vk::ImageType::TYPE_2D)
         .format(format)
         .extent(vk::Extent3D {
@@ -1502,7 +1525,7 @@ fn create_texture(
             depth: 1,
         })
         .mip_levels(levels)
-        .array_layers(1)
+        .array_layers(faces)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
@@ -1562,13 +1585,13 @@ fn create_texture(
 
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
+        .view_type(view_type)
         .format(format)
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(levels)
-                .layer_count(1),
+                .layer_count(faces),
         );
     // SAFETY: the image is live and the create info outlives the call.
     let view = unsafe { device.create_image_view(&view_info, None) }
@@ -1589,8 +1612,12 @@ fn create_texture(
         width,
         height,
         levels,
+        faces,
     })
 }
+
+/// The faces of a cube, as a texture's layers.
+pub(crate) const CUBE_FACES: u32 = 6;
 
 /// The one texel of a sampled texture's coarse level.
 ///
@@ -1607,7 +1634,7 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
     let range = vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .level_count(texture.levels)
-        .layer_count(1);
+        .layer_count(texture.faces);
     let to_destination = [vk::ImageMemoryBarrier::default()
         .src_access_mask(vk::AccessFlags::empty())
         .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -1631,7 +1658,7 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
     }
 
     // One region per level; the coarse level's texels follow the fine level's in the staging
-    // buffer, which is what its offset says.
+    // buffer, which is what its offset says. A cube's faces follow one another, each a layer.
     let mut regions = vec![
         vk::BufferImageCopy::default()
             // Zero means tightly packed, which is what the staging buffer is.
@@ -1640,7 +1667,7 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
             .image_subresource(
                 vk::ImageSubresourceLayers::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .layer_count(1),
+                    .layer_count(texture.faces),
             )
             .image_extent(vk::Extent3D {
                 width: texture.width,
@@ -4895,6 +4922,39 @@ pub fn draw_with_bc3_texture(
                 width,
                 height: Some(height),
                 encoding: orbistoun_gpu::TextureEncoding::Bc3,
+                faces: 1,
+            }),
+            ..Bound::default()
+        },
+    )
+}
+
+/// [`draw_with_texture`] with a cube: `texels` six `edge` x `edge` faces, +x, -x, +y, -y, +z, -z,
+/// one after another, seen through a cube view and point-sampled (D811).
+///
+/// # Errors
+///
+/// When no device is available, or any Vulkan call fails.
+pub fn draw_with_cube_texture(
+    (vertex_words, fragment_words): (&[u32], &[u32]),
+    clear: [f32; 4],
+    size: (u32, u32),
+    (texels, edge): (&[u32], u32),
+) -> Result<Pixels, DispatchError> {
+    let (frame_width, frame_height) = size;
+    render(
+        clear,
+        frame_width,
+        frame_height,
+        Some((vertex_words, fragment_words)),
+        Geometry::Vertex(VertexDraw::TRIANGLE),
+        Bound {
+            textures: &TexturesBound::first(TextureWords {
+                words: texels,
+                width: edge,
+                height: Some(edge),
+                encoding: orbistoun_gpu::TextureEncoding::Rgba8,
+                faces: CUBE_FACES,
             }),
             ..Bound::default()
         },

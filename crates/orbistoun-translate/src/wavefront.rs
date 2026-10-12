@@ -1753,7 +1753,7 @@ impl Wavefront<'_> {
     fn new_texture_source(
         &self,
         descriptor: u32,
-        reaching: Option<(Option<TableBase>, u32)>,
+        (reaching, cube): (Option<(Option<TableBase>, u32)>, bool),
     ) -> Result<TextureSource, &'static str> {
         let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
         if slot as usize >= MAX_TEXTURES {
@@ -1802,6 +1802,7 @@ impl Wavefront<'_> {
             saturated: [false; 2],
             user_data,
             sampler_user_data: None,
+            cube,
         })
     }
 
@@ -3919,7 +3920,7 @@ impl Model for Wavefront<'_> {
         // A compute module's storage image is the guest's, so where its descriptor came from is what
         // binds it; a fragment module's is a harness image.
         if self.stage == Stage::Compute {
-            let mut source = self.new_texture_source(descriptor, None)?;
+            let mut source = self.new_texture_source(descriptor, (None, false))?;
             source.slot = 0;
             self.images.stored_source = Some(source);
         }
@@ -3983,7 +3984,7 @@ impl Model for Wavefront<'_> {
         &mut self,
         descriptor: u32,
         sampler: Option<u32>,
-        at: u32,
+        (at, cube): (u32, bool),
     ) -> Result<model::Texture, &'static str> {
         // The fragment stage only: the harness binds its sampled image with fragment stage flags,
         // and the `vec4` type a sample answers with is declared by the colour output, which only a
@@ -4024,6 +4025,9 @@ impl Model for Wavefront<'_> {
                     "only one is bound for them (D690)"
                 ));
             }
+            if bound.texture.cube != cube {
+                return Err(CUBE_AND_FLAT);
+            }
             // A sampler only conflicts with a sampler; a fetch names none.
             if matches!((bound.sampler, sampler), (Some(was), Some(now)) if was != now) {
                 return Err(concat!(
@@ -4036,7 +4040,7 @@ impl Model for Wavefront<'_> {
             bound.sampler = bound.sampler.or(sampler);
             return Ok(bound.texture);
         }
-        let source = self.new_texture_source(descriptor, reaching)?;
+        let source = self.new_texture_source(descriptor, (reaching, cube))?;
         let binding = orbistoun_spirv::TEXTURE_BINDINGS[source.slot as usize];
 
         let image = self.builder.id();
@@ -4059,16 +4063,19 @@ impl Model for Wavefront<'_> {
         } else {
             (self.f32_type, self.vec4)
         };
+        let (dim, components) = if cube { (DIM_CUBE, 3) } else { (DIM_2D, 2) };
         self.builder
-            .declare(op::TYPE_IMAGE, &[image.0, element.0, 1, 0, 0, 0, 1, 0]);
+            .declare(op::TYPE_IMAGE, &[image.0, element.0, dim, 0, 0, 0, 1, 0]);
         self.builder
             .declare(op::TYPE_SAMPLED_IMAGE, &[combined.0, image.0]);
         self.builder
             .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, combined.0]);
         self.builder
             .declare(op::VARIABLE, &[pointer.0, variable.0, UNIFORM_CONSTANT]);
-        self.builder
-            .declare(op::TYPE_VECTOR, &[coordinate.0, self.f32_type.0, 2]);
+        self.builder.declare(
+            op::TYPE_VECTOR,
+            &[coordinate.0, self.f32_type.0, components],
+        );
         // The integer coordinate a fetch takes: a texel index rather than a position across the
         // image. Declared alongside the sample's type because the unused one costs one declaration.
         let texel = self.builder.id();
@@ -4088,6 +4095,7 @@ impl Model for Wavefront<'_> {
                 .get(source.slot as usize)
                 .copied()
                 .unwrap_or_default(),
+            cube,
         };
         self.textures.push(BoundTexture {
             texture,
@@ -4534,7 +4542,23 @@ pub struct TextureSource {
     /// sampler clamping to half a border is honoured only by a module translated to.
     #[serde(default)]
     pub saturated: [bool; 2],
+    /// Whether the module samples this texture as a cube, which the host binds as six faces seen
+    /// through a cube view (D811).
+    #[serde(default)]
+    pub cube: bool,
 }
+
+/// Why a shader reading one image as a cube and as a flat image is refused (D811).
+const CUBE_AND_FLAT: &str = concat!(
+    "this shader reads one image both as a cube and as a flat image, and a binding is one or the ",
+    "other (D811)"
+);
+
+/// SPIR-V's `Dim2D`, the dimensionality a flat texture binding is declared with.
+const DIM_2D: u32 = 1;
+
+/// SPIR-V's `DimCube`: a cube binding, sampled at a direction of three floats (D811).
+const DIM_CUBE: u32 = 3;
 
 /// One half of a descriptor table's 64-bit address, as the program formed it before loading from
 /// it: a user-data word of the stage, or a constant.

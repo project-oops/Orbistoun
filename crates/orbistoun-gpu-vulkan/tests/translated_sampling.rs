@@ -10,7 +10,7 @@
 use orbistoun_gpu::{BorderColour, MipFilter, TextureFilter, TextureSampling, TextureWrap};
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::{
-    COARSE_TEXEL, draw_with_sampled_texture, draw_with_texture,
+    COARSE_TEXEL, draw_with_cube_texture, draw_with_sampled_texture, draw_with_texture,
 };
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_spirv::{Lod, interpolated_vertex_module, sampling_fragment_module};
@@ -380,10 +380,10 @@ fn an_image_that_is_not_two_dimensional_is_refused() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
 
-    // Every code but two dimensions: 1D, 2D, 3D, cube, 1D array, 2D array, 2D multi-sampled, 2D
-    // multi-sampled array, in the order a disassembler prints them and the measured first bytes
-    // 0x00 to 0x38 put them.
-    for code in (0..8u32).filter(|code| *code != 1) {
+    // Every code but two dimensions and a cube, which a sample reads (D811): 1D, 2D, 3D, cube, 1D
+    // array, 2D array, 2D multi-sampled, 2D multi-sampled array, in the order a disassembler prints
+    // them and the measured first bytes 0x00 to 0x38 put them.
+    for code in (0..8u32).filter(|code| *code != 1 && *code != CUBE) {
         let mut words = image_sample_words(39);
         words[0] = (words[0] & !(0b111 << 3)) | (code << 3);
         let mut bytes = Vec::new();
@@ -412,6 +412,81 @@ fn an_image_that_is_not_two_dimensional_is_refused() {
             detail.contains("two-dimensional"),
             "dimensionality {code} refused, but not for the number of dimensions: {detail}"
         );
+    }
+}
+
+/// The dimensionality code for a cube, fourth in the same order.
+const CUBE: u32 = 3;
+
+/// A shader that samples a cube at face `face` and exports the texel: the face's two coordinates
+/// interpolated into `v0` and `v1`, `v_mov_b32 v2, face` as a literal float, then
+/// `image_sample_lz v[4:7], v[0:2], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_CUBE`.
+fn cube_sampling_shader(face: f32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        bytes.extend((0xC800_0000u32 | (channel << 18) | (channel << 8)).to_le_bytes());
+    }
+    // v_mov_b32 v2, literal: VOP1 opcode 1, destination at shift 17, source 255 the literal.
+    bytes.extend((0x7E00_0000u32 | (1 << 9) | (2 << 17) | 255).to_le_bytes());
+    bytes.extend(face.to_bits().to_le_bytes());
+    let [first, second] = image_sample_words(39);
+    bytes.extend(((first & !(0b111 << 3)) | (CUBE << 3)).to_le_bytes());
+    bytes.extend(second.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
+    bytes.extend(0x0706_0504u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    bytes
+}
+
+/// A cube sample reads the face its address names, at the place its two coordinates name: the
+/// hardware takes each as `sc / |ma| + 1.5` (`prepare_cube_coords`), so sweeping both across
+/// `[1, 2]` covers the face once, and the quadrants are its four texels in order (D811). Every face
+/// a different colour and every texel of it another.
+#[test]
+fn a_translated_cube_sample_reads_the_face_and_texel_it_names() {
+    if !device_or_skip("a_translated_cube_sample_reads_the_face_and_texel_it_names") {
+        return;
+    }
+    let texel = |face: u32, at: u32| [face * 40, at * 60 + 20, 255 - face * 40, 255];
+    let texels: Vec<u32> = (0..6)
+        .flat_map(|face| (0..4).map(move |at| texel(face, at)))
+        .map(|[r, g, b, a]| r | g << 8 | b << 16 | a << 24)
+        .collect();
+    // The coordinate sweeps one to two across the frame: corners at (1, 1), (3, 1) and (1, 3).
+    let corners = [
+        [1.0, 1.0, 0.0, 1.0],
+        [3.0, 1.0, 0.0, 1.0],
+        [1.0, 3.0, 0.0, 1.0],
+    ];
+    let vertex = interpolated_vertex_module(corners);
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    for face in 0..6u32 {
+        #[allow(clippy::cast_precision_loss)]
+        let decoded = decode(&cube_sampling_shader(face as f32), &encodings, &operands);
+        let (module, _) = translate_for(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            Stage::Fragment,
+            Window::default(),
+        )
+        .expect("the cube sample translated");
+        let drawn = draw_with_cube_texture(
+            (&vertex, &module),
+            [1.0, 0.0, 1.0, 1.0],
+            (8, 8),
+            (&texels, 2),
+        )
+        .expect("the cube draw ran");
+        for ((x, y), at) in [((1, 1), 0), ((6, 1), 1), ((1, 6), 2), ((6, 6), 3)] {
+            let want = texel(face, at).map(|c| u8::try_from(c).expect("a byte"));
+            assert_eq!(
+                drawn.at(x, y),
+                Some(want),
+                "face {face}, pixel ({x}, {y}) should be its texel {at}"
+            );
+        }
     }
 }
 
@@ -603,6 +678,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 user_data: None,
                 sampler_user_data: None,
                 saturated: [false; 2],
+                cube: false,
             },
             TextureSource {
                 slot: 1,
@@ -612,6 +688,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 user_data: None,
                 sampler_user_data: None,
                 saturated: [false; 2],
+                cube: false,
             },
         ]
     );
@@ -874,6 +951,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             user_data: None,
             sampler_user_data: None,
             saturated: [false; 2],
+            cube: false,
         }]
     );
 }

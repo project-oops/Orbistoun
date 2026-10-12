@@ -171,6 +171,7 @@ struct BoundTexture {
     encoding: orbistoun_gpu::TextureEncoding,
     hash: u64,
     sampling: orbistoun_gpu::TextureSampling,
+    faces: u32,
 }
 
 impl BoundTexture {
@@ -181,6 +182,7 @@ impl BoundTexture {
             width: self.width,
             height: Some(self.height),
             encoding: self.encoding,
+            faces: self.faces,
         }
     }
 }
@@ -471,25 +473,33 @@ impl VulkanBackend {
             height,
             sampling,
             encoding,
+            faces,
         } = command
         else {
             return Ok(());
         };
-        // Texels one word each, or a four-word block for every four-by-four of them.
-        let words = match encoding {
+        if faces != 1 && faces != framebuffer::CUBE_FACES {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "BindTexture of a face count that is neither a flat image nor a cube",
+            });
+        }
+        // Texels one word each, or a four-word block for every four-by-four of them, each face's.
+        let face_words = match encoding {
             orbistoun_gpu::TextureEncoding::Rgba8
             | orbistoun_gpu::TextureEncoding::Float11_11_10
             | orbistoun_gpu::TextureEncoding::Rgba8Srgb => (width as usize) * (height as usize),
-            orbistoun_gpu::TextureEncoding::Bc3 => {
+            orbistoun_gpu::TextureEncoding::Bc3 | orbistoun_gpu::TextureEncoding::Bc6hUfloat => {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 4
             }
             orbistoun_gpu::TextureEncoding::Bc1Srgb => {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 2
             }
         };
+        let words = face_words * faces as usize;
         if texels.len() != words {
             return Err(BackendError::Device(format!(
-                "BindTexture carries {} texels for a {width}x{height} texture",
+                "BindTexture carries {} texels for a {width}x{height} texture of {faces} face(s)",
                 texels.len()
             )));
         }
@@ -501,6 +511,7 @@ impl VulkanBackend {
             encoding,
             hash,
             sampling,
+            faces,
         });
         let Some(texture) = usize::try_from(slot)
             .ok()

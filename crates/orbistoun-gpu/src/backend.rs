@@ -172,6 +172,9 @@ pub enum RenderCommand {
         sampling: crate::registers::TextureSampling,
         /// What the words are: texels, or blocks of compressed texels.
         encoding: TextureEncoding,
+        /// How many faces the words hold one after another: 1 for a flat image, 6 for a cube,
+        /// +x, -x, +y, -y, +z, -z, which the host samples through a cube view (D811).
+        faces: u32,
     },
     /// The buffers the draws that follow read through at one stage, in the slots its module
     /// numbered them (D733).
@@ -367,6 +370,10 @@ pub enum TextureEncoding {
     /// One word a texel, `10_11_11_FLOAT`'s packed unsigned floats as the guest holds them, which
     /// the host samples natively as `B10G11R11_UFLOAT_PACK32` (D774).
     Float11_11_10,
+    /// `BC6_UFLOAT` blocks, four words each, a block for every four-by-four texels, rows of blocks
+    /// row-major: the guest's compressed half floats as they are, which the host samples natively
+    /// as `BC6H_UFLOAT_BLOCK`.
+    Bc6hUfloat,
     /// One word a texel, `8_8_8_8_SRGB`'s bytes as the guest holds them, which the host samples as
     /// `R8G8B8A8_SRGB`: the colour channels decoded from sRGB to linear as they are read, as the
     /// guest's own sampler decodes them.

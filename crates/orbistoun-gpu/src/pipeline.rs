@@ -3599,6 +3599,17 @@ fn overlaps((a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {
 /// `gl_pack_descriptors` cites it).
 const IMAGE_TYPE_2D: u32 = 9;
 
+/// `SQ_IMG_RSRC_WORD3.TYPE` for a cube: 11 (`SQ_RSRC_IMG_CUBE`, `gfx6.json:588`).
+const IMAGE_TYPE_CUBE: u32 = 11;
+
+/// The faces of a cube, read one after another into one [`RenderCommand::BindTexture`].
+const CUBE_FACES: u32 = 6;
+
+/// `SQ_IMG_RSRC_WORD4.DEPTH` (bits 12:0) for one cube: its last layer, the sixth face. On this
+/// generation the field is "the last accessible layer" (`ac_descriptors.c:533-537`), so a value
+/// past it names an array of cubes, which is not read.
+const ONE_CUBE_LAST_LAYER: u32 = CUBE_FACES - 1;
+
 /// `GFX10_FORMAT_8_8_8_8_UNORM` (`gfx10-rsrc.json:61`).
 const FORMAT_8_8_8_8_UNORM: u32 = 56;
 /// `GFX10_FORMAT_8_UNORM` (`gfx10-rsrc.json:6`): one eight-bit normalised channel.
@@ -3608,14 +3619,32 @@ const FORMAT_BC3_UNORM: u32 = 173;
 /// `GFX10_FORMAT_BC1_SRGB` (`gfx10-rsrc.json:124`): four-by-four texels to an eight-byte block,
 /// its colours sRGB-encoded.
 const FORMAT_BC1_SRGB: u32 = 170;
+/// `GFX10_FORMAT_BC6_UFLOAT` (`gfx10-rsrc.json:133`): four-by-four unsigned half-float texels to a
+/// sixteen-byte block.
+const FORMAT_BC6_UFLOAT: u32 = 179;
 
 /// A block-compressed format read as its blocks: the bytes a block holds, the encoding the host
-/// samples it in, and a tag that keeps its cached blocks apart from another format's.
+/// samples it in, a tag that keeps its cached blocks apart from another format's, and whether it
+/// holds no alpha, which the host then samples as one.
 #[derive(Clone, Copy)]
 struct BlockFormat {
     bytes: u32,
     encoding: crate::backend::TextureEncoding,
     tag: u32,
+    opaque: bool,
+}
+
+impl BlockFormat {
+    /// Whether `selects` return what the host samples this format as: its channels as they are,
+    /// and for a format with no alpha, W as the one the host answers or the constant one, as
+    /// [`selects_exactly`] takes `10_11_11_FLOAT`'s.
+    fn read_exactly(self, selects: [u32; 4]) -> bool {
+        if self.opaque {
+            matches!(selects, [4, 5, 6, 7 | 1])
+        } else {
+            selects == IDENTITY_SELECTS
+        }
+    }
 }
 
 /// The block-compressed formats read as their blocks, by `IMG_FORMAT` code.
@@ -3625,11 +3654,19 @@ fn block_format(format: u32) -> Option<BlockFormat> {
             bytes: 16,
             encoding: crate::backend::TextureEncoding::Bc3,
             tag: 1 << 22,
+            opaque: false,
         }),
         FORMAT_BC1_SRGB => Some(BlockFormat {
             bytes: 8,
             encoding: crate::backend::TextureEncoding::Bc1Srgb,
             tag: 1 << 22 | 1 << 21,
+            opaque: false,
+        }),
+        FORMAT_BC6_UFLOAT => Some(BlockFormat {
+            bytes: 16,
+            encoding: crate::backend::TextureEncoding::Bc6hUfloat,
+            tag: 1 << 22 | 1 << 20,
+            opaque: true,
         }),
         _ => None,
     }
@@ -3694,6 +3731,7 @@ fn bind_textures(
                     sampler_offset: None,
                     user_data: None,
                     sampler_user_data: None,
+                    cube: false,
                     saturated: [false; 2],
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
@@ -3706,7 +3744,8 @@ fn bind_textures(
                     // A descriptor still in the user data the stage was seeded with is read from
                     // those words, with a sampler beside it there.
                     if let Some(first) = source.user_data {
-                        let bound = user_data_texture(source, first, user, memory, texels);
+                        let bound = user_data_texture(source, first, user, memory, texels)
+                            .filter(|bound| shaped_for(bound, source));
                         if bound.is_none() {
                             *unbound += 1;
                             first_unbound.get_or_insert_with(|| {
@@ -3729,7 +3768,7 @@ fn bind_textures(
                         .entry((at, source.slot, sampler_at, source.saturated))
                         .or_insert_with(|| {
                             if is_null_descriptor(at, memory) {
-                                return Some(null_texture(source.slot));
+                                return Some(null_texture(source.slot, source.cube));
                             }
                             let mut bound = read_texture(at, source.slot, memory, texels)?;
                             // A sampler the module named is read and honoured; one that cannot be
@@ -3749,6 +3788,7 @@ fn bind_textures(
                             Some(bound)
                         })
                         .clone();
+                    let bound = bound.filter(|bound| shaped_for(bound, source));
                     // A texture the module samples and nothing binds draws the backend's
                     // placeholder, which is not the guest's picture: counted, so the draw is
                     // refused rather than drawn wrong.
@@ -3765,6 +3805,17 @@ fn bind_textures(
         out.push(command);
     }
     *commands = out;
+}
+
+/// Whether a texture read for `source` is the shape its module samples: a cube's six faces for a
+/// module that samples a cube, one image otherwise (D811). Bound the other way, the host's view
+/// would not be the image its module declares.
+fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
+    let faces = match bound {
+        RenderCommand::BindTexture { faces, .. } => *faces,
+        _ => return false,
+    };
+    (faces == CUBE_FACES) == source.cube
 }
 
 /// An unbound slot whose descriptor is in the user data from word `first`, described.
@@ -3808,7 +3859,7 @@ fn user_data_texture(
     };
     let descriptor: [u32; 8] = words_from(first, 8)?.try_into().ok()?;
     if is_null_image(&descriptor) {
-        return Some(null_texture(source.slot));
+        return Some(null_texture(source.slot, source.cube));
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
     if let Some(sampler) = source.sampler_user_data {
@@ -3847,16 +3898,20 @@ fn is_null_image(words: &[u32; 8]) -> bool {
 
 /// What an all-zero image descriptor samples as: zero in every channel. Its `DST_SEL_X` .. `_W` are
 /// all `SQ_SEL_0` ([`destination_selects`]), so a sample returns that constant whatever the texel
-/// and whatever its sampler says; one texel of zero carries it.
-fn null_texture(slot: u32) -> RenderCommand {
+/// and whatever its sampler says; one texel of zero carries it, on each of a cube's faces where the
+/// module samples a cube.
+fn null_texture(slot: u32, cube: bool) -> RenderCommand {
+    let faces = if cube { CUBE_FACES } else { 1 };
+    let texels: std::sync::Arc<[u32]> = vec![0_u32; faces as usize].into();
     RenderCommand::BindTexture {
         slot,
-        hash: crate::content_hash(&[0]),
-        texels: std::sync::Arc::from([0_u32]),
+        hash: crate::content_hash(&texels),
+        texels,
         width: 1,
         height: 1,
         sampling: crate::registers::TextureSampling::default(),
         encoding: crate::backend::TextureEncoding::Rgba8,
+        faces,
     }
 }
 
@@ -3901,7 +3956,7 @@ fn texture_from_words(
 ) -> Option<RenderCommand> {
     let descriptor = decode_image_descriptor(words);
     if let Some(block) = block_format(descriptor.format) {
-        return read_block_texture(&descriptor, words[3], block, slot, memory, texels);
+        return read_block_texture(&descriptor, &words, block, slot, memory, texels);
     }
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     match (descriptor.tiling, format) {
@@ -3945,15 +4000,13 @@ fn texture_from_words(
         }) == Some(false)
     {
         return Some(swizzled_texture(
-            RenderCommand::BindTexture {
+            block_bind(
                 slot,
-                hash: cached.hash,
-                texels: cached.texels.clone(),
-                width: descriptor.width,
-                height: descriptor.height,
-                sampling: crate::registers::TextureSampling::default(),
-                encoding: crate::backend::TextureEncoding::Rgba8,
-            },
+                cached.hash,
+                cached.texels.clone(),
+                (descriptor.width, descriptor.height, 1),
+                crate::backend::TextureEncoding::Rgba8,
+            ),
             format,
             selects,
         ));
@@ -3992,15 +4045,13 @@ fn texture_from_words(
         },
     );
     Some(swizzled_texture(
-        RenderCommand::BindTexture {
+        block_bind(
             slot,
-            hash: hash ^ u64::from(encoding_tag(texture_encoding(format))),
-            texels: shared,
-            width: descriptor.width,
-            height: descriptor.height,
-            sampling: crate::registers::TextureSampling::default(),
-            encoding: texture_encoding(format),
-        },
+            hash ^ u64::from(encoding_tag(texture_encoding(format))),
+            shared,
+            (descriptor.width, descriptor.height, 1),
+            texture_encoding(format),
+        ),
         format,
         selects,
     ))
@@ -4015,7 +4066,8 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         // Block-compressed blocks carry their format's tag in their own cache keys.
         crate::backend::TextureEncoding::Rgba8
         | crate::backend::TextureEncoding::Bc3
-        | crate::backend::TextureEncoding::Bc1Srgb => 0,
+        | crate::backend::TextureEncoding::Bc1Srgb
+        | crate::backend::TextureEncoding::Bc6hUfloat => 0,
     }
 }
 
@@ -4097,6 +4149,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         height,
         sampling,
         encoding: crate::backend::TextureEncoding::Rgba8,
+        faces: 1,
     } = bound
     else {
         return bound;
@@ -4110,6 +4163,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             height,
             sampling,
             encoding: crate::backend::TextureEncoding::Rgba8,
+            faces: 1,
         };
     }
     let pick = |channels: [u8; 4], select: u32| match select {
@@ -4147,6 +4201,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         height,
         sampling,
         encoding: crate::backend::TextureEncoding::Rgba8,
+        faces: 1,
     }
 }
 
@@ -4234,6 +4289,7 @@ fn read_tiled_texture(
             height,
             sampling: crate::registers::TextureSampling::default(),
             encoding,
+            faces: 1,
         });
     }
     let since = orbistoun_mem::watch::mark(surface.base, span as u64);
@@ -4276,6 +4332,7 @@ fn read_tiled_texture(
         height,
         sampling: crate::registers::TextureSampling::default(),
         encoding,
+        faces: 1,
     })
 }
 
@@ -4285,16 +4342,25 @@ fn read_tiled_texture(
 /// the host to sample natively - the one level every texture is bound with. Only a 2D, uncompressed image returning its channels as they are is
 /// read, at a level whose blocks the chain's element extent gives; any other is `None`, and the draw
 /// is refused rather than sampled some other way.
+///
+/// A single cube is read as its six faces, one after another: each is a slice of the surface, and
+/// addrlib places a slice's whole mip chain before the next (`gfx10addrlib.cpp`,
+/// `ComputeSurfaceInfoMacroTiled`: `sliceSize` is the chain's, `surfSize` that times the slices), so
+/// face `f`'s chain starts `f` chains in (D811).
 fn read_block_texture(
     descriptor: &ImageDescriptor,
-    word3: u32,
+    &[_, _, _, word3, word4, ..]: &[u32; 8],
     block: BlockFormat,
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    if word3 >> 28 != IMAGE_TYPE_2D
-        || destination_selects(word3) != IDENTITY_SELECTS
+    let faces = match word3 >> 28 {
+        IMAGE_TYPE_2D => 1,
+        IMAGE_TYPE_CUBE if word4 & DEPTH_FIELD == ONE_CUBE_LAST_LAYER => CUBE_FACES,
+        _ => return None,
+    };
+    if !block.read_exactly(destination_selects(word3))
         || !matches!(
             descriptor.tiling,
             SwizzleMode::Tiled64KbS | SwizzleMode::Tiled4KbS
@@ -4328,34 +4394,45 @@ fn read_block_texture(
         return None;
     }
     let span = surface.words() * 4;
+    // Each face's chain, one after another; the last face ends its level's span past its start.
+    let stride = layout.chain_bytes(
+        descriptor.width.div_ceil(4),
+        descriptor.height.div_ceil(4),
+        descriptor.levels.max(1),
+    );
+    let watched = stride * u64::from(faces - 1) + span as u64;
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
         crate::registers::Place::Within { origin: (x, y), .. } => {
             1 << 30 | (x & 0x3FF) << 10 | (y & 0x3FF)
         }
     };
-    let key = (surface.base, width, height, block.tag | tail_tag);
+    let cube_tag = if faces > 1 { 1 << 24 } else { 0 };
+    let key = (surface.base, width, height, block.tag | tail_tag | cube_tag);
     if let Some(cached) = texels.get(&key)
         && cached
             .since
-            .and_then(|since| orbistoun_mem::watch::written_since(surface.base, span as u64, since))
+            .and_then(|since| orbistoun_mem::watch::written_since(surface.base, watched, since))
             == Some(false)
     {
         return Some(block_bind(
             slot,
             cached.hash,
             cached.texels.clone(),
-            (width, height),
+            (width, height, faces),
             block.encoding,
         ));
     }
-    let since = orbistoun_mem::watch::mark(surface.base, span as u64);
-    let tiled: Vec<u32> = memory
-        .read(surface.base, span)?
-        .chunks_exact(4)
-        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-        .collect();
-    let blocks = surface.detile_mapped(&tiled, |w| w);
+    let since = orbistoun_mem::watch::mark(surface.base, watched);
+    let mut blocks = Vec::new();
+    for face in 0..u64::from(faces) {
+        let tiled: Vec<u32> = memory
+            .read(surface.base + face * stride, span)?
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect();
+        blocks.extend(surface.detile_mapped(&tiled, |w| w));
+    }
     let hash = crate::content_hash(&blocks);
     let shared: std::sync::Arc<[u32]> = blocks.into();
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
@@ -4373,17 +4450,21 @@ fn read_block_texture(
         slot,
         hash,
         shared,
-        (width, height),
+        (width, height, faces),
         block.encoding,
     ))
 }
 
-/// A [`RenderCommand::BindTexture`] of block-compressed blocks in `encoding`.
+/// `SQ_IMG_RSRC_WORD4.DEPTH`, bits 12:0 (`gfx10-rsrc.json`, `S_00A010_DEPTH_GFX10`).
+const DEPTH_FIELD: u32 = 0x1FFF;
+
+/// A [`RenderCommand::BindTexture`] of words in `encoding` - texels, or block-compressed blocks -
+/// for `faces` images one after another, sampled as no sampler has said yet.
 fn block_bind(
     slot: u32,
     hash: u64,
     texels: std::sync::Arc<[u32]>,
-    (width, height): (u32, u32),
+    (width, height, faces): (u32, u32, u32),
     encoding: crate::backend::TextureEncoding,
 ) -> RenderCommand {
     RenderCommand::BindTexture {
@@ -4394,6 +4475,7 @@ fn block_bind(
         height,
         sampling: crate::registers::TextureSampling::default(),
         encoding,
+        faces,
     }
 }
 
@@ -5163,6 +5245,7 @@ mod tests {
                 sampler_offset: Some(0x60),
                 user_data: None,
                 sampler_user_data: None,
+                cube: false,
                 saturated: [false; 2],
             }],
         )]);
@@ -5233,6 +5316,7 @@ mod tests {
                     sampler_offset: None,
                     user_data: Some(9),
                     sampler_user_data: Some(17),
+                    cube: false,
                     saturated: [false; 2],
                 }],
             )]);
@@ -5292,6 +5376,7 @@ mod tests {
                 sampler_offset: None,
                 user_data: Some(0),
                 sampler_user_data: Some(8),
+                cube: false,
                 saturated: [false; 2],
             }],
         )]);
@@ -5371,6 +5456,7 @@ mod tests {
                     sampler_offset: Some(0x20),
                     user_data: None,
                     sampler_user_data: None,
+                    cube: false,
                     saturated,
                 }],
             )]);
@@ -5449,6 +5535,7 @@ mod tests {
             width: 8,
             height: 8,
             encoding: crate::backend::TextureEncoding::Bc3,
+            faces: 1,
             ..
         }) = bound
         else {
@@ -5499,6 +5586,7 @@ mod tests {
             width: 8,
             height: 8,
             encoding: crate::backend::TextureEncoding::Bc1Srgb,
+            faces: 1,
             ..
         }) = bound
         else {
@@ -5612,6 +5700,7 @@ mod tests {
                 width: bound_width,
                 height: bound_height,
                 encoding: crate::backend::TextureEncoding::Bc3,
+                faces: 1,
                 ..
             }) = bound
             else {
@@ -5629,6 +5718,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A `BC6_UFLOAT` cube binds its six faces one after another, each read a whole chain past the
+    /// last: 64 x 64 texels in `4KB_S` is sixteen blocks a side, one 4 KiB swizzle block a face, so
+    /// face `f` starts `4096 * f` bytes in (D811). A cube whose last layer is past the sixth face is
+    /// an array of cubes and is not read, and a module sampling flat is not handed the cube.
+    #[test]
+    fn a_bc6_cube_binds_its_six_faces_a_chain_apart() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let tag = |face: u32, x: u32, y: u32, word: u32| face << 16 | y << 12 | x << 8 | word;
+        let mut bytes = vec![0u8; 6 * 4096];
+        for face in 0..6 {
+            for y in 0..16 {
+                for x in 0..16 {
+                    let at = face as usize * 4096
+                        + crate::tiling::tiled_byte_offset_4kb_s_bpp16(x, y, 16);
+                    for word in 0..4 {
+                        bytes[at + 4 * word as usize..][..4]
+                            .copy_from_slice(&tag(face, x, y, word).to_le_bytes());
+                    }
+                }
+            }
+        }
+        let memory = Memory(bytes);
+        let (width, height) = (64u32, 64u32);
+        let words = |last_layer: u32| {
+            [
+                0x100,
+                (179 << 20) | (((width - 1) & 3) << 30),
+                ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+                // A cube, ADDR_SW_4KB_S, one level, X, Y and Z as they are and W one: PPSA03416's
+                // selects for its cube, which has no alpha.
+                0xb050_03ac,
+                last_layer,
+                0,
+                0,
+                0,
+            ]
+        };
+        let bound = texture_from_words(words(5), 0, &memory, &mut super::TexelCache::new());
+        let Some(
+            ref command @ RenderCommand::BindTexture {
+                ref texels,
+                width: 64,
+                height: 64,
+                encoding: crate::backend::TextureEncoding::Bc6hUfloat,
+                faces: 6,
+                ..
+            },
+        ) = bound
+        else {
+            panic!("bound as six faces of BC6 blocks: {bound:?}");
+        };
+        assert_eq!(texels.len(), 6 * 16 * 16 * 4);
+        for face in 0..6 {
+            for (x, y) in [(0, 0), (1, 0), (0, 1), (15, 15)] {
+                let at = (face * 16 * 16 * 4 + (y * 16 + x) * 4) as usize;
+                assert_eq!(
+                    texels[at..at + 4],
+                    [0, 1, 2, 3].map(|word| tag(face, x, y, word)),
+                    "face {face} block ({x}, {y})"
+                );
+            }
+        }
+        let source = |cube: bool| super::TextureSource {
+            slot: 0,
+            table_offset: None,
+            table: super::TableBase::default(),
+            sampler_offset: None,
+            user_data: None,
+            sampler_user_data: None,
+            saturated: [false; 2],
+            cube,
+        };
+        assert!(super::shaped_for(command, &source(true)));
+        assert!(
+            !super::shaped_for(command, &source(false)),
+            "not handed to a flat sample"
+        );
+        assert!(
+            texture_from_words(words(11), 0, &memory, &mut super::TexelCache::new()).is_none(),
+            "two cubes are an array, not read"
+        );
     }
 
     /// A pixel shader that samples through a descriptor and sampler still in its user data binds the
@@ -5669,6 +5848,7 @@ mod tests {
                     sampler_offset: None,
                     user_data,
                     sampler_user_data: user_data.map(|_| 8),
+                    cube: false,
                     saturated: [true; 2],
                 }],
             )]);
@@ -6112,6 +6292,7 @@ mod tests {
             width: w,
             height: h,
             encoding,
+            faces: 1,
             ..
         }) = read_texture(table, 0, &Memory(bytes), &mut cache)
         else {
@@ -6180,6 +6361,7 @@ mod tests {
         let Some(RenderCommand::BindTexture {
             texels: words,
             encoding,
+            faces: 1,
             hash,
             ..
         }) = bind(130, identity)

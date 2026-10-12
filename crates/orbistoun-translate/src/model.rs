@@ -333,6 +333,9 @@ const IMAGE_DIMENSION: (u32, u32) = (3, 0b111);
 /// 2D multi-sampled, 2D multi-sampled array. Measured from the same eight encodings.
 const IMAGE_DIMENSION_2D: u32 = 1;
 
+/// The dimensionality code for a cube, fourth in the same order (`dim:SQ_RSRC_IMG_CUBE`).
+const IMAGE_DIMENSION_CUBE: u32 = 3;
+
 /// What a translated texture sample needs from the model.
 ///
 /// Four identifiers declared together on first use: the variable, what loading it produces, the
@@ -364,6 +367,9 @@ pub struct Texture {
     /// Which coordinates, across then down, a sample saturates first: those its sampler clamps to
     /// half a border (D743).
     pub saturate: [bool; 2],
+    /// Whether the binding is a cube: sampled with a three-component direction, and
+    /// [`coordinate`](Self::coordinate) is that direction's type (D811).
+    pub cube: bool,
 }
 
 /// What a translated texture store needs from the model.
@@ -759,11 +765,13 @@ pub trait Model {
     ///
     /// `at` is the sampling instruction's offset, which says which load reached its descriptor
     /// registers where the shader reuses them for another texture.
+    ///
+    /// `cube` is whether the instruction samples a cube, which the binding is then declared as.
     fn sampled_image(
         &mut self,
         _descriptor: u32,
         _sampler: Option<u32>,
-        _at: u32,
+        (_at, _cube): (u32, bool),
     ) -> Result<Texture, &'static str> {
         Err(concat!(
             "this model has no texture to sample - a sampled image is bound by a graphics ",
@@ -8383,6 +8391,8 @@ struct ImageAccess {
     levelled: bool,
     /// Which of the address and the components are sixteen bits wide.
     halves: Halves,
+    /// Whether the image is a cube, its address a face's two coordinates and the face (D811).
+    cube: bool,
 }
 
 /// `A16` and `D16`: whether an image access's address elements, and its components, are sixteen
@@ -8407,16 +8417,17 @@ const IMAGE_LAYOUT_FIELDS: u32 = 1 << 15 | 1 << 16 | 1 << 17;
 /// and so on (`aco_assembler.cpp:744-777`, `:813-821`). The first is the second word's `VADDR`.
 const IMAGE_NSA: (u32, u32) = (1, 0x3);
 
-/// The most address registers a translated access reads: two coordinates and a level.
-const MAX_ADDRESS_REGISTERS: usize = 3;
+/// The most address registers a translated access reads: two coordinates, a cube's face and a
+/// level.
+const MAX_ADDRESS_REGISTERS: usize = 4;
 
 /// Address registers a two-dimensional access uses, by instruction.
 ///
 /// Two elements for a coordinate and three where the level is one of them: the assembler refuses
 /// an address operand whose register count does not match the instruction's dimensionality field.
 /// Sixteen-bit elements pack two to a register.
-const fn address_registers(levelled: bool, a16: bool) -> u32 {
-    let elements: u32 = if levelled { 3 } else { 2 };
+const fn address_registers(levelled: bool, a16: bool, cube: bool) -> u32 {
+    let elements: u32 = 2 + cube as u32 + levelled as u32;
     if a16 { elements.div_ceil(2) } else { elements }
 }
 
@@ -8502,7 +8513,8 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // image of another dimensionality would sample somewhere else.
     let (shift, mask) = IMAGE_DIMENSION;
     let dimension = (instruction.word >> shift) & mask;
-    if dimension != IMAGE_DIMENSION_2D {
+    let cube = dimension == IMAGE_DIMENSION_CUBE && name.starts_with("image_sample");
+    if dimension != IMAGE_DIMENSION_2D && !cube {
         return Err(refuse(concat!(
             "only a two-dimensional image is translated - this instruction's coordinate has a ",
             "different number of components, and reading two of them would sample a place the ",
@@ -8565,7 +8577,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     }
 
     // The address registers and the components coming back both have to fit.
-    let used = address_registers(levelled, a16);
+    let used = address_registers(levelled, a16, cube);
     let addresses = address_list(instruction, u32::from(*address), used).ok_or_else(|| {
         refuse(concat!(
             "an image access whose address registers run past the register file, or whose ",
@@ -8591,6 +8603,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             address: a16,
             data: d16,
         },
+        cube,
     })
 }
 
@@ -8680,12 +8693,18 @@ fn image_sample<M: Model + ?Sized>(
         fetches,
         levelled,
         halves,
+        cube,
     } = image_access(instruction, name)?;
     let a16 = halves.address;
 
     let texture = model
-        .sampled_image(descriptor, sampler, instruction.offset)
+        .sampled_image(descriptor, sampler, (instruction.offset, cube))
         .map_err(refuse)?;
+    if cube && texture.saturate != [false; 2] {
+        return Err(refuse(
+            "a cube sampled through a half-border clamp, which is not translated",
+        ));
+    }
 
     // Which sampling instruction this is: `lz` is level zero named, `_l` takes the level from a
     // register, and the plain form lets the implementation choose from derivatives, a different
@@ -8696,40 +8715,26 @@ fn image_sample<M: Model + ?Sized>(
     let constant_level = model.as_float(zero);
 
     for lane in running_lanes(model) {
-        // Two dimensions from consecutive elements; the dimensionality field was checked above.
-        let u = address_element(model, instruction, (&addresses, a16), 0, lane)?;
-        let v = address_element(model, instruction, (&addresses, a16), 1, lane)?;
         // The level, where the instruction takes one from a register: the last address element. A
         // fetch's level is an integer, a sample's a float.
         let level = if levelled {
-            let bits = address_element(model, instruction, (&addresses, a16), 2, lane)?;
+            let at = 2 + u32::from(cube);
+            let bits = address_element(model, instruction, (&addresses, a16), at, lane)?;
             if fetches { bits } else { model.as_float(bits) }
         } else if fetches {
             zero
         } else {
             constant_level
         };
-        // A fetch's coordinate is a texel index, an integer, so the words go straight in; a
-        // sample's is a position, so the words are reinterpreted as float bits.
-        let (u, v, kind) = if fetches {
-            (u, v, texture.texel)
-        } else {
-            // A half-border clamp samples the coordinate saturated, a NaN to zero as Mesa's
-            // `fsat` (D743).
-            let [u, v] =
-                [(u, texture.saturate[0]), (v, texture.saturate[1])].map(|(at, saturated)| {
-                    if saturated {
-                        clamp_unit(model, at, true)
-                    } else {
-                        at
-                    }
-                });
-            (model.as_float(u), model.as_float(v), texture.coordinate)
-        };
+        let coordinate = sample_coordinate(
+            model,
+            instruction,
+            (&addresses, a16),
+            (&texture, fetches, cube),
+            lane,
+        )?;
 
         let builder = model.builder();
-        let coordinate = builder.id();
-        builder.function(op::COMPOSITE_CONSTRUCT, &[kind.0, coordinate.0, u.0, v.0]);
         // Loaded per lane rather than hoisted, so the translation does not reorder the guest's
         // program on an unchecked aliasing assumption.
         let bound = builder.id();
@@ -8783,6 +8788,93 @@ fn image_sample<M: Model + ?Sized>(
 
     model.count();
     Ok(())
+}
+
+/// The coordinate a texture access reads at, built for one lane from its address registers. A
+/// fetch's is a texel index, an integer, so the words go straight in; a sample's is a position, so
+/// the words are reinterpreted as float bits; a cube's is the direction its face's coordinates and
+/// the face name (D811).
+fn sample_coordinate<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
+    (texture, fetches, cube): (&Texture, bool, bool),
+    lane: u32,
+) -> Result<Id, TranslateError> {
+    // Two dimensions from consecutive elements; the dimensionality field was checked.
+    let across = address_element(model, instruction, (addresses, a16), 0, lane)?;
+    let down = address_element(model, instruction, (addresses, a16), 1, lane)?;
+    let components = if cube {
+        let face = address_element(model, instruction, (addresses, a16), 2, lane)?;
+        cube_direction(model, across, down, face)
+            .map(|bits| model.as_float(bits))
+            .to_vec()
+    } else if fetches {
+        vec![across, down]
+    } else {
+        // A half-border clamp samples the coordinate saturated, a NaN to zero as Mesa's `fsat`
+        // (D743).
+        [(across, texture.saturate[0]), (down, texture.saturate[1])]
+            .map(|(at, saturated)| {
+                let at = if saturated {
+                    clamp_unit(model, at, true)
+                } else {
+                    at
+                };
+                model.as_float(at)
+            })
+            .to_vec()
+    };
+    let kind = if fetches {
+        texture.texel
+    } else {
+        texture.coordinate
+    };
+    let builder = model.builder();
+    let coordinate = builder.id();
+    let mut operands = vec![kind.0, coordinate.0];
+    operands.extend(components.iter().map(|component| component.0));
+    builder.function(op::COMPOSITE_CONSTRUCT, &operands);
+    Ok(coordinate)
+}
+
+/// The direction a cube sample's address names (D811). The hardware takes a face's two coordinates,
+/// each `sc / |ma| + 1.5` as ACO forms them (`ac_nir_lower_tex_coords.c`, `prepare_cube_coords`),
+/// and the face, `cube_amd`'s id. Inverting `cube_amd` with the major component one half gives the
+/// direction a host cube samples at the same place: each coordinate less 1.5 is then that face's
+/// `sc` or `tc` itself.
+fn cube_direction<M: Model + ?Sized>(model: &mut M, across: Id, down: Id, face: Id) -> [Id; 3] {
+    let middle = model.constant(1.5f32.to_bits());
+    let along = model.f32_binary(op::FSUB, across, middle);
+    let upward = model.f32_binary(op::FSUB, down, middle);
+    let sign = model.constant(0x8000_0000);
+    let [against, downward] =
+        [along, upward].map(|value| model.binary(op::BITWISE_XOR, value, sign));
+    let half = model.constant(0.5f32.to_bits());
+    let minus_half = model.constant((-0.5f32).to_bits());
+    let face = model.as_float(face);
+    // Below each boundary between faces: the id is a whole number, so the half-way points split the
+    // faces whatever rounding produced it.
+    let below = [0.5f32, 1.5, 2.5, 3.5, 4.5].map(|boundary| {
+        let boundary = model.constant(boundary.to_bits());
+        let boundary = model.as_float(boundary);
+        model.compare(op::FORD_LESS_THAN, face, boundary)
+    });
+    // Per face: +x, -x, +y, -y, +z, -z.
+    let choose = |model: &mut M, per_face: [Id; 6]| {
+        let mut value = per_face[5];
+        for (at, &under) in below.iter().enumerate().rev() {
+            value = pick(model, under, per_face[at], value);
+        }
+        value
+    };
+    let x = choose(model, [half, minus_half, along, along, along, against]);
+    let y = choose(
+        model,
+        [downward, downward, half, minus_half, downward, downward],
+    );
+    let z = choose(model, [against, along, upward, downward, half, minus_half]);
+    [x, y, z]
 }
 
 /// Translates a texel store.
@@ -9318,10 +9410,13 @@ mod tests {
         ];
         let consecutive = [0x08, 0x01, 0x90, 0xf0, 0x00, 0x00, 0x61, 0x00];
         let first = |bytes: &[u8]| decode(bytes, &encodings, &operands).instructions[0].clone();
-        assert_eq!(super::address_list(&first(&listed), 2, 3), Some([2, 1, 0]));
+        assert_eq!(
+            super::address_list(&first(&listed), 2, 3),
+            Some([2, 1, 0, 2])
+        );
         assert_eq!(
             super::address_list(&first(&consecutive), 0, 3),
-            Some([0, 1, 2])
+            Some([0, 1, 2, 0])
         );
         assert_eq!(
             super::address_list(&first(&listed[..8]), 2, 3),
