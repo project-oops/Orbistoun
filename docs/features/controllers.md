@@ -2,6 +2,7 @@
 
 `orbistoun-input` implements the guest's pad library itself; it wraps no host gamepad
 library. It models up to four ports, opening and closing a pad, and the state a title reads.
+The window reads the host's keyboard and, on Windows, its gamepads, and hands the result in.
 Buttons are named by position, never by glyph: `south`, `east`, `west`, `north`, `l1`, `r1`,
 `l2`, `r2`, `l3`, `r3`, `up`, `down`, `left`, `right`, `select`, `start`, and `shell`.
 
@@ -21,7 +22,12 @@ title reads a pad nobody is holding.
 preferences - controllers sets the ports:
 
 - controllers - how many ports, one to four.
-- port N - what drives it: empty or keyboard.
+- port N - what drives it: empty, keyboard or gamepad. A gamepad port names which of the
+  host's connected gamepads it reads, counting from 0; buttons map by position (south is the
+  bottom face button), the sticks and triggers are analogue, and the gamepad's home button is
+  `shell`. One not connected reports a pad nobody is holding. Gamepads are read on Windows
+  only; elsewhere a gamepad port reports a pad nobody is holding, and a run says so under "on
+  the host".
 - a key for each button and each stick direction. Each row lights, and says "down" or
   "pushed", while its key is held, so a mapping is checked where it is edited.
 

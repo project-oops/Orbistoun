@@ -157,6 +157,10 @@ eframe = { version = "0.29", default-features = false, features = [
 ] }
 egui = "0.29"
 
+# Reading a host gamepad for a pad port set to one. Windows only for now: on Linux it links
+# the system's libudev, a build dependency every Unix image would have to carry.
+gilrs = "0.11"
+
 # Decoding title icons. PNG only and no default features: the one job is turning
 # `sce_sys/icon0.png` into pixels, and the rest of the format zoo is weight for
 # nothing.

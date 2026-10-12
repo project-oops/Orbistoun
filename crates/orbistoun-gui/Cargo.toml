@@ -30,6 +30,11 @@ eframe = { workspace = true }
 egui = { workspace = true }
 image = { workspace = true }
 
+# A pad port set to a host gamepad reads one through this. Windows only: on Linux it links the
+# system's libudev, so there a gamepad port answers a neutral pad and the run says so.
+[target.'cfg(windows)'.dependencies]
+gilrs = { workspace = true }
+
 [dev-dependencies]
 # Temp directories for the capture tests, which write a real PNG and read it back.
 tempfile = { workspace = true }

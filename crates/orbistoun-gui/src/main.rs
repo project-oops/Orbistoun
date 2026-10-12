@@ -9,6 +9,7 @@ mod app;
 mod capture;
 mod controls;
 mod frame;
+mod gamepad;
 mod icons;
 mod input;
 mod payloads;

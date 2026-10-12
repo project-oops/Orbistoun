@@ -2,8 +2,9 @@
 //!
 //! The window owns host input (D326): the guest runs in a child process and the keyboard
 //! belongs to the focused window. The shell takes its own button here, and what is left is
-//! what a title may see. A port set to [`orbistoun_input::Source::Gamepad`] is not read by
-//! this window and reports a neutral pad; the settings pane says so beside the control.
+//! what a title may see. A port set to [`orbistoun_input::Source::Gamepad`] reads the host
+//! gamepad of that index (see [`crate::gamepad`]); one that is not connected, or a host that
+//! reads no gamepad, reports a neutral pad.
 
 use orbistoun_input::{Button, PadState, Pads, ShellButton, ShellPress, Source};
 
@@ -18,6 +19,8 @@ pub(crate) struct Reader {
     ///
     /// Navigation needs edges, not levels: a held direction moves the highlight once.
     previous: Vec<u32>,
+    /// The host's gamepads, opened the first time a port asks for one.
+    gamepads: crate::gamepad::Gamepads,
 }
 
 /// What one frame of input amounted to.
@@ -48,11 +51,16 @@ impl Reader {
             .iter()
             .map(|port| match port.source {
                 Source::Keyboard => ctx.input(|input| keyboard(input, port)),
-                // None of these is fed by this live reader. A script is sampled in the worker
-                // as a pure function of run time (`orbistoun_input::script`, D707).
-                Source::Empty | Source::Gamepad { .. } | Source::Script { .. } => {
-                    PadState::neutral()
-                }
+                // A pad that is not connected is a pad nobody is holding.
+                Source::Gamepad { index } => self
+                    .gamepads
+                    .reading(index)
+                    .map_or_else(PadState::neutral, |reading| {
+                        crate::gamepad::state_from(&reading)
+                    }),
+                // Not fed by this live reader. A script is sampled in the worker as a pure
+                // function of run time (`orbistoun_input::script`, D707).
+                Source::Empty | Source::Script { .. } => PadState::neutral(),
             })
             .collect();
 

@@ -263,13 +263,23 @@ fn pads(ui: &mut egui::Ui, pads: &mut orbistoun_input::Pads, live: &[orbistoun_i
             ui.selectable_value(&mut port.source, Source::Keyboard, "keyboard");
             ui.selectable_value(&mut port.source, Source::Gamepad { index: 0 }, "gamepad");
         });
-        if matches!(port.source, Source::Gamepad { .. }) {
-            // Stated beside the control: a port set to a source this build cannot read
-            // never moves.
-            ui.colored_label(
-                egui::Color32::LIGHT_YELLOW,
-                "no gamepad is read yet - this port reports a pad nobody is holding",
-            );
+        if let Source::Gamepad { index: pad } = &mut port.source {
+            if cfg!(windows) {
+                // Which of the host's connected pads, counting from the first, so two ports can
+                // read two pads.
+                ui.horizontal(|ui| {
+                    ui.label("host gamepad");
+                    ui.add(egui::DragValue::new(pad).range(0..=3));
+                    ui.label("- one not connected reports a pad nobody is holding");
+                });
+            } else {
+                // Stated beside the control: a port set to a source this build cannot read
+                // never moves.
+                ui.colored_label(
+                    egui::Color32::LIGHT_YELLOW,
+                    "this host reads no gamepad - this port reports a pad nobody is holding",
+                );
+            }
         }
 
         let state = live.get(index).copied().unwrap_or_default();

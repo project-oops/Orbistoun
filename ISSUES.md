@@ -57,7 +57,9 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 ## Input and interface
 
 - Live input is not mapped onto pad bytes; the at-rest image is written on every read.
-- `Source::Gamepad` is never read; every pad handle reads port 0.
+- A host gamepad is read on Windows only; on Linux and macOS a gamepad port reports a neutral
+  pad, since the gamepad library links the system's libudev there. Every pad handle reads
+  port 0.
 - Vibration and light bar output are discarded.
 - No layout ships for a second keyboard player.
 - Replay determinism holds only to within one input change when a guest polls the pad several times per flip.
