@@ -740,6 +740,13 @@ enum CompatAction {
         /// Every title whose record says how, one after another.
         #[arg(long)]
         all: bool,
+        /// A permissive preview: every unimplemented import answers 0 (`ORBISTOUN_DEFAULT_RETURN`).
+        ///
+        /// The run is filed in the record's `[experiment]` slot, never `[status]` (D312), and the
+        /// two are printed side by side: the distance between them is what the refusals stand in.
+        /// No sheet is made, since the sheet is the honest run's.
+        #[arg(long)]
+        preview: bool,
         /// Where the records live.
         #[arg(long, default_value = "compat")]
         dir: std::path::PathBuf,
@@ -1071,8 +1078,13 @@ fn dispatch_records(
         Command::Compat { ref action } => match action {
             CompatAction::List { dir } => cmd_compat_list(dir)?,
             CompatAction::Markdown { dir, out, check } => cmd_compat_markdown(dir, out, *check)?,
-            CompatAction::Reproduce { title, all, dir } => {
-                cmd_compat_reproduce(service, (title.as_deref(), *all), dir, symbols_db)?;
+            CompatAction::Reproduce {
+                title,
+                all,
+                preview,
+                dir,
+            } => {
+                cmd_compat_reproduce(service, (title.as_deref(), *all, *preview), dir, symbols_db)?;
             }
             CompatAction::Compare {
                 title,

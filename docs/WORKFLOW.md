@@ -155,6 +155,17 @@ comparison replaces the last whatever it found. The table and the title's page t
 flips match the console beside the rung. Without `--record` nothing is written, so a comparison
 against anything but the console's frames leaves the record alone.
 
+```bash
+orbistoun-cli compat reproduce <title> --preview
+```
+
+`--preview` is a permissive preview: the title runs as its record says, with every unimplemented
+function answering 0 (`ORBISTOUN_DEFAULT_RETURN=ok`). The result goes to the record's `[preview]`
+slot, never `[status]` or `[experiment]` - runs under different policies never compare (D312) -
+and is printed beside `[status]`. The distance between the two is what the refusals stand in, and
+`unanswered` in the preview counts the functions it answered 0. No sheet is made, since the sheet
+is the honest run's.
+
 `submit export` collects the `learned.toml` measurements and both compat slots into one
 directory with a manifest naming the build. It refuses to write an empty bundle.
 `submit check` re-derives what a bundle claims rather than trusting it: agreement is silent, a

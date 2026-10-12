@@ -1264,6 +1264,15 @@ fn standing_service() -> Result<Service, Error> {
     let learned =
         orbistoun_hle::learned::Learned::load(&paths.learned_file()).map_err(Error::Learned)?;
     let mut policy = file.policy;
+    // A permissive preview: every unimplemented import answers 0 for this run. The answer is in the
+    // trace's conditions, so the run is filed as an experiment and never as the title's status
+    // (D312).
+    if orbistoun_env::DEFAULT_RETURN
+        .get()
+        .is_some_and(|value| value.trim() == orbistoun_overrides::DEFAULT_RETURN_OK)
+    {
+        policy.default_return = orbistoun_hle::StubReturn::Ok;
+    }
     policy.absorb(learned.policy());
     // The regions the shipped knowledge base declares, under both of the above. A region cannot be
     // applied at the call like a `returns` kind, because the service reserves the memory before the

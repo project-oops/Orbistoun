@@ -209,13 +209,17 @@ pub(crate) struct RunTaken<'a> {
 /// and into the local title library otherwise.
 pub(crate) fn cmd_compat_reproduce(
     service: &orbistoun_service::Service,
-    (title, all): (Option<&str>, bool),
+    (title, all, preview): (Option<&str>, bool, bool),
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
 ) -> Result<()> {
+    if preview {
+        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+        unsafe { std::env::set_var(orbistoun_env::DEFAULT_RETURN.name, "ok") };
+    }
     match (title, all) {
-        (Some(title), false) => reproduce_one(service, title, dir, symbols_db),
-        (None, true) => reproduce_all(service, dir, symbols_db),
+        (Some(title), false) => reproduce_one(service, title, dir, symbols_db, preview),
+        (None, true) => reproduce_all(service, dir, symbols_db, preview),
         _ => anyhow::bail!("name one title, or pass --all"),
     }
 }
@@ -226,6 +230,7 @@ fn reproduce_all(
     service: &orbistoun_service::Service,
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
+    preview: bool,
 ) -> Result<()> {
     let mut done = 0usize;
     let mut passed_over: Vec<(String, String)> = Vec::new();
@@ -235,7 +240,7 @@ fn reproduce_all(
             continue;
         }
         println!("== {title}");
-        match reproduce_one(service, &title, dir, symbols_db) {
+        match reproduce_one(service, &title, dir, symbols_db, preview) {
             Ok(()) => done += 1,
             Err(e) => passed_over.push((title, format!("{e:#}"))),
         }
@@ -248,14 +253,43 @@ fn reproduce_all(
     Ok(())
 }
 
-/// One title's recorded run, repeated, and its sheet remade.
+/// One title's recorded run, repeated, and its sheet remade - or, as a `preview`, run with every
+/// unimplemented import answering 0 and set beside the honest run instead.
 fn reproduce_one(
     service: &orbistoun_service::Service,
     title: &str,
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
+    preview: bool,
 ) -> Result<()> {
     let reproduce = run_as_recorded(service, title, dir, symbols_db)?;
+    if preview {
+        let file = load_compat(dir, title)?;
+        println!();
+        for (slot, entry) in [("status", &file.status), ("preview", &file.preview)] {
+            match entry {
+                Some(s) => println!(
+                    "  {slot:<10}  {:<9}  {:>4} imports  {:>11} calls  default {}  {}",
+                    s.reach.label(),
+                    s.imports,
+                    s.calls,
+                    if s.default_return.is_empty() {
+                        "-"
+                    } else {
+                        &s.default_return
+                    },
+                    s.outcome
+                ),
+                None => println!("  {slot:<10}  none recorded"),
+            }
+        }
+        println!(concat!(
+            "  the preview answered 0 for everything unimplemented: the distance between the ",
+            "rows is what those refusals stand in. The [preview] row is this run only if it ",
+            "beat the last preview."
+        ));
+        return Ok(());
+    }
     // Written whether or not the run was kept as the record's best: a reproduction's sheet is the
     // point of asking for one.
     match write_title_sheet(dir, title, &reproduce, &orbistoun_paths::Paths::resolve())? {
@@ -695,8 +729,15 @@ fn keep_status(
     meta: &orbistoun_overrides::Title,
     force: bool,
 ) -> Result<Kept> {
-    let propped = status.propped_up();
-    let slot = if propped { "experiment" } else { "status" };
+    // A permissive preview has a slot of its own: runs under different policies never compare, so
+    // sharing the experiment slot would leave whichever came first standing.
+    let slot = if status.is_preview() {
+        "preview"
+    } else if status.propped_up() {
+        "experiment"
+    } else {
+        "status"
+    };
 
     let mut file = load_compat(dir, title)?;
     // Refreshed whether or not the run is kept: the metadata describes the title, not the run, and
@@ -704,10 +745,10 @@ fn keep_status(
     if !meta.is_empty() {
         file.title = meta.clone();
     }
-    let previous = if propped {
-        file.experiment.as_ref()
-    } else {
-        file.status.as_ref()
+    let previous = match slot {
+        "preview" => file.preview.as_ref(),
+        "experiment" => file.experiment.as_ref(),
+        _ => file.status.as_ref(),
     };
     if let Some(previous) = previous {
         if !force && !status.worth_recording(previous) {
@@ -719,10 +760,10 @@ fn keep_status(
             return Ok(Kept::NotBetter { slot, previous });
         }
     }
-    if propped {
-        file.experiment = Some(status.clone());
-    } else {
-        file.status = Some(status.clone());
+    match slot {
+        "preview" => file.preview = Some(status.clone()),
+        "experiment" => file.experiment = Some(status.clone()),
+        _ => file.status = Some(status.clone()),
     }
 
     let path = write_compat(dir, title, &file)?;
@@ -834,6 +875,16 @@ pub(crate) fn record_compat(
         // A record as good as this run is the ordinary outcome; one holding something better means
         // a regression, which is reported.
         Ok(Kept::NotBetter { slot, previous }) => {
+            // Said, not left silent: a slot holding a run under another policy never takes this
+            // one, however far it got.
+            if !status.comparable_with(&previous) {
+                println!();
+                println!(
+                    "  not recorded: [{slot}] holds a run under another policy ({}), which this one ({}) does not compare with",
+                    previous.describe_policy(),
+                    status.describe_policy()
+                );
+            }
             note_if_below_best(&status, &previous);
             // A run as good as the record repeats what it records, so its reproduction and sheet
             // stand for the record too: a record gets its first `[reproduce]` this way, and a
@@ -977,6 +1028,46 @@ mod tests {
             shown: None,
             notes: String::new(),
         }
+    }
+
+    /// A permissive preview goes to its own slot, whatever the experiment slot holds, and never
+    /// touches the honest status; an honest run still goes to the status slot.
+    #[test]
+    fn a_preview_is_kept_apart_from_status_and_experiment() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let honest = reach(103, 505_299);
+        let mut named = reach(57, 500_260);
+        named.overrides = 2;
+        named.propping = 2;
+        let mut preview = reach(261, 1_136_568);
+        preview.default_return = orbistoun_overrides::DEFAULT_RETURN_OK.to_owned();
+        let none = orbistoun_overrides::Title::default();
+
+        for (status, slot) in [
+            (&honest, "status"),
+            (&named, "experiment"),
+            (&preview, "preview"),
+        ] {
+            match super::keep_status(dir.path(), "T", status, &none, false).expect("keeps") {
+                super::Kept::Written { slot: kept, .. } => assert_eq!(kept, slot),
+                super::Kept::NotBetter { .. } => panic!("{slot} was not written"),
+            }
+        }
+        let file = super::load_compat(dir.path(), "T").expect("reads");
+        assert_eq!(file.status.map(|s| s.imports), Some(103));
+        assert_eq!(file.experiment.map(|s| s.imports), Some(57));
+        assert_eq!(file.preview.map(|s| s.imports), Some(261));
+
+        // A smaller preview does not replace a bigger one.
+        let mut smaller = preview.clone();
+        smaller.imports = 200;
+        assert!(matches!(
+            super::keep_status(dir.path(), "T", &smaller, &none, false).expect("keeps"),
+            super::Kept::NotBetter {
+                slot: "preview",
+                ..
+            }
+        ));
     }
 
     /// A regression is fewer imports, or the same imports and fewer calls.

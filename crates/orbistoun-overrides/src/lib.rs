@@ -236,6 +236,13 @@ impl Status {
             || self.propping > 0
     }
 
+    /// Whether this is a permissive preview: every unimplemented function answered 0, which the
+    /// record keeps in [`OverrideFile::preview`].
+    #[must_use]
+    pub fn is_preview(&self) -> bool {
+        self.default_return == DEFAULT_RETURN_OK
+    }
+
     /// The policy in a phrase, for the line that says why an entry is set apart; names both halves,
     /// since either can be doing the propping.
     #[must_use]
@@ -879,6 +886,9 @@ pub const FRAMES_FILE: &str = "frames.png";
 /// The file a title's replayed input is kept in, beside its record.
 pub const INPUTS_FILE: &str = "inputs.toml";
 
+/// [`Status::default_return`] for a run in which every unimplemented function answered 0.
+pub const DEFAULT_RETURN_OK: &str = "ok";
+
 /// [`Status::presented_by`] when orbistoun drew the frame and wrote it back into the flipped buffer.
 pub const PRESENTED_BY_DRAWN: &str = "drawn";
 
@@ -969,6 +979,14 @@ pub struct OverrideFile {
     /// measured thing were implemented (D312).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment: Option<Status>,
+    /// The furthest a permissive preview got: every unimplemented function answering 0.
+    ///
+    /// A slot of its own because it answers a third question - how far the title gets with every
+    /// refusal answered - and runs under different policies never compare, so sharing
+    /// [`Self::experiment`] would leave whichever came first standing for good. The distance from
+    /// [`Self::status`] is what the refusals stand in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<Status>,
     /// How the title's frames compared with the console's, where somebody compared them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_match: Option<FrameMatch>,
@@ -1487,6 +1505,7 @@ reason = "..."
             settings,
             status: None,
             experiment: None,
+            preview: None,
             frame_match: None,
         };
         let r = Resolved::merge(&[(Layer::Repo, f)]);

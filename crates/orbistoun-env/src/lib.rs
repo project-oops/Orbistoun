@@ -45,6 +45,11 @@ pub enum Effect {
     /// diagnosis on its own: it needs a second observation of what the guest did with the
     /// intervention.
     Intervenes,
+    /// Changes what unimplemented functions answer, as the stub policy file can. The run records
+    /// the policy it ran under, so its result is filed in the record's `[experiment]` slot and a
+    /// comparison names the changed policy (D312, D181), rather than being refused like an
+    /// intervention.
+    SetsPolicy,
 }
 
 impl Effect {
@@ -53,6 +58,7 @@ impl Effect {
         match self {
             Self::Observes => "observes",
             Self::Intervenes => "intervenes",
+            Self::SetsPolicy => "sets the stub policy",
         }
     }
 
@@ -551,6 +557,21 @@ pub const RETURN: Var = Var {
     effect: Effect::Intervenes,
 };
 
+/// Answer every unimplemented import with 0 for this run: a permissive preview.
+///
+/// Refusing what is not implemented is the default (D008), and it also hides how far a title could
+/// get. A run under this records its default answer in its conditions, so it is filed in the
+/// record's `[preview]` slot and never in `[status]` (D312), and what it reached is the distance
+/// the refusals stand in.
+pub const DEFAULT_RETURN: Var = Var {
+    name: "ORBISTOUN_DEFAULT_RETURN",
+    kind: Kind::Diagnostic,
+    summary: "ok answers every unimplemented import 0 for this run; the result is recorded in the record's [preview] slot, never as the title's status",
+    example: "ok",
+    read_by: "orbistoun-worker",
+    effect: Effect::SetsPolicy,
+};
+
 /// Reserve a region of guest address space before the guest runs.
 pub const MAP: Var = Var {
     name: "ORBISTOUN_MAP",
@@ -697,6 +718,7 @@ pub const REGISTRY: &[Var] = &[
     MAP_SHAPE,
     WRITE,
     RETURN,
+    DEFAULT_RETURN,
     PEEK,
     MARK_QUERY,
 ];
@@ -780,6 +802,7 @@ mod tests {
         super::MAP_SHAPE,
         super::WRITE,
         super::RETURN,
+        super::DEFAULT_RETURN,
         super::PEEK,
         super::MARK_QUERY,
         super::WATCHPOINT,
@@ -866,6 +889,9 @@ mod tests {
         );
         assert!(Effect::Intervenes.needs_caveat());
         assert!(!Effect::Observes.needs_caveat());
+        // A policy change is recorded as the run's policy and named in a comparison, so it is not
+        // also an intervention that refuses the record.
+        assert!(!Effect::SetsPolicy.needs_caveat());
     }
 
     /// A build always identifies itself.
