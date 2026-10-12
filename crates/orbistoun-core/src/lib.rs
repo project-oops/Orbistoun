@@ -18,9 +18,7 @@ pub mod route;
 pub mod said;
 pub mod stop;
 
-pub use error::{
-    GuestError, GuestResult, PLACEHOLDER_BASE, VENDOR_ERROR_BASE, errno, placeholder_named,
-};
+pub use error::{GuestError, PLACEHOLDER_BASE, VENDOR_ERROR_BASE, errno, placeholder_named};
 pub use handle::{Handle, HandleAllocator};
 pub use stop::{StopReason, stop};
 

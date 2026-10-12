@@ -222,9 +222,6 @@ impl fmt::Display for GuestError {
 
 impl std::error::Error for GuestError {}
 
-/// The result of an HLE call, before it is flattened to a guest return value.
-pub type GuestResult<T> = Result<T, GuestError>;
-
 #[cfg(test)]
 mod tests {
     use super::GuestError;
