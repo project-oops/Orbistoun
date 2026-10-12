@@ -891,6 +891,70 @@ fn a_fifth_texture_from_the_descriptor_table_translates_at_binding_nine() {
     assert!(orbistoun_spirv::declares_binding(&translated.module, 9));
 }
 
+/// One image read through two samplers is two textures, each slot the same image with its own
+/// sampler: PPSA03416's pixel shaders sample one image so (D690). Both slots name the image's
+/// table offset, and each the offset its sampler was loaded from.
+#[test]
+fn one_image_through_two_samplers_takes_two_slots() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load = |name: &str, dst: u32, offset: u32| {
+        let (family, opcode) = encodings.find_by_name(name).expect("the target has it");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    let loads = [
+        s_load("s_load_dwordx8", IMAGE_DESCRIPTOR, 0x00),
+        s_load("s_load_dwordx4", SAMPLER_DESCRIPTOR, 0x20),
+        s_load("s_load_dwordx4", 16, 0x30),
+    ];
+    for word in loads.into_iter().flatten() {
+        bytes.extend(word.to_le_bytes());
+    }
+    let words = image_sample_words(39);
+    let second = (words[1] & !(0x1F << 21) & !(0xFF << 8)) | ((16 / 4) << 21) | (8 << 8);
+    for word in [words[0], words[1], words[0], second] {
+        bytes.extend(word.to_le_bytes());
+    }
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("one image through two samplers translates");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| (source.slot, source.table_offset, source.sampler_offset))
+            .collect::<Vec<_>>(),
+        [(0, Some(0x00), Some(0x20)), (1, Some(0x00), Some(0x30))]
+    );
+}
+
 /// One register group loaded with two descriptors in turn, each sampled after its load, is two
 /// textures, each at the offset of the load that reached its sample: ACO reuses the registers for a
 /// pixel shader's second texture (CRFT00001's `sampler` and `sky_sampler`).

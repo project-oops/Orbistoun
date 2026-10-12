@@ -4018,9 +4018,15 @@ impl Model for Wavefront<'_> {
                 .textures
                 .iter()
                 .any(|b| b.descriptor == descriptor && b.disturbed && !loaded_by(b));
+        // One image read through another sampler is another texture, its own slot (D690): a
+        // sampler only conflicts with a sampler, and a fetch names none.
+        let other_sampler =
+            |b: &BoundTexture| matches!((b.sampler, sampler), (Some(was), Some(now)) if was != now);
         if !rebound
             && let Some(bound) = self.textures.iter_mut().find(|b| {
-                b.descriptor == descriptor && (reaching.is_none() || !b.disturbed || loaded_by(b))
+                b.descriptor == descriptor
+                    && (reaching.is_none() || !b.disturbed || loaded_by(b))
+                    && !other_sampler(b)
             })
         {
             // The same load reached it again: the same texture.
@@ -4036,13 +4042,6 @@ impl Model for Wavefront<'_> {
             }
             if (bound.texture.cube, bound.texture.compare) != (cube, compare) {
                 return Err(CUBE_AND_FLAT);
-            }
-            // A sampler only conflicts with a sampler; a fetch names none.
-            if matches!((bound.sampler, sampler), (Some(was), Some(now)) if was != now) {
-                return Err(concat!(
-                    "this shader reads one image through two samplers, and a binding carries ",
-                    "one (D690)"
-                ));
             }
             // The first instruction to name a sampler records it, which may come after the first to
             // name the image.

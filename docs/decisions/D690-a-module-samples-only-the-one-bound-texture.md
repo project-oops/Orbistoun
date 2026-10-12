@@ -21,5 +21,6 @@ on the safe side.
 A pixel shader may sample sixteen textures, at bindings 2, 4, then 7 to 20, each slot found where
 its descriptor came from: PPSA02664's pixel shader samples three, PPSA03416's more than four.
 Sixteen is what one stage may reach on every Vulkan device (the required minimum of
-`maxPerStageDescriptorSampledImages` and `maxPerStageDescriptorSamplers`). A seventeenth is refused, as is a
+`maxPerStageDescriptorSampledImages` and `maxPerStageDescriptorSamplers`). One image read through
+two samplers takes two slots, each with its own sampler. A seventeenth is refused, as is a
 second or later texture when any descriptor came from neither the table nor the user data.
