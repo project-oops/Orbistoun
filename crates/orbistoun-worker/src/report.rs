@@ -2366,7 +2366,9 @@ fn tail_of_recorded() -> Vec<TracedCall> {
 
 /// The named object a waiting call's first argument is, where it is one the kernel issued: a
 /// semaphore or event flag handle, or - for a lock call - a mapped guest lock word holding a lock's
-/// handle (D806). Nothing is read for any other call, whose first argument may be no address.
+/// handle (D806). For an address wait, the address and the word it holds now, which tells a wake
+/// that never came from one that came for another value. Nothing is read for any other call, whose
+/// first argument may be no address.
 fn waited_on(call: &str, first: u64) -> Option<String> {
     use orbistoun_kernel::sync;
     if let Ok(handle) = i32::try_from(first)
@@ -2376,6 +2378,12 @@ fn waited_on(call: &str, first: u64) -> Option<String> {
     }
     if let Some(name) = sync::event_flag_name_of(first) {
         return Some(format!("event flag {name:?} {first:#x}"));
+    }
+    if call.contains("OnAddressWait") && orbistoun_thunk::is_mapped(first) {
+        // SAFETY: an address wait's first argument, inside a span the run published as readable
+        // guest memory.
+        let word = unsafe { orbistoun_mem::guest::read_u64(first) }?;
+        return Some(format!("address {first:#x} holding {word:#x}"));
     }
     if !call.contains("utex_lock") || !orbistoun_thunk::is_mapped(first) {
         return None;
