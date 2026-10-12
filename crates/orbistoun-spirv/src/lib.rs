@@ -1563,6 +1563,11 @@ pub const PIXEL_BUFFERS_BINDING: u32 = 1;
 /// draw stages', and writable, since a dispatch's stores through them are written back (D746).
 pub const COMPUTE_BUFFERS_BINDING: u32 = 2;
 
+/// Where a compute dispatch's write masks are bound in the draw-buffer set (D809): a word for each
+/// word of a buffer at [`COMPUTE_BUFFERS_BINDING`] the program only stores to, set where the
+/// dispatch stored, slot for slot.
+pub const COMPUTE_WRITTEN_BINDING: u32 = 3;
+
 /// How many buffers one stage of a draw binds: the length of each binding's array. Sixteen: a
 /// retail vertex shader traces eleven, its descriptors, a table and the streams its fetch forms.
 pub const DRAW_BUFFERS_PER_STAGE: u32 = 16;

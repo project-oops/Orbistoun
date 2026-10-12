@@ -800,12 +800,20 @@ pub type DispatchExecutor = fn(
     &[u32],
     &[u32],
     (&[u32], [u32; 3]),
-    (&crate::pipeline::DispatchImages, &[Vec<u32>]),
+    (
+        &crate::pipeline::DispatchImages,
+        &[crate::dispatch::BufferBefore],
+    ),
 ) -> Result<DispatchDone, String>;
 
 /// What a dispatch left: the window's words, whether an access escaped it, the stored image's
-/// texels when it bound one, and its own buffers' words (D746).
-pub type DispatchDone = (Vec<u32>, bool, Option<Vec<u32>>, Vec<Vec<u32>>);
+/// texels when it bound one, and its own buffers' words with their write masks (D746, D809).
+pub type DispatchDone = (
+    Vec<u32>,
+    bool,
+    Option<Vec<u32>>,
+    Vec<crate::dispatch::BufferAfter>,
+);
 
 fn dispatch_executor() -> &'static OnceLock<DispatchExecutor> {
     static EXECUTOR: OnceLock<DispatchExecutor> = OnceLock::new();
@@ -909,20 +917,36 @@ type GuestWrite = (u64, Vec<u8>);
 /// When the device answered another number of buffers, or one of another size.
 fn buffer_writes(
     ranges: &[(u64, u64)],
-    before: &[Vec<u32>],
-    after: &[Vec<u32>],
+    before: &[crate::dispatch::BufferBefore],
+    after: &[crate::dispatch::BufferAfter],
 ) -> Result<(Vec<GuestWrite>, Vec<cp::Fill>), String> {
+    use crate::dispatch::BufferBefore;
     if after.len() != before.len() {
         return Err("the device answered another number of buffers".to_owned());
     }
     let mut writes = Vec::new();
     let mut fills = Vec::new();
     for ((&(address, bytes), before), after) in ranges.iter().zip(before).zip(after) {
-        if after.len() != before.len() {
+        let size = match before {
+            BufferBefore::Words(words) => words.len(),
+            BufferBefore::Unread(words) => (*words).max(1),
+        };
+        if after.words.len() != size {
             return Err("the device answered a buffer of another size".to_owned());
         }
-        let runs = changed_runs(before, after);
+        // A buffer read before the run writes the words it changed; one not read, the words its
+        // write mask says were stored (D809).
+        let runs = match before {
+            BufferBefore::Words(words) => changed_runs(words, &after.words),
+            BufferBefore::Unread(_) => after.stored_runs(),
+        };
+        let whole = match before {
+            BufferBefore::Words(_) => true,
+            BufferBefore::Unread(_) => runs == [(0, after.words.len())],
+        };
+        let after = &after.words;
         if let Some((&pattern, rest)) = after.split_first()
+            && whole
             && !runs.is_empty()
             && rest.iter().all(|&word| word == pattern)
         {
@@ -951,12 +975,24 @@ fn buffer_writes(
 /// amounts to (D750): what a buffer clear leaves, whether or not memory held it already. radeonsi
 /// clears a depth surface's HTILE this way, and the clear is a clear even where the words were
 /// the same before.
-fn uniform_buffers(ranges: &[(u64, u64)], after: &[Vec<u32>]) -> Vec<cp::Fill> {
+/// A buffer the run did not read counts only where it stored every word (D809).
+fn uniform_buffers(
+    ranges: &[(u64, u64)],
+    (before, after): (
+        &[crate::dispatch::BufferBefore],
+        &[crate::dispatch::BufferAfter],
+    ),
+) -> Vec<cp::Fill> {
     ranges
         .iter()
-        .zip(after)
-        .filter_map(|(&(destination, count), words)| {
-            let (&first, rest) = words.split_first()?;
+        .zip(before.iter().zip(after))
+        .filter_map(|(&(destination, count), (before, after))| {
+            if matches!(before, crate::dispatch::BufferBefore::Unread(_))
+                && after.stored_runs() != [(0, after.words.len())]
+            {
+                return None;
+            }
+            let (&first, rest) = after.words.split_first()?;
             rest.iter().all(|&word| word == first).then_some(cp::Fill {
                 destination,
                 pattern: first,
@@ -967,19 +1003,29 @@ fn uniform_buffers(ranges: &[(u64, u64)], after: &[Vec<u32>]) -> Vec<cp::Fill> {
 }
 
 impl GuestCp<'_> {
-    /// Each of a dispatch's own buffers as guest memory holds it now, in whole words (D746).
-    fn read_buffers(&self, ranges: &[(u64, u64)]) -> Result<Vec<Vec<u32>>, String> {
+    /// Each of a dispatch's own buffers as guest memory holds it now, in whole words (D746) -
+    /// except one the program only stores to, which is not read (D809).
+    fn read_buffers(
+        &self,
+        ranges: &[(u64, u64)],
+        unread: &[bool],
+    ) -> Result<Vec<crate::dispatch::BufferBefore>, String> {
         ranges
             .iter()
-            .map(|&(address, bytes)| {
+            .enumerate()
+            .map(|(slot, &(address, bytes))| {
                 let span = usize::try_from(bytes.next_multiple_of(4))
                     .map_err(|_| "a buffer larger than this host addresses")?;
+                if unread.get(slot).copied().unwrap_or(false) {
+                    return Ok(crate::dispatch::BufferBefore::Unread(span / 4));
+                }
                 let read = cp::CpMemory::read(self, address, span)
                     .ok_or("a buffer it binds is not readable guest memory")?;
-                Ok(read
-                    .chunks_exact(4)
-                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                    .collect())
+                Ok(crate::dispatch::BufferBefore::Words(
+                    read.chunks_exact(4)
+                        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                        .collect(),
+                ))
             })
             .collect()
     }
@@ -1022,7 +1068,7 @@ impl GuestCp<'_> {
             }
             None => (None, vec![0]),
         };
-        let buffers_before = self.read_buffers(&prepared.buffers)?;
+        let buffers_before = self.read_buffers(&prepared.buffers, &prepared.unread)?;
         let (after, escaped, stored, buffers_after) = execute(
             &prepared.module,
             &before,
@@ -1076,7 +1122,7 @@ impl GuestCp<'_> {
             }
         }
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
-        let fills = uniform_buffers(&prepared.buffers, &buffers_after);
+        let fills = uniform_buffers(&prepared.buffers, (&buffers_before, &buffers_after));
         if !fills.is_empty()
             && let Some(pipeline) = live_pipeline()
                 .lock()
@@ -2967,6 +3013,7 @@ mod tests {
         GUEST_ARG_REGISTERS, SUBMIT_OK, create_queue, last_submission_report, set_guest_regions,
         submit_command_buffer, submit_dcb,
     };
+    use crate::dispatch::{BufferAfter, BufferBefore};
     use std::sync::{Mutex, PoisonError};
 
     /// A submission whose colour target zero is `COLOR_INVALID` draws depth alone and is not a
@@ -2992,8 +3039,11 @@ mod tests {
     #[test]
     fn a_buffer_cleared_by_a_dispatch_is_written_back_as_a_fill() {
         let ranges = [(0x1000, 10), (0x2000, 8), (0x3000, 8)];
-        let before = [vec![7, 0, 7], vec![1, 1], vec![5, 5]];
-        let after = [vec![0, 0, 0], vec![1, 2], vec![5, 5]];
+        let before = [vec![7, 0, 7], vec![1, 1], vec![5, 5]].map(BufferBefore::Words);
+        let after = [vec![0, 0, 0], vec![1, 2], vec![5, 5]].map(|words| BufferAfter {
+            words,
+            written: Vec::new(),
+        });
         let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
         assert_eq!(
             fills,
@@ -3006,14 +3056,58 @@ mod tests {
         assert_eq!(writes, [(0x2004, 2u32.to_le_bytes().to_vec())]);
     }
 
+    /// A buffer the program only stores to was not read (D809): the words its write mask marks are
+    /// written back, and nothing else - the device's zeros in the words it did not store stay off
+    /// guest memory. Stored whole with one word, it is a fill.
+    #[test]
+    fn an_unread_buffer_writes_back_the_words_it_stored() {
+        let ranges = [(0x1000, 16), (0x2000, 8)];
+        let before = [BufferBefore::Unread(4), BufferBefore::Unread(2)];
+        let after = [
+            BufferAfter {
+                words: vec![9, 0, 8, 7],
+                written: vec![1, 0, 1, 1],
+            },
+            BufferAfter {
+                words: vec![0, 0],
+                written: vec![1, 1],
+            },
+        ];
+        let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
+        assert_eq!(
+            writes,
+            [
+                (0x1000, 9u32.to_le_bytes().to_vec()),
+                (0x1008, [8u32.to_le_bytes(), 7u32.to_le_bytes()].concat()),
+            ]
+        );
+        assert_eq!(
+            fills,
+            [crate::cp::Fill {
+                destination: 0x2000,
+                pattern: 0,
+                count: 8,
+            }]
+        );
+        assert_eq!(
+            super::uniform_buffers(&ranges, (&before, &after)),
+            fills,
+            "only the buffer stored whole is a fill"
+        );
+    }
+
     /// A dispatch's buffer left holding one word throughout is a fill of it, whatever it held
     /// before; one with two words in it is not (D750).
     #[test]
     fn a_buffer_left_uniform_is_a_fill() {
         let ranges = [(0x1000, 8), (0x2000, 8), (0x3000, 0)];
-        let after = [vec![0xFFFC_00F0, 0xFFFC_00F0], vec![1, 2], vec![]];
+        let before = [vec![0, 0], vec![0, 0], vec![]].map(BufferBefore::Words);
+        let after = [vec![0xFFFC_00F0, 0xFFFC_00F0], vec![1, 2], vec![]].map(|words| BufferAfter {
+            words,
+            written: Vec::new(),
+        });
         assert_eq!(
-            super::uniform_buffers(&ranges, &after),
+            super::uniform_buffers(&ranges, (&before, &after)),
             [crate::cp::Fill {
                 destination: 0x1000,
                 pattern: 0xFFFC_00F0,

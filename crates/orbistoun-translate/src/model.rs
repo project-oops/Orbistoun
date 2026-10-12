@@ -894,6 +894,8 @@ pub trait Model {
     /// # Errors
     ///
     /// Stores `value` at word `word_index` of the draw buffer at `slot`, in `lane` (D746).
+    /// `outside` says where the store fell outside the buffer and `value` is the word kept, which
+    /// a dispatch's write mask must not mark (D809).
     ///
     /// # Errors
     ///
@@ -901,11 +903,11 @@ pub trait Model {
     fn write_draw_buffer(
         &mut self,
         slot: u32,
-        word_index: Id,
-        value: Id,
+        (word_index, value): (Id, Id),
+        outside: Id,
         lane: u32,
     ) -> Result<(), TranslateError> {
-        let _ = (slot, word_index, value, lane);
+        let _ = (slot, word_index, value, outside, lane);
         Err(TranslateError::Unsupported {
             offset: 0,
             detail: "a store through a bound buffer in a model that binds none (D746)",
@@ -5253,7 +5255,7 @@ fn store_reached<M: Model + ?Sized>(
             let word = model.binary(op::SHIFT_RIGHT_LOGICAL, address, two);
             let previous = model.read_draw_buffer(slot, word)?;
             let kept = pick(model, outside, previous, value);
-            model.write_draw_buffer(slot, word, kept, lane)?;
+            model.write_draw_buffer(slot, (word, kept), outside, lane)?;
         }
     }
     Ok(())

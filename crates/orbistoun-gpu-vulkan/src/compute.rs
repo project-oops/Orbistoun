@@ -1068,8 +1068,9 @@ pub struct GuestDispatch {
     pub escaped: bool,
     /// The stored image's texels after the dispatch, when it bound one.
     pub stored: Option<Vec<u32>>,
-    /// Each traced buffer's words after the dispatch, by slot (D746); empty when it bound none.
-    pub buffers: Vec<Vec<u32>>,
+    /// Each traced buffer's words after the dispatch and its write mask, by slot (D746, D809);
+    /// empty when it bound none.
+    pub buffers: Vec<crate::compute_buffers::BufferOut>,
 }
 
 /// Words of the observation a guest dispatch module declares: the register-observation layout,
@@ -1103,7 +1104,7 @@ pub fn dispatch_guest_with_buffers(
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
     images: &crate::compute_images::DispatchImages<'_>,
-    buffers: &[Vec<u32>],
+    buffers: &[crate::compute_buffers::BufferIn<'_>],
 ) -> Result<GuestDispatch, DispatchError> {
     // Draws already queued finish first: the window was read from guest memory they write.
     crate::framebuffer::settle_session()?;

@@ -13,7 +13,7 @@
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::compute_images::DispatchImages;
-use orbistoun_gpu_vulkan::dispatch_guest_with_buffers;
+use orbistoun_gpu_vulkan::{BufferIn, dispatch_guest_with_buffers};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::Width;
 use orbistoun_translate::wavefront::{
@@ -48,17 +48,8 @@ fn user_data() -> Vec<u32> {
     block
 }
 
-/// Each of 64 threads copies its word from one bound buffer to the other, and the module needs no
-/// window: both accesses are traced to a slot, the store included.
-#[test]
-fn a_dispatch_copies_between_its_own_buffers() {
-    match probe() {
-        Availability::Available { properties } => println!("device: {}", properties.device),
-        Availability::Unavailable { reason } => {
-            println!("SKIPPED - no device: {reason}");
-            return;
-        }
-    }
+/// The copy, translated to read and write its two buffers through their slots.
+fn copy_module() -> Vec<u32> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let bytes: Vec<u8> = COPY.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -84,18 +75,69 @@ fn a_dispatch_copies_between_its_own_buffers() {
         },
     )
     .expect("the copy translates through its buffers");
+    module
+}
+
+/// Whether a device is here to run on, saying so either way.
+fn device_present() -> bool {
+    match probe() {
+        Availability::Available { properties } => {
+            println!("device: {}", properties.device);
+            true
+        }
+        Availability::Unavailable { reason } => {
+            println!("SKIPPED - no device: {reason}");
+            false
+        }
+    }
+}
+
+/// Each of 64 threads copies its word from one bound buffer to the other, and the module needs no
+/// window: both accesses are traced to a slot, the store included.
+#[test]
+fn a_dispatch_copies_between_its_own_buffers() {
+    if !device_present() {
+        return;
+    }
     let source: Vec<u32> = (0..64).map(|i| 0x5000_0000 | i).collect();
     let destination = vec![0xdead_beef_u32; 64];
     let done = dispatch_guest_with_buffers(
-        &module,
+        &copy_module(),
         &[0],
         (&user_data(), [1, 1, 1]),
         &DispatchImages::default(),
-        &[source.clone(), destination],
+        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
     )
     .expect("dispatched");
     assert!(!done.escaped, "nothing left the bound buffers");
     assert_eq!(done.buffers.len(), 2);
-    assert_eq!(done.buffers[0], source, "the source is unchanged");
-    assert_eq!(done.buffers[1], source, "the destination holds the copy");
+    assert_eq!(done.buffers[0].words, source, "the source is unchanged");
+    assert_eq!(
+        done.buffers[1].words, source,
+        "the destination holds the copy"
+    );
+}
+
+/// A buffer the program only stores to is handed over unread (D809): the device starts it at zero,
+/// and its write mask says which words the dispatch stored - the 64 copied, not the 32 past them.
+#[test]
+fn an_unread_buffer_comes_back_with_the_words_stored_marked() {
+    if !device_present() {
+        return;
+    }
+    let source: Vec<u32> = (0..64).map(|i| 0x5000_0000 | i).collect();
+    let done = dispatch_guest_with_buffers(
+        &copy_module(),
+        &[0],
+        (&user_data(), [1, 1, 1]),
+        &DispatchImages::default(),
+        &[BufferIn::Words(&source), BufferIn::Unread(96)],
+    )
+    .expect("dispatched");
+    let destination = &done.buffers[1];
+    assert_eq!(destination.words[..64], source[..], "the copy");
+    assert_eq!(destination.words[64..], [0; 32], "started at zero");
+    let stored: Vec<bool> = destination.written.iter().map(|&mark| mark != 0).collect();
+    assert_eq!(stored[..64], [true; 64], "the words stored");
+    assert_eq!(stored[64..], [false; 32], "and none past them");
 }

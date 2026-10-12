@@ -489,21 +489,46 @@ pub fn execute_dispatch(
     module: &[u32],
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
-    (images, buffers): (&orbistoun_gpu::pipeline::DispatchImages, &[Vec<u32>]),
+    (images, buffers): (
+        &orbistoun_gpu::pipeline::DispatchImages,
+        &[orbistoun_gpu::dispatch::BufferBefore],
+    ),
 ) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
     let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
         fetched: images.fetched.as_ref().map(dispatch_image),
         stored: images.stored.as_ref().map(dispatch_image),
     };
+    // A buffer the program only stores to goes over unread, as its length alone (D809).
+    let buffers: Vec<orbistoun_gpu_vulkan::BufferIn<'_>> = buffers
+        .iter()
+        .map(|buffer| match buffer {
+            orbistoun_gpu::dispatch::BufferBefore::Words(words) => {
+                orbistoun_gpu_vulkan::BufferIn::Words(words)
+            }
+            orbistoun_gpu::dispatch::BufferBefore::Unread(words) => {
+                orbistoun_gpu_vulkan::BufferIn::Unread(*words)
+            }
+        })
+        .collect();
     on_device(|| {
         orbistoun_gpu_vulkan::dispatch_guest_with_buffers(
             module,
             memory,
             (push, groups),
             &bound,
-            buffers,
+            &buffers,
         )
-        .map(|done| (done.memory, done.escaped, done.stored, done.buffers))
+        .map(|done| {
+            let buffers = done
+                .buffers
+                .into_iter()
+                .map(|out| orbistoun_gpu::dispatch::BufferAfter {
+                    words: out.words,
+                    written: out.written,
+                })
+                .collect();
+            (done.memory, done.escaped, done.stored, buffers)
+        })
         .map_err(|e| format!("the device refused it: {e:?}"))
     })
     .unwrap_or_else(|| Err("the device thread did not answer".to_owned()))

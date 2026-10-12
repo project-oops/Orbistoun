@@ -924,6 +924,9 @@ pub struct PreparedDispatch {
     pub groups: [u32; 3],
     /// The guest range each of its own buffers binds, by slot, as `(address, bytes)` (D746).
     pub buffers: Vec<(u64, u64)>,
+    /// Whether each of them, by slot, is one the program only stores to (D809): its words before
+    /// the run are not read, and what the run stored is found from its write mask.
+    pub unread: Vec<bool>,
 }
 
 impl Pipeline {
@@ -996,7 +999,7 @@ impl Pipeline {
         let program = &window[..decoded.consumed];
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
-        let (served, buffers, formats) = self.dispatch_buffers(state, &decoded, memory)?;
+        let (served, buffers, formats, unread) = self.dispatch_buffers(state, &decoded, memory)?;
         let placed = crate::dispatch::place_window_except(
             state,
             (&decoded, &self.encodings),
@@ -1058,6 +1061,7 @@ impl Pipeline {
             },
             groups: state.groups,
             buffers,
+            unread,
         })
     }
 
@@ -1114,7 +1118,11 @@ impl Pipeline {
                     formats
                 },
             );
-        Ok((traced.served, ranges, formats))
+        // A buffer the program only stores to is not read before it runs (D809).
+        let unread = (0..ranges.len())
+            .map(|slot| u32::try_from(slot).is_ok_and(|slot| traced.stored_only.contains(&slot)))
+            .collect();
+        Ok((traced.served, ranges, formats, unread))
     }
 
     /// A dispatch's program translated for its entry state, its window, its buffers' formats and its
@@ -3579,6 +3587,7 @@ type DispatchBuffers = (
     BTreeMap<u32, u32>,
     Vec<(u64, u64)>,
     Option<orbistoun_translate::wavefront::BufferFormats>,
+    Vec<bool>,
 );
 
 /// Whether two `(address, bytes)` ranges share a byte.

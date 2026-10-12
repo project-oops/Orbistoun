@@ -15,7 +15,7 @@
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::compute_images::DispatchImages;
-use orbistoun_gpu_vulkan::dispatch_guest_with_buffers;
+use orbistoun_gpu_vulkan::{BufferIn, dispatch_guest_with_buffers};
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::Width;
 use orbistoun_translate::wavefront::{
@@ -114,11 +114,14 @@ fn a_formatted_copy_moves_whole_word_elements() {
         &[0],
         (&user_data(word3(FLOAT_32X4), word3(UINT_32X4)), [1, 1, 1]),
         &DispatchImages::default(),
-        &[source.clone(), destination],
+        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
     )
     .expect("dispatched");
     assert!(!done.escaped, "nothing left the bound buffers");
-    assert_eq!(done.buffers[1], source, "the destination holds the copy");
+    assert_eq!(
+        done.buffers[1].words, source,
+        "the destination holds the copy"
+    );
 }
 
 /// A four-channel store through a one-component whole-word format writes the format's one component
@@ -143,10 +146,10 @@ fn a_store_writes_only_its_formats_components() {
         &[0],
         (&user_data(word3(UINT_32X4), ONE_UINT), [1, 1, 1]),
         &DispatchImages::default(),
-        &[source, destination],
+        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
     )
     .expect("dispatched");
-    for (element, words) in done.buffers[1].chunks(4).enumerate() {
+    for (element, words) in done.buffers[1].words.chunks(4).enumerate() {
         let first = u32::try_from(element * 4).expect("small");
         assert_eq!(
             words,
@@ -176,11 +179,11 @@ fn a_load_through_a_null_descriptor_reads_zero() {
         &[0],
         (&user_data(0, word3(UINT_32X4)), [1, 1, 1]),
         &DispatchImages::default(),
-        &[source, destination],
+        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
     )
     .expect("dispatched");
     assert_eq!(
-        done.buffers[1],
+        done.buffers[1].words,
         vec![0; (ELEMENTS * 4) as usize],
         "zeros stored"
     );
@@ -278,11 +281,15 @@ fn the_titles_formatted_fill_runs_as_its_program_says() {
         &[0],
         (&block, [2, 1, 1]),
         &DispatchImages::default(),
-        &[vec![100, 3, 0, 0], source.clone(), vec![0xdead_beef; 128]],
+        &[
+            BufferIn::Words(&[100, 3, 0, 0]),
+            BufferIn::Words(&source),
+            BufferIn::Words(&[0xdead_beef; 128]),
+        ],
     )
     .expect("dispatched");
     assert!(!done.escaped, "nothing left the bound buffers");
-    for (index, &stored) in done.buffers[2].iter().enumerate() {
+    for (index, &stored) in done.buffers[2].words.iter().enumerate() {
         let expected = if index < 100 {
             source[index & 3]
         } else {

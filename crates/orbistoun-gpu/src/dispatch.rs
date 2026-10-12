@@ -520,3 +520,52 @@ mod tests {
         assert!(place_window(&unknown, &decode, &encodings, |_, _| true).is_err());
     }
 }
+
+/// One of a dispatch's own buffers as the host hands it to the device (D746, D809).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BufferBefore {
+    /// Its words as guest memory holds them, which the program may read.
+    Words(Vec<u32>),
+    /// A buffer of this many words the program only stores to: guest memory is not read, and
+    /// what the run stored is found from its write mask.
+    Unread(usize),
+}
+
+/// One of a dispatch's own buffers after the run: its words, and - for one handed over unread - its
+/// write mask, word `i` non-zero where word `i` was stored to (D809).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BufferAfter {
+    /// The words after.
+    pub words: Vec<u32>,
+    /// The write mask.
+    pub written: Vec<u32>,
+}
+
+impl BufferAfter {
+    /// Whether word `index` was stored to.
+    #[must_use]
+    pub fn stored(&self, index: usize) -> bool {
+        self.written.get(index).is_some_and(|&mask| mask != 0)
+    }
+
+    /// The runs of consecutive words stored to, as `(first, count)`.
+    #[must_use]
+    pub fn stored_runs(&self) -> Vec<(usize, usize)> {
+        let mut runs = Vec::new();
+        let mut start = None;
+        for index in 0..self.words.len() {
+            match (self.stored(index), start) {
+                (true, None) => start = Some(index),
+                (false, Some(first)) => {
+                    runs.push((first, index - first));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(first) = start {
+            runs.push((first, self.words.len() - first));
+        }
+        runs
+    }
+}

@@ -3,7 +3,7 @@
 //! back after the dispatch so the caller can write what changed to guest memory.
 
 use ash::vk;
-use orbistoun_spirv::{COMPUTE_BUFFERS_BINDING, DRAW_BUFFERS_PER_STAGE};
+use orbistoun_spirv::{COMPUTE_BUFFERS_BINDING, COMPUTE_WRITTEN_BINDING, DRAW_BUFFERS_PER_STAGE};
 
 use crate::DispatchError;
 use crate::compute::{DispatchBuffer, read_back};
@@ -42,6 +42,22 @@ struct Slot {
     bound: (vk::Buffer, vk::DeviceMemory),
     /// The memory properties `bound` was allocated with.
     #[cfg_attr(not(test), allow(dead_code))]
+    placed: vk::MemoryPropertyFlags,
+    staging: DispatchBuffer,
+    /// Whether the host did not read its words, so the device clears it rather than copying them
+    /// in (D809).
+    unread: bool,
+    /// Its write mask (D809). Every slot of the dispatch's own has one, read or not: the module
+    /// marks each slot its trace found only stored to, and a mark must land in a mask, never in a
+    /// buffer.
+    mask: Option<Mask>,
+}
+
+/// A write mask: a word for each of its buffer's words and one more (D809), on the device and
+/// read back through a host buffer.
+struct Mask {
+    bound: (vk::Buffer, vk::DeviceMemory),
+    /// The memory properties `bound` was allocated with.
     placed: vk::MemoryPropertyFlags,
     staging: DispatchBuffer,
 }
@@ -171,11 +187,9 @@ fn new_buffer_in(
 
 /// A dispatch's buffers on the device, with the set that binds them.
 pub(crate) struct BoundBuffers {
-    /// One per slot the module declares; the slots past the dispatch's own hold one word each, so
-    /// every element of the array is a valid buffer.
+    /// One per slot of the dispatch's own; every other element of the bound array binds one of
+    /// these, which the module never reaches.
     slots: Vec<Slot>,
-    /// How many of `slots` are the dispatch's.
-    used: usize,
     /// The set's layout, set one of the pipeline.
     pub(crate) layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
@@ -183,9 +197,42 @@ pub(crate) struct BoundBuffers {
     pub(crate) set: vk::DescriptorSet,
 }
 
+/// One of a dispatch's buffers as the host hands it over (D809).
+#[derive(Debug, Clone, Copy)]
+pub enum BufferIn<'a> {
+    /// Its words before the dispatch, which the program may read.
+    Words(&'a [u32]),
+    /// A buffer of this many words the program only stores to: nothing is read or uploaded, and
+    /// the device starts it at zero.
+    Unread(usize),
+}
+
+impl BufferIn<'_> {
+    /// How many words it holds; at least one, so every element of the bound array is a buffer.
+    fn words(self) -> usize {
+        match self {
+            Self::Words(words) => words.len(),
+            Self::Unread(words) => words,
+        }
+        .max(1)
+    }
+}
+
+/// A dispatch's buffer after it ran: its words, and - for one handed over unread - its write
+/// mask, a word for each word, non-zero where the dispatch stored (D809).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferOut {
+    /// The words after.
+    pub words: Vec<u32>,
+    /// Word `i` non-zero where word `i` was stored to; empty for a buffer the host read, whose
+    /// stores are found by comparing its words.
+    pub written: Vec<u32>,
+}
+
 impl BoundBuffers {
-    /// Stages `contents`, one buffer per slot, and builds the set binding them; `None` for a
-    /// dispatch that binds none. The words reach the bound buffers through
+    /// Stages `contents`, one buffer per slot, each with its write mask, and
+    /// builds the set binding them; `None` for a dispatch that binds none. The words reach the
+    /// bound buffers, and the masks and unread buffers are cleared, through
     /// [`Self::record_upload`].
     ///
     /// # Errors
@@ -193,7 +240,7 @@ impl BoundBuffers {
     /// More buffers than a module declares, or a device that refused a step.
     pub(crate) fn create(
         (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
-        contents: &[Vec<u32>],
+        contents: &[BufferIn<'_>],
     ) -> Result<Option<Self>, DispatchError> {
         if contents.is_empty() {
             return Ok(None);
@@ -204,49 +251,28 @@ impl BoundBuffers {
             ));
         }
         let context = (instance, physical, device);
-        let mut slots = Vec::with_capacity(DRAW_BUFFERS_PER_STAGE as usize);
-        for slot in 0..DRAW_BUFFERS_PER_STAGE as usize {
-            let words = contents.get(slot).map_or(&[0][..], |w| w.as_slice());
-            let words = if words.is_empty() { &[0][..] } else { words };
-            let size = (words.len() * 4) as vk::DeviceSize;
-            let (staging, staging_memory, _) = buffer_in(context, size, STAGING_USAGE, STAGED_IN)?;
-            // SAFETY: the memory is host-visible, holds `size` bytes and is not mapped.
-            let mapped =
-                unsafe { device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) }
-                    .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
-            // SAFETY: the mapping covers `words.len()` whole words, and device memory and the
-            // caller's slice cannot overlap.
-            unsafe {
-                std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<u32>(), words.len());
-            };
-            // SAFETY: mapped immediately above and not used after unmapping.
-            unsafe { device.unmap_memory(staging_memory) };
-            let (bound, bound_memory, placed) = buffer_in(context, size, BOUND_USAGE, BOUND_IN)?;
-            slots.push(Slot {
-                bound: (bound, bound_memory),
-                placed,
-                staging: DispatchBuffer {
-                    buffer: staging,
-                    memory: staging_memory,
-                    size,
-                    words: words.len(),
-                    offset: 0,
-                },
-            });
-        }
+        // Buffers for the dispatch's own slots only: the module reaches no other, so the rest of
+        // the array binds one of these.
+        let slots = contents
+            .iter()
+            .map(|&handed| Slot::create(context, handed))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bound_at = |index: usize| slots.get(index).unwrap_or(&slots[0]);
 
-        let bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(COMPUTE_BUFFERS_BINDING)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(DRAW_BUFFERS_PER_STAGE)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)];
+        let bindings = [COMPUTE_BUFFERS_BINDING, COMPUTE_WRITTEN_BINDING].map(|binding| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(binding)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(DRAW_BUFFERS_PER_STAGE)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        });
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: the create info outlives the call.
         let layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
             .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(DRAW_BUFFERS_PER_STAGE)];
+            .descriptor_count(DRAW_BUFFERS_PER_STAGE * 2)];
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .pool_sizes(&pool_sizes)
             .max_sets(1);
@@ -260,39 +286,74 @@ impl BoundBuffers {
         // SAFETY: the pool has room for exactly this one set.
         let set = unsafe { device.allocate_descriptor_sets(&allocate) }
             .map_err(|e| DispatchError::Vulkan("allocate_descriptor_sets", e))?[0];
-        let infos: Vec<vk::DescriptorBufferInfo> = slots
-            .iter()
-            .map(|slot| {
+        let infos: Vec<vk::DescriptorBufferInfo> = (0..DRAW_BUFFERS_PER_STAGE as usize)
+            .map(|index| {
+                let slot = bound_at(index);
                 vk::DescriptorBufferInfo::default()
                     .buffer(slot.bound.0)
                     .offset(0)
                     .range(slot.staging.size)
             })
             .collect();
-        let writes = [vk::WriteDescriptorSet::default()
-            .dst_set(set)
-            .dst_binding(COMPUTE_BUFFERS_BINDING)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .buffer_info(&infos)];
-        // SAFETY: the write refers to a live set and live buffers, and the slices outlive the call.
+        // Every slot of the dispatch's own has a mask; the rest of the array binds slot zero's.
+        let masks: Vec<vk::DescriptorBufferInfo> = (0..DRAW_BUFFERS_PER_STAGE as usize)
+            .map(|index| {
+                let slot = bound_at(index);
+                let (buffer, size) = slot
+                    .mask
+                    .as_ref()
+                    .map_or((slot.bound.0, slot.staging.size), |mask| {
+                        (mask.bound.0, mask.staging.size)
+                    });
+                vk::DescriptorBufferInfo::default()
+                    .buffer(buffer)
+                    .offset(0)
+                    .range(size)
+            })
+            .collect();
+        let writes = [
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(COMPUTE_BUFFERS_BINDING)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&infos),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(COMPUTE_WRITTEN_BINDING)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&masks),
+        ];
+        // SAFETY: the writes refer to a live set and live buffers, and the slices outlive the call.
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         Ok(Some(Self {
             slots,
-            used: contents.len(),
             layout,
             pool,
             set,
         }))
     }
 
-    /// Records each slot's copy from its staging buffer to the buffer the set binds, ordered before
+    /// Records each slot's copy from its staging buffer to the buffer the set binds - or, for a
+    /// buffer the host did not read, a clear to zero - and every write mask's clear, ordered before
     /// the dispatch, into an open recording.
     pub(crate) fn record_upload(&self, device: &ash::Device, command: vk::CommandBuffer) {
         for slot in &self.slots {
-            let region = [vk::BufferCopy::default().size(slot.staging.size)];
-            // SAFETY: recording is open, and both buffers are live and at least `size` bytes.
-            unsafe { device.cmd_copy_buffer(command, slot.staging.buffer, slot.bound.0, &region) };
+            if let Some(mask) = &slot.mask {
+                // SAFETY: recording is open, and the buffer is live, made for transfers into it.
+                unsafe { device.cmd_fill_buffer(command, mask.bound.0, 0, vk::WHOLE_SIZE, 0) };
+            }
+            if slot.unread {
+                // SAFETY: as above.
+                unsafe { device.cmd_fill_buffer(command, slot.bound.0, 0, vk::WHOLE_SIZE, 0) };
+            } else {
+                let region = [vk::BufferCopy::default().size(slot.staging.size)];
+                // SAFETY: recording is open, and both buffers are live and at least `size` bytes.
+                unsafe {
+                    device.cmd_copy_buffer(command, slot.staging.buffer, slot.bound.0, &region);
+                };
+            }
         }
         memory_barrier(
             device,
@@ -308,8 +369,8 @@ impl BoundBuffers {
         );
     }
 
-    /// Records the dispatch's own buffers' copy back to their staging buffers, after its stores and
-    /// before the host reads them, into an open recording.
+    /// Records the dispatch's own buffers' and write masks' copies back to their staging buffers,
+    /// after its stores and before the host reads them, into an open recording.
     pub(crate) fn record_readback(&self, device: &ash::Device, command: vk::CommandBuffer) {
         memory_barrier(
             device,
@@ -323,10 +384,13 @@ impl BoundBuffers {
                 vk::PipelineStageFlags::TRANSFER,
             ),
         );
-        for slot in &self.slots[..self.used] {
-            let region = [vk::BufferCopy::default().size(slot.staging.size)];
-            // SAFETY: recording is open, and both buffers are live and at least `size` bytes.
-            unsafe { device.cmd_copy_buffer(command, slot.bound.0, slot.staging.buffer, &region) };
+        for slot in &self.slots {
+            let mask = slot.mask.as_ref().map(|mask| (mask.bound.0, &mask.staging));
+            for (from, to) in std::iter::once((slot.bound.0, &slot.staging)).chain(mask) {
+                let region = [vk::BufferCopy::default().size(to.size)];
+                // SAFETY: recording is open, and both buffers are live and at least `size` bytes.
+                unsafe { device.cmd_copy_buffer(command, from, to.buffer, &region) };
+            }
         }
         memory_barrier(
             device,
@@ -339,26 +403,37 @@ impl BoundBuffers {
         );
     }
 
-    /// The dispatch's buffers as the dispatch left them, by slot, once the recording that copied
-    /// them back has completed.
+    /// The dispatch's buffers as the dispatch left them, with their write masks, by slot, once the
+    /// recording that copied them back has completed.
     ///
     /// # Errors
     ///
-    /// A device that refused a mapping.
-    pub(crate) fn read(&self, device: &ash::Device) -> Result<Vec<Vec<u32>>, DispatchError> {
-        self.slots[..self.used]
+    /// A buffer that could not be mapped.
+    pub(crate) fn read(&self, device: &ash::Device) -> Result<Vec<BufferOut>, DispatchError> {
+        self.slots
             .iter()
-            .map(|slot| read_back(device, &slot.staging))
+            .map(|slot| {
+                let written = match &slot.mask {
+                    Some(mask) => {
+                        let mut written = read_back(device, &mask.staging)?;
+                        // The word past the buffer's marks the stores that did not land.
+                        written.truncate(slot.staging.words);
+                        written
+                    }
+                    None => Vec::new(),
+                };
+                Ok(BufferOut {
+                    words: read_back(device, &slot.staging)?,
+                    written,
+                })
+            })
             .collect()
     }
 
     /// The memory properties each of the dispatch's own buffers was allocated with.
     #[cfg(test)]
     fn placed_in(&self) -> Vec<vk::MemoryPropertyFlags> {
-        self.slots[..self.used]
-            .iter()
-            .map(|slot| slot.placed)
-            .collect()
+        self.slots.iter().map(|slot| slot.placed).collect()
     }
 
     /// Releases the set, and the buffers to the spares (D805), once the dispatch that used them
@@ -369,23 +444,95 @@ impl BoundBuffers {
         // SAFETY: as above.
         unsafe { device.destroy_descriptor_set_layout(self.layout, None) };
         for slot in self.slots {
-            let size = slot.staging.size;
-            release(
-                device,
-                slot.bound,
-                (size, BOUND_USAGE, BOUND_IN, slot.placed),
-            );
-            release(
-                device,
-                (slot.staging.buffer, slot.staging.memory),
-                (
-                    size,
-                    STAGING_USAGE,
-                    STAGED_IN,
-                    vk::MemoryPropertyFlags::empty(),
-                ),
-            );
+            let mask = slot
+                .mask
+                .map(|mask| (mask.bound, mask.staging, mask.placed));
+            for (bound, staging, placed) in
+                std::iter::once((slot.bound, slot.staging, slot.placed)).chain(mask)
+            {
+                let size = staging.size;
+                release(device, bound, (size, BOUND_USAGE, BOUND_IN, placed));
+                release(
+                    device,
+                    (staging.buffer, staging.memory),
+                    (
+                        size,
+                        STAGING_USAGE,
+                        STAGED_IN,
+                        vk::MemoryPropertyFlags::empty(),
+                    ),
+                );
+            }
         }
+    }
+}
+
+impl Slot {
+    /// One slot's buffer and write mask, each a bound buffer and its staging buffer, with the
+    /// words staged where the host read them.
+    fn create(
+        context: (&ash::Instance, vk::PhysicalDevice, &ash::Device),
+        handed: BufferIn<'_>,
+    ) -> Result<Self, DispatchError> {
+        let device = context.2;
+        let words = handed.words();
+        let size = (words * 4) as vk::DeviceSize;
+        let (staging, staging_memory, _) = buffer_in(context, size, STAGING_USAGE, STAGED_IN)?;
+        if let BufferIn::Words(contents) = handed
+            && !contents.is_empty()
+        {
+            // SAFETY: the memory is host-visible, holds `size` bytes and is not mapped.
+            let mapped =
+                unsafe { device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) }
+                    .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
+            // SAFETY: the mapping covers `contents.len()` whole words, and device memory and the
+            // caller's slice cannot overlap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    contents.as_ptr(),
+                    mapped.cast::<u32>(),
+                    contents.len(),
+                );
+            };
+            // SAFETY: mapped immediately above and not used after unmapping.
+            unsafe { device.unmap_memory(staging_memory) };
+        }
+        let (bound, bound_memory, placed) = buffer_in(context, size, BOUND_USAGE, BOUND_IN)?;
+        let unread = !matches!(handed, BufferIn::Words(contents) if !contents.is_empty());
+        // A mask word for each of the buffer's words, and one past them that a store which did not
+        // land marks.
+        let mask = {
+            let mask_words = words + 1;
+            let mask_size = (mask_words * 4) as vk::DeviceSize;
+            let (staging, staging_memory, _) =
+                buffer_in(context, mask_size, STAGING_USAGE, STAGED_IN)?;
+            let (bound, bound_memory, placed) =
+                buffer_in(context, mask_size, BOUND_USAGE, BOUND_IN)?;
+            Some(Mask {
+                bound: (bound, bound_memory),
+                placed,
+                staging: DispatchBuffer {
+                    buffer: staging,
+                    memory: staging_memory,
+                    size: mask_size,
+                    words: mask_words,
+                    offset: 0,
+                },
+            })
+        };
+        Ok(Self {
+            bound: (bound, bound_memory),
+            placed,
+            staging: DispatchBuffer {
+                buffer: staging,
+                memory: staging_memory,
+                size,
+                words,
+                offset: 0,
+            },
+            unread,
+            mask,
+        })
     }
 }
 
@@ -441,12 +588,12 @@ mod tests {
         let context = (instance, physical, device);
         // A size no other test uses, so the spares hold none of it before.
         let words = 4099;
-        let first = BoundBuffers::create(context, &[vec![1; words]])
+        let first = BoundBuffers::create(context, &[super::BufferIn::Words(&vec![1; words])])
             .expect("created")
             .expect("one buffer");
         let bound = first.slots[0].bound.0;
         first.destroy(device);
-        let second = BoundBuffers::create(context, &[vec![2; words]])
+        let second = BoundBuffers::create(context, &[super::BufferIn::Words(&vec![2; words])])
             .expect("created")
             .expect("one buffer");
         let reused = second.slots[0].bound.0;
@@ -479,9 +626,12 @@ mod tests {
             ref device,
             ..
         } = *session;
-        let bound = BoundBuffers::create((instance, physical, device), &[vec![7; 64]])
-            .expect("created")
-            .expect("one buffer");
+        let bound = BoundBuffers::create(
+            (instance, physical, device),
+            &[super::BufferIn::Words(&[7; 64])],
+        )
+        .expect("created")
+        .expect("one buffer");
         let placed = bound.placed_in();
         bound.destroy(device);
         assert!(

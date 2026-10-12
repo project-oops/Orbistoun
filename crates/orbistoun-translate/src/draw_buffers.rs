@@ -163,6 +163,9 @@ pub struct DrawBuffers {
     pub sources: Vec<BufferSource>,
     /// The slot each traced access reads through, by the access's byte offset in the program.
     pub served: BTreeMap<u32, u32>,
+    /// The slots every access to which is a store (D809): a dispatch's buffer the program writes
+    /// and never reads, whose words before the run nothing depends on but the ones it leaves.
+    pub stored_only: std::collections::BTreeSet<u32>,
 }
 
 /// Traces the buffers a program reads through, for a stage whose `count` user-data words land in
@@ -213,6 +216,7 @@ pub fn trace(
     // Every access, with the state it reads, in program order: the bases' reach is known only once
     // every load through them has been seen.
     let mut accesses: Vec<(u32, Access)> = Vec::new();
+    let mut stores: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for (block, state) in blocks.iter().zip(reached) {
         let Some(mut held) = state else {
             continue;
@@ -224,6 +228,9 @@ pub fn trace(
             if let Some(&(_, name)) = named.as_ref()
                 && let Some(access) = access(instruction, name, &held)
             {
+                if bound_buffer_store(name) {
+                    stores.insert(instruction.offset);
+                }
                 accesses.push((instruction.offset, access));
             } else if let Some(&(_, name)) = named.as_ref()
                 && globals
@@ -235,7 +242,26 @@ pub fn trace(
         }
     }
     accesses.sort_by_key(|(offset, _)| *offset);
-    slots(accesses, decode, (first_register, count))
+    let mut buffers = slots(accesses, decode, (first_register, count));
+    buffers.stored_only = stored_only(&buffers.served, &stores);
+    buffers
+}
+
+/// The slots every access to which is one of `stores` (D809).
+fn stored_only(
+    served: &BTreeMap<u32, u32>,
+    stores: &std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeSet<u32> {
+    let slots: std::collections::BTreeSet<u32> = served.values().copied().collect();
+    slots
+        .into_iter()
+        .filter(|&slot| {
+            served
+                .iter()
+                .filter(|&(_, &served_slot)| served_slot == slot)
+                .all(|(offset, _)| stores.contains(offset))
+        })
+        .collect()
 }
 
 /// The program's words before byte `at`, rebuilt from its instructions: each one's words and its
@@ -823,6 +849,11 @@ mod tests {
             dispatch.served,
             std::collections::BTreeMap::from([(0, 0), (12, 1)]),
             "the load through slot 0, the store through slot 1"
+        );
+        assert_eq!(
+            dispatch.stored_only,
+            std::collections::BTreeSet::from([1]),
+            "only the store's buffer is written and never read (D809)"
         );
         assert!(
             trace(&copy, &encodings, (0, 16), (false, false))

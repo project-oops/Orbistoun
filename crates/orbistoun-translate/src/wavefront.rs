@@ -1638,6 +1638,12 @@ pub struct Wavefront<'a> {
     /// The draw's bound buffers, and the slot each traced access reads, by the access's offset
     /// (D733). `None` for a module that reads through none.
     draw_buffers: Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)>,
+    /// A dispatch's write mask beside its buffers (D809): a word for each word of a buffer the
+    /// program only stores to, set where a store lands, so the host writes back what the program
+    /// stored and never reads such a buffer.
+    write_mask: Option<buffer::DrawBufferArray>,
+    /// The slots of the buffers the program only stores to, which [`Self::write_mask`] marks.
+    unread_slots: std::collections::BTreeSet<u32>,
     /// The global data share, declared on the first access to it (D789).
     global_share: Option<buffer::StorageBuffer>,
     /// Scalar registers the program filled with a plain copy of one still holding a user-data word,
@@ -1653,6 +1659,57 @@ const GEOMETRY_SYSTEM_SGPRS: u32 = 8;
 const GEOMETRY_INPUT_VGPRS: u32 = 9;
 
 impl Wavefront<'_> {
+    /// Marks word `index` of buffer `buffer` in the write mask (D809), where the store landed:
+    /// inside the buffer, and in a running lane. The mask has a word for each of the buffer's and
+    /// one more past them; a store that did not land marks that last word instead, so a plain
+    /// store of one does it - no atomic, no read - and never clears or sets another word's mark.
+    fn mark_written(
+        &mut self,
+        mask: buffer::DrawBufferArray,
+        (buffer, index): (Id, Id),
+        (inside, active): (Id, Option<Id>),
+    ) {
+        let u32_type = self.u32_type;
+        let bool_type = self.bool_type;
+        let (one, zero) = (Self::constant(self, 1), Self::constant(self, 0));
+        let b = &mut self.builder;
+        let landed = match active {
+            None => inside,
+            Some(active) => {
+                let both = b.id();
+                b.function(op::LOGICAL_AND, &[bool_type.0, both.0, inside.0, active.0]);
+                both
+            }
+        };
+        let block = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[mask.block_ptr.0, block.0, mask.variable.0, buffer.0],
+        );
+        let length = b.id();
+        b.function(op::ARRAY_LENGTH, &[u32_type.0, length.0, block.0, 0]);
+        let spare = b.id();
+        b.function(op::ISUB, &[u32_type.0, spare.0, length.0, one.0]);
+        let target = b.id();
+        b.function(
+            op::SELECT,
+            &[u32_type.0, target.0, landed.0, index.0, spare.0],
+        );
+        let pointer = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[
+                mask.element_ptr.0,
+                pointer.0,
+                mask.variable.0,
+                buffer.0,
+                zero.0,
+                target.0,
+            ],
+        );
+        b.function(op::STORE, &[pointer.0, one.0]);
+    }
+
     /// The texture sources this module samples, in slot order.
     #[must_use]
     pub fn image_sources(&self) -> (Vec<TextureSource>, Option<TextureSource>) {
@@ -2167,6 +2224,13 @@ impl<'a> Wavefront<'a> {
             declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, &user_data);
         let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
+        let write_mask = (stage == Stage::Compute && draw_buffers.is_some()).then(|| {
+            buffer::declare_draw_buffers(
+                &mut b,
+                u32_type,
+                (orbistoun_spirv::COMPUTE_WRITTEN_BINDING, true),
+            )
+        });
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
@@ -2244,6 +2308,8 @@ impl<'a> Wavefront<'a> {
             reads_geometry_input: false,
             draw_data: None,
             draw_buffers,
+            write_mask,
+            unread_slots: buffers.stored_only.clone(),
             global_share: None,
             scalar_copies: BTreeMap::new(),
         };
@@ -4212,8 +4278,8 @@ impl Model for Wavefront<'_> {
     fn write_draw_buffer(
         &mut self,
         slot: u32,
-        word_index: Id,
-        value: Id,
+        (word_index, value): (Id, Id),
+        outside: Id,
         lane: u32,
     ) -> Result<(), TranslateError> {
         let known = self.lane_known(lane);
@@ -4280,6 +4346,20 @@ impl Model for Wavefront<'_> {
             }
         };
         b.function(op::STORE, &[pointer.0, chosen.0]);
+        if let Some(mask) = self.write_mask
+            && self.unread_slots.contains(&slot)
+        {
+            let bool_type = self.bool_type;
+            let stored = self.builder.id();
+            self.builder
+                .function(op::LOGICAL_NOT, &[bool_type.0, stored.0, outside.0]);
+            let landed = self.builder.id();
+            self.builder.function(
+                op::LOGICAL_AND,
+                &[bool_type.0, landed.0, inside.0, stored.0],
+            );
+            self.mark_written(mask, (buffer, index), (landed, active));
+        }
         Ok(())
     }
 

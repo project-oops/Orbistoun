@@ -10,6 +10,7 @@
 
 pub mod compute;
 mod compute_buffers;
+pub use compute_buffers::{BufferIn, BufferOut};
 pub mod compute_images;
 mod depth;
 mod draw_buffers;
