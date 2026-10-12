@@ -426,6 +426,8 @@ mod tests {
             measured_on: "2026-08-27".to_owned(),
             link_plan: String::new(),
             link_plan_stored: String::new(),
+            presented_by: String::new(),
+            shown: None,
             notes: String::new(),
         }
     }

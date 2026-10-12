@@ -189,6 +189,12 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     if written && drawn_into == Some(address) {
         DRAWN_FRAME_PRESENTED.store(true, Ordering::Relaxed);
     }
+    // Decided on every flip, window or not, so a headless run's record can say whether the window
+    // would have shown what was flipped.
+    LAST_FLIP_SHOWABLE.store(
+        window_can_show(address, shape, drawn_into),
+        Ordering::Relaxed,
+    );
     report_perf(LIVE_EVENTS.get().copied());
     let Some((sink, dir)) = listening.filter(|_| due) else {
         if let Some(shown) = shown {
@@ -207,6 +213,28 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
             present_now(address, shape, sink, dir);
         }
     });
+}
+
+/// Whether the window can show the buffer flipped at `address`: from the device copy when the frame
+/// was drawn into exactly that buffer (D719, D784), or read from memory when its scanout format is
+/// one [`scanout_decoder`] knows. Either way only video-out tiling 0, the one [`present_now`]
+/// detiles. A buffer it cannot show leaves the window empty while the flip still counts.
+fn window_can_show(
+    address: u64,
+    shape: orbistoun_video::BufferShape,
+    drawn_into: Option<u64>,
+) -> bool {
+    shape.tiling == 0 && (drawn_into == Some(address) || scanout_decoder(shape.format).is_some())
+}
+
+/// Whether the last flip was of a buffer the window can show; see [`window_can_show`].
+static LAST_FLIP_SHOWABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the window could show the buffer the guest last flipped, decided at that flip whether a
+/// window was attached or not. False before any flip.
+pub fn last_flip_showable() -> bool {
+    LAST_FLIP_SHOWABLE.load(Ordering::Relaxed)
 }
 
 /// Whether the flipped buffer is exactly the frame's target, so the device copy is the frame with
@@ -1246,6 +1274,43 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, render};
+
+    /// The window shows a flip drawn into exactly its buffer whatever the format, a buffer read from
+    /// memory only in a scanout format it decodes, and nothing tiled other than video-out tiling 0.
+    #[test]
+    fn the_window_shows_what_it_can_decode_and_nothing_else() {
+        let shape = |format: u64, tiling: u32| orbistoun_video::BufferShape {
+            tiling,
+            width: 1920,
+            height: 1080,
+            format,
+        };
+        let unknown = 0x8000_0000_1100_0000;
+        let sdk = 0x8000_0000_0000_0000;
+        let at = 0x1000_0000;
+        assert!(
+            super::window_can_show(at, shape(unknown, 0), Some(at)),
+            "drawn into it"
+        );
+        assert!(!super::window_can_show(
+            at,
+            shape(unknown, 0),
+            Some(at + 0x10_0000)
+        ));
+        assert!(
+            !super::window_can_show(at, shape(unknown, 0), None),
+            "an unknown format"
+        );
+        assert!(
+            super::window_can_show(at, shape(sdk, 0), None),
+            "a format it decodes"
+        );
+        assert!(
+            !super::window_can_show(at, shape(sdk, 1), None),
+            "tiling it does not read"
+        );
+        assert!(!super::window_can_show(at, shape(unknown, 1), Some(at)));
+    }
 
     /// Every N keeps guest flips 1, 1+N, 1+2N; a list keeps exactly the flips it names; the two
     /// combine, and flip 0, which no guest submits, is never kept.

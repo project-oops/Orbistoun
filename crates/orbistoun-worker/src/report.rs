@@ -2174,31 +2174,33 @@ fn frame_written_against(address: u64, regions: &[(u64, u64, bool)], cap: u64) -
         .any(|&b| b != 0)
 }
 
-/// Whether the buffer the guest last flipped holds bytes it wrote: the framebuffer signal behind
-/// `Reach::Presented`.
+/// What put a frame in the buffer the guest last flipped - the framebuffer signal behind
+/// `Reach::Presented` - or `None` when nothing did.
 ///
-/// A frame orbistoun drew and wrote back into the flipped buffer counts. Otherwise the buffer is
-/// read, only in a run that drew nothing: a drawn target's pages are guarded for lazy write-back
-/// (D717), and touching them from here would wait on threads that are stopped. The address is a
-/// virtual one, so it is bounded by the guest mapping holding it, never by the physical
-/// direct-memory map, and the whole frame the decoded shape describes is read: a guest drawing over
-/// black leaves the first rows zero.
-fn flipped_frame_written() -> bool {
+/// [`PRESENTED_BY_DRAWN`] when orbistoun drew a frame and wrote it back into the flipped buffer.
+/// Otherwise the buffer is read, only in a run that drew nothing: a drawn target's pages are guarded
+/// for lazy write-back (D717), and touching them from here would wait on threads that are stopped.
+/// The address is a virtual one, so it is bounded by the guest mapping holding it, never by the
+/// physical direct-memory map, and the whole frame the decoded shape describes is read: a guest
+/// drawing over black leaves the first rows zero. A non-zero byte there is
+/// [`PRESENTED_BY_MEMORY`], a frame the guest's own code put there rather than the translator.
+///
+/// [`PRESENTED_BY_DRAWN`]: orbistoun_report::trace::PRESENTED_BY_DRAWN
+/// [`PRESENTED_BY_MEMORY`]: orbistoun_report::trace::PRESENTED_BY_MEMORY
+fn flipped_frame_source() -> Option<&'static str> {
     /// Bytes per pixel the extent is taken at. Every scanout format registered in the corpus is
     /// four bytes a pixel; a wider one is read only as far as its first four bytes a pixel reach.
     const BYTES_PER_PIXEL: u64 = 4;
 
     if crate::render::drawn_frame_presented() {
-        return true;
+        return Some(orbistoun_report::trace::PRESENTED_BY_DRAWN);
     }
     // A drawn run's targets, or any page a deferred copy guards, fault on a read from here, which
     // may be a fault handler already.
     if crate::render::any_frame_drawn() || orbistoun_gpu::agc_driver::guards_guest_memory() {
-        return false;
+        return None;
     }
-    let Some((address, shape)) = orbistoun_video::last_flipped_buffer() else {
-        return false;
-    };
+    let (address, shape) = orbistoun_video::last_flipped_buffer()?;
     let extent = u64::from(shape.width) * u64::from(shape.height) * BYTES_PER_PIXEL;
     // The read happens with the mappings held, so the range validated cannot be unmapped under it.
     orbistoun_kernel::with_guest_mappings(|ranges| {
@@ -2206,9 +2208,14 @@ fn flipped_frame_written() -> bool {
         frame_written_against(address, &regions, extent)
     })
     .unwrap_or(false)
+    .then_some(orbistoun_report::trace::PRESENTED_BY_MEMORY)
 }
 
 /// Collects the trace, recording where the guest died.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one literal naming every field of the trace, each beside why it is read that way"
+)]
 pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>) -> CallTrace {
     // What the watched region became, printed here because this is the one point reached on both
     // endings, a fault and a time limit.
@@ -2233,6 +2240,11 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
     // signature comes from the same snapshot as its call count.
     let shapes = orbistoun_thunk::arg_shapes();
 
+    // Whether the buffer that flip carried holds a frame, read back and bounds-checked: the signal
+    // that lifts `flipped` to `presented`, and what put it there.
+    let presented_by = flipped_frame_source();
+    let frames = orbistoun_video::flips_accepted();
+
     CallTrace {
         module: module.to_owned(),
         reached: reached.to_owned(),
@@ -2242,10 +2254,11 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         distinct: counts.len(),
         // Asked of the port table rather than counted from the rows, because a submission a port
         // refused is still a call to something implemented (D558).
-        frames: orbistoun_video::flips_accepted(),
-        // Whether the buffer that flip carried holds bytes the guest wrote, read back and
-        // bounds-checked: the signal that lifts `flipped` to `presented`.
-        frame_written: flipped_frame_written(),
+        frames,
+        frame_written: presented_by.is_some(),
+        presented_by: presented_by.unwrap_or_default().to_owned(),
+        // Decided at each flip, so it holds for a run with no window.
+        frame_showable: (frames > 0).then(crate::render::last_flip_showable),
         // The first command buffer a guest handed to `sceAgcDriverSubmitDcb`, summarised.
         submission: submission_summary(),
         // Recorded, not just printed, so a guest that talks to the kernel by number leaves

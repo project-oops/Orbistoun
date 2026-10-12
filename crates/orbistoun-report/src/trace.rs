@@ -4,6 +4,9 @@
 //! GUI share one implementation (D034). The producing side (the fault handler, the region
 //! table, the allocation-free line writer) stays in `orbistoun-worker`.
 
+/// What [`CallTrace::presented_by`] holds, declared beside the record field it becomes.
+pub use orbistoun_overrides::{PRESENTED_BY_DRAWN, PRESENTED_BY_MEMORY};
+
 /// What a guest asked for, in the order of how much it wanted it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CallTrace {
@@ -29,6 +32,19 @@ pub struct CallTrace {
     /// so an unwritten or unreadable buffer stays at `flipped`.
     #[serde(default)]
     pub frame_written: bool,
+    /// What put the frame in the flipped buffer, when [`Self::frame_written`] is set:
+    /// [`PRESENTED_BY_DRAWN`] when orbistoun drew it and wrote it back, [`PRESENTED_BY_MEMORY`]
+    /// when nothing was drawn and the guest's own buffer read back non-zero. Empty otherwise.
+    ///
+    /// The two mean different things: only a drawn frame says the command-stream translation
+    /// produced the picture.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub presented_by: String,
+    /// Whether the window could show the buffer the guest last flipped - from the device copy, or
+    /// decoded from memory in a scanout format it knows - decided at the flip whether a window was
+    /// attached or not. `None` when nothing flipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_showable: Option<bool>,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
     /// Every system call the guest made directly, not through a stub.
@@ -897,6 +913,17 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
         measured_on,
         link_plan: trace.conditions.link_plan.clone(),
         link_plan_stored: trace.conditions.link_plan_stored.clone(),
+        // Only beside the rung it explains.
+        presented_by: if reach == Reach::Presented {
+            trace.presented_by.clone()
+        } else {
+            String::new()
+        },
+        shown: if trace.frames > 0 {
+            trace.frame_showable
+        } else {
+            None
+        },
         notes: String::new(),
     }
 }
@@ -1500,6 +1527,43 @@ mod tests {
         assert_eq!(super::describe_end(&faulted), "image+0x1234");
     }
 
+    /// What earned `presented` is recorded beside that rung and nowhere else, and whether the
+    /// window could show the last flip is recorded wherever something flipped.
+    #[test]
+    fn what_earned_presented_and_whether_it_showed_are_recorded_beside_the_rung() {
+        use orbistoun_overrides::Reach;
+
+        let status = |frames: u64, written: bool, by: &str, showable: Option<bool>| {
+            let mut t = trace(47, 933, None, None);
+            t.reached = "Entered".to_owned();
+            t.frames = frames;
+            t.frame_written = written;
+            t.presented_by = by.to_owned();
+            t.frame_showable = showable;
+            super::status_of(&t, "2026-10-12".to_owned())
+        };
+
+        let drawn = status(3, true, super::PRESENTED_BY_DRAWN, Some(true));
+        assert_eq!(drawn.reach, Reach::Presented);
+        assert_eq!(drawn.presented_by, "drawn");
+        assert_eq!(drawn.shown, Some(true));
+
+        let hidden = status(3, true, super::PRESENTED_BY_MEMORY, Some(false));
+        assert_eq!(
+            (hidden.presented_by.as_str(), hidden.shown),
+            ("memory", Some(false)),
+            "a frame the window cannot show still presents, and says so"
+        );
+
+        let flipped = status(3, false, super::PRESENTED_BY_DRAWN, Some(true));
+        assert_eq!(flipped.reach, Reach::Flipped);
+        assert!(flipped.presented_by.is_empty(), "no source below presented");
+        assert_eq!(flipped.shown, Some(true));
+
+        let none = status(0, false, "", Some(true));
+        assert_eq!(none.shown, None, "nothing flipped, nothing to show");
+    }
+
     /// A written frame reaches `Presented`; an unwritten flip stops at `Flipped`; and
     /// `frame_written` without an accepted flip, or below `Entered`, does not reach it.
     #[test]
@@ -1566,6 +1630,8 @@ mod tests {
             distinct,
             frames: 0,
             frame_written: false,
+            presented_by: String::new(),
+            frame_showable: None,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),

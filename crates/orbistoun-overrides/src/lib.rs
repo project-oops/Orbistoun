@@ -208,6 +208,18 @@ pub struct Status {
     /// A `mismatch` is a loader defect, whatever the rest of the entry says.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub link_plan_stored: String,
+    /// What earned [`Reach::Presented`]: `drawn` when orbistoun drew the frame and wrote it back
+    /// into the flipped buffer, `memory` when nothing was drawn and the guest's own buffer read back
+    /// non-zero. Empty below that rung, and in a record that predates the field.
+    ///
+    /// Only `drawn` says the command-stream translation produced the picture.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub presented_by: String,
+    /// Whether the window could show the buffer the guest last flipped. `Some(false)` is a frame that
+    /// counts for the rung while the window stays empty - a scanout format or tiling the display
+    /// path does not decode. `None` when nothing flipped, or the record predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown: Option<bool>,
     /// Anything a person should know that the numbers do not say.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
@@ -568,6 +580,7 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
     let _ = writeln!(out, "\n## How far it gets\n");
     let _ = writeln!(out, "| | |\n|---|--:|");
     let _ = writeln!(out, "| Reach | {} |", s.reach.label());
+    out.push_str(&presentation_rows(s));
     let _ = writeln!(out, "| Outcome | {} |", md_cell(&s.outcome));
     let _ = writeln!(out, "| Distinct imports | {} |", s.imports);
     let _ = writeln!(
@@ -612,6 +625,31 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
     render_frames(&mut out, row, name);
     render_reproduce(&mut out, row);
     out
+}
+
+/// A page's rows for what earned `presented` and whether the window could show the last flip,
+/// each only where the record says.
+fn presentation_rows(s: &Status) -> String {
+    use core::fmt::Write as _;
+
+    let mut rows = String::new();
+    let by = match s.presented_by.as_str() {
+        "" => None,
+        PRESENTED_BY_DRAWN => Some("a frame orbistoun drew from the command stream"),
+        PRESENTED_BY_MEMORY => Some("the guest's own buffer, written without orbistoun drawing"),
+        other => Some(other),
+    };
+    if let Some(by) = by {
+        let _ = writeln!(rows, "| Presented by | {} |", md_cell(by));
+    }
+    if let Some(shown) = s.shown {
+        rows.push_str(if shown {
+            "| Shown in the window | yes |\n"
+        } else {
+            "| Shown in the window | no - a scanout format or tiling the display does not decode |\n"
+        });
+    }
+    rows
 }
 
 /// A page's row for its comparison with the console's frames: which flips were compared, which
@@ -840,6 +878,13 @@ pub const FRAMES_FILE: &str = "frames.png";
 
 /// The file a title's replayed input is kept in, beside its record.
 pub const INPUTS_FILE: &str = "inputs.toml";
+
+/// [`Status::presented_by`] when orbistoun drew the frame and wrote it back into the flipped buffer.
+pub const PRESENTED_BY_DRAWN: &str = "drawn";
+
+/// [`Status::presented_by`] when nothing was drawn and the flipped buffer, read from guest memory,
+/// held something non-zero.
+pub const PRESENTED_BY_MEMORY: &str = "memory";
 
 /// How a title's frames compared with the console's frames of the same flips (`compat compare`).
 ///
@@ -1467,6 +1512,8 @@ reason = "..."
             measured_on: "2026-08-21".to_owned(),
             link_plan: String::new(),
             link_plan_stored: String::new(),
+            presented_by: String::new(),
+            shown: None,
             notes: String::new(),
         }
     }
@@ -1607,6 +1654,42 @@ reason = "..."
             )),
             "{page}"
         );
+    }
+
+    /// A title page says what earned `presented` and whether the window could show it, only where
+    /// the record says, so a record from before these fields renders as it did.
+    #[test]
+    fn a_title_page_says_what_presented_and_whether_it_showed() {
+        let mut row = Row {
+            name: None,
+            title: "t".to_owned(),
+            status: status(Reach::Presented, 32, 4_000_000),
+            experiment: false,
+            screenshot: None,
+            hardware: None,
+            reproduce: None,
+            inputs: false,
+            frame_match: None,
+        };
+        let before = super::render_title_page(&row, &super::Title::default(), "");
+        assert!(!before.contains("Presented by") && !before.contains("Shown in the window"));
+
+        row.status.presented_by = super::PRESENTED_BY_MEMORY.to_owned();
+        row.status.shown = Some(false);
+        let page = super::render_title_page(&row, &super::Title::default(), "");
+        assert!(
+            page.contains(
+                "| Presented by | the guest's own buffer, written without orbistoun drawing |"
+            ),
+            "{page}"
+        );
+        assert!(page.contains("| Shown in the window | no - "), "{page}");
+
+        row.status.presented_by = super::PRESENTED_BY_DRAWN.to_owned();
+        row.status.shown = Some(true);
+        let page = super::render_title_page(&row, &super::Title::default(), "");
+        assert!(page.contains("| Presented by | a frame orbistoun drew from the command stream |"));
+        assert!(page.contains("| Shown in the window | yes |"));
     }
 
     /// A partial match says how many flips matched, and none compared is not a match.

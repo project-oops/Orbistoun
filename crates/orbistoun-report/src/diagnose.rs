@@ -1436,6 +1436,8 @@ mod tests {
             distinct: 0,
             frames: 0,
             frame_written: false,
+            presented_by: String::new(),
+            frame_showable: None,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -2212,6 +2214,8 @@ mod tests {
             distinct: 2,
             frames: 0,
             frame_written: false,
+            presented_by: String::new(),
+            frame_showable: None,
             submission: None,
             calls: vec![
                 CalledImport {

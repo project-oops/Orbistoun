@@ -973,6 +973,8 @@ mod tests {
             link_plan_stored: String::new(),
             frames: 0,
             unanswered: None,
+            presented_by: String::new(),
+            shown: None,
             notes: String::new(),
         }
     }
