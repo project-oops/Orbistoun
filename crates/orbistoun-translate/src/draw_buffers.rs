@@ -747,14 +747,15 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
         }
         _ => {
             let (first, second) = match family {
-                "SOP1" | "SOP2" | "SOPK" => (true, false),
+                // A short vector form's second operand is a source: its carry or compare result,
+                // where it has one, goes to `vcc`, which no operand names.
+                "SOP1" | "SOP2" | "SOPK" | "VOP1" | "VOP2" | "VOPC" => (true, false),
                 "SMEM" => {
                     if let Some(Operand::Scalar(destination)) = operands.first() {
                         forget(held, *destination, scalar_words(name).max(4));
                     }
                     (false, false)
                 }
-                "VOP1" | "VOP2" | "VOPC" => (true, true),
                 "VOP3" => (
                     true,
                     name.contains("_co_")
@@ -1049,6 +1050,24 @@ mod tests {
         );
         assert_eq!(buffers.served.get(&0x0), Some(&0));
         assert_eq!(buffers.served.get(&0xc), Some(&1));
+    }
+
+    /// A short-form compare reading the scalar register below a descriptor writes `vcc`, not the
+    /// registers it reads: the descriptor stays traced. PPSA03416's pixel shader compares against
+    /// `s71` between loads through `s[72:75]` (`v_cmp_gt_f32_e32 vcc_lo, s71, v4`).
+    #[test]
+    fn a_compare_reading_beside_a_descriptor_keeps_it() {
+        let program = [
+            0xf408_0100, // s_load_dwordx4 s[4:7], s[0:1], 0x10
+            0xfa00_0010,
+            WAIT,
+            0x7c08_0003, // v_cmp_gt_f32_e32 vcc_lo, s3, v0
+            0xf420_0202, // s_buffer_load_dword s8, s[4:7], 0x0
+            0xfa00_0000,
+            END,
+        ];
+        let buffers = traced(&program, 2);
+        assert_eq!(buffers.served.get(&0x10), Some(&1), "{:?}", buffers.served);
     }
 
     /// A register written with something else on one path to the load leaves it untraced: the
