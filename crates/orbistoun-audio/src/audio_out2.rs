@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::time::Duration;
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError};
 use orbistoun_hle::guest_module;
@@ -209,6 +210,9 @@ pub(crate) fn context_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
+    // The grain, the parameters' fifth word in frames at 48000 Hz (D820).
+    let frames = words.map_or(0, |w| w[4]);
+    queue().grain = Duration::from_nanos(u64::from(frames) * 1_000_000_000 / u64::from(PORT_RATE));
     // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
     if unsafe { guest::write_u64(context, 0) } {
         0
@@ -243,12 +247,11 @@ pub(crate) fn context_advance(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceAudioOut2ContextGetQueueLevel(context, queued, available)`: on the context made, writes 0
-/// to `queued` and 2 to `available`, each a u32 over the low half of its slot, and answers 0; a
-/// null slot is skipped, both null answer `0x80268001`, as do contexts 1 and -1 (REQ-24b2,
-/// `report-1791836505.txt` 85-92). 0 and 2 are the level before any push and the level the
-/// measured pushes settled back to (0 and 2 after the third); the brief levels just after a
-/// push are not modelled (assumed). Any other handle is unmeasured and answers the placeholder.
+/// `sceAudioOut2ContextGetQueueLevel(context, queued, available)`: on the context made, writes the
+/// queue's level (D820) - grains queued, and the available count measured beside it - each a u32
+/// over the low half of its slot, and answers 0; a null slot is skipped, both null answer
+/// `0x80268001`, as do contexts 1 and -1 (REQ-24b2, `report-1791836505.txt` 85-92; REQ-ap02,
+/// `report-1791842051.txt`). Any other handle is unmeasured and answers the placeholder.
 pub(crate) fn context_get_queue_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (context, queued, available) = (args[0], args[1], args[2]);
     if is_refused_context(context) || (queued == 0 && available == 0) {
@@ -257,7 +260,8 @@ pub(crate) fn context_get_queue_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
     if !is_made_context(context) {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
-    for (slot, level) in [(queued, 0_u32), (available, 2)] {
+    let level = queue().level(since_start());
+    for (slot, level) in [(queued, level.0), (available, level.1)] {
         // SAFETY: the guest's out-parameter, a u32, by the call's contract.
         if slot != 0 && !unsafe { guest::write_u32(slot, level) } {
             return u64::from(GuestError::Unimplemented.as_raw());
@@ -267,18 +271,109 @@ pub(crate) fn context_get_queue_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
 }
 
 /// `sceAudioOut2ContextPush(context, flag)`: 0 on the context made for flag 0 (not blocking) and
-/// flag 1 (blocking), returning within microseconds either way as measured - no grain is paced -
-/// and `0x80268001` for flag 2 and for contexts 1 and -1 (REQ-24b2, `report-1791836505.txt`
-/// 98-164). Other flags and handles are unmeasured and answer the placeholder.
+/// flag 1 (blocking), and `0x80268001` for flag 2 and for contexts 1 and -1 (REQ-24b2,
+/// `report-1791836505.txt` 98-164). Once a port has published PCM a push queues a grain, a
+/// blocking one first waiting for one to drain when two are queued, so a pump runs at the grain
+/// rate (REQ-ap02, `report-1791842051.txt` 61-385; D820). Other flags and handles are unmeasured
+/// and answer the placeholder.
 pub(crate) fn context_push(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (context, flag) = (args[0], args[1] as u32);
     if is_refused_context(context) || (is_made_context(context) && flag == 2) {
         return INVALID_ARGUMENT;
     }
-    if is_made_context(context) && flag <= 1 {
-        0
-    } else {
-        u64::from(GuestError::Unimplemented.as_raw())
+    if !is_made_context(context) || flag > 1 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let published = PUBLISHED.load(Ordering::Acquire);
+    let wait = queue().push(since_start(), flag == 1, published);
+    if !wait.is_zero() {
+        std::thread::sleep(wait);
+        // The guest clock is logical by default (D582): the wait must advance it too.
+        orbistoun_hle::clocks::advance(wait.as_nanos());
+    }
+    0
+}
+
+/// Whether a port has published PCM through `sceAudioOut2PortSetAttributes`: until one has, a push
+/// queues nothing and never waits (REQ-24b2's pushes, with none published, returned at once).
+static PUBLISHED: AtomicBool = AtomicBool::new(false);
+
+/// The time since the queue's clock began, which the queue counts grains by.
+fn since_start() -> Duration {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
+}
+
+/// The process's context queue (D820).
+fn queue() -> std::sync::MutexGuard<'static, GrainQueue> {
+    static QUEUE: Mutex<GrainQueue> = Mutex::new(GrainQueue::new());
+    QUEUE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The most grains a context queues: non-blocking pushes saturated at 3 (REQ-ap02).
+const QUEUE_DEPTH: u32 = 3;
+/// The level at which a blocking push waits for a grain to drain: it kept 2 queued (REQ-ap02).
+const BLOCKING_LEVEL: u32 = 2;
+/// The available count measured beside each queued count: 2 at 0 queued (REQ-24b2, before any
+/// push) and at 1, 1 at 2, 0 at 3 (REQ-ap02).
+const AVAILABLE: [u32; 4] = [2, 2, 1, 0];
+
+/// A context's queue of grains, drained one per grain of time from the moment one is queued
+/// (D820): the measured pump - two pushes returning at once, then each blocking push returning a
+/// grain after the last, 189 in a second for 256-frame grains (REQ-ap02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrainQueue {
+    /// Grains queued.
+    queued: u32,
+    /// When the oldest queued grain finishes draining, on the queue's clock.
+    next_drain: Duration,
+    /// One grain's time.
+    grain: Duration,
+}
+
+impl GrainQueue {
+    const fn new() -> Self {
+        Self {
+            queued: 0,
+            next_drain: Duration::ZERO,
+            grain: Duration::ZERO,
+        }
+    }
+
+    /// Drains every grain whose time has passed by `now`.
+    fn drain(&mut self, now: Duration) {
+        while self.queued > 0 && now >= self.next_drain && !self.grain.is_zero() {
+            self.queued -= 1;
+            self.next_drain += self.grain;
+        }
+    }
+
+    /// Queues a grain at `now`, answering how long the push waits first: a blocking push with
+    /// [`BLOCKING_LEVEL`] grains queued waits for one to drain. Nothing is queued until a port has
+    /// published PCM.
+    fn push(&mut self, now: Duration, blocking: bool, published: bool) -> Duration {
+        self.drain(now);
+        if !published {
+            return Duration::ZERO;
+        }
+        let mut at = now;
+        if blocking && self.queued >= BLOCKING_LEVEL {
+            at = self.next_drain;
+            self.drain(at);
+        }
+        if self.queued == 0 {
+            self.next_drain = at + self.grain;
+        }
+        self.queued = (self.queued + 1).min(QUEUE_DEPTH);
+        at.saturating_sub(now)
+    }
+
+    /// Grains queued at `now`, and the available count measured beside them.
+    fn level(&mut self, now: Duration) -> (u32, u32) {
+        self.drain(now);
+        (self.queued, AVAILABLE[self.queued as usize])
     }
 }
 
@@ -493,12 +588,24 @@ pub(crate) fn port_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// PPSA04263's two shapes, read off its calls (REQ-ap01).
 const MEASURED_ATTRIBUTES: [&[(u32, u64)]; 2] = [&[(0, 8)], &[(0, 8), (8, 4), (4, 4)]];
 
-/// `sceAudioOut2PortSetAttributes(port, attributes, count)`: for the measured record shapes,
-/// `{ u32 id; u32 pad; u64 value; u64 size }` each, `0x80268001`, with nothing of the values
-/// written, on a port the process made and on `-1` alike (REQ-ap01, `report-1791818993.txt`
-/// 440-573: values of zero). Any other shape is unmeasured and answers the placeholder.
+/// `sceAudioOut2PortSetAttributes(port, attributes, count)`, records `{ u32 id; u32 pad; u64
+/// value; u64 size }`, `value` pointing at the attribute's `size` bytes: one record of id 0 and
+/// size 8 whose 8 bytes are a non-null pointer - the PCM - on a port the process made, publishes
+/// it and answers 0 (REQ-ap02, `report-1791842051.txt` 60). For the measured record shapes whose
+/// values are zero, `0x80268001`, nothing written, on a made port and on `-1` alike (REQ-ap01,
+/// `report-1791818993.txt` 440-573). Any other shape or value is unmeasured and answers the
+/// placeholder.
 pub(crate) fn port_set_attributes(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let (records, count) = (args[1], args[2]);
+    let (port, records, count) = (args[0], args[1], args[2]);
+    // SAFETY: the guest's first attribute record's value pointer, at +8.
+    let pointer = unsafe { guest::read_u64(records.wrapping_add(8)) };
+    // SAFETY: the 8 bytes it points at, the first attribute's value.
+    let value = pointer.and_then(|at| unsafe { guest::read_u64(at) });
+    let made = PORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .0
+        .contains(&port);
     let shape: Option<Vec<(u32, u64)>> = (0..count.min(8))
         .map(|i| {
             let at = records.wrapping_add(i * 0x18);
@@ -510,7 +617,13 @@ pub(crate) fn port_set_attributes(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         })
         .collect();
     match shape {
-        Some(shape) if MEASURED_ATTRIBUTES.contains(&shape.as_slice()) => INVALID_ARGUMENT,
+        Some(shape) if shape == [(0, 8)] && made && value.is_some_and(|v| v != 0) => {
+            PUBLISHED.store(true, Ordering::Release);
+            0
+        }
+        Some(shape) if MEASURED_ATTRIBUTES.contains(&shape.as_slice()) && value == Some(0) => {
+            INVALID_ARGUMENT
+        }
         _ => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
@@ -590,4 +703,80 @@ pub(crate) fn get_speaker_array_memory_size(args: &[u64; GUEST_ARG_REGISTERS]) -
             u64::from(GuestError::Unimplemented.as_raw()),
             |(_, size)| *size,
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Duration, GrainQueue};
+
+    /// One 256-frame grain at 48000 Hz, the measured context's (REQ-ap02).
+    const GRAIN: Duration = Duration::from_nanos(256 * 1_000_000_000 / 48_000);
+
+    fn queue() -> GrainQueue {
+        GrainQueue {
+            grain: GRAIN,
+            ..GrainQueue::new()
+        }
+    }
+
+    /// The measured blocking pump (REQ-ap02): two pushes return at once, queueing 1 then 2, and
+    /// each after waits a grain, the level staying 2 queued and 1 available.
+    #[test]
+    fn a_blocking_pump_waits_a_grain_once_two_are_queued() {
+        let mut queue = queue();
+        let mut now = Duration::ZERO;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let wait = queue.push(now, true, true);
+            now += wait;
+            seen.push((wait, queue.level(now)));
+        }
+        let zero = Duration::ZERO;
+        assert_eq!(
+            seen,
+            [
+                (zero, (1, 2)),
+                (zero, (2, 1)),
+                (GRAIN, (2, 1)),
+                (GRAIN, (2, 1)),
+                (GRAIN, (2, 1)),
+            ]
+        );
+    }
+
+    /// The measured blocking pump runs 189 times in a second of 256-frame grains (REQ-ap02,
+    /// iterations 0xbd).
+    #[test]
+    fn a_blocking_pump_runs_189_times_a_second() {
+        let mut queue = queue();
+        let (mut now, mut pushes) = (Duration::ZERO, 0);
+        // Pushes returned within the second, as the probe counted them.
+        loop {
+            now += queue.push(now, true, true);
+            if now > Duration::from_secs(1) {
+                break;
+            }
+            pushes += 1;
+        }
+        assert_eq!(pushes, 189);
+    }
+
+    /// Non-blocking pushes never wait and saturate at 3 queued, 0 available (REQ-ap02); with no
+    /// PCM published nothing is queued and nothing waits (REQ-24b2).
+    #[test]
+    fn a_non_blocking_pump_saturates_and_an_unpublished_one_queues_nothing() {
+        let mut full = queue();
+        let levels: Vec<(u32, u32)> = (0..4)
+            .map(|_| {
+                assert!(full.push(Duration::ZERO, false, true).is_zero());
+                full.level(Duration::ZERO)
+            })
+            .collect();
+        assert_eq!(levels, [(1, 2), (2, 1), (3, 0), (3, 0)]);
+        let mut quiet = queue();
+        for _ in 0..4 {
+            assert!(quiet.push(Duration::ZERO, true, false).is_zero());
+        }
+        assert_eq!(quiet.level(Duration::ZERO), (0, 2));
+    }
 }

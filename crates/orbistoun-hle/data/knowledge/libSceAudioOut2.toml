@@ -176,7 +176,8 @@ purpose = "(port, attributes, count): sets a port's attributes from count record
 returns = "status"
 edge_cases = [
     "MEASURED (REQ-ap01): on the first mono port, the record shapes PPSA04263 uses - one record { id 0, size 8 }, or three { 0, 8 }, { 8, 4 }, { 4, 4 } - with values of zero answered 0x80268001, the values unchanged; one record on port -1 the same.",
-    "orbistoun answers 0x80268001 for those record shapes on any port, writing nothing; any other shape is unmeasured and answers the placeholder.",
+    "MEASURED (REQ-ap02, report-1791842051.txt line 60): on a 2-channel port the process made, one record { id 0, size 8 } whose value pointed at a pointer to 256 stereo float frames answered 0, and the context's blocking pushes then paced (see sceAudioOut2ContextPush).",
+    "orbistoun answers 0 for one { id 0, size 8 } record whose 8 bytes are a non-null pointer, on a made port, and counts the port as publishing PCM (D820); 0x80268001 for the measured shapes whose values are zero, on any port, writing nothing; any other shape or value is unmeasured and answers the placeholder.",
 ]
 found_by = "static"
 known_by = "measured"
@@ -204,7 +205,8 @@ purpose = "(context, flag): pushes the context's mixed grain out, flag 0 not blo
 returns = "status"
 edge_cases = [
     "MEASURED (REQ-24b2, report-1791836505.txt 98-164): on context 0 six non-blocking pushes and twenty blocking ones each answered 0, each within 0x4ea to 0x1b8e TSC ticks - no grain was paced; flag 2 and contexts 1 and -1 answered 0x80268001.",
-    "orbistoun answers 0 on the context made for flags 0 and 1, without blocking, and 0x80268001 for flag 2 and for 1 and -1; other flags and handles are unmeasured and answer the placeholder.",
+    "MEASURED (REQ-ap02, report-1791842051.txt 50-385): on PPSA04263's parameters with a 2-channel port publishing PCM, blocking pushes returned at once twice (queued 1, then 2) and then each after a 256-frame grain, 5.33 ms (the first 10.15 ms), 189 in one second, the level staying queued 2, available 1; non-blocking pushes never waited, saturating at queued 3, available 0. TSC 1,596,308,405 Hz.",
+    "orbistoun answers 0 on the context made for flags 0 and 1 and 0x80268001 for flag 2 and for 1 and -1; once a port has published PCM it paces by a queue of grains (D820, assumed beyond the measured parameter set); other flags and handles are unmeasured and answer the placeholder.",
 ]
 found_by = "static"
 known_by = "measured"
@@ -219,7 +221,8 @@ returns = "status"
 edge_cases = [
     "MEASURED (REQ-24b2, report-1791836505.txt 85-92): on context 0 before any push, rc 0, queued 0 and available 2, each written as a u32 with the slot's high 4 bytes untouched; a null queued or a null available answered 0, both null 0x80268001; contexts 1 and -1 0x80268001.",
     "MEASURED (same, 101-121): after non-blocking pushes the level read 1/0, then 0/1, then 0/2 for the rest - the queue settles back to 0 and 2.",
-    "ASSUMED: orbistoun answers the settled level, queued 0 and available 2, always; the brief levels just after a push are not modelled.",
+    "MEASURED (REQ-ap02, report-1791842051.txt 61-385): with PCM published, queued 1 available 2, queued 2 available 1, queued 3 available 0.",
+    "orbistoun answers the level of its grain queue (D820) with the available count measured beside each queued count; the brief REQ-24b2 levels without PCM published (1/0, 0/1) are not modelled.",
 ]
 found_by = "static"
 known_by = "measured"
