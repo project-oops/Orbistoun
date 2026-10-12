@@ -2403,29 +2403,36 @@ impl Pipeline {
     /// Binds what each draw's shaders read beside their user data, for a backend that supplies it:
     /// the textures they sample and the buffers they read through (D733).
     fn bind_resources(&mut self, submission: &mut Submission, memory: &impl GuestMemory) {
-        submission.report.textures = texture_census(&submission.commands, memory);
+        use crate::perf::{Span, span};
+        submission.report.textures = span(Span::TextureCensus, || {
+            texture_census(&submission.commands, memory)
+        });
         if !self.feeds_user_data {
             return;
         }
-        bind_textures(
-            &mut submission.commands,
-            (&self.texture_sources, &mut self.texels),
-            memory,
-            (
-                &mut submission.report.unbound_textures,
-                &mut submission.report.first_unbound_texture,
-            ),
-        );
-        crate::draw_buffers::bind_draw_buffers(
-            &mut submission.commands,
-            (
-                &self.buffer_sources,
-                (&self.index_readers, &self.assemblies),
-                &mut self.buffers,
-            ),
-            memory,
-            &mut submission.report.unbound_buffers,
-        );
+        span(Span::TextureBind, || {
+            bind_textures(
+                &mut submission.commands,
+                (&self.texture_sources, &mut self.texels),
+                memory,
+                (
+                    &mut submission.report.unbound_textures,
+                    &mut submission.report.first_unbound_texture,
+                ),
+            );
+        });
+        span(Span::BufferBind, || {
+            crate::draw_buffers::bind_draw_buffers(
+                &mut submission.commands,
+                (
+                    &self.buffer_sources,
+                    (&self.index_readers, &self.assemblies),
+                    &mut self.buffers,
+                ),
+                memory,
+                &mut submission.report.unbound_buffers,
+            );
+        });
     }
 
     /// The host subgroup a primitive shader runs one invocation per lane on (D760): wherever the
@@ -4097,6 +4104,7 @@ fn texture_from_words(
             orbistoun_mem::watch::written_since(descriptor.base, span as u64, since)
         }) == Some(false)
     {
+        crate::perf::span(crate::perf::Span::TextureKept, || ());
         return Some(swizzled_texture(
             block_bind(
                 slot,
@@ -4110,7 +4118,7 @@ fn texture_from_words(
         ));
     }
     // Marked before the bytes are hashed, so a write racing the hash is seen next time.
-    let since = orbistoun_mem::watch::mark(descriptor.base, span as u64);
+    let since = texture_mark(descriptor.base, span as u64);
     let texels_bytes = memory.read(descriptor.base, span)?;
     let rows = || (0..height).map(|row| &texels_bytes[row * row_bytes..][..width * 4]);
     let mut hasher = crate::ContentHasher::new(width * height);
@@ -4267,12 +4275,61 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             faces: 1,
         };
     }
+    let moved = crate::content_hash(&[
+        selects[0],
+        selects[1],
+        selects[2],
+        selects[3],
+        format.bytes(),
+    ]);
+    let hash = hash ^ moved.rotate_left(17);
+    let kept = swizzled_kept()
+        .lock()
+        .ok()
+        .and_then(|kept| kept.get(&hash).cloned());
+    let swizzled = kept.unwrap_or_else(|| {
+        crate::perf::span(crate::perf::Span::TextureSwizzle, || {
+            let swizzled = swizzle_texels(&texels, format, selects);
+            if let Ok(mut kept) = swizzled_kept().lock() {
+                if kept.len() >= TEXEL_CACHE_ENTRIES {
+                    kept.clear();
+                }
+                kept.insert(hash, std::sync::Arc::clone(&swizzled));
+            }
+            swizzled
+        })
+    });
+    RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels: swizzled,
+        width,
+        height,
+        sampling,
+        encoding: crate::backend::TextureEncoding::Rgba8,
+        faces: 1,
+    }
+}
+
+/// Swizzled texels by the hash they are bound under. The hash is the source texels' combined with
+/// the format and selects, so equal hashes swizzle to equal texels; a frame binds the same few
+/// textures many times, and a large one took tens of milliseconds to swizzle at every binding.
+fn swizzled_kept()
+-> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<[u32]>>> {
+    static KEPT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<[u32]>>>,
+    > = std::sync::OnceLock::new();
+    KEPT.get_or_init(Default::default)
+}
+
+/// Each texel's channels as `selects` pick them from `format`'s.
+fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std::sync::Arc<[u32]> {
     let pick = |channels: [u8; 4], select: u32| match select {
         1 => 0xFF,
         4..=7 => channels[(select - SELECT_X) as usize],
         _ => 0,
     };
-    let swizzled: Vec<u32> = texels
+    texels
         .iter()
         .map(|&texel| {
             let channels = match format {
@@ -4286,24 +4343,17 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             };
             u32::from_le_bytes(selects.map(|select| pick(channels, select)))
         })
-        .collect();
-    let moved = crate::content_hash(&[
-        selects[0],
-        selects[1],
-        selects[2],
-        selects[3],
-        format.bytes(),
-    ]);
-    RenderCommand::BindTexture {
-        slot,
-        hash: hash ^ moved.rotate_left(17),
-        texels: swizzled.into(),
-        width,
-        height,
-        sampling,
-        encoding: crate::backend::TextureEncoding::Rgba8,
-        faces: 1,
+        .collect()
+}
+
+/// The host's mark of when a texture's texels were read, counted when there is none: the next
+/// binding then reads them again.
+fn texture_mark(base: u64, len: u64) -> Option<u64> {
+    let since = orbistoun_mem::watch::mark(base, len);
+    if since.is_none() {
+        crate::perf::span(crate::perf::Span::TextureUnwatched, || ());
     }
+    since
 }
 
 /// A texture's texels as last read, with their content hash and the host's mark of when.
@@ -4382,6 +4432,7 @@ fn read_tiled_texture(
             .and_then(|since| orbistoun_mem::watch::written_since(surface.base, span as u64, since))
             == Some(false)
     {
+        crate::perf::span(crate::perf::Span::TextureKept, || ());
         return Some(RenderCommand::BindTexture {
             slot,
             hash: cached.hash,
@@ -4393,7 +4444,7 @@ fn read_tiled_texture(
             faces: 1,
         });
     }
-    let since = orbistoun_mem::watch::mark(surface.base, span as u64);
+    let since = texture_mark(surface.base, span as u64);
     let (hash, shared): (u64, std::sync::Arc<[u32]>) = if cleared {
         let zeros = vec![0u32; width as usize * height as usize];
         (crate::content_hash(&zeros), zeros.into())
@@ -4516,6 +4567,7 @@ fn read_block_texture(
             .and_then(|since| orbistoun_mem::watch::written_since(surface.base, watched, since))
             == Some(false)
     {
+        crate::perf::span(crate::perf::Span::TextureKept, || ());
         return Some(block_bind(
             slot,
             cached.hash,
@@ -4524,7 +4576,7 @@ fn read_block_texture(
             block.encoding,
         ));
     }
-    let since = orbistoun_mem::watch::mark(surface.base, watched);
+    let since = texture_mark(surface.base, watched);
     let mut blocks = Vec::new();
     for face in 0..u64::from(faces) {
         let tiled: Vec<u32> = memory

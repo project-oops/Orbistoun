@@ -230,11 +230,24 @@ pub enum Span {
     PrepareGeometry,
     /// Preparing a submission: its textures, read and bound.
     PrepareTextures,
+    /// Within [`Self::PrepareTextures`]: every bound texture's descriptor read for the report.
+    TextureCensus,
+    /// Within [`Self::PrepareTextures`]: the textures each draw samples, read or kept.
+    TextureBind,
+    /// Within [`Self::PrepareTextures`]: the buffers each draw reads, read and bound.
+    BufferBind,
+    /// A texture's texels kept from an earlier read, nothing having written them since. Counted.
+    TextureKept,
+    /// A texture read whose memory the host does not write-watch, so the next binding reads it
+    /// again. Counted.
+    TextureUnwatched,
+    /// A texture's channels re-picked for its view, not having been swizzled for it before.
+    TextureSwizzle,
 }
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 35] = [
         Self::SubmitCall,
         Self::CommandProcessor,
         Self::RunDraws,
@@ -264,6 +277,12 @@ impl Span {
         Self::PrepareShaders,
         Self::PrepareGeometry,
         Self::PrepareTextures,
+        Self::TextureCensus,
+        Self::TextureBind,
+        Self::BufferBind,
+        Self::TextureKept,
+        Self::TextureUnwatched,
+        Self::TextureSwizzle,
     ];
 
     /// What to call it in the report.
@@ -298,6 +317,12 @@ impl Span {
             Self::PrepareShaders => "prepare: shaders",
             Self::PrepareGeometry => "prepare: geometry",
             Self::PrepareTextures => "prepare: textures",
+            Self::TextureCensus => "textures: census",
+            Self::TextureBind => "textures: bind",
+            Self::BufferBind => "textures: buffers",
+            Self::TextureKept => "textures: kept",
+            Self::TextureUnwatched => "textures: unwatched",
+            Self::TextureSwizzle => "textures: swizzle",
         }
     }
 }
