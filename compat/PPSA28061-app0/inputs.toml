@@ -1,6 +1,9 @@
 # PPSA28061 past its first notice screen, which waits on a button (D721, D736). Flips count from
 # guest entry; Cross then Options, pressed and released every forty flips from flip 200, so a
-# press lands on the notice whatever the host speed. Written by hand, not captured.
+# press lands on the notice whatever the host speed. Then into play: Cross at flip 1200 wakes the
+# title's menu, and Circle - the menus' confirm - held ten flips every sixty flips from 1260 takes
+# START, the difficulty (NORMAL) and the stage intro; stage one is on screen by flip 1800, where
+# the later presses fire. Written by hand, not captured.
 
 [[step]]
 at_flip = 1
@@ -109,3 +112,150 @@ buttons = ["south"]
 
 [[step]]
 at_flip = 763
+
+[[step]]
+at_flip = 1200
+buttons = ["south"]
+
+[[step]]
+at_flip = 1210
+
+[[step]]
+at_flip = 1260
+buttons = ["east"]
+
+[[step]]
+at_flip = 1270
+
+[[step]]
+at_flip = 1320
+buttons = ["east"]
+
+[[step]]
+at_flip = 1330
+
+[[step]]
+at_flip = 1380
+buttons = ["east"]
+
+[[step]]
+at_flip = 1390
+
+[[step]]
+at_flip = 1440
+buttons = ["east"]
+
+[[step]]
+at_flip = 1450
+
+[[step]]
+at_flip = 1500
+buttons = ["east"]
+
+[[step]]
+at_flip = 1510
+
+[[step]]
+at_flip = 1560
+buttons = ["east"]
+
+[[step]]
+at_flip = 1570
+
+[[step]]
+at_flip = 1620
+buttons = ["east"]
+
+[[step]]
+at_flip = 1630
+
+[[step]]
+at_flip = 1680
+buttons = ["east"]
+
+[[step]]
+at_flip = 1690
+
+[[step]]
+at_flip = 1740
+buttons = ["east"]
+
+[[step]]
+at_flip = 1750
+
+[[step]]
+at_flip = 1800
+buttons = ["east"]
+
+[[step]]
+at_flip = 1810
+
+[[step]]
+at_flip = 1860
+buttons = ["east"]
+
+[[step]]
+at_flip = 1870
+
+[[step]]
+at_flip = 1920
+buttons = ["east"]
+
+[[step]]
+at_flip = 1930
+
+[[step]]
+at_flip = 1980
+buttons = ["east"]
+
+[[step]]
+at_flip = 1990
+
+[[step]]
+at_flip = 2040
+buttons = ["east"]
+
+[[step]]
+at_flip = 2050
+
+[[step]]
+at_flip = 2100
+buttons = ["east"]
+
+[[step]]
+at_flip = 2110
+
+[[step]]
+at_flip = 2160
+buttons = ["east"]
+
+[[step]]
+at_flip = 2170
+
+[[step]]
+at_flip = 2220
+buttons = ["east"]
+
+[[step]]
+at_flip = 2230
+
+[[step]]
+at_flip = 2280
+buttons = ["east"]
+
+[[step]]
+at_flip = 2290
+
+[[step]]
+at_flip = 2340
+buttons = ["east"]
+
+[[step]]
+at_flip = 2350
+
+[[step]]
+at_flip = 2400
+buttons = ["east"]
+
+[[step]]
+at_flip = 2410
