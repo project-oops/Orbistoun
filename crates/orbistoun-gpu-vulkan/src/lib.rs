@@ -267,11 +267,9 @@ pub struct VulkanBackend {
     /// The user-data block the next draw's shaders read at entry, vertex words first, as the latest
     /// `SetUserData` for each stage left it.
     user_data: [u32; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
-    /// The texture the next draw samples, and its row length: the latest `BindTexture`; `None`
-    /// samples the default texel.
-    texture: Option<BoundTexture>,
-    /// The second texture, from a `BindTexture` of slot 1.
-    second_texture: Option<BoundTexture>,
+    /// The textures the next draw samples, by slot, each with its row length: the latest
+    /// `BindTexture` of that slot; `None` samples the default texel.
+    textures: [Option<BoundTexture>; framebuffer::MAX_TEXTURES],
     /// The buffers the next draw's primitive shader and pixel shader read through (D733): the
     /// latest `BindDrawBuffers` for each stage.
     draw_buffers: [Vec<orbistoun_gpu::DrawBuffer>; 2],
@@ -354,8 +352,7 @@ impl VulkanBackend {
             geometry_buffers_rebound: false,
             batched: None,
             user_data: [0; orbistoun_gpu::USER_DATA_BLOCK_WORDS],
-            texture: None,
-            second_texture: None,
+            textures: [const { None }; framebuffer::MAX_TEXTURES],
             draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
             write_mask: None,
@@ -462,7 +459,8 @@ impl VulkanBackend {
     }
 
     /// Binds the texture a [`RenderCommand::BindTexture`] carries, which the following draws sample
-    /// at its slot; the second slot is a pixel shader's second texture.
+    /// at its slot: the pixel shader's first texture, second, and so on up to
+    /// [`framebuffer::MAX_TEXTURES`].
     fn bind_texture(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
         let &RenderCommand::BindTexture {
             slot,
@@ -503,16 +501,16 @@ impl VulkanBackend {
             hash,
             sampling,
         });
-        match slot {
-            0 => self.texture = bound,
-            1 => self.second_texture = bound,
-            _ => {
-                self.refused += 1;
-                return Err(BackendError::Unsupported {
-                    command: "BindTexture beyond the second texture slot",
-                });
-            }
-        }
+        let Some(texture) = usize::try_from(slot)
+            .ok()
+            .and_then(|slot| self.textures.get_mut(slot))
+        else {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "BindTexture beyond the last texture slot",
+            });
+        };
+        *texture = bound;
         Ok(())
     }
 
@@ -902,14 +900,19 @@ impl VulkanBackend {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (shaders, extent).hash(&mut hasher);
         // The samplers too: each is built with its pipeline's descriptor set.
-        self.texture
-            .as_ref()
-            .map(|t| (t.hash, t.sampling, t.encoding))
-            .hash(&mut hasher);
-        self.second_texture
-            .as_ref()
-            .map(|t| (t.hash, t.sampling, t.encoding))
-            .hash(&mut hasher);
+        // The first two slots as they always were, so their keys do not move; a later slot only
+        // where it is bound, with its slot, so an unbound one adds nothing.
+        for texture in &self.textures[..2] {
+            texture
+                .as_ref()
+                .map(|t| (t.hash, t.sampling, t.encoding))
+                .hash(&mut hasher);
+        }
+        for (slot, t) in self.textures.iter().enumerate().skip(2) {
+            if let Some(t) = t {
+                (slot, t.hash, t.sampling, t.encoding).hash(&mut hasher);
+            }
+        }
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
@@ -1147,8 +1150,7 @@ impl VulkanBackend {
             None => (None, None),
         };
         let block = self.user_data;
-        let texture = self.texture.clone();
-        let second_texture = self.second_texture.clone();
+        let textures = self.textures.clone();
         let draw_buffers = self.draw_buffers.clone();
         let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
         let start = framebuffer::Start {
@@ -1157,18 +1159,15 @@ impl VulkanBackend {
             mesh_first_vertex: draw.first_vertex,
             initial: None,
             user_data: &block,
-            texture: texture.as_ref().map(BoundTexture::words),
+            textures: textures
+                .each_ref()
+                .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
             write_mask: self.write_mask,
             viewport: self.viewport_transform,
-            second_texture: second_texture.as_ref().map(BoundTexture::words),
-            sampling: [
-                texture.as_ref().map(|t| t.sampling).unwrap_or_default(),
-                second_texture
-                    .as_ref()
-                    .map(|t| t.sampling)
-                    .unwrap_or_default(),
-            ],
+            sampling: textures
+                .each_ref()
+                .map(|t| t.as_ref().map(|t| t.sampling).unwrap_or_default()),
             pipeline_key: Some(pipeline_key),
             depth,
             cull: self.cull,

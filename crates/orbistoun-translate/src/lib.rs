@@ -761,7 +761,7 @@ mod tests {
                     draw_buffers: false,
                     buffer_formats: None,
                     flat_twins: None,
-                    saturated: [[false; 2]; 2],
+                    saturated: [[false; 2]; crate::wavefront::MAX_TEXTURES],
                     local_words: None,
                 },
             )
@@ -1132,6 +1132,57 @@ mod tests {
         words.extend(load_and_fetch);
         let refused = fragment(&words).expect_err("refused").to_string();
         assert!(refused.contains("not traced"), "{refused}");
+    }
+
+    /// A pixel shader reading up to four textures from its descriptor table translates, each at its
+    /// own slot and offset (D690): PPSA02664's samples three. A fifth is refused by name, since four
+    /// bindings exist.
+    #[test]
+    fn up_to_four_textures_from_the_table_translate_and_a_fifth_is_refused() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let fragment = |count: u32| {
+            let mut words = Vec::new();
+            for texture in 0..count {
+                // s_load_dwordx8 s[8 + 8n : 15 + 8n], s[0:1], 0x40 * n
+                words.extend([
+                    0xf40c_0000 | ((8 + 8 * texture) << 6),
+                    0xfa00_0000 | (0x40 * texture),
+                ]);
+            }
+            words.push(0xbf8c_c07f);
+            for texture in 0..count {
+                // image_load_mip v[0:3], v[4:6], s[8 + 8n : 15 + 8n] dmask:0xf dim:2D unorm
+                words.extend([0xf004_1f08, ((8 + 8 * texture) / 4) << 16 | 0x04]);
+            }
+            // exp mrt0 v0, v1, v2, v3 done vm
+            words.extend([0xf800_180f, 0x0302_0100, 0xbf81_0000]);
+            let decoded = decode(&stream(&words), &table, &operands);
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::Predicated {
+                    fidelity: Fidelity::Wavefront,
+                    width: Width::default(),
+                },
+                (Stage::Fragment, MeshPrimitive::default()),
+                Window::default(),
+                UserData::default(),
+            )
+        };
+        for count in 3..=4 {
+            let translated = fragment(count).expect("up to four textures translate");
+            assert_eq!(
+                translated
+                    .textures
+                    .iter()
+                    .map(|t| (t.slot, t.table_offset))
+                    .collect::<Vec<_>>(),
+                (0..count).map(|n| (n, Some(0x40 * n))).collect::<Vec<_>>()
+            );
+        }
+        let refused = fragment(5).expect_err("refused").to_string();
+        assert!(refused.contains("more than four textures"), "{refused}");
     }
 
     /// SuperTuxKart's compute image copy, as ACO compiled it for radeonsi in the guest: it fetches

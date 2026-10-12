@@ -24,6 +24,7 @@ use crate::{TranslateError, Width};
 mod compute_inputs;
 mod pixel_inputs;
 pub use compute_inputs::{ComputeInputs, PartialGroups};
+pub use orbistoun_spirv::MAX_TEXTURES;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
 
 /// Lanes in a wavefront.
@@ -430,7 +431,7 @@ pub struct UserData {
     /// For each texture slot a pixel shader samples, which coordinates, across then down, it
     /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
     #[serde(default)]
-    pub saturated: [[bool; 2]; 2],
+    pub saturated: [[bool; 2]; MAX_TEXTURES],
     /// The local data share the stage's program declares, in words: its `RSRC2`'s `LDS_SIZE`, in
     /// the 512-byte units radeonsi encodes it in (`ac_shader_encode_lds_size`). `None` when the
     /// stream declared none, and then the module provides a fixed 1 KiB.
@@ -1500,7 +1501,7 @@ pub struct Wavefront<'a> {
     /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
     integer_images: [bool; 2],
     /// The coordinates each texture slot's samples saturate (D743).
-    saturated: [[bool; 2]; 2],
+    saturated: [[bool; 2]; MAX_TEXTURES],
     /// The four-component unsigned vector an integer image's texel is, declared on first use.
     uvec4: Option<Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
@@ -1662,9 +1663,9 @@ impl Wavefront<'_> {
     /// The source of a texture first sampled through `descriptor`: the next slot, and the table
     /// offset the descriptor was loaded from.
     ///
-    /// Refused where the texture cannot be identified: a third texture (two bindings exist), a
-    /// descriptor loaded from more than one offset, or a second texture when either did not come
-    /// from the table. A pipeline finds a texture by its offset, so binding offset zero to both
+    /// Refused where the texture cannot be identified: a fifth texture (four bindings exist), a
+    /// descriptor loaded from more than one offset, or a texture after the first when it or an
+    /// earlier one did not come from the table. A pipeline finds a texture by its offset, so binding offset zero to both
     /// would draw the wrong image.
     fn new_texture_source(
         &self,
@@ -1672,8 +1673,10 @@ impl Wavefront<'_> {
         reaching: Option<(Option<TableBase>, u32)>,
     ) -> Result<TextureSource, &'static str> {
         let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
-        if slot > 1 {
-            return Err("this shader reads more than two textures, and two bindings exist (D690)");
+        if slot as usize >= MAX_TEXTURES {
+            return Err(
+                "this shader reads more than four textures, and four bindings exist (D690)",
+            );
         }
         let user_data = self.resident_descriptor(descriptor)?;
         let (table, table_offset) = match self.descriptor_loads.0.get(&descriptor) {
@@ -1699,12 +1702,12 @@ impl Wavefront<'_> {
                 ));
             }
         };
-        let first_resolved = self.textures.first().is_none_or(|first| {
-            first.source.table_offset.is_some() || first.source.user_data.is_some()
+        let earlier_resolved = self.textures.iter().all(|earlier| {
+            earlier.source.table_offset.is_some() || earlier.source.user_data.is_some()
         });
-        if slot == 1 && ((table_offset.is_none() && user_data.is_none()) || !first_resolved) {
+        if slot >= 1 && ((table_offset.is_none() && user_data.is_none()) || !earlier_resolved) {
             return Err(concat!(
-                "this shader reads two textures and at least one descriptor did not come from ",
+                "this shader reads more than one texture and at least one descriptor did not come from ",
                 "its descriptor table, so which is which cannot be told (D690)"
             ));
         }
@@ -3942,11 +3945,7 @@ impl Model for Wavefront<'_> {
             return Ok(bound.texture);
         }
         let source = self.new_texture_source(descriptor, reaching)?;
-        let binding = if source.slot == 0 {
-            orbistoun_spirv::TEXTURE_BINDING
-        } else {
-            orbistoun_spirv::SECOND_TEXTURE_BINDING
-        };
+        let binding = orbistoun_spirv::TEXTURE_BINDINGS[source.slot as usize];
 
         let image = self.builder.id();
         let combined = self.builder.id();
@@ -4402,7 +4401,8 @@ pub type ImageSources = (Vec<TextureSource>, Option<TextureSource>);
 /// stage's first two user-data words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextureSource {
-    /// 0 for the first texture the module samples, 1 for a second.
+    /// 0 for the first texture the module samples, 1 for a second, up to
+    /// [`orbistoun_spirv::MAX_TEXTURES`].
     pub slot: u32,
     /// The descriptor's byte offset in the table, when a load from the table put it there.
     pub table_offset: Option<u32>,

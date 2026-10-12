@@ -1476,6 +1476,13 @@ pub const STORAGE_IMAGE_BINDING: u32 = 3;
 /// The open-toolchain GL context's second texture unit samples one.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
 
+/// Which binding each of a pixel shader's sampled images is bound at, by slot: [`TEXTURE_BINDING`],
+/// [`SECOND_TEXTURE_BINDING`], then seven and eight, after the global data share's binding (D690).
+pub const TEXTURE_BINDINGS: [u32; MAX_TEXTURES] = [TEXTURE_BINDING, SECOND_TEXTURE_BINDING, 7, 8];
+
+/// How many sampled images a pixel shader may read: four, one binding each (D690).
+pub const MAX_TEXTURES: usize = 4;
+
 /// Which binding a compute module reaches the global data share at: six, after the draw data
 /// (D789). Declared only by a module that accesses it.
 pub const GDS_BINDING: u32 = 6;

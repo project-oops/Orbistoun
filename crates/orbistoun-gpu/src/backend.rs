@@ -157,7 +157,7 @@ pub enum RenderCommand {
     /// emitted and the backend's default texture stays bound.
     BindTexture {
         /// Which of the fragment module's textures this is: 0 for the first it samples, 1 for a
-        /// second.
+        /// second, up to four.
         slot: u32,
         /// Texels, row-major and tightly packed, each the guest's four bytes in memory order.
         /// Shared, so a texture bound for many draws is read and held once.

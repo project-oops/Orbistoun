@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use orbistoun_shader::{
     Capture, EncodingTable, Operand, OperandTable, ShaderCorpus, ShaderError, decode_program,
 };
+use orbistoun_translate::wavefront::MAX_TEXTURES;
 use orbistoun_translate::wavefront::MeshPrimitive;
 use orbistoun_translate::wavefront::Stage;
 use orbistoun_translate::wavefront::Window;
@@ -96,11 +97,11 @@ struct ForDraw {
     window_space: WindowSpace,
     buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
     flat_twins: Option<FlatTwins>,
-    saturated: [[bool; 2]; 2],
+    saturated: [[bool; 2]; MAX_TEXTURES],
 }
 
 /// No texture slot's coordinates saturated.
-const UNSATURATED: [[bool; 2]; 2] = [[false; 2]; 2];
+const UNSATURATED: [[bool; 2]; MAX_TEXTURES] = [[false; 2]; MAX_TEXTURES];
 
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
 /// position space (D731), in the cache key.
@@ -557,7 +558,7 @@ struct ByGeometry {
     /// The flat twins the draw being bound gives its attributes (D742).
     flat_twins: Option<FlatTwins>,
     /// The coordinates the draw being bound has its pixel shader's samples saturate (D743).
-    saturated: [[bool; 2]; 2],
+    saturated: [[bool; 2]; MAX_TEXTURES],
 }
 
 /// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
@@ -2302,7 +2303,7 @@ impl Pipeline {
         (words, memory): (&[u32; USER_DATA_WORDS], &impl GuestMemory),
         by_geometry: &mut ByGeometry,
         submission: &mut Submission,
-    ) -> [[bool; 2]; 2] {
+    ) -> [[bool; 2]; MAX_TEXTURES] {
         let mut saturated = UNSATURATED;
         let Some(&fragment) = candidates.iter().find(|c| c.stage == ShaderStage::Fragment) else {
             return saturated;
@@ -5745,7 +5746,10 @@ mod tests {
             &mut by_geometry,
             &mut Submission::default(),
         );
-        assert_eq!(saturated, [[true, false], [false, false]]);
+        assert_eq!(
+            saturated,
+            [[true, false], [false; 2], [false; 2], [false; 2]]
+        );
     }
 
     /// A dispatch whose buffers no window spans binds each on its own (D746): STKT00001's copy,

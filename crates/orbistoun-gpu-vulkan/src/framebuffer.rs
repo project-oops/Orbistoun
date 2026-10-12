@@ -1827,11 +1827,7 @@ pub(crate) fn draw_vertices(
             scissor,
             initial: start.initial,
             user_data: start.user_data,
-            textures: &TexturesBound {
-                first: start.texture.unwrap_or(TextureWords::NONE),
-                second: start.second_texture.unwrap_or(TextureWords::NONE),
-                sampling: start.sampling,
-            },
+            textures: &TexturesBound::from_start(start),
             blend: start.blend,
             write_mask: start.write_mask,
             viewport: start.viewport,
@@ -1860,8 +1856,8 @@ pub(crate) struct Start<'a> {
     pub(crate) initial: Option<&'a [u8]>,
     /// The user-data block.
     pub(crate) user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
-    /// The texture and its row length.
-    pub(crate) texture: Option<TextureWords<'a>>,
+    /// The textures, by slot, each with its row length.
+    pub(crate) textures: [Option<TextureWords<'a>>; MAX_TEXTURES],
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
     /// The channels colour target zero's draws write; `None` writes every one.
@@ -1869,10 +1865,8 @@ pub(crate) struct Start<'a> {
     /// The guest's clip-to-pixel transform; `None` maps clip space over the whole attachment, `+y`
     /// down.
     pub(crate) viewport: Option<orbistoun_gpu::ViewportTransform>,
-    /// The second texture and its row length.
-    pub(crate) second_texture: Option<TextureWords<'a>>,
-    /// How each of the two textures is sampled, as its sampler descriptor says.
-    pub(crate) sampling: [orbistoun_gpu::TextureSampling; 2],
+    /// How each texture is sampled, as its sampler descriptor says.
+    pub(crate) sampling: [orbistoun_gpu::TextureSampling; MAX_TEXTURES],
     /// The draw's pipeline, as the backend hashed it: a resident draw with a key reuses the
     /// pipeline built for the last draw with the same key. `None` builds afresh.
     pub(crate) pipeline_key: Option<std::num::NonZeroU64>,
@@ -2380,8 +2374,9 @@ fn release_pipeline(device: &ash::Device, built: &Pipeline) {
             // SAFETY: as above, and the buffer that used it is already destroyed.
             unsafe { device.free_memory(memory, None) };
         }
-        release_texture(device, &built.texture);
-        release_texture(device, &built.second_texture);
+        for texture in &built.textures {
+            release_texture(device, texture);
+        }
         // SAFETY: as above.
         unsafe { device.destroy_image_view(built.storage_image.view, None) };
         // SAFETY: as above.
@@ -3343,8 +3338,9 @@ fn render_resident_with(
     // this done.
     if !built.textures_uploaded {
         one_shot(session, |device, command| {
-            upload_texture(device, command, &built.texture);
-            upload_texture(device, command, &built.second_texture);
+            for texture in &built.textures {
+                upload_texture(device, command, texture);
+            }
             open_storage_image(device, command, &built.storage_image);
         })?;
         built.textures_uploaded = true;
@@ -3529,8 +3525,9 @@ fn record(
     // the cache already holds its textures.
     if let Some(built) = pipeline {
         if !built.textures_uploaded {
-            upload_texture(device, command, &built.texture);
-            upload_texture(device, command, &built.second_texture);
+            for texture in &built.textures {
+                upload_texture(device, command, texture);
+            }
         }
         open_storage_image(device, command, &built.storage_image);
     }
@@ -3619,11 +3616,9 @@ struct Pipeline {
     descriptor_pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
     buffers: [(vk::Buffer, vk::DeviceMemory); 2],
-    /// The sampled image bound at binding 2, which a guest's textured pixel shader needs and every
-    /// other module ignores.
-    texture: Texture,
-    /// The sampled image bound at binding 4: a pixel shader's second texture.
-    second_texture: Texture,
+    /// The sampled images bound at [`TEXTURE_BINDINGS`], by slot, which a guest's textured pixel
+    /// shader needs and every other module ignores.
+    textures: [Texture; MAX_TEXTURES],
     /// The storage image bound at binding 3, which a guest's `image_store` writes. Created for
     /// every pipeline, like the texture.
     storage_image: StorageImage,
@@ -3637,8 +3632,7 @@ struct Pipeline {
     user_data: [u32; USER_DATA_BLOCK_WORDS],
     /// Where the draw's geometry buffers lie, which its words carry (D747).
     draw_places: crate::draw_buffers::GeometryPlaces,
-    /// Whether [`Self::texture`] and [`Self::second_texture`] already hold their texels on the
-    /// device: true once a cached pipeline has drawn, so its reuse copies nothing.
+    /// Whether [`Self::textures`] already hold their texels on the device: true once a cached pipeline has drawn, so its reuse copies nothing.
     textures_uploaded: bool,
     /// The dynamic offset of binding 1: which window-ring slot the draw reads. Zero for a pipeline
     /// that made its own guest-memory buffer.
@@ -3713,8 +3707,7 @@ fn build_pipeline(
         descriptor_pool,
         set,
         buffers: resources.buffers,
-        texture: resources.texture,
-        second_texture: resources.second_texture,
+        textures: resources.textures,
         storage_image: resources.storage_image,
         geometry,
         owns_guest_memory: resources.owns_guest_memory,
@@ -3753,8 +3746,7 @@ fn create_shader_modules(
 struct BoundResources {
     buffers: [(vk::Buffer, vk::DeviceMemory); 2],
     owns_guest_memory: bool,
-    texture: Texture,
-    second_texture: Texture,
+    textures: [Texture; MAX_TEXTURES],
     storage_image: StorageImage,
     draw_data_info: [vk::DescriptorBufferInfo; 1],
 }
@@ -3789,20 +3781,26 @@ fn create_bound_resources(
         ),
     };
     let buffers = [observation, guest_memory];
-    let texture = create_texture(
-        devices,
-        bound.textures.first,
-        bound.coarse_level,
-        bound.textures.sampling[0],
-    )?;
-    // The second texture unit: a pixel shader that samples two textures reads the second here. The
-    // default white texel when nothing asked for one.
-    let second_texture = create_texture(
-        devices,
-        bound.textures.second,
-        false,
-        bound.textures.sampling[1],
-    )?;
+    // One per slot, the default white texel where nothing asked for one; only the first takes the
+    // harness's coarse level.
+    let mut textures = Vec::with_capacity(MAX_TEXTURES);
+    for (slot, (&words, &sampling)) in bound
+        .textures
+        .words
+        .iter()
+        .zip(&bound.textures.sampling)
+        .enumerate()
+    {
+        textures.push(create_texture(
+            devices,
+            words,
+            slot == 0 && bound.coarse_level,
+            sampling,
+        )?);
+    }
+    let Ok(textures) = <[Texture; MAX_TEXTURES]>::try_from(textures) else {
+        unreachable!("one texture is made for each slot");
+    };
     let storage_image = create_storage_image(devices, STORAGE_IMAGE_SIZE)?;
     // One dispatch's span of the draw-data buffer; the batch's offset is given at bind (D718).
     let draw_data_info = [vk::DescriptorBufferInfo::default()
@@ -3812,8 +3810,7 @@ fn create_bound_resources(
     Ok(BoundResources {
         buffers,
         owns_guest_memory,
-        texture,
-        second_texture,
+        textures,
         storage_image,
         draw_data_info,
     })
@@ -3836,23 +3833,11 @@ fn create_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, Di
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT),
-        // The fragment stage only: a guest's pixel shader samples textures, and declaring other
-        // stages would claim what nothing has shown.
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(TEXTURE_BINDING)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         // A storage image, separate from the sampled one: a sampled image is read through a sampler
         // and cannot be written, and a storage image is written and has no sampler.
         vk::DescriptorSetLayoutBinding::default()
             .binding(STORAGE_IMAGE_BINDING)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(SECOND_TEXTURE_BINDING)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
         // Each draw's user data, for a mesh module carrying a batch of draws (D718); dynamic,
@@ -3863,6 +3848,16 @@ fn create_set_layout(device: &ash::Device) -> Result<vk::DescriptorSetLayout, Di
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT | vk::ShaderStageFlags::MESH_EXT),
     ];
+    // The fragment stage only: a guest's pixel shader samples textures, and declaring other stages
+    // would claim what nothing has shown.
+    let sampled = TEXTURE_BINDINGS.map(|binding| {
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(binding)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+    });
+    let bindings: Vec<_> = bindings.into_iter().chain(sampled).collect();
     let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     // SAFETY: the create info outlives the call.
     let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
@@ -3906,7 +3901,7 @@ fn allocate_set(
             .descriptor_count(2),
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(2),
+            .descriptor_count(MAX_TEXTURES as u32),
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_IMAGE)
             .descriptor_count(1),
@@ -3935,8 +3930,6 @@ fn write_descriptor_set(
     resources: &BoundResources,
 ) {
     let buffers = resources.buffers;
-    let texture = &resources.texture;
-    let second_texture = &resources.second_texture;
     let storage_image = &resources.storage_image;
     let draw_data_info = resources.draw_data_info;
     let observation = [vk::DescriptorBufferInfo::default()
@@ -3949,14 +3942,12 @@ fn write_descriptor_set(
         .range(words_to_bytes(windows[1]))];
     // The layout the barrier in `upload_texture` leaves the image in: a descriptor records the
     // layout at read time, not at write time.
-    let sampled = [vk::DescriptorImageInfo::default()
-        .sampler(texture.sampler)
-        .image_view(texture.view)
-        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-    let second_sampled = [vk::DescriptorImageInfo::default()
-        .sampler(second_texture.sampler)
-        .image_view(second_texture.view)
-        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+    let sampled = resources.textures.each_ref().map(|texture| {
+        [vk::DescriptorImageInfo::default()
+            .sampler(texture.sampler)
+            .image_view(texture.view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]
+    });
     // `GENERAL`, the only layout a storage image may be written in, set by the barrier before the
     // render pass.
     let stored = [vk::DescriptorImageInfo::default()
@@ -3975,26 +3966,27 @@ fn write_descriptor_set(
             .buffer_info(&memory),
         vk::WriteDescriptorSet::default()
             .dst_set(set)
-            .dst_binding(TEXTURE_BINDING)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&sampled),
-        vk::WriteDescriptorSet::default()
-            .dst_set(set)
             .dst_binding(STORAGE_IMAGE_BINDING)
             .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
             .image_info(&stored),
-        vk::WriteDescriptorSet::default()
-            .dst_set(set)
-            .dst_binding(SECOND_TEXTURE_BINDING)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .image_info(&second_sampled),
         vk::WriteDescriptorSet::default()
             .dst_set(set)
             .dst_binding(DRAW_DATA_BINDING)
             .descriptor_type(vk::DescriptorType::STORAGE_BUFFER_DYNAMIC)
             .buffer_info(&draw_data_info),
     ];
-    // SAFETY: the set came from the pool above and the buffers outlive the call.
+    let sampled_writes = TEXTURE_BINDINGS
+        .iter()
+        .zip(&sampled)
+        .map(|(&binding, info)| {
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(binding)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(info)
+        });
+    let writes: Vec<_> = writes.into_iter().chain(sampled_writes).collect();
+    // SAFETY: the set came from the pool above and the buffers and images outlive the call.
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
@@ -4374,11 +4366,7 @@ pub(crate) fn draw_resident(
             guest_buffer: Some(guest_buffer),
             scissor,
             user_data: start.user_data,
-            textures: &TexturesBound {
-                first: start.texture.unwrap_or(TextureWords::NONE),
-                second: start.second_texture.unwrap_or(TextureWords::NONE),
-                sampling: start.sampling,
-            },
+            textures: &TexturesBound::from_start(start),
             blend: start.blend,
             write_mask: start.write_mask,
             viewport: start.viewport,
@@ -4429,10 +4417,7 @@ pub fn draw_mesh_over_texture(
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
             memory,
-            textures: &TexturesBound {
-                first: TextureWords::rgba8(texture.0, texture.1),
-                ..NO_TEXTURES
-            },
+            textures: &TexturesBound::first(TextureWords::rgba8(texture.0, texture.1)),
             ..Bound::default()
         },
     )
@@ -4533,19 +4518,36 @@ struct DrawBuffersBound<'a> {
 /// The textures a draw samples, each as its texels and row length, and how each is sampled.
 #[derive(Clone, Copy)]
 struct TexturesBound<'a> {
-    /// The first sampled image; the default texel when nothing bound one.
-    first: TextureWords<'a>,
-    /// The second, likewise.
-    second: TextureWords<'a>,
+    /// The sampled images, by slot; the default texel where nothing bound one.
+    words: [TextureWords<'a>; MAX_TEXTURES],
     /// How each is sampled, as its sampler descriptor says.
-    sampling: [orbistoun_gpu::TextureSampling; 2],
+    sampling: [orbistoun_gpu::TextureSampling; MAX_TEXTURES],
 }
 
-/// A draw that samples no texture: the default texel in both slots, point-sampled.
+impl<'a> TexturesBound<'a> {
+    /// `first` in slot zero, point-sampled, and the default texel in every other.
+    const fn first(first: TextureWords<'a>) -> Self {
+        let mut words = [TextureWords::NONE; MAX_TEXTURES];
+        words[0] = first;
+        Self {
+            words,
+            sampling: NO_TEXTURES.sampling,
+        }
+    }
+
+    /// The textures a draw's start names, the default texel where it names none.
+    fn from_start(start: &Start<'a>) -> Self {
+        Self {
+            words: start.textures.map(|t| t.unwrap_or(TextureWords::NONE)),
+            sampling: start.sampling,
+        }
+    }
+}
+
+/// A draw that samples no texture: the default texel in every slot, point-sampled.
 static NO_TEXTURES: TexturesBound<'static> = TexturesBound {
-    first: TextureWords::NONE,
-    second: TextureWords::NONE,
-    sampling: [orbistoun_gpu::TextureSampling::CLAMPED_POINT; 2],
+    words: [TextureWords::NONE; MAX_TEXTURES],
+    sampling: [orbistoun_gpu::TextureSampling::CLAMPED_POINT; MAX_TEXTURES],
 };
 
 /// A draw that binds no buffers.
@@ -4664,6 +4666,12 @@ pub const TEXTURE_BINDING: u32 = 2;
 /// Which binding a pixel shader's second sampled image is bound at: four, after the storage image.
 /// Mirrors `orbistoun_spirv::SECOND_TEXTURE_BINDING`, as [`TEXTURE_BINDING`] mirrors its own.
 pub const SECOND_TEXTURE_BINDING: u32 = 4;
+
+/// Which binding each of a pixel shader's sampled images is bound at, by slot (D690):
+/// `orbistoun_spirv`'s, which the modules sample them by.
+pub const TEXTURE_BINDINGS: [u32; MAX_TEXTURES] = orbistoun_spirv::TEXTURE_BINDINGS;
+/// How many sampled images a pixel shader may read, one at each of [`TEXTURE_BINDINGS`].
+pub const MAX_TEXTURES: usize = orbistoun_spirv::MAX_TEXTURES;
 
 /// Which binding a mesh module reads its per-draw user data from, how many words each draw has
 /// there, and how many draws one dispatch carries (D718): `orbistoun_spirv`'s, which the modules
@@ -4855,10 +4863,7 @@ pub fn draw_with_texture(
         Some((vertex_words, fragment_words)),
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
-            textures: &TexturesBound {
-                first: TextureWords::rgba8(texture.0, texture.1),
-                ..NO_TEXTURES
-            },
+            textures: &TexturesBound::first(TextureWords::rgba8(texture.0, texture.1)),
             coarse_level: true,
             ..Bound::default()
         },
@@ -4885,15 +4890,12 @@ pub fn draw_with_bc3_texture(
         Some((vertex_words, fragment_words)),
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
-            textures: &TexturesBound {
-                first: TextureWords {
-                    words: blocks,
-                    width,
-                    height: Some(height),
-                    encoding: orbistoun_gpu::TextureEncoding::Bc3,
-                },
-                ..NO_TEXTURES
-            },
+            textures: &TexturesBound::first(TextureWords {
+                words: blocks,
+                width,
+                height: Some(height),
+                encoding: orbistoun_gpu::TextureEncoding::Bc3,
+            }),
             ..Bound::default()
         },
     )
@@ -4921,9 +4923,12 @@ pub fn draw_with_sampled_texture(
         Geometry::Vertex(VertexDraw::TRIANGLE),
         Bound {
             textures: &TexturesBound {
-                first: TextureWords::rgba8(texture.0, texture.1),
-                sampling: [sampling, orbistoun_gpu::TextureSampling::CLAMPED_POINT],
-                ..NO_TEXTURES
+                sampling: {
+                    let mut each = NO_TEXTURES.sampling;
+                    each[0] = sampling;
+                    each
+                },
+                ..TexturesBound::first(TextureWords::rgba8(texture.0, texture.1))
             },
             ..Bound::default()
         },

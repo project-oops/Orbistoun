@@ -4,8 +4,8 @@
 //! `image_sample_lz` (level zero) and the plain `image_sample` (level from derivatives) are
 //! different SPIR-V instructions, so each is checked against a hand-written oracle emitting its own
 //! form. A guest's resource and sampler operands describe a surface at a guest address no host
-//! image stands behind, so every sample reads the one texture the pipeline bound, and a module
-//! naming a second is refused.
+//! image stands behind, so every sample reads a texture the pipeline bound, and a module naming one
+//! whose descriptor cannot be found is refused.
 
 use orbistoun_gpu::{BorderColour, MipFilter, TextureFilter, TextureSampling, TextureWrap};
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
@@ -528,7 +528,7 @@ fn a_second_texture_is_refused_rather_than_guessed() {
     // Two textures bind only where each descriptor is found in the descriptor table; neither is
     // here, so which is which cannot be told.
     assert!(
-        detail.contains("reads two textures"),
+        detail.contains("reads more than one texture"),
         "refused, but not for naming two textures: {detail}"
     );
 }
@@ -615,6 +615,82 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
             },
         ]
     );
+}
+
+/// Three textures whose descriptors come from the descriptor table translate too, the third at slot
+/// two: PPSA02664's pixel shader samples three (D690).
+#[test]
+fn a_third_texture_from_the_descriptor_table_translates_at_slot_two() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let s_load_x8 = |dst: u32, offset: u32| {
+        let (family, opcode) = encodings
+            .find_by_name("s_load_dwordx8")
+            .expect("the target has s_load_dwordx8");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|e| e.name == family)
+            .expect("its family");
+        [
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 6),
+            offset,
+        ]
+    };
+
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        let word = 0xC800_0000u32 | (channel << 18) | (channel << 8);
+        bytes.extend(word.to_le_bytes());
+    }
+    let units = [(IMAGE_DESCRIPTOR, 0x00), (20, 0x40), (28, 0x80)];
+    for (unit, offset) in units {
+        for word in s_load_x8(unit, offset) {
+            bytes.extend(word.to_le_bytes());
+        }
+    }
+    let words = image_sample_words(39);
+    for (unit, _) in units {
+        let from_unit = (words[1] & !(0x1F << 16)) | ((unit / 4) << 16);
+        for word in [words[0], from_unit] {
+            bytes.extend(word.to_le_bytes());
+        }
+    }
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("three textures from the table translate");
+    assert_eq!(
+        translated
+            .textures
+            .iter()
+            .map(|source| (source.slot, source.table_offset))
+            .collect::<Vec<_>>(),
+        [(0, Some(0x00)), (1, Some(0x40)), (2, Some(0x80))]
+    );
+    // Each at its own binding: two, four and seven.
+    for binding in &orbistoun_spirv::TEXTURE_BINDINGS[..3] {
+        assert!(
+            orbistoun_spirv::declares_binding(&translated.module, *binding),
+            "no sampled image at binding {binding}"
+        );
+    }
+    assert!(!orbistoun_spirv::declares_binding(
+        &translated.module,
+        orbistoun_spirv::TEXTURE_BINDINGS[3]
+    ));
 }
 
 /// One register group loaded with two descriptors in turn, each sampled after its load, is two
@@ -821,7 +897,7 @@ fn a_half_border_clamp_holds_a_coordinate_past_the_edge_at_half_the_border() {
         (Stage::Fragment, MeshPrimitive::default()),
         Window::default(),
         UserData {
-            saturated: [[true; 2], [false; 2]],
+            saturated: [[true; 2], [false; 2], [false; 2], [false; 2]],
             ..UserData::default()
         },
     )
