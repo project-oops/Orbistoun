@@ -95,7 +95,8 @@ returns = "status"
 edge_cases = [
     "MEASURED (REQ-ao05): in a fresh process after the context set-up and UserCreate(0xff), with param u32 0, channels << 8, 48000, 2 and the user handle at +0x10, rc 0 and port 0 for 2 channels, then port 1 for 8; the block was unchanged.",
     "MEASURED (REQ-ao07): the port type, the word at +0x0c, after those two: 8 channels of type 3 gave port 2 and of type 1 port 3; 8 channels of type 4 answered 0x80268001, of type 0 0x80268002, and 2 channels of type 3 0x80268002, the out parameter reading -1.",
-    "orbistoun numbers a process's ports from 0 for the measured channel counts and types on the context ContextCreate made, and answers the measured refusals writing nothing; other channel counts, types, rates, contexts and users are unmeasured and answer the placeholder.",
+    "MEASURED (REQ-ap01, 000-boot/audioout2-mono-ports, report-1791818993.txt lines 440-573): PPSA04263's mono block - u32 0x100, 0x100 (one channel), 48000, 0, the user at +0x10 - made 36 times in a row: rc 0 each, ports 0x80000000 to 0x80000023 in the 8-byte slot, the block unchanged.",
+    "orbistoun numbers a process's ports from 0 for the measured channel counts and types on the context ContextCreate made, and its mono ports from 0x80000000; it answers the measured refusals writing nothing; other channel counts, types, rates, contexts and users are unmeasured and answer the placeholder.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261011T0010Z-ao05, reports/hardware/report-1791713884.txt lines 54-99, and REQ-20261011T1440Z-ao07, reports/hardware/report-1791758178.txt lines 54-82 (000-boot/audioout2-fresh-process)."
@@ -144,5 +145,35 @@ edge_cases = [
 found_by = "static"
 known_by = "measured"
 cites = "obSCEne REQ-20261012T0537Z-so01, reports/hardware/report-1791801495.txt lines 54-61 and 99-104."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "sceAudioOut2PortDestroy"
+arity = 1
+purpose = "(port): closes an output port."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ap01, 000-boot/audioout2-mono-ports, report-1791818993.txt lines 440-573): on the first mono port made, rc 0; again on the same port 0x80268009; on port -1 0x80268001.",
+    "orbistoun answers 0 for a port the process made and has not destroyed, 0x80268009 for one it destroyed, 0x80268001 for -1; any other number is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1123Z-ap01, reports/hardware/report-1791818993.txt lines 440-573."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "sceAudioOut2PortSetAttributes"
+arity = 3
+purpose = "(port, attributes, count): sets a port's attributes from count records of { u32 id; u32 pad; u64 value pointer; u64 size }."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ap01): on the first mono port, the record shapes PPSA04263 uses - one record { id 0, size 8 }, or three { 0, 8 }, { 8, 4 }, { 4, 4 } - with values of zero answered 0x80268001, the values unchanged; one record on port -1 the same.",
+    "orbistoun answers 0x80268001 for those record shapes on any port, writing nothing; any other shape is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1123Z-ap01, reports/hardware/report-1791818993.txt lines 440-573."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-12"

@@ -29,10 +29,12 @@ guest_module! {
         "sceAudioOut2Initialize" => 6,
         // (context, param, port)
         "sceAudioOut2PortCreate" => 3,
-        "sceAudioOut2PortDestroy" => 6,
+        // (port)
+        "sceAudioOut2PortDestroy" => 1,
         // (port, state)
         "sceAudioOut2PortGetState" => 2,
-        "sceAudioOut2PortSetAttributes" => 6,
+        // (port, attributes, count)
+        "sceAudioOut2PortSetAttributes" => 3,
         // (user, out)
         "sceAudioOut2UserCreate" => 2,
         // (user)
@@ -207,9 +209,30 @@ const PORT_TYPES: [((u32, u32), u64); 7] = [
     ((2, 3), 0x8026_8002),
 ];
 
-/// What `param`'s port parameters answer, for a user `sceAudioOut2UserCreate` gave: [`PORT_TYPES`]'
-/// answer for its channels and type, or `None` where the parameters are unmeasured.
-fn measured_port(param: u64) -> Option<u64> {
+/// The parameter words PPSA04263 makes its pool of mono ports with: `0x100`, one channel, 48000 Hz
+/// and port type 0 (REQ-ap01, `report-1791818993.txt` 440-573).
+const MONO_PORT: [u32; 4] = [0x100, 1 << 8, PORT_RATE, 0];
+
+/// The next mono port: the console numbered thirty-six of them `0x80000000` to `0x80000023`, in the
+/// order they were made, apart from the ports [`NEXT_PORT`] numbers (REQ-ap01).
+static NEXT_MONO_PORT: AtomicU64 = AtomicU64::new(0x8000_0000);
+
+/// The ports made and not yet destroyed, and those destroyed: `sceAudioOut2PortDestroy` answers
+/// each differently.
+static PORTS: Mutex<(BTreeSet<u64>, BTreeSet<u64>)> =
+    Mutex::new((BTreeSet::new(), BTreeSet::new()));
+
+/// What a port's parameters ask for: one of the measured kinds, or `None` where unmeasured.
+enum PortParams {
+    /// Numbered from zero, answering [`PORT_TYPES`]' answer.
+    Numbered(u64),
+    /// A [`MONO_PORT`], numbered from `0x80000000`.
+    Mono,
+}
+
+/// What `param`'s port parameters are, for a user `sceAudioOut2UserCreate` gave, or `None` where
+/// the parameters or the user are unmeasured.
+fn measured_port(param: u64) -> Option<PortParams> {
     let mut words = [0_u32; 4];
     for (i, word) in words.iter_mut().enumerate() {
         // SAFETY: the guest's parameter block, by the call's contract.
@@ -217,42 +240,108 @@ fn measured_port(param: u64) -> Option<u64> {
     }
     // SAFETY: the same block's user handle, at +0x10.
     let user = unsafe { guest::read_u64(param.wrapping_add(0x10)) }?;
-    let [first, layout, rate, fourth] = words;
     let known_user = USERS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(&user);
-    if first != 0 || rate != PORT_RATE || !known_user || layout & 0xff != 0 {
+    if !known_user {
+        return None;
+    }
+    if words == MONO_PORT {
+        return Some(PortParams::Mono);
+    }
+    let [first, layout, rate, fourth] = words;
+    if first != 0 || rate != PORT_RATE || layout & 0xff != 0 {
         return None;
     }
     let channels = layout >> 8;
     PORT_TYPES
         .iter()
         .find(|((measured, kind), _)| *measured == channels && *kind == fourth)
-        .map(|&(_, answer)| answer)
+        .map(|&(_, answer)| PortParams::Numbered(answer))
 }
 
 /// `sceAudioOut2PortCreate(context, param, port)`: on the context `sceAudioOut2ContextCreate` made,
 /// with measured parameters, writes the next port number to the 8-byte `port` and answers 0
-/// (REQ-ao05, `report-1791713884.txt` 54-99: 2 channels then 8 gave ports 0 and 1). Other
-/// parameters, contexts and users are unmeasured and answer the placeholder.
+/// (REQ-ao05, `report-1791713884.txt` 54-99: 2 channels then 8 gave ports 0 and 1); a mono port
+/// takes the next of its own numbers, from `0x80000000` (REQ-ap01). Other parameters, contexts and
+/// users are unmeasured and answer the placeholder.
 pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (context, param, port) = (args[0], args[1], args[2]);
     let made = CONTEXT_MADE.load(Ordering::Acquire);
     if !made || context != 0 || param == 0 || port == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
-    match measured_port(param) {
+    let number = match measured_port(param) {
         None => return u64::from(GuestError::Unimplemented.as_raw()),
-        Some(0) => {}
-        Some(refused) => return refused,
-    }
-    let number = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        Some(PortParams::Numbered(0)) => NEXT_PORT.fetch_add(1, Ordering::Relaxed),
+        Some(PortParams::Numbered(refused)) => return refused,
+        Some(PortParams::Mono) => NEXT_MONO_PORT.fetch_add(1, Ordering::Relaxed),
+    };
     // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
     if unsafe { guest::write_u64(port, number) } {
+        PORTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .insert(number);
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `SCE_AUDIO_OUT2_ERROR_INVALID_ARGUMENT`: what a port of `-1` and the measured attribute records
+/// were answered.
+const INVALID_ARGUMENT: u64 = 0x8026_8001;
+
+/// What a port destroyed already was answered (REQ-ap01).
+const INVALID_HANDLE: u64 = 0x8026_8009;
+
+/// `sceAudioOut2PortDestroy(port)`: 0 for a port the process made, `0x80268009` for one it has
+/// destroyed and `0x80268001` for `-1` (REQ-ap01, `report-1791818993.txt` 440-573). Any other
+/// number is unmeasured and answers the placeholder.
+pub(crate) fn port_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let port = args[0];
+    if port == u64::MAX {
+        return INVALID_ARGUMENT;
+    }
+    let mut ports = PORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if ports.0.remove(&port) {
+        ports.1.insert(port);
+        0
+    } else if ports.1.contains(&port) {
+        INVALID_HANDLE
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// The attribute records `sceAudioOut2PortSetAttributes` was measured with, `(id, size)` each:
+/// PPSA04263's two shapes, read off its calls (REQ-ap01).
+const MEASURED_ATTRIBUTES: [&[(u32, u64)]; 2] = [&[(0, 8)], &[(0, 8), (8, 4), (4, 4)]];
+
+/// `sceAudioOut2PortSetAttributes(port, attributes, count)`: for the measured record shapes,
+/// `{ u32 id; u32 pad; u64 value; u64 size }` each, `0x80268001`, with nothing of the values
+/// written, on a port the process made and on `-1` alike (REQ-ap01, `report-1791818993.txt`
+/// 440-573: values of zero). Any other shape is unmeasured and answers the placeholder.
+pub(crate) fn port_set_attributes(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (records, count) = (args[1], args[2]);
+    let shape: Option<Vec<(u32, u64)>> = (0..count.min(8))
+        .map(|i| {
+            let at = records.wrapping_add(i * 0x18);
+            // SAFETY: the guest's attribute records, by the call's contract.
+            let id = unsafe { guest::read_u32(at) }?;
+            // SAFETY: the same record's size, at +0x10.
+            let size = unsafe { guest::read_u64(at.wrapping_add(0x10)) }?;
+            Some((id, size))
+        })
+        .collect();
+    match shape {
+        Some(shape) if MEASURED_ATTRIBUTES.contains(&shape.as_slice()) => INVALID_ARGUMENT,
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
 

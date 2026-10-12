@@ -243,6 +243,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
         ("sceAudioOut2PortCreate", audio_out2::port_create),
+        ("sceAudioOut2PortDestroy", audio_out2::port_destroy),
+        (
+            "sceAudioOut2PortSetAttributes",
+            audio_out2::port_set_attributes,
+        ),
         ("sceAudioOut2PortGetState", audio_out2::port_get_state),
         ("sceAudioOut2GetSpeakerInfo", audio_out2::get_speaker_info),
         (
@@ -355,6 +360,7 @@ mod tests {
         }
         assert_eq!(ports, [0, 1]);
         ports_by_type_and_state(user);
+        mono_ports(user);
         // Six channels, which the title rounds up to eight before it calls, is unmeasured.
         let mut block = [0_u8; 0x40];
         block[4..8].copy_from_slice(&(6_u32 << 8).to_le_bytes());
@@ -365,6 +371,59 @@ mod tests {
         let unmeasured = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
         assert_ne!(call("sceAudioOut2PortCreate", unmeasured), 0);
         assert_eq!(port, [0xa5; 8], "an unmeasured call writes nothing");
+    }
+
+    /// PPSA04263's pool of mono ports as REQ-ap01 measured it (`report-1791818993.txt` 440-573):
+    /// thirty-six numbered `0x80000000` on, the block untouched; both attribute shapes refused
+    /// `0x80268001`, on a made port and on `-1`; a port destroyed once answers 0, then `0x80268009`,
+    /// and `-1` `0x80268001`.
+    fn mono_ports(user: [u8; 8]) {
+        let mut block = [0_u8; 0x38];
+        for (i, word) in [0x100_u32, 0x100, 48_000, 0].into_iter().enumerate() {
+            block[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        block[16..24].copy_from_slice(&user);
+        let before = block;
+        let mut numbers = Vec::new();
+        for _ in 0..36 {
+            let mut port = [0xcc_u8; 8];
+            let args = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
+            assert_eq!(call("sceAudioOut2PortCreate", args), 0);
+            numbers.push(u64::from_le_bytes(port));
+        }
+        assert_eq!(numbers.first(), Some(&0x8000_0000));
+        assert_eq!(numbers.last(), Some(&0x8000_0023));
+        assert_eq!(block, before, "the block is untouched");
+
+        let record = |id: u32, value: u64, size: u64| {
+            let mut r = [0_u8; 0x18];
+            r[0..4].copy_from_slice(&id.to_le_bytes());
+            r[8..16].copy_from_slice(&value.to_le_bytes());
+            r[16..24].copy_from_slice(&size.to_le_bytes());
+            r
+        };
+        let (v, a, b) = ([0_u8; 8], [0_u8; 4], [0_u8; 4]);
+        let one = record(0, v.as_ptr() as u64, 8);
+        let mut three = [0_u8; 0x48];
+        three[..0x18].copy_from_slice(&one);
+        three[0x18..0x30].copy_from_slice(&record(8, a.as_ptr() as u64, 4));
+        three[0x30..].copy_from_slice(&record(4, b.as_ptr() as u64, 4));
+        let first = numbers[0];
+        let set = |port: u64, records: &[u8], count: u64| {
+            call(
+                "sceAudioOut2PortSetAttributes",
+                [port, records.as_ptr() as u64, count, 0, 0, 0],
+            )
+        };
+        assert_eq!(set(first, &one, 1), 0x8026_8001);
+        assert_eq!(set(first, &three, 3), 0x8026_8001);
+        assert_eq!(set(u64::MAX, &one, 1), 0x8026_8001);
+        assert_eq!((v, a, b), ([0; 8], [0; 4], [0; 4]), "nothing written");
+
+        let destroy = |port: u64| call("sceAudioOut2PortDestroy", [port, 0, 0, 0, 0, 0]);
+        assert_eq!(destroy(first), 0);
+        assert_eq!(destroy(first), 0x8026_8009);
+        assert_eq!(destroy(u64::MAX), 0x8026_8001);
     }
 
     /// The rest of the port sequence REQ-ao07 measured, after the two ports of

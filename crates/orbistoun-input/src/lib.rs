@@ -43,6 +43,8 @@ guest_module! {
         "scePadSetLightBar" => 2,
         // (handle, info) and (handle)
         "scePadGetControllerInformation" => 2,
+        // (handle, info)
+        "scePadDeviceClassGetExtendedInformation" => 2,
         "scePadResetOrientation" => 1,
         // The reading functions; `scePadReadExt` is declared and not implemented.
         "scePadReadState" => 2,
@@ -186,6 +188,32 @@ fn pad_get_controller_information(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// What `scePadDeviceClassGetExtendedInformation` wrote for the console's open pad: twenty zero
+/// bytes, and nothing past them in a 0x100-byte block (REQ-ux01, `000-boot/ux01-calls`,
+/// `report-1791818993.txt` 574-603).
+const EXTENDED_INFORMATION_BYTES: usize = 20;
+
+/// `scePadDeviceClassGetExtendedInformation(handle, info)`: for an open handle 0, with
+/// [`EXTENDED_INFORMATION_BYTES`] zero bytes written; for one never issued `0x80920003` (REQ-ux01).
+/// A null `info` is unmeasured and answers the placeholder.
+fn pad_get_extended_information(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if ours(args[0]).is_none() {
+        return u64::from(
+            GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
+        );
+    }
+    if args[1] == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's information block, by the call's contract; written through the checked
+    // accessor.
+    if unsafe { orbistoun_mem::guest::write_bytes(args[1], &[0; EXTENDED_INFORMATION_BYTES]) } {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
 /// `scePadReadState(handle, into)` - what the pad is doing now.
 ///
 /// Writes the whole 120-byte extent every call, as measured (`changed 120`), so no stale bytes
@@ -274,6 +302,10 @@ const OWN: &[(&str, GuestFn)] = &[
     (
         "scePadGetControllerInformation",
         pad_get_controller_information,
+    ),
+    (
+        "scePadDeviceClassGetExtendedInformation",
+        pad_get_extended_information,
     ),
     ("sceImeKeyboardGetResourceId", ime::keyboard_get_resource_id),
     ("scePadGetHandle", pad_refused_to_this_process),
@@ -466,6 +498,27 @@ mod tests {
         assert_eq!(call("scePadResetOrientation", &args(handle)), 0);
         assert_eq!(
             call("scePadResetOrientation", &args(handle + 10_000)),
+            0x8092_0003
+        );
+    }
+
+    /// The extended information is twenty zero bytes for an open handle and nothing past them; an
+    /// invented handle is refused with `0x80920003` (REQ-ux01).
+    #[test]
+    fn extended_information_is_twenty_zero_bytes() {
+        let handle = super::pad_open(&args(0));
+        let mut info = [0xcc_u8; 0x100];
+        let mut argv = args(handle);
+        argv[1] = info.as_mut_ptr() as u64;
+        assert_eq!(call("scePadDeviceClassGetExtendedInformation", &argv), 0);
+        assert!(info[..20].iter().all(|&b| b == 0));
+        assert!(
+            info[20..].iter().all(|&b| b == 0xcc),
+            "20 bytes and no more"
+        );
+        argv[0] = handle + 10_000;
+        assert_eq!(
+            call("scePadDeviceClassGetExtendedInformation", &argv),
             0x8092_0003
         );
     }
