@@ -125,14 +125,46 @@ const SCANOUT_BGRA8: u64 = 0x8000_0000_0000_0000;
 /// Whether any flip found a frame orbistoun drew waiting for write-back.
 static FRAME_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether a flip wrote a drawn frame back into the very buffer it flipped.
+/// Whether a flip wrote a drawn frame back into the very buffer it flipped, and that frame held a
+/// picture: a byte that is not zero, the test the guest-buffer branch applies (D694).
 static DRAWN_FRAME_PRESENTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Whether the guest flipped a buffer holding a frame orbistoun drew for it: the drawn half of
-/// `Reach::Presented`.
+/// When a flipped drawn frame was last read back to look for a picture.
+static PICTURE_LOOKED_FOR: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// How often a flipped drawn frame is read back while none has held a picture. A read-back is a
+/// whole frame off the device, so a title that flips blank frames pays it once a second rather
+/// than every flip, and nothing once a picture has been seen.
+const PICTURE_LOOK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether the guest flipped a buffer holding a frame orbistoun drew for it, with a picture in it:
+/// the drawn half of `Reach::Presented`.
 pub fn drawn_frame_presented() -> bool {
     DRAWN_FRAME_PRESENTED.load(Ordering::Relaxed)
+}
+
+/// Whether a frame's bytes hold a picture: any byte not zero. A frame cleared to zero and flipped
+/// is a flip, not a presentation.
+fn holds_a_picture(bytes: &[u8]) -> bool {
+    bytes.iter().any(|&b| b != 0)
+}
+
+/// Looks for a picture in the drawn frame just flipped, if none has been seen and a look is due.
+fn look_for_a_picture() {
+    if DRAWN_FRAME_PRESENTED.load(Ordering::Relaxed) {
+        return;
+    }
+    let due = PICTURE_LOOKED_FOR.lock().is_ok_and(|mut last| {
+        let due = last.is_none_or(|at| at.elapsed() >= PICTURE_LOOK_INTERVAL);
+        if due {
+            *last = Some(std::time::Instant::now());
+        }
+        due
+    });
+    if due && executed_frame().is_some_and(|(_, _, bytes)| holds_a_picture(&bytes)) {
+        DRAWN_FRAME_PRESENTED.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Whether any frame was drawn this run. Its targets are guarded for lazy write-back (D717), so a
@@ -187,7 +219,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
         FRAME_DRAWN.store(true, Ordering::Relaxed);
     }
     if written && drawn_into == Some(address) {
-        DRAWN_FRAME_PRESENTED.store(true, Ordering::Relaxed);
+        look_for_a_picture();
     }
     // Decided on every flip, window or not, so a headless run's record can say whether the window
     // would have shown what was flipped.
@@ -675,6 +707,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
         );
     });
     if outcome.refused > 0 {
+        count_refusals(&outcome.refusals);
         return None;
     }
     // A dumped submission's frame is read now, for its snapshot; every other frame stays on the
@@ -1223,6 +1256,36 @@ fn command_summary(commands: &[orbistoun_gpu::RenderCommand]) -> Vec<String> {
     lines
 }
 
+/// Every refusal over the run, by reason, and how many submissions they kept from the guest.
+static REFUSALS: Mutex<(std::collections::BTreeMap<&'static str, u64>, u64)> =
+    Mutex::new((std::collections::BTreeMap::new(), 0));
+
+/// Adds one refused submission's refusals to the run's.
+fn count_refusals(refusals: &[(&'static str, usize)]) {
+    let mut run = REFUSALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for &(why, count) in refusals {
+        *run.0.entry(why).or_default() += count as u64;
+    }
+    run.1 += 1;
+}
+
+/// The run's refusals by reason, most first, and the submissions they kept from the guest: what
+/// the run report names as a host gap.
+pub fn refusals() -> (Vec<(String, u64)>, u64) {
+    let run = REFUSALS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut by_reason: Vec<(String, u64)> = run
+        .0
+        .iter()
+        .map(|(why, count)| ((*why).to_owned(), *count))
+        .collect();
+    by_reason.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    (by_reason, run.1)
+}
+
 /// Each refusal reason and its count, one indented line apiece, for the end of an outcome line.
 fn refusal_lines(refusals: &[(&'static str, usize)]) -> String {
     let mut lines = String::new();
@@ -1274,7 +1337,18 @@ fn log_execution() {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeptFlips, RenderOutcome, render};
+    use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// A drawn frame cleared to zero is no picture, whatever its size; one non-zero byte anywhere
+    /// in it, alpha included, is.
+    #[test]
+    fn a_frame_cleared_to_zero_holds_no_picture() {
+        let mut frame = vec![0_u8; 64 * 64 * 4];
+        assert!(!holds_a_picture(&frame));
+        assert!(!holds_a_picture(&[]));
+        *frame.last_mut().expect("a frame") = 1;
+        assert!(holds_a_picture(&frame));
+    }
 
     /// The window shows a flip drawn into exactly its buffer whatever the format, a buffer read from
     /// memory only in a scanout format it decodes, and nothing tiled other than video-out tiling 0.

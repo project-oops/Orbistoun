@@ -49,6 +49,14 @@ pub struct CallTrace {
     /// tiling. Empty when nothing flipped. What a reader needs when the window could not show it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub flipped_buffer: String,
+    /// Commands the graphics backend refused over the run, by reason, most first. A submission
+    /// with any refused command is not written back (D705), so its frame never reaches the guest,
+    /// while every call the guest made around it succeeded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpu_refusals: Vec<(String, u64)>,
+    /// Submissions those refusals kept from being written back.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub gpu_refused_submissions: u64,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
     /// Every system call the guest made directly, not through a stub.
@@ -704,6 +712,12 @@ impl Conditions {
 /// Whether a count is zero, so an unrecorded one stays out of the serialised conditions.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
+/// [`is_zero`], for a 64-bit count.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u64(count: &u64) -> bool {
     *count == 0
 }
 
@@ -1647,6 +1661,8 @@ mod tests {
             presented_by: String::new(),
             frame_showable: None,
             flipped_buffer: String::new(),
+            gpu_refusals: Vec::new(),
+            gpu_refused_submissions: 0,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),

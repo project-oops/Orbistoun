@@ -2244,6 +2244,7 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
     // that lifts `flipped` to `presented`, and what put it there.
     let presented_by = flipped_frame_source();
     let frames = orbistoun_video::flips_accepted();
+    let (gpu_refusals, gpu_refused_submissions) = crate::render::refusals();
 
     CallTrace {
         module: module.to_owned(),
@@ -2267,6 +2268,8 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
                 )
             })
             .unwrap_or_default(),
+        gpu_refusals,
+        gpu_refused_submissions,
         // The first command buffer a guest handed to `sceAgcDriverSubmitDcb`, summarised.
         submission: submission_summary(),
         // Recorded, not just printed, so a guest that talks to the kernel by number leaves

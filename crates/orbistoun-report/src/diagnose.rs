@@ -1113,6 +1113,33 @@ fn host_capabilities(trace: &CallTrace) -> Vec<Finding> {
         });
     }
 
+    if trace.gpu_refused_submissions > 0 {
+        let commands: u64 = trace.gpu_refusals.iter().map(|(_, n)| n).sum();
+        out.push(Finding {
+            gap: Gap::HostCapability,
+            confidence: Confidence::Certain,
+            subject: Some("graphics".to_owned()),
+            what: format!(
+                "the graphics backend refused {commands} command(s), so {} submission(s) drew nothing the guest could see",
+                trace.gpu_refused_submissions
+            ),
+            evidence: trace
+                .gpu_refusals
+                .iter()
+                .map(|(why, count)| format!("{count} x {why}"))
+                .chain(std::iter::once(
+                    "the last refused submission is dumped as `refused` in the traces directory"
+                        .to_owned(),
+                ))
+                .collect(),
+            action: Some(
+                "carry out the most-refused command in orbistoun-gpu-vulkan, against the dumped submission (D705)"
+                    .to_owned(),
+            ),
+            weight: 0,
+        });
+    }
+
     let gamepads = trace.conditions.gamepad_ports;
     if gamepads > 0 {
         out.push(Finding {
@@ -1512,10 +1539,23 @@ mod tests {
         trace.flipped_buffer =
             "3840x2160, scanout format 0x8100000000000000, video-out tiling 0".to_owned();
         trace.conditions.gamepad_ports = 1;
+        trace.gpu_refusals = vec![
+            ("a depth-bounds test".to_owned(), 40),
+            ("an SRGB store".to_owned(), 2),
+        ];
+        trace.gpu_refused_submissions = 7;
 
         let found = host(&trace);
         let subjects: Vec<&str> = found.iter().filter_map(|f| f.subject.as_deref()).collect();
-        assert_eq!(subjects, ["audio output", "display", "input"]);
+        assert_eq!(subjects, ["audio output", "display", "graphics", "input"]);
+        assert!(
+            found[2]
+                .what
+                .contains("refused 42 command(s), so 7 submission(s)"),
+            "{}",
+            found[2].what
+        );
+        assert_eq!(found[2].evidence[0], "40 x a depth-bounds test");
         assert!(
             found[0].what.contains("64377 audio buffer(s)"),
             "only the push is unheard when no device was asked for: {}",
@@ -1650,6 +1690,8 @@ mod tests {
             presented_by: String::new(),
             frame_showable: None,
             flipped_buffer: String::new(),
+            gpu_refusals: Vec::new(),
+            gpu_refused_submissions: 0,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -2429,6 +2471,8 @@ mod tests {
             presented_by: String::new(),
             frame_showable: None,
             flipped_buffer: String::new(),
+            gpu_refusals: Vec::new(),
+            gpu_refused_submissions: 0,
             submission: None,
             calls: vec![
                 CalledImport {

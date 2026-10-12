@@ -117,9 +117,12 @@ pub enum Reach {
     Flipped,
     /// The guest put pixels it produced into a buffer that reached the output layer.
     ///
-    /// The top rung (D694), awarded only when a flipped buffer is read back holding something the
-    /// guest wrote, a positive measurement against a known prior that reaching the interface cannot
-    /// fake. Rungs are decided by `orbistoun_report::trace::status_of`, not this crate.
+    /// The top rung (D694), awarded only on a positive measurement against a known prior that
+    /// reaching the interface cannot fake: a byte that is not zero in the flipped frame. A buffer
+    /// orbistoun drew into is written back at the flip, and the drawn frame is read back from the
+    /// device and looked at; a buffer it did not draw into is read in guest memory, holding what
+    /// the guest wrote. A frame cleared to zero and flipped is `Flipped` either way. Rungs are
+    /// decided by `orbistoun_report::trace::status_of`, not this crate.
     Presented,
 }
 
