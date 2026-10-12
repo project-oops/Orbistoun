@@ -6213,24 +6213,32 @@ fn deliver_pending_signal() {
         // action; ending the process for a race is worse than dropping a signal nothing listens for.
         return;
     };
-    // The same value in both, as measured: `rsi` and `rdx` carry the identical pointer.
+    // On the interrupted thread's own stack, below its frames, as the hardware delivers: the pointer
+    // at `+0xf8` then lies on that stack, above the context and below everything the thread holds,
+    // and a collector's suspend handler scans from it (PPSA25872). The same value in both, as
+    // measured: `rsi` and `rdx` carry the identical pointer.
+    let span = thread::this_stack().or_else(|| STACK_SPAN.get().copied());
     // SAFETY: `handler` is a guest function pointer the guest passed to
-    // `sceKernelInstallExceptionHandler`; `call_guest_placing` reserves and guards its own stack,
-    // and the context is written into the low end of that same stack - inside the span it is
-    // given, and released with it.
+    // `sceKernelInstallExceptionHandler`, and `span` is this thread's own stack. The context is
+    // written inside the span `call_guest_beneath` hands over, which holds `SIGNAL_FRAME` bytes.
     let _ = unsafe {
-        thread::call_guest_placing(handler, |low, _len| {
+        thread::call_guest_beneath(handler, span, SIGNAL_FRAME, |low, _len| {
             let context = exception_context(signum, low);
             [signum, context, context]
         })
     };
 }
 
-/// How far into the handler's stack the context is placed.
+/// The span a delivered signal's context needs: the offset it is placed at, its measured inner
+/// pointer, and a word for that pointer to name.
+const SIGNAL_FRAME: u64 = CONTEXT_INTO_STACK + CONTEXT_INNER_DELTA + 8;
+
+/// How far into the span a delivered signal is given the context is placed.
 ///
 /// On the stack, as the hardware places it, because guests scan forward from the context to the
-/// end of its allocation, and a stack bounds that scan with memory the guest owns. The low end,
-/// because a stack grows down and the frames in use are at the top.
+/// end of its allocation, and a stack bounds that scan with memory the guest owns. Nothing the
+/// handler pushes reaches it: beneath the thread's frames the handler runs below the span, and on
+/// a fresh stack it grows down from the top while the context sits at the low end.
 const CONTEXT_INTO_STACK: u64 = 0x1000;
 
 /// Offset of the signal number within the context, as measured by obSCEne
@@ -6240,7 +6248,10 @@ const CONTEXT_SIGNAL: u64 = 0x48;
 /// Offset of a pointer handlers read, which refers to another address on the same stack.
 ///
 /// On the hardware it points `0x7e8` past the context; only the pointer's existence and
-/// reachability are facts, not what it holds.
+/// reachability are measured, not what it holds. A guest reads it as the interrupted thread's
+/// stack top: PPSA25872's collector (PS5Util `+0x210` handing it to `Il2cppUserAssemblies`
+/// `+0x11e760`) records it as where to scan the stopped thread from, so it must lie on that
+/// thread's stack, below its frames.
 const CONTEXT_INNER: u64 = 0xf8;
 
 /// How far past the context the measured inner pointer pointed.

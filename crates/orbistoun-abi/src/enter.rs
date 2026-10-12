@@ -85,6 +85,46 @@ pub fn float_environment() -> u32 {
     0
 }
 
+/// How many words [`preserved_registers`] answers.
+pub const PRESERVED_WORDS: usize = 7;
+
+/// The stack pointer and the six registers System V says a callee preserves, as they stand.
+///
+/// In the order `rsp`, `rbx`, `rbp`, `r12`, `r13`, `r14`, `r15`. A guest that called into this
+/// thread's host code left its own values in the last six: each is still in its register, or
+/// saved on the stack above `rsp` by a frame that took it over. A collector that stops this thread
+/// needs both halves to find what the guest holds (D813).
+#[cfg(target_arch = "x86_64")]
+#[must_use]
+#[inline(never)]
+pub fn preserved_registers() -> [u64; PRESERVED_WORDS] {
+    let mut words = [0_u64; PRESERVED_WORDS];
+    // SAFETY: seven stores through `rax`, which points at `words`, a live array of exactly seven
+    // words on this frame. `rbx` and `rbp` cannot be operands, so they are named in the template;
+    // `rax` is pinned so the pointer cannot be allocated to a register being read.
+    unsafe {
+        core::arch::asm!(
+            "mov [rax], rsp",
+            "mov [rax + 8], rbx",
+            "mov [rax + 16], rbp",
+            "mov [rax + 24], r12",
+            "mov [rax + 32], r13",
+            "mov [rax + 40], r14",
+            "mov [rax + 48], r15",
+            in("rax") words.as_mut_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+    words
+}
+
+/// The stack pointer and preserved registers, where there are any.
+#[cfg(not(target_arch = "x86_64"))]
+#[must_use]
+pub fn preserved_registers() -> [u64; PRESERVED_WORDS] {
+    [0; PRESERVED_WORDS]
+}
+
 /// Transfers control to a process entry point, and never comes back.
 ///
 /// System V puts `rsp` sixteen-byte aligned at the entry point, pointing at the argument count;

@@ -609,6 +609,76 @@ pub unsafe fn call_guest_placing(
     Some(result)
 }
 
+/// How far below the stack pointer read at [`call_guest_beneath`] its span begins.
+///
+/// The calls it makes after reading the pointer - the `place` callback and its writes - push
+/// frames below it, and must not reach the span. They are shallow; this is many times their depth.
+const BENEATH_GAP: u64 = 16 * 1024;
+
+/// The least stack a guest function called beneath the live frames is left to run in.
+const BENEATH_ROOM: u64 = 64 * 1024;
+
+/// [`call_guest_placing`], on the calling thread's own stack beneath its live frames.
+///
+/// The hardware delivers a signal on the thread it interrupts, below the frames it interrupted, so
+/// a handler can name the interrupted stack by an address on its own. A garbage collector's
+/// suspend handler does exactly that: it records an address in the context as the top of the
+/// stopped thread's stack and scans from there to the stack's end, then waits on that thread until
+/// the collection is over. On a stack of its own, that address lay outside the thread's stack, the
+/// scan covered nothing, and whatever only that thread held was collected under it (PPSA25872, a
+/// managed array reference reading `1`).
+///
+/// `place` receives a span of `reserve` bytes and answers the three arguments, as for
+/// [`call_guest_placing`]; the guest function runs on the stack below it. Above the span, beneath
+/// the gap the calls made here use, the thread's preserved registers are written: a scan starting
+/// anywhere in the span covers them, every frame the guest and this emulator have on the stack, and
+/// so everything the guest held when it called in. `span` is this thread's stack as `(lowest
+/// usable, length)`. Where the stack pointer is not inside it - a reentrant call already on a stack
+/// of its own - or the stack has no room, this falls back to [`call_guest_placing`].
+///
+/// # Safety
+///
+/// As [`call_guest_placing`], and `span` must be the writable guest stack this thread runs on.
+pub unsafe fn call_guest_beneath(
+    entry: u64,
+    span: Option<(u64, u64)>,
+    reserve: u64,
+    place: impl FnOnce(u64, u64) -> [u64; 3],
+) -> Option<u64> {
+    let registers = orbistoun_abi::enter::preserved_registers();
+    let live = registers[0];
+    let reserve = reserve.next_multiple_of(orbistoun_mem::stack::STACK_ALIGN);
+    let fits = span.and_then(|(low, len)| {
+        let high = low.checked_add(len)?;
+        if !(low..high).contains(&live) {
+            return None;
+        }
+        let saved = live.checked_sub(BENEATH_GAP)? & !(orbistoun_mem::stack::STACK_ALIGN - 1);
+        let start = saved.checked_sub(reserve)?;
+        (start.checked_sub(low)? >= BENEATH_ROOM).then_some((saved, start))
+    });
+    let Some((saved, start)) = fits else {
+        // SAFETY: the caller's contract is the general form's.
+        return unsafe { call_guest_placing(entry, place) };
+    };
+    for (i, word) in registers[1..].iter().enumerate() {
+        // SAFETY: `saved` is at least `BENEATH_GAP` below the live stack pointer and the span below
+        // it is free, so the words lie in this thread's stack, which the caller vouches is writable,
+        // and above any frame in use.
+        unsafe { orbistoun_mem::guest::write_u64(saved + i as u64 * 8, *word) };
+    }
+    let args = place(start, reserve);
+    // SAFETY: the caller vouches `entry` is executable guest code. The stack pointer is `start`,
+    // aligned, with at least `BENEATH_ROOM` of this thread's own stack beneath it and every frame in
+    // use above it, so the guest function overwrites nothing live.
+    let result = unsafe {
+        orbistoun_abi::enter::enter_guest_with_three_arguments(
+            entry, start, args[0], args[1], args[2],
+        )
+    };
+    Some(result)
+}
+
 /// Waits for a guest thread to finish.
 ///
 /// Returns whether there was anything to wait for. A second join on the same handle answers
@@ -1050,5 +1120,73 @@ mod tests {
     fn the_default_policy_records_rather_than_places() {
         // Observe is the default: no title examined depends on placement.
         assert_eq!(AffinityPolicy::default(), AffinityPolicy::Observe);
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// What the beneath test saw: the live stack pointer, the span handed to `place`, and an
+    /// address on the called function's frame.
+    static BENEATH: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+    extern "sysv64" fn report_frame(_: u64, _: u64, _: u64) -> u64 {
+        let local = std::hint::black_box(0_u64);
+        std::ptr::from_ref(&local) as u64
+    }
+
+    extern "sysv64" fn call_beneath(low: u64, len: u64, _: u64) -> u64 {
+        BENEATH[0].store(
+            orbistoun_abi::enter::preserved_registers()[0],
+            Ordering::SeqCst,
+        );
+        // SAFETY: `report_frame` is a System V function, and the span is the stack this runs on.
+        let frame = unsafe {
+            super::call_guest_beneath(
+                report_frame as *const () as u64,
+                Some((low, len)),
+                0x100,
+                |start, reserve| {
+                    BENEATH[1].store(start, Ordering::SeqCst);
+                    BENEATH[2].store(reserve, Ordering::SeqCst);
+                    [0, 0, 0]
+                },
+            )
+        };
+        BENEATH[3].store(frame.unwrap_or(0), Ordering::SeqCst);
+        0
+    }
+
+    /// A function called beneath runs on the caller's own stack, below the frames in use, as a
+    /// signal does on the hardware: a collector's handler names the stopped thread's stack by an
+    /// address on its own, and a stack elsewhere made that thread's frames unscanned (PPSA25872).
+    #[test]
+    fn a_function_called_beneath_runs_on_this_stack_below_its_frames() {
+        let stack = orbistoun_mem::stack::GuestStack::reserve(super::stack_base_for(1023), 0x80000)
+            .expect("a stack for the test");
+        let (low, len) = (stack.lowest_usable(), stack.len());
+        // SAFETY: `call_beneath` is a System V function, and the stack is reserved, aligned and
+        // outlives the call.
+        unsafe {
+            orbistoun_abi::enter::enter_guest_with_three_arguments(
+                call_beneath as *const () as u64,
+                stack.initial_pointer(),
+                low,
+                len,
+                0,
+            )
+        };
+        let [live, start, reserve, frame] = BENEATH.each_ref().map(|v| v.load(Ordering::SeqCst));
+        assert!(
+            (low..low + len).contains(&live),
+            "the caller ran on the stack"
+        );
+        assert_eq!(reserve, 0x100, "the span is the size asked for");
+        assert!(
+            start + reserve <= live - super::BENEATH_GAP,
+            "the span lies below the frames in use"
+        );
+        assert!(
+            (low..start).contains(&frame),
+            "the function ran on the same stack, beneath the span: {frame:#x} against {low:#x}..{start:#x}"
+        );
     }
 }
