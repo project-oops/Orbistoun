@@ -418,6 +418,22 @@ pub const CLOCK: Var = Var {
     effect: Effect::Observes,
 };
 
+/// Where a guest's audio output goes.
+///
+/// Unset, it plays nowhere and each output port paces itself by its sample rate, so a run from
+/// the command line is silent. The window sets it to `host` for the runs it plays.
+pub const AUDIO: Var = Var {
+    name: "ORBISTOUN_AUDIO",
+    kind: Kind::Setting,
+    summary: "`host` plays the guest's audio output on the host's default device, paced by it; unset, output plays nowhere and is paced by its sample rate",
+    example: "host",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
+/// The value of [`AUDIO`] that plays output on the host's device.
+pub const AUDIO_HOST: &str = "host";
+
 /// The run's opening calls, in order, with the address each was made from.
 ///
 /// The call trace keeps the tail, for the fault; this keeps the head, which says where two runs
@@ -705,6 +721,7 @@ pub const REGISTRY: &[Var] = &[
     APR_DELIVER,
     TRACE_FORMAT,
     CLOCK,
+    AUDIO,
     RUNTIME_GLOBALS,
     HEAP_FILL,
     HEAP_BASE,
@@ -790,6 +807,7 @@ mod tests {
         super::APR_DELIVER,
         super::TRACE_FORMAT,
         super::CLOCK,
+        super::AUDIO,
         super::RUNTIME_GLOBALS,
         super::HEAP_FILL,
         super::HEAP_BASE,

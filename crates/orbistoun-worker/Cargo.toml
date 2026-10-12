@@ -22,6 +22,9 @@ orbistoun-gpu = { workspace = true }
 # orbistoun-gpu deliberately has no graphics-runtime dependency, so the backend lives here.
 orbistoun-gpu-vulkan = { workspace = true }
 orbistoun-env = { workspace = true }
+# The guest's audio ports, and the host device they play on when a run asks for one.
+orbistoun-audio = { workspace = true }
+orbistoun-audio-host = { workspace = true }
 orbistoun-paths = { workspace = true }
 orbistoun-abi = { workspace = true }
 orbistoun-core = { workspace = true }

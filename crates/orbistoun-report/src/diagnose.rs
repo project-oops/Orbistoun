@@ -1023,13 +1023,63 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
     })
 }
 
-/// The calls through which a guest hands audio to an output, by trace label. orbistoun paces each
-/// by its sample rate and plays none of them.
-const AUDIO_OUTPUT_CALLS: [&str; 3] = [
-    "libSceAudioOut::sceAudioOutOutput",
+/// The call whose samples reach a host device when the run asked for one (`ORBISTOUN_AUDIO`).
+const AUDIO_PLAYED_CALL: &str = "libSceAudioOut::sceAudioOutOutput";
+
+/// The calls through which a guest hands audio to an output whose samples reach no device
+/// however the run is set up: their sample layouts are unmodelled.
+const AUDIO_UNPLAYED_CALLS: [&str; 2] = [
     "libSceAudioOut::sceAudioOutOutputs",
     "libSceAudioOut2::sceAudioOut2ContextPush",
 ];
+
+/// Audio the guest handed over that no host device played: output through a call that reaches
+/// none, and output through the one that does when the run asked for a device and none opened.
+/// A run that asked for none chose its silence, and that is no gap.
+fn unplayed_audio(trace: &CallTrace) -> Option<Finding> {
+    let refused = &trace.conditions.audio_refused;
+    let audio: Vec<&crate::trace::CalledImport> = trace
+        .calls
+        .iter()
+        .filter(|c| {
+            c.calls > 0
+                && (AUDIO_UNPLAYED_CALLS.contains(&c.label.as_str())
+                    || (!refused.is_empty() && c.label == AUDIO_PLAYED_CALL))
+        })
+        .collect();
+    let buffers: u64 = audio.iter().map(|c| c.calls).sum();
+    if buffers == 0 {
+        return None;
+    }
+    let unmodelled = audio
+        .iter()
+        .any(|c| AUDIO_UNPLAYED_CALLS.contains(&c.label.as_str()));
+    let why = if refused.is_empty() {
+        format!("only {AUDIO_PLAYED_CALL}'s samples reach a host device")
+    } else {
+        format!("the run asked for the host's audio device, and none opened: {refused}")
+    };
+    let action = if unmodelled {
+        "carry these calls' samples to the host audio sink, as sceAudioOutOutput's are (D819)"
+    } else {
+        "give the host an output device it can open; the title is silent until then (D819)"
+    };
+    Some(Finding {
+        gap: Gap::HostCapability,
+        confidence: Confidence::Certain,
+        subject: Some("audio output".to_owned()),
+        what: format!(
+            "the guest handed {buffers} audio buffer(s) to an output, and no host device played any of them"
+        ),
+        evidence: audio
+            .iter()
+            .map(|c| format!("{}: {} call(s)", c.label, c.calls))
+            .chain(std::iter::once(why))
+            .collect(),
+        action: Some(action.to_owned()),
+        weight: 0,
+    })
+}
 
 /// What the host failed to do while the guest was satisfied: audio no device played, a flipped
 /// frame the window could not show, pad ports set to a gamepad nothing reads.
@@ -1040,34 +1090,7 @@ const AUDIO_OUTPUT_CALLS: [&str; 3] = [
 fn host_capabilities(trace: &CallTrace) -> Vec<Finding> {
     let mut out = Vec::new();
 
-    let audio: Vec<&crate::trace::CalledImport> = trace
-        .calls
-        .iter()
-        .filter(|c| c.calls > 0 && AUDIO_OUTPUT_CALLS.contains(&c.label.as_str()))
-        .collect();
-    let buffers: u64 = audio.iter().map(|c| c.calls).sum();
-    if buffers > 0 {
-        out.push(Finding {
-            gap: Gap::HostCapability,
-            confidence: Confidence::Certain,
-            subject: Some("audio output".to_owned()),
-            what: format!(
-                "the guest handed {buffers} audio buffer(s) to an output, and no host device played any of them"
-            ),
-            evidence: audio
-                .iter()
-                .map(|c| format!("{}: {} call(s)", c.label, c.calls))
-                .chain(std::iter::once(
-                    "orbistoun-audio paces output by its sample rate and opens no device".to_owned(),
-                ))
-                .collect(),
-            action: Some(
-                "add a host audio sink behind the paced ports (REQ-20261012T1848Z-0127); the title is silent until then"
-                    .to_owned(),
-            ),
-            weight: 0,
-        });
-    }
+    out.extend(unplayed_audio(trace));
 
     if trace.frame_showable == Some(false) {
         out.push(Finding {
@@ -1494,8 +1517,8 @@ mod tests {
         let subjects: Vec<&str> = found.iter().filter_map(|f| f.subject.as_deref()).collect();
         assert_eq!(subjects, ["audio output", "display", "input"]);
         assert!(
-            found[0].what.contains("64400 audio buffer(s)"),
-            "{}",
+            found[0].what.contains("64377 audio buffer(s)"),
+            "only the push is unheard when no device was asked for: {}",
             found[0].what
         );
         assert!(
@@ -1507,6 +1530,31 @@ mod tests {
             found[1].evidence
         );
         assert!(found.iter().all(|f| f.action.is_some() && f.weight == 0));
+
+        // A device asked for and refused leaves the played call unheard too, and says why.
+        trace.conditions.audio_refused = "the host has no output device".to_owned();
+        let audio = &host(&trace)[0];
+        assert!(
+            audio.what.contains("64400 audio buffer(s)"),
+            "{}",
+            audio.what
+        );
+        assert!(
+            audio
+                .evidence
+                .iter()
+                .any(|e| e.contains("the host has no output device")),
+            "{:?}",
+            audio.evidence
+        );
+        // Output only through the played call, with the device open, is heard.
+        trace.conditions.audio_refused.clear();
+        trace.calls.remove(0);
+        assert!(
+            !host(&trace)
+                .iter()
+                .any(|f| f.subject.as_deref() == Some("audio output"))
+        );
 
         // A flip the window could show is no finding.
         trace.frame_showable = Some(true);

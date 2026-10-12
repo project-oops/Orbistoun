@@ -46,6 +46,11 @@ fn main() -> eframe::Result<()> {
         // environment concurrently; the spawned workers inherit it at their start.
         unsafe { std::env::set_var(orbistoun_env::CLOCK.name, "host") };
     }
+    // And is heard: its audio output plays on the host's device unless chosen otherwise.
+    if std::env::var_os(orbistoun_env::AUDIO.name).is_none() {
+        // SAFETY: as above - still no worker or guest thread.
+        unsafe { std::env::set_var(orbistoun_env::AUDIO.name, orbistoun_env::AUDIO_HOST) };
+    }
 
     // Beside an orbistoun-aot manifest this program is that build's launcher, and plays only its
     // title (D724); `--headless` runs it in this process with no window, as a check.

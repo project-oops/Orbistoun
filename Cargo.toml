@@ -34,6 +34,9 @@ members = [
     # one - `cargo` enforces that boundary, not review (principle 12).
     "crates/orbistoun-gpu",
     "crates/orbistoun-gpu-vulkan",
+    # The host side of audio output, as `orbistoun-gpu-vulkan` is of graphics: `orbistoun-audio`
+    # has no path to a host audio API.
+    "crates/orbistoun-audio-host",
     "crates/orbistoun-shader",
     "crates/orbistoun-translate",
     "crates/orbistoun-spirv",
@@ -160,6 +163,10 @@ egui = "0.29"
 # Reading a host gamepad for a pad port set to one. Windows only for now: on Linux it links
 # the system's libudev, a build dependency every Unix image would have to carry.
 gilrs = "0.11"
+
+# Playing a run's audio output on a host device. Windows only for now, as for gilrs: on Linux
+# it links the system's ALSA library, a build dependency every Unix image would have to carry.
+cpal = "0.16"
 
 # Decoding title icons. PNG only and no default features: the one job is turning
 # `sce_sys/icon0.png` into pixels, and the rest of the format zoo is weight for
@@ -291,6 +298,7 @@ orbistoun-translate = { path = "crates/orbistoun-translate" }
 orbistoun-gpu = { path = "crates/orbistoun-gpu" }
 orbistoun-gpu-vulkan = { path = "crates/orbistoun-gpu-vulkan" }
 orbistoun-audio = { path = "crates/orbistoun-audio" }
+orbistoun-audio-host = { path = "crates/orbistoun-audio-host" }
 orbistoun-net = { path = "crates/orbistoun-net" }
 orbistoun-video = { path = "crates/orbistoun-video" }
 orbistoun-input = { path = "crates/orbistoun-input" }

@@ -912,7 +912,8 @@ fn prepare_diagnostics(
 ) {
     // Before the run's conditions are recorded, which builds the direct map (D772).
     fit_memory_to_title(module);
-    let experiments = record_run_conditions(service, limits);
+    let audio_refused = install_audio();
+    let experiments = record_run_conditions(service, limits, audio_refused);
 
     install_guest_region_lookups();
     install_presentation();
@@ -990,7 +991,43 @@ fn link_leaf_imports(thunks: &orbistoun_thunk::ThunkTable) {
 }
 
 /// Records the conditions this run is under and returns the diagnostics it was asked for.
-fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Experiments {
+/// Plays the guest's audio output on the host's device when [`orbistoun_env::AUDIO`] asks for
+/// it, and answers why none plays when it asked and none opened; empty otherwise. The device is
+/// opened once per process, however many runs it serves.
+fn install_audio() -> String {
+    static OPENED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OPENED.get_or_init(open_audio).clone()
+}
+
+fn open_audio() -> String {
+    if orbistoun_env::AUDIO.get().as_deref() != Some(orbistoun_env::AUDIO_HOST) {
+        return String::new();
+    }
+    match orbistoun_audio_host::open() {
+        Ok(opened) => {
+            tracing::info!(
+                "audio output plays on the host device at {} Hz, {} channel(s)",
+                opened.rate,
+                opened.channels
+            );
+            orbistoun_audio::install_sink(orbistoun_audio::Sink {
+                play: orbistoun_audio_host::play,
+                close: orbistoun_audio_host::close,
+            });
+            String::new()
+        }
+        Err(why) => {
+            eprintln!("orbistoun: audio output plays nowhere: {why}");
+            why
+        }
+    }
+}
+
+fn record_run_conditions(
+    service: &Service,
+    limits: Limits,
+    audio_refused: String,
+) -> experiment::Experiments {
     // What this run is subject to, recorded before anything can fault. A comparison between runs is
     // evidence only when these match, and neither the wall-clock limit nor the stub policy shows in
     // any number the run reports (D181).
@@ -1034,14 +1071,19 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
         link_plan_stored: String::new(),
         link_plan_differs: Vec::new(),
         link_syscalls: 0,
-        // A port set to a host gamepad answers a neutral pad, since none is read yet: a host gap
-        // the report names, which no guest call would show.
-        gamepad_ports: service
-            .pads()
-            .ports
-            .iter()
-            .filter(|port| matches!(port.source, orbistoun_input::Source::Gamepad { .. }))
-            .count(),
+        // A port set to a host gamepad answers a neutral pad where none is read - every host but
+        // Windows: a host gap the report names, which no guest call would show.
+        gamepad_ports: if cfg!(windows) {
+            0
+        } else {
+            service
+                .pads()
+                .ports
+                .iter()
+                .filter(|port| matches!(port.source, orbistoun_input::Source::Gamepad { .. }))
+                .count()
+        },
+        audio_refused,
     });
     experiments
 }

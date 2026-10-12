@@ -94,6 +94,27 @@ pub unsafe fn write_bytes(at: u64, bytes: &[u8]) -> bool {
     true
 }
 
+/// Fills `into` from the bytes at `at`; `false`, reading nothing, for a refused address.
+///
+/// # Safety
+///
+/// See the [module contract](self#safety).
+pub unsafe fn read_into(at: u64, into: &mut [u8]) -> bool {
+    let Some(at) = host(at) else {
+        return false;
+    };
+    // SAFETY: the module contract: `into.len()` readable guest bytes at `at`, which cannot
+    // overlap a host slice the caller holds mutably.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            std::ptr::with_exposed_provenance::<u8>(at),
+            into.as_mut_ptr(),
+            into.len(),
+        );
+    }
+    true
+}
+
 /// The bytes of the NUL-terminated string at `at`, without the terminator, stopping after
 /// `max` bytes when no terminator comes first.
 ///
@@ -155,6 +176,10 @@ mod tests {
         assert_eq!(unsafe { read_u32(base + 8) }, Some(0xAABB_CCDD));
         // SAFETY: as the write above.
         assert_eq!(unsafe { read_cstr(base + 12, 2) }, Some(b"hi".to_vec()));
+        let mut back = [0_u8; 4];
+        // SAFETY: `base + 8..base + 12` lies inside `buffer`.
+        assert!(unsafe { read_into(base + 8, &mut back) });
+        assert_eq!(back, 0xAABB_CCDD_u32.to_le_bytes());
     }
 
     /// The null address is refused without a dereference.
@@ -170,6 +195,8 @@ mod tests {
         assert!(!unsafe { write_u64(0, 1) });
         // SAFETY: as above.
         assert!(!unsafe { write_bytes(0, b"x") });
+        // SAFETY: as above.
+        assert!(!unsafe { read_into(0, &mut [0; 1]) });
         // SAFETY: as above.
         assert_eq!(unsafe { read_path(0) }, None);
     }

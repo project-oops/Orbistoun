@@ -1,0 +1,16 @@
+[package]
+publish = false
+name = "orbistoun-audio-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Audio output on a host device - the mixer behind the guest's output ports."
+
+[lints]
+workspace = true
+
+[target.'cfg(windows)'.dependencies]
+cpal = { workspace = true }

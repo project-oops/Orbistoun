@@ -40,6 +40,20 @@ The window's runs take the limit from the toolbar (or preferences - general) and
 from `run-call-budget` under `[library]` in `config.toml`. Both default to `0`, no limit,
 because a title launched from the window is being played.
 
+## Sound
+
+A title the window plays is heard on the host's default output device (D819). Each output
+port waits on the device, so the title's audio runs at the device's pace, about 64 ms behind
+the title. A run from the command line is silent unless asked:
+
+```bash
+ORBISTOUN_AUDIO=host orbistoun-cli run <title>/eboot.bin
+```
+
+Sound plays on Windows only; elsewhere output is paced by its sample rate and heard nowhere.
+Output through `sceAudioOutOutputs` or `sceAudioOut2ContextPush` is not heard yet, and the run
+result names it under "on the host", as it does a device that did not open.
+
 ## Linking ahead of time
 
 A run starts from the title's link plan (D724). The first run of an executable builds the plan

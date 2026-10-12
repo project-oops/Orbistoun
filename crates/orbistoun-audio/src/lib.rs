@@ -55,7 +55,13 @@ fn audio_out_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&raw)
         .is_some();
-    if removed { 0 } else { no_such_port() }
+    if !removed {
+        return no_such_port();
+    }
+    if let Some(sink) = SINK.get() {
+        (sink.close)(raw);
+    }
+    0
 }
 
 /// What an open refuses a format it does not serve with.
@@ -95,6 +101,33 @@ pub(crate) fn port_state(channels: u8) -> [u8; PORT_STATE_BYTES] {
 /// stereo pair rather than a refusal, since all three measured selectors open.
 const fn channels_for(selector: u64) -> u8 {
     if selector == 0 { 1 } else { 2 }
+}
+
+/// The format selectors whose samples are 16-bit signed little-endian, interleaved.
+///
+/// Assumed from oops-sdk, whose `audio.c` opens its ports with selector 1 as "16-bit signed
+/// interleaved stereo" and plays on hardware; selector 0 is taken as that format's one-channel
+/// form, as the measured channel counts pair them. Selector 2's format is unmeasured, so its
+/// samples reach no sink.
+const S16_SELECTORS: [u64; 2] = [0, 1];
+
+/// Where an output port's samples go once the guest hands them over: a host device, at guest
+/// semantics - a port, its channel count, and samples at [`SERVED_FREQUENCY`].
+#[derive(Debug, Clone, Copy)]
+pub struct Sink {
+    /// Plays one chunk of interleaved samples on a port. Answers how long the port should wait
+    /// before it returns, so a guest is paced by the device rather than by a sleep.
+    pub play: fn(port: u32, channels: u8, samples: &[i16]) -> std::time::Duration,
+    /// Forgets a closed port and anything it still had queued.
+    pub close: fn(port: u32),
+}
+
+static SINK: std::sync::OnceLock<Sink> = std::sync::OnceLock::new();
+
+/// Installs where output ports' samples go. First install wins; with none, output is paced by
+/// the sample rate and played nowhere.
+pub fn install_sink(sink: Sink) {
+    let _ = SINK.set(sink);
 }
 
 /// One open port, and what it was opened as.
@@ -164,12 +197,17 @@ fn audio_out_open(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceAudioOutOutput(handle, samples)` - hand a chunk of samples to a port.
 ///
-/// Sleeps for as long as the samples take to play. There is no device; what a guest needs is
-/// the pacing, and returning at once would let an audio thread spin. `090-audio/blocking`
-/// treats eight 512-frame buffers at 48 kHz (85 ms of audio) returning in under 40 ms as not
-/// blocking. The hardware returns sooner than real time, through a queue of unmeasured depth,
-/// so there is no queue here and every call waits. The frame-count return is assumed.
+/// With a [`Sink`] installed, the samples go to it and the call waits as long as it says. With
+/// none, the call sleeps for as long as the samples take to play: what a guest needs is the
+/// pacing, and returning at once would let an audio thread spin. `090-audio/blocking` treats
+/// eight 512-frame buffers at 48 kHz (85 ms of audio) returning in under 40 ms as not blocking.
+/// The hardware returns sooner than real time, through a queue of unmeasured depth; a sink
+/// keeps a queue of its own, the sleep keeps none. A null buffer plays nothing and is paced
+/// alike. The frame-count return is assumed.
 fn audio_out_output(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Ok(raw) = u32::try_from(args[0]) else {
+        return no_such_port();
+    };
     let Some(port) = port(args[0]) else {
         return no_such_port();
     };
@@ -177,12 +215,42 @@ fn audio_out_output(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let playing = std::time::Duration::from_micros(
             port.frames.saturating_mul(1_000_000) / port.frequency,
         );
-        std::thread::sleep(playing);
+        let wait = SINK
+            .get()
+            .and_then(|sink| {
+                let samples = samples(args[1], port)?;
+                Some((sink.play)(raw, channels_for(port.selector), &samples))
+            })
+            .unwrap_or(playing);
+        std::thread::sleep(wait);
         // The guest clock is logical by default (D582), so the sleep must also advance it, or a
         // guest timing the output sees no time pass.
         orbistoun_hle::clocks::advance(playing.as_nanos());
     }
     port.frames
+}
+
+/// The chunk of samples a port's output names at `at`, or `None` for a null buffer or a format
+/// whose samples are not known to be 16-bit ([`S16_SELECTORS`]).
+fn samples(at: u64, port: Port) -> Option<Vec<i16>> {
+    if at == 0 || !S16_SELECTORS.contains(&port.selector) {
+        return None;
+    }
+    let count = usize::try_from(port.frames)
+        .ok()?
+        .checked_mul(usize::from(channels_for(port.selector)))?;
+    let mut bytes = vec![0_u8; count.checked_mul(2)?];
+    // SAFETY: the output call's contract: a port's buffer holds one chunk, its frames times its
+    // channels of 16-bit samples, readable for the call.
+    if !unsafe { orbistoun_mem::guest::read_into(at, &mut bytes) } {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect(),
+    )
 }
 
 /// `sceAudioOutGetPortState(handle, state)` - what a port is set to.
@@ -663,6 +731,66 @@ mod tests {
             "eight 512-frame buffers at 48 kHz took {elapsed:?}, which reads as not blocking"
         );
         assert_eq!(call("sceAudioOutClose", [handle, 0, 0, 0, 0, 0]), 0);
+    }
+
+    /// What the test sink was handed: `(port, channels, samples)` per chunk, and closed ports.
+    static PLAYED: std::sync::Mutex<Vec<(u32, u8, Vec<i16>)>> = std::sync::Mutex::new(Vec::new());
+    static CLOSED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+    /// Records a chunk and asks for the wait the sample rate gives, so the pacing tests hold
+    /// whichever test installs it first.
+    fn test_play(port: u32, channels: u8, samples: &[i16]) -> std::time::Duration {
+        PLAYED
+            .lock()
+            .expect("unpoisoned")
+            .push((port, channels, samples.to_vec()));
+        let frames = samples.len() as u64 / u64::from(channels);
+        std::time::Duration::from_micros(frames * 1_000_000 / super::SERVED_FREQUENCY)
+    }
+
+    fn test_close(port: u32) {
+        CLOSED.lock().expect("unpoisoned").push(port);
+    }
+
+    /// A port's samples reach the sink as the guest wrote them, with the selector's channel count;
+    /// a format not known to be 16-bit and a null buffer reach it with nothing, and a close is
+    /// passed on.
+    #[test]
+    fn output_hands_its_samples_to_the_sink() {
+        super::install_sink(super::Sink {
+            play: test_play,
+            close: test_close,
+        });
+        let stereo = open(4, 48_000, 1);
+        let chunk: [i16; 8] = [1, -1, 2, -2, 3, -3, i16::MAX, i16::MIN];
+        let at = chunk.as_ptr().expose_provenance() as u64;
+        assert_eq!(call("sceAudioOutOutput", [stereo, at, 0, 0, 0, 0]), 4);
+        assert_eq!(call("sceAudioOutOutput", [stereo, 0, 0, 0, 0, 0]), 4);
+        let unmeasured = open(4, 48_000, 2);
+        call("sceAudioOutOutput", [unmeasured, at, 0, 0, 0, 0]);
+
+        let played = PLAYED.lock().expect("unpoisoned").clone();
+        let of = |handle: u64| {
+            played
+                .iter()
+                .filter(|(port, ..)| u64::from(*port) == handle)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(of(stereo), [(stereo as u32, 2, chunk.to_vec())]);
+        assert!(
+            of(unmeasured).is_empty(),
+            "selector 2's format is unmeasured"
+        );
+
+        assert_eq!(call("sceAudioOutClose", [stereo, 0, 0, 0, 0, 0]), 0);
+        assert!(
+            CLOSED
+                .lock()
+                .expect("unpoisoned")
+                .contains(&(stereo as u32))
+        );
+        assert_eq!(call("sceAudioOutClose", [unmeasured, 0, 0, 0, 0, 0]), 0);
     }
 
     /// A handle nobody opened is refused with the audio subsystem's own code, not a placeholder.

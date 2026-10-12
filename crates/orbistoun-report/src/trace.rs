@@ -600,10 +600,14 @@ pub struct Conditions {
     pub link_syscalls: usize,
     /// Pad ports this run's configuration drives from a host gamepad.
     ///
-    /// Recorded because no host gamepad is read yet, so such a port answers a neutral pad: a host
+    /// Recorded only where no host gamepad is read, so such a port answers a neutral pad: a host
     /// gap no guest call shows.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub gamepad_ports: usize,
+    /// Why the run's audio output played nowhere, when it asked for the host's device and none
+    /// opened; empty when it opened or none was asked for.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub audio_refused: String,
 }
 
 impl Conditions {
@@ -1895,6 +1899,7 @@ mod tests {
             link_plan_differs: Vec::new(),
             link_syscalls: 0,
             gamepad_ports: 0,
+            audio_refused: String::new(),
         };
         let before = under(conditions.clone());
         // The first run stored the plan the second matched: the same link.

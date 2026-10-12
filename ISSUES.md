@@ -61,6 +61,8 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
   pad, since the gamepad library links the system's libudev there. Every pad handle reads
   port 0.
 - Vibration and light bar output are discarded.
+- Audio plays on a host device on Windows only (D819). `sceAudioOutOutputs`, `sceAudioOut2`
+  context pushes and format selector 2, whose sample layout is unmeasured, are not heard.
 - No layout ships for a second keyboard player.
 - Replay determinism holds only to within one input change when a guest polls the pad several times per flip.
 - The video and input preference panes are empty; the record button is disabled.
