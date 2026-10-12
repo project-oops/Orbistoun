@@ -134,7 +134,7 @@ itself, so no run is refused for its policy (D312). `--force` replaces a better 
 slot. The run prompts for this after it moves.
 
 ```bash
-orbistoun-cli compat compare <title> --reference <directory> [--tolerance <steps>]
+orbistoun-cli compat compare <title> --reference <directory> [--tolerance <steps>] [--record <source>]
 ```
 
 `compat compare` is framebuffer diffing against the console. It runs the title as its record's
@@ -146,6 +146,14 @@ are within the tolerance; alpha is not compared (D796). The run keeps its frames
 `compare-<title>/kept` in the traces directory rather than beside every other run's, and writes
 a difference picture for each flip that did not match. It fails when any reference flip was not
 drawn, differs in extent or does not match, so it can stand as a gate.
+
+`--record <source>` writes the result to the record's `[frame_match]` section: the flips
+compared, the flips matched, the tolerance, the largest difference, where the console's frames
+came from, and the build and date of the comparison. It is a section of its own rather than part
+of `[status]`, because the run compared is not necessarily the run `[status]` keeps, and the latest
+comparison replaces the last whatever it found. The table and the title's page then say how many
+flips match the console beside the rung. Without `--record` nothing is written, so a comparison
+against anything but the console's frames leaves the record alone.
 
 `submit export` collects the `learned.toml` measurements and both compat slots into one
 directory with a manifest naming the build. It refuses to write an empty bundle.

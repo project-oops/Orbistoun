@@ -83,6 +83,7 @@ fn compat_rows(
                 hardware: file.hardware.clone(),
                 reproduce: file.reproduce.clone(),
                 inputs,
+                frame_match: file.frame_match.clone(),
             },
             file.title,
             notes,
@@ -272,12 +273,14 @@ fn reproduce_one(
 /// (TESTING.md, framebuffer diffing).
 ///
 /// Each comparison is printed with its matched pixels and error, and a difference picture is
-/// written beside the kept frames. Fails when any reference flip was not drawn, differs in extent,
-/// or has a pixel outside `tolerance`, so the command can stand as a gate.
+/// written beside the kept frames. With `record` - where the console's frames came from - the
+/// result is written to the record's `[frame_match]` whatever it found. Fails when any reference
+/// flip was not drawn, differs in extent, or has a pixel outside `tolerance`, so the command can
+/// stand as a gate.
 pub(crate) fn cmd_compat_compare(
     service: &orbistoun_service::Service,
     title: &str,
-    (reference, tolerance): (&std::path::Path, u8),
+    (reference, tolerance, record): (&std::path::Path, u8, Option<&str>),
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
 ) -> Result<()> {
@@ -308,14 +311,56 @@ pub(crate) fn cmd_compat_compare(
         "{title} against {} (tolerance {tolerance})",
         reference.display()
     );
-    let mut failed = 0usize;
-    for wanted in &references {
+    let (matched, max_error) = compare_flips(&references, &kept, tolerance, &out)?;
+    let compared = orbistoun_overrides::FrameMatch {
+        flips: references.iter().map(|r| r.flip).collect(),
+        matched,
+        tolerance,
+        max_error,
+        source: record.unwrap_or_default().to_owned(),
+        build: orbistoun_env::build::line(),
+        measured_on: orbistoun_nid::today(),
+    };
+    if let Some(source) = record {
+        anyhow::ensure!(
+            !source.trim().is_empty(),
+            "--record must name where the console's frames came from"
+        );
+        let mut file = load_compat(dir, title)?;
+        file.frame_match = Some(compared.clone());
+        write_compat(dir, title, &file)?;
+        println!(
+            "recorded [frame_match] in {}",
+            compat_path(dir, title).display()
+        );
+    }
+    anyhow::ensure!(
+        compared.all_match(),
+        "{} of {} reference flips did not match",
+        compared.flips.len() - compared.matched.len(),
+        compared.flips.len()
+    );
+    println!("every reference flip matched");
+    Ok(())
+}
+
+/// Compares each reference with the kept frame of the same flip, printing a line per flip and
+/// writing a difference picture into `out` for each that did not match. The flips that matched,
+/// and the largest colour difference over every flip that could be compared at all.
+fn compare_flips(
+    references: &[crate::frames::Reference],
+    kept: &[crate::frames::Kept],
+    tolerance: u8,
+    out: &std::path::Path,
+) -> Result<(Vec<u64>, u8)> {
+    let mut matched = Vec::new();
+    let mut max_error = 0u8;
+    for wanted in references {
         let Some(ours) = kept.iter().find(|k| k.flip == wanted.flip) else {
             println!(
                 "  flip {:>6}  not kept: the run did not reach it, or nothing was drawn before it",
                 wanted.flip
             );
-            failed += 1;
             continue;
         };
         if (ours.width, ours.height) != (wanted.width, wanted.height) {
@@ -323,7 +368,6 @@ pub(crate) fn cmd_compat_compare(
                 "  flip {:>6}  extent {}x{}, the console's {}x{}",
                 wanted.flip, ours.width, ours.height, wanted.width, wanted.height
             );
-            failed += 1;
             continue;
         }
         let bytes = std::fs::read(&ours.path)
@@ -333,38 +377,32 @@ pub(crate) fn cmd_compat_compare(
                 "  flip {:>6}  kept frame is not {}x{}",
                 wanted.flip, ours.width, ours.height
             );
-            failed += 1;
             continue;
         };
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a percentage of a pixel count, reported to two places"
-        )]
-        let share = 100.0 * result.matched as f64 / result.pixels.max(1) as f64;
+        max_error = max_error.max(result.max_error);
+        // A count, not a share: one pixel in two million rounds to a whole percentage.
         println!(
-            "  flip {:>6}  {}/{} pixels ({share:.2}%) match, mean error {:.2}, max {}",
-            wanted.flip, result.matched, result.pixels, result.mean_error, result.max_error
+            "  flip {:>6}  {}/{} pixels match ({} differ), mean error {:.2}, max {}",
+            wanted.flip,
+            result.matched,
+            result.pixels,
+            result.pixels - result.matched,
+            result.mean_error,
+            result.max_error
         );
-        if !result.exact() {
-            failed += 1;
-            if let Some(picture) =
-                crate::frames::difference(ours.width, ours.height, &bytes, &wanted.rgba)
-            {
-                let path = out.join(format!("flip-{}-difference.png", wanted.flip));
-                picture
-                    .save_with_format(&path, image::ImageFormat::Png)
-                    .with_context(|| format!("writing {}", path.display()))?;
-                println!("               difference: {}", path.display());
-            }
+        if result.exact() {
+            matched.push(wanted.flip);
+        } else if let Some(picture) =
+            crate::frames::difference(ours.width, ours.height, &bytes, &wanted.rgba)
+        {
+            let path = out.join(format!("flip-{}-difference.png", wanted.flip));
+            picture
+                .save_with_format(&path, image::ImageFormat::Png)
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("               difference: {}", path.display());
         }
     }
-    anyhow::ensure!(
-        failed == 0,
-        "{failed} of {} reference flips did not match",
-        references.len()
-    );
-    println!("every reference flip matched");
-    Ok(())
+    Ok((matched, max_error))
 }
 
 /// Runs `title` as its record's `[reproduce]` section says - the pinned build, the limit, the frame

@@ -733,6 +733,11 @@ enum CompatAction {
         /// The largest difference in any colour channel still counted as a match, in 8-bit steps.
         #[arg(long, default_value_t = 0)]
         tolerance: u8,
+        /// Write the result to the record's `[frame_match]`, naming where the console's frames came
+        /// from - the obSCEne request or capture that made them. Without it nothing is recorded,
+        /// so comparing against anything but the console leaves the record alone.
+        #[arg(long, value_name = "SOURCE")]
+        record: Option<String>,
         /// Where the records live.
         #[arg(long, default_value = "compat")]
         dir: std::path::PathBuf,
@@ -1047,8 +1052,15 @@ fn dispatch_records(
                 title,
                 reference,
                 tolerance,
+                record,
                 dir,
-            } => cmd_compat_compare(service, title, (reference, *tolerance), dir, symbols_db)?,
+            } => cmd_compat_compare(
+                service,
+                title,
+                (reference, *tolerance, record.as_deref()),
+                dir,
+                symbols_db,
+            )?,
             CompatAction::Record {
                 path,
                 dir,

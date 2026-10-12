@@ -416,6 +416,8 @@ pub struct Row {
     pub reproduce: Option<Reproduce>,
     /// Whether an `inputs.toml` sits beside the record.
     pub inputs: bool,
+    /// How its frames compared with the console's, where somebody compared them.
+    pub frame_match: Option<FrameMatch>,
 }
 
 impl Row {
@@ -463,12 +465,18 @@ pub fn render_markdown(rows: &[Row]) -> String {
             Some(_) => r.status.answered().to_string(),
             None => "-".to_owned(),
         };
+        // The comparison with the console's frames beside the rung it qualifies, only where one
+        // was made: `presented` says a buffer was written, this says whether it was the console's.
+        let reach = match &r.frame_match {
+            Some(compared) => format!("{}, {}", r.status.reach.label(), compared.summary()),
+            None => r.status.reach.label().to_owned(),
+        };
         let _ = writeln!(
             out,
             "| {}{} | {} | {} | {} | {} | {}% | {} | {} | {} | {} |",
             shown,
             mark,
-            r.status.reach.label(),
+            reach,
             r.status.imports,
             answered,
             r.status.calls,
@@ -585,6 +593,9 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
         },
     );
     let _ = writeln!(out, "| On hardware | {hardware} |");
+    if let Some(compared) = &row.frame_match {
+        let _ = writeln!(out, "{}", frame_match_row(compared));
+    }
     if !s.link_plan.is_empty() {
         let stood = if s.link_plan_stored.is_empty() {
             String::new()
@@ -601,6 +612,35 @@ pub fn render_title_page(row: &Row, title: &Title, notes: &str) -> String {
     render_frames(&mut out, row, name);
     render_reproduce(&mut out, row);
     out
+}
+
+/// A page's row for its comparison with the console's frames: which flips were compared, which
+/// matched, and where the console's frames came from.
+fn frame_match_row(compared: &FrameMatch) -> String {
+    let flips = |list: &[u64]| {
+        if list.is_empty() {
+            "none".to_owned()
+        } else {
+            list.iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    format!(
+        concat!(
+            "| Against the console's frames | {} (flips {}; matched {}; tolerance {}, ",
+            "largest difference {}) - references from {}, compared {} by `{}` |"
+        ),
+        compared.summary(),
+        flips(&compared.flips),
+        flips(&compared.matched),
+        compared.tolerance,
+        compared.max_error,
+        md_cell(&compared.source),
+        md_cell(&compared.measured_on),
+        md_cell(&compared.build),
+    )
 }
 
 /// A page's sheet of frames, or why it has none (D736).
@@ -801,6 +841,52 @@ pub const FRAMES_FILE: &str = "frames.png";
 /// The file a title's replayed input is kept in, beside its record.
 pub const INPUTS_FILE: &str = "inputs.toml";
 
+/// How a title's frames compared with the console's frames of the same flips (`compat compare`).
+///
+/// Framebuffer diffing, recorded: what `presented` cannot say, that the picture is the console's.
+/// A section of its own rather than a `[status]` field, because the run compared is not
+/// necessarily the run `[status]` keeps, so it carries its own build and date. The latest
+/// comparison replaces the last, whatever it found: a regression is recorded, not hidden.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameMatch {
+    /// The guest flips a console frame was compared at, in order.
+    pub flips: Vec<u64>,
+    /// Of those, the flips whose every pixel matched within [`Self::tolerance`].
+    pub matched: Vec<u64>,
+    /// The largest difference in any colour channel still counted as a match, in 8-bit steps.
+    pub tolerance: u8,
+    /// The largest colour-channel difference over every flip that could be compared at all.
+    pub max_error: u8,
+    /// Where the console's frames came from - the obSCEne request or capture that made them.
+    pub source: String,
+    /// The orbistoun build that ran the comparison.
+    pub build: String,
+    /// When.
+    pub measured_on: String,
+}
+
+impl FrameMatch {
+    /// Whether every flip compared matched; false when none was compared.
+    #[must_use]
+    pub fn all_match(&self) -> bool {
+        !self.flips.is_empty() && self.matched.len() == self.flips.len()
+    }
+
+    /// One line for a table cell: how many flips match.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        if self.all_match() {
+            format!("matches the console at {} flips", self.flips.len())
+        } else {
+            format!(
+                "{} of {} flips match the console",
+                self.matched.len(),
+                self.flips.len()
+            )
+        }
+    }
+}
+
 /// One override file, as it appears on disk.
 ///
 /// `BTreeMap` throughout so serialisation is deterministic and diffs show no ordering churn.
@@ -838,6 +924,9 @@ pub struct OverrideFile {
     /// measured thing were implemented (D312).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment: Option<Status>,
+    /// How the title's frames compared with the console's, where somebody compared them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_match: Option<FrameMatch>,
 }
 
 impl OverrideFile {
@@ -1353,6 +1442,7 @@ reason = "..."
             settings,
             status: None,
             experiment: None,
+            frame_match: None,
         };
         let r = Resolved::merge(&[(Layer::Repo, f)]);
         let keys: Vec<_> = r.values.keys().map(String::as_str).collect();
@@ -1394,6 +1484,7 @@ reason = "..."
                 hardware: None,
                 reproduce: None,
                 inputs: false,
+                frame_match: None,
             },
             Row {
                 name: None,
@@ -1404,6 +1495,7 @@ reason = "..."
                 hardware: None,
                 reproduce: None,
                 inputs: false,
+                frame_match: None,
             },
         ];
         let md = render_markdown(&rows);
@@ -1443,6 +1535,7 @@ reason = "..."
             hardware: None,
             reproduce: None,
             inputs: false,
+            frame_match: None,
         };
         assert!(
             !super::render_title_page(&row, &super::Title::default(), "").contains("Link plan")
@@ -1452,6 +1545,83 @@ reason = "..."
         assert!(
             super::render_title_page(&row, &super::Title::default(), "")
                 .contains("| Link plan | `0123456789abcdef` (match) |")
+        );
+    }
+
+    /// A comparison with the console's frames round-trips through the record, and is shown in the
+    /// table and on the page only where one was made, so a record without one renders exactly as
+    /// before.
+    #[test]
+    fn a_frame_match_is_recorded_and_shown_only_where_one_was_made() {
+        let compared = super::FrameMatch {
+            flips: vec![30, 60, 61],
+            matched: vec![30, 60, 61],
+            tolerance: 0,
+            max_error: 0,
+            source: "obSCEne REQ-x".to_owned(),
+            build: "v0.1.0 - abc1234".to_owned(),
+            measured_on: "2026-10-12".to_owned(),
+        };
+        let file = OverrideFile {
+            status: Some(status(Reach::Presented, 32, 4_000_000)),
+            frame_match: Some(compared.clone()),
+            ..OverrideFile::default()
+        };
+        let text = file.to_toml().expect("render");
+        assert!(text.contains("[frame_match]"), "{text}");
+        assert_eq!(OverrideFile::from_toml(&text).expect("parse"), file);
+        let without = OverrideFile {
+            frame_match: None,
+            ..file
+        };
+        assert!(!without.to_toml().expect("render").contains("frame_match"));
+
+        let mut row = Row {
+            name: None,
+            title: "t".to_owned(),
+            status: status(Reach::Presented, 32, 4_000_000),
+            experiment: false,
+            screenshot: None,
+            hardware: None,
+            reproduce: None,
+            inputs: false,
+            frame_match: None,
+        };
+        let plain_table = render_markdown(std::slice::from_ref(&row));
+        let plain_page = super::render_title_page(&row, &super::Title::default(), "");
+        assert!(plain_table.contains("| presented |"), "{plain_table}");
+        assert!(!plain_page.contains("console's frames"));
+
+        row.frame_match = Some(compared);
+        let table = render_markdown(std::slice::from_ref(&row));
+        assert!(
+            table.contains("| presented, matches the console at 3 flips |"),
+            "{table}"
+        );
+        let page = super::render_title_page(&row, &super::Title::default(), "");
+        assert!(
+            page.contains(concat!(
+                "| Against the console's frames | matches the console at 3 flips ",
+                "(flips 30, 60, 61; matched 30, 60, 61; tolerance 0, largest difference 0) - ",
+                "references from obSCEne REQ-x, compared 2026-10-12 by `v0.1.0 - abc1234` |"
+            )),
+            "{page}"
+        );
+    }
+
+    /// A partial match says how many flips matched, and none compared is not a match.
+    #[test]
+    fn a_partial_frame_match_says_how_many_flips_matched() {
+        let partial = super::FrameMatch {
+            flips: vec![1, 30, 60],
+            matched: vec![30],
+            ..super::FrameMatch::default()
+        };
+        assert!(!partial.all_match());
+        assert_eq!(partial.summary(), "1 of 3 flips match the console");
+        assert!(
+            !super::FrameMatch::default().all_match(),
+            "no flip compared"
         );
     }
 
@@ -1468,6 +1638,7 @@ reason = "..."
             hardware: None,
             reproduce: None,
             inputs: false,
+            frame_match: None,
         };
         assert_eq!(row.on_hardware(), "unknown");
         assert!(render_markdown(std::slice::from_ref(&row)).contains("| unknown |"));
@@ -1507,6 +1678,7 @@ reason = "..."
             hardware: None,
             reproduce: None,
             inputs: false,
+            frame_match: None,
         }];
         let md = render_markdown(&rows);
         assert!(md.contains("## Screenshots"));
@@ -1831,6 +2003,7 @@ reason = "..."
                 hardware: None,
                 reproduce: None,
                 inputs: false,
+                frame_match: None,
             })
             .collect();
         let table = render_markdown(&rows);
@@ -2076,6 +2249,7 @@ reason = "..."
             hardware: None,
             reproduce: Some(reproduce(frames)),
             inputs: true,
+            frame_match: None,
         };
         let committed = render_title_page(
             &row(Some("compat/T0001/frames.png"), FramesKept::Committed),
