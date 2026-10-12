@@ -4304,10 +4304,12 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         format.bytes(),
     ]);
     let hash = hash ^ moved.rotate_left(17);
+    // By extent as well: the levels of one chain are bound under one hash.
+    let key = (hash, width, height);
     let kept = swizzled_kept()
         .lock()
         .ok()
-        .and_then(|kept| kept.get(&hash).cloned());
+        .and_then(|kept| kept.get(&key).cloned());
     let swizzled = kept.unwrap_or_else(|| {
         crate::perf::span(crate::perf::Span::TextureSwizzle, || {
             let swizzled = swizzle_texels(&texels, format, selects);
@@ -4315,7 +4317,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
                 if kept.len() >= TEXEL_CACHE_ENTRIES {
                     kept.clear();
                 }
-                kept.insert(hash, std::sync::Arc::clone(&swizzled));
+                kept.insert(key, std::sync::Arc::clone(&swizzled));
             }
             swizzled
         })
@@ -4332,16 +4334,17 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
     }
 }
 
-/// Swizzled texels by the hash they are bound under. The hash is the source texels' combined with
-/// the format and selects, so equal hashes swizzle to equal texels; a frame binds the same few
-/// textures many times, and a large one took tens of milliseconds to swizzle at every binding.
-fn swizzled_kept()
--> &'static std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<[u32]>>> {
-    static KEPT: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u64, std::sync::Arc<[u32]>>>,
-    > = std::sync::OnceLock::new();
+/// Swizzled texels by the hash they are bound under and their extent. The hash is the source
+/// texels' combined with the format and selects, but the levels of one chain share it, so the
+/// extent is part of the key; a frame binds the same few textures many times, and a large one took
+/// tens of milliseconds to swizzle at every binding.
+fn swizzled_kept() -> &'static std::sync::Mutex<SwizzledKept> {
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<SwizzledKept>> = std::sync::OnceLock::new();
     KEPT.get_or_init(Default::default)
 }
+
+/// Swizzled texels by (hash, width, height).
+type SwizzledKept = std::collections::HashMap<(u64, u32, u32), std::sync::Arc<[u32]>>;
 
 /// Each texel's channels as `selects` pick them from `format`'s.
 fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std::sync::Arc<[u32]> {
@@ -5893,6 +5896,34 @@ mod tests {
             sampling.depth_compare, 6,
             "greater-or-equal, from the table"
         );
+    }
+
+    /// Swizzled texels are kept per size as well as hash: two bindings under one hash - two levels
+    /// of one chain - each get texels of their own extent. STKT00001 bound a 128 x 128 level with a
+    /// 256 x 256 one's texels, which the device refused.
+    #[test]
+    fn swizzled_texels_are_kept_per_extent() {
+        use super::{RenderCommand, TexelFormat, swizzled_texture};
+        let bind = |side: u32| RenderCommand::BindTexture {
+            slot: 0,
+            hash: 0x5eed_0000_0000_0001,
+            texels: vec![0x0403_0201_u32; (side * side) as usize].into(),
+            width: side,
+            height: side,
+            sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+            encoding: crate::backend::TextureEncoding::Rgba8,
+            faces: 1,
+        };
+        // Blue, green, red, alpha: not the identity, so the texels are swizzled.
+        let selects = [6, 5, 4, 7];
+        for side in [2_u32, 1] {
+            let RenderCommand::BindTexture { texels, .. } =
+                swizzled_texture(bind(side), TexelFormat::Rgba8, selects)
+            else {
+                panic!("a texture binding");
+            };
+            assert_eq!(texels.len(), (side * side) as usize, "{side} x {side}");
+        }
     }
 
     /// A `BC3_UNORM` texture in `64KB_S` is bound as its blocks, detiled row-major, for the host to
