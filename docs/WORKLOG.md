@@ -348,3 +348,47 @@ One entry per milestone. Commit messages hold the rest.
   53 distinct imports and 92 submissions writing 863,437,904 bytes.
 - A manually run workflow packs it as `neverball-aot-portable-win.zip` with its licences and
   sources. It is Windows only: no guest has been run on Linux or macOS.
+
+## 2026-09-28 - Every title swept from its capture
+
+- A compatibility record is a directory: the report, the pad script it was measured with, and a
+  frame sheet (D736).
+- The sweep replays each title's pad capture and keeps the captures; the first-party guests,
+  GLCB00001 and NVRB00001 among them, reach `presented`.
+
+## 2026-10-05 - Compute dispatches bind what they trace
+
+- A dispatch's traced buffers are resolved, bound and written back (D746).
+- A primitive shader reads its draw's vertex count from the draw data (D745).
+
+## 2026-10-08 - Retail textures sampled
+
+- 32-bpp textures laid out in `4KB_S`, and BC3 textures from `4KB_S` and mipmapped
+  standard-swizzle chains, are sampled.
+- Anisotropic samplers sample at the ratio radv encodes (D775).
+- The vendor timed condition wait and the RTC tick are served (D776).
+
+## 2026-10-09 - Three retail titles present
+
+- PPSA02664 and PPSA03416 present frames to their 120 s limit; PPSA28061 presents once a pad
+  script carries it past its notice screen.
+- A scanout read from memory decodes by its format, and a flipped colour target is shown as drawn
+  (D784).
+- The window hands a title its held keys, and titles read the host keyboard (D783).
+
+## 2026-10-10 - The C library widens
+
+- The wide and bounds-checked `printf` family, `sscanf_s`, `fgetpos`/`fsetpos`, `ungetc`,
+  `localeconv` and the C-locale multibyte conversions are served.
+- `sceKernelNanosleep`, `sceKernelSleep`, `scePthreadExit` and
+  `sceKernelQueryMemoryProtection` are served.
+
+## 2026-10-12 - Depth sampled, blocked threads named, gaps ranked
+
+- Cube textures are sampled, and a depth compare samples the depth target at its address
+  (D816, D817).
+- A run's report names each blocked thread, what it waits on, where it called from, and the locks
+  held at the end.
+- A title's kept frames compare with the console's, flip for flip, and the result is recorded.
+- A reference emulator's answer enters only as a prediction in a hardware request (D818), and
+  `orbistoun-cli census` ranks what no measurement covers across the corpus.
