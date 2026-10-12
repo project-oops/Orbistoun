@@ -1870,6 +1870,14 @@ impl Service {
         // And every module it ships that nothing imports, which it may load by path (D515).
         let by_path = titlemodules::loadable_by_path(root, &found, is_platform);
         found.extend(by_path);
+        // And the libraries those modules link from the package in turn (D803).
+        titlemodules::with_dependencies(root, &mut found, is_platform, |path| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| self.module_tables(&bytes).ok())
+                .map(|(libraries, _)| libraries.into_values().collect())
+                .unwrap_or_default()
+        });
         Ok(found)
     }
 

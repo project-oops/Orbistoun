@@ -182,9 +182,71 @@ pub fn loadable_by_path(
     out
 }
 
+/// Adds to `found` the modules its members need in turn: each module's own imports, as
+/// `imports_of` reads them, found as [`find`] finds the executable's - a platform library only in
+/// the package's module directory - until nothing new is needed (D803). The platform's loader
+/// serves a module it loads the libraries that module imports, from that directory, so a plugin
+/// the title loads by path brings the platform libraries it links with it.
+pub fn with_dependencies(
+    root: &Path,
+    found: &mut Vec<TitleModule>,
+    is_platform: impl Fn(&str) -> bool,
+    imports_of: impl Fn(&Path) -> Vec<String>,
+) {
+    let mut queue: Vec<PathBuf> = found.iter().map(|module| module.path.clone()).collect();
+    while let Some(path) = queue.pop() {
+        let wanted: Vec<String> = imports_of(&path)
+            .into_iter()
+            .filter(|library| {
+                !found
+                    .iter()
+                    .any(|module| module.library.eq_ignore_ascii_case(library))
+            })
+            .collect();
+        for module in find(root, &wanted, &is_platform) {
+            if found.iter().any(|kept| kept.path == module.path) {
+                continue;
+            }
+            queue.push(module.path.clone());
+            found.push(module);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TitleModule, find};
+
+    /// A plugin's own imports bring the platform libraries it links from the package's module
+    /// directory, and theirs in turn (D803): PPSA25872's `PSN.prx` imports `libSceNpCppWebApi`,
+    /// which the title ships in `sce_module`. A platform library the title does not ship stays
+    /// the platform's, and nothing is placed twice.
+    #[test]
+    fn a_plugins_imports_bring_the_package_libraries_it_links() {
+        let dir = title(&[
+            "Media/Plugins/PSN.prx",
+            "sce_module/libSceNpCppWebApi.prx",
+            "sce_module/libSceJobManager.prx",
+            "sce_module/libc.prx",
+        ]);
+        let platform = |library: &str| library.starts_with("libSce") || library == "libc";
+        let mut found = find(dir.path(), &["libc".to_owned()], platform);
+        found.extend(super::loadable_by_path(dir.path(), &found, platform));
+        super::with_dependencies(dir.path(), &mut found, platform, |path| {
+            match path.file_stem().and_then(|s| s.to_str()) {
+                Some("PSN") => vec!["libSceNpCppWebApi".to_owned(), "libSceNet".to_owned()],
+                Some("libSceNpCppWebApi") => {
+                    vec!["libSceJobManager".to_owned(), "libc".to_owned()]
+                }
+                _ => Vec::new(),
+            }
+        });
+        let names: Vec<&str> = found.iter().map(|m| m.library.as_str()).collect();
+        assert_eq!(
+            names,
+            ["libc", "PSN", "libSceNpCppWebApi", "libSceJobManager"]
+        );
+    }
 
     /// Builds a title tree: each entry is a path relative to the root.
     fn title(files: &[&str]) -> tempfile::TempDir {
