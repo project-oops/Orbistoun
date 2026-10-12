@@ -5,6 +5,7 @@
 //! too. Each command's implementation is in the module named after it.
 
 mod audit;
+mod census;
 mod common;
 mod compat;
 mod corpus;
@@ -25,6 +26,7 @@ mod turn;
 mod worklist;
 
 use crate::audit::{cmd_audit, cmd_harvest};
+use crate::census::{CensusRequest, cmd_census};
 use crate::common::library_or;
 use crate::compat::{
     cmd_compat_compare, cmd_compat_list, cmd_compat_markdown, cmd_compat_record,
@@ -395,6 +397,29 @@ enum Command {
         /// interface that needs no run at all.
         #[arg(long)]
         static_gap: bool,
+    },
+    /// Rank what no measurement covers, across every title in the library.
+    ///
+    /// Imports whose knowledge entry is missing or weaker than `measured`/`published`, and the
+    /// shader refusals the runs recorded, each ranked by how many titles reach it. A row is a
+    /// hardware question; grouped by area, the rows become one obSCEne request per group (D818).
+    /// Neither flag means both.
+    Census {
+        /// List imports with no measured or published answer.
+        #[arg(long)]
+        imports: bool,
+        /// List shader refusals by reason.
+        #[arg(long)]
+        refusals: bool,
+        /// Only these titles: comma-separated title-directory prefixes, e.g. `PPSA02664,PPSA21564`.
+        #[arg(long)]
+        titles: Option<String>,
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+        /// How many rows of each table to show.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
     },
     /// Rebuild the standard-library word list from a FreeBSD source tree.
     ///
@@ -907,6 +932,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Firmware { .. }
         | Command::Questions { .. }
         | Command::Worklist { .. }
+        | Command::Census { .. }
         | Command::Harvest { .. }
         | Command::Audit { .. } => dispatch_reports(&cli.command, service)?,
     }
@@ -1118,6 +1144,22 @@ fn dispatch_reports(command: &Command, service: &Service) -> Result<()> {
                 cmd_worklist(top);
             }
         }
+        Command::Census {
+            imports,
+            refusals,
+            ref titles,
+            json,
+            top,
+        } => cmd_census(
+            service,
+            &CensusRequest {
+                imports,
+                refusals,
+                titles: titles.as_deref(),
+                json,
+                top,
+            },
+        )?,
         Command::Harvest {
             ref source,
             ref out,

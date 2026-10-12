@@ -215,15 +215,19 @@ the checks that disagree. Sending and supervising the probe is Prosperous's job 
 ## What no measurement covers
 
 ```bash
-orbistoun-cli census --imports [--titles A,B] [--json]   # imports with no measured entry
-orbistoun-cli census --refusals [--json]                 # translator and backend refusals
+orbistoun-cli census                                  # both tables
+orbistoun-cli census --imports --titles PPSA02664,PPSA21564 --json
+orbistoun-cli census --refusals --top 20
 ```
 
-`census --imports` lists every import of every module in the corpus - eboot and shipped
-modules - whose knowledge entry is missing or not `measured`/`published`: library, name or
-hash, its `known_by`, and the titles that import it. `census --refusals` lists every
-translator and backend refusal in the corpus's latest traces by reason, with the instruction
-or register and the titles that hit it. Both rank by titles reached, then calls.
+`census --imports` lists every import of every module a title in the library runs - its
+executable and the modules it ships - whose knowledge entry is missing or not
+`measured`/`published`: library, name or hash, its `known_by`, whether orbistoun implements
+it, the calls the persisted traces recorded, and the titles that import it. Imports the
+title's own modules answer are left out; loading those is the work, not measuring them.
+`census --refusals` lists the shader refusals the persisted traces recorded, keyed by the
+translator's reason with stage and address stripped; a trace keeps its first submission's
+failures. Both rank by titles reached, then by volume.
 
 The census is what a capability request is filed from: group its rows by library or GPU
 layer and file one obSCEne request per group, with any reference emulator's answers attached
