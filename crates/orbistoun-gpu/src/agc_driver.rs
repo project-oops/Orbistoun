@@ -1041,11 +1041,12 @@ impl GuestCp<'_> {
     /// it over its window as guest memory holds it now, and writes back exactly the words it
     /// changed. Nothing is written unless the whole dispatch ran exactly.
     fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
+        use crate::perf::{Span, span};
         let execute = dispatch_executor()
             .get()
             .ok_or("no device is installed to run it")?;
-        let walked = crate::packet::walk(dispatch.stream);
-        let prepared = {
+        let prepared = span(Span::DispatchPrepare, || {
+            let walked = crate::packet::walk(dispatch.stream);
             let mut live = live_pipeline()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1059,29 +1060,36 @@ impl GuestCp<'_> {
                 dispatch.groups,
                 dispatch.initiator,
             )?;
-            pipeline.prepare_dispatch(&state, &self.memory)?
-        };
-        // A program with no buffer runs over one word nobody reads, and writes nothing back there.
-        let (base, before) = match prepared.window {
-            Some(window) => {
-                let span = window.words() as usize * 4;
-                let bytes = cp::CpMemory::read(self, window.address(), span)
-                    .ok_or("its window is not readable guest memory")?;
-                let words: Vec<u32> = bytes
-                    .chunks_exact(4)
-                    .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-                    .collect();
-                (Some(window.address()), words)
-            }
-            None => (None, vec![0]),
-        };
-        let buffers_before = self.read_buffers(&prepared.buffers, &prepared.unread)?;
-        let (after, escaped, stored, buffers_after) = execute(
-            &prepared.module,
-            &before,
-            (&prepared.push, prepared.groups),
-            (&prepared.images, &buffers_before),
-        )?;
+            pipeline.prepare_dispatch(&state, &self.memory)
+        })?;
+        let ((base, before), buffers_before) = span(Span::DispatchRead, || {
+            // A program with no buffer runs over one word nobody reads, and writes nothing back
+            // there.
+            let window = match prepared.window {
+                Some(window) => {
+                    let span = window.words() as usize * 4;
+                    let bytes = cp::CpMemory::read(self, window.address(), span)
+                        .ok_or("its window is not readable guest memory")?;
+                    let words: Vec<u32> = bytes
+                        .chunks_exact(4)
+                        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                        .collect();
+                    (Some(window.address()), words)
+                }
+                None => (None, vec![0]),
+            };
+            let buffers = self.read_buffers(&prepared.buffers, &prepared.unread)?;
+            Ok::<_, String>((window, buffers))
+        })?;
+        let (after, escaped, stored, buffers_after) = span(Span::DispatchExecute, || {
+            execute(
+                &prepared.module,
+                &before,
+                (&prepared.push, prepared.groups),
+                (&prepared.images, &buffers_before),
+            )
+        })?;
+        let _written_back = crate::perf::SpanGuard::start(Span::DispatchWriteBack);
         if escaped {
             return Err(concat!(
                 "an access left its window or went through a buffer descriptor whose addressing ",
@@ -1092,6 +1100,7 @@ impl GuestCp<'_> {
         if after.len() != before.len() {
             return Err("the device answered a window of another size".to_owned());
         }
+        let working_out = crate::perf::SpanGuard::start(Span::WriteBackChanges);
         let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
         if let Some(base) = base {
             for (first, words) in changed_runs(&before, &after) {
@@ -1106,28 +1115,10 @@ impl GuestCp<'_> {
             buffer_writes(&prepared.buffers, &buffers_before, &buffers_after)?;
         writes.extend(buffer_writes);
         writes.extend(stored_image_writes(&prepared.images, stored)?);
-        let writable = write_lookup().get();
-        let allowed = |at: u64, bytes: u64| writable.is_some_and(|allows| allows(at, bytes));
-        if !writes
-            .iter()
-            .all(|(at, bytes)| allowed(*at, bytes.len() as u64))
-            || !buffer_fills
-                .iter()
-                .all(|fill| allowed(fill.destination, fill.count))
-        {
-            return Err("it wrote guest memory that is not writable".to_owned());
-        }
-        for (at, bytes) in writes {
-            if !cp::CpMemory::write(self, at, &bytes) {
-                return Err("a write back into guest memory was refused".to_owned());
-            }
-        }
-        for fill in &buffer_fills {
-            let count = usize::try_from(fill.count).map_err(|_| "a fill past this host's reach")?;
-            if !cp::CpMemory::fill(self, fill.destination, fill.pattern, count) {
-                return Err("a fill back into guest memory was refused".to_owned());
-            }
-        }
+        drop(working_out);
+        span(Span::WriteBackGuest, || {
+            self.write_back_dispatch(&writes, &buffer_fills)
+        })?;
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
         let fills = uniform_buffers(&prepared.buffers, (&buffers_before, &buffers_after));
         if !fills.is_empty()
@@ -2392,12 +2383,130 @@ impl GuestCp<'_> {
     fn settle_pending(&mut self, address: u64, length: u64) -> bool {
         match pending_target() {
             Some((target, _)) if overlaps_target(target, address, length) => {
-                write_back_pending(self)
+                crate::perf::span(crate::perf::Span::SettlePending, || {
+                    write_back_pending(self)
+                })
             }
             _ => true,
         }
     }
+
+    /// Writes a dispatch's changed runs and fills into guest memory, in order, as
+    /// [`cp::CpMemory::write`] and [`cp::CpMemory::fill`] would one at a time; nothing is written
+    /// unless every one of them is writable. A dispatch's changes come back as runs of the bytes it
+    /// changed, often thousands close together, so the writability lookup, the deferred copies, the
+    /// pending frame and the protected target are each asked once for a stretch of neighbouring
+    /// runs rather than once per run. Only the runs' own bytes are written: what lies between them
+    /// may have been written by the guest since it was read.
+    fn write_back_dispatch(
+        &mut self,
+        writes: &[GuestWrite],
+        fills: &[cp::Fill],
+    ) -> Result<(), String> {
+        let writable = write_lookup().get();
+        let allowed = |at: u64, bytes: u64| writable.is_some_and(|allows| allows(at, bytes));
+        let stretches = stretches(writes);
+        // A stretch not writable as a whole (a gap between its runs crossing out of a mapping) has
+        // each run checked on its own.
+        let whole: Vec<bool> = stretches
+            .iter()
+            .map(|&((first, end), _)| allowed(first, end - first))
+            .collect();
+        let each_run = || {
+            stretches.iter().zip(&whole).all(|((_, runs), &whole)| {
+                whole
+                    || writes[runs.clone()]
+                        .iter()
+                        .all(|(at, bytes)| allowed(*at, bytes.len() as u64))
+            })
+        };
+        if !each_run()
+            || !fills
+                .iter()
+                .all(|fill| allowed(fill.destination, fill.count))
+        {
+            return Err("it wrote guest memory that is not writable".to_owned());
+        }
+        for ((range, runs), whole) in stretches.into_iter().zip(whole) {
+            if !self.write_stretch(range, &writes[runs], whole) {
+                return Err("a write back into guest memory was refused".to_owned());
+            }
+        }
+        for fill in fills {
+            let count = usize::try_from(fill.count).map_err(|_| "a fill past this host's reach")?;
+            if !cp::CpMemory::fill(self, fill.destination, fill.pattern, count) {
+                return Err("a fill back into guest memory was refused".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes `runs`, which lie within `[first, end)`, settling the stretch once; a stretch not
+    /// `whole`ly writable has each run written through the checked path.
+    fn write_stretch(
+        &mut self,
+        (first, end): (u64, u64),
+        runs: &[GuestWrite],
+        whole: bool,
+    ) -> bool {
+        let length = end - first;
+        if !carry_out_overlapping(first, length) || !self.settle_pending(first, length) {
+            return false;
+        }
+        if !whole {
+            return runs.iter().all(|(at, bytes)| write_guest(*at, bytes));
+        }
+        unprotect_overlapping(first, length);
+        for (at, bytes) in runs {
+            let Ok(dest) = usize::try_from(*at) else {
+                return false;
+            };
+            // SAFETY: the installed lookup vouched that `[first, end)`, which holds this run, lies
+            // inside identity-mapped guest mappings whose protection allows writes, and a protected
+            // target's pages in it were given their protection back above, so nothing here faults.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    std::ptr::with_exposed_provenance_mut::<u8>(dest),
+                    bytes.len(),
+                );
+            }
+        }
+        true
+    }
 }
+
+/// `writes` cut into stretches of consecutive, neighbouring runs, in order: each stretch's byte
+/// range and the runs it holds.
+fn stretches(writes: &[GuestWrite]) -> Vec<((u64, u64), std::ops::Range<usize>)> {
+    let mut stretches = Vec::new();
+    let mut start = 0;
+    while start < writes.len() {
+        let first = writes[start].0;
+        let mut end = first.saturating_add(writes[start].1.len() as u64);
+        let mut stop = start + 1;
+        while let Some((at, bytes)) = writes.get(stop) {
+            let after = at.saturating_add(bytes.len() as u64);
+            if *at < first
+                || *at > end.saturating_add(RUN_GAP)
+                || after.max(end) - first > RUN_STRETCH
+            {
+                break;
+            }
+            end = end.max(after);
+            stop += 1;
+        }
+        stretches.push(((first, end), start..stop));
+        start = stop;
+    }
+    stretches
+}
+
+/// The largest gap between two runs written back as one stretch.
+const RUN_GAP: u64 = 4096;
+
+/// The longest stretch written back as one.
+const RUN_STRETCH: u64 = 16 << 20;
 
 thread_local! {
     /// The releases the command processor reported during the walk in progress on this thread,
@@ -3022,6 +3131,33 @@ mod tests {
     };
     use crate::dispatch::{BufferAfter, BufferBefore};
     use std::sync::{Mutex, PoisonError};
+
+    /// Neighbouring runs written back share a stretch; a wide gap, a run behind the stretch's start
+    /// or one past its longest length starts another; and the runs keep their order.
+    #[test]
+    fn neighbouring_runs_share_a_stretch_in_order() {
+        let run = |at: u64, len: usize| (at, vec![0u8; len]);
+        let writes = [
+            run(0x1000, 4),
+            run(0x1008, 4),
+            run(0x2000, 8),
+            run(0x9000, 4),
+            run(0x8000, 4),
+            run(0x8000 + super::RUN_STRETCH, 4),
+        ];
+        assert_eq!(
+            super::stretches(&writes),
+            [
+                ((0x1000, 0x2008), 0..3),
+                ((0x9000, 0x9004), 3..4),
+                ((0x8000, 0x8004), 4..5),
+                (
+                    (0x8000 + super::RUN_STRETCH, 0x8004 + super::RUN_STRETCH),
+                    5..6
+                ),
+            ]
+        );
+    }
 
     /// A submission whose colour target zero is `COLOR_INVALID` draws depth alone and is not a
     /// target a frame is written back to; an `8_8_8_8` one draws colour (D779). PPSA02664's depth

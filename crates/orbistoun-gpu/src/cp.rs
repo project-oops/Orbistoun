@@ -310,15 +310,18 @@ fn is_memory_inert(opcode: u8, body_dwords: usize) -> bool {
 /// cannot carry out exactly.
 pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
     let mut result = CpExecution::default();
-    let walked = packet::walk(stream);
+    let (walked, segments) = crate::perf::span(crate::perf::Span::CpWalk, || {
+        let walked = packet::walk(stream);
+        // The draw segments, found before any draw runs; each is carried out at its first draw.
+        let segments = draw_segments(stream, &walked.packets);
+        (walked, segments)
+    });
     // A walk that desynchronised or overran may have read a body as a header: executing any of it
     // could fill memory from bytes that were never a fill. Nothing runs.
     if !walked.is_trustworthy() {
         result.stopped = Stopped::Malformed { offset: 0 };
         return result;
     }
-    // The draw segments, found before any draw runs; each is carried out at its first draw.
-    let segments = draw_segments(stream, &walked.packets);
     let mut next_segment = segments.iter().peekable();
     for packet in &walked.packets {
         let offset = packet.offset;
@@ -365,7 +368,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             }),
             CONTEXT_CONTROL => context_control(&body),
             packet::build::DISPATCH_DIRECT => {
-                dispatch_direct(stream, offset, &body, memory, &mut result)
+                crate::perf::span(crate::perf::Span::CpDispatch, || {
+                    dispatch_direct(stream, offset, &body, memory, &mut result)
+                })
             }
             WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 write_data(&body, memory, &mut result)

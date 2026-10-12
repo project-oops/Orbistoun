@@ -243,11 +243,39 @@ pub enum Span {
     TextureUnwatched,
     /// A texture's channels re-picked for its view, not having been swizzled for it before.
     TextureSwizzle,
+    /// Within [`Self::CommandProcessor`]: the stream walked into packets and its draw segments
+    /// found.
+    CpWalk,
+    /// Within [`Self::CommandProcessor`]: a compute dispatch carried out into guest memory.
+    CpDispatch,
+    /// Within [`Self::CpDispatch`]: its registers found and its program translated or kept.
+    DispatchPrepare,
+    /// Within [`Self::CpDispatch`]: its window and buffers read out of guest memory.
+    DispatchRead,
+    /// Within [`Self::CpDispatch`]: the device's part, handed over and answered.
+    DispatchExecute,
+    /// Within [`Self::CpDispatch`]: what it changed written back into guest memory.
+    DispatchWriteBack,
+    /// Within [`Self::DispatchExecute`]: its buffers and images made and filled.
+    DeviceSetup,
+    /// Within [`Self::DispatchExecute`]: its pipeline built.
+    DevicePipeline,
+    /// Within [`Self::DispatchExecute`]: recorded, submitted and waited for.
+    DeviceRun,
+    /// Within [`Self::DispatchExecute`]: its results read off the device and everything released.
+    DeviceReadBack,
+    /// Within [`Self::DispatchWriteBack`]: what changed worked out, a stored image tiled back.
+    WriteBackChanges,
+    /// Within [`Self::DispatchWriteBack`]: the changed bytes and fills written into guest memory.
+    WriteBackGuest,
+    /// A frame still on the device written back because command-processor work touched its target
+    /// before the flip (D714).
+    SettlePending,
 }
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 48] = [
         Self::SubmitCall,
         Self::CommandProcessor,
         Self::RunDraws,
@@ -283,6 +311,19 @@ impl Span {
         Self::TextureKept,
         Self::TextureUnwatched,
         Self::TextureSwizzle,
+        Self::CpWalk,
+        Self::CpDispatch,
+        Self::DispatchPrepare,
+        Self::DispatchRead,
+        Self::DispatchExecute,
+        Self::DispatchWriteBack,
+        Self::DeviceSetup,
+        Self::DevicePipeline,
+        Self::DeviceRun,
+        Self::DeviceReadBack,
+        Self::WriteBackChanges,
+        Self::WriteBackGuest,
+        Self::SettlePending,
     ];
 
     /// What to call it in the report.
@@ -323,6 +364,19 @@ impl Span {
             Self::TextureKept => "textures: kept",
             Self::TextureUnwatched => "textures: unwatched",
             Self::TextureSwizzle => "textures: swizzle",
+            Self::CpWalk => "cp: walk",
+            Self::CpDispatch => "cp: dispatch",
+            Self::DispatchPrepare => "dispatch: prepare",
+            Self::DispatchRead => "dispatch: read",
+            Self::DispatchExecute => "dispatch: execute",
+            Self::DispatchWriteBack => "dispatch: write back",
+            Self::DeviceSetup => "device: setup",
+            Self::DevicePipeline => "device: pipeline",
+            Self::DeviceRun => "device: run",
+            Self::DeviceReadBack => "device: read back",
+            Self::WriteBackChanges => "write back: changes",
+            Self::WriteBackGuest => "write back: guest",
+            Self::SettlePending => "settle pending frame",
         }
     }
 }
@@ -340,6 +394,34 @@ pub fn set_detail(on: bool) {
 /// Whether [`Span`]s are being measured.
 pub fn detail() -> bool {
     DETAIL.load(Ordering::Relaxed)
+}
+
+/// A [`Span`] measured from [`SpanGuard::start`] until the guard is dropped, for a stretch with
+/// several ways out.
+#[derive(Debug)]
+pub struct SpanGuard {
+    span: Span,
+    started: Option<std::time::Instant>,
+}
+
+impl SpanGuard {
+    /// Starts measuring `span`, when detail is on.
+    pub fn start(span: Span) -> Self {
+        Self {
+            span,
+            started: detail().then(std::time::Instant::now),
+        }
+    }
+}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            SPAN_SPENT[self.span as usize].fetch_add(nanos, Ordering::Relaxed);
+            SPAN_COUNTED[self.span as usize].fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Runs `work`, adding its time to `span` when detail is on.

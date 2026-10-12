@@ -763,16 +763,20 @@ fn dispatch_core(
         Option<&crate::compute_buffers::BoundBuffers>,
     ),
 ) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
+    use orbistoun_gpu::perf::{Span, SpanGuard, span};
     let push_bytes = u32::try_from(push.len() * 4)
         .map_err(|_| DispatchError::Vulkan("push constants", vk::Result::ERROR_UNKNOWN))?;
-    let bound = build_pipeline(
-        device,
-        module,
-        binding0.buffer,
-        binding0.size,
-        (binding1.buffer, binding1.offset, binding1.size),
-        (push_bytes, images, buffers.map(|b| b.layout)),
-    )?;
+    let bound = span(Span::DevicePipeline, || {
+        build_pipeline(
+            device,
+            module,
+            binding0.buffer,
+            binding0.size,
+            (binding1.buffer, binding1.offset, binding1.size),
+            (push_bytes, images, buffers.map(|b| b.layout)),
+        )
+    })?;
+    let running = SpanGuard::start(Span::DeviceRun);
     let pipeline = bound.pipeline;
     let pipeline_layout = bound.layout;
     let sets = [bound.set];
@@ -860,6 +864,8 @@ fn dispatch_core(
     // SAFETY: the device is live and nothing else is using it.
     unsafe { device.device_wait_idle() }
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
+    drop(running);
+    let _reading = SpanGuard::start(Span::DeviceReadBack);
 
     // Read back.
     let observed = read_back(device, binding0)?;
@@ -1111,6 +1117,8 @@ pub fn dispatch_guest_with_buffers(
     images: &crate::compute_images::DispatchImages<'_>,
     buffers: &[crate::compute_buffers::BufferIn<'_>],
 ) -> Result<GuestDispatch, DispatchError> {
+    use orbistoun_gpu::perf::{Span, SpanGuard};
+    let setting_up = SpanGuard::start(Span::DeviceSetup);
     // Draws already queued finish first: the window was read from guest memory they write.
     crate::framebuffer::settle_session()?;
     let session = session()?;
@@ -1166,6 +1174,7 @@ pub fn dispatch_guest_with_buffers(
     let bound = crate::compute_images::BoundImages::create((instance, physical, device), images)?;
     let traced =
         crate::compute_buffers::BoundBuffers::create((instance, physical, device), buffers)?;
+    drop(setting_up);
     let dispatched = dispatch_core(
         device,
         queue,
@@ -1175,6 +1184,7 @@ pub fn dispatch_guest_with_buffers(
         &window,
         (groups, push, &bound, traced.as_ref()),
     );
+    let _reading = SpanGuard::start(Span::DeviceReadBack);
     let stored = dispatched
         .as_ref()
         .ok()
