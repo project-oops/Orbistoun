@@ -174,14 +174,19 @@ pub(crate) fn create_host_buffer(
 
     // Host-visible and coherent, so the result is read without an explicit flush or a staging copy.
     let wanted = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-    let memory_type = (0..memory_properties.memory_type_count)
-        .find(|i| {
-            let usable = requirements.memory_type_bits & (1 << i) != 0;
-            let suitable = memory_properties.memory_types[*i as usize]
-                .property_flags
-                .contains(wanted);
-            usable && suitable
+    let with = |flags: vk::MemoryPropertyFlags| {
+        (0..memory_properties.memory_type_count).find(|i| {
+            requirements.memory_type_bits & (1 << i) != 0
+                && memory_properties.memory_types[*i as usize]
+                    .property_flags
+                    .contains(flags)
         })
+    };
+    // Cached where the device offers it, as `framebuffer::create_host_buffer` is: the window is
+    // read back whole after every dispatch, and the first host-visible type is commonly
+    // write-combined, which the host reads far more slowly.
+    let memory_type = with(wanted | vk::MemoryPropertyFlags::HOST_CACHED)
+        .or_else(|| with(wanted))
         .ok_or(DispatchError::NoHostVisibleMemory)?;
 
     let allocate = vk::MemoryAllocateInfo::default()

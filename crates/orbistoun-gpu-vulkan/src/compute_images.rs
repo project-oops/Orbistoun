@@ -553,11 +553,17 @@ fn staging_buffer(
         .map_err(|e| DispatchError::Vulkan("create_buffer(dispatch image)", e))?;
     // SAFETY: the buffer was created on this device.
     let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+    // Cached where the device offers it: a stored image is read back texel by texel, and an
+    // uncached read costs a bus round trip each.
+    let coherent = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+    let context = (instance, physical, device);
     let memory = match allocate(
-        (instance, physical, device),
+        context,
         requirements,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    ) {
+        coherent | vk::MemoryPropertyFlags::HOST_CACHED,
+    )
+    .or_else(|_| allocate(context, requirements, coherent))
+    {
         Ok(memory) => memory,
         Err(e) => {
             // SAFETY: created above and never used.
