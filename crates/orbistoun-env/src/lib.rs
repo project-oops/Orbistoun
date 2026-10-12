@@ -164,12 +164,41 @@ pub const PROFILE: Var = Var {
 /// Keep the frame drawn before every Nth flip, so a run can be looked at as a sequence.
 ///
 /// A headless run leaves one picture, at its end; whether a menu came up, and whether it drew,
-/// happens in between. Each kept frame is read off the device, which waits for it.
+/// happens in between. Each kept frame is read off the device, which waits for it. Flips are the
+/// guest's own, counted from 1 on the port that flipped, so the first kept is flip 1 and the rest
+/// follow every N.
 pub const FRAME_EVERY: Var = Var {
     name: "ORBISTOUN_FRAME_EVERY",
     kind: Kind::Diagnostic,
-    summary: "N keeps the frame drawn before every Nth flip in the traces directory, as flip-<n>-<w>x<h>.rgba",
+    summary: "N keeps the frame drawn before guest flips 1, 1+N, 1+2N ... in the traces directory, as flip-<n>-<w>x<h>.rgba",
     example: "30",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Keep the frames drawn before these guest flips, by the guest's own flip index.
+///
+/// The index a console reports for the same flip, so a kept frame can be compared with a hardware
+/// frame of the same index. Kept beside whatever [`FRAME_EVERY`] keeps.
+pub const FRAME_AT: Var = Var {
+    name: "ORBISTOUN_FRAME_AT",
+    kind: Kind::Diagnostic,
+    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba",
+    example: "1,30,60",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Where kept frames go, instead of the traces directory every run shares.
+///
+/// A run clears the kept frames before it starts, so two runs at once in the shared directory
+/// clear and overwrite each other's; a comparison that must read its own run's frames names a
+/// directory of its own.
+pub const FRAME_DIR: Var = Var {
+    name: "ORBISTOUN_FRAME_DIR",
+    kind: Kind::Diagnostic,
+    summary: "a directory the frames ORBISTOUN_FRAME_EVERY and ORBISTOUN_FRAME_AT keep are written to, instead of the traces directory",
+    example: "compare-run",
     effect: Effect::Observes,
     read_by: "orbistoun-worker",
 };
@@ -632,6 +661,8 @@ pub const REGISTRY: &[Var] = &[
     TRACE_SUBMITS,
     PROFILE,
     FRAME_EVERY,
+    FRAME_AT,
+    FRAME_DIR,
     LIMIT,
     COMMIT,
     LLM_API_KEY,
@@ -714,6 +745,8 @@ mod tests {
         super::TRACE_SUBMITS,
         super::PROFILE,
         super::FRAME_EVERY,
+        super::FRAME_AT,
+        super::FRAME_DIR,
         super::LIMIT,
         super::COMMIT,
         super::LLM_API_KEY,

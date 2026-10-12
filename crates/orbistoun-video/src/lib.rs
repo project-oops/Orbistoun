@@ -160,6 +160,12 @@ mod port {
         .flatten()
     }
 
+    /// How many flips the port that last flipped has completed, or `None` if none has flipped.
+    pub(super) fn last_flipped_count() -> Option<u64> {
+        let handle = last_flipped_handle().load(std::sync::atomic::Ordering::Relaxed);
+        with(handle, |p| p.flips)
+    }
+
     /// Every port ever opened. Index plus [`FIRST`] is the handle; a closed one stays, so handles
     /// are never renumbered.
     fn table() -> &'static Mutex<Vec<Port>> {
@@ -750,6 +756,16 @@ pub fn flips_accepted() -> u64 {
 #[must_use]
 pub fn last_flipped_buffer() -> Option<(u64, BufferShape)> {
     port::last_flipped_buffer()
+}
+
+/// The guest's own index of the flip it last submitted: the count of flips completed on the port
+/// that flipped, the number `sceVideoOutGetFlipStatus` reports, counting from 1.
+///
+/// Read inside the flip observer it is the index of the flip being shown, which is how a frame kept
+/// here is matched to the frame a console flipped at the same index. `None` until a port flips.
+#[must_use]
+pub fn last_flip_index() -> Option<u64> {
+    port::last_flipped_count()
 }
 
 /// What sees each presented frame: the flipped buffer's guest address and shape, handed over as

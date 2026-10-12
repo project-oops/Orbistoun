@@ -27,7 +27,8 @@ mod worklist;
 use crate::audit::{cmd_audit, cmd_harvest};
 use crate::common::library_or;
 use crate::compat::{
-    cmd_compat_list, cmd_compat_markdown, cmd_compat_record, cmd_compat_reproduce,
+    cmd_compat_compare, cmd_compat_list, cmd_compat_markdown, cmd_compat_record,
+    cmd_compat_reproduce,
 };
 use crate::corpus::{cmd_corpus_list, cmd_corpus_run, cmd_corpus_sync};
 use crate::learn::{cmd_knows, cmd_learn};
@@ -718,6 +719,24 @@ enum CompatAction {
         #[arg(long, default_value = "compat")]
         dir: std::path::PathBuf,
     },
+    /// Run a title as its record says and compare its frames with the console's, flip for flip.
+    ///
+    /// The references are the console's frames of the same guest flip, as `flip-<n>-<w>x<h>.rgba`
+    /// or `flip-<n>.png`; the run keeps the frames drawn before exactly those flips. Fails when a
+    /// flip was not drawn or any pixel differs by more than the tolerance.
+    Compare {
+        /// The title, as its record is named.
+        title: String,
+        /// The directory of reference frames.
+        #[arg(long)]
+        reference: std::path::PathBuf,
+        /// The largest difference in any colour channel still counted as a match, in 8-bit steps.
+        #[arg(long, default_value_t = 0)]
+        tolerance: u8,
+        /// Where the records live.
+        #[arg(long, default_value = "compat")]
+        dir: std::path::PathBuf,
+    },
     /// Record what the last run of this title achieved.
     Record {
         /// Path to the guest executable that was run.
@@ -1024,6 +1043,12 @@ fn dispatch_records(
             CompatAction::Reproduce { title, all, dir } => {
                 cmd_compat_reproduce(service, (title.as_deref(), *all), dir, symbols_db)?;
             }
+            CompatAction::Compare {
+                title,
+                reference,
+                tolerance,
+                dir,
+            } => cmd_compat_compare(service, title, (reference, *tolerance), dir, symbols_db)?,
             CompatAction::Record {
                 path,
                 dir,

@@ -177,7 +177,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // comes with a device copy of its own.
     let drawn_into = orbistoun_gpu::agc_driver::pending_frame_base();
     if drawn_into.is_some() {
-        keep_every_nth_frame();
+        keep_frame_at_this_flip();
     }
     let (written, shown) = orbistoun_gpu::agc_driver::write_back_at_this_flip_showing(due);
     if !written {
@@ -755,28 +755,69 @@ pub fn discard_snapshot(id: u64) {
     });
 }
 
-/// Keeps the frame drawn before every Nth flip, when `ORBISTOUN_FRAME_EVERY` asks.
-fn keep_every_nth_frame() {
-    static EVERY: OnceLock<Option<u64>> = OnceLock::new();
-    static FLIPS: AtomicU64 = AtomicU64::new(0);
-    let Some(every) = *EVERY.get_or_init(|| {
-        orbistoun_env::FRAME_EVERY
-            .get()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .filter(|&n| n > 0)
-    }) else {
+/// Which guest flips have the frame drawn before them kept: `ORBISTOUN_FRAME_EVERY` and
+/// `ORBISTOUN_FRAME_AT`, by the guest's own flip index.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct KeptFlips {
+    /// Flips 1, 1+N, 1+2N ...
+    every: Option<u64>,
+    /// These flips exactly.
+    at: Vec<u64>,
+}
+
+impl KeptFlips {
+    /// From the two variables' values; anything that is not a positive number is ignored.
+    fn parse(every: Option<&str>, at: Option<&str>) -> Self {
+        let positive = |value: &str| value.trim().parse::<u64>().ok().filter(|&n| n > 0);
+        Self {
+            every: every.and_then(positive),
+            at: at
+                .map(|list| list.split(',').filter_map(positive).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Whether the frame drawn before guest flip `flip` (counted from 1) is kept.
+    fn wants(&self, flip: u64) -> bool {
+        flip > 0
+            && (self.every.is_some_and(|every| (flip - 1) % every == 0) || self.at.contains(&flip))
+    }
+}
+
+/// Keeps the frame drawn before this flip when `ORBISTOUN_FRAME_EVERY` or `ORBISTOUN_FRAME_AT`
+/// asks, named by the guest's flip index: the index a console reports for the same flip, so a
+/// kept frame can be compared with the console's frame of that index.
+fn keep_frame_at_this_flip() {
+    static ASKED: OnceLock<KeptFlips> = OnceLock::new();
+    // `ORBISTOUN_FRAME_DIR` gives this run a directory of its own, since the traces directory is
+    // shared with every other run.
+    static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let asked = ASKED.get_or_init(|| {
+        KeptFlips::parse(
+            orbistoun_env::FRAME_EVERY.get().as_deref(),
+            orbistoun_env::FRAME_AT.get().as_deref(),
+        )
+    });
+    let Some(flip) = orbistoun_video::last_flip_index() else {
         return;
     };
-    let flip = FLIPS.fetch_add(1, Ordering::Relaxed);
-    if flip % every != 0 {
+    if !asked.wants(flip) {
         return;
     }
-    if let (Some((width, height, bytes)), Some(dir)) = (executed_frame(), frames_dir())
-        && let Err(e) = std::fs::write(
+    let own = OWN.get_or_init(|| orbistoun_env::FRAME_DIR.get().map(PathBuf::from));
+    let Some(dir) = own.as_deref().or_else(frames_dir) else {
+        return;
+    };
+    let Some((width, height, bytes)) = executed_frame() else {
+        return;
+    };
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        std::fs::write(
             dir.join(format!("flip-{flip:06}-{width}x{height}.rgba")),
             bytes,
         )
-    {
+    });
+    if let Err(e) = written {
         tracing::warn!("a kept frame could not be written: {e}");
     }
 }
@@ -1204,7 +1245,35 @@ fn log_execution() {
 
 #[cfg(test)]
 mod tests {
-    use super::{RenderOutcome, render};
+    use super::{KeptFlips, RenderOutcome, render};
+
+    /// Every N keeps guest flips 1, 1+N, 1+2N; a list keeps exactly the flips it names; the two
+    /// combine, and flip 0, which no guest submits, is never kept.
+    #[test]
+    fn kept_flips_follow_the_guest_flip_index() {
+        let every = KeptFlips::parse(Some("30"), None);
+        let kept: Vec<u64> = (0..=91).filter(|&flip| every.wants(flip)).collect();
+        assert_eq!(
+            kept,
+            [1, 31, 61, 91],
+            "the first drawn flip and every 30th after it"
+        );
+
+        let at = KeptFlips::parse(None, Some("1, 30,60,x,0"));
+        assert_eq!(at.at, [1, 30, 60], "not-a-number and zero are ignored");
+        let kept: Vec<u64> = (0..=100).filter(|&flip| at.wants(flip)).collect();
+        assert_eq!(kept, [1, 30, 60], "exactly the flips named");
+
+        let both = KeptFlips::parse(Some("50"), Some("30"));
+        let kept: Vec<u64> = (0..=101).filter(|&flip| both.wants(flip)).collect();
+        assert_eq!(kept, [1, 30, 51, 101], "every N and the list together");
+
+        assert_eq!(KeptFlips::parse(Some("0"), Some("")), KeptFlips::default());
+        assert!(
+            !KeptFlips::default().wants(1),
+            "nothing asked, nothing kept"
+        );
+    }
 
     /// A flipped buffer that is exactly its frame's colour target is shown from the device copy
     /// whatever its video-out format: PPSA28061 flips 3840x2160 in `0x8000000022000000`, not the

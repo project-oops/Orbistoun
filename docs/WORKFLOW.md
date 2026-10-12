@@ -133,6 +133,20 @@ default or by `learned.toml` answers updates `[experiment]`. Each slot is compar
 itself, so no run is refused for its policy (D312). `--force` replaces a better entry within a
 slot. The run prompts for this after it moves.
 
+```bash
+orbistoun-cli compat compare <title> --reference <directory> [--tolerance <steps>]
+```
+
+`compat compare` is framebuffer diffing against the console. It runs the title as its record's
+`[reproduce]` section says, keeping the frames drawn before exactly the flips the reference
+directory holds, and compares each with the console's frame of the same flip. References are
+`flip-<n>-<w>x<h>.rgba` or `flip-<n>.png`, where `n` is the guest's own flip index, the count
+`sceVideoOutGetFlipStatus` reports. A flip counts as matched when every pixel's colour channels
+are within the tolerance; alpha is not compared (D796). The run keeps its frames under
+`compare-<title>/kept` in the traces directory rather than beside every other run's, and writes
+a difference picture for each flip that did not match. It fails when any reference flip was not
+drawn, differs in extent or does not match, so it can stand as a gate.
+
 `submit export` collects the `learned.toml` measurements and both compat slots into one
 directory with a manifest naming the build. It refuses to write an empty bundle.
 `submit check` re-derives what a bundle claims rather than trusting it: agreement is silent, a

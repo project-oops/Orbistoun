@@ -144,8 +144,259 @@ pub(crate) fn write_sheet(kept: &[Kept], out: &std::path::Path) -> Result<usize>
     Ok(frames.len())
 }
 
+/// A frame the console flipped, by the guest's flip index: what a kept frame of the same index is
+/// compared with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reference {
+    pub(crate) flip: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    /// `Rgba8`, rows top to bottom, no padding.
+    pub(crate) rgba: Vec<u8>,
+}
+
+/// The reference frames in `dir`: every `flip-<n>-<w>x<h>.rgba` (the kept-frame layout) and every
+/// `flip-<n>.png`, in flip order. Two references for one flip are refused, since which one a
+/// comparison used could not be told afterwards.
+///
+/// # Errors
+///
+/// When `dir` or a frame cannot be read, a raw frame's length is not its extent's, or a flip has
+/// two references.
+pub(crate) fn references(dir: &std::path::Path) -> Result<Vec<Reference>> {
+    let mut references = Vec::new();
+    for frame in kept(dir)? {
+        let rgba = std::fs::read(&frame.path)
+            .with_context(|| format!("reading {}", frame.path.display()))?;
+        let expected = u64::from(frame.width) * u64::from(frame.height) * 4;
+        anyhow::ensure!(
+            u64::try_from(rgba.len())? == expected,
+            "{} holds {} bytes, and a {}x{} Rgba8 frame is {expected}",
+            frame.path.display(),
+            rgba.len(),
+            frame.width,
+            frame.height
+        );
+        references.push(Reference {
+            flip: frame.flip,
+            width: frame.width,
+            height: frame.height,
+            rgba,
+        });
+    }
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(flip) = name
+            .strip_prefix("flip-")
+            .and_then(|rest| rest.strip_suffix(".png"))
+            .and_then(|flip| flip.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        let image = image::open(entry.path())
+            .with_context(|| format!("reading {}", entry.path().display()))?
+            .into_rgba8();
+        references.push(Reference {
+            flip,
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw(),
+        });
+    }
+    references.sort_by_key(|reference| reference.flip);
+    if let Some(pair) = references
+        .windows(2)
+        .find(|pair| pair[0].flip == pair[1].flip)
+    {
+        anyhow::bail!(
+            "{} holds two references for flip {}",
+            dir.display(),
+            pair[0].flip
+        );
+    }
+    Ok(references)
+}
+
+/// How a kept frame compares with the console's frame of the same flip.
+///
+/// Colour only: a presented frame is shown opaque (D796), so alpha never reaches the picture and
+/// is not compared.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Comparison {
+    pub(crate) pixels: u64,
+    /// Pixels whose every colour channel is within the tolerance of the reference's.
+    pub(crate) matched: u64,
+    /// The mean absolute difference over every colour channel of every pixel, in 8-bit steps.
+    pub(crate) mean_error: f64,
+    /// The largest absolute difference in any colour channel.
+    pub(crate) max_error: u8,
+}
+
+impl Comparison {
+    /// Whether every pixel matched.
+    pub(crate) fn exact(&self) -> bool {
+        self.matched == self.pixels
+    }
+}
+
+/// Compares two `Rgba8` frames of one extent, pixel by pixel, counting a pixel as matched when no
+/// colour channel differs by more than `tolerance`. `None` when the lengths differ or are not
+/// whole pixels, since frames of different extents have no pixel-for-pixel answer.
+pub(crate) fn compare(kept: &[u8], reference: &[u8], tolerance: u8) -> Option<Comparison> {
+    if kept.len() != reference.len() || kept.len() % 4 != 0 {
+        return None;
+    }
+    let (mut matched, mut total, mut max_error) = (0u64, 0u64, 0u8);
+    for (ours, theirs) in kept.chunks_exact(4).zip(reference.chunks_exact(4)) {
+        let worst = ours[..3]
+            .iter()
+            .zip(&theirs[..3])
+            .map(|(a, b)| {
+                let difference = a.abs_diff(*b);
+                total += u64::from(difference);
+                difference
+            })
+            .max()
+            .unwrap_or(0);
+        max_error = max_error.max(worst);
+        if worst <= tolerance {
+            matched += 1;
+        }
+    }
+    let pixels = u64::try_from(kept.len() / 4).ok()?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a mean over at most a few hundred million channels, reported to two places"
+    )]
+    let mean_error = if pixels == 0 {
+        0.0
+    } else {
+        total as f64 / (pixels * 3) as f64
+    };
+    Some(Comparison {
+        pixels,
+        matched,
+        mean_error,
+        max_error,
+    })
+}
+
+/// The per-channel absolute difference between two `Rgba8` frames of one extent, as a picture:
+/// black where they agree. `None` when the lengths are not `width * height` pixels each.
+pub(crate) fn difference(
+    width: u32,
+    height: u32,
+    kept: &[u8],
+    reference: &[u8],
+) -> Option<image::RgbImage> {
+    let expected = usize::try_from(u64::from(width) * u64::from(height) * 4).ok()?;
+    if kept.len() != expected || reference.len() != expected {
+        return None;
+    }
+    let pixels: Vec<u8> = kept
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .flat_map(|(ours, theirs)| {
+            [
+                ours[0].abs_diff(theirs[0]),
+                ours[1].abs_diff(theirs[1]),
+                ours[2].abs_diff(theirs[2]),
+            ]
+        })
+        .collect();
+    image::RgbImage::from_raw(width, height, pixels)
+}
+
 #[cfg(test)]
 mod tests {
+    /// Matching counts a pixel only when every colour channel is within the tolerance, alpha is
+    /// ignored, and the error figures are over colour channels alone.
+    #[test]
+    fn a_comparison_counts_colour_within_the_tolerance_and_ignores_alpha() {
+        let reference = [10, 20, 30, 255, 0, 0, 0, 0, 100, 100, 100, 7];
+        let kept = [10, 20, 30, 0, 2, 0, 0, 255, 100, 100, 110, 7];
+        let exact = super::compare(&kept, &reference, 0).expect("same extent");
+        assert_eq!(
+            (exact.pixels, exact.matched),
+            (3, 1),
+            "alpha alone differs in pixel 0"
+        );
+        assert_eq!(exact.max_error, 10);
+        assert!(
+            (exact.mean_error - 12.0 / 9.0).abs() < 1e-9,
+            "{}",
+            exact.mean_error
+        );
+        assert!(!exact.exact());
+        let loose = super::compare(&kept, &reference, 2).expect("same extent");
+        assert_eq!(
+            loose.matched, 2,
+            "a difference of 2 is within a tolerance of 2"
+        );
+        assert!(super::compare(&kept, &reference, 10).expect("same").exact());
+        assert!(
+            super::compare(&kept[..8], &reference, 0).is_none(),
+            "extents differ"
+        );
+        assert!(
+            super::compare(&kept[..7], &reference[..7], 0).is_none(),
+            "not whole pixels"
+        );
+    }
+
+    /// The difference picture is black where the frames agree and holds the per-channel distance
+    /// where they do not.
+    #[test]
+    fn the_difference_picture_is_black_where_frames_agree() {
+        let reference = [10, 20, 30, 255, 0, 0, 0, 0];
+        let kept = [10, 20, 30, 0, 5, 0, 9, 255];
+        let picture = super::difference(2, 1, &kept, &reference).expect("2x1");
+        assert_eq!(picture.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_eq!(picture.get_pixel(1, 0).0, [5, 0, 9]);
+        assert!(super::difference(3, 1, &kept, &reference).is_none());
+    }
+
+    /// References are read from raw kept-frame files and from PNGs, ordered by flip, and a flip
+    /// with two references, or a raw file of the wrong length, is refused.
+    #[test]
+    fn references_are_read_from_raw_frames_and_pngs() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        std::fs::write(dir.path().join("flip-000030-2x1.rgba"), [1u8; 8]).expect("writes");
+        image::RgbaImage::from_raw(1, 1, vec![9, 8, 7, 6])
+            .expect("1x1")
+            .save(dir.path().join("flip-1.png"))
+            .expect("writes a png");
+        std::fs::write(dir.path().join("notes.txt"), b"ignored").expect("writes");
+        let references = super::references(dir.path()).expect("reads");
+        let summary: Vec<(u64, u32, u32, usize)> = references
+            .iter()
+            .map(|r| (r.flip, r.width, r.height, r.rgba.len()))
+            .collect();
+        assert_eq!(summary, [(1, 1, 1, 4), (30, 2, 1, 8)]);
+        assert_eq!(references[0].rgba, [9, 8, 7, 6]);
+
+        std::fs::write(dir.path().join("flip-30.png"), b"").expect("writes");
+        assert!(
+            super::references(dir.path()).is_err(),
+            "an unreadable png is an error"
+        );
+        std::fs::remove_file(dir.path().join("flip-30.png")).expect("removes");
+        image::RgbaImage::from_raw(1, 1, vec![0; 4])
+            .expect("1x1")
+            .save(dir.path().join("flip-30.png"))
+            .expect("writes a png");
+        let error = super::references(dir.path()).expect_err("two references for flip 30");
+        assert!(error.to_string().contains("flip 30"), "{error}");
+
+        let short = tempfile::tempdir().expect("a temporary directory");
+        std::fs::write(short.path().join("flip-000001-2x2.rgba"), [0u8; 8]).expect("writes");
+        assert!(
+            super::references(short.path()).is_err(),
+            "8 bytes is not a 2x2 frame"
+        );
+    }
+
     /// Frames are tiled in order, nine to a row, each shrunk to a tile whatever its size.
     #[test]
     fn frames_are_tiled_in_order_nine_to_a_row() {

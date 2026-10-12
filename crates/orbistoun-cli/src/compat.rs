@@ -254,6 +254,127 @@ fn reproduce_one(
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
 ) -> Result<()> {
+    let reproduce = run_as_recorded(service, title, dir, symbols_db)?;
+    // Written whether or not the run was kept as the record's best: a reproduction's sheet is the
+    // point of asking for one.
+    match write_title_sheet(dir, title, &reproduce, &orbistoun_paths::Paths::resolve())? {
+        Some((sheet, shown, kept)) => println!(
+            "wrote {} ({shown} of the {kept} frames kept, evenly across the run)",
+            sheet.display()
+        ),
+        None => println!("the run kept no frames, so {title} has no sheet"),
+    }
+    Ok(())
+}
+
+/// `compat compare` - runs a title as its record says, keeping the frames drawn before the flips
+/// `reference` holds frames for, and compares each with the console's frame of the same flip
+/// (TESTING.md, framebuffer diffing).
+///
+/// Each comparison is printed with its matched pixels and error, and a difference picture is
+/// written beside the kept frames. Fails when any reference flip was not drawn, differs in extent,
+/// or has a pixel outside `tolerance`, so the command can stand as a gate.
+pub(crate) fn cmd_compat_compare(
+    service: &orbistoun_service::Service,
+    title: &str,
+    (reference, tolerance): (&std::path::Path, u8),
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+) -> Result<()> {
+    let references = crate::frames::references(reference)?;
+    anyhow::ensure!(
+        !references.is_empty(),
+        "{} holds no reference frames (flip-<n>-<w>x<h>.rgba or flip-<n>.png)",
+        reference.display()
+    );
+    // The run keeps its frames in a directory of its own: the traces directory is shared, and
+    // another run clears and overwrites the frames kept there.
+    let out = orbistoun_paths::Paths::resolve()
+        .traces_dir()
+        .join(format!("compare-{title}"));
+    let own = out.join("kept");
+    std::fs::create_dir_all(&own).with_context(|| format!("creating {}", own.display()))?;
+    crate::frames::clear(&own)?;
+    let flips: Vec<String> = references.iter().map(|r| r.flip.to_string()).collect();
+    // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+    unsafe { std::env::set_var(orbistoun_env::FRAME_AT.name, flips.join(",")) };
+    // SAFETY: as above.
+    unsafe { std::env::set_var(orbistoun_env::FRAME_DIR.name, &own) };
+    run_as_recorded(service, title, dir, symbols_db)?;
+
+    let kept = crate::frames::kept(&own)?;
+    println!();
+    println!(
+        "{title} against {} (tolerance {tolerance})",
+        reference.display()
+    );
+    let mut failed = 0usize;
+    for wanted in &references {
+        let Some(ours) = kept.iter().find(|k| k.flip == wanted.flip) else {
+            println!(
+                "  flip {:>6}  not kept: the run did not reach it, or nothing was drawn before it",
+                wanted.flip
+            );
+            failed += 1;
+            continue;
+        };
+        if (ours.width, ours.height) != (wanted.width, wanted.height) {
+            println!(
+                "  flip {:>6}  extent {}x{}, the console's {}x{}",
+                wanted.flip, ours.width, ours.height, wanted.width, wanted.height
+            );
+            failed += 1;
+            continue;
+        }
+        let bytes = std::fs::read(&ours.path)
+            .with_context(|| format!("reading {}", ours.path.display()))?;
+        let Some(result) = crate::frames::compare(&bytes, &wanted.rgba, tolerance) else {
+            println!(
+                "  flip {:>6}  kept frame is not {}x{}",
+                wanted.flip, ours.width, ours.height
+            );
+            failed += 1;
+            continue;
+        };
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a percentage of a pixel count, reported to two places"
+        )]
+        let share = 100.0 * result.matched as f64 / result.pixels.max(1) as f64;
+        println!(
+            "  flip {:>6}  {}/{} pixels ({share:.2}%) match, mean error {:.2}, max {}",
+            wanted.flip, result.matched, result.pixels, result.mean_error, result.max_error
+        );
+        if !result.exact() {
+            failed += 1;
+            if let Some(picture) =
+                crate::frames::difference(ours.width, ours.height, &bytes, &wanted.rgba)
+            {
+                let path = out.join(format!("flip-{}-difference.png", wanted.flip));
+                picture
+                    .save_with_format(&path, image::ImageFormat::Png)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                println!("               difference: {}", path.display());
+            }
+        }
+    }
+    anyhow::ensure!(
+        failed == 0,
+        "{failed} of {} reference flips did not match",
+        references.len()
+    );
+    println!("every reference flip matched");
+    Ok(())
+}
+
+/// Runs `title` as its record's `[reproduce]` section says - the pinned build, the limit, the frame
+/// interval and the input beside the record - answering that section.
+fn run_as_recorded(
+    service: &orbistoun_service::Service,
+    title: &str,
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+) -> Result<orbistoun_overrides::Reproduce> {
     let record = load_compat(dir, title)?;
     let Some(reproduce) = record.reproduce else {
         anyhow::bail!(
@@ -301,16 +422,7 @@ fn reproduce_one(
         (symbols_db, inputs.is_file().then_some(inputs.as_path())),
         (false, false),
     )?;
-    // Written whether or not the run was kept as the record's best: a reproduction's sheet is the
-    // point of asking for one.
-    match write_title_sheet(dir, title, &reproduce, &orbistoun_paths::Paths::resolve())? {
-        Some((sheet, shown, kept)) => println!(
-            "wrote {} ({shown} of the {kept} frames kept, evenly across the run)",
-            sheet.display()
-        ),
-        None => println!("the run kept no frames, so {title} has no sheet"),
-    }
-    Ok(())
+    Ok(reproduce)
 }
 
 /// Writes `title`'s sheet from the frames the last run kept, where its record says: beside the
