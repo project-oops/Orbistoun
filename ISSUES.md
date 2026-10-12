@@ -95,7 +95,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - No error-code corpus with per-entry provenance exists.
 - Miri does not run over the host-side crates, though `rust-toolchain.toml` mentions it.
 - No synthetic malformed-container fixtures exist.
-- Public items with no consumer: `HandleAllocator`, `GuestResult`, `StubReturn::as_raw`, `SymbolDbFile`, `Registry::len`, `SymbolDb::len`, `Protection`, `Region`.
+- Public items with no consumer: `GuestResult`, `StubReturn::as_raw`, `SymbolDb::len`, `Protection`, `Region`.
 - Five crates cannot be cross-checked for Linux from a Windows host; only CI covers them.
 - `agc_driver::tests::a_protected_target_is_trusted_until_a_write_to_it_faults` is flaky.
 - The GUI's embedded-docs registry in `orbistoun-gui/src/app.rs` has stale page names and blurbs.
