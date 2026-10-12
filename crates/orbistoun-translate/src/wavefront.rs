@@ -2055,7 +2055,7 @@ fn declare_user_data_source(
     b: &mut Builder,
     (stage, reads_buffers): (Stage, bool),
     u32_type: Id,
-    user_data: UserData,
+    user_data: &UserData,
 ) -> Option<UserDataSource> {
     // Declared only when this stage reads user data, so a module that reads none is unchanged.
     //
@@ -2222,7 +2222,7 @@ impl<'a> Wavefront<'a> {
         let indexed = user_data.geometry.is_some_and(|g| g.indices.is_some());
         let reads_buffers = !buffers.served.is_empty() || indexed;
         let user_data_source =
-            declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, user_data);
+            declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, &user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, &user_data);
         let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
         let write_mask = (stage == Stage::Compute && draw_buffers.is_some()).then(|| {
@@ -2315,7 +2315,7 @@ impl<'a> Wavefront<'a> {
             scalar_copies: BTreeMap::new(),
         };
 
-        this.seed_entry(user_data_source, user_data, &system);
+        this.seed_entry(user_data_source, &user_data, &system);
         this
     }
 
@@ -2323,7 +2323,7 @@ impl<'a> Wavefront<'a> {
     fn seed_entry(
         &mut self,
         user_data_source: Option<UserDataSource>,
-        user_data: UserData,
+        user_data: &UserData,
         system: &pixel_inputs::SystemInputs,
     ) {
         // Every lane runs at entry; a zero mask would discard every write and produce a buffer of
@@ -2701,7 +2701,7 @@ impl<'a> Wavefront<'a> {
     }
 
     /// Loads each user-data word from `source` into its scalar register, at entry.
-    fn load_user_data(&mut self, source: UserDataSource, user_data: UserData) {
+    fn load_user_data(&mut self, source: UserDataSource, user_data: &UserData) {
         let u32_type = self.u32_type;
         let member = self.constant(0);
         // Where this stage's words begin: its share of the push-constant block, or this workgroup's
@@ -5249,6 +5249,38 @@ mod per_lane_tests {
         let decode = decode_program(&bytes, &encodings, &operands);
         assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
         super::runs_per_lane(&decode, &encodings)
+    }
+
+    /// A fetch shader's buffers are each traced to a slot of their own, and nineteen fit one
+    /// stage: PPSA03416's vertex shader, past its title screen, forms seventeen descriptors by
+    /// computation beside two it reads from user data (D733). Seventeen loads, each with a scalar
+    /// offset and so each found per draw, are seventeen slots and bind.
+    #[test]
+    fn a_fetch_shader_s_computed_buffers_fit_a_stage() {
+        const END: u32 = 0xbf81_0000;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let mut words = Vec::new();
+        for _ in 0..17 {
+            // buffer_load_format_x v4, v4, s[12:15], s11 idxen
+            words.extend([0xe000_2000_u32, 0x0b03_0404]);
+        }
+        words.push(END);
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        let buffers = super::draw_buffers_for(
+            &decode,
+            &encodings,
+            super::Stage::Mesh,
+            super::UserData {
+                count: 16,
+                draw_buffers: true,
+                ..super::UserData::default()
+            },
+        )
+        .expect("seventeen buffers bind");
+        assert_eq!(buffers.sources.len(), 17);
     }
 
     /// A program whose lanes exchange only through masks, lane reads and the local data share

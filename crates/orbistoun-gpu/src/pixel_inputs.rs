@@ -36,7 +36,7 @@ pub(crate) fn decode(writes: &[RegisterWrite]) -> Option<PixelInputs> {
 ///
 /// Held in bits 0-47, clear of the user-data count and first register in bits 48-63: `ENA` in the
 /// low sixteen bits and `ADDR` from bit 32, both sixteen-bit fields (`gfx103.json`).
-pub(crate) fn salt(user_data: UserData) -> u64 {
+pub(crate) fn salt(user_data: &UserData) -> u64 {
     let inputs = user_data.pixel_inputs.map_or(0, |inputs| {
         1 << 18 | u64::from(inputs.address & 0xffff) << 32 | u64::from(inputs.enable & 0xffff)
     });
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn the_salt_tells_apart_what_changes_the_module() {
         let with = |pixel_inputs, dx10_clamp| {
-            salt(UserData {
+            salt(&UserData {
                 pixel_inputs,
                 dx10_clamp,
                 ..UserData::default()

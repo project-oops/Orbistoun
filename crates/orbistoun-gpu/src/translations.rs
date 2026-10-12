@@ -149,7 +149,7 @@ impl TranslationStore {
         }
         let mut refill = Refill::default();
         self.entries.retain(|_, kept| {
-            if let Some(made) = translate(&kept.bytes, kept.context, encodings, operands) {
+            if let Some(made) = translate(&kept.bytes, &kept.context, encodings, operands) {
                 *kept = made;
                 refill.translated += 1;
                 true
@@ -168,7 +168,7 @@ impl TranslationStore {
 /// translates.
 fn translate(
     bytes: &[u8],
-    context: Context,
+    context: &Context,
     encodings: &EncodingTable,
     operands: &OperandTable,
 ) -> Option<Kept> {
@@ -187,7 +187,7 @@ fn translate(
     .ok()?;
     Some(Kept {
         bytes: bytes.to_vec(),
-        context,
+        context: *context,
         module: translated.module,
         textures: translated.textures,
         warnings: translated
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn a_kept_translation_is_served_for_its_own_bytes() {
         let (encodings, operands) = tables();
-        let kept = translate(&TRIVIAL, context(), &encodings, &operands).expect("translates");
+        let kept = translate(&TRIVIAL, &context(), &encodings, &operands).expect("translates");
         let mut store = TranslationStore::default();
         store.insert(7, kept.clone());
         assert_eq!(store.get(7, &TRIVIAL), Some(&kept));
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn a_refill_translates_another_builds_entries_again() {
         let (encodings, operands) = tables();
-        let mut kept = translate(&TRIVIAL, context(), &encodings, &operands).expect("translates");
+        let mut kept = translate(&TRIVIAL, &context(), &encodings, &operands).expect("translates");
         let module = kept.module.clone();
         kept.module = vec![0xdead_beef];
         let mut refused = kept.clone();
@@ -299,7 +299,7 @@ mod tests {
         assert_ne!(first, second);
 
         let (encodings, operands) = tables();
-        let mut kept = translate(&TRIVIAL, context(), &encodings, &operands).expect("translates");
+        let mut kept = translate(&TRIVIAL, &context(), &encodings, &operands).expect("translates");
         let module = kept.module.clone();
         let mut store = TranslationStore::default();
         store.refill(&first, (&encodings, &operands));

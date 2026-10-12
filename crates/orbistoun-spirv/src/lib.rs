@@ -1568,9 +1568,11 @@ pub const COMPUTE_BUFFERS_BINDING: u32 = 2;
 /// dispatch stored, slot for slot.
 pub const COMPUTE_WRITTEN_BINDING: u32 = 3;
 
-/// How many buffers one stage of a draw binds: the length of each binding's array. Sixteen: a
-/// retail vertex shader traces eleven, its descriptors, a table and the streams its fetch forms.
-pub const DRAW_BUFFERS_PER_STAGE: u32 = 16;
+/// How many buffers one stage of a draw binds: the length of each binding's array. Thirty-two: a
+/// retail vertex shader traces eleven, its descriptors, a table and the streams its fetch forms,
+/// and PPSA03416's nineteen, seventeen of them descriptors its fetch computes (D733). Desktop
+/// devices bind far more storage buffers per stage; the backend checks before it relies on it.
+pub const DRAW_BUFFERS_PER_STAGE: u32 = 32;
 
 /// A fragment shader that writes one texel of a storage image, and a colour.
 ///

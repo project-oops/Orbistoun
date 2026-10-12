@@ -3057,8 +3057,8 @@ impl Pipeline {
             ^ primitive_salt(primitive)
             ^ window_salt(self.window)
             ^ width_salt
-            ^ layout_salt(user_data)
-            ^ crate::pixel_inputs::salt(user_data)
+            ^ layout_salt(&user_data)
+            ^ crate::pixel_inputs::salt(&user_data)
             ^ for_draw_salt(for_draw)
             ^ if user_data.draw_buffers {
                 DRAW_BUFFERS_SALT
@@ -3097,7 +3097,7 @@ impl Pipeline {
         {
             kept.clone()
         } else {
-            let kept = self.translate_now(address, shader, decoded, context)?;
+            let kept = self.translate_now(address, shader, decoded, &context)?;
             if let Some(store) = self.store.as_mut() {
                 store.insert(key, kept.clone());
             }
@@ -3132,7 +3132,7 @@ impl Pipeline {
         address: u64,
         shader: &[u8],
         decoded: Option<&orbistoun_shader::Decode>,
-        context: crate::translations::Context,
+        context: &crate::translations::Context,
     ) -> Result<crate::translations::Kept, PrepareFailure> {
         let again;
         let decoded = if let Some(decoded) = decoded {
@@ -3178,7 +3178,7 @@ impl Pipeline {
         })?;
         Ok(crate::translations::Kept {
             bytes: shader.to_vec(),
-            context,
+            context: *context,
             module: translated.module,
             textures: translated.textures,
             warnings: translated
@@ -4622,7 +4622,7 @@ fn local_words_salt(words: Option<u32>) -> u64 {
 
 /// What a draw stage's module key takes from its user-data layout: where its words land, how many,
 /// and the local share it declares.
-fn layout_salt(user_data: UserData) -> u64 {
+fn layout_salt(user_data: &UserData) -> u64 {
     (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
         ^ local_words_salt(user_data.local_words)
 }
