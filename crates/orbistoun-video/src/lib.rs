@@ -128,6 +128,9 @@ mod port {
         /// The buffer index the guest last submitted a flip for: which of [`Self::buffers`] it last
         /// asked to present.
         pub last_flip: Option<u64>,
+        /// The argument the guest passed with the last flip that completed, which
+        /// `sceVideoOutGetFlipStatus` reports (D814).
+        pub last_flip_arg: u64,
     }
 
     /// The handle of the port that most recently completed a flip, or zero for none.
@@ -475,6 +478,7 @@ pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
     let Some(flips) = port::with(handle, |p| {
         p.flips += 1;
         p.last_flip = Some(buffer_index);
+        p.last_flip_arg = flip_arg;
         p.flips
     }) else {
         return video_error::INVALID_HANDLE;
@@ -612,17 +616,25 @@ fn video_out_set_flip_rate(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The offset of the completed-flip count in the flip-status structure.
 ///
 /// Zero: the count is the documented first field of `SceVideoOutFlipStatus`, and obSCEne reads a
-/// `uint64` from `status[0..8]`. The rest of the structure has no established layout.
+/// `uint64` from `status[0..8]`.
 const FLIP_COUNT_OFFSET: usize = 0;
+
+/// The offset of the last completed flip's argument in the flip-status structure (D814).
+///
+/// Assumed: the open toolchain's declaration of `SceVideoOutFlipStatus` puts `flipArg` here, the
+/// fourth 64-bit word, and every status obSCEne has read there (`080-video/visual-flip`,
+/// `report-1791801495.txt` 4424-4433) held 0 after flips whose argument was 0.
+const FLIP_ARG_OFFSET: usize = 0x18;
 
 /// `sceVideoOutGetFlipStatus(handle, status)`.
 ///
-/// Writes the port's completed-flip count at [`FLIP_COUNT_OFFSET`]; with flips completing on
-/// submit, this is the number of flips submitted. Only the count is written: the structure's other
-/// fields have no citable offsets (D010), so a caller reading them gets what it left there.
+/// Writes the port's completed-flip count at [`FLIP_COUNT_OFFSET`] and the last completed flip's
+/// argument at [`FLIP_ARG_OFFSET`]; with flips completing on submit, these are the flips submitted.
+/// The structure's other fields - its times, queue counts and current buffer - are not written
+/// (D010), so a caller reading them gets what it left there.
 fn video_out_get_flip_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, status) = (args[0], args[1]);
-    let Some(flips) = port::with(handle, |p| p.flips) else {
+    let Some((flips, flip_arg)) = port::with(handle, |p| (p.flips, p.last_flip_arg)) else {
         return video_error::INVALID_HANDLE;
     };
     let Ok(at) = usize::try_from(status) else {
@@ -637,6 +649,13 @@ fn video_out_get_flip_status(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         std::ptr::write_unaligned(
             std::ptr::with_exposed_provenance_mut::<u64>(at + FLIP_COUNT_OFFSET),
             flips,
+        );
+    }
+    // SAFETY: as above, the same structure's fourth word.
+    unsafe {
+        std::ptr::write_unaligned(
+            std::ptr::with_exposed_provenance_mut::<u64>(at + FLIP_ARG_OFFSET),
+            flip_arg,
         );
     }
     OK
@@ -989,6 +1008,36 @@ mod tests {
                 event.data >> 16,
                 flip_arg,
                 "the argument comes back through sar 16"
+            );
+        }
+    }
+
+    /// The flip status reports the count and the last completed flip's argument, at +0 and +0x18,
+    /// and writes nothing else of a 0x40-byte block (D814): PPSA25872 releases frames by how far
+    /// that argument moved.
+    #[test]
+    fn the_flip_status_carries_the_last_flip_argument() {
+        let _guard = serial();
+        let handle = open_on(21);
+        let addresses: [u64; 2] = [0x2_0400_0000, 0x2_0401_0000];
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, addresses.as_ptr() as u64, 2])),
+            0
+        );
+        for (count, flip_arg) in (1_u64..).zip([0x12_3456_789a_u64, 7]) {
+            assert_eq!(video_out_submit_flip(&args([handle, 0, 1, flip_arg])), 0);
+            let mut status = [0xcc_u8; 0x40];
+            assert_eq!(
+                video_out_get_flip_status(&args([handle, status.as_mut_ptr() as u64, 0, 0])),
+                0
+            );
+            assert_eq!(status[..8], count.to_le_bytes(), "the count");
+            assert_eq!(status[0x18..0x20], flip_arg.to_le_bytes(), "the argument");
+            assert!(
+                status[8..0x18]
+                    .iter()
+                    .chain(&status[0x20..])
+                    .all(|&b| b == 0xcc)
             );
         }
     }
