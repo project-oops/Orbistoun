@@ -5471,7 +5471,11 @@ fn typed_buffer_memory<M: Model + ?Sized>(
             detail: "a typed buffer access names a format code with no meaning",
         });
     };
-    if format.components() != channels as usize {
+    // A load of fewer channels than a format of whole words reads the element's first words: ACO
+    // relies on it ("if a larger format is selected, it's still OK to load a smaller amount from
+    // it", `aco_select_nir_intrinsics.cpp`, `mtbuf_load_callback`). Any other mismatch is refused.
+    let fewer_words = loading && format.is_plain_words() && format.components() > channels as usize;
+    if format.components() != channels as usize && !fewer_words {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "a typed buffer access whose format and channel count disagree",

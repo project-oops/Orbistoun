@@ -3785,6 +3785,47 @@ fn a_packed_float_narrower_than_a_half_decodes_to_its_measured_bits() {
     }
 }
 
+/// A typed load naming fewer channels than its format has reads the first of them: three channels
+/// of `BUF_FMT_32_32_32_32_FLOAT` (77) are the element's first three words, the fourth not read and
+/// the register past the third untouched. ACO relies on it ("if a larger format is selected, it's
+/// still OK to load a smaller amount from it", `mtbuf_load_callback`), and PPSA03416's fragment
+/// shaders load so (`tbuffer_load_format_xyz v10, v20, s72, 0`).
+#[test]
+fn a_typed_load_of_fewer_channels_reads_the_first_words() {
+    if !device_or_skip("a_typed_load_of_fewer_channels_reads_the_first_words") {
+        return;
+    }
+    let mut program = describe_buffer(4, 256);
+    for (at, word) in [(0_u32, 11_u32), (4, 22), (8, 33), (12, 44)] {
+        program.extend(v_mov_literal(0, at));
+        program.extend(v_mov_literal(1, word));
+        program.extend(mubuf("buffer_store_dword", 1, 0, 4, INLINE_0, OFFEN));
+    }
+    program.extend(v_mov_literal(0, 0));
+    program.extend(v_mov_literal(5, 0x5555));
+    program.extend(mtbuf(
+        "tbuffer_load_format_xyz",
+        2,
+        0,
+        4,
+        INLINE_0,
+        FMT_32X4_FLOAT,
+        OFFEN,
+    ));
+    program.push(s_endpgm());
+    let (registers, _memory) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [2, 3, 4].map(|n| vector(&registers, n)),
+        [11, 22, 33],
+        "the element's first three words"
+    );
+    assert_eq!(
+        vector(&registers, 5),
+        0x5555,
+        "nothing past the third channel"
+    );
+}
+
 /// Five floats stored through `BUF_FMT_10_11_11_FLOAT` and the packed word each produced.
 ///
 /// Measured on hardware by obSCEne's `typed-buffer-formats` check. They pin the three rules a
@@ -3859,13 +3900,14 @@ fn a_packed_float_store_translates_to_well_formed_spirv() {
         .expect("a packed 10/11-bit float store now translates");
 }
 
-/// A typed access whose format's component count disagrees with its channels is refused.
+/// A typed store whose format's component count disagrees with its channels is refused; only a
+/// load of fewer whole words than its format has is read.
 #[test]
 fn a_typed_buffer_access_whose_format_disagrees_with_its_channels_is_refused() {
-    // What the hardware does then (padding or discarding channels) is unmeasured.
+    // What the hardware writes for the channels a store does not name is unmeasured.
     let mut program = describe_buffer(4, 256);
     program.extend(mtbuf(
-        "tbuffer_load_format_x",
+        "tbuffer_store_format_x",
         2,
         0,
         4,
