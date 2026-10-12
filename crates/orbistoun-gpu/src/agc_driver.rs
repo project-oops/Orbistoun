@@ -741,6 +741,11 @@ impl GuestCp<'_> {
             ));
         }
         set_pending(Some((target, swap)));
+        // The frame now pending was drawn over the one the deferred write-back holds, and writes
+        // every byte it would: it is superseded, unread (D801).
+        if matches!(before, TargetRead::HeldOverDeferred) {
+            drop_covered(target.base, target.words() as u64 * 4);
+        }
         Ok(())
     }
 }
@@ -1367,12 +1372,12 @@ fn read_target(
                         if held == word && kept == length)
             })
         });
-        if !unchanged && let Ok(mut last) = last_written().lock() {
-            *last = Some(Written {
+        if !unchanged {
+            replace_written(Some(Written {
                 target,
                 contents: now,
                 since: None,
-            });
+            }));
         }
         crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
         return Some(if unchanged {
@@ -1380,6 +1385,16 @@ fn read_target(
         } else {
             TargetRead::of_pattern(word, target, swap)
         });
+    }
+    // The frame this target held, written back to it at its flip and still deferred (D719): nothing
+    // has touched the target since - the copy's guard would have carried it out - and the drawer,
+    // which keeps each target it draws, holds that frame (D801).
+    if let Some(found) = written_for(target, length)
+        && deferred_self_frames(target, &found.contents)
+    {
+        replace_written(Some(found));
+        crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
+        return Some(TargetRead::HeldOverDeferred);
     }
     let was_protected = protected_unwritten(target);
     protect_target(target);
@@ -1394,7 +1409,7 @@ fn read_target(
                     || memory.holds(target.base, &written.contents.bytes()))
         })
     });
-    if unchanged {
+    if unchanged || held_earlier(memory, target, length) {
         crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
         return Some(TargetRead::Unchanged);
     }
@@ -1421,13 +1436,11 @@ fn read_target(
     // What the drawer is handed is what memory holds now: with the frame kept on the device until
     // the flip, memory still holding these bytes means nothing else has written the target since
     // (D714).
-    if let Ok(mut last) = last_written().lock() {
-        *last = Some(Written {
-            target,
-            contents: Contents::Bytes(Arc::new(bytes)),
-            since,
-        });
-    }
+    replace_written(Some(Written {
+        target,
+        contents: Contents::Bytes(Arc::new(bytes)),
+        since,
+    }));
     crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
     Some(before)
 }
@@ -1437,6 +1450,9 @@ fn read_target(
 enum TargetRead {
     /// Memory holds exactly what this last wrote or read there: the drawer already has it.
     Unchanged,
+    /// Memory will hold the frame the drawer last drew there, once the write-back still deferred
+    /// over it is carried out (D801): the drawer already has it.
+    HeldOverDeferred,
     /// Something else wrote it: its contents, as linear `Rgba8`.
     Changed(Vec<u32>),
     /// Something else wrote it with one word throughout - a clear: that word as linear `Rgba8`.
@@ -1460,7 +1476,7 @@ impl TargetRead {
     /// What a drawer is handed of it.
     fn before(&self) -> Before<'_> {
         match self {
-            Self::Unchanged => Before::Held,
+            Self::Unchanged | Self::HeldOverDeferred => Before::Held,
             Self::Changed(contents) => Before::Words(contents),
             Self::Uniform(word) => Before::Uniform(*word),
         }
@@ -1501,13 +1517,11 @@ fn write_target(
         let wrote = edited && tiled_ok;
         // Marked after this write, so the next check does not see this write as someone else's.
         let since = orbistoun_mem::watch::mark(target.base, words as u64 * 4);
-        if let Ok(mut last) = last_written().lock() {
-            *last = wrote.then(|| Written {
-                target,
-                contents: Contents::Bytes(Arc::new(written)),
-                since,
-            });
-        }
+        replace_written(wrote.then(|| Written {
+            target,
+            contents: Contents::Bytes(Arc::new(written)),
+            since,
+        }));
         // Protected from here, as write-watch is marked from here (D720).
         if wrote {
             protect_target(target);
@@ -1521,6 +1535,103 @@ fn write_target(
 fn last_written() -> &'static Mutex<Option<Written>> {
     static LAST: Mutex<Option<Written>> = Mutex::new(None);
     &LAST
+}
+
+/// How many targets before the last this keeps the bytes of (D801): a frame's display buffers
+/// alternate, so the one a submission draws into is the one before the last.
+const EARLIER_KEPT: usize = 3;
+
+/// The targets this wrote or read before [`last_written`], most recent first, each with the bytes
+/// its memory held then (D801). Nothing but their bytes vouches for them: the protection and the
+/// write-watch mark follow only the last.
+fn earlier_written() -> &'static Mutex<Vec<Written>> {
+    static EARLIER: Mutex<Vec<Written>> = Mutex::new(Vec::new());
+    &EARLIER
+}
+
+/// Makes `next` the last target written or read, keeping the one it replaces among the earlier
+/// ones when it is another target's bytes (D801).
+fn replace_written(next: Option<Written>) {
+    let Ok(mut last) = last_written().lock() else {
+        return;
+    };
+    let replaced = std::mem::replace(&mut *last, next);
+    let current = last.as_ref().map(|written| written.target);
+    let Ok(mut earlier) = earlier_written().lock() else {
+        return;
+    };
+    earlier.retain(|kept| Some(kept.target) != current);
+    if let Some(old) = replaced
+        && Some(old.target) != current
+        && matches!(old.contents, Contents::Bytes(_))
+    {
+        earlier.retain(|kept| kept.target != old.target);
+        earlier.insert(0, old);
+        earlier.truncate(EARLIER_KEPT);
+    }
+}
+
+/// What this recorded of `target`'s memory when it last wrote or read it, from the last target or
+/// an earlier one, where it recorded `length` bytes.
+fn written_for(target: ColourTarget, length: usize) -> Option<Written> {
+    let matching = |written: &Written| written.target == target && written.contents.len() == length;
+    if let Some(last) = last_written()
+        .lock()
+        .ok()
+        .and_then(|last| last.clone())
+        .filter(matching)
+    {
+        return Some(last);
+    }
+    earlier_written()
+        .lock()
+        .ok()
+        .and_then(|earlier| earlier.iter().find(|kept| matching(kept)).cloned())
+}
+
+/// Whether every deferred write over `target` is a write-back of its own frame onto it whole, taken
+/// over exactly the bytes `contents` records (D801) - and there is one.
+fn deferred_self_frames(target: ColourTarget, contents: &Contents) -> bool {
+    let Contents::Bytes(kept) = contents else {
+        return false;
+    };
+    let span = target.words() as u64 * 4;
+    let Ok(list) = deferred().lock() else {
+        return false;
+    };
+    let mut over = list
+        .iter()
+        .filter(|copy| ranges_overlap((copy.destination, copy.length), (target.base, span)))
+        .peekable();
+    over.peek().is_some()
+        && over.all(|copy| {
+            copy.destination == target.base
+                && copy.length == span
+                && matches!(&copy.held, Held::Frame { target: from, memory_then: Contents::Bytes(then), .. }
+                    if *from == target && Arc::ptr_eq(then, kept))
+        })
+}
+
+/// Whether `target` is one this wrote or read before the last and its memory still holds exactly
+/// the bytes it held then (D801): nothing has written it since, so the drawer, which keeps each
+/// target it draws, already holds it. It becomes the last again.
+fn held_earlier(memory: &dyn cp::CpMemory, target: ColourTarget, length: usize) -> bool {
+    // Marked before the bytes are compared, so a write that races the compare is seen next time.
+    let since = orbistoun_mem::watch::mark(target.base, length as u64);
+    let found = earlier_written().lock().ok().and_then(|mut earlier| {
+        let at = earlier.iter().position(|kept| {
+            kept.target == target
+                && kept.contents.len() == length
+                && memory.holds(target.base, &kept.contents.bytes())
+        })?;
+        Some(earlier.remove(at))
+    });
+    let Some(mut found) = found else {
+        return false;
+    };
+    found.since = since;
+    replace_written(Some(found));
+    true
 }
 
 /// A target, the bytes its memory held when this last wrote or read it, and the host's mark
@@ -1576,6 +1687,9 @@ impl Contents {
 fn forget_written() {
     if let Ok(mut last) = last_written().lock() {
         *last = None;
+    }
+    if let Ok(mut earlier) = earlier_written().lock() {
+        earlier.clear();
     }
     unprotect_overlapping(0, u64::MAX);
 }
@@ -3422,7 +3536,113 @@ mod tests {
         *super::queue_stall()
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        super::earlier_written()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         guard
+    }
+
+    /// A target whose own frame is still deferred onto it from its flip is held by the drawer
+    /// (D801): read again to be drawn over, it answers so without the frame being read back or
+    /// memory written, and the copy stays deferred.
+    #[test]
+    fn a_target_under_its_own_deferred_frame_is_held() {
+        use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, Written};
+        use fake::TAKEN;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        allow_writes_to(base, span as u64);
+        fake::install();
+        super::forget_written();
+        *super::last_written().lock().expect("slot") = Some(Written {
+            target,
+            contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+            since: None,
+        });
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        let before = memory.to_vec();
+        assert!(super::write_back_at_this_flip());
+        let taken = TAKEN.load(Ordering::SeqCst);
+        let cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(matches!(
+            super::read_target(&cp, target, ComponentSwap::Standard),
+            Some(TargetRead::HeldOverDeferred)
+        ));
+        assert_eq!(
+            TAKEN.load(Ordering::SeqCst),
+            taken,
+            "the frame is not read back"
+        );
+        assert_eq!(memory, before.as_slice(), "nor written");
+        assert!(
+            super::deferred()
+                .lock()
+                .expect("list")
+                .iter()
+                .any(|copy| copy.destination == base),
+            "the write-back stays deferred"
+        );
+        super::drop_covered(base, span as u64);
+    }
+
+    /// Two targets read in turn, as a frame's display buffers alternate: the second read of the
+    /// first answers unchanged while its memory holds the bytes it held when read (D801), and a
+    /// target whose memory changed since is read again.
+    #[test]
+    fn an_earlier_target_whose_bytes_are_unchanged_is_held() {
+        use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead};
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let page = super::HOST_PAGE as usize;
+        let stride = span.div_ceil(page) * page;
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; 2 * stride + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + 2 * stride];
+        for (at, byte) in memory.iter_mut().enumerate() {
+            *byte = (at * 7 % 251) as u8;
+        }
+        let base = memory.as_ptr() as usize as u64;
+        let target = |at: u64| ColourTarget {
+            base: at,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        let (first, second) = (target(base), target(base + stride as u64));
+        set_guest_regions(vec![region_of(memory)]);
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        let read = |cp: &GuestCp<'_>, at| super::read_target(cp, at, ComponentSwap::Standard);
+        assert!(matches!(read(cp, first), Some(TargetRead::Changed(_))));
+        assert!(matches!(read(cp, second), Some(TargetRead::Changed(_))));
+        assert!(
+            matches!(read(cp, first), Some(TargetRead::Unchanged)),
+            "the first, read before the last, still holds its bytes"
+        );
+        // The second is no longer the last, nor protected: a write lands, and it is read again.
+        memory[stride] ^= 0xff;
+        assert!(matches!(read(cp, second), Some(TargetRead::Changed(_))));
     }
 
     /// A submission that stops holds up every later one on the queue: the fence stream submitted
