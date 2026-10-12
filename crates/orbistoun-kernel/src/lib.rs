@@ -14,6 +14,7 @@ pub mod direct;
 pub mod fiber;
 pub mod interrupt;
 pub mod mapped;
+mod placement;
 mod quarantine;
 pub mod sync;
 pub mod thread;

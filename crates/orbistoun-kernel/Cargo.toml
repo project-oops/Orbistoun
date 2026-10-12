@@ -31,5 +31,13 @@ orbistoun-env = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 
+# Placing a guest thread's host thread on the cores its affinity mask names, under the `map`
+# and `strict` policies. No portable API exists; each is one OS call.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
 [dev-dependencies]
 toml = { workspace = true }

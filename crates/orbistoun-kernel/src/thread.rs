@@ -75,8 +75,8 @@ pub enum AffinityPolicy {
     Observe,
     /// Fold the guest's mask onto the host's cores.
     ///
-    /// Guest core `n` becomes host core `n % host`, which keeps threads pinned apart apart and
-    /// gives up exact placement.
+    /// Guest core `n` becomes host core `n % host`, which keeps threads pinned apart and gives up
+    /// exact placement. The folded mask is applied to the host thread as it starts.
     Map,
     /// Apply the mask as given, and fail if the host cannot satisfy it.
     ///
@@ -137,10 +137,12 @@ pub struct Settings {
     pub topology: CpuTopology,
     /// What happens to an affinity request.
     pub affinity: AffinityPolicy,
-    /// Whether the guest's priority requests are applied to host threads.
+    /// Whether the guest's priority requests should be applied to host threads.
     ///
     /// Off by default: raising a host thread's priority on a guest's request can starve the
-    /// emulator's own threads.
+    /// emulator's own threads. Recorded only for now: no mapping from the guest's priority range
+    /// onto a host's is decided, so a priority is kept on the thread record and never applied,
+    /// whatever this says.
     pub apply_priority: bool,
 }
 
@@ -646,10 +648,21 @@ pub fn become_thread(handle: ThreadHandle) {
     current_handle().with(|c| c.set(handle));
     // Recorded here rather than at registration: a thread is created by one thread and runs on
     // another.
+    let mut effective = Affinity::default();
     if let Ok(mut table) = table().lock() {
         if let Some(record) = table.get_mut(&handle) {
             record.host = orbistoun_thunk::host_thread();
+            effective = record.effective_affinity;
         }
+    }
+    // Placed from the thread itself, before any guest code runs on it. The effective mask is zero
+    // under `observe`, so the host scheduler keeps it; under `map` and `strict` it is the mask the
+    // policy computed (D150).
+    if let Err(why) = crate::placement::pin_current_thread(effective.0) {
+        tracing::warn!(
+            "guest thread {handle:?} could not be placed on cores {:#x}: {why}",
+            effective.0
+        );
     }
     // The signal slot is cached in a thread-local so a wait predicate reads it without a lock
     // (D652).

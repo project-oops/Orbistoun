@@ -2942,9 +2942,11 @@ dependencies = [
  "orbistoun-mem",
  "orbistoun-nid",
  "orbistoun-thunk",
+ "rustix 1.1.4",
  "serde",
  "toml 0.8.23",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
