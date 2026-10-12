@@ -185,6 +185,18 @@ fn new_buffer_in(
     Ok((buffer, memory, flags))
 }
 
+/// The bindings of a dispatch's buffer set, set one of its pipeline: the same for every dispatch, so
+/// a pipeline kept across dispatches binds any dispatch's set.
+pub(crate) fn layout_bindings() -> [vk::DescriptorSetLayoutBinding<'static>; 2] {
+    [COMPUTE_BUFFERS_BINDING, COMPUTE_WRITTEN_BINDING].map(|binding| {
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(binding)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(DRAW_BUFFERS_PER_STAGE)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+    })
+}
+
 /// A dispatch's buffers on the device, with the set that binds them.
 pub(crate) struct BoundBuffers {
     /// One per slot of the dispatch's own; every other element of the bound array binds one of
@@ -259,13 +271,7 @@ impl BoundBuffers {
             .collect::<Result<Vec<_>, _>>()?;
         let bound_at = |index: usize| slots.get(index).unwrap_or(&slots[0]);
 
-        let bindings = [COMPUTE_BUFFERS_BINDING, COMPUTE_WRITTEN_BINDING].map(|binding| {
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(binding)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(DRAW_BUFFERS_PER_STAGE)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        });
+        let bindings = layout_bindings();
         let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
         // SAFETY: the create info outlives the call.
         let layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }

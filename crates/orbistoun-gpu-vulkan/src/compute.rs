@@ -212,12 +212,22 @@ pub(crate) fn create_host_buffer(
     Ok((buffer, memory))
 }
 
-/// A compute pipeline and the descriptor objects that feed it, created, used and released together.
-struct BoundPipeline {
+/// A compute pipeline and the layouts it binds through, which outlive one dispatch.
+#[derive(Debug, Clone, Copy)]
+struct KeptPipeline {
     shader: vk::ShaderModule,
     set_layout: vk::DescriptorSetLayout,
+    /// Set 1's, where the pipeline binds a dispatch's buffers.
+    buffers_layout: Option<vk::DescriptorSetLayout>,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+}
+
+/// A pipeline as one dispatch binds it: the pipeline, whether it is kept for later dispatches or
+/// released after this one, and the descriptor set this dispatch fills.
+struct BoundPipeline {
+    kept: KeptPipeline,
+    held: bool,
     descriptor_pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
 }
@@ -307,63 +317,34 @@ fn build_pipeline(
     ),
 ) -> Result<BoundPipeline, DispatchError> {
     let module = for_this_device(module);
-    let shader_info = vk::ShaderModuleCreateInfo::default().code(&module);
-    // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an error, which
-    // makes this usable as a check.
-    let shader = unsafe { device.create_shader_module(&shader_info, None) }
-        .map_err(|e| DispatchError::Vulkan("create_shader_module", e))?;
-
-    let mut bindings = vec![
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(1)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::COMPUTE),
-    ];
-    // The images a guest dispatch reads and writes, at the bindings its module names them.
-    bindings.extend(images.layout_bindings());
     // The global data share, where the module reaches it (D789).
     let global_share = GlobalShare::for_module(&module)?;
-    bindings.extend(global_share.layout_binding());
-    let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-    // SAFETY: the create info outlives the call.
-    let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
-        .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
-
-    let set_layouts = [set_layout];
-    // The pipeline's layout has the dispatch's buffers as set 1; the set allocated here is set 0's.
-    let pipeline_set_layouts: Vec<vk::DescriptorSetLayout> =
-        std::iter::once(set_layout).chain(buffers).collect();
-    // A module reading user data declares the push-constant block; one that reads none declares
-    // none and gets no range.
-    let push_ranges = [vk::PushConstantRange::default()
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        .offset(0)
-        .size(push_bytes)];
-    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-        .set_layouts(&pipeline_set_layouts)
-        .push_constant_ranges(if push_bytes == 0 { &[] } else { &push_ranges });
-    // SAFETY: the create info outlives the call.
-    let layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
-        .map_err(|e| DispatchError::Vulkan("create_pipeline_layout", e))?;
-
-    let stage = vk::PipelineShaderStageCreateInfo::default()
-        .stage(vk::ShaderStageFlags::COMPUTE)
-        .module(shader)
-        .name(c"main");
-    let pipeline_info = [vk::ComputePipelineCreateInfo::default()
-        .stage(stage)
-        .layout(layout)];
-    // SAFETY: the create info outlives the call and names a shader module still alive.
-    let pipelines = unsafe {
-        device.create_compute_pipelines(crate::pipeline_cache::cache(), &pipeline_info, None)
-    }
-    .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
+    let image_bindings = images.layout_bindings();
+    let key = pipeline_key(
+        device,
+        &module,
+        &image_bindings,
+        buffers.is_some(),
+        push_bytes,
+    );
+    let found = kept_pipelines()
+        .lock()
+        .ok()
+        .and_then(|kept| kept.get(&key).copied());
+    let (kept, held) = if let Some(kept) = found {
+        (kept, true)
+    } else {
+        let made = make_pipeline(
+            device,
+            &module,
+            (&image_bindings, &global_share),
+            (buffers.is_some(), push_bytes),
+        )?;
+        let held = kept_pipelines()
+            .lock()
+            .is_ok_and(|mut kept| kept.len() < KEPT_PIPELINES && kept.insert(key, made).is_none());
+        (made, held)
+    };
 
     let mut pool_sizes = vec![
         vk::DescriptorPoolSize::default()
@@ -378,6 +359,7 @@ fn build_pipeline(
     let descriptor_pool = unsafe { device.create_descriptor_pool(&pool_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_descriptor_pool", e))?;
 
+    let set_layouts = [kept.set_layout];
     let allocate_sets = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(descriptor_pool)
         .set_layouts(&set_layouts);
@@ -411,13 +393,153 @@ fn build_pipeline(
     images.write(device, sets[0]);
 
     Ok(BoundPipeline {
-        shader,
-        set_layout,
-        layout,
-        pipeline: pipelines[0],
+        kept,
+        held,
         descriptor_pool,
         set: sets[0],
     })
+}
+
+/// Compiled compute pipelines kept across dispatches, by [`pipeline_key`]. A frame runs the same
+/// few programs every time, and building one took longer than running it.
+fn kept_pipelines() -> &'static std::sync::Mutex<std::collections::HashMap<u64, KeptPipeline>> {
+    static KEPT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, KeptPipeline>>,
+    > = std::sync::OnceLock::new();
+    KEPT.get_or_init(Default::default)
+}
+
+/// How many pipelines are kept. Past this one is built for its dispatch and released after it, as
+/// every pipeline was before any was kept: a kept one is never released while a dispatch may hold
+/// it.
+const KEPT_PIPELINES: usize = 512;
+
+/// What a compute pipeline is built from: the device, the module, the images' bindings, whether it
+/// binds a buffer set and its push-constant size. The global data share's binding follows from
+/// the module.
+fn pipeline_key(
+    device: &ash::Device,
+    module: &[u32],
+    images: &[vk::DescriptorSetLayoutBinding<'_>],
+    buffers: bool,
+    push_bytes: u32,
+) -> u64 {
+    let mut shape = vec![
+        orbistoun_gpu::content_hash(module) as u32,
+        (orbistoun_gpu::content_hash(module) >> 32) as u32,
+        u32::from(buffers),
+        push_bytes,
+        vk::Handle::as_raw(device.handle()) as u32,
+        (vk::Handle::as_raw(device.handle()) >> 32) as u32,
+    ];
+    for binding in images {
+        shape.extend([binding.binding, binding.descriptor_type.as_raw() as u32]);
+    }
+    orbistoun_gpu::content_hash(&shape)
+}
+
+/// Builds the parts of a compute pipeline that outlive a dispatch.
+fn make_pipeline(
+    device: &ash::Device,
+    module: &[u32],
+    (images, global_share): (&[vk::DescriptorSetLayoutBinding<'static>], &GlobalShare),
+    (buffers, push_bytes): (bool, u32),
+) -> Result<KeptPipeline, DispatchError> {
+    let shader_info = vk::ShaderModuleCreateInfo::default().code(module);
+    // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an error, which
+    // makes this usable as a check.
+    let shader = unsafe { device.create_shader_module(&shader_info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_shader_module", e))?;
+
+    let mut bindings = vec![
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+    ];
+    // The images a guest dispatch reads and writes, at the bindings its module names them.
+    bindings.extend_from_slice(images);
+    bindings.extend(global_share.layout_binding());
+    let layout_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+    // SAFETY: the create info outlives the call.
+    let set_layout = unsafe { device.create_descriptor_set_layout(&layout_info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?;
+    // The dispatch's buffers are set 1, in a layout of its own defined as every dispatch's buffer
+    // set is, so any dispatch's set binds to this pipeline.
+    let buffers_layout = if buffers {
+        let bindings = crate::compute_buffers::layout_bindings();
+        let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        // SAFETY: the create info outlives the call.
+        Some(
+            unsafe { device.create_descriptor_set_layout(&info, None) }
+                .map_err(|e| DispatchError::Vulkan("create_descriptor_set_layout", e))?,
+        )
+    } else {
+        None
+    };
+
+    // The pipeline's layout has the dispatch's buffers as set 1; the set allocated for a dispatch
+    // is set 0's.
+    let pipeline_set_layouts: Vec<vk::DescriptorSetLayout> =
+        std::iter::once(set_layout).chain(buffers_layout).collect();
+    // A module reading user data declares the push-constant block; one that reads none declares
+    // none and gets no range.
+    let push_ranges = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        .offset(0)
+        .size(push_bytes)];
+    let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+        .set_layouts(&pipeline_set_layouts)
+        .push_constant_ranges(if push_bytes == 0 { &[] } else { &push_ranges });
+    // SAFETY: the create info outlives the call.
+    let layout = unsafe { device.create_pipeline_layout(&pipeline_layout_info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_pipeline_layout", e))?;
+
+    let stage = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(shader)
+        .name(c"main");
+    let pipeline_info = [vk::ComputePipelineCreateInfo::default()
+        .stage(stage)
+        .layout(layout)];
+    // SAFETY: the create info outlives the call and names a shader module still alive.
+    let pipelines = unsafe {
+        device.create_compute_pipelines(crate::pipeline_cache::cache(), &pipeline_info, None)
+    }
+    .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
+
+    Ok(KeptPipeline {
+        shader,
+        set_layout,
+        buffers_layout,
+        layout,
+        pipeline: pipelines[0],
+    })
+}
+
+impl KeptPipeline {
+    /// Releases everything it holds.
+    fn release(self, device: &ash::Device) {
+        // SAFETY: every handle was created on this device for this pipeline, nothing recorded with
+        // it is still running (the dispatch waited for its submission), and each is destroyed once.
+        unsafe { device.destroy_pipeline(self.pipeline, None) };
+        // SAFETY: as above.
+        unsafe { device.destroy_pipeline_layout(self.layout, None) };
+        // SAFETY: as above.
+        unsafe { device.destroy_descriptor_set_layout(self.set_layout, None) };
+        if let Some(buffers) = self.buffers_layout {
+            // SAFETY: as above.
+            unsafe { device.destroy_descriptor_set_layout(buffers, None) };
+        }
+        // SAFETY: as above.
+        unsafe { device.destroy_shader_module(self.shader, None) };
+    }
 }
 
 /// What a dispatch left behind.
@@ -777,8 +899,8 @@ fn dispatch_core(
         )
     })?;
     let running = SpanGuard::start(Span::DeviceRun);
-    let pipeline = bound.pipeline;
-    let pipeline_layout = bound.layout;
+    let pipeline = bound.kept.pipeline;
+    let pipeline_layout = bound.kept.layout;
     let sets = [bound.set];
 
     // Record and submit.
@@ -855,15 +977,24 @@ fn dispatch_core(
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
 
     let submits = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
-    // SAFETY: the command buffer has finished recording and the queue belongs to this device.
-    unsafe { device.queue_submit(queue, &submits, vk::Fence::null()) }
-        .map_err(|e| DispatchError::Vulkan("queue_submit", e))?;
-    // A device wait rather than a fence: one submission, and a fence would add an object to release
-    // for no extra guarantee.
+    // A fence for this submission alone: a device wait also waited for whatever else the device
+    // was doing, such as a frame being shown.
     //
-    // SAFETY: the device is live and nothing else is using it.
-    unsafe { device.device_wait_idle() }
-        .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
+    // SAFETY: the device is live and the create info outlives the call.
+    let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
+        .map_err(|e| DispatchError::Vulkan("create_fence", e))?;
+    // SAFETY: the command buffer has finished recording, the queue belongs to this device, and the
+    // fence is unsignalled and used by nothing else.
+    let waited = unsafe { device.queue_submit(queue, &submits, fence) }
+        .map_err(|e| DispatchError::Vulkan("queue_submit", e))
+        .and_then(|()| {
+            // SAFETY: the fence was submitted with the work just above.
+            unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
+                .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))
+        });
+    // SAFETY: the submission it fenced has completed, or was never made.
+    unsafe { device.destroy_fence(fence, None) };
+    waited?;
     drop(running);
     let _reading = SpanGuard::start(Span::DeviceReadBack);
 
@@ -871,21 +1002,17 @@ fn dispatch_core(
     let observed = read_back(device, binding0)?;
     let guest_memory = read_back(device, binding1)?;
 
-    // Release everything but the buffers.
+    // Release what was this dispatch's alone: the buffers are the caller's, and a kept pipeline
+    // serves the next dispatch of its program.
     //
-    // SAFETY: every handle below was created here on this device, is not in use after the queue
+    // SAFETY: every handle below was created here on this device, is not in use after the fence
     // wait, and is destroyed exactly once.
     unsafe { device.destroy_command_pool(command_pool, None) };
     // SAFETY: as above.
     unsafe { device.destroy_descriptor_pool(bound.descriptor_pool, None) };
-    // SAFETY: as above.
-    unsafe { device.destroy_pipeline(bound.pipeline, None) };
-    // SAFETY: as above.
-    unsafe { device.destroy_pipeline_layout(bound.layout, None) };
-    // SAFETY: as above.
-    unsafe { device.destroy_descriptor_set_layout(bound.set_layout, None) };
-    // SAFETY: as above.
-    unsafe { device.destroy_shader_module(bound.shader, None) };
+    if !bound.held {
+        bound.kept.release(device);
+    }
 
     Ok((observed, guest_memory))
 }
