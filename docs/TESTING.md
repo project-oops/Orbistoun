@@ -83,6 +83,16 @@ and opening one fails until it is added and justified. For any "for each X found
 test, ask what it reports when nothing is found; if the answer is "it passes", write the
 converse.
 
+## A measurement lands as a fixture
+
+A hardware measurement becomes a test before it becomes behaviour. The test names the
+request and the sweep rows it rests on, and asserts the measured value - a return code, a
+structure's bytes, a texel's offset, a frame's hash. A change that disagrees with the
+hardware then fails the gate instead of waiting to be noticed in a run.
+
+A measured value printed rather than asserted is a defect: `tests/oracle_gl_cube.rs` in
+`orbistoun-gpu` holds the console's two frame hashes and is the case this rule exists for.
+
 ## Validation separate from effect
 
 `orbistoun-mem` separates validation from mapping: `validate()` is a pure function over the

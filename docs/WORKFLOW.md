@@ -204,6 +204,23 @@ compares a run under orbistoun with the same probe's transcript from the hardwar
 the checks that disagree. Sending and supervising the probe is Prosperous's job (see
 [THE_LOOP.md](THE_LOOP.md#probing-on-the-hardware)).
 
+## What no measurement covers
+
+```bash
+orbistoun-cli census --imports [--titles A,B] [--json]   # imports with no measured entry
+orbistoun-cli census --refusals [--json]                 # translator and backend refusals
+```
+
+`census --imports` lists every import of every module in the corpus - eboot and shipped
+modules - whose knowledge entry is missing or not `measured`/`published`: library, name or
+hash, its `known_by`, and the titles that import it. `census --refusals` lists every
+translator and backend refusal in the corpus's latest traces by reason, with the instruction
+or register and the titles that hit it. Both rank by titles reached, then calls.
+
+The census is what a capability request is filed from: group its rows by library or GPU
+layer and file one obSCEne request per group, with any reference emulator's answers attached
+as predictions (D818, [THE_LOOP.md](THE_LOOP.md#the-capability-sub-loop)).
+
 ## Settings and the environment
 
 | | Where | What belongs in it |

@@ -41,6 +41,14 @@ The window itself draws through `wgpu`, and reports which backend and adapter it
 to the terminal at startup as `orbistoun: renderer: <backend> - <adapter>`, and shown in the
 shell view's footer.
 
+## What it does not handle yet
+
+The pipeline refuses what nobody has measured rather than guessing, and every refusal names
+its reason in the run report. `orbistoun-cli census --refusals` ranks those reasons across
+the corpus by how many titles reach them: that ranking is the outstanding GPU work, and each
+reason is settled by an obSCEne measurement before it is implemented
+([THE_LOOP.md](../THE_LOOP.md#the-capability-sub-loop)).
+
 ## Diagnostics
 
 | Variable | Does |

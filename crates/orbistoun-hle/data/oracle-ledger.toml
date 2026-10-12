@@ -1,0 +1,66 @@
+# Predictions a reference emulator made that hardware refuted (D818).
+#
+# A reference emulator's answer enters orbistoun only as a prediction inside an obSCEne
+# request. When the sweep rows contradict it, the contradiction is recorded here: the area,
+# the function or field, what was predicted, what was measured, and the rows that measured it.
+# The behaviour itself lives in the knowledge file, as `measured`; this file only says how
+# often predictions in each area turn out wrong, so the next census knows which are worth
+# sending as a probe's first arm.
+#
+# One `[[refuted]]` table per contradicted value. `area` is a library or a GPU layer.
+
+[[refuted]]
+area = "libSceAjm"
+function = "sceAjmInitialize"
+predicted = "writes context id 1"
+measured = "writes 0x15 for a fresh process's first context, then 0x16; ids count up"
+cites = "obSCEne REQ-cn10 and REQ-20261009T1430Z-aj01, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls"
+
+[[refuted]]
+area = "libSceAjm"
+function = "sceAjmModuleRegister"
+predicted = "answers 0 on every call"
+measured = "0x0 the first time a codec is registered, 0x80930009 on a repeat"
+cites = "obSCEne REQ-20261009T1430Z-aj01, reports/hardware/20261009-215800-eboot.log lines 4282-4290"
+
+[[refuted]]
+area = "libSceAvPlayer"
+function = "sceAvPlayerPostInit"
+predicted = "answers 0 for any non-null handle"
+measured = "0x806a0001 after InitEx, invoking no callback"
+cites = "obSCEne REQ-20261012T0445Z-av01, report-1791801495.txt, 000-boot/avplayer-lifecycle"
+
+[[refuted]]
+area = "libSceAvPlayer"
+function = "sceAvPlayerAddSourceEx"
+predicted = "0x806a0002 (operation failed) for a file that does not exist"
+measured = "0x806a0001 for /app0/none.mp4"
+cites = "obSCEne REQ-20261012T0445Z-av01, report-1791801495.txt, 000-boot/avplayer-lifecycle"
+
+[[refuted]]
+area = "libSceAvPlayer"
+function = "sceAvPlayerInitEx"
+predicted = "allocates nothing through the caller's allocator"
+measured = "one allocation of 0x1000 bytes through the allocate callback, freed by Close"
+cites = "obSCEne REQ-20261012T0445Z-av01, report-1791801495.txt, 000-boot/avplayer-lifecycle"
+
+[[refuted]]
+area = "libSceJson2"
+function = "sce::Json::MemAllocator::MemAllocator()"
+predicted = "returns this and writes nothing"
+measured = "writes the object's first eight bytes, its vtable pointer, and nothing else"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init, base-obj-after)"
+
+[[refuted]]
+area = "libSceJson2"
+function = "sce::Json::Initializer::Initializer()"
+predicted = "returns this and writes nothing"
+measured = "writes byte 0 of the object as 0x00 and nothing else"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init, arm1-ctor)"
+
+[[refuted]]
+area = "libSceJson2"
+function = "sce::Json::InitParameter2::InitParameter2()"
+predicted = "zeroes all 0x28 bytes"
+measured = "0x28 bytes, zero but for 2 at +0x18"
+cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init)"

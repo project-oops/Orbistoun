@@ -108,7 +108,8 @@ the file is shown absent from the place the run reads: the resolved data directo
     do about it.
 17. A person reads the top finding. `orbistoun-turn` has already run the mechanical sweeps
     against it. If what is left is an unmeasured interface or structure, the next step is a
-    hardware probe question rather than a guess.
+    hardware probe question rather than a guess, filed as a census row batched with the other
+    unmeasured facts of its area (see [the capability sub-loop](#the-capability-sub-loop)).
 18. A person writes the implementation - from a published source, or from what an obSCEne
     probe measured on the hardware - and tags it with its `known_by`.
 19. Go to step 2. `FURTHER` keeps the change; `same` or `BACK` does not.
@@ -131,6 +132,8 @@ the file is shown absent from the place the run reads: the resolved data directo
 | 18 - write the implementation | a person | no |
 | record what a function must answer | orbistoun, into `learned.toml` | yes |
 | record what was learned by hand | a person, via `learn` | no, deliberately |
+| rank what no measurement covers, corpus-wide | orbistoun, via `census` | yes |
+| file a census batch to obSCEne, with predictions | a person | no |
 | record what the title reached | `compat record`, prompted by the run | prompted |
 
 ## Step 17: the dispatcher
@@ -330,6 +333,53 @@ Three components share step E:
 - A person starts the loader on the hardware after a power cycle, and decides the hardware is
   free: a faulting call takes down whatever was running.
 
+## The capability sub-loop
+
+The questions sub-loop retires assumptions orbistoun has already written down. The capability
+sub-loop finds the ones nobody has written down yet: an import no knowledge entry covers, a
+register field the pipeline refuses, an instruction the translator does not know. It turns
+each into a measurement, and the measurement into a test.
+
+```mermaid
+flowchart LR
+    A["orbistoun-cli census<br/>imports with no measured entry,<br/>refusals by reason,<br/>ranked by titles reached"] --> B["group by area:<br/>one library, one GPU layer"]
+    B --> C["one obSCEne request per area,<br/>many arms; predictions attached<br/>where a reference has them"]
+    C --> D["obSCEne sweep rows"]
+    D --> E{"rows settle<br/>every arm?"}
+    E -- no --> F["re-file the arms<br/>the rows missed"]
+    F --> C
+    E -- yes --> G["knowledge entry,<br/>known_by: measured"]
+    D --> L["refuted predictions<br/>into the oracle ledger"]
+    G --> H["a fixture test asserting<br/>the measured value"]
+    H --> I["the implementation,<br/>step 18"]
+    I --> A
+```
+
+1. `orbistoun-cli census` lists every import in the corpus with no measured knowledge entry,
+   and every translator and backend refusal by reason, each ranked by how many titles reach
+   it. It is the worklist across titles, as `worklist` is within one.
+2. Rows are grouped by area - one library, one GPU layer - and each area becomes one request
+   with many arms. A probe that loads a library once and calls twenty functions costs one
+   round trip; twenty requests cost twenty.
+3. Where a reference emulator has an answer, it travels with the request as a prediction
+   (D818): a first arm for the probe and nothing more. The request resolves only on obSCEne's
+   own rows, and an arm the rows miss is re-filed, never assumed.
+4. A resolved row becomes a knowledge entry with `known_by: measured`, and a fixture test that
+   asserts the value before any implementation uses it ([TESTING.md](TESTING.md#a-measurement-lands-as-a-fixture)).
+5. Every refuted prediction goes into `crates/orbistoun-hle/data/oracle-ledger.toml`, so the
+   next census knows which areas' predictions are worth sending.
+
+### Conformance titles grade whole layers
+
+Two kinds of first-party guest turn the census from a list into a graded test:
+
+- GCTS00001, the GL conformance suite, runs on the hardware through oops-mesa. Run on both,
+  its per-case results diff into findings: every case that passes on the hardware and fails
+  here is a GPU fact with its answer attached.
+- A first-party title's frames, captured on the hardware by flip index, diff against
+  orbistoun's own. A title chosen because it uses a layer - tessellation, multisampling,
+  compute atomics - grades that layer by picture.
+
 ## Checkout and binary
 
 The loop does not need this repository. Somebody running a release binary against a title
@@ -359,6 +409,9 @@ receive these; see [WORKFLOW.md](WORKFLOW.md#recording-what-a-turn-produced).
   the re-run says `FURTHER`.
 - Step 18 never invalidates step 3: the plan names thunk indices, not implementations, so a
   turn that adds an implementation reuses the stored plan and pays only for the run.
+- The capability sub-loop makes catching up a ranking problem, not a research problem: the
+  census says what is missing and how many titles it costs, a reference emulator says what
+  the answer probably is, and the hardware says what it is.
 - The loop runs in the worker, because the mechanical sweeps of step 17 need it. A native
   executable (D724) writes the same trace as a run played from the window and is compared and
   recorded like one, so playing a title that way still feeds steps 14 to 16.
