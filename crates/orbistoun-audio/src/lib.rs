@@ -244,6 +244,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
         ("sceAudioOut2PortCreate", audio_out2::port_create),
         ("sceAudioOut2PortGetState", audio_out2::port_get_state),
+        ("sceAudioOut2GetSpeakerInfo", audio_out2::get_speaker_info),
         (
             "sceAudioOut2GetSpeakerArrayMemorySize",
             audio_out2::get_speaker_array_memory_size,
@@ -618,5 +619,23 @@ mod tests {
             handle,
             "and the number is not reissued"
         );
+    }
+
+    /// The speaker information is the measured record: byte 0 zero and three at +4, in the first
+    /// 16 bytes, whatever the flag; nothing past them is written (REQ-so01).
+    #[test]
+    fn the_speaker_information_is_the_measured_record() {
+        for flag in [0, 1] {
+            let mut info = [0xcc_u8; 0x20];
+            assert_eq!(
+                call(
+                    "sceAudioOut2GetSpeakerInfo",
+                    [info.as_mut_ptr() as u64, flag, 0, 0, 0, 0]
+                ),
+                0
+            );
+            assert_eq!(info[..16], [0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(info[16..], [0xcc; 16], "the title's own fields after it");
+        }
     }
 }

@@ -1,0 +1,45 @@
+library = "libSceRemoteplay"
+
+[[function]]
+name = "sceRemoteplayInitialize"
+arity = 2
+purpose = "(heap, size): starts remote play in a heap the title gives it."
+returns = "status"
+edge_cases = [
+    "MEASURED (000-boot/audioout2-fresh-process, link-bound in a fresh process) with PPSA04263's arguments - a 0x1800-byte heap, 16-byte aligned: rc 0, 0x55c bytes of the heap written; a second call 0x80fc0003.",
+    "orbistoun answers 0 then 0x80fc0003 and writes nothing into the heap: what the console wrote there is the library's own state, which the title does not read.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0537Z-so01, reports/hardware/report-1791801495.txt lines 156-167."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "sceRemoteplayGetConnectionStatus"
+arity = 2
+purpose = "(user, status): whether a remote-play session is connected."
+returns = "status"
+edge_cases = [
+    "MEASURED after initialisation, for the initial user: rc 0, four bytes of status written 0 (no session), the rest of an 8-byte 0xcc block untouched.",
+    "Before initialisation, or with no status, unmeasured; orbistoun answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0537Z-so01, reports/hardware/report-1791801495.txt lines 156-167."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "sceRemoteplayTerminate"
+arity = 0
+purpose = "Stops remote play."
+returns = "status"
+edge_cases = [
+    "MEASURED after the calls above: rc 0.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0537Z-so01, reports/hardware/report-1791801495.txt lines 156-167."
+found_in = []
+found_on = "2026-10-12"

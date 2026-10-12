@@ -129,3 +129,20 @@ found_by = "static"
 known_by = "assumed"
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceAudioOut2GetSpeakerInfo"
+arity = 2
+purpose = "(info, flag): writes the output's speaker information."
+returns = "status"
+edge_cases = [
+    "MEASURED (000-boot/audioout2-fresh-process, link-bound in a fresh process): rc 0 for flag 0 and 1, with no port made and with 2- and 8-channel ports made, the first 16 bytes written 00 00 00 00 03 00 00 00 and eight zeros - byte 0 zero, the word at +4 three - the same every time.",
+    "The probe's 0x40-byte block changed throughout; only the first 16 bytes were read back, so the rest are unmeasured and not written. PPSA04263's block is 0x10 bytes, its own fields after it.",
+    "PPSA04263 calls it right after creating its ports and traps (int 0x41) on a non-zero answer; it then compares byte 0 with 3 and reads the word at +4.",
+    "A null block is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0537Z-so01, reports/hardware/report-1791801495.txt lines 54-61 and 99-104."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"

@@ -24,6 +24,8 @@ guest_module! {
         "sceAudioOut2ContextResetParam" => 6,
         // (speakers, height, order)
         "sceAudioOut2GetSpeakerArrayMemorySize" => 3,
+        // (info, flag)
+        "sceAudioOut2GetSpeakerInfo" => 2,
         "sceAudioOut2Initialize" => 6,
         // (context, param, port)
         "sceAudioOut2PortCreate" => 3,
@@ -266,6 +268,28 @@ const PORT_STATE: [u8; 0x40] = {
     }
     state
 };
+
+/// The 16 bytes `sceAudioOut2GetSpeakerInfo` wrote first: byte 0 zero and the word at +4 three,
+/// the rest zero, for flag 0 and 1, with and without a port made (REQ-so01,
+/// `report-1791801495.txt` 54-61, 99-104).
+const SPEAKER_INFO: [u8; 16] = [0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// `sceAudioOut2GetSpeakerInfo(info, flag)`: 0, with [`SPEAKER_INFO`] written. The console changed
+/// 0x40 bytes of the probe's block, of which only the first 16 were read back; the rest are
+/// unmeasured, and only the 16 are written - PPSA04263's block is 0x10 bytes, the title's own
+/// fields after it. A null block is unmeasured and answers the placeholder.
+pub(crate) fn get_speaker_info(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let info = args[0];
+    if info == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's info block, by the call's contract.
+    if unsafe { guest::write_bytes(info, &SPEAKER_INFO) } {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
 
 /// `sceAudioOut2PortGetState(port, state)`: for a port the process made, writes [`PORT_STATE`] and
 /// answers 0 (D799). A port it did not make, or a null record, is unmeasured and answers the
