@@ -82,3 +82,18 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/report-1791727748.txt lines 14928-14945, check 200-census/libSceAmpr/0xb5866f7aedc94e43."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceAmprCommandBufferWriteAddress_04_00"
+purpose = "(obj, address, value, flags): appends to the bound buffer a command that writes value to address when the buffer runs."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-aw01, report-1791826929.txt 661-681): (obj, slot, 0x12345678, 0) answered 0 and appended 12 bytes at the buffer's current end - 05420000, the slot's low word, 0x12345678 >> 2 - the object's +4 moving from 0 to 12 (bytes used) and +8 from 0 to 1 (commands); the slot itself was not written. A second call appended the same 12 bytes after the first. The measure call answered 12 with and without arguments.",
+    "MEASURED (REQ-aw02, report-1791833977.txt 680-693): a slot at 0x7eeff95b0 and 0x87654321 appended 05520700 b095ffee c850d921 - the address's bits 47:32 in the header's high half, the value's low two bits at flag bits 5:4; value 3 appended 8 bytes, 05310700 b095ffee, no value word where value >> 2 is zero; 0xfffffffd's value word was 0x3fffffff. A 4-aligned slot (0x7eeff954c) was refused with 0x80020016 and nothing appended.",
+    "The header's flags read as bit 6 for the value word, 5:4 the value's low bits, 3:0 the words after the header - the reading every measured packet fits. A command past the bound buffer's size is unmeasured; orbistoun answers it the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1552Z-aw01 and REQ-20261012T1900Z-aw02, check 000-boot/ampr-write-address."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"

@@ -21,6 +21,8 @@ guest_module! {
         "sceAmprCommandBufferConstructor" => 6,
         "sceAmprCommandBufferReset" => 6,
         "sceAmprCommandBufferSetBuffer" => 6,
+        // (obj, address, value, 0), as PPSA04263's wrapper calls it.
+        "sceAmprCommandBufferWriteAddress_04_00" => 6,
         // Known by NID only: answers the kernel's EINVAL and writes nothing, with every argument a
         // buffer and with every argument zero (obSCEne census, `200-census/libSceAmpr/0xb5866f7aedc94e43`).
         "0xb5866f7aedc94e43" => 6,
@@ -73,6 +75,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             command_buffer_constructor,
         ),
         ("sceAmprCommandBufferSetBuffer", command_buffer_set_buffer),
+        (
+            "sceAmprCommandBufferWriteAddress_04_00",
+            command_buffer_write_address,
+        ),
         ("sceAmprCommandBufferReset", command_buffer_reset),
         (
             "sceAmprAprCommandBufferConstructor",
@@ -160,6 +166,73 @@ fn command_buffer_set_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// Where the bytes the bound buffer's commands take are counted, a 32-bit word (REQ-aw01).
+const USED_AT: u64 = 4;
+/// Where the commands appended are counted, a 32-bit word (REQ-aw01).
+const COUNT_AT: u64 = 8;
+/// The write-address command's opcode, the header word's low byte (REQ-aw01, REQ-aw02).
+const WRITE_ADDRESS: u32 = 0x05;
+
+/// The write-address command for `value` written to `address`, as a console appended it (REQ-aw01,
+/// REQ-aw02, `report-1791833977.txt` 658-693): a header - the opcode, a flags byte, the address's bits
+/// 47:32 - then the address's low word, then the value shifted down two where that is not zero. The
+/// flags carry the value's low two bits at 5:4 and the words after the header at 3:0, with bit 6 set
+/// where the value word is there.
+fn write_address_command(address: u64, value: u32) -> Vec<u32> {
+    let shifted = value >> 2;
+    let words = if shifted == 0 { 1 } else { 2 };
+    let flags = (u32::from(shifted != 0) << 6) | ((value & 0x3) << 4) | words;
+    let high = ((address >> 32) & 0xffff) as u32;
+    let mut command = vec![WRITE_ADDRESS | (flags << 8) | (high << 16), address as u32];
+    if shifted != 0 {
+        command.push(shifted);
+    }
+    command
+}
+
+/// `sceAmprCommandBufferWriteAddress_04_00(obj, address, value, ..)`: appends the command that
+/// writes `value` to `address` when the buffer runs - nothing is written to `address` now - and
+/// answers 0, the object's used bytes (+4) and command count (+8) moved on; an `address` not
+/// 8-aligned is refused with `0x80020016`, nothing appended (REQ-aw01, REQ-aw02). A command that
+/// would not fit the bound buffer is unmeasured and answers the placeholder.
+fn command_buffer_write_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (object, address, value) = (args[0], args[1], args[2] as u32);
+    if address % 8 != 0 {
+        return UNALIGNED;
+    }
+    let placeholder = u64::from(GuestError::Unimplemented.as_raw());
+    // SAFETY: the guest's own constructed object, at its measured fields.
+    let used = unsafe { guest::read_u32(object + USED_AT) };
+    // SAFETY: as above.
+    let count = unsafe { guest::read_u32(object + COUNT_AT) };
+    // SAFETY: as above.
+    let size = unsafe { guest::read_u32(object + SIZE_AT) };
+    // SAFETY: as above.
+    let buffer = unsafe { guest::read_u64(object + BUFFER_AT) };
+    let (Some(used), Some(count), Some(size), Some(buffer)) = (used, count, size, buffer) else {
+        return placeholder;
+    };
+    let bytes: Vec<u8> = write_address_command(address, value)
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    let Ok(length) = u32::try_from(bytes.len()) else {
+        return placeholder;
+    };
+    if buffer == 0 || used.saturating_add(length) > size {
+        return placeholder;
+    }
+    // SAFETY: the bound buffer, `size` bytes, of which the command takes the next `length`.
+    let appended = unsafe { guest::write_bytes(buffer + u64::from(used), &bytes) };
+    // SAFETY: the object's measured counters.
+    let counted = appended && unsafe { guest::write_u32(object + USED_AT, used + length) };
+    // SAFETY: as above.
+    if !counted || !unsafe { guest::write_u32(object + COUNT_AT, count + 1) } {
+        return placeholder;
+    }
+    0
+}
+
 /// `sceAmprCommandBufferReset(obj)`: answers 0 and, measured after a binding, leaves the object as
 /// it was - the bound buffer and its size kept.
 fn command_buffer_reset(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -194,5 +267,49 @@ mod tests {
             answer(&[0xa1; orbistoun_core::GUEST_ARG_REGISTERS]),
             0x8002_0016
         );
+    }
+
+    /// The write-address command as a console appended it (REQ-aw01, REQ-aw02,
+    /// `report-1791833977.txt` 658-693): a header word - `0x05`, a flags byte, the address's bits
+    /// 47:32 - the address's low word, and the value shifted down two where that is not zero, its
+    /// low two bits in the flags; the object's used bytes at +4 and count at +8 move on. A slot that
+    /// is not 8-aligned is refused with `0x80020016`, nothing appended.
+    #[test]
+    fn a_write_address_command_is_appended_as_the_console_appends_it() {
+        use orbistoun_core::GUEST_ARG_REGISTERS;
+        let mut buffer = [0xcc_u8; 0x40];
+        let mut object = [0_u8; 0x40];
+        object[12..16].copy_from_slice(&0x40_u32.to_le_bytes());
+        object[16..24].copy_from_slice(&(buffer.as_mut_ptr() as u64).to_le_bytes());
+        let obj = object.as_mut_ptr() as u64;
+        let write = |address: u64, value: u64| {
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[..4].copy_from_slice(&[obj, address, value, 0]);
+            super::command_buffer_write_address(&args)
+        };
+        assert_eq!(write(0x1_916f40, 0x1234_5678), 0);
+        assert_eq!(write(0x7_eeff_95b0, 0x8765_4321), 0);
+        assert_eq!(write(0x7_eeff_95b0, 3), 0);
+        assert_eq!(write(0x7_eeff_954c, 0x8765_4321), 0x8002_0016, "4-aligned");
+        let words: Vec<u32> = buffer[..0x24]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                0x0000_4205,
+                0x0191_6f40,
+                0x048d_159e,
+                0x0007_5205,
+                0xeeff_95b0,
+                0x21d9_50c8,
+                0x0007_3105,
+                0xeeff_95b0,
+                0xcccc_cccc
+            ]
+        );
+        let word = |at: usize| u32::from_le_bytes(object[at..at + 4].try_into().expect("four"));
+        assert_eq!((word(4), word(8)), (0x20, 3), "used bytes and commands");
     }
 }
