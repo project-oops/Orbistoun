@@ -136,6 +136,14 @@ pub(crate) fn context_reset_param(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// need 0x45698 bytes (REQ-ao04, `20261010-231900-eboot.obs.log` 30-56).
 const MEASURED_NEED: ([u32; 6], u64) = ([4, 0x48, 0, 2, 0x100, 1], 0x45698);
 
+/// PPSA21564's parameter set and its need: u32s 0x14, 0x200, 0, 1, 0x200, 1 need 0x78e9c bytes,
+/// and no context is made from them (REQ-ac01, `report-1791826929.txt` 189-206).
+const REFUSED_NEED: ([u32; 6], u64) = ([0x14, 0x200, 0, 1, 0x200, 1], 0x78e9c);
+
+/// `SCE_AUDIO_OUT2_ERROR_INVALID_SIZE`: what [`REFUSED_NEED`]'s context was answered when it was
+/// given a size (REQ-ac01).
+const INVALID_SIZE: u64 = 0x8026_8002;
+
 /// Reads the six u32s of a context parameter block.
 fn read_param(param: u64) -> Option<[u32; 6]> {
     let mut words = [0_u32; 6];
@@ -151,11 +159,19 @@ fn read_param(param: u64) -> Option<[u32; 6]> {
 /// unmeasured and answers the placeholder.
 pub(crate) fn context_query_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (param, size) = (args[0], args[1]);
-    if param == 0 || size == 0 || read_param(param) != Some(MEASURED_NEED.0) {
+    let words = if param == 0 { None } else { read_param(param) };
+    let Some(need) = [MEASURED_NEED, REFUSED_NEED]
+        .into_iter()
+        .find(|(set, _)| Some(*set) == words)
+        .map(|(_, need)| need)
+    else {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    if size == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
     // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
-    if unsafe { guest::write_u64(size, MEASURED_NEED.1) } {
+    if unsafe { guest::write_u64(size, need) } {
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
@@ -172,7 +188,16 @@ static CONTEXT_MADE: AtomicBool = AtomicBool::new(false);
 /// placeholder.
 pub(crate) fn context_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (param, memory, size, context) = (args[0], args[1], args[2], args[3]);
-    let measured = param != 0 && read_param(param) == Some(MEASURED_NEED.0);
+    let words = if param == 0 { None } else { read_param(param) };
+    // PPSA21564's set is refused whatever memory it is given, writing nothing (REQ-ac01).
+    if words == Some(REFUSED_NEED.0) && memory != 0 && context != 0 {
+        return if size == 0 {
+            INVALID_ARGUMENT
+        } else {
+            INVALID_SIZE
+        };
+    }
+    let measured = words == Some(MEASURED_NEED.0);
     if !measured || memory == 0 || context == 0 || size < MEASURED_NEED.1 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
@@ -269,6 +294,11 @@ fn measured_port(param: u64) -> Option<PortParams> {
 pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (context, param, port) = (args[0], args[1], args[2]);
     let made = CONTEXT_MADE.load(Ordering::Acquire);
+    // Eight channels of type 0 or 2 on a handle no context was made as are refused, writing
+    // nothing (REQ-ac01, `report-1791826929.txt` 207-212).
+    if (!made || context != 0) && port != 0 && eight_channels_of_type(param, &[0, 2]) {
+        return INVALID_ARGUMENT;
+    }
     if !made || context != 0 || param == 0 || port == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
@@ -291,8 +321,22 @@ pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `SCE_AUDIO_OUT2_ERROR_INVALID_ARGUMENT`: what a port of `-1` and the measured attribute records
-/// were answered.
+/// Whether the port parameters at `param` are eight channels at 48000 Hz of one of `types`.
+fn eight_channels_of_type(param: u64, types: &[u32]) -> bool {
+    if param == 0 {
+        return false;
+    }
+    let word = |at: u64| {
+        // SAFETY: the guest's port parameter block, by the call's contract.
+        unsafe { guest::read_u32(param.wrapping_add(at)) }
+    };
+    word(4) == Some(8 << 8)
+        && word(8) == Some(PORT_RATE)
+        && word(12).is_some_and(|port_type| types.contains(&port_type))
+}
+
+/// `SCE_AUDIO_OUT2_ERROR_INVALID_ARGUMENT`: what a port of `-1`, the measured attribute records, a
+/// context from PPSA21564's set and a port on no context were answered.
 const INVALID_ARGUMENT: u64 = 0x8026_8001;
 
 /// What a port destroyed already was answered (REQ-ap01).
