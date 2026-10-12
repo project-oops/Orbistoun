@@ -243,6 +243,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
         ("sceAudioOut2PortCreate", audio_out2::port_create),
+        ("sceAudioOut2PortGetState", audio_out2::port_get_state),
         (
             "sceAudioOut2GetSpeakerArrayMemorySize",
             audio_out2::get_speaker_array_memory_size,
@@ -352,6 +353,7 @@ mod tests {
             ports.push(u64::from_le_bytes(port));
         }
         assert_eq!(ports, [0, 1]);
+        ports_by_type_and_state(user);
         // Six channels, which the title rounds up to eight before it calls, is unmeasured.
         let mut block = [0_u8; 0x40];
         block[4..8].copy_from_slice(&(6_u32 << 8).to_le_bytes());
@@ -362,6 +364,51 @@ mod tests {
         let unmeasured = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
         assert_ne!(call("sceAudioOut2PortCreate", unmeasured), 0);
         assert_eq!(port, [0xa5; 8], "an unmeasured call writes nothing");
+    }
+
+    /// The rest of the port sequence REQ-ao07 measured, after the two ports of
+    /// [`an_audio_out2_context_is_set_up_as_measured`]: the port types, and a made port's state.
+    fn ports_by_type_and_state(user: [u8; 8]) {
+        // The port types REQ-ao07 measured after those (`report-1791758178.txt` 54-82): eight
+        // channels take types 1, 2 and 3 and the numbering goes on; type 4 is refused 0x80268001,
+        // type 0 and two channels of type 3 0x80268002, each writing nothing.
+        let create = |channels: u32, kind: u32| {
+            let mut block = [0_u8; 0x40];
+            block[4..8].copy_from_slice(&(channels << 8).to_le_bytes());
+            block[8..12].copy_from_slice(&48_000_u32.to_le_bytes());
+            block[12..16].copy_from_slice(&kind.to_le_bytes());
+            block[16..24].copy_from_slice(&user);
+            let mut port = [0xa5_u8; 8];
+            let args = [0, block.as_ptr() as u64, port.as_mut_ptr() as u64, 0, 0, 0];
+            (call("sceAudioOut2PortCreate", args), port)
+        };
+        assert_eq!(create(8, 3), (0, 2_u64.to_le_bytes()), "type 3");
+        assert_eq!(create(8, 1), (0, 3_u64.to_le_bytes()), "type 1");
+        assert_eq!(create(8, 4), (0x8026_8001, [0xa5; 8]), "type 4");
+        assert_eq!(create(8, 0), (0x8026_8002, [0xa5; 8]), "type 0");
+        assert_eq!(
+            create(2, 3),
+            (0x8026_8002, [0xa5; 8]),
+            "two channels of type 3"
+        );
+        // A made port's state is the measured record, zero to 0x40 (D799); one never made is
+        // unmeasured and writes nothing.
+        let mut state = [0xa5_u8; 0x48];
+        let state_at = state.as_mut_ptr() as u64;
+        assert_eq!(
+            call("sceAudioOut2PortGetState", [1, state_at, 0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(state[..8], [0x81, 0, 2, 0, 0xff, 0xff, 5, 0]);
+        assert!(state[8..0x40].iter().all(|&b| b == 0), "zero to 0x40");
+        assert!(state[0x40..].iter().all(|&b| b == 0xa5), "nothing past it");
+        let mut untouched = [0xa5_u8; 0x40];
+        let untouched_at = untouched.as_mut_ptr() as u64;
+        assert_ne!(
+            call("sceAudioOut2PortGetState", [99, untouched_at, 0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(untouched, [0xa5; 0x40], "an unmade port writes nothing");
     }
 
     /// `sceAudioOut2GetSpeakerArrayMemorySize` answers the measured byte counts (REQ-ao06,

@@ -94,10 +94,11 @@ purpose = "(context, param, port): opens an output port on a context for a user,
 returns = "status"
 edge_cases = [
     "MEASURED (REQ-ao05): in a fresh process after the context set-up and UserCreate(0xff), with param u32 0, channels << 8, 48000, 2 and the user handle at +0x10, rc 0 and port 0 for 2 channels, then port 1 for 8; the block was unchanged.",
-    "orbistoun numbers a process's ports from 0 for those parameters on the context ContextCreate made; other channel counts, rates, contexts and users are unmeasured and answer the placeholder.",
+    "MEASURED (REQ-ao07): the port type, the word at +0x0c, after those two: 8 channels of type 3 gave port 2 and of type 1 port 3; 8 channels of type 4 answered 0x80268001, of type 0 0x80268002, and 2 channels of type 3 0x80268002, the out parameter reading -1.",
+    "orbistoun numbers a process's ports from 0 for the measured channel counts and types on the context ContextCreate made, and answers the measured refusals writing nothing; other channel counts, types, rates, contexts and users are unmeasured and answer the placeholder.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261011T0010Z-ao05, reports/hardware/report-1791713884.txt lines 54-99 (000-boot/audioout2-fresh-process)."
+cites = "obSCEne REQ-20261011T0010Z-ao05, reports/hardware/report-1791713884.txt lines 54-99, and REQ-20261011T1440Z-ao07, reports/hardware/report-1791758178.txt lines 54-82 (000-boot/audioout2-fresh-process)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-11"
 
@@ -114,3 +115,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T1130Z-ao06 via REQ-20261011T1310Z-lk01, reports/hardware/report-1791727748.txt lines 92-124 (000-boot/audioout2-fresh-process)."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceAudioOut2PortGetState"
+arity = 2
+purpose = "(port, state): writes a port's state record."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ao07, 000-boot/audioout2-fresh-process, report-1791758178.txt lines 77-86): for an 8-channel port, rc 0 and 0x40 bytes written, the same twice: 81 00 02 00 ff ff 05 00, sixteen zero bytes, then 0x28 bytes of the console's own addresses.",
+    "orbistoun writes the first 0x18 bytes as measured and zero to 0x40, for a port the process made, and answers 0 (D799, the zeroed tail assumed); another port or a null record is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "assumed"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"

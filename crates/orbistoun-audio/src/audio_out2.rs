@@ -28,6 +28,8 @@ guest_module! {
         // (context, param, port)
         "sceAudioOut2PortCreate" => 3,
         "sceAudioOut2PortDestroy" => 6,
+        // (port, state)
+        "sceAudioOut2PortGetState" => 2,
         "sceAudioOut2PortSetAttributes" => 6,
         // (user, out)
         "sceAudioOut2UserCreate" => 2,
@@ -186,37 +188,46 @@ pub(crate) fn context_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 static NEXT_PORT: AtomicU64 = AtomicU64::new(0);
 
 /// The port parameters whose creation is measured, as u32s from +0x00: 0, the channels shifted
-/// left by 8, the rate and 2, for 2 and 8 channels at 48000 Hz, with an 8-byte user handle at +0x10
-/// (REQ-ao05). PPSA04263 rounds a request for 6 channels up to 8 before it calls.
-const PORT_CHANNELS: [u32; 2] = [2, 8];
+/// left by 8, the rate and the port type ([`PORT_TYPES`]), at 48000 Hz, with an 8-byte user handle
+/// at +0x10 (REQ-ao05, REQ-ao07). PPSA04263 rounds a request for 6 channels up to 8 before it calls.
 const PORT_RATE: u32 = 48_000;
 
-/// Whether `param` holds port parameters as measured, for a user `sceAudioOut2UserCreate` gave.
-fn measured_port(param: u64) -> bool {
+/// What `sceAudioOut2PortCreate` answered for each channel count and port type (the word at +0x0c)
+/// measured, in a fresh process after a context and a user (REQ-ao07, `report-1791758178.txt`
+/// 54-82): `0` where a port was made, and the refusal otherwise.
+const PORT_TYPES: [((u32, u32), u64); 7] = [
+    ((2, 2), 0),
+    ((8, 2), 0),
+    ((8, 3), 0),
+    ((8, 1), 0),
+    ((8, 4), 0x8026_8001),
+    ((8, 0), 0x8026_8002),
+    ((2, 3), 0x8026_8002),
+];
+
+/// What `param`'s port parameters answer, for a user `sceAudioOut2UserCreate` gave: [`PORT_TYPES`]'
+/// answer for its channels and type, or `None` where the parameters are unmeasured.
+fn measured_port(param: u64) -> Option<u64> {
     let mut words = [0_u32; 4];
     for (i, word) in words.iter_mut().enumerate() {
         // SAFETY: the guest's parameter block, by the call's contract.
-        match unsafe { guest::read_u32(param.wrapping_add(i as u64 * 4)) } {
-            Some(value) => *word = value,
-            None => return false,
-        }
+        *word = unsafe { guest::read_u32(param.wrapping_add(i as u64 * 4)) }?;
     }
     // SAFETY: the same block's user handle, at +0x10.
-    let Some(user) = (unsafe { guest::read_u64(param.wrapping_add(0x10)) }) else {
-        return false;
-    };
+    let user = unsafe { guest::read_u64(param.wrapping_add(0x10)) }?;
     let [first, layout, rate, fourth] = words;
     let known_user = USERS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(&user);
-    first == 0
-        && PORT_CHANNELS
-            .iter()
-            .any(|&channels| layout == channels << 8)
-        && rate == PORT_RATE
-        && fourth == 2
-        && known_user
+    if first != 0 || rate != PORT_RATE || !known_user || layout & 0xff != 0 {
+        return None;
+    }
+    let channels = layout >> 8;
+    PORT_TYPES
+        .iter()
+        .find(|((measured, kind), _)| *measured == channels && *kind == fourth)
+        .map(|&(_, answer)| answer)
 }
 
 /// `sceAudioOut2PortCreate(context, param, port)`: on the context `sceAudioOut2ContextCreate` made,
@@ -226,12 +237,46 @@ fn measured_port(param: u64) -> bool {
 pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (context, param, port) = (args[0], args[1], args[2]);
     let made = CONTEXT_MADE.load(Ordering::Acquire);
-    if !made || context != 0 || param == 0 || port == 0 || !measured_port(param) {
+    if !made || context != 0 || param == 0 || port == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    match measured_port(param) {
+        None => return u64::from(GuestError::Unimplemented.as_raw()),
+        Some(0) => {}
+        Some(refused) => return refused,
     }
     let number = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
     // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
     if unsafe { guest::write_u64(port, number) } {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// The bytes `sceAudioOut2PortGetState` writes (D799): the port state a console reported for its
+/// port in a fresh process (REQ-ao07, `report-1791758178.txt` 77-86), then zero to 0x40.
+const PORT_STATE: [u8; 0x40] = {
+    let mut state = [0_u8; 0x40];
+    let measured = [0x81, 0, 2, 0, 0xff, 0xff, 5, 0];
+    let mut i = 0;
+    while i < measured.len() {
+        state[i] = measured[i];
+        i += 1;
+    }
+    state
+};
+
+/// `sceAudioOut2PortGetState(port, state)`: for a port the process made, writes [`PORT_STATE`] and
+/// answers 0 (D799). A port it did not make, or a null record, is unmeasured and answers the
+/// placeholder with nothing written.
+pub(crate) fn port_get_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (port, state) = (args[0], args[1]);
+    if state == 0 || port >= NEXT_PORT.load(Ordering::Relaxed) {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's state record, by the call's contract.
+    if unsafe { guest::write_bytes(state, &PORT_STATE) } {
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
