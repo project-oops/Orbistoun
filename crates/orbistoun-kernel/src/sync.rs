@@ -147,6 +147,10 @@ impl GuestMutex {
     ///
     /// The self-relock check comes before any waiting: a non-recursive lock re-taken by its owner
     /// can never become free, so it is answered the same way however patient the caller is.
+    ///
+    /// A signal raised on the sleeping thread runs here with the lock's state released, and the
+    /// thread waits again (D808): libthr's lock sleeps in `_umtx_op`, which a signal interrupts and
+    /// the lock is retried after the handler.
     fn acquire(&self, by: ThreadHandle, until: Blocking) -> Acquisition {
         let Ok(mut held) = self.state.lock() else {
             return Acquisition::Busy;
@@ -161,9 +165,24 @@ impl GuestMutex {
                 Recursion::Forbidden => Acquisition::Busy,
             };
         }
-        let Some(mut held) = wait_while(&self.released, held, until, |h| h.depth > 0) else {
-            return Acquisition::Busy;
-        };
+        loop {
+            let Some(woken) = wait_while(&self.released, held, until, |h| {
+                h.depth > 0 && !signal_pending()
+            }) else {
+                return Acquisition::Busy;
+            };
+            if woken.depth == 0 {
+                held = woken;
+                break;
+            }
+            // The handler is guest code and may take this very lock.
+            drop(woken);
+            deliver_signal();
+            let Ok(again) = self.state.lock() else {
+                return Acquisition::Busy;
+            };
+            held = again;
+        }
         held.owner = by;
         held.depth = 1;
         Acquisition::Locked
@@ -1427,7 +1446,7 @@ fn deliver_signal() {
 /// Nudges every wait that delivers signals, so a thread with a signal pending re-tests its
 /// predicate.
 ///
-/// Every address queue, semaphore, condition variable and event flag, because a raise knows its target thread but not what
+/// Every address queue, lock, semaphore, condition variable and event flag, because a raise knows its target thread but not what
 /// it sleeps on. Each other sleeper re-tests once and sleeps again, once per raise. Each lock is
 /// taken before notifying, so the flag cannot be set between a sleeper's last test and its sleep.
 pub fn nudge_waiters() {
@@ -1439,6 +1458,16 @@ pub fn nudge_waiters() {
         if let Ok(state) = queue.state.lock() {
             drop(state);
             queue.woken.notify_all();
+        }
+    }
+    let locks: Vec<Arc<GuestMutex>> = match table().lock() {
+        Ok(table) => table.values().cloned().collect(),
+        Err(_) => return,
+    };
+    for lock in locks {
+        if let Ok(held) = lock.state.lock() {
+            drop(held);
+            lock.released.notify_all();
         }
     }
     let semaphores: Vec<Arc<GuestSemaphore>> = match semaphores().lock() {
@@ -1808,6 +1837,16 @@ mod tests {
         assert!(!waiter.is_finished(), "a signal is not a bit");
         assert_eq!(super::event_flag_set(f, 1), Some(true));
         assert_eq!(waiter.join().ok(), Some(Some(super::FlagWait::Found(1))));
+
+        // A lock another thread holds, as PPSA03416's GC finaliser waits on the collector's (D808).
+        let m = create(Recursion::Forbidden, "collector");
+        assert_eq!(acquire(m, 1, Blocking::Never), Some(Acquisition::Locked));
+        let waiter = std::thread::spawn(move || acquire(m, 2, Blocking::Forever));
+        raise_on(waiter.thread().id());
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), before + 4, "lock");
+        assert!(!waiter.is_finished(), "a signal is not a release");
+        assert_eq!(unlock(m, 1), Some(true));
+        assert_eq!(waiter.join().ok(), Some(Some(Acquisition::Locked)));
     }
 
     #[test]

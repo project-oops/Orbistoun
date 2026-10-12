@@ -2606,7 +2606,8 @@ fn pthread_mutex_lock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         Err(code) => return code,
     };
     let by = thread::adopt("main");
-    match sync::acquire(handle, by, sync::Blocking::Forever) {
+    // A collector suspends a thread asleep on a lock as on any other wait (D808).
+    match parked(|| sync::acquire(handle, by, sync::Blocking::Forever)) {
         Some(sync::Acquisition::Locked) => OK,
         // Two failures, two codes: a refusal is the guest deadlocking against itself on a non-recursive
         // lock; a miss is a handle naming nothing. This call waits forever, so `Busy` can only be the
