@@ -161,6 +161,13 @@ samples = 8
 operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 21, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
 
 [[opcode_operands]]
+family = "MIMG"
+opcode = 47
+mnemonic = "image_sample_c_lz"
+samples = 7
+operands = [{ word = 1, shift = 8, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 0, width = 8, kind = "vgpr", scale = 1 }, { word = 1, shift = 16, width = 5, kind = "source", scale = 4 }, { word = 1, shift = 21, width = 5, kind = "source", scale = 4 }, { word = 0, shift = 8, width = 4, kind = "immediate", scale = 1 }]
+
+[[opcode_operands]]
 family = "MTBUF"
 opcode = 0
 mnemonic = "tbuffer_load_format_x"
