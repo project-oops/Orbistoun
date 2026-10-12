@@ -211,3 +211,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261012T1814Z-24b2, check 000-boot/audioout2-ppsa21564-context."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceAudioOut2ContextGetQueueLevel"
+purpose = "(context, queued, available): the context's queue level, two u32 counts."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-24b2, report-1791836505.txt 85-92): on context 0 before any push, rc 0, queued 0 and available 2, each written as a u32 with the slot's high 4 bytes untouched; a null queued or a null available answered 0, both null 0x80268001; contexts 1 and -1 0x80268001.",
+    "MEASURED (same, 101-121): after non-blocking pushes the level read 1/0, then 0/1, then 0/2 for the rest - the queue settles back to 0 and 2.",
+    "ASSUMED: orbistoun answers the settled level, queued 0 and available 2, always; the brief levels just after a push are not modelled.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1814Z-24b2, check 000-boot/audioout2-ppsa21564-context."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-12"

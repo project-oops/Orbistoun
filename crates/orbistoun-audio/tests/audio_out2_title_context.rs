@@ -94,4 +94,34 @@ fn ppsa21564s_context_and_ports_are_made_in_a_fresh_process() {
             INVALID_ARGUMENT
         );
     }
+    // The queue level (REQ-24b2, `report-1791836505.txt` 85-92): queued 0 and available 2, each
+    // a u32 written over the low half of its slot; one null slot is fine, both are refused, as are
+    // contexts 1 and -1.
+    let mut queued = [0xff_u8; 8];
+    let mut available = [0xff_u8; 8];
+    let (q, a) = (queued.as_mut_ptr() as u64, available.as_mut_ptr() as u64);
+    assert_eq!(
+        call("sceAudioOut2ContextGetQueueLevel", [0, q, a, 0, 0, 0]),
+        0
+    );
+    assert_eq!(queued, [0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(available, [2, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+    assert_eq!(
+        call("sceAudioOut2ContextGetQueueLevel", [0, 0, a, 0, 0, 0]),
+        0
+    );
+    assert_eq!(
+        call("sceAudioOut2ContextGetQueueLevel", [0, q, 0, 0, 0, 0]),
+        0
+    );
+    assert_eq!(
+        call("sceAudioOut2ContextGetQueueLevel", [0, 0, 0, 0, 0, 0]),
+        INVALID_ARGUMENT
+    );
+    for bad in [1_u64, u64::MAX] {
+        assert_eq!(
+            call("sceAudioOut2ContextGetQueueLevel", [bad, q, a, 0, 0, 0]),
+            INVALID_ARGUMENT
+        );
+    }
 }

@@ -246,6 +246,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
         ("sceAudioOut2ContextAdvance", audio_out2::context_advance),
         ("sceAudioOut2ContextPush", audio_out2::context_push),
+        (
+            "sceAudioOut2ContextGetQueueLevel",
+            audio_out2::context_get_queue_level,
+        ),
         ("sceAudioOut2PortCreate", audio_out2::port_create),
         ("sceAudioOut2PortDestroy", audio_out2::port_destroy),
         (

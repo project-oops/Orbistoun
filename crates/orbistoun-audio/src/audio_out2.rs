@@ -243,6 +243,29 @@ pub(crate) fn context_advance(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceAudioOut2ContextGetQueueLevel(context, queued, available)`: on the context made, writes 0
+/// to `queued` and 2 to `available`, each a u32 over the low half of its slot, and answers 0; a
+/// null slot is skipped, both null answer `0x80268001`, as do contexts 1 and -1 (REQ-24b2,
+/// `report-1791836505.txt` 85-92). 0 and 2 are the level before any push and the level the
+/// measured pushes settled back to (0 and 2 after the third); the brief levels just after a
+/// push are not modelled (assumed). Any other handle is unmeasured and answers the placeholder.
+pub(crate) fn context_get_queue_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (context, queued, available) = (args[0], args[1], args[2]);
+    if is_refused_context(context) || (queued == 0 && available == 0) {
+        return INVALID_ARGUMENT;
+    }
+    if !is_made_context(context) {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    for (slot, level) in [(queued, 0_u32), (available, 2)] {
+        // SAFETY: the guest's out-parameter, a u32, by the call's contract.
+        if slot != 0 && !unsafe { guest::write_u32(slot, level) } {
+            return u64::from(GuestError::Unimplemented.as_raw());
+        }
+    }
+    0
+}
+
 /// `sceAudioOut2ContextPush(context, flag)`: 0 on the context made for flag 0 (not blocking) and
 /// flag 1 (blocking), returning within microseconds either way as measured - no grain is paced -
 /// and `0x80268001` for flag 2 and for contexts 1 and -1 (REQ-24b2, `report-1791836505.txt`
