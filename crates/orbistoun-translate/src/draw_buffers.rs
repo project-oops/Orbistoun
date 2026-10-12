@@ -264,26 +264,16 @@ fn stored_only(
         .collect()
 }
 
-/// The program's words before byte `at`, rebuilt from its instructions: each one's words and its
-/// literal. [`None`] where an instruction's words do not account for its length.
+/// The program's words before byte `at`, rebuilt from its instructions: every dword each one
+/// occupies - its fixed part, a modifier dword, further address registers, a literal, and the
+/// constant `v_madmk_f32` and `v_madak_f32` carry, which no literal operand names. [`None`] where an instruction's words do not account for its length.
 fn prefix_words(decode: &Decode, at: u32) -> Option<Vec<u32>> {
     let mut words = Vec::new();
     for instruction in decode.instructions.iter().take_while(|i| i.offset < at) {
-        let start = words.len();
-        words.push(instruction.word);
-        words.extend(instruction.second_word);
-        words.extend(
-            instruction
-                .operands
-                .iter()
-                .filter_map(|operand| match operand {
-                    Operand::Literal(value) => Some(*value),
-                    _ => None,
-                }),
-        );
-        if (words.len() - start) * 4 != instruction.length as usize {
+        if instruction.words.len() * 4 != instruction.length as usize {
             return None;
         }
+        words.extend_from_slice(&instruction.words);
     }
     Some(words)
 }
@@ -815,6 +805,23 @@ mod tests {
         0x8003_0100,
         END,
     ];
+
+    /// A computed descriptor after a multiply-add with an inline constant is traced with the program
+    /// before it whole: `v_madmk_f32`'s constant is a dword of its own that no literal operand
+    /// names, and the prefix is rebuilt from every dword. PPSA03416's fetch shader, past its title
+    /// screen, computes so before loading through a descriptor it builds with a scalar offset
+    /// (`buffer_load_format_x v4, v4, s[12:15], s11 idxen`).
+    #[test]
+    fn a_computed_access_after_a_constant_multiply_add_keeps_its_prefix() {
+        let madmk = [0x402e_270f, 0x429c_774c]; // v_madmk_f32 v23, v15, 0x429c774c, v19
+        let program = [madmk[0], madmk[1], 0xe000_2000, 0x0b03_0404, END];
+        let traced = traced(&program, 16);
+        let [BufferSource::Computed(computed)] = traced.sources.as_slice() else {
+            panic!("one computed buffer: {:?}", traced.sources);
+        };
+        assert_eq!(computed.prefix, madmk, "the multiply-add's both dwords");
+        assert_eq!(computed.at, 8);
+    }
 
     /// A dispatch's buffer store is traced like its load (D746): the copy reads one buffer and
     /// writes another, each through its own slot. A draw's, a snapshot, traces nothing, as does a
