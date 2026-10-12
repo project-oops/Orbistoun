@@ -6,9 +6,9 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 - PPSA04263: an `int 0x41` assertion at image+0x2bf156c after `sceAgcDriverSetTFRing`, which orbistoun answers 0 without setting anything up.
 - PPSA04263: the IME update and user-service game-preset stubs need measured values.
-- PPSA21564: the record ends at image+0x2990db, measured 2026-09-28 at a 20 s limit; no cause is recorded.
+- PPSA21564: runs its 120 s limit at `entered` with 263 imports and never flips; what it waits on before its first frame is not recorded.
 - `libSceAmpr` serves construction, binding, reset and the APR file read (`crates/orbistoun-gpu/src/ampr.rs`); its other imports have no measured answer (`orbistoun-cli census --imports`).
-- PPSA02664 and PPSA03416 carry `link_plan_stored = "mismatch"`: a fresh link differs from the stored plan under the same key.
+- A title's link-plan key (executable, build, host CPU) does not cover the modules it ships, so a change in which of them link reads as a `mismatch` (the defect finding) rather than as a changed input; PPSA02664's and PPSA03416's 2026-10-10 mismatches followed plugin loading.
 - NVRB00001: busy-waits on the process time counter (about 100 million reads in 40 s).
 
 ## Graphics
