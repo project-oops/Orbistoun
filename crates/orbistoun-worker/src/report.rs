@@ -2394,6 +2394,16 @@ fn waited_on(call: &str, first: u64) -> Option<String> {
     sync::name_of(word).map(|name| format!("lock {name:?} {word:#x}"))
 }
 
+/// Where a call made with the guest stack at `rsp` returns to: the stack's top word, as the guest's
+/// `call` left it, read only where the stack is mapped guest memory.
+fn called_from(rsp: u64) -> Option<u64> {
+    if rsp == 0 || rsp % 8 != 0 || !orbistoun_thunk::is_mapped(rsp) {
+        return None;
+    }
+    // SAFETY: a mapped, aligned guest stack word, read through the checked accessor.
+    unsafe { orbistoun_mem::guest::read_u64(rsp) }
+}
+
 /// Every guest thread, joined against the calls still in the recorded window.
 ///
 /// The thread registry knows names and handles, the ring knows what was called on which host
@@ -2417,10 +2427,14 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
                 inside: inside
                     .iter()
                     .find(|&&(host, ..)| record.host != 0 && host == record.host)
-                    .map(|&(_, index, first)| {
+                    .map(|&(_, index, first, rsp)| {
                         let call = labelled(index as usize);
-                        match waited_on(&call, first) {
+                        let call = match waited_on(&call, first) {
                             Some(object) => format!("{call} on {object}"),
+                            None => call,
+                        };
+                        match called_from(rsp) {
+                            Some(site) => format!("{call}, called from {site:#x}"),
                             None => call,
                         }
                     }),

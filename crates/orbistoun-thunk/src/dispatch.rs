@@ -1472,7 +1472,7 @@ unsafe extern "sysv64" fn on_guest_call(
     // handler, so an implementation asking what it is inside gets its own thread's answer (D621).
     // SAFETY: the trampoline's contract: `args` points to the saved argument registers.
     let first = unsafe { args.read() };
-    let outer = enter_import(index, first);
+    let outer = enter_import(index, (first, entry_rsp));
     // SAFETY: `args`, `floats` and `entry_rsp` are this function's own parameters, forwarded
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
@@ -1490,16 +1490,16 @@ unsafe extern "sysv64" fn on_guest_call(
 /// both ends of the call would then name the first thread's slot. A call of its own computes it
 /// afresh on whichever thread is running.
 #[inline(never)]
-fn enter_import(index: u64, first: u64) -> (u32, u64) {
+fn enter_import(index: u64, call: (u64, u64)) -> (u32, (u64, u64)) {
     let entered = (index as u32).wrapping_add(1);
-    let outer_first = publish_inside(entered, first);
-    (INSIDE.with(|inside| inside.replace(entered)), outer_first)
+    let outer_call = publish_inside(entered, call);
+    (INSIDE.with(|inside| inside.replace(entered)), outer_call)
 }
 
 /// Puts back what `enter_import` answered, on the thread running now.
 #[inline(never)]
-fn leave_import((outer, outer_first): (u32, u64)) {
-    publish_inside(outer, outer_first);
+fn leave_import((outer, outer_call): (u32, (u64, u64))) {
+    publish_inside(outer, outer_call);
     INSIDE.with(|inside| inside.set(outer));
 }
 
@@ -1515,6 +1515,9 @@ static PUBLISHED_INSIDE: [AtomicU32; PUBLISHED_THREADS] =
 /// The first argument of that call: the object a waiting call waits on (D806).
 static PUBLISHED_FIRST: [AtomicU64; PUBLISHED_THREADS] =
     [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+/// The guest stack pointer at that call, whose top word is where the call returns to.
+static PUBLISHED_RSP: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
 /// The next slot a thread claims.
 static PUBLISHED_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1523,11 +1526,11 @@ thread_local! {
     static PUBLISHED_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Publishes what this thread is inside and the call's first argument, so another thread - the
-/// report - can say what a quiet thread is blocked in and on what (D806), answering the first
-/// argument published before. Two relaxed stores a call end, and a slot claimed on a thread's
-/// first call.
-fn publish_inside(value: u32, first: u64) -> u64 {
+/// Publishes what this thread is inside, the call's first argument and the guest stack pointer at
+/// the call, so another thread - the report - can say what a quiet thread is blocked in, on what
+/// (D806) and called from where, answering the argument and stack pointer published before. Three
+/// relaxed stores a call end, and a slot claimed on a thread's first call.
+fn publish_inside(value: u32, (first, rsp): (u64, u64)) -> (u64, u64) {
     let slot = PUBLISHED_SLOT.with(|slot| {
         if slot.get() == 0 {
             let claimed = PUBLISHED_CLAIMED.fetch_add(1, Ordering::Relaxed);
@@ -1541,16 +1544,20 @@ fn publish_inside(value: u32, first: u64) -> u64 {
     if let Some(published) = PUBLISHED_INSIDE.get(slot) {
         published.store(value, Ordering::Relaxed);
     }
-    PUBLISHED_FIRST
-        .get(slot)
-        .map_or(0, |published| published.swap(first, Ordering::Relaxed))
+    let swap = |table: &[AtomicU64; PUBLISHED_THREADS], value: u64| {
+        table
+            .get(slot)
+            .map_or(0, |published| published.swap(value, Ordering::Relaxed))
+    };
+    (swap(&PUBLISHED_FIRST, first), swap(&PUBLISHED_RSP, rsp))
 }
 
-/// Every host thread that is inside an import now, the import's index and the call's first
-/// argument: what a thread blocked in a call is blocked in and on, however long ago it made the
-/// call (D806).
+/// Every host thread that is inside an import now, the import's index, the call's first argument
+/// and the guest stack pointer at the call: what a thread blocked in a call is blocked in, on what
+/// and - the stack's top word - called from where, however long ago it made the call (D806). The
+/// stack is the caller's to read, and only while it is mapped.
 #[must_use]
-pub fn threads_inside() -> Vec<(u64, u32, u64)> {
+pub fn threads_inside() -> Vec<(u64, u32, u64, u64)> {
     let claimed = PUBLISHED_CLAIMED
         .load(Ordering::Relaxed)
         .min(PUBLISHED_THREADS);
@@ -1561,7 +1568,8 @@ pub fn threads_inside() -> Vec<(u64, u32, u64)> {
                 .load(Ordering::Relaxed)
                 .checked_sub(1)?;
             let first = PUBLISHED_FIRST[slot].load(Ordering::Relaxed);
-            (host != 0).then_some((host, index, first))
+            let rsp = PUBLISHED_RSP[slot].load(Ordering::Relaxed);
+            (host != 0).then_some((host, index, first, rsp))
         })
         .collect()
 }
@@ -1827,9 +1835,10 @@ mod tests {
     #[test]
     fn a_thread_inside_a_call_is_published() {
         let (inside, after) = std::thread::spawn(|| {
-            let outer = super::enter_import(4242, 0x5e2d_0000_0040);
+            let rsp = 0x6000_007f_c018;
+            let outer = super::enter_import(4242, (0x5e2d_0000_0040, rsp));
             let host = super::host_thread();
-            let inside = super::threads_inside().contains(&(host, 4242, 0x5e2d_0000_0040));
+            let inside = super::threads_inside().contains(&(host, 4242, 0x5e2d_0000_0040, rsp));
             super::leave_import(outer);
             let after = super::threads_inside()
                 .iter()
