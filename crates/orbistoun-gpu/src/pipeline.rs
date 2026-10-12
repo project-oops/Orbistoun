@@ -3875,10 +3875,11 @@ fn read_texture(
 
 /// The swizzle modes a texture is read in through [`read_tiled_texture`], as their layouts place a
 /// chain ([`crate::tiling::SurfaceLayout`]).
-const SAMPLED_AS_RENDERED: [SwizzleMode; 4] = [
+const SAMPLED_AS_RENDERED: [SwizzleMode; 5] = [
     SwizzleMode::Tiled64KbRX,
     SwizzleMode::Tiled4KbDX,
     SwizzleMode::Tiled4KbS,
+    SwizzleMode::Tiled64KbS,
     SwizzleMode::Linear,
 ];
 
@@ -4196,6 +4197,7 @@ fn read_tiled_texture(
         crate::tiling::SurfaceLayout::S4Kb => 1 << 19,
         crate::tiling::SurfaceLayout::S4KbBpp8 => 1 << 18,
         crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
+        crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
     };
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
