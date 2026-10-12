@@ -217,6 +217,48 @@ pub(crate) fn context_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// Whether `context` is the context `sceAudioOut2ContextCreate` made, the only one a process has
+/// here: handle 0.
+fn is_made_context(context: u64) -> bool {
+    context == 0 && CONTEXT_SET.load(Ordering::Acquire) != NO_CONTEXT
+}
+
+/// The handles measured refused as no context: 1 and -1 (REQ-24b2).
+fn is_refused_context(context: u64) -> bool {
+    context == 1 || context == u64::MAX
+}
+
+/// `sceAudioOut2ContextAdvance(context)`: 0 on the context made, twice running as well, and
+/// `0x80268001` for 1 and -1 (REQ-24b2, `report-1791836505.txt` 93-97). Any other handle is
+/// unmeasured and answers the placeholder.
+pub(crate) fn context_advance(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let context = args[0];
+    if is_refused_context(context) {
+        return INVALID_ARGUMENT;
+    }
+    if is_made_context(context) {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `sceAudioOut2ContextPush(context, flag)`: 0 on the context made for flag 0 (not blocking) and
+/// flag 1 (blocking), returning within microseconds either way as measured - no grain is paced -
+/// and `0x80268001` for flag 2 and for contexts 1 and -1 (REQ-24b2, `report-1791836505.txt`
+/// 98-164). Other flags and handles are unmeasured and answer the placeholder.
+pub(crate) fn context_push(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (context, flag) = (args[0], args[1] as u32);
+    if is_refused_context(context) || (is_made_context(context) && flag == 2) {
+        return INVALID_ARGUMENT;
+    }
+    if is_made_context(context) && flag <= 1 {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
 /// The next port `sceAudioOut2PortCreate` gives: a fresh process's ports were numbered from 0 in the
 /// order they were made (REQ-ao05, `report-1791713884.txt` 54-99).
 static NEXT_PORT: AtomicU64 = AtomicU64::new(0);

@@ -3,6 +3,9 @@
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 
+/// `SCE_AUDIO_OUT2_ERROR_INVALID_ARGUMENT`.
+const INVALID_ARGUMENT: u64 = 0x8026_8001;
+
 /// An implementation by name, so the test cannot reach one a guest cannot.
 fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (_, function) = orbistoun_audio::implementations()
@@ -65,4 +68,30 @@ fn ppsa21564s_context_and_ports_are_made_in_a_fresh_process() {
         ports.push(u64::from_le_bytes(port));
     }
     assert_eq!(ports, [0, 1]);
+
+    // The context's runtime (REQ-24b2, `report-1791836505.txt` 93-164): Advance and Push answer 0
+    // on it, non-blocking (0) or blocking (1); a context never made and a flag of 2 are refused.
+    for context in [0_u64, 0] {
+        assert_eq!(
+            call("sceAudioOut2ContextAdvance", [context, 0, 0, 0, 0, 0]),
+            0
+        );
+    }
+    for flag in [0_u64, 1] {
+        assert_eq!(call("sceAudioOut2ContextPush", [0, flag, 0, 0, 0, 0]), 0);
+    }
+    assert_eq!(
+        call("sceAudioOut2ContextPush", [0, 2, 0, 0, 0, 0]),
+        INVALID_ARGUMENT
+    );
+    for bad in [1_u64, u64::MAX] {
+        assert_eq!(
+            call("sceAudioOut2ContextAdvance", [bad, 0, 0, 0, 0, 0]),
+            INVALID_ARGUMENT
+        );
+        assert_eq!(
+            call("sceAudioOut2ContextPush", [bad, 1, 0, 0, 0, 0]),
+            INVALID_ARGUMENT
+        );
+    }
 }

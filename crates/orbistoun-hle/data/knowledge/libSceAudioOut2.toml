@@ -182,3 +182,31 @@ known_by = "measured"
 cites = "obSCEne REQ-20261012T1123Z-ap01, reports/hardware/report-1791818993.txt lines 440-573."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceAudioOut2ContextAdvance"
+purpose = "(context): moves the context's queue on a grain."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-24b2, report-1791836505.txt 93-97): on context 0 (PPSA21564's parameters, first of the process) answered 0, and 0 again with no push between; contexts 1 and -1 answered 0x80268001.",
+    "orbistoun answers 0 on the context ContextCreate made and 0x80268001 for 1 and -1; any other handle is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1814Z-24b2, check 000-boot/audioout2-ppsa21564-context."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "sceAudioOut2ContextPush"
+purpose = "(context, flag): pushes the context's mixed grain out, flag 0 not blocking and 1 blocking."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-24b2, report-1791836505.txt 98-164): on context 0 six non-blocking pushes and twenty blocking ones each answered 0, each within 0x4ea to 0x1b8e TSC ticks - no grain was paced; flag 2 and contexts 1 and -1 answered 0x80268001.",
+    "orbistoun answers 0 on the context made for flags 0 and 1, without blocking, and 0x80268001 for flag 2 and for 1 and -1; other flags and handles are unmeasured and answer the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1814Z-24b2, check 000-boot/audioout2-ppsa21564-context."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-12"

@@ -244,6 +244,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             audio_out2::context_query_memory,
         ),
         ("sceAudioOut2ContextCreate", audio_out2::context_create),
+        ("sceAudioOut2ContextAdvance", audio_out2::context_advance),
+        ("sceAudioOut2ContextPush", audio_out2::context_push),
         ("sceAudioOut2PortCreate", audio_out2::port_create),
         ("sceAudioOut2PortDestroy", audio_out2::port_destroy),
         (
