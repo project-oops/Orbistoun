@@ -321,7 +321,7 @@ fn run_quietly(path: &std::path::Path, limit: u64) -> Result<()> {
 }
 
 /// The identity of the trace file on disk, for telling this run's trace from an older one.
-fn trace_stamp(module: &std::path::Path) -> Option<orbistoun_report::trace::Stamp> {
+pub(crate) fn trace_stamp(module: &std::path::Path) -> Option<orbistoun_report::trace::Stamp> {
     let paths = orbistoun_paths::Paths::resolve();
     orbistoun_report::trace::stamp_of(&paths.traces_dir(), module)
 }

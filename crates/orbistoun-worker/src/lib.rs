@@ -1322,6 +1322,16 @@ fn standing_service() -> Result<Service, Error> {
         .is_some_and(|value| value.trim() == orbistoun_overrides::DEFAULT_RETURN_OK)
     {
         policy.default_return = orbistoun_hle::StubReturn::Ok;
+        // Some of them refused again, so a rerun says whether the preview depended on them. An
+        // entry here wins over everything absorbed below, which only fills names left empty.
+        for name in orbistoun_env::WITHHOLD.get().unwrap_or_default().split(',') {
+            let name = name.trim();
+            if !name.is_empty() {
+                policy
+                    .overrides
+                    .insert(name.to_owned(), orbistoun_hle::StubReturn::Unimplemented);
+            }
+        }
     }
     policy.absorb(learned.policy());
     // The regions the shipped knowledge base declares, under both of the above. A region cannot be

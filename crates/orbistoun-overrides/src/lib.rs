@@ -340,6 +340,20 @@ impl Status {
         }
         self.ranking_key() > previous.ranking_key()
     }
+
+    /// How far this result got against `other`, whatever policy produced either: the rung, a
+    /// deliberate exit and the imports reached, the head of the ranking key. The quality measures
+    /// after it move with a run's timing, so two runs of one guest under one policy can differ
+    /// there and nowhere else. For comparing a run with one it was derived from, as a preview's
+    /// reruns are; never for deciding which to keep (see [`Self::beats`]).
+    #[must_use]
+    pub fn reach_against(&self, other: &Self) -> std::cmp::Ordering {
+        let head = |s: &Self| {
+            let (reach, exited, imports, ..) = s.ranking_key();
+            (reach, exited, imports)
+        };
+        head(self).cmp(&head(other))
+    }
 }
 
 /// Whether a count is zero, so an ordinary run writes no line about overrides.
@@ -990,6 +1004,36 @@ pub struct OverrideFile {
     /// How the title's frames compared with the console's, where somebody compared them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_match: Option<FrameMatch>,
+    /// Which of a preview's zero answers the title depended on, where somebody ranked them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_dependence: Option<PreviewDependence>,
+}
+
+/// Which of a permissive preview's zero answers the title depended on (`compat reproduce
+/// --preview --rank`).
+///
+/// Measured by the guest itself, one function at a time: the preview is rerun with that function
+/// refused again, and a rerun that ranks below the preview depended on its answer. Those are the
+/// refusals standing between the title and the preview's reach, and the order to implement them
+/// in. A section of its own, with its own build and date, because it describes the preview it was
+/// taken from rather than any run a slot keeps.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDependence {
+    /// The functions whose refusal set the title back, the furthest set back first, each as
+    /// `name: what the rerun reached`.
+    pub depended: Vec<String>,
+    /// The functions whose refusal changed nothing the ranking measures.
+    pub unneeded: Vec<String>,
+    /// The functions whose refusal took the title further than the preview: its zero answer was
+    /// in the way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harmful: Vec<String>,
+    /// What the preview reached, which each rerun was ranked against.
+    pub preview: String,
+    /// The orbistoun build that ran the reruns.
+    pub build: String,
+    /// When.
+    pub measured_on: String,
 }
 
 impl OverrideFile {
@@ -1507,6 +1551,7 @@ reason = "..."
             experiment: None,
             preview: None,
             frame_match: None,
+            preview_dependence: None,
         };
         let r = Resolved::merge(&[(Layer::Repo, f)]);
         let keys: Vec<_> = r.values.keys().map(String::as_str).collect();

@@ -588,6 +588,21 @@ pub const DEFAULT_RETURN: Var = Var {
     effect: Effect::SetsPolicy,
 };
 
+/// Under a permissive preview, refuse these functions again, so a rerun says whether the guest
+/// depended on their zero answer.
+///
+/// Comma-separated, each the name a trace label gives after `::` - a symbol name, or a NID as
+/// `0x` and sixteen digits. An intervention: the run is never recorded, only compared with the
+/// preview it was taken from.
+pub const WITHHOLD: Var = Var {
+    name: "ORBISTOUN_WITHHOLD",
+    kind: Kind::Diagnostic,
+    summary: "refuse these functions under ORBISTOUN_DEFAULT_RETURN=ok, to see whether the preview depended on their zero answer",
+    example: "sceNpCheckCallback,0x6abac2f3dc6f8cee",
+    read_by: "orbistoun-worker",
+    effect: Effect::Intervenes,
+};
+
 /// Reserve a region of guest address space before the guest runs.
 pub const MAP: Var = Var {
     name: "ORBISTOUN_MAP",
@@ -736,6 +751,7 @@ pub const REGISTRY: &[Var] = &[
     WRITE,
     RETURN,
     DEFAULT_RETURN,
+    WITHHOLD,
     PEEK,
     MARK_QUERY,
 ];
@@ -821,6 +837,7 @@ mod tests {
         super::WRITE,
         super::RETURN,
         super::DEFAULT_RETURN,
+        super::WITHHOLD,
         super::PEEK,
         super::MARK_QUERY,
         super::WATCHPOINT,

@@ -42,3 +42,50 @@ unanswered = 4
 limit_seconds = 20
 build = "v0.1.0 - 8eeb512-dirty"
 measured_on = "2026-09-25"
+
+[preview]
+reach = "entered"
+outcome = "image+0x2b2c463"
+imports = 263
+calls = 3669122
+standing = 100
+default_return = "ok"
+unanswered = 26
+limit_seconds = 120
+build = "v0.1.0 - 22b92f1-dirty"
+measured_on = "2026-10-12"
+link_plan = "5e4bff5a3efac2a2"
+link_plan_stored = "new"
+
+[preview_dependence]
+depended = ["sceNpGetState: entered at 218 imports"]
+unneeded = [
+    "0x0a4e469ba741de7d",
+    "0xe486fe61994e8976",
+    "sceNetCtlCheckCallback",
+    "sceNpTrophy2CreateContext",
+    "sceNpTrophy2CreateHandle",
+    "sceNpTrophy2RegisterContext",
+    "sceShareFeaturePermit",
+    "sceAmprCommandBufferGetCurrentOffset",
+    "sceAudioOut2SpeakerArrayCreate",
+    "sceGameLiveStreamingInitialize",
+    "sceGameLiveStreamingTerminate",
+    "_ZN3sce4Json11InitializerD1Ev",
+    "_ZN3sce4Json12MemAllocatorD2Ev",
+    "sceNetInetPton",
+    "sceNpEntitlementAccessInitialize",
+    "sceNpGameIntentTerminate",
+    "sceNpRegisterNpReachabilityStateCallback",
+    "sceNpRegisterStateCallbackA",
+    "sceNpSetNpTitleId",
+    "sceNpUniversalDataSystemTerminate",
+    "sceRtcGetCurrentNetworkTick",
+    "sceSharePlayInitialize",
+    "sceSharePlayTerminate",
+    "sceWebBrowserDialogInitialize",
+    "sceWebBrowserDialogTerminate",
+]
+preview = "entered at 263 imports"
+build = "v0.1.0 - 22b92f1-dirty"
+measured_on = "2026-10-12"

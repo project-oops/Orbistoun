@@ -166,6 +166,20 @@ and is printed beside `[status]`. The distance between the two is what the refus
 `unanswered` in the preview counts the functions it answered 0. No sheet is made, since the sheet
 is the honest run's.
 
+```bash
+orbistoun-cli compat reproduce <title> --preview --rank
+```
+
+`--rank` then asks the guest which of those answers it needed. The preview is rerun once per
+function it answered without an implementation, with that one function refused again
+(`ORBISTOUN_WITHHOLD=<name>`). A rerun that got less far - a lower rung, or fewer imports - depended
+on the answer. One that got as far did not. One that got further had the answer in its way. Only
+the rung and the imports are compared, since calls and frames move with a run's timing. The
+result goes to the record's `[preview_dependence]` section, the furthest set back first: the
+refusals standing between the title and the preview's reach, in the order to implement them. Each
+rerun is an intervention and is never recorded as a result. The command makes one run per
+function, each as long as the record's limit.
+
 `submit export` collects the `learned.toml` measurements and both compat slots into one
 directory with a manifest naming the build. It refuses to write an empty bundle.
 `submit check` re-derives what a bundle claims rather than trusting it: agreement is silent, a

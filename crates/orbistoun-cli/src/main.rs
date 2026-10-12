@@ -742,11 +742,16 @@ enum CompatAction {
         all: bool,
         /// A permissive preview: every unimplemented import answers 0 (`ORBISTOUN_DEFAULT_RETURN`).
         ///
-        /// The run is filed in the record's `[experiment]` slot, never `[status]` (D312), and the
+        /// The run is filed in the record's `[preview]` slot, never `[status]` (D312), and the
         /// two are printed side by side: the distance between them is what the refusals stand in.
         /// No sheet is made, since the sheet is the honest run's.
         #[arg(long)]
         preview: bool,
+        /// After the preview, rerun it once per zero answer with that function refused again
+        /// (`ORBISTOUN_WITHHOLD`), and record which the title depended on as
+        /// `[preview_dependence]`. One run per function, each as long as the record's limit.
+        #[arg(long, requires = "preview")]
+        rank: bool,
         /// Where the records live.
         #[arg(long, default_value = "compat")]
         dir: std::path::PathBuf,
@@ -1082,9 +1087,15 @@ fn dispatch_records(
                 title,
                 all,
                 preview,
+                rank,
                 dir,
             } => {
-                cmd_compat_reproduce(service, (title.as_deref(), *all, *preview), dir, symbols_db)?;
+                let how = match (*preview, *rank) {
+                    (_, true) => compat::Reproduction::RankedPreview,
+                    (true, false) => compat::Reproduction::Preview,
+                    (false, false) => compat::Reproduction::Recorded,
+                };
+                cmd_compat_reproduce(service, (title.as_deref(), *all, how), dir, symbols_db)?;
             }
             CompatAction::Compare {
                 title,

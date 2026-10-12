@@ -209,19 +209,31 @@ pub(crate) struct RunTaken<'a> {
 /// and into the local title library otherwise.
 pub(crate) fn cmd_compat_reproduce(
     service: &orbistoun_service::Service,
-    (title, all, preview): (Option<&str>, bool, bool),
+    (title, all, how): (Option<&str>, bool, Reproduction),
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
 ) -> Result<()> {
-    if preview {
+    if how != Reproduction::Recorded {
         // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
         unsafe { std::env::set_var(orbistoun_env::DEFAULT_RETURN.name, "ok") };
     }
     match (title, all) {
-        (Some(title), false) => reproduce_one(service, title, dir, symbols_db, preview),
-        (None, true) => reproduce_all(service, dir, symbols_db, preview),
+        (Some(title), false) => reproduce_one(service, title, dir, symbols_db, how),
+        (None, true) => reproduce_all(service, dir, symbols_db, how),
         _ => anyhow::bail!("name one title, or pass --all"),
     }
+}
+
+/// What `compat reproduce` repeats a recorded run as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reproduction {
+    /// As recorded, and its sheet remade.
+    Recorded,
+    /// As a permissive preview, set beside the honest run.
+    Preview,
+    /// As a preview, then once more per zero answer with that answer refused again, ranking which
+    /// the title depended on.
+    RankedPreview,
 }
 
 /// Every title whose record says how, one after another; a title that cannot be reproduced here -
@@ -230,7 +242,7 @@ fn reproduce_all(
     service: &orbistoun_service::Service,
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
-    preview: bool,
+    how: Reproduction,
 ) -> Result<()> {
     let mut done = 0usize;
     let mut passed_over: Vec<(String, String)> = Vec::new();
@@ -240,7 +252,7 @@ fn reproduce_all(
             continue;
         }
         println!("== {title}");
-        match reproduce_one(service, &title, dir, symbols_db, preview) {
+        match reproduce_one(service, &title, dir, symbols_db, how) {
             Ok(()) => done += 1,
             Err(e) => passed_over.push((title, format!("{e:#}"))),
         }
@@ -260,10 +272,14 @@ fn reproduce_one(
     title: &str,
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
-    preview: bool,
+    how: Reproduction,
 ) -> Result<()> {
-    let reproduce = run_as_recorded(service, title, dir, symbols_db)?;
-    if preview {
+    let (reproduce, module) = run_as_recorded(service, title, dir, symbols_db)?;
+    if how != Reproduction::Recorded {
+        // Taken first: the reruns overwrite the trace the preview left.
+        let ranked = (how == Reproduction::RankedPreview)
+            .then(|| previous_trace(&module))
+            .flatten();
         let file = load_compat(dir, title)?;
         println!();
         for (slot, entry) in [("status", &file.status), ("preview", &file.preview)] {
@@ -288,6 +304,10 @@ fn reproduce_one(
             "rows is what those refusals stand in. The [preview] row is this run only if it ",
             "beat the last preview."
         ));
+        if how == Reproduction::RankedPreview {
+            let preview = ranked.context("the preview left no trace to rank")?;
+            rank_preview(service, title, dir, symbols_db, (&module, &preview))?;
+        }
         return Ok(());
     }
     // Written whether or not the run was kept as the record's best: a reproduction's sheet is the
@@ -300,6 +320,123 @@ fn reproduce_one(
         None => println!("the run kept no frames, so {title} has no sheet"),
     }
     Ok(())
+}
+
+/// Reruns a preview once per function it answered without an implementation, with that function
+/// refused again (`ORBISTOUN_WITHHOLD`), and records which the title depended on (`-5926`).
+///
+/// The guest is the oracle, one function at a time: a rerun that got less far than the preview
+/// needed that answer. Only how far each run got is compared (see
+/// [`orbistoun_overrides::Status::reach_against`]), since the rest moves with timing. Each rerun is
+/// an intervention, so none is recorded as a result; the ranking is, as `[preview_dependence]`.
+fn rank_preview(
+    service: &orbistoun_service::Service,
+    title: &str,
+    dir: &std::path::Path,
+    symbols_db: Option<&std::path::Path>,
+    (module, preview): (&std::path::Path, &orbistoun_report::trace::CallTrace),
+) -> Result<()> {
+    anyhow::ensure!(
+        preview.conditions.default_return == orbistoun_overrides::DEFAULT_RETURN_OK,
+        "the run to rank was not a preview: it answered {}",
+        preview.conditions.default_return
+    );
+    let reached = orbistoun_report::trace::status_of(preview, String::new());
+    let answered: Vec<String> = preview
+        .stubbed_imports()
+        .iter()
+        .filter_map(|c| c.label.split_once("::").map(|(_, name)| name.to_owned()))
+        .collect();
+    println!();
+    println!(
+        "ranking {} zero answer(s) against the preview's {}: one rerun each, refusing it again",
+        answered.len(),
+        reach_line(&reached)
+    );
+    let mut reruns = Vec::with_capacity(answered.len());
+    for (i, name) in answered.iter().enumerate() {
+        println!();
+        println!("== {}/{} {title}, refusing {name}", i + 1, answered.len());
+        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+        unsafe { std::env::set_var(orbistoun_env::WITHHOLD.name, name) };
+        let before = crate::run::trace_stamp(module);
+        run_as_recorded(service, title, dir, symbols_db)?;
+        let rerun = orbistoun_report::trace::wrote_a_trace(before, crate::run::trace_stamp(module))
+            .then(|| previous_trace(module))
+            .flatten()
+            .map(|trace| orbistoun_report::trace::status_of(&trace, String::new()));
+        reruns.push((name.clone(), rerun));
+    }
+    // SAFETY: as above; no worker is running.
+    unsafe { std::env::remove_var(orbistoun_env::WITHHOLD.name) };
+
+    let ranked = rank_reruns(&reached, reruns);
+    println!();
+    println!(
+        "{title}: what the preview's {} rested on",
+        reach_line(&reached)
+    );
+    for (heading, names) in [
+        ("depended on", &ranked.depended),
+        ("in the way", &ranked.harmful),
+        ("unneeded", &ranked.unneeded),
+    ] {
+        println!("  {heading} ({})", names.len());
+        for name in names {
+            println!("    {name}");
+        }
+    }
+    let mut file = load_compat(dir, title)?;
+    file.preview_dependence = Some(ranked);
+    let path = write_compat(dir, title, &file)?;
+    println!("recorded [preview_dependence] in {}", path.display());
+    Ok(())
+}
+
+/// A result's rung and imports, the part a preview's reruns are ranked by.
+fn reach_line(status: &orbistoun_overrides::Status) -> String {
+    format!("{} at {} imports", status.reach.label(), status.imports)
+}
+
+/// Sorts a preview's reruns, each by the function it refused, against the preview they came from.
+///
+/// A rerun that left no trace ended the worker before it could write one, which is a dependence
+/// too, and the furthest set back of all.
+fn rank_reruns(
+    preview: &orbistoun_overrides::Status,
+    reruns: Vec<(String, Option<orbistoun_overrides::Status>)>,
+) -> orbistoun_overrides::PreviewDependence {
+    use std::cmp::Ordering;
+    let mut depended: Vec<(Option<orbistoun_overrides::Status>, String)> = Vec::new();
+    let (mut unneeded, mut harmful) = (Vec::new(), Vec::new());
+    for (name, rerun) in reruns {
+        match rerun.as_ref().map(|r| (r.reach_against(preview), r)) {
+            Some((Ordering::Equal, _)) => unneeded.push(name),
+            Some((Ordering::Greater, r)) => harmful.push(format!("{name}: {}", reach_line(r))),
+            Some((Ordering::Less, _)) | None => depended.push((rerun, name)),
+        }
+    }
+    // The furthest set back first: no trace at all, then the lowest rung and fewest imports.
+    depended.sort_by(|(a, an), (b, bn)| match (a, b) {
+        (None, None) => an.cmp(bn),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(a), Some(b)) => a.reach_against(b).then_with(|| an.cmp(bn)),
+    });
+    orbistoun_overrides::PreviewDependence {
+        depended: depended
+            .into_iter()
+            .map(|(rerun, name)| match rerun {
+                Some(r) => format!("{name}: {}", reach_line(&r)),
+                None => format!("{name}: no trace (the worker ended without one)"),
+            })
+            .collect(),
+        unneeded,
+        harmful,
+        preview: reach_line(preview),
+        build: orbistoun_env::build::line(),
+        measured_on: orbistoun_nid::today(),
+    }
 }
 
 /// `compat compare` - runs a title as its record says, keeping the frames drawn before the flips
@@ -446,7 +583,7 @@ fn run_as_recorded(
     title: &str,
     dir: &std::path::Path,
     symbols_db: Option<&std::path::Path>,
-) -> Result<orbistoun_overrides::Reproduce> {
+) -> Result<(orbistoun_overrides::Reproduce, std::path::PathBuf)> {
     let record = load_compat(dir, title)?;
     let Some(reproduce) = record.reproduce else {
         anyhow::bail!(
@@ -494,7 +631,7 @@ fn run_as_recorded(
         (symbols_db, inputs.is_file().then_some(inputs.as_path())),
         (false, false),
     )?;
-    Ok(reproduce)
+    Ok((reproduce, module))
 }
 
 /// Writes `title`'s sheet from the frames the last run kept, where its record says: beside the
@@ -1028,6 +1165,37 @@ mod tests {
             shown: None,
             notes: String::new(),
         }
+    }
+
+    /// A rerun that got less far depended on the refused answer, the furthest set back first and a
+    /// rerun with no trace before all; one that got as far, only differing in calls, did not; one
+    /// that got further had the answer in its way.
+    #[test]
+    fn a_previews_reruns_are_ranked_by_how_far_each_got() {
+        let preview = reach(261, 1_000_000);
+        let mut flipped = reach(261, 5);
+        flipped.reach = orbistoun_overrides::Reach::Flipped;
+        let ranked = super::rank_reruns(
+            &preview,
+            vec![
+                ("sceA".to_owned(), Some(reach(200, 9))),
+                ("sceB".to_owned(), Some(reach(261, 7))),
+                ("sceC".to_owned(), None),
+                ("sceD".to_owned(), Some(reach(103, 9))),
+                ("sceE".to_owned(), Some(flipped)),
+            ],
+        );
+        assert_eq!(
+            ranked.depended,
+            [
+                "sceC: no trace (the worker ended without one)",
+                "sceD: entered at 103 imports",
+                "sceA: entered at 200 imports",
+            ]
+        );
+        assert_eq!(ranked.unneeded, ["sceB"]);
+        assert_eq!(ranked.harmful, ["sceE: flipped at 261 imports"]);
+        assert_eq!(ranked.preview, "entered at 261 imports");
     }
 
     /// A permissive preview goes to its own slot, whatever the experiment slot holds, and never

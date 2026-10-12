@@ -101,6 +101,10 @@ pub struct Experiments {
     ///
     /// Carried here because it intervenes, so the verdict carries a caveat.
     pub apr_deliver: bool,
+    /// Functions a permissive preview refuses again, as written.
+    ///
+    /// An intervention: the run exists only to be compared with the preview it was taken from.
+    pub withhold: Option<String>,
 }
 
 impl Experiments {
@@ -122,6 +126,7 @@ impl Experiments {
             resolve: orbistoun_env::RESOLVE.get(),
             handoff_poison: orbistoun_env::HANDOFF_POISON.get(),
             entry_argument: orbistoun_env::ENTRY_ARGUMENT.get(),
+            withhold: orbistoun_env::WITHHOLD.get(),
         }
     }
 
@@ -194,6 +199,9 @@ impl Experiments {
         }
         if self.apr_deliver {
             parts.push("the asynchronous file path delivering what it resolved".to_owned());
+        }
+        if let Some(names) = &self.withhold {
+            parts.push(format!("{names} refused again"));
         }
         parts.join("; ")
     }
