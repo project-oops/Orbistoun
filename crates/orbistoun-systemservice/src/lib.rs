@@ -501,12 +501,14 @@ fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64
 const USER_SERVICE_INVALID_ARGUMENT: u64 = 0x8096_0005;
 /// `SCE_USER_SERVICE_ERROR_INVALID_USER_ID`, measured for user ids -1 and 0.
 const USER_SERVICE_INVALID_USER: u64 = 0x8096_0105;
-/// The only record size `sceUserServiceGetGamePresets` accepts, held in the record's first quadword.
-const GAME_PRESETS_BYTES: u64 = 0x30;
+/// The record sizes `sceUserServiceGetGamePresets` accepts, held in the record's first quadword:
+/// `0x30` (`-9a3e`) and `0x28`, the size Unity passes (REQ-us01, `get-game-presets`).
+const GAME_PRESETS_SIZES: [u64; 2] = [0x28, 0x30];
 
 /// `sceUserServiceGetGamePresets(user, presets)`: for the signed-in user and a record whose first
-/// quadword is its size, `0x30`, zeroes the other 40 bytes and answers `0` - the console's user had
-/// no presets set, and every field read back zero. A size of 0 or `0x40`, or no record, answers
+/// quadword is its size, `0x30` or `0x28`, zeroes the rest of the record and answers `0` - the
+/// console's user had no presets set, and every field read back zero (a `0x28` record answered `0`
+/// with its bytes, already zero, unchanged; REQ-us01). A size of 0 or `0x40`, or no record, answers
 /// `0x80960005`; users -1 and 0 `0x80960105`; each writes nothing (obSCEne `-9a3e`, sweep
 /// 20260927-223648, `130-layout/user-game-presets`). Another user than the signed-in one is taken
 /// as invalid as those two were; a bad user with a bad record was not measured, and the user is
@@ -520,23 +522,35 @@ fn user_service_get_game_presets(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return USER_SERVICE_INVALID_ARGUMENT;
     }
     // SAFETY: the guest's record, whose first quadword is its size by the call's contract.
-    if unsafe { orbistoun_mem::guest::read_u64(record) } != Some(GAME_PRESETS_BYTES) {
+    let size = unsafe { orbistoun_mem::guest::read_u64(record) };
+    let Some(size) = size.filter(|size| GAME_PRESETS_SIZES.contains(size)) else {
         return USER_SERVICE_INVALID_ARGUMENT;
-    }
-    // SAFETY: the same record, 0x30 bytes as its size field says.
-    if unsafe { orbistoun_mem::guest::write_bytes(record + 8, &[0; 40]) } {
+    };
+    let zeroes = vec![0_u8; usize::try_from(size - 8).unwrap_or(0)];
+    // SAFETY: the same record, as many bytes as its size field says.
+    if unsafe { orbistoun_mem::guest::write_bytes(record + 8, &zeroes) } {
         OK
     } else {
         USER_SERVICE_INVALID_ARGUMENT
     }
 }
 
-/// What `sceUserServiceGetAgeLevel` answers for the signed-in user. Measured; its meaning is not
-/// established.
-const AGE_LEVEL_SIGNED_IN: u64 = 0x8096_0002;
-/// What it answers for a value that is not a user: 0 and a buffer's address, the census's zero and
-/// buffer arguments.
+/// The age level `sceUserServiceGetAgeLevel` writes for the signed-in user: 21, as a console's
+/// signed-in user reported it in a fresh process after `sceUserServiceInitialize`
+/// (`000-boot/unity-user-service-chain`, `get-age-level`, `report-1791758178.txt`). A user's own
+/// setting there; orbistoun's users carry none, so each reports the measured one.
+const AGE_LEVEL: u32 = 0x15;
+/// What the user-service getters answer for a value that is not a user (`get-age-level-user-0xff`,
+/// and the census's zero and buffer arguments): `SCE_USER_SERVICE_ERROR_NO_USER`, nothing written.
 const AGE_LEVEL_NOT_A_USER: u64 = 0x8096_0009;
+/// The accessibility settings the signed-in user reported in the same chain, each written as a
+/// word: chat transcription and press-and-hold delay `0`, trigger effect and vibration `1`.
+const ACCESSIBILITY: [(&str, u32); 4] = [
+    ("sceUserServiceGetAccessibilityChatTranscription", 0),
+    ("sceUserServiceGetAccessibilityPressAndHoldDelay", 0),
+    ("sceUserServiceGetAccessibilityTriggerEffect", 1),
+    ("sceUserServiceGetAccessibilityVibration", 1),
+];
 
 /// `sceUserServiceGetAgeLevel(user, out)`: for the signed-in user answers `0x80960002` and writes
 /// none of `out` (obSCEne `070-user/oneshot-setup-calls` arm 3, a 0x40-byte buffer filled with
@@ -544,10 +558,24 @@ const AGE_LEVEL_NOT_A_USER: u64 = 0x8096_0009;
 /// and buffer arguments were answered. Another user than the signed-in one is taken as not a user,
 /// as [`user_service_get_game_presets`] takes it.
 fn user_service_get_age_level(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[0] == u64::from(signed_in_user()) {
-        AGE_LEVEL_SIGNED_IN
+    write_user_word(args, AGE_LEVEL)
+}
+
+/// For the signed-in user, writes `value` to the word at `args[1]` and answers 0, as each getter in
+/// `000-boot/unity-user-service-chain` did; any other value answers [`AGE_LEVEL_NOT_A_USER`] with
+/// nothing written, and a null out pointer is refused.
+fn write_user_word(args: &[u64; GUEST_ARG_REGISTERS], value: u32) -> u64 {
+    if args[0] != u64::from(signed_in_user()) {
+        return AGE_LEVEL_NOT_A_USER;
+    }
+    if args[1] == 0 {
+        return USER_SERVICE_INVALID_ARGUMENT;
+    }
+    // SAFETY: the guest's out word, by the call's contract; written through the checked accessor.
+    if unsafe { orbistoun_mem::guest::write_u32(args[1], value) } {
+        OK
     } else {
-        AGE_LEVEL_NOT_A_USER
+        USER_SERVICE_INVALID_ARGUMENT
     }
 }
 
@@ -562,16 +590,30 @@ fn user_service_get_foreground_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceUserServiceGetAccessibilityVibration(user, out)` and its trigger-effect twin: for the
-/// signed-in user each answered `0x80960002` and wrote none of a buffer filled `0xa5` (REQ-cn10
-/// arm 6, `20261009-151440-eboot.obs.log`), the code `sceUserServiceGetAgeLevel` answers. Another
-/// user is unmeasured and refused with the placeholder.
-fn user_service_get_accessibility(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[0] == u64::from(signed_in_user()) {
-        AGE_LEVEL_SIGNED_IN
-    } else {
-        u64::from(GuestError::InvalidArgument.as_raw())
-    }
+/// `sceUserServiceGetAccessibility*(user, out)`: the setting [`ACCESSIBILITY`] names for the
+/// getter, written as [`write_user_word`] writes.
+fn accessibility(name: &str, args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let value = ACCESSIBILITY
+        .iter()
+        .find(|(getter, _)| *getter == name)
+        .map_or(0, |&(_, value)| value);
+    write_user_word(args, value)
+}
+
+fn accessibility_chat_transcription(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    accessibility(ACCESSIBILITY[0].0, args)
+}
+
+fn accessibility_press_and_hold_delay(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    accessibility(ACCESSIBILITY[1].0, args)
+}
+
+fn accessibility_trigger_effect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    accessibility(ACCESSIBILITY[2].0, args)
+}
+
+fn accessibility_vibration(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    accessibility(ACCESSIBILITY[3].0, args)
 }
 
 /// `sceSystemServiceGetNoticeScreenSkipFlag(flag)`: writes one byte, 1, and answers 0 (REQ-cn10
@@ -691,11 +733,19 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ),
     (
         "sceUserServiceGetAccessibilityVibration",
-        user_service_get_accessibility,
+        accessibility_vibration,
     ),
     (
         "sceUserServiceGetAccessibilityTriggerEffect",
-        user_service_get_accessibility,
+        accessibility_trigger_effect,
+    ),
+    (
+        "sceUserServiceGetAccessibilityChatTranscription",
+        accessibility_chat_transcription,
+    ),
+    (
+        "sceUserServiceGetAccessibilityPressAndHoldDelay",
+        accessibility_press_and_hold_delay,
     ),
     (
         "sceSystemServiceGetNoticeScreenSkipFlag",

@@ -1,5 +1,6 @@
-//! `sceUserServiceGetAgeLevel` as obSCEne measured it (`070-user/oneshot-setup-calls`, arm 3, and
-//! `200-census/libSceUserService/sceUserServiceGetAgeLevel`, `20261009-104652-eboot.obs.log`).
+//! The user-service getters Unity calls before it opens a pad, as a console answered them in a fresh
+//! process after `sceUserServiceInitialize` (obSCEne REQ-us01, `000-boot/unity-user-service-chain`,
+//! `reports/hardware/report-1791758178.txt` lines 154-212).
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 
@@ -13,10 +14,11 @@ fn call(name: &str, args: &[u64]) -> u64 {
     f(&regs)
 }
 
-/// For the signed-in user the call answers `0x80960002` and writes none of a 0x40-byte buffer
-/// filled with `0xa5`; for user 0 it answers `0x80960009`, as the census's zero arguments did.
+/// For the signed-in user the age level and each accessibility setting answer 0 and write one word:
+/// the age level 21, chat transcription and press-and-hold delay 0, trigger effect and vibration 1.
+/// For user 0xff, or 0, the age level answers `0x80960009` and writes nothing.
 #[test]
-fn the_age_level_answers_as_measured_and_writes_nothing() {
+fn the_getters_answer_as_a_fresh_process_measured() {
     let mut id = 0_u32;
     assert_eq!(
         call(
@@ -25,17 +27,34 @@ fn the_age_level_answers_as_measured_and_writes_nothing() {
         ),
         0
     );
-    let mut out = [0xa5_u8; 0x40];
-    assert_eq!(
-        call(
-            "sceUserServiceGetAgeLevel",
-            &[u64::from(id), out.as_mut_ptr() as u64]
-        ),
-        0x8096_0002
-    );
-    assert!(out.iter().all(|&b| b == 0xa5), "nothing written");
-    assert_eq!(
-        call("sceUserServiceGetAgeLevel", &[0, out.as_mut_ptr() as u64]),
-        0x8096_0009
-    );
+    for (name, value) in [
+        ("sceUserServiceGetAgeLevel", 0x15_u32),
+        ("sceUserServiceGetAccessibilityChatTranscription", 0),
+        ("sceUserServiceGetAccessibilityPressAndHoldDelay", 0),
+        ("sceUserServiceGetAccessibilityTriggerEffect", 1),
+        ("sceUserServiceGetAccessibilityVibration", 1),
+    ] {
+        let mut out = [0xa5_u8; 0x40];
+        assert_eq!(
+            call(name, &[u64::from(id), out.as_mut_ptr() as u64]),
+            0,
+            "{name}"
+        );
+        assert_eq!(out[..4], value.to_le_bytes(), "{name} writes its word");
+        assert!(
+            out[4..].iter().all(|&b| b == 0xa5),
+            "{name} writes one word"
+        );
+    }
+    for user in [0xff, 0] {
+        let mut out = [0xa5_u8; 0x40];
+        assert_eq!(
+            call(
+                "sceUserServiceGetAgeLevel",
+                &[user, out.as_mut_ptr() as u64]
+            ),
+            0x8096_0009
+        );
+        assert!(out.iter().all(|&b| b == 0xa5), "nothing written");
+    }
 }

@@ -6,7 +6,7 @@ arity = 2
 purpose = "Reads a user's game presets into a record whose first quadword is its size: sceUserServiceGetGamePresets(user, presets)."
 returns = "status"
 edge_cases = [
-    "Measured (obSCEne -9a3e, sweep 20260927-223648, check 130-layout/user-game-presets): the initial user and a record of size 0x30 answer 0x0, the size kept and the other 40 bytes zeroed; a size of 0 or 0x40, or a null record, 0x80960005; user -1 or 0 0x80960105; nothing is written when refused.",
+    "MEASURED (REQ-us01, 000-boot/unity-user-service-chain, report-1791758178.txt): a record of size 0x28, as Unity passes, answers 0x0 with its bytes, already zero, unchanged; orbistoun zeroes a 0x28 record past its size field as it does a 0x30 one.", "Measured (obSCEne -9a3e, sweep 20260927-223648, check 130-layout/user-game-presets): the initial user and a record of size 0x30 answer 0x0, the size kept and the other 40 bytes zeroed; a size of 0 or 0x40, or a null record, 0x80960005; user -1 or 0 0x80960105; nothing is written when refused.",
     "The zero fields are what a console whose user set no presets reads back; orbistoun presents that user. A user other than the signed-in one answers as -1 and 0 did, and with both user and record wrong the user is checked first, which no arm settled.",
     "PPSA21564 calls it for user 1 (orbistoun's signed-in user) and user 0.",
 ]
@@ -53,40 +53,45 @@ name = "sceUserServiceGetAgeLevel"
 arity = 2
 purpose = "Reads a user's age level: (user, out)."
 edge_cases = [
-    "MEASURED (070-user/oneshot-setup-calls arm 3): for the signed-in user 0x1ea2f4d9 it answered 0x80960002 and wrote none of a 0x40-byte out buffer filled with 0xa5. What that code means is not established.",
-    "MEASURED (200-census/libSceUserService/sceUserServiceGetAgeLevel): user 0 and a buffer's address as the user answered 0x80960009 and changed nothing.",
-    "orbistoun answers 0x80960002 for its signed-in user and 0x80960009 for any other value, writing nothing. PPSA02664 and PPSA03416 call it twice during set-up as (user, out).",
+    "MEASURED (000-boot/unity-user-service-chain, a fresh process after sceUserServiceInitialize, link-bound): for the signed-in user 0x1ea2f4d9 it answered 0x0 and wrote one word, 0x15 - 21, that console account's own setting; orbistoun's users carry none, so each reports it.",
+    "MEASURED earlier (070-user/oneshot-setup-calls), in a process whose sceUserServiceInitialize was not recorded: 0x80960002 and nothing written. The fresh-process chain above, after Initialize, is what orbistoun answers, as every title calls Initialize first.",
+    "orbistoun answers 0x0 and writes 0x15 for its signed-in user; any other value answers 0x80960009 with nothing written, as the chain's user 0xff did for sceUserServiceGetAgeLevel, and a null out pointer 0x80960005.",
 ]
+found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-cn10, reports/hardware/20261009-104652-eboot.obs.log, 070-user/oneshot-setup-calls and 200-census/libSceUserService/sceUserServiceGetAgeLevel."
+cites = "obSCEne REQ-us01, reports/hardware/report-1791758178.txt lines 154-212 (000-boot/unity-user-service-chain); earlier REQ-cn10 rows, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
-found_on = "2026-10-09"
+found_on = "2026-10-12"
 
 [[function]]
 name = "sceUserServiceGetAccessibilityVibration"
 arity = 2
 purpose = "Reads a user's controller-vibration accessibility setting: (user, out)."
 edge_cases = [
-    "MEASURED (070-user/oneshot-setup-calls arm 6): for the signed-in user 0x1ea2f4d9 it answered 0x80960002 and wrote none of a 0x40-byte out buffer filled with 0xa5, the code sceUserServiceGetAgeLevel answers.",
-    "orbistoun answers 0x80960002 for its signed-in user, writing nothing; another user is unmeasured and refused with the placeholder. PPSA02664 and PPSA03416 call it during set-up.",
+    "MEASURED (000-boot/unity-user-service-chain, a fresh process after sceUserServiceInitialize, link-bound): for the signed-in user 0x1ea2f4d9 it answered 0x0 and wrote one word, 1 (vibration on).",
+    "MEASURED earlier (070-user/oneshot-setup-calls), in a process whose sceUserServiceInitialize was not recorded: 0x80960002 and nothing written. The fresh-process chain above, after Initialize, is what orbistoun answers, as every title calls Initialize first.",
+    "orbistoun answers 0x0 and writes 1 for its signed-in user; any other value answers 0x80960009 with nothing written, as the chain's user 0xff did for sceUserServiceGetAgeLevel, and a null out pointer 0x80960005.",
 ]
+found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 6."
+cites = "obSCEne REQ-us01, reports/hardware/report-1791758178.txt lines 154-212 (000-boot/unity-user-service-chain); earlier REQ-cn10 rows, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
-found_on = "2026-10-09"
+found_on = "2026-10-12"
 
 [[function]]
 name = "sceUserServiceGetAccessibilityTriggerEffect"
 arity = 2
 purpose = "Reads a user's adaptive-trigger accessibility setting: (user, out)."
 edge_cases = [
-    "MEASURED (070-user/oneshot-setup-calls arm 6): for the signed-in user 0x1ea2f4d9 it answered 0x80960002 and wrote none of a 0x40-byte out buffer filled with 0xa5.",
-    "orbistoun answers as sceUserServiceGetAccessibilityVibration does.",
+    "MEASURED (000-boot/unity-user-service-chain, a fresh process after sceUserServiceInitialize, link-bound): for the signed-in user 0x1ea2f4d9 it answered 0x0 and wrote one word, 1 (trigger effect on).",
+    "MEASURED earlier (070-user/oneshot-setup-calls), in a process whose sceUserServiceInitialize was not recorded: 0x80960002 and nothing written. The fresh-process chain above, after Initialize, is what orbistoun answers, as every title calls Initialize first.",
+    "orbistoun answers 0x0 and writes 1 for its signed-in user; any other value answers 0x80960009 with nothing written, as the chain's user 0xff did for sceUserServiceGetAgeLevel, and a null out pointer 0x80960005.",
 ]
+found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 6."
+cites = "obSCEne REQ-us01, reports/hardware/report-1791758178.txt lines 154-212 (000-boot/unity-user-service-chain); earlier REQ-cn10 rows, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
-found_on = "2026-10-09"
+found_on = "2026-10-12"
 
 [[function]]
 name = "sceUserServiceGetForegroundUser"
@@ -100,3 +105,33 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 200-census/libSceUserService/sceUserServiceGetForegroundUser."
 found_in = ["CRFT00001"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceUserServiceGetAccessibilityChatTranscription"
+arity = 2
+purpose = "Reads a user's chat-transcription accessibility setting: (user, out)."
+edge_cases = [
+    "MEASURED (000-boot/unity-user-service-chain, a fresh process after sceUserServiceInitialize, link-bound): for the signed-in user 0x1ea2f4d9 it answered 0x0 and wrote one word, 0 (off).",
+    "MEASURED earlier (070-user/oneshot-setup-calls), in a process whose sceUserServiceInitialize was not recorded: 0x80960002 and nothing written. The fresh-process chain above, after Initialize, is what orbistoun answers, as every title calls Initialize first.",
+    "orbistoun answers 0x0 and writes 0 for its signed-in user; any other value answers 0x80960009 with nothing written, as the chain's user 0xff did for sceUserServiceGetAgeLevel, and a null out pointer 0x80960005.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-us01, reports/hardware/report-1791758178.txt lines 154-212 (000-boot/unity-user-service-chain); earlier REQ-cn10 rows, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "sceUserServiceGetAccessibilityPressAndHoldDelay"
+arity = 2
+purpose = "Reads a user's press-and-hold-delay accessibility setting: (user, out)."
+edge_cases = [
+    "MEASURED (000-boot/unity-user-service-chain, a fresh process after sceUserServiceInitialize, link-bound): for the signed-in user 0x1ea2f4d9 it answered 0x0 and wrote one word, 0 (the default).",
+    "MEASURED earlier (070-user/oneshot-setup-calls), in a process whose sceUserServiceInitialize was not recorded: 0x80960002 and nothing written. The fresh-process chain above, after Initialize, is what orbistoun answers, as every title calls Initialize first.",
+    "orbistoun answers 0x0 and writes 0 for its signed-in user; any other value answers 0x80960009 with nothing written, as the chain's user 0xff did for sceUserServiceGetAgeLevel, and a null out pointer 0x80960005.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-us01, reports/hardware/report-1791758178.txt lines 154-212 (000-boot/unity-user-service-chain); earlier REQ-cn10 rows, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-12"

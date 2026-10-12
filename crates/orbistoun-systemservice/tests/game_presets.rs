@@ -49,7 +49,22 @@ fn the_signed_in_user_gets_a_zeroed_record() {
     assert!(bytes[8..].iter().all(|&b| b == 0));
 }
 
-/// A size other than 0x30, or no record, is `0x80960005` with nothing written; user -1 or 0 is
+/// A 0x28-byte record, the size Unity passes, answers 0 too and zeroes the rest of its own length -
+/// a console answered it 0 (REQ-us01, `000-boot/unity-user-service-chain`, `get-game-presets`) -
+/// leaving the bytes past it alone.
+#[test]
+fn a_record_of_the_older_size_is_answered_within_its_length() {
+    let mut bytes = record(0x28);
+    assert_eq!(presets(user(), &mut bytes), 0);
+    assert_eq!(bytes[..8], 0x28_u64.to_le_bytes());
+    assert!(
+        bytes[8..0x28].iter().all(|&b| b == 0),
+        "its own length zeroed"
+    );
+    assert!(bytes[0x28..].iter().all(|&b| b == 0xcc), "nothing past it");
+}
+
+/// A size other than 0x28 or 0x30, or no record, is `0x80960005` with nothing written; user -1 or 0 is
 /// `0x80960105` with nothing written (PPSA21564 asks for user 0 too).
 #[test]
 fn a_wrong_size_or_user_is_refused_untouched() {
