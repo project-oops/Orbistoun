@@ -10,7 +10,7 @@
 //! original is kept (see [`AffinityPolicy`], D150).
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// How the guest sees a thread.
@@ -659,7 +659,7 @@ pub fn become_thread(handle: ThreadHandle) {
     }
 }
 
-/// One thread's signal state: what has been raised on it, and whether a raise can reach it.
+/// One thread's signal state: what has been raised on it and not yet run.
 ///
 /// An `Arc` of atomics rather than a field in [`ThreadRecord`]: the pending flag is read inside
 /// a condition-variable predicate under the wait queue's lock, and `sceKernelRaiseException`
@@ -667,13 +667,9 @@ pub fn become_thread(handle: ThreadHandle) {
 /// inversion (D652).
 #[derive(Debug, Default)]
 pub struct SignalSlot {
-    /// The signal number raised and not yet run, or zero for none.
+    /// The signal number raised and not yet run, or zero for none. It runs when the thread is in
+    /// a wait that consults it: at once if it sleeps in one, or when it next enters one (D813).
     pending: AtomicU64,
-    /// Whether this thread is inside a wait that consults the pending flag.
-    ///
-    /// A thread spinning in guest code, or blocked in a wait that does not check, is not parked; a
-    /// signal raised on a parked thread runs.
-    parked: AtomicBool,
 }
 
 /// Every thread's signal slot, by handle.
@@ -695,10 +691,12 @@ fn my_slot() -> Option<Arc<SignalSlot>> {
     MY_SIGNALS.with(|s| s.borrow().clone())
 }
 
-/// Marks `signum` as raised on `handle`, answering whether the thread can be reached.
+/// Marks `signum` as raised on `handle`, answering whether the thread has a slot to hold it.
 ///
-/// `false` when the thread is not parked in a wait that consults its slot, so the caller
-/// refuses rather than answering a success the handler would never honour (D652).
+/// The signal waits on the thread until it is in a wait that consults its slot: the hardware
+/// delivers a signal whatever its target is doing, and a target running guest code that orbistoun
+/// cannot interrupt takes it when it next sleeps in one (D813). `false` only for a handle this
+/// crate never adopted.
 pub fn raise_pending(handle: ThreadHandle, signum: u64) -> bool {
     let Ok(slots) = signal_slots().lock() else {
         return false;
@@ -706,9 +704,6 @@ pub fn raise_pending(handle: ThreadHandle, signum: u64) -> bool {
     let Some(slot) = slots.get(&handle) else {
         return false;
     };
-    if !slot.parked.load(Ordering::Acquire) {
-        return false;
-    }
     slot.pending.store(signum, Ordering::Release);
     true
 }
@@ -726,13 +721,6 @@ pub fn take_pending() -> Option<u64> {
         0 => None,
         signum => Some(signum),
     }
-}
-
-/// Records that this thread is, or is no longer, inside a wait that consults its slot.
-///
-/// Returns the previous value so a nested wait restores rather than clears it.
-pub fn set_parked(parked: bool) -> bool {
-    my_slot().is_some_and(|slot| slot.parked.swap(parked, Ordering::AcqRel))
 }
 
 /// A hook run at the top of every spawned guest thread, before it enters guest code.
@@ -833,34 +821,18 @@ fn next_stack_index() -> u64 {
 #[cfg(test)]
 mod tests {
 
-    /// A thread that is not parked refuses the signal.
-    ///
-    /// An accepted raise tells the guest the handler will run, which only a thread in a wait that
-    /// consults its slot can do (D652).
+    /// A raise on a thread running guest code is accepted and waits for it, taken exactly once
+    /// when the thread next sleeps where it is consulted, and leaves nothing behind (D813). The
+    /// hardware delivers a signal whatever its target is doing; refusing one aimed at a running
+    /// thread left PPSA25872's collector waiting forever for an acknowledgement.
     #[test]
-    fn a_raise_on_a_thread_that_is_not_parked_is_refused() {
-        let handle = super::adopt("not-parked");
+    fn a_raise_on_a_running_thread_waits_and_is_taken_exactly_once() {
+        let handle = super::adopt("running");
         assert!(handle != NO_THREAD, "the thread has a handle");
 
         assert!(
-            !super::raise_pending(handle, 30),
-            "a thread that is awake cannot be reached, and says so"
-        );
-        assert!(
-            !super::signal_pending(),
-            "and nothing was left pending to surprise a later wait"
-        );
-    }
-
-    /// A raise on a parked thread is accepted, delivered once, and leaves nothing behind.
-    #[test]
-    fn a_raise_on_a_parked_thread_is_taken_exactly_once() {
-        let handle = super::adopt("parked");
-        let was = super::set_parked(true);
-
-        assert!(
             super::raise_pending(handle, 30),
-            "a parked thread is reachable"
+            "a thread running guest code is reachable"
         );
         assert!(super::signal_pending(), "and the wait predicate can see it");
         assert_eq!(
@@ -874,8 +846,6 @@ mod tests {
             "and taking it twice does not run a handler twice"
         );
         assert!(!super::signal_pending());
-
-        super::set_parked(was);
     }
 
     /// A raise naming a thread nothing issued is refused rather than remembered.

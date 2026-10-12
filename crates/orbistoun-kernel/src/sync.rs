@@ -1779,6 +1779,8 @@ mod tests {
     /// The thread a test signal is raised on, and how many handlers have run there.
     static SIGNALLED: std::sync::Mutex<Option<std::thread::ThreadId>> = std::sync::Mutex::new(None);
     static DELIVERED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    /// Held by each test that raises, so one test's count is not another's.
+    static RAISING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Raises a test signal on `on` and waits long enough for an owned wait to run it.
     fn raise_on(on: std::thread::ThreadId) {
@@ -1811,6 +1813,9 @@ mod tests {
     #[test]
     fn a_signal_runs_in_each_owned_wait_which_then_waits_on() {
         use std::sync::atomic::Ordering;
+        let _raising = RAISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = DELIVERED.load(Ordering::SeqCst);
 
         let h = super::create_semaphore(0, 1, "suspend ack");
@@ -1845,6 +1850,41 @@ mod tests {
         raise_on(waiter.thread().id());
         assert_eq!(DELIVERED.load(Ordering::SeqCst), before + 4, "lock");
         assert!(!waiter.is_finished(), "a signal is not a release");
+        assert_eq!(unlock(m, 1), Some(true));
+        assert_eq!(waiter.join().ok(), Some(Some(Acquisition::Locked)));
+    }
+
+    /// A signal raised on a thread before it sleeps runs as it enters its owned wait, and it then
+    /// waits on (D813): PPSA25872's collector raised on its main thread while main was running,
+    /// and main went on to sleep on the lock the collector holds.
+    #[test]
+    fn a_signal_raised_before_the_wait_runs_as_the_thread_enters_it() {
+        use std::sync::atomic::Ordering;
+        let _raising = RAISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let m = create(Recursion::Forbidden, "collector held");
+        assert_eq!(acquire(m, 1, Blocking::Never), Some(Acquisition::Locked));
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        let waiter = std::thread::spawn(move || {
+            let _ = gate.recv();
+            acquire(m, 2, Blocking::Forever)
+        });
+        // Raised while the thread is still running, before it reaches the lock.
+        let before = DELIVERED.load(Ordering::SeqCst);
+        raise_on(waiter.thread().id());
+        assert_eq!(DELIVERED.load(Ordering::SeqCst), before, "nothing ran yet");
+        let _ = go.send(());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            DELIVERED.load(Ordering::SeqCst),
+            before + 1,
+            "ran on entering the wait"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "and the thread still waits for the lock"
+        );
         assert_eq!(unlock(m, 1), Some(true));
         assert_eq!(waiter.join().ok(), Some(Some(Acquisition::Locked)));
     }
