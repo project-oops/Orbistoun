@@ -360,6 +360,12 @@ pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !made || context != 0 || param == 0 || port == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
+    if set == TITLE_SET
+        && eight_channels_of_type(param, &[0, 2])
+        && let Some(answer) = indexed_port(param, port)
+    {
+        return answer;
+    }
     let number = match measured_port(param, set) {
         None => return u64::from(GuestError::Unimplemented.as_raw()),
         Some(PortParams::Numbered(0)) => NEXT_PORT.fetch_add(1, Ordering::Relaxed),
@@ -378,6 +384,45 @@ pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         u64::from(GuestError::Unimplemented.as_raw())
     }
 }
+
+/// What PPSA21564's context answered for an eight-channel port by its parameters' first word
+/// (REQ-ac03, `report-1791839056.txt` 76-123): 0 and 1 make a port, its handle the word in the
+/// upper half over the process's count of ports made; 2 and 3 answer `0x8026800e`, 7 `0x80268011`
+/// and 0x100 `0x80268001`, the port written -1. [`None`] for any other word, which is unmeasured.
+fn indexed_port(param: u64, port: u64) -> Option<u64> {
+    // SAFETY: the guest's port parameter block, by the call's contract.
+    let index = unsafe { guest::read_u32(param) }?;
+    let refused = match index {
+        0 | 1 => {
+            let handle = (u64::from(index) << 16) | NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+            // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
+            if !unsafe { guest::write_u64(port, handle) } {
+                return Some(u64::from(GuestError::Unimplemented.as_raw()));
+            }
+            PORTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0
+                .insert(handle);
+            return Some(0);
+        }
+        2 | 3 => PORT_INDEX_REFUSED,
+        7 => PORT_INDEX_OUT_OF_RANGE,
+        0x100 => INVALID_ARGUMENT,
+        _ => return None,
+    };
+    // SAFETY: as above.
+    if unsafe { guest::write_u64(port, u64::MAX) } {
+        Some(refused)
+    } else {
+        Some(u64::from(GuestError::Unimplemented.as_raw()))
+    }
+}
+
+/// What a first word of 2 or 3 was answered on PPSA21564's context (REQ-ac03).
+const PORT_INDEX_REFUSED: u64 = 0x8026_800e;
+/// What a first word of 7 was answered there (REQ-ac03).
+const PORT_INDEX_OUT_OF_RANGE: u64 = 0x8026_8011;
 
 /// Whether the port parameters at `param` are eight channels at 48000 Hz of one of `types`.
 fn eight_channels_of_type(param: u64, types: &[u32]) -> bool {
