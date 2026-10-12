@@ -993,6 +993,40 @@ pub fn equeue_exists(handle: EqueueHandle) -> bool {
     equeues().lock().is_ok_and(|t| t.contains_key(&handle))
 }
 
+/// Every lock held now, with who holds it and how many times: the other half of a thread reported
+/// inside a lock call (D807).
+#[must_use]
+pub fn held_locks() -> Vec<HeldLock> {
+    let Ok(table) = table().lock() else {
+        return Vec::new();
+    };
+    table
+        .iter()
+        .filter_map(|(handle, lock)| {
+            let held = lock.state.lock().ok()?;
+            (held.depth > 0).then(|| HeldLock {
+                handle: *handle,
+                name: lock.name.clone(),
+                owner: held.owner,
+                depth: held.depth,
+            })
+        })
+        .collect()
+}
+
+/// A lock held when it was asked about, for a run report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldLock {
+    /// The handle the guest's lock word holds.
+    pub handle: MutexHandle,
+    /// What it was made as.
+    pub name: String,
+    /// The thread holding it.
+    pub owner: ThreadHandle,
+    /// How many times that thread holds it.
+    pub depth: u32,
+}
+
 /// What a queue is called and what has been registered against it, for a run report.
 #[must_use]
 pub fn equeue_summary() -> Vec<EqueueTraffic> {
@@ -1555,6 +1589,35 @@ mod tests {
             first_word, 0,
             "unknown fields must read as zero, not garbage"
         );
+    }
+
+    /// A held lock is listed with its holder and depth until it is released (D807); one nobody
+    /// holds is not.
+    #[test]
+    fn a_held_lock_is_listed_with_its_holder() {
+        let lock = create(Recursion::Allowed, "held-lock-test");
+        let listed = |lock| {
+            super::held_locks()
+                .into_iter()
+                .find(|held| held.handle == lock)
+        };
+        assert_eq!(listed(lock), None, "nobody holds it yet");
+        assert_eq!(
+            acquire(lock, 0x77, Blocking::Never),
+            Some(Acquisition::Locked)
+        );
+        assert_eq!(
+            acquire(lock, 0x77, Blocking::Never),
+            Some(Acquisition::Locked)
+        );
+        let held = listed(lock).expect("listed while held");
+        assert_eq!(
+            (held.owner, held.depth, held.name.as_str()),
+            (0x77, 2, "held-lock-test")
+        );
+        assert_eq!(unlock(lock, 0x77), Some(true));
+        assert_eq!(unlock(lock, 0x77), Some(true));
+        assert_eq!(listed(lock), None, "released");
     }
 
     #[test]

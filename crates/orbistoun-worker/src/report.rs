@@ -2430,6 +2430,7 @@ pub fn persist(trace: &CallTrace) {
         // did not do (D515).
         orbistoun_kernel::module_start_summary(),
         orbistoun_kernel::equeue_summary(),
+        orbistoun_kernel::held_lock_summary(),
     ]
     .into_iter()
     .flatten()

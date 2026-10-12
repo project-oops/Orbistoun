@@ -1992,6 +1992,39 @@ pub fn equeue_summary() -> Option<String> {
     Some(format!("{} event queue(s): {named}", queues.len()))
 }
 
+/// One line for a run report: the locks held when the run ended, each with the guest thread that
+/// holds it by name (D807). [`None`] when none is held. Read beside the threads reported inside a
+/// lock call, it names who a blocked thread waits for.
+#[must_use]
+pub fn held_lock_summary() -> Option<String> {
+    let held = sync::held_locks();
+    if held.is_empty() {
+        return None;
+    }
+    let threads = thread::all();
+    let named = held
+        .iter()
+        .map(|lock| {
+            let owner = threads
+                .iter()
+                .find(|t| t.handle == lock.owner)
+                .map_or_else(|| format!("{:#x}", lock.owner), |t| format!("{:?}", t.name));
+            format!(
+                "{:?} {:#x} by {owner}{}",
+                lock.name,
+                lock.handle,
+                if lock.depth > 1 {
+                    format!(" x{}", lock.depth)
+                } else {
+                    String::new()
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{} lock(s) held at the end: {named}", held.len()))
+}
+
 /// One line for a run report: which modules were handed a handle and never started.
 ///
 /// [`None`] when the guest asked for none. A gap report, not a diagnostic: a guest calling into
