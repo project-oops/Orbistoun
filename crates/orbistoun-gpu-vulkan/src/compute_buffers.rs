@@ -26,6 +26,17 @@ const STAGED_IN: &[vk::MemoryPropertyFlags] = &[
     ),
 ];
 
+/// The use a slot's staging buffer is made for.
+const STAGING_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
+    vk::BufferUsageFlags::TRANSFER_SRC.as_raw() | vk::BufferUsageFlags::TRANSFER_DST.as_raw(),
+);
+/// The use the buffer a slot binds is made for.
+const BOUND_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
+    vk::BufferUsageFlags::STORAGE_BUFFER.as_raw()
+        | vk::BufferUsageFlags::TRANSFER_SRC.as_raw()
+        | vk::BufferUsageFlags::TRANSFER_DST.as_raw(),
+);
+
 /// One slot: the buffer the set binds, and the host buffer its words are copied through.
 struct Slot {
     bound: (vk::Buffer, vk::DeviceMemory),
@@ -35,8 +46,83 @@ struct Slot {
     staging: DispatchBuffer,
 }
 
-/// A buffer of `size` bytes for `usage`, in the first memory of `preferred` the device offers.
+/// A buffer a finished dispatch released, kept for the next that needs one of its size, use and
+/// placement (D805): every reuse overwrites all of it - a staging buffer with the words copied in,
+/// a bound one with the copy from its staging buffer - so nothing it held is ever read.
+struct Spare {
+    size: vk::DeviceSize,
+    usage: vk::BufferUsageFlags,
+    /// Which placement list it was allocated from, by the list's address.
+    preferred: usize,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    flags: vk::MemoryPropertyFlags,
+}
+
+/// The spares, on the session's one device.
+fn spares() -> &'static std::sync::Mutex<Vec<Spare>> {
+    static SPARES: std::sync::Mutex<Vec<Spare>> = std::sync::Mutex::new(Vec::new());
+    &SPARES
+}
+
+/// The most bytes the spares hold together: two 32 MiB buffers - a display buffer's staging and
+/// bound copies - and the slots' placeholders, with room to spare.
+const SPARE_BYTES_MOST: vk::DeviceSize = 160 << 20;
+
+/// Keeps a released buffer among the spares, or destroys it when they hold enough already.
+fn release(
+    device: &ash::Device,
+    (buffer, memory): (vk::Buffer, vk::DeviceMemory),
+    (size, usage, preferred, flags): (
+        vk::DeviceSize,
+        vk::BufferUsageFlags,
+        &[vk::MemoryPropertyFlags],
+        vk::MemoryPropertyFlags,
+    ),
+) {
+    if let Ok(mut spares) = spares().lock() {
+        let held: vk::DeviceSize = spares.iter().map(|spare| spare.size).sum();
+        if held + size <= SPARE_BYTES_MOST {
+            spares.push(Spare {
+                size,
+                usage,
+                preferred: preferred.as_ptr() as usize,
+                buffer,
+                memory,
+                flags,
+            });
+            return;
+        }
+    }
+    // SAFETY: created on this device, no longer in use, and destroyed exactly once.
+    unsafe { device.destroy_buffer(buffer, None) };
+    // SAFETY: as above, and nothing is bound to the memory now.
+    unsafe { device.free_memory(memory, None) };
+}
+
+/// A buffer of `size` bytes for `usage`, in the first memory of `preferred` the device offers: a
+/// spare of exactly that where one is kept (D805), else a new one.
 fn buffer_in(
+    context: (&ash::Instance, vk::PhysicalDevice, &ash::Device),
+    size: vk::DeviceSize,
+    usage: vk::BufferUsageFlags,
+    preferred: &[vk::MemoryPropertyFlags],
+) -> Result<(vk::Buffer, vk::DeviceMemory, vk::MemoryPropertyFlags), DispatchError> {
+    if let Ok(mut spares) = spares().lock()
+        && let Some(at) = spares.iter().position(|spare| {
+            spare.size == size
+                && spare.usage == usage
+                && spare.preferred == preferred.as_ptr() as usize
+        })
+    {
+        let spare = spares.swap_remove(at);
+        return Ok((spare.buffer, spare.memory, spare.flags));
+    }
+    new_buffer_in(context, size, usage, preferred)
+}
+
+/// [`buffer_in`]'s new buffer.
+fn new_buffer_in(
     (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
     size: vk::DeviceSize,
     usage: vk::BufferUsageFlags,
@@ -123,12 +209,7 @@ impl BoundBuffers {
             let words = contents.get(slot).map_or(&[0][..], |w| w.as_slice());
             let words = if words.is_empty() { &[0][..] } else { words };
             let size = (words.len() * 4) as vk::DeviceSize;
-            let (staging, staging_memory, _) = buffer_in(
-                context,
-                size,
-                vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST,
-                STAGED_IN,
-            )?;
+            let (staging, staging_memory, _) = buffer_in(context, size, STAGING_USAGE, STAGED_IN)?;
             // SAFETY: the memory is host-visible, holds `size` bytes and is not mapped.
             let mapped =
                 unsafe { device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) }
@@ -140,14 +221,7 @@ impl BoundBuffers {
             };
             // SAFETY: mapped immediately above and not used after unmapping.
             unsafe { device.unmap_memory(staging_memory) };
-            let (bound, bound_memory, placed) = buffer_in(
-                context,
-                size,
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-                BOUND_IN,
-            )?;
+            let (bound, bound_memory, placed) = buffer_in(context, size, BOUND_USAGE, BOUND_IN)?;
             slots.push(Slot {
                 bound: (bound, bound_memory),
                 placed,
@@ -287,19 +361,30 @@ impl BoundBuffers {
             .collect()
     }
 
-    /// Releases the buffers and the set, once the dispatch that used them has finished.
+    /// Releases the set, and the buffers to the spares (D805), once the dispatch that used them
+    /// has finished.
     pub(crate) fn destroy(self, device: &ash::Device) {
         // SAFETY: created here on this device, no longer in use, and destroyed exactly once.
         unsafe { device.destroy_descriptor_pool(self.pool, None) };
         // SAFETY: as above.
         unsafe { device.destroy_descriptor_set_layout(self.layout, None) };
         for slot in self.slots {
-            for (buffer, memory) in [slot.bound, (slot.staging.buffer, slot.staging.memory)] {
-                // SAFETY: as above.
-                unsafe { device.destroy_buffer(buffer, None) };
-                // SAFETY: as above, and nothing is bound to the memory now.
-                unsafe { device.free_memory(memory, None) };
-            }
+            let size = slot.staging.size;
+            release(
+                device,
+                slot.bound,
+                (size, BOUND_USAGE, BOUND_IN, slot.placed),
+            );
+            release(
+                device,
+                (slot.staging.buffer, slot.staging.memory),
+                (
+                    size,
+                    STAGING_USAGE,
+                    STAGED_IN,
+                    vk::MemoryPropertyFlags::empty(),
+                ),
+            );
         }
     }
 }
@@ -334,6 +419,46 @@ mod tests {
 
     use super::BoundBuffers;
     use crate::compute::{Availability, Session, probe, session};
+
+    /// A finished dispatch's buffers are kept for the next of the same sizes (D805): the second
+    /// dispatch binds the very buffers the first released, and its words are its own.
+    #[test]
+    fn a_dispatch_s_buffers_are_reused_by_the_next() {
+        if let Availability::Unavailable { reason } = probe() {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+        let session = session().expect("a session");
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Session {
+            ref instance,
+            physical,
+            ref device,
+            ..
+        } = *session;
+        let context = (instance, physical, device);
+        // A size no other test uses, so the spares hold none of it before.
+        let words = 4099;
+        let first = BoundBuffers::create(context, &[vec![1; words]])
+            .expect("created")
+            .expect("one buffer");
+        let bound = first.slots[0].bound.0;
+        first.destroy(device);
+        let second = BoundBuffers::create(context, &[vec![2; words]])
+            .expect("created")
+            .expect("one buffer");
+        let reused = second.slots[0].bound.0;
+        let staged = crate::compute::read_back(device, &second.slots[0].staging);
+        second.destroy(device);
+        assert_eq!(reused, bound, "the bound buffer is the one released");
+        assert_eq!(
+            staged.expect("read").first(),
+            Some(&2),
+            "the second's own words"
+        );
+    }
 
     /// A dispatch's buffers live where the device reads them fastest. PPSA28061 runs 0x1fe000
     /// groups over one 32 MiB buffer each frame; held in host memory, every access crossed the bus
