@@ -621,9 +621,9 @@ const FLIP_COUNT_OFFSET: usize = 0;
 
 /// The offset of the last completed flip's argument in the flip-status structure (D814).
 ///
-/// Assumed: the open toolchain's declaration of `SceVideoOutFlipStatus` puts `flipArg` here, the
-/// fourth 64-bit word, and every status obSCEne has read there (`080-video/visual-flip`,
-/// `report-1791801495.txt` 4424-4433) held 0 after flips whose argument was 0.
+/// Measured: after flips with arguments `0x123456789a`, `-1` and `0x7fffffffffff` the word here
+/// read each exactly, bit 63 included (REQ-fs01, `080-video/visual-flip`, `report-1791818993.txt`
+/// 4649-4730).
 const FLIP_ARG_OFFSET: usize = 0x18;
 
 /// `sceVideoOutGetFlipStatus(handle, status)`.

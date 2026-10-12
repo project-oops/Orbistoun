@@ -7,11 +7,10 @@
 before, and the argument of the last completed flip at +0x18, as a 64-bit word. Nothing else in
 the structure is written.
 
-`known_by = assumed` for +0x18. The open toolchain's declaration of `SceVideoOutFlipStatus` puts
-`flipArg` there, the fourth 64-bit word, after the count, the process time and the timestamp.
-Every status obSCEne has read (`080-video/visual-flip`, `report-1791801495.txt` 4424-4433) held 0
-there after flips whose argument was 0, which agrees with it and does not distinguish it.
-REQ-fs01 asks for the status after flips with distinct arguments.
+Measured (REQ-fs01, `080-video/visual-flip`, `report-1791818993.txt` 4649-4730): after flips with
+arguments `0x123456789a`, `-1` and `0x7fffffffffff`, the word at +0x18 read each exactly, bit 63
+included. It was first assumed from the open toolchain's declaration of `SceVideoOutFlipStatus`,
+which puts `flipArg` there, and from earlier statuses that held 0 after flips whose argument was 0.
 
 **Why:** PPSA25872 paces its frames by that word. Its flip thread reads the status on every flip
 event, takes +0x18 as the latest completed flip's argument with bit 63 cleared, and releases as
