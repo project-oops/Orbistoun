@@ -527,11 +527,10 @@ mod tests {
     }
 
     /// PPSA21564's context block, as the console answered it (REQ-ac01, `report-1791826929.txt`
-    /// 189-212): it needs 0x78e9c bytes, and a context is not made from it - refused
-    /// `0x80268001` with the title's size of 0 and `0x80268002` with a size - nor is a port of 8
-    /// channels, of type 0 or 2, on a handle no context was made as.
+    /// 189-212): it needs 0x78e9c bytes, and a port of 8 channels, of type 0 or 2, on a handle no
+    /// context was made as is refused.
     #[test]
-    fn ppsa21564s_audio_out2_context_is_refused_as_measured() {
+    fn ppsa21564s_audio_out2_block_is_answered_as_measured() {
         let mut param = [0_u8; 0x40];
         for (i, value) in [0x14_u32, 0x200, 0, 1, 0x200, 1].into_iter().enumerate() {
             param[i * 4..i * 4 + 4].copy_from_slice(&value.to_le_bytes());
@@ -544,27 +543,6 @@ mod tests {
             0
         );
         assert_eq!(u64::from_le_bytes(size), 0x78e9c);
-        let mut context = [0xcc_u8; 8];
-        let context_at = context.as_mut_ptr() as u64;
-        let memory = vec![0_u8; 0x78e9c];
-        let memory_at = memory.as_ptr() as u64;
-        assert_eq!(
-            call(
-                "sceAudioOut2ContextCreate",
-                [at, memory_at, 0, context_at, 0, 0]
-            ),
-            0x8026_8001,
-            "the title's order, size 0"
-        );
-        assert_eq!(
-            call(
-                "sceAudioOut2ContextCreate",
-                [at, memory_at, 0x78e9c, context_at, 0, 0]
-            ),
-            0x8026_8002,
-            "with the size"
-        );
-        assert_eq!(context, [0xcc; 8], "no context written");
         for port_type in [0_u32, 2] {
             let mut block = [0_u8; 0x40];
             block[4..8].copy_from_slice(&(8_u32 << 8).to_le_bytes());

@@ -81,8 +81,8 @@ purpose = "(param, memory, size, context): creates a context in memory of the si
 returns = "status"
 edge_cases = [
     "MEASURED (REQ-ao04): with those parameters, 16-aligned memory of 0x45698 bytes, rc 0 and context 0 - the first context's handle is 0.",
-    "MEASURED (REQ-ac01, report-1791826929.txt lines 195-203): with PPSA21564's parameters and memory of the size QueryMemory answered, rc 0x80268001 with size 0 (the order the title calls it in) and 0x80268002 with the size given, in either memory order; the context slot was not written.",
-    "orbistoun answers the first context in a process so, and PPSA21564's set with the measured refusals; a second context, other parameters or too little memory are unmeasured and answer the placeholder.",
+    "MEASURED, NOT TAKEN (REQ-ac01, report-1791826929.txt lines 195-203): with PPSA21564's parameters, rc 0x80268001 with size 0 and 0x80268002 with the size QueryMemory answered, the slot not written - but in a process that had already made a context (000-boot/audioout2-fresh-process, lines 49-51), and the title passes exactly that size and runs on the console; re-asked in a fresh process (REQ-ac02).",
+    "orbistoun answers the first context in a process so; a second context, other parameters or too little memory are unmeasured and answer the placeholder.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
