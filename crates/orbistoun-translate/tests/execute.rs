@@ -5725,6 +5725,38 @@ fn an_sdwa_logarithm_and_a_truncation() {
     assert_eq!(vector(&registers, 2), (-2.0f32).to_bits(), "trunc -2.75");
 }
 
+/// PPSA03416's shaders apply modifiers through SDWA over whole registers: a fraction scaled by the
+/// output multiplier (`v_fract_f32_sdwa v4, v4 mul:4`, words 0x7e0840f9 0x00068604) and a maximum of
+/// two absolute values (`v_max_f32_sdwa v4, |v1|, |v0|`, words 0x200800f9 0x26260601). fract 2.75 is
+/// 0.75, times four 3.0; max(|-5.0|, |3.0|) is 5.0.
+#[test]
+fn an_sdwa_fraction_scales_and_an_sdwa_maximum_takes_absolute_values() {
+    if !device_or_skip("an_sdwa_fraction_scales_and_an_sdwa_maximum_takes_absolute_values") {
+        return;
+    }
+    let fract = head("v_fract_f32_e32") | (4 << 17) | SDWA_MARKER;
+    assert_eq!(fract, 0x7e08_40f9, "PPSA03416's fraction");
+    let max = head("v_max_f32_e32") | (4 << 17) | SDWA_MARKER;
+    assert_eq!(
+        max, 0x2008_00f9,
+        "PPSA03416's maximum, its second source v0"
+    );
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(4, 2.75f32.to_bits()));
+    program.extend(v_mov_literal(1, (-5.0f32).to_bits()));
+    program.extend(v_mov_literal(0, 3.0f32.to_bits()));
+    program.extend([fract & !(0xff << 17) | (2 << 17), 0x0006_8604]);
+    program.extend([max & !(0xff << 17) | (3 << 17), 0x2626_0601]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 2), 3.0f32.to_bits(), "fract 2.75 * 4");
+    assert_eq!(
+        vector(&registers, 3),
+        5.0f32.to_bits(),
+        "max(|-5.0|, |3.0|)"
+    );
+}
+
 /// `v_cndmask_b32` in its SDWA form over whole registers picks its second source where the lane's
 /// `vcc` bit is set and its first where it is clear, as the short form does: PPSA03416's fragment
 /// shaders select between an inline zero and a register so (`0x0213e4f9 0x86860680`).

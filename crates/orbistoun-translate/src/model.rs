@@ -3877,6 +3877,13 @@ fn combine<M: Model + ?Sized>(
 ) -> Result<Id, TranslateError> {
     match (name, sources) {
         ("v_cvt_pkrtz_f16_f32_e64", [low, high]) => Ok(pack_two_halves(model, *low, *high)),
+        ("v_max_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMAX, *first, *second)),
+        ("v_min_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMIN, *first, *second)),
+        // `x - floor(x)`, as the short form computes it.
+        ("v_fract_f32_e64", [value]) => {
+            let floor = model.f32_ext_unary(GLSL_FLOOR, *value);
+            Ok(model.f32_binary(op::FSUB, *value, floor))
+        }
         (
             "v_add_f32_e64" | "v_sub_f32_e64" | REVERSE_SUBTRACT | "v_mul_f32_e64",
             [first, second],
@@ -6301,6 +6308,9 @@ pub const SDWA_FLOAT: &[(&str, &str)] = &[
     ("v_sub_f32_e32", "v_sub_f32_e64"),
     ("v_subrev_f32_e32", REVERSE_SUBTRACT),
     ("v_mul_f32_e32", "v_mul_f32_e64"),
+    ("v_max_f32_e32", "v_max_f32_e64"),
+    ("v_min_f32_e32", "v_min_f32_e64"),
+    ("v_fract_f32_e32", "v_fract_f32_e64"),
 ];
 
 /// The one-source float short-form instructions translated in their SDWA form over whole registers:
@@ -6420,7 +6430,8 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
 /// An `SDWA_FLOAT` instruction in its SDWA form: over whole registers, its long form `long` under
 /// the word's source negate and absolute value (20, 21; 28, 29), clamp (13) and output multiplier
 /// (15:14). A select of part of a register, a sign extension, or a destination part, which would
-/// read or write a float's bits as an integer field, is refused.
+/// read or write a float's bits as an integer field, is refused. A one-source instruction (VOP1)
+/// has no second source, and its word's second select is not read.
 fn sdwa_float<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -6428,16 +6439,15 @@ fn sdwa_float<M: Model + ?Sized>(
     word: u32,
 ) -> Result<(), TranslateError> {
     let fields = SdwaFields::read(word);
-    let whole = fields
-        .select
+    let vsrc1 = instruction.operands.get(2);
+    let read = if vsrc1.is_some() { 2 } else { 1 };
+    let whole = fields.select[..read]
         .iter()
         .all(|&(select, extend)| select == SDWA_DWORD && !extend)
         && fields.dst_sel == SDWA_DWORD;
-    let (Some(Operand::Vector(register)), Some(Operand::Vector(vsrc1)), true) = (
-        instruction.operands.first(),
-        instruction.operands.get(2),
-        whole,
-    ) else {
+    let (Some(Operand::Vector(register)), None | Some(Operand::Vector(_)), true) =
+        (instruction.operands.first(), vsrc1, whole)
+    else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: concat!(
@@ -6446,10 +6456,14 @@ fn sdwa_float<M: Model + ?Sized>(
             ),
         });
     };
-    let sources = [
-        sdwa_operand(instruction, fields.src0, fields.src0_scalar)?,
-        sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?,
-    ];
+    let mut sources = vec![sdwa_operand(instruction, fields.src0, fields.src0_scalar)?];
+    if let Some(Operand::Vector(vsrc1)) = vsrc1 {
+        sources.push(sdwa_operand(
+            instruction,
+            u32::from(*vsrc1),
+            fields.src1_scalar,
+        )?);
+    }
     let bit = |at: u32| word >> at & 1 != 0;
     let modifiers = Modifiers {
         negate: [bit(20), bit(28), false],
