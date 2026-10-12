@@ -3619,6 +3619,9 @@ const FORMAT_BC3_UNORM: u32 = 173;
 /// `GFX10_FORMAT_BC1_SRGB` (`gfx10-rsrc.json:124`): four-by-four texels to an eight-byte block,
 /// its colours sRGB-encoded.
 const FORMAT_BC1_SRGB: u32 = 170;
+/// `GFX10_FORMAT_BC3_SRGB` (`gfx10-rsrc.json:128`): `BC3_UNORM`'s blocks, its colours
+/// sRGB-encoded.
+const FORMAT_BC3_SRGB: u32 = 174;
 /// `GFX10_FORMAT_BC6_UFLOAT` (`gfx10-rsrc.json:133`): four-by-four unsigned half-float texels to a
 /// sixteen-byte block.
 const FORMAT_BC6_UFLOAT: u32 = 179;
@@ -3660,6 +3663,12 @@ fn block_format(format: u32) -> Option<BlockFormat> {
             bytes: 8,
             encoding: crate::backend::TextureEncoding::Bc1Srgb,
             tag: 1 << 22 | 1 << 21,
+            opaque: false,
+        }),
+        FORMAT_BC3_SRGB => Some(BlockFormat {
+            bytes: 16,
+            encoding: crate::backend::TextureEncoding::Bc3Srgb,
+            tag: 1 << 22 | 1 << 23,
             opaque: false,
         }),
         FORMAT_BC6_UFLOAT => Some(BlockFormat {
@@ -4067,6 +4076,7 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
         crate::backend::TextureEncoding::Rgba8
         | crate::backend::TextureEncoding::Bc3
         | crate::backend::TextureEncoding::Bc1Srgb
+        | crate::backend::TextureEncoding::Bc3Srgb
         | crate::backend::TextureEncoding::Bc6hUfloat => 0,
     }
 }
@@ -5529,7 +5539,8 @@ mod tests {
             0,
             0,
         ];
-        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let memory = Memory(bytes);
+        let bound = texture_from_words(words, 0, &memory, &mut super::TexelCache::new());
         let Some(RenderCommand::BindTexture {
             texels,
             width: 8,
@@ -5544,6 +5555,20 @@ mod tests {
         let tags: Vec<u32> = texels.chunks(4).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
         assert_eq!(texels[1], 1, "a block's words in order");
+        // `BC3_SRGB` (174): the same blocks, sampled with their colours decoded from sRGB.
+        let mut srgb = words;
+        srgb[1] = (174 << 20) | (((width - 1) & 3) << 30);
+        let bound = texture_from_words(srgb, 0, &memory, &mut super::TexelCache::new());
+        assert!(
+            matches!(
+                bound,
+                Some(RenderCommand::BindTexture {
+                    encoding: crate::backend::TextureEncoding::Bc3Srgb,
+                    ..
+                })
+            ),
+            "bound as BC3_SRGB blocks: {bound:?}"
+        );
     }
 
     /// A `BC1_SRGB` texture in `4KB_S` is bound as its eight-byte blocks, detiled row-major, for the

@@ -1479,6 +1479,7 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
         orbistoun_gpu::TextureEncoding::Bc6hUfloat => {
             (vk::Format::BC6H_UFLOAT_BLOCK, as_they_are())
         }
+        orbistoun_gpu::TextureEncoding::Bc3Srgb => (vk::Format::BC3_SRGB_BLOCK, as_they_are()),
         // Hardware BC1 decodes the one-bit alpha a three-colour block selects, as `RGBA` does.
         orbistoun_gpu::TextureEncoding::Bc1Srgb => (vk::Format::BC1_RGBA_SRGB_BLOCK, as_they_are()),
     }
