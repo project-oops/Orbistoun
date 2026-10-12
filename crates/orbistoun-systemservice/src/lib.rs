@@ -11,6 +11,7 @@ use orbistoun_hle::guest_module;
 
 pub mod app_content;
 pub mod common_dialog;
+pub mod content_export;
 pub mod coredump;
 pub mod error_dialog;
 pub mod json2;
