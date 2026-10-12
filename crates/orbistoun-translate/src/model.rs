@@ -5008,7 +5008,8 @@ const SOFFSET_NULL: u32 = 125;
 /// models reads zero, as D147 has the vector accesses do.
 ///
 /// The destination may be a lane mask, as the AGC formatted copy loads its count into `vcc_lo`
-/// (PPSA03416): one word writes the mask's low half, two its whole.
+/// (PPSA03416): one word writes the mask's low half, two its whole. One word into a mask's high
+/// half, `vcc_hi` or `exec_hi`, writes that half (PPSA02664).
 ///
 /// Refused by name: an offset register (`SOFFSET` other than `null`), which the solved layout has
 /// no operand for, and offset bits above the sixteen the probes solved.
@@ -5020,6 +5021,10 @@ fn scalar_buffer_load<M: Model + ?Sized>(
     let words = access_words(name);
     let (destination, base, offset) = three_operands(instruction)?;
     let mask = mask_destination(destination).filter(|_| words <= 2);
+    let high_mask = match destination {
+        Operand::Named(named) if words == 1 => lane_mask_high_name(named),
+        _ => None,
+    };
     let (register, Operand::Scalar(base_register), Operand::Immediate(bytes)) =
         (destination, base, offset)
     else {
@@ -5031,6 +5036,7 @@ fn scalar_buffer_load<M: Model + ?Sized>(
     let register = match (register, mask) {
         (Operand::Scalar(register), _) => *register,
         (_, Some(_)) => 0,
+        _ if high_mask.is_some() => 0,
         _ => {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
@@ -5088,6 +5094,7 @@ fn scalar_buffer_load<M: Model + ?Sized>(
         values.push(model.select(outside, zero, loaded));
     }
     match (mask, values.as_slice()) {
+        (None, [high]) if let Some(mask) = high_mask => write_mask_high(model, mask, *high)?,
         (Some(mask), [low]) => write_mask_low(model, mask, *low)?,
         (Some(mask), [low, high]) => model.write_lane_mask(mask, *low, *high)?,
         _ => {
@@ -6284,8 +6291,9 @@ pub const SDWA_COMPARE: &[&str] = &[
 /// sources from the modifier word - the first's code in 7:0, scalar where bit 23 says, the second
 /// the instruction's own, scalar where bit 31 says - each negated (20, 28) and made absolute (21,
 /// 29) as the word says; the answer into `vcc`, or, where bit 15 is set, into the scalar register
-/// pair bits 14:8 name. Over whole registers only: a select of part of one, or the clamp (13), is
-/// refused.
+/// pair bits 14:8 name, bit 13 among them. Only a compare into `vcc` has a clamp bit, 13
+/// (`aco_assembler.cpp:1193-1199`). Over whole registers only: a select of part of one, or that
+/// clamp, is refused.
 fn sdwa_compare<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -6301,7 +6309,7 @@ fn sdwa_compare<M: Model + ?Sized>(
         .select
         .iter()
         .all(|&select| select == (SDWA_DWORD, false));
-    if !whole || word >> 13 & 1 != 0 {
+    if !whole || word >> 15 & 1 == 0 && word >> 13 & 1 != 0 {
         return Err(refuse(
             "an SDWA compare selects part of a register or clamps, which is not translated",
         ));

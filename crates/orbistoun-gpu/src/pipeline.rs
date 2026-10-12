@@ -883,6 +883,9 @@ pub struct Pipeline {
     /// The translated primitive shaders that read their vertex ids from the draw's index buffer
     /// (D740), which a draw binds after their traced buffers.
     index_readers: std::collections::BTreeSet<ResourceId>,
+    /// The assembly each primitive shader translated for a draw's geometry takes its primitives
+    /// by, from which a draw's system registers are seeded on the host (D800).
+    assemblies: BTreeMap<ResourceId, Assembly>,
     /// The colour channels each translated pixel shader exports, by its resource.
     colour_channels: BTreeMap<ResourceId, u8>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
@@ -955,6 +958,7 @@ impl Pipeline {
             texture_sources: BTreeMap::new(),
             memory_readers: BTreeMap::new(),
             index_readers: std::collections::BTreeSet::new(),
+            assemblies: BTreeMap::new(),
             colour_channels: BTreeMap::new(),
             texels: TexelCache::new(),
             buffer_sources: BTreeMap::new(),
@@ -1087,7 +1091,7 @@ impl Pipeline {
         }
         let mut ranges = Vec::with_capacity(traced.sources.len());
         for source in &traced.sources {
-            let range = crate::draw_buffers::resolve_range(source, (&words, 0), memory)?;
+            let range = crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)?;
             if ranges.iter().any(|&held| overlaps(held, range)) {
                 return Err(concat!(
                     "two buffers the dispatch binds overlap, and two copies of one byte would ",
@@ -1104,7 +1108,7 @@ impl Pipeline {
                     for (slot, source) in traced.sources.iter().enumerate() {
                         formats.set(
                             slot,
-                            crate::draw_buffers::resolve_fourth_word(source, &words, memory),
+                            crate::draw_buffers::resolve_fourth_word(source, (&words, &[]), memory),
                         );
                     }
                     formats
@@ -2406,7 +2410,11 @@ impl Pipeline {
         );
         crate::draw_buffers::bind_draw_buffers(
             &mut submission.commands,
-            (&self.buffer_sources, &self.index_readers, &mut self.buffers),
+            (
+                &self.buffer_sources,
+                (&self.index_readers, &self.assemblies),
+                &mut self.buffers,
+            ),
             memory,
             &mut submission.report.unbound_buffers,
         );
@@ -2598,7 +2606,16 @@ impl Pipeline {
         }
         let needs = by_geometry.needs.get(&key).cloned().unwrap_or_default();
         let buffer_formats = (candidate.stage == ShaderStage::Vertex)
-            .then(|| self.draw_buffer_formats(candidate.address, words, memory))
+            .then(|| {
+                let system = geometry.as_ref().map_or(Vec::new(), |inputs| {
+                    orbistoun_translate::wavefront::geometry_system_scalars(
+                        inputs.vertices,
+                        inputs.primitives,
+                    )
+                    .to_vec()
+                });
+                self.draw_buffer_formats(candidate.address, (words, &system), memory)
+            })
             .flatten();
         self.prepare_with_geometry(
             candidate,
@@ -2616,7 +2633,7 @@ impl Pipeline {
     fn draw_buffer_formats(
         &mut self,
         address: u64,
-        words: &[u32; USER_DATA_WORDS],
+        (words, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
         memory: &impl GuestMemory,
     ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
         let traced = self.format_words(address)?;
@@ -2624,7 +2641,7 @@ impl Pipeline {
         for (slot, source) in traced.iter().enumerate() {
             formats.set(
                 slot,
-                crate::draw_buffers::resolve_fourth_word(source, words, memory),
+                crate::draw_buffers::resolve_fourth_word(source, (words, system), memory),
             );
         }
         Some(formats)
@@ -2786,6 +2803,7 @@ impl Pipeline {
                 submission.report.addresses_resolved += 1;
                 submission.report.shaders_translated += 1;
                 let indexed = for_draw.geometry.is_some_and(|g| g.indices.is_some());
+                let assembly = for_draw.geometry.map(|g| g.assembly);
                 Ok(match prepared {
                     // Only a module the backend has not seen travels with the submission.
                     Prepared::Fresh {
@@ -2798,12 +2816,18 @@ impl Pipeline {
                         if indexed {
                             self.index_readers.insert(resource);
                         }
+                        if let Some(assembly) = assembly {
+                            self.assemblies.insert(resource, assembly);
+                        }
                         resource
                     }
                     Prepared::Cached { resource } => {
                         submission.report.cache_hits += 1;
                         if indexed {
                             self.index_readers.insert(resource);
+                        }
+                        if let Some(assembly) = assembly {
+                            self.assemblies.insert(resource, assembly);
                         }
                         resource
                     }
@@ -5869,11 +5893,11 @@ mod tests {
         words[19] = 0x2222_2222;
         let address = 0x40_0000;
         pipeline.decoded.insert(address, program(20));
-        let first = pipeline.draw_buffer_formats(address, &words, &Nothing);
+        let first = pipeline.draw_buffer_formats(address, (&words, &[]), &Nothing);
         assert_eq!(first.map(|f| f.get(0)), Some(Some(0x1111_1111)));
         assert_eq!(
             pipeline
-                .draw_buffer_formats(address, &words, &Nothing)
+                .draw_buffer_formats(address, (&words, &[]), &Nothing)
                 .map(|f| f.get(0)),
             Some(Some(0x1111_1111)),
             "served again"
@@ -5881,7 +5905,7 @@ mod tests {
         pipeline.decoded.insert(address, program(24));
         assert_eq!(
             pipeline
-                .draw_buffer_formats(address, &words, &Nothing)
+                .draw_buffer_formats(address, (&words, &[]), &Nothing)
                 .map(|f| f.get(0)),
             Some(Some(0x2222_2222)),
             "the rewritten program's descriptor"

@@ -633,6 +633,24 @@ fn forget(held: &mut Held, first: u16, count: u32) {
     }
 }
 
+/// How many scalar registers an instruction's scalar destination spans: two for a lane mask a
+/// compare writes, and for a 64-bit destination - the first type in the name is the destination's
+/// (`s_bfe_u64` and `s_cselect_b64` write a pair, `s_bcnt1_i32_b64` one); one otherwise.
+fn destination_words(name: &str) -> u32 {
+    if name.starts_with("v_cmp") {
+        return 2;
+    }
+    let first_type = name.split('_').find(|part| {
+        matches!(part.as_bytes(), [b'b' | b'u' | b'i' | b'f', rest @ ..]
+            if !rest.is_empty() && rest.iter().all(u8::is_ascii_digit))
+    });
+    if first_type.is_some_and(|kind| kind.ends_with("64")) {
+        2
+    } else {
+        1
+    }
+}
+
 /// Carries `held` over one instruction.
 ///
 /// A move from a constant or a traced register, and a scalar load from a traced base, are followed.
@@ -732,7 +750,13 @@ fn step(held: &mut Held, instruction: &Instruction, named: Option<(&str, &str)>)
             };
             for (position, writes) in [first, second].into_iter().enumerate() {
                 if let (true, Some(Operand::Scalar(register))) = (writes, operands.get(position)) {
-                    forget(held, *register, 2);
+                    // A carry out, the second, is a lane mask.
+                    let words = if position == 0 {
+                        destination_words(name)
+                    } else {
+                        2
+                    };
+                    forget(held, *register, words);
                 }
             }
         }
@@ -1045,6 +1069,27 @@ mod tests {
             END,
         ];
         assert!(traced(&program, 4).sources.is_empty());
+    }
+
+    /// A 32-bit scalar write forgets its own register and not the next: `s_add_i32 s3, s3, s3`
+    /// leaves the descriptor in `s[4:7]` the user data's, as PPSA02664's vertex shader writes `s7`
+    /// by `s_bfe_u32` below a descriptor in `s[8:11]`. A 64-bit one forgets the pair.
+    #[test]
+    fn a_scalar_write_forgets_only_its_width() {
+        let load = [0xf420_0002, 0xfa00_0000]; // s_buffer_load_dword s0, s[4:7], 0x0
+        let program = [0x8103_0303, load[0], load[1], END]; // s_add_i32 s3, s3, s3
+        let sources = traced(&program, 8).sources;
+        assert!(
+            matches!(
+                sources.as_slice(),
+                [BufferSource::Descriptor { words, .. }]
+                    if *words == [4, 5, 6, 7].map(DescriptorWord::UserData)
+            ),
+            "{sources:?}"
+        );
+        // s_lshl_b64 s[3:4], s[3:4], 1 writes s4 too.
+        let program = [0x8f83_8103, load[0], load[1], END];
+        assert!(traced(&program, 8).sources.is_empty());
     }
 
     /// A program that writes memory is traced not at all: a buffer bound for the draw is its

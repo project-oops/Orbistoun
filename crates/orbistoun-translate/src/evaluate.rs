@@ -50,22 +50,32 @@ const LOGICAL_NOT_EQUAL: u16 = 165;
 pub type Scalars = [Option<u32>; SCALAR_CODES];
 
 /// Runs `decode`'s instructions up to byte `until` over a stage whose user-data words land from
-/// scalar register `first_register`, reading guest memory word by word through `read`. A branch
-/// whose condition the host knows - `s_branch`, and `s_cbranch_scc0`/`scc1` on a known condition
-/// code - is followed, as [`lane_addresses`] follows one (D758).
+/// scalar register `first_register`, with the system registers `system` seeds as the module seeds
+/// them, reading guest memory word by word through `read`. A branch whose condition the host
+/// knows is followed, as [`lane_addresses`] follows one (D758): `s_branch`, `s_cbranch_scc0` and
+/// `scc1` on a known condition code, and `s_cbranch_vccz` and `vccnz` on a known condition mask.
+///
+/// `None` where a branch the host follows jumps past the access: the wave does not reach it, and
+/// what it would read through is never read (D800).
 ///
 /// # Errors
 ///
 /// A reason, where the prefix branches on what the host cannot know, jumps to a computed address,
-/// branches past the access, or runs longer than its program allows.
+/// or runs longer than its program allows.
 pub fn scalar_prefix(
     decode: &Decode,
     encodings: &EncodingTable,
     until: u32,
     (first_register, user_data): (u32, &[u32]),
+    system: &[(u32, u32)],
     read: &mut dyn FnMut(u64) -> Option<u32>,
-) -> Result<Scalars, &'static str> {
+) -> Result<Option<Scalars>, &'static str> {
     let mut model = Concrete::new(encodings, decode.instructions.len());
+    for &(register, word) in system {
+        if register < model::SCALAR_REGISTERS {
+            model.scalars[register as usize] = Some(word);
+        }
+    }
     for (register, word) in (first_register as usize..).zip(user_data) {
         if register < model::SCALAR_REGISTERS as usize {
             model.scalars[register] = Some(*word);
@@ -79,7 +89,7 @@ pub fn scalar_prefix(
             break;
         }
         if instruction.offset > until {
-            return Err("the program branches past the access (D753)");
+            return Ok(None);
         }
         steps += 1;
         if steps > 4 * decode.instructions.len() {
@@ -109,11 +119,18 @@ pub fn scalar_prefix(
                         return Err("a branch with no target (D753)");
                     };
                     let target = i64::from(instruction.offset) + 4 + 4 * jump;
+                    // The prefix ends at the access: a jump beyond it skips it (D800).
+                    if target > i64::from(until) {
+                        return Ok(None);
+                    }
                     at = decode
                         .instructions
                         .iter()
                         .position(|i| i64::from(i.offset) == target)
-                        .ok_or("a branch into the middle of an instruction (D753)")?;
+                        .unwrap_or(decode.instructions.len());
+                    if at == decode.instructions.len() && target != i64::from(until) {
+                        return Err("a branch into the middle of an instruction (D753)");
+                    }
                 }
             }
             "SOPP" => {}
@@ -135,7 +152,7 @@ pub fn scalar_prefix(
             _ => model.forget_vector_writes(instruction, name),
         }
     }
-    Ok(model.scalars)
+    Ok(Some(model.scalars))
 }
 
 /// Whether the condition mask is non-zero, where the scalar registers say: a known non-zero low half
@@ -786,9 +803,9 @@ impl<'a> Concrete<'a> {
             ..,
         ] = instruction.operands.as_slice()
         else {
-            if let Some(Operand::Scalar(destination)) = instruction.operands.first() {
-                self.forget(usize::from(*destination), 16);
-            }
+            // Whatever the destination is named - a register or a lane mask's half - its code is
+            // the word's `SDATA`, bits 12:6.
+            self.forget((instruction.word >> 6 & 0x7f) as usize, 16);
             return;
         };
         let destination = usize::from(*destination);
@@ -953,8 +970,12 @@ impl<'a> Concrete<'a> {
             let Some(word) = instruction.second_word else {
                 return false;
             };
-            // Whole registers only, and no clamp: anything else is not a plain compare.
-            if word >> 16 & 0xf != 6 || word >> 24 & 0xf != 6 || word >> 13 & 1 != 0 {
+            // Whole registers only, and no clamp - bit 13 of a compare into `vcc`, of the
+            // destination otherwise: anything else is not a plain compare.
+            if word >> 16 & 0xf != 6
+                || word >> 24 & 0xf != 6
+                || word >> 15 & 1 == 0 && word >> 13 & 1 != 0
+            {
                 return false;
             }
             if word >> 20 & 0x3 != 0
@@ -1248,9 +1269,59 @@ impl Model for Concrete<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{VCC, lane_addresses, scalar_prefix};
+    use super::{Scalars, VCC, lane_addresses, scalar_prefix};
+    use orbistoun_shader::Decode;
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
     use std::collections::BTreeMap;
+
+    /// A prefix the access is reached at, from no system registers.
+    fn reached(
+        decode: &Decode,
+        encodings: &EncodingTable,
+        until: u32,
+        user_data: (u32, &[u32]),
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) -> Result<Scalars, &'static str> {
+        scalar_prefix(decode, encodings, until, user_data, &[], read)
+            .map(|scalars| scalars.expect("the access is reached"))
+    }
+
+    /// A wave whose execution mask the module seeds from merged_wave_info skips an access it
+    /// branches past while any lane runs (D800): `s_mov_b32 exec_lo, s3; s_mov_b32 exec_hi, 0`,
+    /// then the condition mask copied from it and `s_cbranch_vccnz 1` over the access. A draw of
+    /// three vertices seeds a non-zero `s3`, and the access is passed; with no seed the mask is
+    /// unknown and the branch is refused.
+    #[test]
+    fn an_access_a_seeded_wave_branches_past_is_not_reached() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = [
+            0xbefe_0303_u32,
+            0xbeff_0380,
+            0xbeea_037e,
+            0xbeeb_037f,
+            0xbf87_0001,
+            0xbe84_0385,
+            0xbe85_0387,
+            0xbf81_0000,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[5].offset;
+        let seeds = crate::wavefront::geometry_system_scalars(3, 1);
+        let passed = scalar_prefix(&decode, &encodings, access, (8, &[]), &seeds, &mut |_| None);
+        assert_eq!(
+            passed,
+            Ok(None),
+            "a wave with lanes branches past the access"
+        );
+        assert!(
+            scalar_prefix(&decode, &encodings, access, (8, &[]), &[], &mut |_| None).is_err(),
+            "an unseeded mask leaves the branch unknown"
+        );
+    }
 
     /// A fetch shader's prefix, as PPSA28061's vertex shader forms its vertex descriptor: a word
     /// from the table at `s[10:11]` picks the descriptor's place in the table at `s[8:9]`, and the
@@ -1298,7 +1369,7 @@ mod tests {
             index_table as u32,
             (index_table >> 32) as u32,
         ];
-        let scalars = scalar_prefix(
+        let scalars = reached(
             &decode,
             &encodings,
             access,
@@ -1428,13 +1499,13 @@ mod tests {
         let decode = decode_program(&program(0xbf85_0001), &encodings, &operands);
         let end = decode.instructions.last().expect("s_endpgm").offset;
         for (first, s4) in [(0, None), (1, Some(5))] {
-            let scalars = scalar_prefix(&decode, &encodings, end, (8, &[first]), &mut |_| None)
+            let scalars = reached(&decode, &encodings, end, (8, &[first]), &mut |_| None)
                 .expect("a branch the host can decide");
             assert_eq!(scalars[4], s4, "first user-data word {first}");
             assert_eq!(scalars[5], Some(7));
         }
         let unknown = decode_program(&program(0xbf86_0001), &encodings, &operands);
-        assert!(scalar_prefix(&unknown, &encodings, end, (8, &[0]), &mut |_| None).is_err());
+        assert!(reached(&unknown, &encodings, end, (8, &[0]), &mut |_| None).is_err());
         // `s_mov_b32 vcc_lo, 1; s_mov_b32 vcc_hi, 0; s_cbranch_vccnz 1` over the same moves: the
         // mask the program set is known, so the branch is taken and s4 never written.
         let bytes: Vec<u8> = [
@@ -1450,7 +1521,7 @@ mod tests {
         .collect();
         let known = decode_program(&bytes, &encodings, &operands);
         let end = known.instructions.last().expect("s_endpgm").offset;
-        let scalars = scalar_prefix(&known, &encodings, end, (8, &[]), &mut |_| None)
+        let scalars = reached(&known, &encodings, end, (8, &[]), &mut |_| None)
             .expect("a branch on a known mask");
         assert_eq!((scalars[4], scalars[5]), (None, Some(7)));
     }
@@ -1472,7 +1543,7 @@ mod tests {
         let decode = decode_program(&bytes, &encodings, &operands);
         let end = decode.instructions.last().expect("s_endpgm").offset;
         for (first, s4) in [(0_u32, Some(0)), (1.0f32.to_bits(), Some(3))] {
-            let scalars = scalar_prefix(&decode, &encodings, end, (8, &[first]), &mut |_| None)
+            let scalars = reached(&decode, &encodings, end, (8, &[first]), &mut |_| None)
                 .expect("a straight-line prefix");
             assert_eq!(scalars[4], s4, "first user-data word {first:#x}");
         }
@@ -1499,7 +1570,7 @@ mod tests {
         let decode = decode_program(&bytes, &encodings, &operands);
         let end = decode.instructions.last().expect("s_endpgm").offset;
         let memory = BTreeMap::from([(0x1004_u64, 0xabcd), (0x1010, 0x1234)]);
-        let scalars = scalar_prefix(
+        let scalars = reached(
             &decode,
             &encodings,
             end,
@@ -1523,7 +1594,7 @@ mod tests {
             .flat_map(|w| w.to_le_bytes())
             .collect();
         let decode = decode_program(&bytes, &encodings, &operands);
-        let scalars = scalar_prefix(&decode, &encodings, 4, (8, &[]), &mut |_| Some(0))
+        let scalars = reached(&decode, &encodings, 4, (8, &[]), &mut |_| Some(0))
             .expect("a straight-line prefix");
         assert_eq!(scalars[4], None);
     }

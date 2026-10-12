@@ -730,6 +730,32 @@ impl Assembly {
             Self::Quads { .. } => primitives.div_ceil(2) * 4,
         }
     }
+
+    /// How many primitives a draw of `vertices` vertices makes: whole triangles of a list, whole
+    /// lines, and whole quads two triangles each. The host's count of what the module counts at
+    /// run time from the draw's vertex count (D745).
+    #[must_use]
+    pub const fn primitives_from(self, vertices: u32) -> u32 {
+        match self {
+            Self::List => vertices / 3,
+            Self::LineList => vertices / 2,
+            Self::Strip { .. } => vertices.saturating_sub(2),
+            Self::LineStrip => vertices.saturating_sub(1),
+            Self::Quads { .. } => vertices / 4 * 2,
+        }
+    }
+}
+
+/// The system scalar registers a primitive shader's module seeds for a draw of `vertices` vertices
+/// and `primitives` primitives, by register: gs_tg_info in `s2` and merged_wave_info in `s3`, laid
+/// out as [`GeometryInputs`] says. A host replay of the program's prefix starts from them as the
+/// module does (D800).
+#[must_use]
+pub const fn geometry_system_scalars(vertices: u32, primitives: u32) -> [(u32, u32); 2] {
+    [
+        (2, vertices << 12 | primitives << 22),
+        (3, vertices | primitives << 8 | 1 << 28),
+    ]
 }
 
 impl GeometryInputs {

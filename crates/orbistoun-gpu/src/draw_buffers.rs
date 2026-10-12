@@ -220,17 +220,18 @@ pub(crate) fn resolve_word(
 }
 
 /// What a computed access reads through, and its scalar offset, for a draw with these user-data
-/// words (D753): the program before the access, run over them and guest memory. A descriptor's four
-/// words, or a scalar load's base pair in the first two.
+/// words (D753): the program before the access, run over them, the system registers `system` seeds
+/// and guest memory. A descriptor's four words, or a scalar load's base pair in the first two;
+/// `None` where the program branches past the access, which then reads through nothing (D800).
 ///
 /// # Errors
 ///
 /// A refusal naming why the prefix leaves what it reads through or the offset unknown.
 pub(crate) fn evaluate_computed(
     computed: &Computed,
-    user_data: &[u32; USER_DATA_WORDS],
+    (user_data, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
     memory: &impl GuestMemory,
-) -> Result<([u32; 4], u32), &'static str> {
+) -> Result<Option<([u32; 4], u32)>, &'static str> {
     const UNKNOWN: &str = concat!(
         "a buffer descriptor the program computes from something the host cannot know for the ",
         "draw - a vector result, the execution mask, or an operation not evaluated (D753)"
@@ -244,11 +245,15 @@ pub(crate) fn evaluate_computed(
         encodings,
         computed.at,
         (computed.first_register, &user_data[..count]),
+        system,
         &mut |address| {
             let bytes = memory.read(address, 4)?;
             Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         },
     )?;
+    let Some(scalars) = scalars else {
+        return Ok(None);
+    };
     let (first, count) = match computed.through {
         ComputedAccess::Descriptor { first, .. } => (usize::from(first), 4),
         ComputedAccess::Pointer { base, .. } => (usize::from(base), 2),
@@ -273,7 +278,7 @@ pub(crate) fn evaluate_computed(
             .flatten()
             .ok_or(UNKNOWN)?,
     };
-    Ok((words, soffset))
+    Ok(Some((words, soffset)))
 }
 
 /// The shader tables, and a prefix of a program decoded with them.
@@ -428,10 +433,11 @@ fn run_global_loads(
 }
 
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and
-/// selects (D738) - where the source has one and it can be found.
+/// selects (D738) - where the source has one and it can be found. A computed descriptor the program
+/// branches past, from the system registers `system` seeds, is null: zero (D800).
 pub(crate) fn resolve_fourth_word(
     source: &BufferSource,
-    user_data: &[u32; USER_DATA_WORDS],
+    (user_data, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
     memory: &impl GuestMemory,
 ) -> Option<u32> {
     match source {
@@ -439,9 +445,9 @@ pub(crate) fn resolve_fourth_word(
         BufferSource::Computed(computed)
             if matches!(computed.through, ComputedAccess::Descriptor { .. }) =>
         {
-            evaluate_computed(computed, user_data, memory)
+            evaluate_computed(computed, (user_data, system), memory)
                 .ok()
-                .map(|(words, _)| words[3])
+                .map(|found| found.map_or(0, |(words, _)| words[3]))
         }
         // A scalar load's base names no format, and a global load has no descriptor.
         BufferSource::Computed(_) | BufferSource::Pointer { .. } | BufferSource::Global(_) => None,
@@ -460,15 +466,16 @@ fn table_address(table: TableBase, user_data: &[u32; USER_DATA_WORDS]) -> u64 {
     u64::from(half(table.low)) | u64::from(half(table.high)) << 32
 }
 
-/// The guest range a source names for a draw of `vertices` vertices with these user-data words: its
-/// address and length.
+/// The guest range a source names for a draw of `vertices` vertices with these user-data words and
+/// system registers: its address and length. A computed access the program branches past binds
+/// nothing (D800).
 ///
 /// # Errors
 ///
 /// A refusal naming why the range cannot be bound exactly.
 pub(crate) fn resolve_range(
     source: &BufferSource,
-    (user_data, vertices): (&[u32; USER_DATA_WORDS], u32),
+    (user_data, vertices, system): (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), &'static str> {
     let (address, length) = match source {
@@ -479,7 +486,10 @@ pub(crate) fn resolve_range(
         // From the descriptor's base, through the scalar offset the shader adds to every address
         // and the extent the descriptor admits past it.
         BufferSource::Computed(computed) => {
-            let (values, soffset) = evaluate_computed(computed, user_data, memory)?;
+            let Some((values, soffset)) = evaluate_computed(computed, (user_data, system), memory)?
+            else {
+                return Ok((0, 0));
+            };
             match computed.through {
                 ComputedAccess::Descriptor { reads, .. } => (
                     crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base),
@@ -536,15 +546,39 @@ fn counting_indices(indices: Option<Result<(IndexBuffer, u32), &'static str>>) -
     }
 }
 
+/// The translated primitive shaders that read their vertex ids from the draw's index buffer (D740),
+/// and the assembly each one translated for a draw's geometry takes its primitives by (D800).
+pub type PrimitiveShaders<'a> = (
+    &'a std::collections::BTreeSet<ResourceId>,
+    &'a BTreeMap<ResourceId, orbistoun_translate::wavefront::Assembly>,
+);
+
+/// The system registers a module translated for `assembly` seeds for a draw of `vertices`
+/// vertices, for the host replay of its program (D800); none for a module with no geometry.
+fn system_scalars(
+    assembly: Option<&orbistoun_translate::wavefront::Assembly>,
+    vertices: u32,
+) -> Vec<(u32, u32)> {
+    assembly.map_or_else(Vec::new, |assembly| {
+        orbistoun_translate::wavefront::geometry_system_scalars(
+            vertices,
+            assembly.primitives_from(vertices),
+        )
+        .to_vec()
+    })
+}
+
 /// Inserts a [`RenderCommand::BindDrawBuffers`] before each draw whose shaders read through
 /// buffers, for each stage whose buffers differ from the ones last bound, so every draw reads the
 /// ranges its own user data names. A draw whose buffers cannot all be bound is counted in
-/// `refused`, with the first reason, and binds none for that stage.
+/// `refused`, with the first reason, and binds none for that stage. A primitive shader's program
+/// is replayed from the system registers its module seeds for the draw, by the assembly in
+/// `assemblies` it was translated for (D800).
 pub fn bind_draw_buffers(
     commands: &mut Vec<RenderCommand>,
-    (sources, index_readers, cache): (
+    (sources, (index_readers, assemblies), cache): (
         &BTreeMap<ResourceId, Vec<BufferSource>>,
-        &std::collections::BTreeSet<ResourceId>,
+        PrimitiveShaders<'_>,
         &mut BufferCache,
     ),
     memory: &impl GuestMemory,
@@ -602,10 +636,11 @@ pub fn bind_draw_buffers(
                     if list.is_empty() && indices.is_none() {
                         continue;
                     }
+                    let system = system_scalars(module.and_then(|m| assemblies.get(&m)), vertices);
                     let ranges = list
                         .iter()
                         .map(|source| {
-                            resolve_range(source, (&words[at], vertices), memory).map(Some)
+                            resolve_range(source, (&words[at], vertices, &system), memory).map(Some)
                         })
                         .chain(indices.map(|found| {
                             found.map(|(buffer, count)| match buffer {
@@ -824,6 +859,39 @@ mod tests {
         }
     }
 
+    /// A computed descriptor the program branches past (D800) is null: its range binds nothing and
+    /// its fourth word is zero, which a format load reads as zeros. `s_mov_b32 exec_lo, s3;
+    /// s_mov_b32 exec_hi, 0; s_mov_b64 vcc, exec; s_cbranch_vccnz 1` jumps over the access at 16
+    /// whenever the draw's merged_wave_info is seeded, as a draw's is.
+    #[test]
+    fn a_computed_descriptor_no_lane_reaches_is_null() {
+        use orbistoun_translate::draw_buffers::{BufferSource, Computed};
+        let source = BufferSource::Computed(Box::new(Computed {
+            prefix: vec![0xbefe_0303, 0xbeff_0380, 0xbeea_047e, 0xbf87_0001],
+            at: 16,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Descriptor {
+                first: 8,
+                reads: vector(Some(16), true),
+            },
+            soffset: 125,
+            first_register: 4,
+            user_data: 0,
+        }));
+        let user_data = [0u32; super::USER_DATA_WORDS];
+        let memory = At(0, Vec::new());
+        let seeds = orbistoun_translate::wavefront::geometry_system_scalars(3, 1);
+        assert_eq!(
+            super::resolve_range(&source, (&user_data, 3, &seeds), &memory),
+            Ok((0, 0))
+        );
+        assert_eq!(
+            super::resolve_fourth_word(&source, (&user_data, &seeds), &memory),
+            Some(0)
+        );
+        // Unseeded, the mask is unknown and so is the descriptor.
+        assert!(super::resolve_range(&source, (&user_data, 3, &[]), &memory).is_err());
+    }
+
     /// A computed descriptor (D753) is found by running the program before the access over the
     /// draw's user data and memory: here a load of the descriptor from the table the user data
     /// names. Its range runs from the descriptor's base through the scalar offset the access adds
@@ -852,12 +920,12 @@ mod tests {
         let mut user_data = [0u32; super::USER_DATA_WORDS];
         user_data[0] = 0x1000;
         assert_eq!(
-            super::resolve_range(&source, (&user_data, 0), &memory),
+            super::resolve_range(&source, (&user_data, 0, &[]), &memory),
             Ok((0x2000, 16 + 4 * 16)),
             "four sixteen-byte records past a sixteen-byte offset"
         );
         assert_eq!(
-            super::resolve_fourth_word(&source, &user_data, &memory),
+            super::resolve_fourth_word(&source, (&user_data, &[]), &memory),
             Some(STRUCTURED)
         );
         // A scalar load's base pair, computed the same way, binds from the base past the offset,
@@ -874,16 +942,16 @@ mod tests {
             user_data: 2,
         }));
         assert_eq!(
-            super::resolve_range(&pointer, (&user_data, 0), &memory),
+            super::resolve_range(&pointer, (&user_data, 0, &[]), &memory),
             Ok((0x1010, 16))
         );
         assert_eq!(
-            super::resolve_fourth_word(&pointer, &user_data, &memory),
+            super::resolve_fourth_word(&pointer, (&user_data, &[]), &memory),
             None
         );
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
-        assert!(super::resolve_range(&source, (&user_data, 0), &memory).is_err());
+        assert!(super::resolve_range(&source, (&user_data, 0, &[]), &memory).is_err());
     }
 
     /// The open-toolchain GL context's vertex prologue and one four-component attribute fetch
@@ -961,10 +1029,10 @@ mod tests {
         user_data[2] = table as u32;
         user_data[4] = 3;
         assert_eq!(
-            super::resolve_range(&source, (&user_data, 3), &memory),
+            super::resolve_range(&source, (&user_data, 3, &[]), &memory),
             Ok((vertices + 3 * stride, 2 * stride + 16))
         );
-        assert!(super::resolve_range(&source, (&user_data, 33), &memory).is_err());
+        assert!(super::resolve_range(&source, (&user_data, 33, &[]), &memory).is_err());
     }
 
     /// An indexed draw of a primitive shader that reads its vertex ids from its index buffer binds
@@ -996,7 +1064,10 @@ mod tests {
                 &mut commands,
                 (
                     &std::collections::BTreeMap::new(),
-                    &std::collections::BTreeSet::from([reader]),
+                    (
+                        &std::collections::BTreeSet::from([reader]),
+                        &std::collections::BTreeMap::new(),
+                    ),
                     &mut super::BufferCache::default(),
                 ),
                 &memory,
@@ -1043,7 +1114,10 @@ mod tests {
             &mut commands,
             (
                 &std::collections::BTreeMap::new(),
-                &std::collections::BTreeSet::from([reader]),
+                (
+                    &std::collections::BTreeSet::from([reader]),
+                    &std::collections::BTreeMap::new(),
+                ),
                 &mut super::BufferCache::default(),
             ),
             &At(0, Vec::new()),
@@ -1110,7 +1184,10 @@ mod tests {
             &mut commands,
             (
                 &sources,
-                &std::collections::BTreeSet::new(),
+                (
+                    &std::collections::BTreeSet::new(),
+                    &std::collections::BTreeMap::new(),
+                ),
                 &mut super::BufferCache::default(),
             ),
             &memory,

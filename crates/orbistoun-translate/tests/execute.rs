@@ -958,6 +958,22 @@ fn a_scalar_buffer_load_reads_from_its_descriptor_s_base() {
     );
 }
 
+/// A one-word scalar buffer load into `vcc_hi` writes the condition mask's high half, as
+/// PPSA02664's vertex shader does (`s_buffer_load_dword vcc_hi, s[8:11], 0x58`): read back through
+/// a move to s0.
+#[test]
+fn a_scalar_buffer_load_into_vcc_hi_writes_the_mask_s_high_half() {
+    if !device_or_skip("a_scalar_buffer_load_into_vcc_hi_writes_the_mask_s_high_half") {
+        return;
+    }
+    let mut program = seeded_buffer([11, 22, 33, 44], 16);
+    program.extend(s_buffer_load("s_buffer_load_dword", 107, 4, 4));
+    program.push(sop1("s_mov_b32", 0, 107));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(scalar(&registers, 0), 22);
+}
+
 /// A scalar buffer load reads zero for each word that does not fit within the descriptor's record
 /// count, in bytes for a raw buffer - the range check the vector raw-buffer access makes, applied a
 /// word at a time: from GFX8 a scalar access out of bounds does not reach memory
@@ -1522,22 +1538,24 @@ fn a_comparison_produces_a_mask_that_narrows_who_writes() {
 /// A compare in its SDWA form takes scalar sources from its modifier word and writes the register
 /// pair bits 14:8 name when bit 15 is set: PPSA02664's vertex shader does `v_cmp_neq_f32_sdwa s0,
 /// 0, s71` (words 0x7c1a8ef9 0x86868080). 0 against 1.0 is unequal in every lane, 0 against 0 in
-/// none, and the pair, anded into `exec`, says which lanes write.
+/// none, and the pair, anded into `exec`, says which lanes write. A compare has no clamp: bit 13 is
+/// the destination's, as in `s[36:37]` (`v_cmp_ge_f32_sdwa s[36:37], 0, v16`, 0x7c0c20f9
+/// 0x0686a480, there).
 #[test]
 fn an_sdwa_compare_writes_the_pair_its_word_names() {
     const SDWA_MARKER: u32 = 0xf9;
     if !device_or_skip("an_sdwa_compare_writes_the_pair_its_word_names") {
         return;
     }
-    // src0 inline zero (128, scalar), dst s[4:5], both selects DWORD, src1 scalar s6.
-    let sdwa = 128 | 4 << 8 | 1 << 15 | 6 << 16 | 1 << 23 | 6 << 24 | 1 << 31;
+    // src0 inline zero (128, scalar), dst s[36:37], both selects DWORD, src1 scalar s6.
+    let sdwa = 128 | 36 << 8 | 1 << 15 | 6 << 16 | 1 << 23 | 6 << 24 | 1 << 31;
     let compare = head("v_cmp_neq_f32_e32") | (6 << 9) | SDWA_MARKER;
     for (s6, expected) in [(242, 63), (128, 0)] {
         let program = [
             sop1("s_mov_b32", 6, s6),
             compare,
             sdwa,
-            s_logic_b64("s_and_b64", 126, 126, 4),
+            s_logic_b64("s_and_b64", 126, 126, 36),
             v_mov_inline(2, 63),
             s_endpgm(),
         ];
