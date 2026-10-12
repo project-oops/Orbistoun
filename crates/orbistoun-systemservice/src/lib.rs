@@ -708,6 +708,10 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         json2::init_parameter2_set_allocator,
     ),
     (
+        "_ZN3sce4Json14InitParameter217setFileBufferSizeEm",
+        json2::init_parameter2_set_file_buffer_size,
+    ),
+    (
         "_ZN3sce4Json11Initializer9terminateEv",
         json2::initializer_terminate,
     ),

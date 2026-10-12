@@ -13,3 +13,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261010T1900Z-np02, reports/hardware/20261011-083754-eboot.obs.log lines 2933-2960 and 20261011-1791715554-eboot.obs.log lines 2987-3014 (070-user/ppsa02664-np-setup)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceNpUniversalDataSystemCreateContext"
+arity = 4
+purpose = "(&ctx, user, 0, 0): creates a reporting context, writing its number to ctx."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-np03, 000-boot/np-appcontent-startup, report-1791758178.txt lines 223-266, link-bound in a fresh process): 0x0, the low 32 bits of ctx written 0x400d3, the high half left as it was; a second call 0x0 and 0x400d4.",
+    "orbistoun numbers contexts from 0x400d3, the next each call, writing the low 32 bits; a null ctx is unmeasured and answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261011T1745Z-np03, reports/hardware/report-1791758178.txt lines 223-266."
+found_in = ["PPSA03416-app0", "PPSA21564-app0"]
+found_on = "2026-10-12"

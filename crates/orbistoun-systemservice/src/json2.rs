@@ -24,6 +24,8 @@ guest_module! {
         "_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E" => 2,
         // (this)
         "_ZN3sce4Json14InitParameter2C1Ev" => 1,
+        // (this, size)
+        "_ZN3sce4Json14InitParameter217setFileBufferSizeEm" => 2,
         // (this, allocator, pass-through word)
         "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv" => 3,
         "_ZN3sce4Json11InitializerC1Ev" => 6,
@@ -111,6 +113,22 @@ pub(crate) fn init_parameter2_set_allocator(args: &[u64; GUEST_ARG_REGISTERS]) -
     // SAFETY: as above.
     let wrote_pass = unsafe { guest::write_u64(this + PASS_THROUGH_AT, pass) };
     if wrote_allocator && wrote_pass {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// Where `InitParameter2::setFileBufferSize` writes its size (REQ-np03).
+const FILE_BUFFER_SIZE_AT: u64 = 0x10;
+
+/// `InitParameter2::setFileBufferSize(size_t)`: writes `size` as a quadword at `+0x10` and nothing
+/// else, on a constructed parameter as on a raw block (REQ-np03, `json-set-file-buffer-size`,
+/// `report-1791758178.txt` 223-266: `0x1000` there, the constructor's `2` at `+0x18` kept). A
+/// setter whose answer the probe did not read; 0 here.
+pub(crate) fn init_parameter2_set_file_buffer_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's object, by the call's contract; written through the checked accessor.
+    if unsafe { guest::write_u64(args[0] + FILE_BUFFER_SIZE_AT, args[1]) } {
         OK
     } else {
         u64::from(GuestError::Unimplemented.as_raw())

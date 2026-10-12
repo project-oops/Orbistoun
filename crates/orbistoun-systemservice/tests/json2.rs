@@ -92,6 +92,17 @@ fn the_initializer_runs_its_measured_lifecycle_through_the_guests_allocator() {
     expected[8..16].copy_from_slice(&0x1234_5678_u64.to_le_bytes());
     expected[0x18] = 2;
     assert_eq!(param[..0x28], expected, "`param-after`");
+    // setFileBufferSize writes its size at +0x10 and nothing else (REQ-np03).
+    let mut resized = param;
+    let mut args = at(resized.as_mut_ptr() as usize as u64);
+    args[1] = 0x1000;
+    assert_eq!(
+        call("_ZN3sce4Json14InitParameter217setFileBufferSizeEm", args),
+        0
+    );
+    assert_eq!(resized[0x10..0x18], 0x1000_u64.to_le_bytes());
+    assert_eq!(resized[..0x10], param[..0x10], "nothing before it");
+    assert_eq!(resized[0x18..], param[0x18..], "nor after");
     assert!(
         param[0x28..].iter().all(|&b| b == 0xcc),
         "nothing past 0x28"

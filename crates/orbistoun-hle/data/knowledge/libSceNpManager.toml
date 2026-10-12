@@ -26,3 +26,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261010T0040Z-np01, reports/hardware/20261010-115300-eboot.log lines 3540-3558 (070-user/np-check-callback)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-10-10"
+
+[[function]]
+name = "sceNpGetAccountIdA"
+arity = 2
+purpose = "(user, out): reads the signed-in account's id into an 8-byte out value."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-np03, 000-boot/np-appcontent-startup, report-1791758178.txt lines 223-266, link-bound, a console signed in to no account): 0x80550006 and the eight bytes of out zeroed, alike twice.",
+    "orbistoun answers as the console did, no account being signed in; a null out is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261011T1745Z-np03, reports/hardware/report-1791758178.txt lines 223-266."
+found_in = ["PPSA03416-app0"]
+found_on = "2026-10-12"

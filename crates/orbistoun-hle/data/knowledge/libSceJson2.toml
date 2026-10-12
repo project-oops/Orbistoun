@@ -93,3 +93,17 @@ found_by = "static"
 known_by = "assumed"
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "_ZN3sce4Json14InitParameter217setFileBufferSizeEm"
+purpose = "Sets the file buffer size an InitParameter2 carries."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-np03, 000-boot/np-appcontent-startup, report-1791758178.txt lines 223-266, link-bound): on a constructed InitParameter2 and on a raw 0xcc block alike, writes its argument, 0x1000, as a quadword at +0x10 and changes nothing else; the constructor's 2 at +0x18 kept. Its answer was not read.",
+    "orbistoun writes the size at +0x10 and answers 0.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261011T1745Z-np03, reports/hardware/report-1791758178.txt lines 223-266."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-12"
