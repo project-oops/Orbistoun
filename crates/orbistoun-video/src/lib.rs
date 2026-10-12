@@ -36,6 +36,8 @@ guest_module! {
         "sceVideoOutGetOutputStatus" => 2,
         // Unnamed: (handle, which, p0, 0, 0, p1), as PPSA28061 calls it once a frame.
         "0x1643ec4c4a7c2230" => 6,
+        // Arity 1: a delivered event, as `sceKernelWaitEqueue` wrote it.
+        "sceVideoOutGetEventId" => 1,
     }
 }
 
@@ -528,6 +530,31 @@ const FLIP_EVENT_FLAGS: u16 = 0x20;
 /// observed, so whether it varies with the port is not established.
 const FLIP_EVENT_IDENT: u64 = 0x0006_0100_0000_0000;
 
+/// The id `sceVideoOutGetEventId` answers for a flip completion (D802): the one a title's flip
+/// handler acts on. PPSA25872's waits on its flip queue, takes the event's id and goes on to the
+/// flip only when it is zero, waiting again otherwise; the call itself binds in no probe (obSCEne
+/// REQ-ve01), so it is the guest's own reading of the id.
+const FLIP_EVENT_ID: u64 = 0;
+
+/// `sceVideoOutGetEventId(event)`: which video-out event a delivered event is.
+///
+/// A flip completion - the filter and ident orbistoun posts at a flip, both measured - is
+/// [`FLIP_EVENT_ID`] (D802). Any other event is not modelled and answers the placeholder: the ids
+/// of the other video-out events are unestablished.
+fn video_out_get_event_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let event = args[0];
+    // SAFETY: a guest-supplied event, which `sceKernelWaitEqueue` wrote in identity-mapped guest
+    // memory; an unmapped one reads as `None`.
+    let ident = unsafe { guest::read_u64(event) };
+    // SAFETY: the same event's filter word, eight bytes in.
+    let word = unsafe { guest::read_u32(event + 8) };
+    let filter = word.map(|word| (word & 0xffff) as u16 as i16);
+    if ident == Some(FLIP_EVENT_IDENT) && filter == Some(EVFILT_VIDEO_OUT) {
+        return FLIP_EVENT_ID;
+    }
+    u64::from(GuestError::Unimplemented.as_raw())
+}
+
 /// `sceVideoOutAddFlipEvent(equeue, handle, udata)`.
 ///
 /// Registers a flip completion against an event queue, keyed by the port handle, so
@@ -760,6 +787,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceVideoOutGetOutputStatus", video_out_get_output_status),
         ("0x1643ec4c4a7c2230", video_out_1643ec4c4a7c2230),
+        ("sceVideoOutGetEventId", video_out_get_event_id),
     ]
 }
 
@@ -963,6 +991,37 @@ mod tests {
                 "the argument comes back through sar 16"
             );
         }
+    }
+
+    /// The event a flip delivers is the flip event to `sceVideoOutGetEventId`, the id PPSA25872's
+    /// flip handler goes on from (D802); an event of another filter is not one this models.
+    #[test]
+    fn a_flip_completion_is_the_flip_event() {
+        let _guard = serial();
+        let handle = open_on(12);
+        let queue = orbistoun_kernel::sync::create_equeue("event-id-test");
+        let mut add = [0_u64; GUEST_ARG_REGISTERS];
+        add[..3].copy_from_slice(&[queue, handle, 0x55]);
+        assert_eq!(super::video_out_add_flip_event(&add), 0);
+        let addresses: [u64; 2] = [0x2_0600_0000, 0x2_0601_0000];
+        assert_eq!(
+            video_out_register_buffers(&args([handle, 0, addresses.as_ptr() as u64, 2])),
+            0
+        );
+        assert_eq!(video_out_submit_flip(&args([handle, 0, 1, 7])), 0);
+        let events = orbistoun_kernel::sync::take_events(queue, 4);
+        let delivered = events[0].to_bytes();
+        let id = |bytes: &[u8]| {
+            super::video_out_get_event_id(&args([bytes.as_ptr() as usize as u64, 0, 0, 0]))
+        };
+        assert_eq!(id(&delivered), 0, "a flip completion");
+        let mut timer = delivered;
+        timer[0x08..0x0a].copy_from_slice(&(-7i16).to_le_bytes());
+        assert_eq!(
+            id(&timer),
+            u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+            "another filter's event is not modelled"
+        );
     }
 
     /// A flip queued in a command buffer is performed at its release (D728): the completion is

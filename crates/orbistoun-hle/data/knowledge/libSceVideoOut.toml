@@ -256,3 +256,16 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 4396-4401, 130-layout/video-out-unregister-buffers."
 found_in = ["SOHK00001", "TSHP00001"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceVideoOutGetEventId"
+arity = 1
+purpose = "Names which video-out event a delivered event is: (event), the kevent sceKernelWaitEqueue wrote."
+edge_cases = [
+    "Not measurable by a probe: obSCEne REQ-ve01 found it binds in no leg (report-1791758178.txt lines 16912-16935).",
+    "PPSA25872's flip handler (eboot text 0x11c42ab) takes the id of each event on its flip queue and goes on to the flip only when it is 0, waiting again otherwise; the placeholder orbistoun answered before kept it waiting for a flip forever (D802).",
+    "orbistoun answers 0 for a flip completion - filter -13 and ident 0x0006010000000000, both measured (-4e20) - and its placeholder for any other event, whose ids are unestablished.",
+]
+known_by = "guest-observed"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-12"
