@@ -262,8 +262,15 @@ pub enum Span {
     DevicePipeline,
     /// Within [`Self::DispatchExecute`]: recorded, submitted and waited for.
     DeviceRun,
-    /// Within [`Self::DispatchExecute`]: its results read off the device and everything released.
+    /// Within [`Self::DispatchExecute`]: its observation and guest-memory window read off the
+    /// device.
     DeviceReadBack,
+    /// Within [`Self::DispatchExecute`]: the image it stored read off the device.
+    ReadBackImage,
+    /// Within [`Self::DispatchExecute`]: its own buffers read off the device.
+    ReadBackBuffers,
+    /// Within [`Self::DispatchExecute`]: its images, buffers and window released.
+    DeviceRelease,
     /// Within [`Self::DispatchWriteBack`]: what changed worked out, a stored image tiled back.
     WriteBackChanges,
     /// Within [`Self::DispatchWriteBack`]: the changed bytes and fills written into guest memory.
@@ -275,7 +282,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 51] = [
         Self::SubmitCall,
         Self::CommandProcessor,
         Self::RunDraws,
@@ -321,6 +328,9 @@ impl Span {
         Self::DevicePipeline,
         Self::DeviceRun,
         Self::DeviceReadBack,
+        Self::ReadBackImage,
+        Self::ReadBackBuffers,
+        Self::DeviceRelease,
         Self::WriteBackChanges,
         Self::WriteBackGuest,
         Self::SettlePending,
@@ -373,7 +383,10 @@ impl Span {
             Self::DeviceSetup => "device: setup",
             Self::DevicePipeline => "device: pipeline",
             Self::DeviceRun => "device: run",
-            Self::DeviceReadBack => "device: read back",
+            Self::DeviceReadBack => "device: read back window",
+            Self::ReadBackImage => "device: read back image",
+            Self::ReadBackBuffers => "device: read back buffers",
+            Self::DeviceRelease => "device: release",
             Self::WriteBackChanges => "write back: changes",
             Self::WriteBackGuest => "write back: guest",
             Self::SettlePending => "settle pending frame",

@@ -1311,17 +1311,20 @@ pub fn dispatch_guest_with_buffers(
         &window,
         (groups, push, &bound, traced.as_ref()),
     );
-    let _reading = SpanGuard::start(Span::DeviceReadBack);
-    let stored = dispatched
-        .as_ref()
-        .ok()
-        .map(|_| bound.read_stored(device))
-        .transpose();
+    let stored = orbistoun_gpu::perf::span(Span::ReadBackImage, || {
+        dispatched
+            .as_ref()
+            .ok()
+            .map(|_| bound.read_stored(device))
+            .transpose()
+    });
+    let buffers_after =
+        orbistoun_gpu::perf::span(Span::ReadBackBuffers, || match (&dispatched, &traced) {
+            (Ok(_), Some(traced)) => traced.read(device),
+            _ => Ok(Vec::new()),
+        });
+    let _releasing = SpanGuard::start(Span::DeviceRelease);
     bound.destroy(device);
-    let buffers_after = match (&dispatched, &traced) {
-        (Ok(_), Some(traced)) => traced.read(device),
-        _ => Ok(Vec::new()),
-    };
     if let Some(traced) = traced {
         traced.destroy(device);
     }
