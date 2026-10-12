@@ -1909,26 +1909,24 @@ const ADDR_SW_4KB_S: u32 = 5;
 
 /// The tiling (swizzle) mode of a surface - a colour target or a texture.
 ///
-/// Only the two modes orbistoun acts on are named: linear and 64KB_R_X. Any other is carried by its
-/// raw five-bit value, so it is refused downstream rather than read with the wrong swizzle (D010).
+/// Only the modes orbistoun acts on are named. Any other is carried by its raw five-bit value, so
+/// it is refused downstream rather than read with the wrong swizzle (D010).
 /// The values are `AddrSwizzleMode` (`src/amd/addrlib/inc/addrtypes.h:225` in oops-mesa), shared by
 /// `COLOR_SW_MODE` and a texture's `SQ_IMG_RSRC_WORD3.SW_MODE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwizzleMode {
     /// No swizzle; pixels are row-major (`ADDR_SW_LINEAR`).
     Linear,
-    /// 64KB_R_X, the mode [`crate::tiling`] detiles (`ADDR_SW_64KB_R_X`).
+    /// 64KB_R_X (`ADDR_SW_64KB_R_X`), the display and colour-target mode.
     Tiled64KbRX,
     /// 4KB_D_X (`ADDR_SW_4KB_D_X`), which radeonsi gives a small colour surface.
     Tiled4KbDX,
     /// 64KB_D_X (`ADDR_SW_64KB_D_X`), which radeonsi gives a block-compressed texture; modelled at
     /// sixteen bytes a texel, the blocks a compute copy moves.
     Tiled64KbDX,
-    /// 64KB_S (`ADDR_SW_64KB_S`), the standard swizzle with no pipe XOR; modelled at sixteen bytes
-    /// an element, a block-compressed image's blocks.
+    /// 64KB_S (`ADDR_SW_64KB_S`), the standard swizzle with no pipe XOR.
     Tiled64KbS,
-    /// 4KB_S (`ADDR_SW_4KB_S`), the standard swizzle in 4 KiB blocks; modelled at sixteen bytes an
-    /// element, a block-compressed image's blocks.
+    /// 4KB_S (`ADDR_SW_4KB_S`), the standard swizzle in 4 KiB blocks.
     Tiled4KbS,
     /// A mode orbistoun does not model, carried by its raw five-bit swizzle-mode value.
     Other(u32),
@@ -1937,8 +1935,9 @@ pub enum SwizzleMode {
 /// Decodes a five-bit `SW_MODE` field into a [`SwizzleMode`].
 ///
 /// The field is the raw value a `COLOR_SW_MODE` or `SQ_IMG_RSRC_WORD3.SW_MODE` carries once the
-/// caller has shifted it out of its register. Values are `AddrSwizzleMode`: linear `0`, 64KB_R_X
-/// `27`.
+/// caller has shifted it out of its register. Values are `AddrSwizzleMode`: linear `0`, 4KB_S `5`,
+/// 64KB_S `9`, 4KB_D_X `22`, 64KB_D_X `26`, 64KB_R_X `27`. Which element sizes each is modelled
+/// at is [`crate::tiling::SurfaceLayout::at_bytes_per_texel`]'s to say.
 #[must_use]
 pub fn decode_swizzle_mode(field: u32) -> SwizzleMode {
     match field & 0x1F {

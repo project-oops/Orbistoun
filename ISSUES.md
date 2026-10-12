@@ -4,13 +4,12 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Retail title walls
 
-- PPSA02664, PPSA03416: a null write at image+0x3f840 after one frame; both call `libSceAmpr`'s command-buffer constructors first, which have no implementation.
-- PPSA25872: `ScriptingAssemblies.json` is opened and never read, because it is read through `libSceAmpr` command buffers, which have no implementation; every IL2CPP type lookup then fails and a null read follows in its own module.
-- `libSceAmpr` and the APR submit, wait, file-stat and prefix-resolve calls have no implementation; their layouts are unmeasured.
-- PPSA04263: the static object at image+0x5b37e98 (wall at image+0x19676d7) is never constructed; it calls the unimplemented APR prefix-resolve and file-stat 302 times each before that.
+- PPSA25872: runs to its 120 s limit with one flip and 8.7 million calls (`compat/PPSA25872-app0/report.toml`); what holds up the second flip is not recorded.
+- PPSA04263: an `int 0x41` assertion at image+0x2bf156c after `sceAgcDriverSetTFRing`, which orbistoun answers 0 without setting anything up.
 - PPSA04263: the IME update and user-service game-preset stubs need measured values.
-- PPSA21564: stops in its own module code at +0x7af792 with no missing import named.
-- PPSA28061: aborts after `libSceJson2` initialisation answers a placeholder.
+- PPSA21564: the record ends at image+0x2990db, measured 2026-09-28 at a 20 s limit; no cause is recorded.
+- `libSceAmpr` serves construction, binding, reset and the APR file read (`crates/orbistoun-gpu/src/ampr.rs`); its other imports have no measured answer (`orbistoun-cli census --imports`).
+- PPSA02664 and PPSA03416 carry `link_plan_stored = "mismatch"`: a fresh link differs from the stored plan under the same key.
 - NVRB00001: busy-waits on the process time counter (about 100 million reads in 40 s).
 
 ## Graphics
@@ -22,8 +21,8 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - The clear-colour state is not decoded; the Vulkan backend refuses `ClearColour`, `Fence` and `present`.
 - The Vulkan backend ignores the decoded colour-target state (`CB_COLOR0_BASE`, `ATTRIB2`, swizzle mode).
 - gl1-probe fails most checks (scissor, stencil, clip plane, logic op, depth range, mipmaps, readbacks; many rows read `0xbf800000`).
-- Detiling covers one 64 KiB block of 32-bpp `64KB_R_X` only; other modes, depths and the multi-block `pipeBankXor` case are refused.
-- A second bound texture, a third texture per draw, or a descriptor from two table offsets is refused; no surface cache or format table exists.
+- Detiling models `64KB_R_X` (1, 4 bytes), `4KB_D_X` (4, 16), `64KB_D_X` (16), `64KB_S` (4, 16), `4KB_S` (1, 4, 8, 16) and `LINEAR` (1, 4) (`tiling.rs`, `SurfaceLayout::of`); every other mode and depth, 3D and partially-resident layouts, and depth surfaces are refused.
+- A pixel shader samples at most sixteen images (`MAX_TEXTURES`); no surface cache or full texture format table exists.
 - MTBUF 11/10-bit packed floats, `SRGB` and packed stores are refused.
 - `v_rcp_f32` translates as an exact division; approximate instructions are not modelled.
 - A pixel shader enabling `SAMPLE_COVERAGE` or `POS_FIXED_PT` is refused: their register content is unmeasured. The ancillary word carries only the layer; its sample and shading-rate bits read zero.

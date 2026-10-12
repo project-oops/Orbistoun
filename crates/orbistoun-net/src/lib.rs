@@ -6,8 +6,9 @@
 //! carry on. Every name comes from a real import table (D504); unmeasured arities are `6`,
 //! the trampoline's full capture, which loses no argument where a low guess would. Sockets,
 //! the network pools, the HTTP client and its TLS contexts are carried out over the host's
-//! network (D727); the account-service libraries are listed in `SERVES_NOTHING`. Online
-//! services are out of scope (`docs/SCOPE.md`).
+//! network (D727). The account-service libraries answer offline: their initialisation and
+//! the calls a title makes before going online succeed or refuse, and nothing
+//! reaches a server. Online services are out of scope (`docs/SCOPE.md`).
 
 mod contexts;
 pub mod host;

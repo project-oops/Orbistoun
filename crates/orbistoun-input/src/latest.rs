@@ -64,7 +64,7 @@ pub fn summarise() -> Option<String> {
     }
     if read == 0 {
         return Some(format!(
-            "{arrived} pad update(s) arrived and none reached the guest - no measured layout to write one into"
+            "{arrived} pad update(s) arrived and the guest read none - no pad read came after the first arrived"
         ));
     }
     Some(format!("{arrived} pad update(s) arrived, {read} read"))

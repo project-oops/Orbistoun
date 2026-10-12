@@ -5,9 +5,12 @@
 //! data and corrupts every tiled surface, so the swizzle is anchored to hardware (D010). One texel
 //! was read back from a point draw into a 32-bpp `64KB_R_X` target: texel `(15, 15)` at tiled byte
 //! 4348. A display-size readback (1920x1080, every pixel against a linear control) confirms the
-//! in-block swizzle with row-major 64 KiB blocks. Only `64KB_R_X` at 32 bpp is modelled: it is the
-//! colour-target mode, and texture tilings such as `4KB_S` have no measurement, so they are refused
-//! by name. Block-compressed data needs no decode, since Vulkan consumes it natively.
+//! in-block swizzle with row-major 64 KiB blocks. [`SurfaceLayout::of`] names every mode and
+//! element size modelled - `64KB_R_X`, `4KB_D_X`, `64KB_D_X`, `64KB_S`, `4KB_S` and `LINEAR` at
+//! the sizes it lists - and the run path detiles through it; any other mode is refused by name.
+//! [`detile_colour_target`], [`detile_texture`] and [`detile_image`] are the older single-mode
+//! path, 32-bpp `64KB_R_X` only, kept for the measured-pixel tests they carry and called by
+//! nothing else. Block-compressed data needs no decode, since Vulkan consumes it natively.
 
 use crate::registers::{
     ImageDescriptor, RegisterWrite, SwizzleMode, colour_swizzle_mode_at, colour_target_at,

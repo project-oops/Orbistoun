@@ -3,7 +3,9 @@
 //! Guests often block on audio-buffer completion, so a port that never drains hangs the
 //! title with no audio symptom. Output is paced from the sample rate rather than a device:
 //! the output ports follow the contract obSCEne's `090-audio` checks measure on hardware.
-//! `ajm`, `audio3d`, `audio_in` and `audio_out2` are declarations only.
+//! `audio_out2` serves its contexts and ports, and `ajm` its context set-up (initialise,
+//! register a codec, finalise); `ajm`'s instances and batches, `audio3d` and `audio_in` are
+//! declarations only.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn, HandleAllocator};
 use orbistoun_hle::guest_module;

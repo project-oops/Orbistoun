@@ -76,8 +76,8 @@ fn the_wired_set_is_the_size_the_module_documentation_claims() {
         agc::implementations().len(),
         87,
         concat!(
-            "the wired builder count changed - update the count in the agc.rs module ",
-            "documentation to match, then update this number"
+            "the wired builder count changed - this test is where the count lives, so update ",
+            "this number"
         )
     );
 }
