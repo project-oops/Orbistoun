@@ -40,6 +40,15 @@ The window's runs take the limit from the toolbar (or preferences - general) and
 from `run-call-budget` under `[library]` in `config.toml`. Both default to `0`, no limit,
 because a title launched from the window is being played.
 
+## GPU work alongside the title
+
+A title the window plays runs on while its GPU work is carried out on a thread of its own, as on
+hardware (D821): a fence it waits on is written when the work behind it has run. A run from the
+command line carries each submission out as the submit returns, so two runs agree on when every
+fence was written and a verdict between them measures orbistoun. `ORBISTOUN_SUBMIT=async` gives a
+command-line run the window's behaviour, and `ORBISTOUN_SUBMIT=sync` the window the command
+line's.
+
 ## Sound
 
 A title the window plays is heard on the host's default output device (D819). Each output

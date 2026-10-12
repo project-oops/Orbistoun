@@ -431,6 +431,24 @@ pub const AUDIO: Var = Var {
     effect: Effect::Observes,
 };
 
+/// Where a guest's GPU submissions are carried out.
+///
+/// Unset, each is carried out as the submit returns, so two runs agree on when every fence was
+/// written and a verdict between them measures the emulator. `async` carries them out on the
+/// command processor's own thread while the guest runs on (D821); the window sets it for the runs
+/// it plays.
+pub const SUBMIT: Var = Var {
+    name: "ORBISTOUN_SUBMIT",
+    kind: Kind::Setting,
+    summary: "`async` carries GPU submissions out on a thread of their own while the guest runs on; unset, each is carried out as the submit returns",
+    example: "async",
+    read_by: "orbistoun-worker",
+    effect: Effect::Observes,
+};
+
+/// The value of [`SUBMIT`] that carries submissions out asynchronously.
+pub const SUBMIT_ASYNC: &str = "async";
+
 /// The value of [`AUDIO`] that plays output on the host's device.
 pub const AUDIO_HOST: &str = "host";
 
@@ -737,6 +755,7 @@ pub const REGISTRY: &[Var] = &[
     TRACE_FORMAT,
     CLOCK,
     AUDIO,
+    SUBMIT,
     RUNTIME_GLOBALS,
     HEAP_FILL,
     HEAP_BASE,
@@ -824,6 +843,7 @@ mod tests {
         super::TRACE_FORMAT,
         super::CLOCK,
         super::AUDIO,
+        super::SUBMIT,
         super::RUNTIME_GLOBALS,
         super::HEAP_FILL,
         super::HEAP_BASE,

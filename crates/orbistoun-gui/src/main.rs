@@ -51,6 +51,12 @@ fn main() -> eframe::Result<()> {
         // SAFETY: as above - still no worker or guest thread.
         unsafe { std::env::set_var(orbistoun_env::AUDIO.name, orbistoun_env::AUDIO_HOST) };
     }
+    // And its GPU work runs alongside it, as on hardware (D821); `ORBISTOUN_SUBMIT=sync` keeps the
+    // command line's order.
+    if std::env::var_os(orbistoun_env::SUBMIT.name).is_none() {
+        // SAFETY: as above - still no worker or guest thread.
+        unsafe { std::env::set_var(orbistoun_env::SUBMIT.name, orbistoun_env::SUBMIT_ASYNC) };
+    }
 
     // Beside an orbistoun-aot manifest this program is that build's launcher, and plays only its
     // title (D724); `--headless` runs it in this process with no window, as a check.

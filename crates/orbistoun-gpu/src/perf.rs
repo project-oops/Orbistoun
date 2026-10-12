@@ -173,6 +173,8 @@ pub fn take() -> Snapshot {
 pub enum Span {
     /// The guest's submit call, whole.
     SubmitCall,
+    /// A guest waiting at its submit for room in the command processor's queue (D821).
+    QueueFull,
     /// The command processor's walk of a submission, draws included.
     CommandProcessor,
     /// Carrying out a submission's draws into its target.
@@ -285,8 +287,9 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 52] = [
+    pub const ALL: [Self; 53] = [
         Self::SubmitCall,
+        Self::QueueFull,
         Self::CommandProcessor,
         Self::RunDraws,
         Self::ExecuteHandOff,
@@ -344,6 +347,7 @@ impl Span {
     pub const fn label(self) -> &'static str {
         match self {
             Self::SubmitCall => "submit call",
+            Self::QueueFull => "queue full",
             Self::CommandProcessor => "command processor",
             Self::RunDraws => "run draws",
             Self::ExecuteHandOff => "execute hand-off",

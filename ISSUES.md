@@ -26,7 +26,8 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 - `v_rcp_f32` translates as an exact division; approximate instructions are not modelled.
 - A pixel shader enabling `SAMPLE_COVERAGE` or `POS_FIXED_PT` is refused: their register content is unmeasured. The ancillary word carries only the layer; its sample and shading-rate bits read zero.
 - The host side of the resource model (descriptor base to host memory) is unbuilt.
-- Submissions run synchronously; hardware queues the buffer and runs alongside the CPU.
+- An asynchronous submission is still prepared on the guest's thread (D821): shader translation
+  waits there, where hardware's driver would have it ready.
 - Per-frame host cost remains in prepare, flip write-back, and the first read and detile of each cleared target.
 - Hardware's direct-dispatch packet is one dword longer than the documented one; the extra dword is unmodelled.
 - `tests/oracle_gl_cube.rs` prints its two pixel hashes instead of asserting them.

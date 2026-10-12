@@ -1080,6 +1080,13 @@ fn write_submission(submission: &Submission, name: &str) {
 /// owns the protocol stream; the endings that stop the process from their own thread only log
 /// the region's name.
 pub fn render_and_log_last_submission() -> Option<Event> {
+    // Submissions still queued are carried out first, so the record and the frame are the run's
+    // whole (D821). Bounded: one blocked on a stopped guest thread would hold the ending forever.
+    if !orbistoun_gpu::agc_driver::settle(std::time::Duration::from_secs(2)) {
+        tracing::warn!(
+            "submissions were still queued when the run ended; the report leaves them out"
+        );
+    }
     log_execution();
     let submission = orbistoun_gpu::agc_driver::take_last_submission()?;
     write_submission(&submission, "last");

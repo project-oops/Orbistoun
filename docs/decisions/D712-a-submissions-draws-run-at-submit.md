@@ -9,6 +9,8 @@ from the first draw to the last is a draw or memory-inert, into one target of on
 extent in a tiling and format that write back exactly, starting from what guest memory holds;
 anything else leaves them unexecuted. The executor runs on a host thread of its own.
 Amended by D729: memory work between draws splits them into segments run in order.
+Amended by D821: under `ORBISTOUN_SUBMIT=async` a prepared submission is carried out on the
+command processor's own thread, the guest running on.
 
 **Why:** a fence may stand only for work that ran (D705), and a GL frame loop waits on the fence
 after its draws. The guest reads and composes over its target, so a frame kept only on the host

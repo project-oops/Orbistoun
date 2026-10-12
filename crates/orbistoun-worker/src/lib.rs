@@ -526,6 +526,10 @@ fn install_presentation() {
     orbistoun_gpu::agc_driver::set_write_back_at_flip(
         orbistoun_env::TARGET_WRITEBACK.get().as_deref() != Some("submit"),
     );
+    // Submissions carried out on the command processor's own thread when the run asks (D821).
+    orbistoun_gpu::agc_driver::set_asynchronous(
+        orbistoun_env::SUBMIT.get().as_deref() == Some(orbistoun_env::SUBMIT_ASYNC),
+    );
     // The subgroup a primitive shader runs one invocation per lane on, where the device has one
     // (D760).
     if let orbistoun_gpu_vulkan::compute::Availability::Available { properties } =

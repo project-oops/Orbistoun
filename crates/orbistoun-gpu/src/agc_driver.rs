@@ -3061,6 +3061,119 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         }
     }
     let submission = submission;
+    // The next submission is prepared from the registers this one leaves, so they are carried here,
+    // in submission order, before it is carried out anywhere.
+    carry_registers(&bytes, &submission);
+    // Prepared here, in order, on the guest's thread; carried out where the run says (D821).
+    if asynchronous() {
+        command_processor::queue(bytes, submission);
+    } else {
+        run_submission(&bytes, submission);
+    }
+    SUBMIT_OK
+}
+
+/// Whether submissions are carried out on a thread of their own, the guest running on (D821).
+static ASYNCHRONOUS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Carries out submissions on the command processor's own thread from now on, so a guest runs on
+/// while its work executes and waits on its fences as it would on hardware (D821). Off by default:
+/// two runs then agree on when each fence was written, which a verdict between them needs.
+pub fn set_asynchronous(on: bool) {
+    ASYNCHRONOUS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn asynchronous() -> bool {
+    ASYNCHRONOUS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Waits, up to `limit`, for every queued submission to have been carried out, and answers whether
+/// they all were. Immediate when submissions run synchronously.
+pub fn settle(limit: std::time::Duration) -> bool {
+    command_processor::settle(limit)
+}
+
+/// The command processor's thread, and the submissions queued for it (D821).
+mod command_processor {
+    use super::{Submission, run_submission};
+    use std::sync::mpsc::{SyncSender, sync_channel};
+    use std::sync::{Condvar, Mutex, OnceLock};
+
+    /// Submissions queued ahead of the one executing. A guest that gets this far ahead waits at
+    /// its next submit, as a full ring stops a guest on hardware; the wait is timed as its own
+    /// span.
+    const DEPTH: usize = 4;
+
+    /// Submissions queued and not yet carried out, and the signal that the count fell.
+    static IN_FLIGHT: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+    /// A prepared submission and its command stream, boxed so a refused send hands back a pointer.
+    type Work = Box<(Vec<u8>, Submission)>;
+
+    fn sender() -> Option<&'static Mutex<SyncSender<Work>>> {
+        static SENDER: OnceLock<Option<Mutex<SyncSender<Work>>>> = OnceLock::new();
+        SENDER
+            .get_or_init(|| {
+                let (send, receive) = sync_channel::<Work>(DEPTH);
+                std::thread::Builder::new()
+                    .name("orbistoun-command-processor".to_owned())
+                    .spawn(move || {
+                        for work in receive {
+                            let (bytes, submission) = *work;
+                            run_submission(&bytes, submission);
+                            let (count, fell) = &IN_FLIGHT;
+                            *count
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+                            fell.notify_all();
+                        }
+                    })
+                    .ok()
+                    .map(|_| Mutex::new(send))
+            })
+            .as_ref()
+    }
+
+    /// Queues a prepared submission; carries it out here when no thread could be started.
+    pub(super) fn queue(bytes: Vec<u8>, submission: Submission) {
+        let Some(sender) = sender() else {
+            run_submission(&bytes, submission);
+            return;
+        };
+        *IN_FLIGHT
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        let sent = crate::perf::span(crate::perf::Span::QueueFull, || {
+            sender
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .send(Box::new((bytes, submission)))
+        });
+        if let Err(std::sync::mpsc::SendError(work)) = sent {
+            *IN_FLIGHT
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+            let (bytes, submission) = *work;
+            run_submission(&bytes, submission);
+        }
+    }
+
+    pub(super) fn settle(limit: std::time::Duration) -> bool {
+        let (count, fell) = &IN_FLIGHT;
+        let held = count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        fell.wait_timeout_while(held, limit, |queued| *queued > 0)
+            .is_ok_and(|(left, _)| *left == 0)
+    }
+}
+
+/// Carries out one prepared submission: the command processor's memory work, its draws, its
+/// flips' release, and the record of what ran.
+fn run_submission(bytes: &[u8], submission: Submission) {
+    let memory = MappedRegions::current();
     // A queue an earlier submission stopped retires nothing more (D710).
     let stalled = *queue_stall()
         .lock()
@@ -3072,15 +3185,15 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         if let Ok(mut slot) = last_submission().lock() {
             *slot = Some(submission);
         }
-        return SUBMIT_OK;
+        return;
     }
-    // The command processor's own memory work, carried out synchronously as the submit returns. It
-    // stops at the first packet needing the GPU, so a fence is written only when everything before
-    // it ran (D705); draws are such work once an executor is installed and they can run as one into
-    // a target they can be written back to.
+    // The command processor's own memory work, carried out as the submit returns or, asynchronously,
+    // on its own thread. It stops at the first packet needing the GPU, so a fence is written only
+    // when everything before it ran (D705); draws are such work once an executor is installed and
+    // they can run as one into a target they can be written back to.
     let executed = crate::perf::span(crate::perf::Span::CommandProcessor, || {
         cp::execute(
-            &bytes,
+            bytes,
             &mut GuestCp {
                 memory,
                 submission: Some(&submission),
@@ -3088,7 +3201,6 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         )
     });
     hand_releases_to_display();
-    carry_registers(&bytes, &submission);
     if executed.draws == 0
         && let Ok(mut pending) = undelivered_modules().lock()
     {
@@ -3109,7 +3221,6 @@ fn submit_described_timed(descriptor: u64) -> u64 {
     if let Ok(mut slot) = last_submission().lock() {
         *slot = Some(submission);
     }
-    SUBMIT_OK
 }
 
 /// Implementations this crate provides for `libSceAgcDriver`.
@@ -5051,6 +5162,54 @@ mod tests {
             memory
                 .chunks_exact(4)
                 .all(|w| w == 0x5566_7788u32.to_le_bytes())
+        );
+    }
+
+    /// Asynchronously, a submit returns before its work runs: the label its last packet writes is
+    /// not there until the command processor has carried the submission out, and is after (D821).
+    /// The command processor is held off by holding the queue's stall slot, which carrying out a
+    /// submission takes first.
+    #[test]
+    fn an_asynchronous_submission_writes_its_label_only_when_carried_out() {
+        use crate::packet::build::command_header;
+        let _guard = serial();
+        let label = off_page(8, 0);
+        let label_at = label.as_ptr() as usize as u64;
+        allow_writes_to(label_at, 8);
+        // WRITE_DATA to memory through L2, write-confirmed: the label, as a frame loop writes it.
+        let words = [
+            command_header(crate::cp::WRITE_DATA, 4),
+            (2 << 8) | (1 << 20),
+            label_at as u32,
+            (label_at >> 32) as u32,
+            0xfeed_f00d,
+        ];
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        set_guest_regions(vec![region_of(&stream), (label_at, label_at + 8)]);
+        let desc = descriptor(&stream);
+
+        super::set_asynchronous(true);
+        let held = super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(submit_dcb(&args(desc.as_ptr() as usize as u64)), SUBMIT_OK);
+        assert!(
+            !super::settle(std::time::Duration::from_millis(50)),
+            "the submission waits"
+        );
+        assert_eq!(
+            label[..4],
+            [0; 4],
+            "the submit returned before its work ran"
+        );
+        drop(held);
+        let carried_out = super::settle(std::time::Duration::from_secs(5));
+        super::set_asynchronous(false);
+        assert!(carried_out, "the queue drains once the processor can run");
+        assert_eq!(
+            label[..4],
+            0xfeed_f00d_u32.to_le_bytes(),
+            "and the label is written"
         );
     }
 
