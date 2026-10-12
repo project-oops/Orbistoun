@@ -1041,19 +1041,10 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
 /// Hands the graphics submit path the guest's readable and writable regions.
 fn install_guest_region_lookups() {
     // The regions the guest can read, so a submitted command buffer and the shader addresses it
-    // names resolve against the guest's own memory (D101). Set before the guest is entered, from
-    // the map recorded above.
-    if let Ok(map) = orbistoun_kernel::direct::map().lock() {
-        orbistoun_gpu::agc_driver::set_guest_regions(
-            map.regions()
-                .iter()
-                .filter(|r| r.allocated)
-                .map(|r| (r.start, r.end))
-                .collect(),
-        );
-    }
-    // The live answer for everything the guest maps after this point, such as a graphics context's
-    // command buffer.
+    // names resolve against the guest's own memory (D101): the kernel's live answer, which covers
+    // every mapping the guest holds when it submits. Not the direct-memory map, whose spans are
+    // physical and start at zero - the guest reaches them only where it mapped them, and taking
+    // them as addresses made the null page readable.
     orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
     // Where the command processor may write: a fill, a copy, a fence.
     orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
@@ -3411,6 +3402,19 @@ mod tests {
 
     fn service() -> Service {
         Service::new(ServiceConfig::default())
+    }
+
+    /// The direct-memory map holds physical spans, from zero, and the guest never sees them at those
+    /// addresses: a submit reading a buffer at 4 is refused, not dereferenced. Seeding the submit
+    /// path with them made the null page readable, and PPSA03416 faulted the host on it.
+    #[test]
+    fn physical_direct_memory_is_not_readable_at_its_own_addresses() {
+        let held = orbistoun_kernel::direct::map()
+            .lock()
+            .is_ok_and(|map| map.regions().iter().any(|r| r.allocated && r.start == 0));
+        assert!(held, "the default shape takes the low physical span");
+        super::install_guest_region_lookups();
+        assert!(!orbistoun_gpu::agc_driver::guest_readable(4, 0x40));
     }
 
     /// Pad state survives the wire intact, and the worker answers nothing on the way.

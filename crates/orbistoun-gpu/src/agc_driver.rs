@@ -187,16 +187,23 @@ fn guest_regions() -> &'static Mutex<Vec<(u64, u64)>> {
     REGIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Record the regions a submit may read from - the allocated regions of the guest's memory map.
+/// Record regions a submit may read from beside the live lookup - guest virtual spans, which a
+/// harness holding its own memory sets.
 ///
-/// The worker calls this before entering the guest, from the map it records as `memory_map` in the
-/// run conditions. A shader address inside a region is read and counted resolved; one outside
-/// reads `None` and is counted unresolved (D130). Neither faults the host. Empty (the default),
-/// nothing resolves.
+/// A shader address inside a region is read and counted resolved; one outside reads `None` and is
+/// counted unresolved (D130). Neither faults the host. Empty (the default), only the live lookup
+/// resolves.
 pub fn set_guest_regions(regions: Vec<(u64, u64)>) {
     if let Ok(mut slot) = guest_regions().lock() {
         *slot = regions;
     }
+}
+
+/// Whether a submit would read `[address, address + length)` as guest memory: inside a region set at
+/// entry, or one the installed live lookup vouches for.
+#[must_use]
+pub fn guest_readable(address: u64, length: usize) -> bool {
+    MappedRegions::current().contains(address, length)
 }
 
 /// Whether a range is readable guest memory as the run stands now - installed by the worker, which
