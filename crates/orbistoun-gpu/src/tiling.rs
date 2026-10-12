@@ -343,7 +343,7 @@ pub fn tiled_byte_offset_4kb_s_bpp4(x: u32, y: u32, width: u32) -> usize {
 /// (`gfx10SwizzlePattern.h`, `GFX10_SW_64K_S_RBPLUS_PATINFO` rows `{1, 2, 3, 3, 0}`): nibbles 0-1
 /// row 2 put x0, x1, y0, y1, y2, x2 in bits 2-7, nibble 2 row 3 y3, x3, y4, x4 in bits 8-11, and
 /// nibble 3 row 3 y5, x5, y6, x6 in bits 12-15 - the `4KB_S` equation's twelve bits, continued.
-/// The same rows at sixteen bytes (`{1, 4, 5, 5, 0}`) give [`S_BPP16_X_BITS`].
+/// The same rows at sixteen bytes (`{1, 4, 5, 5, 0}`) give [`tiled_byte_offset_64kb_s_bpp16`]'s places.
 #[must_use]
 pub fn tiled_byte_offset_64kb_s_bpp4(x: u32, y: u32, width: u32) -> usize {
     const X_BITS: [usize; 7] = [0x4, 0x8, 0x80, 0x200, 0x800, 0x2000, 0x8000];
