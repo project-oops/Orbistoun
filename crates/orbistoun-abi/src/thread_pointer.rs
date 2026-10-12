@@ -53,9 +53,19 @@ pub fn processor_supports_base_writes() -> bool {
     false
 }
 
+/// How many times an install writes a dropped base before answering [`Unsupported::NotRetained`].
+///
+/// Windows resets a user-set base when it switches the thread out, so a switch landing between the
+/// write and the read-back drops a base that is in fact kept. Each attempt is two instructions; a
+/// run of them losing every time means the base is not kept at all.
+const INSTALL_ATTEMPTS: usize = 16;
+
 /// Points the `fs` base at `address`.
 ///
-/// Affects only the calling thread; each guest thread installs its own.
+/// Affects only the calling thread; each guest thread installs its own. A base that does not read
+/// back is written again, up to `INSTALL_ATTEMPTS` times: a spawned thread whose one write lost
+/// that race started with no thread pointer to restore, and faulted on its first thread-local read
+/// (PPSA25872, `fs:[0]` reading zero on a new thread).
 ///
 /// # Errors
 ///
@@ -72,28 +82,29 @@ pub unsafe fn install(address: u64) -> Result<(), Unsupported> {
     if !processor_supports_base_writes() {
         return Err(Unsupported::NoProcessorSupport);
     }
-    // SAFETY: the caller guarantees the address is a live thread-local block laid out as this
-    // crate expects. `wrfsbase` affects only this thread's segment base, and the processor
-    // feature was just checked.
-    // Emitted as raw bytes: the intrinsic is unstable on this toolchain, and the mnemonic needs
-    // the feature enabled for the whole translation unit, which would let the compiler emit it
-    // elsewhere.
-    unsafe {
-        core::arch::asm!(
-            "mov rax, {base}",
-            ".byte 0xF3, 0x48, 0x0F, 0xAE, 0xD0", // wrfsbase rax
-            base = in(reg) address,
-            out("rax") _,
-            options(nostack, preserves_flags),
-        );
+    for _ in 0..INSTALL_ATTEMPTS {
+        // SAFETY: the caller guarantees the address is a live thread-local block laid out as this
+        // crate expects. `wrfsbase` affects only this thread's segment base, and the processor
+        // feature was just checked.
+        // Emitted as raw bytes: the intrinsic is unstable on this toolchain, and the mnemonic needs
+        // the feature enabled for the whole translation unit, which would let the compiler emit it
+        // elsewhere.
+        unsafe {
+            core::arch::asm!(
+                "mov rax, {base}",
+                ".byte 0xF3, 0x48, 0x0F, 0xAE, 0xD0", // wrfsbase rax
+                base = in(reg) address,
+                out("rax") _,
+                options(nostack, preserves_flags),
+            );
+        }
+        // Read back, as the module promises: a write the system discards would otherwise look like
+        // success and leave `fs:` pointing at the host's block.
+        if current() == Some(address) {
+            return Ok(());
+        }
     }
-    // Read back, as the module promises: a write the system discards would otherwise look like
-    // success and leave `fs:` pointing at the host's block.
-    if current() == Some(address) {
-        Ok(())
-    } else {
-        Err(Unsupported::NotRetained)
-    }
+    Err(Unsupported::NotRetained)
 }
 
 /// Points the `fs` base at `address`.
