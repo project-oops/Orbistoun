@@ -13,7 +13,7 @@
 //! and the call path does relaxed atomic adds. A bounded ring keeps calls in order, because the
 //! sequence says what the guest was trying to do.
 
-use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use orbistoun_core::GuestError;
 
@@ -1489,13 +1489,70 @@ unsafe extern "sysv64" fn on_guest_call(
 /// afresh on whichever thread is running.
 #[inline(never)]
 fn enter_import(index: u64) -> u32 {
-    INSIDE.with(|inside| inside.replace((index as u32).wrapping_add(1)))
+    let entered = (index as u32).wrapping_add(1);
+    publish_inside(entered);
+    INSIDE.with(|inside| inside.replace(entered))
 }
 
 /// Puts back what `enter_import` answered, on the thread running now.
 #[inline(never)]
 fn leave_import(outer: u32) {
+    publish_inside(outer);
     INSIDE.with(|inside| inside.set(outer));
+}
+
+/// How many host threads [`threads_inside`] can answer for; a thread past them is not published.
+const PUBLISHED_THREADS: usize = 512;
+
+/// Each published host thread's identifier, by its slot; zero for a slot not yet claimed.
+static PUBLISHED_HOST: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+/// The import each published thread is inside, plus one, as [`INSIDE`] holds it on that thread.
+static PUBLISHED_INSIDE: [AtomicU32; PUBLISHED_THREADS] =
+    [const { AtomicU32::new(0) }; PUBLISHED_THREADS];
+/// The next slot a thread claims.
+static PUBLISHED_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// This thread's slot in the published table, plus one; zero until its first call.
+    static PUBLISHED_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Publishes what this thread is inside, so another thread - the report - can say what a quiet
+/// thread is blocked in (D806). One relaxed store a call end, and a slot claimed on a thread's
+/// first call.
+fn publish_inside(value: u32) {
+    let slot = PUBLISHED_SLOT.with(|slot| {
+        if slot.get() == 0 {
+            let claimed = PUBLISHED_CLAIMED.fetch_add(1, Ordering::Relaxed);
+            if claimed < PUBLISHED_THREADS {
+                PUBLISHED_HOST[claimed].store(host_thread(), Ordering::Relaxed);
+            }
+            slot.set(claimed + 1);
+        }
+        slot.get() - 1
+    });
+    if let Some(published) = PUBLISHED_INSIDE.get(slot) {
+        published.store(value, Ordering::Relaxed);
+    }
+}
+
+/// Every host thread that is inside an import now, and the import's index: what a thread blocked
+/// in a call is blocked in, however long ago it made the call (D806).
+#[must_use]
+pub fn threads_inside() -> Vec<(u64, u32)> {
+    let claimed = PUBLISHED_CLAIMED
+        .load(Ordering::Relaxed)
+        .min(PUBLISHED_THREADS);
+    (0..claimed)
+        .filter_map(|slot| {
+            let host = PUBLISHED_HOST[slot].load(Ordering::Relaxed);
+            let index = PUBLISHED_INSIDE[slot]
+                .load(Ordering::Relaxed)
+                .checked_sub(1)?;
+            (host != 0).then_some((host, index))
+        })
+        .collect()
 }
 
 /// Counts one call of `index` and, for its first calls, folds its argument shapes in.
@@ -1753,6 +1810,26 @@ mod tests {
         install_float_handlers, is_implemented, trampoline_address,
     };
     use std::sync::atomic::Ordering;
+
+    /// A thread inside an import is published as inside it, so a report read on another thread
+    /// names what a thread blocked in a call is blocked in (D806); leaving it unpublishes it.
+    #[test]
+    fn a_thread_inside_a_call_is_published() {
+        let (inside, after) = std::thread::spawn(|| {
+            let outer = super::enter_import(4242);
+            let host = super::host_thread();
+            let inside = super::threads_inside().contains(&(host, 4242));
+            super::leave_import(outer);
+            let after = super::threads_inside()
+                .iter()
+                .any(|&(thread, _)| thread == host);
+            (inside, after)
+        })
+        .join()
+        .expect("the thread ran");
+        assert!(inside, "published while inside");
+        assert!(!after, "not published once it left");
+    }
 
     /// A slot's sequence is stored offset by one, so an untouched slot is empty rather than call
     /// zero.

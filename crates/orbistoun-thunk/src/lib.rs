@@ -21,7 +21,7 @@ pub use dispatch::{
     install_forced_returns, install_forced_writes, install_handlers, install_policy_returns,
     install_policy_writes, install_readable_ranges, install_stub_returns, install_writable_ranges,
     is_implemented, is_mapped, last_call, note_readable_range, opening_calls, opening_sequence,
-    ranges_known, readable_span, recorded_calls, stack_arguments, total_calls,
+    ranges_known, readable_span, recorded_calls, stack_arguments, threads_inside, total_calls,
 };
 
 use orbistoun_mem::{AddressSpace, MemError, Protection};

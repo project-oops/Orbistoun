@@ -2370,6 +2370,7 @@ fn tail_of_recorded() -> Vec<TracedCall> {
 /// thread, and only together do they say which named thread went quiet.
 fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
     let recorded = orbistoun_thunk::recorded_calls();
+    let inside = orbistoun_thunk::threads_inside();
     orbistoun_kernel::thread::all()
         .into_iter()
         .map(|record| {
@@ -2383,6 +2384,10 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
                 finished: record.finished,
                 last_call: newest.map(|call| labelled(call.index as usize)),
                 last_sequence: newest.map(|call| call.sequence),
+                inside: inside
+                    .iter()
+                    .find(|&&(host, _)| record.host != 0 && host == record.host)
+                    .map(|&(_, index)| labelled(index as usize)),
             }
         })
         .collect()

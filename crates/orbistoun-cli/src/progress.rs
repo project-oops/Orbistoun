@@ -340,13 +340,18 @@ fn print_threads(trace: &orbistoun_report::trace::CallTrace) {
         } else {
             format!("x{}", notes.len())
         };
-        let tail = match newest {
-            Some(note) => format!(
+        let blocked = notes.iter().find_map(|n| n.inside.as_deref());
+        let tail = match (newest, blocked) {
+            (Some(note), _) => format!(
                 "last called {} at {}",
                 note.last_call.as_deref().unwrap_or("?"),
                 note.last_sequence.unwrap_or(0)
             ),
-            None => format!(
+            (None, Some(call)) => format!(
+                "inside {call}, from before the last {} calls of the run",
+                orbistoun_report::trace::TAIL_CALLS
+            ),
+            (None, None) => format!(
                 "no call in the last {} of the run",
                 orbistoun_report::trace::TAIL_CALLS
             ),

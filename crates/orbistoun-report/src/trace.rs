@@ -199,6 +199,10 @@ pub struct ThreadNote {
     /// Where that call sits in the run's order, for reading against the tail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sequence: Option<u64>,
+    /// The call it was inside when the run ended, however long before it made it (D806): what a
+    /// thread blocked in a call is blocked in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside: Option<String>,
 }
 
 /// What the guest's calls looked like against the System V convention.
