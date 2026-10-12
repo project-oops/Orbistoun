@@ -896,8 +896,13 @@ fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> 
     runs
 }
 
+/// Bytes to write at a guest address.
+type GuestWrite = (u64, Vec<u8>);
+
 /// What a dispatch's own buffers write back (D746): each one's changed words, at its guest range,
-/// the last cut where the range ends inside it.
+/// the last cut where the range ends inside it - and, for a buffer it changed and left holding one
+/// word throughout, that word as a fill of the whole range instead (D804), which a later reader of
+/// the range is answered without the bytes being written.
 ///
 /// # Errors
 ///
@@ -906,16 +911,29 @@ fn buffer_writes(
     ranges: &[(u64, u64)],
     before: &[Vec<u32>],
     after: &[Vec<u32>],
-) -> Result<Vec<(u64, Vec<u8>)>, String> {
+) -> Result<(Vec<GuestWrite>, Vec<cp::Fill>), String> {
     if after.len() != before.len() {
         return Err("the device answered another number of buffers".to_owned());
     }
     let mut writes = Vec::new();
+    let mut fills = Vec::new();
     for ((&(address, bytes), before), after) in ranges.iter().zip(before).zip(after) {
         if after.len() != before.len() {
             return Err("the device answered a buffer of another size".to_owned());
         }
-        for (first, words) in changed_runs(before, after) {
+        let runs = changed_runs(before, after);
+        if let Some((&pattern, rest)) = after.split_first()
+            && !runs.is_empty()
+            && rest.iter().all(|&word| word == pattern)
+        {
+            fills.push(cp::Fill {
+                destination: address,
+                pattern,
+                count: bytes,
+            });
+            continue;
+        }
+        for (first, words) in runs {
             let mut changed: Vec<u8> = after[first..first + words]
                 .iter()
                 .flat_map(|w| w.to_le_bytes())
@@ -926,7 +944,7 @@ fn buffer_writes(
             writes.push((address + start, changed));
         }
     }
-    Ok(writes)
+    Ok((writes, fills))
 }
 
 /// Each of a dispatch's own buffers its run left holding one word throughout, as the fill it
@@ -1031,22 +1049,30 @@ impl GuestCp<'_> {
                 writes.push((base + first as u64 * 4, bytes));
             }
         }
-        writes.extend(buffer_writes(
-            &prepared.buffers,
-            &buffers_before,
-            &buffers_after,
-        )?);
+        let (buffer_writes, buffer_fills) =
+            buffer_writes(&prepared.buffers, &buffers_before, &buffers_after)?;
+        writes.extend(buffer_writes);
         writes.extend(stored_image_writes(&prepared.images, stored)?);
         let writable = write_lookup().get();
+        let allowed = |at: u64, bytes: u64| writable.is_some_and(|allows| allows(at, bytes));
         if !writes
             .iter()
-            .all(|(at, bytes)| writable.is_some_and(|allows| allows(*at, bytes.len() as u64)))
+            .all(|(at, bytes)| allowed(*at, bytes.len() as u64))
+            || !buffer_fills
+                .iter()
+                .all(|fill| allowed(fill.destination, fill.count))
         {
             return Err("it wrote guest memory that is not writable".to_owned());
         }
         for (at, bytes) in writes {
             if !cp::CpMemory::write(self, at, &bytes) {
                 return Err("a write back into guest memory was refused".to_owned());
+            }
+        }
+        for fill in &buffer_fills {
+            let count = usize::try_from(fill.count).map_err(|_| "a fill past this host's reach")?;
+            if !cp::CpMemory::fill(self, fill.destination, fill.pattern, count) {
+                return Err("a fill back into guest memory was refused".to_owned());
             }
         }
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
@@ -2958,6 +2984,26 @@ mod tests {
             &crate::pipeline::Submission::default()
         ));
         assert!(super::writable_target(&with(0x0001_8000)).is_none());
+    }
+
+    /// A dispatch's buffer it changed and left holding one word throughout is written back as a
+    /// fill of its whole range (D804), as PPSA28061's per-frame clear of its display buffer is;
+    /// one with two words in it writes its changed runs, and one it left as it was writes nothing.
+    #[test]
+    fn a_buffer_cleared_by_a_dispatch_is_written_back_as_a_fill() {
+        let ranges = [(0x1000, 10), (0x2000, 8), (0x3000, 8)];
+        let before = [vec![7, 0, 7], vec![1, 1], vec![5, 5]];
+        let after = [vec![0, 0, 0], vec![1, 2], vec![5, 5]];
+        let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
+        assert_eq!(
+            fills,
+            [crate::cp::Fill {
+                destination: 0x1000,
+                pattern: 0,
+                count: 10,
+            }]
+        );
+        assert_eq!(writes, [(0x2004, 2u32.to_le_bytes().to_vec())]);
     }
 
     /// A dispatch's buffer left holding one word throughout is a fill of it, whatever it held
