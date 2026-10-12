@@ -4,7 +4,6 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Retail title walls
 
-- PPSA25872: runs to its 120 s limit with one flip and 8.7 million calls (`compat/PPSA25872-app0/report.toml`); what holds up the second flip is not recorded.
 - PPSA04263: an `int 0x41` assertion at image+0x2bf156c after `sceAgcDriverSetTFRing`, which orbistoun answers 0 without setting anything up.
 - PPSA04263: the IME update and user-service game-preset stubs need measured values.
 - PPSA21564: the record ends at image+0x2990db, measured 2026-09-28 at a 20 s limit; no cause is recorded.
