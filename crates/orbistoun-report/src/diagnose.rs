@@ -77,6 +77,12 @@ pub enum Gap {
     /// says what the command stream holds, so the next work (translating the shaders its registers
     /// name, then a backend to run them) is ranked rather than guessed at.
     Submitted,
+    /// Something the host failed to do while the guest was satisfied: audio no device played, a
+    /// flipped frame the window could not show, a gamepad nothing reads.
+    ///
+    /// No guest call fails for these, so no other finding names them, and they are most of the
+    /// distance between a title that presents and one that plays.
+    HostCapability,
 }
 
 impl Gap {
@@ -98,6 +104,9 @@ impl Gap {
             Self::LinkMismatch => "crates/orbistoun-loader, and what linking reads that varies",
             Self::Captured => "the implementation you asked about",
             Self::Submitted => "crates/orbistoun-gpu and its pipeline, then a backend crate",
+            Self::HostCapability => {
+                "the host side the finding names: an audio sink, the display path, the input reader"
+            }
         }
     }
 }
@@ -219,6 +228,7 @@ pub fn findings(trace: &CallTrace) -> Vec<Finding> {
     out.extend(faulted(trace));
     out.extend(unnamed(trace));
     out.extend(unimplemented(trace));
+    out.extend(host_capabilities(trace));
     // Last, because it asks what the others already claim: an unimplemented import keeps its dump
     // where it is shown.
     let claimed = captured(trace, &out);
@@ -1013,6 +1023,96 @@ fn short_reads(trace: &CallTrace) -> Option<Finding> {
     })
 }
 
+/// The calls through which a guest hands audio to an output, by trace label. orbistoun paces each
+/// by its sample rate and plays none of them.
+const AUDIO_OUTPUT_CALLS: [&str; 3] = [
+    "libSceAudioOut::sceAudioOutOutput",
+    "libSceAudioOut::sceAudioOutOutputs",
+    "libSceAudioOut2::sceAudioOut2ContextPush",
+];
+
+/// What the host failed to do while the guest was satisfied: audio no device played, a flipped
+/// frame the window could not show, pad ports set to a gamepad nothing reads.
+///
+/// No guest call fails for any of these, so without this nothing in a run names them. Each is
+/// certain from the trace; each is weighted zero, so it ranks below every wall of its confidence:
+/// a silent title still runs, and the wall is what stops it.
+fn host_capabilities(trace: &CallTrace) -> Vec<Finding> {
+    let mut out = Vec::new();
+
+    let audio: Vec<&crate::trace::CalledImport> = trace
+        .calls
+        .iter()
+        .filter(|c| c.calls > 0 && AUDIO_OUTPUT_CALLS.contains(&c.label.as_str()))
+        .collect();
+    let buffers: u64 = audio.iter().map(|c| c.calls).sum();
+    if buffers > 0 {
+        out.push(Finding {
+            gap: Gap::HostCapability,
+            confidence: Confidence::Certain,
+            subject: Some("audio output".to_owned()),
+            what: format!(
+                "the guest handed {buffers} audio buffer(s) to an output, and no host device played any of them"
+            ),
+            evidence: audio
+                .iter()
+                .map(|c| format!("{}: {} call(s)", c.label, c.calls))
+                .chain(std::iter::once(
+                    "orbistoun-audio paces output by its sample rate and opens no device".to_owned(),
+                ))
+                .collect(),
+            action: Some(
+                "add a host audio sink behind the paced ports (REQ-20261012T1848Z-0127); the title is silent until then"
+                    .to_owned(),
+            ),
+            weight: 0,
+        });
+    }
+
+    if trace.frame_showable == Some(false) {
+        out.push(Finding {
+            gap: Gap::HostCapability,
+            confidence: Confidence::Certain,
+            subject: Some("display".to_owned()),
+            what: "the window could not show the buffer the guest last flipped".to_owned(),
+            evidence: vec![
+                format!("the flipped buffer: {}", trace.flipped_buffer),
+                format!(
+                    "{} flip(s) counted, so the run reaches its rung while the window stays empty",
+                    trace.frames
+                ),
+            ],
+            action: Some(
+                "decode this scanout format and tiling in the worker's display path (D784), or measure what the console shows for it"
+                    .to_owned(),
+            ),
+            weight: 0,
+        });
+    }
+
+    let gamepads = trace.conditions.gamepad_ports;
+    if gamepads > 0 {
+        out.push(Finding {
+            gap: Gap::HostCapability,
+            confidence: Confidence::Certain,
+            subject: Some("input".to_owned()),
+            what: format!(
+                "{gamepads} pad port(s) are set to a host gamepad, and no host gamepad is read"
+            ),
+            evidence: vec![
+                "the input reader answers a gamepad port with a neutral pad".to_owned(),
+            ],
+            action: Some(
+                "read a host gamepad in orbistoun-gui's input reader (REQ-20261012T1804Z-5774); until then drive those ports from the keyboard or a script"
+                    .to_owned(),
+            ),
+            weight: 0,
+        });
+    }
+
+    out
+}
+
 /// The title linked differently from its stored plan under the same key.
 ///
 /// Ranked above everything: every other finding describes a guest linked in a way no earlier run
@@ -1354,6 +1454,69 @@ mod tests {
         assert_eq!(submission.weight, 40, "ranked by packet count");
     }
 
+    /// Each host gap is a finding when the trace shows it, with an arrow, and nothing else is: an
+    /// ordinary run without audio, an unshowable flip or a gamepad port has none. Each ranks below
+    /// a wall of its confidence.
+    #[test]
+    fn host_gaps_are_findings_only_where_the_trace_shows_them() {
+        let host = |trace: &CallTrace| -> Vec<super::Finding> {
+            findings(trace)
+                .into_iter()
+                .filter(|f| f.gap == Gap::HostCapability)
+                .collect()
+        };
+        assert!(host(&empty()).is_empty(), "an ordinary run has no host gap");
+
+        let mut trace = empty();
+        trace.calls = vec![
+            CalledImport {
+                index: 0,
+                label: "libSceAudioOut2::sceAudioOut2ContextPush".to_owned(),
+                calls: 64_377,
+                implemented: false,
+                shape: String::new(),
+            },
+            CalledImport {
+                index: 1,
+                label: "libSceAudioOut::sceAudioOutOutput".to_owned(),
+                calls: 23,
+                implemented: true,
+                shape: String::new(),
+            },
+        ];
+        trace.frames = 3;
+        trace.frame_showable = Some(false);
+        trace.flipped_buffer =
+            "3840x2160, scanout format 0x8100000000000000, video-out tiling 0".to_owned();
+        trace.conditions.gamepad_ports = 1;
+
+        let found = host(&trace);
+        let subjects: Vec<&str> = found.iter().filter_map(|f| f.subject.as_deref()).collect();
+        assert_eq!(subjects, ["audio output", "display", "input"]);
+        assert!(
+            found[0].what.contains("64400 audio buffer(s)"),
+            "{}",
+            found[0].what
+        );
+        assert!(
+            found[1]
+                .evidence
+                .iter()
+                .any(|e| e.contains("0x8100000000000000")),
+            "{:?}",
+            found[1].evidence
+        );
+        assert!(found.iter().all(|f| f.action.is_some() && f.weight == 0));
+
+        // A flip the window could show is no finding.
+        trace.frame_showable = Some(true);
+        assert!(
+            !host(&trace)
+                .iter()
+                .any(|f| f.subject.as_deref() == Some("display"))
+        );
+    }
+
     /// The register that was the null pointer is named, and a register whose value merely matches
     /// the address arithmetic is not.
     #[test]
@@ -1438,6 +1601,7 @@ mod tests {
             frame_written: false,
             presented_by: String::new(),
             frame_showable: None,
+            flipped_buffer: String::new(),
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -2216,6 +2380,7 @@ mod tests {
             frame_written: false,
             presented_by: String::new(),
             frame_showable: None,
+            flipped_buffer: String::new(),
             submission: None,
             calls: vec![
                 CalledImport {

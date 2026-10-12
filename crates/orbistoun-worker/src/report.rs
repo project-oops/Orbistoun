@@ -2259,6 +2259,14 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
         presented_by: presented_by.unwrap_or_default().to_owned(),
         // Decided at each flip, so it holds for a run with no window.
         frame_showable: (frames > 0).then(crate::render::last_flip_showable),
+        flipped_buffer: orbistoun_video::last_flipped_buffer()
+            .map(|(_, shape)| {
+                format!(
+                    "{}x{}, scanout format {:#x}, video-out tiling {}",
+                    shape.width, shape.height, shape.format, shape.tiling
+                )
+            })
+            .unwrap_or_default(),
         // The first command buffer a guest handed to `sceAgcDriverSubmitDcb`, summarised.
         submission: submission_summary(),
         // Recorded, not just printed, so a guest that talks to the kernel by number leaves

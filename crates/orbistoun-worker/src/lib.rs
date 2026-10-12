@@ -1034,6 +1034,14 @@ fn record_run_conditions(service: &Service, limits: Limits) -> experiment::Exper
         link_plan_stored: String::new(),
         link_plan_differs: Vec::new(),
         link_syscalls: 0,
+        // A port set to a host gamepad answers a neutral pad, since none is read yet: a host gap
+        // the report names, which no guest call would show.
+        gamepad_ports: service
+            .pads()
+            .ports
+            .iter()
+            .filter(|port| matches!(port.source, orbistoun_input::Source::Gamepad { .. }))
+            .count(),
     });
     experiments
 }

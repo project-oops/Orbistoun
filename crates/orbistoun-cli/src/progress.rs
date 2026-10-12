@@ -176,7 +176,7 @@ fn findings_to_show(setting: Option<String>) -> usize {
 /// Rendered from the same structured findings the trace holds, so a person and a machine read the
 /// same thing (D179).
 fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
-    use orbistoun_report::diagnose::Confidence;
+    use orbistoun_report::diagnose::{Confidence, Gap};
 
     let findings = orbistoun_report::diagnose::findings(trace);
     if findings.is_empty() {
@@ -185,16 +185,14 @@ fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
     println!();
     println!("what to do about it");
     // Findings asked for with `ORBISTOUN_DUMP` (`Gap::Captured`) are always shown and never count
-    // against the cap, which applies only to findings the tool volunteered.
-    let (asked, volunteered): (Vec<_>, Vec<_>) = findings
-        .iter()
-        .partition(|f| f.gap == orbistoun_report::diagnose::Gap::Captured);
+    // against the cap, which applies only to findings the tool volunteered. Host gaps are always
+    // shown too, in a block of their own after the walls: they rank below every wall, and a cap
+    // would hide the one place a silent title or an empty window is named.
+    let (asked, rest): (Vec<_>, Vec<_>) = findings.iter().partition(|f| f.gap == Gap::Captured);
+    let (host, volunteered): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(|f| f.gap == Gap::HostCapability);
     let shown = findings_to_show(orbistoun_env::FINDINGS.get());
-    for finding in asked
-        .iter()
-        .copied()
-        .chain(volunteered.iter().copied().take(shown))
-    {
+    let print = |finding: &orbistoun_report::diagnose::Finding| {
         let mark = match finding.confidence {
             Confidence::Certain => "!",
             Confidence::Likely => "?",
@@ -215,9 +213,23 @@ fn print_findings(trace: &orbistoun_report::trace::CallTrace) {
         if let Some(action) = &finding.action {
             println!("    -> {action}");
         }
+    };
+    for finding in asked
+        .iter()
+        .copied()
+        .chain(volunteered.iter().copied().take(shown))
+    {
+        print(finding);
     }
     if volunteered.len() > shown {
         println!("  ... and {} more", volunteered.len() - shown);
+    }
+    if !host.is_empty() {
+        println!();
+        println!("on the host");
+        for finding in host {
+            print(finding);
+        }
     }
 }
 

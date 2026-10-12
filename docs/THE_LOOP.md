@@ -105,7 +105,10 @@ the file is shown absent from the place the run reads: the resolved data directo
     or `BACK`. When the two runs applied different link plans, the verdict says so, so a loader
     change is never read as the effect of an implementation.
 16. The findings are printed, ranked worst first: what went wrong, the evidence, and what to
-    do about it.
+    do about it. After them, under "on the host", come the gaps no guest call shows: audio no
+    device played, a flipped buffer the window could not show, pad ports set to a gamepad
+    nothing reads. They rank below every wall, since a silent title still runs, and are always
+    printed, since nothing else names them.
 17. A person reads the top finding. `orbistoun-turn` has already run the mechanical sweeps
     against it. If what is left is an unmeasured interface or structure, the next step is a
     hardware probe question rather than a guess, filed as a census row batched with the other

@@ -45,6 +45,10 @@ pub struct CallTrace {
     /// attached or not. `None` when nothing flipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_showable: Option<bool>,
+    /// The buffer the guest last flipped, in words: its extent, scanout format and video-out
+    /// tiling. Empty when nothing flipped. What a reader needs when the window could not show it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub flipped_buffer: String,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
     /// Every system call the guest made directly, not through a stub.
@@ -594,6 +598,12 @@ pub struct Conditions {
     /// routes, found before the guest ran.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub link_syscalls: usize,
+    /// Pad ports this run's configuration drives from a host gamepad.
+    ///
+    /// Recorded because no host gamepad is read yet, so such a port answers a neutral pad: a host
+    /// gap no guest call shows.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gamepad_ports: usize,
 }
 
 impl Conditions {
@@ -1632,6 +1642,7 @@ mod tests {
             frame_written: false,
             presented_by: String::new(),
             frame_showable: None,
+            flipped_buffer: String::new(),
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -1883,6 +1894,7 @@ mod tests {
             link_plan_stored: "new".to_owned(),
             link_plan_differs: Vec::new(),
             link_syscalls: 0,
+            gamepad_ports: 0,
         };
         let before = under(conditions.clone());
         // The first run stored the plan the second matched: the same link.

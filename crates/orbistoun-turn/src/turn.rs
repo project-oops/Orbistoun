@@ -213,6 +213,12 @@ pub fn step(finding: &Finding) -> Step {
                 "can sweep"
             ),
         },
+        Gap::HostCapability => Step::Person {
+            why: concat!(
+                "a host capability - an audio sink, a display decode, a gamepad reader - is ",
+                "engineering on the host side, and no diagnostic of the guest supplies it"
+            ),
+        },
     }
 }
 
