@@ -3575,6 +3575,11 @@ mod tests {
     /// These tests share the process-global region and last-submission stores, the last-written
     /// target and its write protection, so they run one at a time - any test reaching `draw_over`,
     /// `read_target` or a submission included. A poisoned lock is recovered rather than cascading a panic across the others.
+    ///
+    /// Each test starts with no frame bookkeeping left by the one before, finished or panicked:
+    /// deferred copies and protection are kept by whole host pages, and a page one test left
+    /// guarded can hold the next test's freshly allocated buffer. That copy is then carried out
+    /// under the next test's write allowance, refused, and fails whatever touched the page.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         let guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3586,6 +3591,22 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        *super::last_written()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        // The fake protection changes no page, so forgetting it restores nothing.
+        *super::write_protected()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        super::deferred()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        super::resolved()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        super::set_pending(None);
         guard
     }
 
@@ -3741,6 +3762,16 @@ mod tests {
     fn region_of(buffer: &[u8]) -> (u64, u64) {
         let base = buffer.as_ptr() as usize as u64;
         (base, base + buffer.len() as u64)
+    }
+
+    /// A leaked buffer of `len` bytes holding `byte`, starting off a host page, so a fill over it is
+    /// carried out at once rather than deferred (D719). Where a heap buffer starts is the
+    /// allocator's choice, and one that happened to be page-aligned would have its fill deferred.
+    fn off_page(len: usize, byte: u8) -> &'static mut [u8] {
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![byte; len + 2 * page].into_boxed_slice());
+        let at = (page - memory.as_ptr() as usize % page) % page + 0x100;
+        &mut memory[at..at + len]
     }
 
     /// Two `SET_CONTEXT_REG` packets (`0xc0016900`, offset, value), as the guest would have built.
@@ -4126,7 +4157,7 @@ mod tests {
             place: crate::registers::Place::Whole,
         };
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
-        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span].into_boxed_slice());
+        let memory = off_page(span, 0xAA);
         let base = memory.as_ptr() as usize as u64;
         let target = ColourTarget { base, ..target };
         allow_writes_to(base, span as u64);
@@ -4634,8 +4665,7 @@ mod tests {
             (16, 8, 1, 0x1_0000, 0x1000),
             (256, 128, 3, 0x4_0000, 0x3000),
         ] {
-            let buffer: &'static mut [u8] =
-                Box::leak(vec![0u8; span + keys + 0x2000].into_boxed_slice());
+            let buffer = off_page(span + keys + 0x2000, 0);
             let buffer_at = buffer.as_ptr() as usize as u64;
             allow_writes_to(buffer_at, buffer.len() as u64);
             set_guest_regions(vec![region_of(buffer)]);
@@ -4701,7 +4731,7 @@ mod tests {
         use std::sync::Arc;
         let _guard = serial();
         let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
-        let memory: &'static mut [u8] = Box::leak(vec![0u8; span].into_boxed_slice());
+        let memory = off_page(span, 0);
         let base = memory.as_ptr() as usize as u64;
         allow_writes_to(base, span as u64);
         let target = ColourTarget {
