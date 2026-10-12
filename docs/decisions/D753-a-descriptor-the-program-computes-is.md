@@ -16,7 +16,9 @@ The prefix runs through the translator's own instruction semantics, driven by a 
 are numbers rather than SPIR-V. Nothing about an instruction is written twice. A value the prefix
 cannot know on the host is unknown, and an access that depends on one is refused by name, as an
 untraced one is. Such values are a vector result written to a scalar, the execution mask at entry
-(which differs from wave to wave), and anything after a branch. A scalar load reads guest memory as
+(which differs from wave to wave), and anything after a branch whose condition the host cannot
+know; a branch on a known condition code, and `s_branch`, is followed, as a lane run follows one
+(D758). A scalar load reads guest memory as
 the draw's snapshot of it holds.
 
 **Why:** PPSA28061's vertex shader is a fetch shader. It loads its vertex descriptor from a table at

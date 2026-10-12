@@ -49,12 +49,15 @@ const LOGICAL_NOT_EQUAL: u16 = 165;
 /// What each scalar register code holds after a prefix, where the host can know it.
 pub type Scalars = [Option<u32>; SCALAR_CODES];
 
-/// Runs `decode`'s instructions before byte `until` over a stage whose user-data words land from
-/// scalar register `first_register`, reading guest memory word by word through `read`.
+/// Runs `decode`'s instructions up to byte `until` over a stage whose user-data words land from
+/// scalar register `first_register`, reading guest memory word by word through `read`. A branch
+/// whose condition the host knows - `s_branch`, and `s_cbranch_scc0`/`scc1` on a known condition
+/// code - is followed, as [`lane_addresses`] follows one (D758).
 ///
 /// # Errors
 ///
-/// A reason, where the prefix branches: control flow past a branch is not followed.
+/// A reason, where the prefix branches on what the host cannot know, jumps to a computed address,
+/// branches past the access, or runs longer than its program allows.
 pub fn scalar_prefix(
     decode: &Decode,
     encodings: &EncodingTable,
@@ -68,17 +71,50 @@ pub fn scalar_prefix(
             model.scalars[register] = Some(*word);
         }
     }
-    for instruction in decode
-        .instructions
-        .iter()
-        .take_while(|instruction| instruction.offset < until)
-    {
+    let mut at = 0usize;
+    // A bound on the steps, since a known branch can go backwards.
+    let mut steps = 0usize;
+    while let Some(instruction) = decode.instructions.get(at) {
+        if instruction.offset == until {
+            break;
+        }
+        if instruction.offset > until {
+            return Err("the program branches past the access (D753)");
+        }
+        steps += 1;
+        if steps > 4 * decode.instructions.len() {
+            return Err("the program loops before the access (D753)");
+        }
+        at += 1;
         let Some((family, name)) = named(encodings, instruction) else {
             return Err("an instruction before the access has no name (D753)");
         };
         match family {
             "SOPP" if branches(name) => {
-                return Err("the program branches before the access, which is not followed (D753)");
+                let taken = match name {
+                    "s_branch" => Some(true),
+                    "s_cbranch_scc0" => model.condition.map(|scc| scc == 0),
+                    "s_cbranch_scc1" => model.condition.map(|scc| scc != 0),
+                    "s_cbranch_vccz" => vcc_set(&model.scalars).map(|set| !set),
+                    "s_cbranch_vccnz" => vcc_set(&model.scalars),
+                    _ => None,
+                };
+                let Some(taken) = taken else {
+                    return Err(
+                        "the program branches before the access on what the host cannot know (D753)",
+                    );
+                };
+                if taken {
+                    let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
+                        return Err("a branch with no target (D753)");
+                    };
+                    let target = i64::from(instruction.offset) + 4 + 4 * jump;
+                    at = decode
+                        .instructions
+                        .iter()
+                        .position(|i| i64::from(i.offset) == target)
+                        .ok_or("a branch into the middle of an instruction (D753)")?;
+                }
             }
             "SOPP" => {}
             "SMEM" => model.scalar_load(instruction, name, read),
@@ -100,6 +136,17 @@ pub fn scalar_prefix(
         }
     }
     Ok(model.scalars)
+}
+
+/// Whether the condition mask is non-zero, where the scalar registers say: a known non-zero low half
+/// says so alone, and both halves known say either way.
+fn vcc_set(scalars: &Scalars) -> Option<bool> {
+    match (scalars[VCC], scalars[VCC + 1]) {
+        (Some(low), _) if low != 0 => Some(true),
+        (_, Some(high)) if high != 0 => Some(true),
+        (Some(_), Some(_)) => Some(false),
+        _ => None,
+    }
 }
 
 /// The addresses a primitive shader's global loads read, for one draw: each load's byte offset in
@@ -1210,6 +1257,56 @@ mod tests {
         // Four components, so the branch skips the three-component load.
         assert_eq!(run(64), Ok(vec![(loads[1], expected.clone())]));
         assert_eq!(run(2), Ok(vec![(loads[1], expected[..2].to_vec())]));
+    }
+
+    /// A prefix follows a branch whose condition the host knows (D753, as D758 does for lanes):
+    /// `s_cmp_eq_u32 s8, 0; s_cbranch_scc1 1` skips `s_mov_b32 s4, 5` when the draw's first
+    /// user-data word is zero and runs it when not, and `s_mov_b32 s5, 7` after both. A branch on
+    /// what the host cannot know, `s_cbranch_vccz` at entry, is still refused.
+    #[test]
+    fn a_prefix_follows_a_branch_it_can_decide() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let program = |branch: u32| -> Vec<u8> {
+            [
+                0xbf06_8008_u32,
+                branch,
+                0xbe84_0385,
+                0xbe85_0387,
+                0xbf81_0000,
+            ]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect()
+        };
+        let decode = decode_program(&program(0xbf85_0001), &encodings, &operands);
+        let end = decode.instructions.last().expect("s_endpgm").offset;
+        for (first, s4) in [(0, None), (1, Some(5))] {
+            let scalars = scalar_prefix(&decode, &encodings, end, (8, &[first]), &mut |_| None)
+                .expect("a branch the host can decide");
+            assert_eq!(scalars[4], s4, "first user-data word {first}");
+            assert_eq!(scalars[5], Some(7));
+        }
+        let unknown = decode_program(&program(0xbf86_0001), &encodings, &operands);
+        assert!(scalar_prefix(&unknown, &encodings, end, (8, &[0]), &mut |_| None).is_err());
+        // `s_mov_b32 vcc_lo, 1; s_mov_b32 vcc_hi, 0; s_cbranch_vccnz 1` over the same moves: the
+        // mask the program set is known, so the branch is taken and s4 never written.
+        let bytes: Vec<u8> = [
+            0xbeea_0381_u32,
+            0xbeeb_0380,
+            0xbf87_0001,
+            0xbe84_0385,
+            0xbe85_0387,
+            0xbf81_0000,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let known = decode_program(&bytes, &encodings, &operands);
+        let end = known.instructions.last().expect("s_endpgm").offset;
+        let scalars = scalar_prefix(&known, &encodings, end, (8, &[]), &mut |_| None)
+            .expect("a branch on a known mask");
+        assert_eq!((scalars[4], scalars[5]), (None, Some(7)));
     }
 
     /// A value the host cannot know stays unknown: the execution mask at entry, and so anything
