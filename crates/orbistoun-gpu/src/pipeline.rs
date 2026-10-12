@@ -3741,6 +3741,7 @@ fn bind_textures(
                     user_data: None,
                     sampler_user_data: None,
                     cube: false,
+                    compare: false,
                     saturated: [false; 2],
                 }];
                 let slots = if fragment.is_some_and(|m| !sources.contains_key(&m)) {
@@ -3824,7 +3825,9 @@ fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
         RenderCommand::BindTexture { faces, .. } => *faces,
         _ => return false,
     };
-    (faces == CUBE_FACES) == source.cube
+    // A depth texture compared against a reference is not yet read for the host (D816): its draw
+    // is refused rather than handed a texture that samples otherwise.
+    (faces == CUBE_FACES) == source.cube && !source.compare
 }
 
 /// An unbound slot whose descriptor is in the user data from word `first`, described.
@@ -5256,6 +5259,7 @@ mod tests {
                 user_data: None,
                 sampler_user_data: None,
                 cube: false,
+                compare: false,
                 saturated: [false; 2],
             }],
         )]);
@@ -5327,6 +5331,7 @@ mod tests {
                     user_data: Some(9),
                     sampler_user_data: Some(17),
                     cube: false,
+                    compare: false,
                     saturated: [false; 2],
                 }],
             )]);
@@ -5387,6 +5392,7 @@ mod tests {
                 user_data: Some(0),
                 sampler_user_data: Some(8),
                 cube: false,
+                compare: false,
                 saturated: [false; 2],
             }],
         )]);
@@ -5467,6 +5473,7 @@ mod tests {
                     user_data: None,
                     sampler_user_data: None,
                     cube: false,
+                    compare: false,
                     saturated,
                 }],
             )]);
@@ -5823,6 +5830,7 @@ mod tests {
             sampler_user_data: None,
             saturated: [false; 2],
             cube,
+            compare: false,
         };
         assert!(super::shaped_for(command, &source(true)));
         assert!(
@@ -5874,6 +5882,7 @@ mod tests {
                     user_data,
                     sampler_user_data: user_data.map(|_| 8),
                     cube: false,
+                    compare: false,
                     saturated: [true; 2],
                 }],
             )]);

@@ -57,6 +57,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample",
     "image_sample_l",
     "image_sample_lz",
+    "image_sample_c_lz",
     "image_store",
     "global_load_dword",
     "global_load_dwordx2",
@@ -370,6 +371,8 @@ pub struct Texture {
     /// Whether the binding is a cube: sampled with a three-component direction, and
     /// [`coordinate`](Self::coordinate) is that direction's type (D811).
     pub cube: bool,
+    /// Whether the binding is a depth texture sampled against a reference (D816).
+    pub compare: bool,
 }
 
 /// What a translated texture store needs from the model.
@@ -766,12 +769,13 @@ pub trait Model {
     /// `at` is the sampling instruction's offset, which says which load reached its descriptor
     /// registers where the shader reuses them for another texture.
     ///
-    /// `cube` is whether the instruction samples a cube, which the binding is then declared as.
+    /// `cube` is whether the instruction samples a cube, which the binding is then declared as, and
+    /// `compare` whether it samples a depth texture against a reference (D816).
     fn sampled_image(
         &mut self,
         _descriptor: u32,
         _sampler: Option<u32>,
-        (_at, _cube): (u32, bool),
+        (_at, _cube, _compare): (u32, bool, bool),
     ) -> Result<Texture, &'static str> {
         Err(concat!(
             "this model has no texture to sample - a sampled image is bound by a graphics ",
@@ -2627,9 +2631,8 @@ fn memory_instruction<M: Model + ?Sized>(
         }
 
         // A texture sample or fetch; the descriptor rules are D690's.
-        "image_sample_lz" | "image_sample" | "image_sample_l" | "image_load" | "image_load_mip" => {
-            image_sample(model, instruction, name)
-        }
+        "image_sample_lz" | "image_sample_c_lz" | "image_sample" | "image_sample_l"
+        | "image_load" | "image_load_mip" => image_sample(model, instruction, name),
         // A store, the one image instruction that needs its own binding, since nothing writes a
         // sampled image (D692).
         "image_store" => image_store(model, instruction, name),
@@ -8391,8 +8394,17 @@ struct ImageAccess {
     levelled: bool,
     /// Which of the address and the components are sixteen bits wide.
     halves: Halves,
-    /// Whether the image is a cube, its address a face's two coordinates and the face (D811).
+    /// What shape of image it samples.
+    shape: ImageShape,
+}
+
+/// The shape of image an access samples, beyond a flat image's.
+#[derive(Clone, Copy)]
+struct ImageShape {
+    /// A cube, its address a face's two coordinates and the face (D811).
     cube: bool,
+    /// A depth texture compared against a reference, the first address element (D816).
+    compare: bool,
 }
 
 /// `A16` and `D16`: whether an image access's address elements, and its components, are sixteen
@@ -8426,8 +8438,8 @@ const MAX_ADDRESS_REGISTERS: usize = 4;
 /// Two elements for a coordinate and three where the level is one of them: the assembler refuses
 /// an address operand whose register count does not match the instruction's dimensionality field.
 /// Sixteen-bit elements pack two to a register.
-const fn address_registers(levelled: bool, a16: bool, cube: bool) -> u32 {
-    let elements: u32 = 2 + cube as u32 + levelled as u32;
+const fn address_registers(levelled: bool, a16: bool, (cube, compare): (bool, bool)) -> u32 {
+    let elements: u32 = 2 + cube as u32 + levelled as u32 + compare as u32;
     if a16 { elements.div_ceil(2) } else { elements }
 }
 
@@ -8514,6 +8526,9 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     let (shift, mask) = IMAGE_DIMENSION;
     let dimension = (instruction.word >> shift) & mask;
     let cube = dimension == IMAGE_DIMENSION_CUBE && name.starts_with("image_sample");
+    // A compare's reference comes first, as ACO places it ahead of the coordinates
+    // (`aco_select_nir.cpp`, the MIMG address after any offset and bias).
+    let compare = name == "image_sample_c_lz";
     if dimension != IMAGE_DIMENSION_2D && !cube {
         return Err(refuse(concat!(
             "only a two-dimensional image is translated - this instruction's coordinate has a ",
@@ -8575,9 +8590,14 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             "instruction does not have"
         )));
     }
+    if compare && (cube || mask != 1) {
+        return Err(refuse(
+            "a depth-compare sample of a cube, or of more than one channel, is not translated",
+        ));
+    }
 
     // The address registers and the components coming back both have to fit.
-    let used = address_registers(levelled, a16, cube);
+    let used = address_registers(levelled, a16, (cube, compare));
     let addresses = address_list(instruction, u32::from(*address), used).ok_or_else(|| {
         refuse(concat!(
             "an image access whose address registers run past the register file, or whose ",
@@ -8603,7 +8623,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             address: a16,
             data: d16,
         },
-        cube,
+        shape: ImageShape { cube, compare },
     })
 }
 
@@ -8693,12 +8713,12 @@ fn image_sample<M: Model + ?Sized>(
         fetches,
         levelled,
         halves,
-        cube,
+        shape: ImageShape { cube, compare },
     } = image_access(instruction, name)?;
     let a16 = halves.address;
 
     let texture = model
-        .sampled_image(descriptor, sampler, (instruction.offset, cube))
+        .sampled_image(descriptor, sampler, (instruction.offset, cube, compare))
         .map_err(refuse)?;
     if cube && texture.saturate != [false; 2] {
         return Err(refuse(
@@ -8733,6 +8753,16 @@ fn image_sample<M: Model + ?Sized>(
             (&texture, fetches, cube),
             lane,
         )?;
+        if compare {
+            compare_sample(
+                model,
+                instruction,
+                (&addresses, a16),
+                (&texture, coordinate),
+                lane,
+            )?;
+            continue;
+        }
 
         let builder = model.builder();
         // Loaded per lane rather than hoisted, so the translation does not reorder the guest's
@@ -8790,6 +8820,50 @@ fn image_sample<M: Model + ?Sized>(
     Ok(())
 }
 
+/// A depth-compare sample at level zero, for one lane (D816): the reference, the first address
+/// element, compared against the depth texture at the coordinate, its result - the filtered
+/// comparison, one float - written to the one channel the mask names.
+fn compare_sample<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
+    (texture, coordinate): (&Texture, Id),
+    lane: u32,
+) -> Result<(), TranslateError> {
+    let Some(Operand::Vector(destination)) = instruction.operands.first() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a depth-compare sample's data is not a vector register",
+        });
+    };
+    let reference = address_element(model, instruction, (addresses, a16), 0, lane)?;
+    let reference = model.as_float(reference);
+    let zero = model.constant(0);
+    let level = model.as_float(zero);
+    let f32_type = model.f32_type();
+    let u32_type = model.u32_type();
+    let builder = model.builder();
+    let bound = builder.id();
+    builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+    let compared = builder.id();
+    builder.function(
+        op::IMAGE_SAMPLE_DREF_EXPLICIT_LOD,
+        &[
+            f32_type.0,
+            compared.0,
+            bound.0,
+            coordinate.0,
+            reference.0,
+            image_operands::LOD,
+            level.0,
+        ],
+    );
+    let bits = builder.id();
+    builder.function(op::BITCAST, &[u32_type.0, bits.0, compared.0]);
+    model.write_vector_lane(u32::from(*destination), lane, bits);
+    Ok(())
+}
+
 /// The coordinate a texture access reads at, built for one lane from its address registers. A
 /// fetch's is a texel index, an integer, so the words go straight in; a sample's is a position, so
 /// the words are reinterpreted as float bits; a cube's is the direction its face's coordinates and
@@ -8801,9 +8875,11 @@ fn sample_coordinate<M: Model + ?Sized>(
     (texture, fetches, cube): (&Texture, bool, bool),
     lane: u32,
 ) -> Result<Id, TranslateError> {
-    // Two dimensions from consecutive elements; the dimensionality field was checked.
-    let across = address_element(model, instruction, (addresses, a16), 0, lane)?;
-    let down = address_element(model, instruction, (addresses, a16), 1, lane)?;
+    // Two dimensions from consecutive elements; the dimensionality field was checked. A compare's
+    // reference is ahead of them (D816).
+    let first = u32::from(texture.compare);
+    let across = address_element(model, instruction, (addresses, a16), first, lane)?;
+    let down = address_element(model, instruction, (addresses, a16), first + 1, lane)?;
     let components = if cube {
         let face = address_element(model, instruction, (addresses, a16), 2, lane)?;
         cube_direction(model, across, down, face)

@@ -159,6 +159,9 @@ pub mod op {
     /// The form a guest's `image_sample_lz` asks for, and the one available without derivatives.
     /// Carries a literal operand mask after the coordinate, then the level.
     pub const IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88;
+    /// Samples a depth texture at a level the instruction names, compared against a reference: the
+    /// filtered result of the comparison, one float. A guest's `image_sample_c_lz` (D816).
+    pub const IMAGE_SAMPLE_DREF_EXPLICIT_LOD: u16 = 89;
     /// Reads one texel by its integer coordinate, with no sampler involved.
     ///
     /// What a guest's `image_load` is. Carries a literal operand mask like the explicit sampling
@@ -2078,6 +2081,14 @@ static SHAPES: &[ShapeEntry] = &[
         Some(1),
         &[0, 2, 3],
         Some(5),
+        RestStride::Every,
+    ),
+    // The same with the reference at index four, so the mask is at five and the level from six.
+    (
+        op::IMAGE_SAMPLE_DREF_EXPLICIT_LOD,
+        Some(1),
+        &[0, 2, 3, 4],
+        Some(6),
         RestStride::Every,
     ),
     // The same shape as the explicit sampling form: a literal mask at index four, and the level

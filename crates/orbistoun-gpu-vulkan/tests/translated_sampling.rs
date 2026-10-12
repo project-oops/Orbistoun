@@ -415,6 +415,45 @@ fn an_image_that_is_not_two_dimensional_is_refused() {
     }
 }
 
+/// A depth-compare sample at level zero translates to a depth image sampled against its reference
+/// (D816): `image_sample_c_lz v4, v[2:4], s[4:11], s[12:15] dmask:0x1`, the reference in `v2` and
+/// the coordinate in `v3` and `v4`, as PPSA03416's shadowed scenes sample (MIMG opcode 47).
+#[test]
+fn a_depth_compare_sample_translates_to_a_depth_image_and_its_reference() {
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let words = [
+        0xf0bc_0108_u32,
+        0x0061_0402,
+        0xF800_000F,
+        0x0706_0504,
+        0xBF81_0000,
+    ];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _) = translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        Window::default(),
+    )
+    .expect("the compare sample translated");
+    // SPIR-V after the five header words: each instruction's first word is its word count above
+    // its opcode.
+    let mut at = 5;
+    let (mut dref, mut depth_image) = (false, false);
+    while at < module.len() {
+        let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
+        // OpTypeImage's fourth operand is Depth; OpImageSampleDrefExplicitLod is 89.
+        depth_image |= opcode == 25 && module.get(at + 4) == Some(&1);
+        dref |= opcode == 89;
+        at += count.max(1);
+    }
+    assert!(depth_image, "the image is declared depth");
+    assert!(dref, "it is sampled against the reference");
+}
+
 /// The dimensionality code for a cube, fourth in the same order.
 const CUBE: u32 = 3;
 
@@ -679,6 +718,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 sampler_user_data: None,
                 saturated: [false; 2],
                 cube: false,
+                compare: false,
             },
             TextureSource {
                 slot: 1,
@@ -689,6 +729,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 sampler_user_data: None,
                 saturated: [false; 2],
                 cube: false,
+                compare: false,
             },
         ]
     );
@@ -952,6 +993,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             sampler_user_data: None,
             saturated: [false; 2],
             cube: false,
+            compare: false,
         }]
     );
 }

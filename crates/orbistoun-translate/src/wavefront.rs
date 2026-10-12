@@ -1750,10 +1750,18 @@ impl Wavefront<'_> {
     /// descriptor loaded from more than one offset, or a texture after the first when it or an
     /// earlier one did not come from the table. A pipeline finds a texture by its offset, so binding offset zero to both
     /// would draw the wrong image.
+    /// Places `variable` at `binding` of descriptor set zero.
+    fn decorate_binding(&mut self, variable: Id, binding: u32) {
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
+        self.builder
+            .annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
+    }
+
     fn new_texture_source(
         &self,
         descriptor: u32,
-        (reaching, cube): (Option<(Option<TableBase>, u32)>, bool),
+        (reaching, (cube, compare)): (Reaching, (bool, bool)),
     ) -> Result<TextureSource, &'static str> {
         let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
         if slot as usize >= MAX_TEXTURES {
@@ -1803,6 +1811,7 @@ impl Wavefront<'_> {
             user_data,
             sampler_user_data: None,
             cube,
+            compare,
         })
     }
 
@@ -3920,7 +3929,7 @@ impl Model for Wavefront<'_> {
         // A compute module's storage image is the guest's, so where its descriptor came from is what
         // binds it; a fragment module's is a harness image.
         if self.stage == Stage::Compute {
-            let mut source = self.new_texture_source(descriptor, (None, false))?;
+            let mut source = self.new_texture_source(descriptor, (None, (false, false)))?;
             source.slot = 0;
             self.images.stored_source = Some(source);
         }
@@ -3984,7 +3993,7 @@ impl Model for Wavefront<'_> {
         &mut self,
         descriptor: u32,
         sampler: Option<u32>,
-        (at, cube): (u32, bool),
+        (at, cube, compare): (u32, bool, bool),
     ) -> Result<model::Texture, &'static str> {
         // The fragment stage only: the harness binds its sampled image with fragment stage flags,
         // and the `vec4` type a sample answers with is declared by the colour output, which only a
@@ -4025,7 +4034,7 @@ impl Model for Wavefront<'_> {
                     "only one is bound for them (D690)"
                 ));
             }
-            if bound.texture.cube != cube {
+            if (bound.texture.cube, bound.texture.compare) != (cube, compare) {
                 return Err(CUBE_AND_FLAT);
             }
             // A sampler only conflicts with a sampler; a fetch names none.
@@ -4040,7 +4049,7 @@ impl Model for Wavefront<'_> {
             bound.sampler = bound.sampler.or(sampler);
             return Ok(bound.texture);
         }
-        let source = self.new_texture_source(descriptor, (reaching, cube))?;
+        let source = self.new_texture_source(descriptor, (reaching, (cube, compare)))?;
         let binding = orbistoun_spirv::TEXTURE_BINDINGS[source.slot as usize];
 
         let image = self.builder.id();
@@ -4048,11 +4057,7 @@ impl Model for Wavefront<'_> {
         let pointer = self.builder.id();
         let variable = self.builder.id();
         let coordinate = self.builder.id();
-
-        self.builder
-            .annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
-        self.builder
-            .annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
+        self.decorate_binding(variable, binding);
 
         // Element type, then: two-dimensional, not depth, not arrayed, single-sampled, used with a
         // sampler, and no declared format - the same seven values the hand-written oracle declares.
@@ -4064,8 +4069,10 @@ impl Model for Wavefront<'_> {
             (self.f32_type, self.vec4)
         };
         let (dim, components) = if cube { (DIM_CUBE, 3) } else { (DIM_2D, 2) };
-        self.builder
-            .declare(op::TYPE_IMAGE, &[image.0, element.0, dim, 0, 0, 0, 1, 0]);
+        self.builder.declare(
+            op::TYPE_IMAGE,
+            &[image.0, element.0, dim, u32::from(compare), 0, 0, 1, 0],
+        );
         self.builder
             .declare(op::TYPE_SAMPLED_IMAGE, &[combined.0, image.0]);
         self.builder
@@ -4096,6 +4103,7 @@ impl Model for Wavefront<'_> {
                 .copied()
                 .unwrap_or_default(),
             cube,
+            compare,
         };
         self.textures.push(BoundTexture {
             texture,
@@ -4546,12 +4554,19 @@ pub struct TextureSource {
     /// through a cube view (D811).
     #[serde(default)]
     pub cube: bool,
+    /// Whether the module samples this texture as depth compared against a reference (D816).
+    #[serde(default)]
+    pub compare: bool,
 }
+
+/// The table load that reached a descriptor's registers, where it is known: the table's base and
+/// the byte offset in it.
+type Reaching = Option<(Option<TableBase>, u32)>;
 
 /// Why a shader reading one image as a cube and as a flat image is refused (D811).
 const CUBE_AND_FLAT: &str = concat!(
-    "this shader reads one image both as a cube and as a flat image, and a binding is one or the ",
-    "other (D811)"
+    "this shader reads one image in two shapes - a cube and a flat image, or compared and not - ",
+    "and a binding is one (D811, D816)"
 );
 
 /// SPIR-V's `Dim2D`, the dimensionality a flat texture binding is declared with.
