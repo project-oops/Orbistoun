@@ -81,8 +81,9 @@ purpose = "(param, memory, size, context): creates a context in memory of the si
 returns = "status"
 edge_cases = [
     "MEASURED (REQ-ao04): with those parameters, 16-aligned memory of 0x45698 bytes, rc 0 and context 0 - the first context's handle is 0.",
-    "MEASURED, NOT TAKEN (REQ-ac01, report-1791826929.txt lines 195-203): with PPSA21564's parameters, rc 0x80268001 with size 0 and 0x80268002 with the size QueryMemory answered, the slot not written - but in a process that had already made a context (000-boot/audioout2-fresh-process, lines 49-51), and the title passes exactly that size and runs on the console; re-asked in a fresh process (REQ-ac02).",
-    "orbistoun answers the first context in a process so; a second context, other parameters or too little memory are unmeasured and answer the placeholder.",
+    "MEASURED (REQ-ac01, report-1791826929.txt lines 195-203): in a process that had already made a context, PPSA21564's parameters answered 0x80268001 with size 0 and 0x80268002 with a size, the slot not written.",
+    "MEASURED (REQ-ac02, report-1791833977.txt lines 30-66): as the first context of its process, PPSA21564's parameters in 16-aligned memory of 0x78e9c bytes answered 0 and context 0.",
+    "orbistoun answers the first context in a process so, for either measured parameter set; a second context, other parameters or too little memory are unmeasured and answer the placeholder.",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261010T1430Z-ao04, reports/hardware/20261010-231900-eboot.obs.log lines 30-56 (000-boot/audioout2-fresh-process)."
@@ -98,6 +99,7 @@ edge_cases = [
     "MEASURED (REQ-ao05): in a fresh process after the context set-up and UserCreate(0xff), with param u32 0, channels << 8, 48000, 2 and the user handle at +0x10, rc 0 and port 0 for 2 channels, then port 1 for 8; the block was unchanged.",
     "MEASURED (REQ-ao07): the port type, the word at +0x0c, after those two: 8 channels of type 3 gave port 2 and of type 1 port 3; 8 channels of type 4 answered 0x80268001, of type 0 0x80268002, and 2 channels of type 3 0x80268002, the out parameter reading -1.",
     "MEASURED (REQ-ap01, 000-boot/audioout2-mono-ports, report-1791818993.txt lines 440-573): PPSA04263's mono block - u32 0x100, 0x100 (one channel), 48000, 0, the user at +0x10 - made 36 times in a row: rc 0 each, ports 0x80000000 to 0x80000023 in the 8-byte slot, the block unchanged.",
+    "MEASURED (REQ-ac02, report-1791833977.txt lines 53-61): on the context PPSA21564's parameters made, after UserCreate(0xff), 8 channels of type 0 gave port 0 and of type 2 port 1 - type 0, refused on the other measured context (REQ-ao07), is taken here, so what a context takes depends on how it was made.",
     "MEASURED (REQ-ac01, report-1791826929.txt lines 207-212): on a handle no context was made as (0xcccccccccccccccc, after PPSA21564's set was refused), 8 channels of type 0 and of type 2 each rc 0x80268001, the port slot not written.",
     "orbistoun numbers a process's ports from 0 for the measured channel counts and types on the context ContextCreate made, and its mono ports from 0x80000000; it answers the measured refusals writing nothing; other channel counts, types, rates, contexts and users are unmeasured and answer the placeholder.",
 ]

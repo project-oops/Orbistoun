@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError};
 use orbistoun_hle::guest_module;
@@ -137,9 +137,8 @@ pub(crate) fn context_reset_param(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 const MEASURED_NEED: ([u32; 6], u64) = ([4, 0x48, 0, 2, 0x100, 1], 0x45698);
 
 /// PPSA21564's parameter set and its need: u32s 0x14, 0x200, 0, 1, 0x200, 1 need 0x78e9c bytes
-/// (REQ-ac01, `report-1791826929.txt` 189-194). Its context is not modelled: the console refused
-/// one in a process that had already made a context, which the title's own process has not
-/// (REQ-ac02).
+/// (REQ-ac01, `report-1791826929.txt` 189-194), and make a process's first context
+/// (REQ-ac02, `report-1791833977.txt` 30-66).
 const TITLE_NEED: ([u32; 6], u64) = ([0x14, 0x200, 0, 1, 0x200, 1], 0x78e9c);
 
 /// Reads the six u32s of a context parameter block.
@@ -176,8 +175,15 @@ pub(crate) fn context_query_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// Whether `sceAudioOut2ContextCreate` has made the process's first context.
-static CONTEXT_MADE: AtomicBool = AtomicBool::new(false);
+/// Which parameter set made the process's first context: [`NO_CONTEXT`], [`MEASURED_SET`] or
+/// [`TITLE_SET`]. What ports a context takes depends on it (REQ-ao07 against REQ-ac02).
+static CONTEXT_SET: AtomicU8 = AtomicU8::new(NO_CONTEXT);
+/// No context has been made.
+const NO_CONTEXT: u8 = 0;
+/// [`MEASURED_NEED`]'s set made it.
+const MEASURED_SET: u8 = 1;
+/// [`TITLE_NEED`]'s set made it.
+const TITLE_SET: u8 = 2;
 
 /// `sceAudioOut2ContextCreate(param, memory, size, context)`: the first context in a process,
 /// created in memory of at least the need [`context_query_memory`] answered, written to `context`
@@ -187,11 +193,20 @@ static CONTEXT_MADE: AtomicBool = AtomicBool::new(false);
 pub(crate) fn context_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (param, memory, size, context) = (args[0], args[1], args[2], args[3]);
     let words = if param == 0 { None } else { read_param(param) };
-    let measured = words == Some(MEASURED_NEED.0);
-    if !measured || memory == 0 || context == 0 || size < MEASURED_NEED.1 {
+    let Some((set, need)) = [(MEASURED_SET, MEASURED_NEED), (TITLE_SET, TITLE_NEED)]
+        .into_iter()
+        .find(|(_, (measured, _))| Some(*measured) == words)
+        .map(|(set, (_, need))| (set, need))
+    else {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    if memory == 0 || context == 0 || size < need {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
-    if CONTEXT_MADE.swap(true, Ordering::AcqRel) {
+    if CONTEXT_SET
+        .compare_exchange(NO_CONTEXT, set, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
     // SAFETY: the guest's 8-byte out-parameter, by the call's contract.
@@ -224,6 +239,11 @@ const PORT_TYPES: [((u32, u32), u64); 7] = [
     ((2, 3), 0x8026_8002),
 ];
 
+/// What `sceAudioOut2PortCreate` answered on a context [`TITLE_NEED`]'s set made, by channel count
+/// and port type (REQ-ac02, `report-1791833977.txt` 56-61): eight channels of type 0 and of type 2
+/// each made a port.
+const TITLE_PORT_TYPES: [((u32, u32), u64); 2] = [((8, 0), 0), ((8, 2), 0)];
+
 /// The parameter words PPSA04263 makes its pool of mono ports with: `0x100`, one channel, 48000 Hz
 /// and port type 0 (REQ-ap01, `report-1791818993.txt` 440-573).
 const MONO_PORT: [u32; 4] = [0x100, 1 << 8, PORT_RATE, 0];
@@ -247,7 +267,7 @@ enum PortParams {
 
 /// What `param`'s port parameters are, for a user `sceAudioOut2UserCreate` gave, or `None` where
 /// the parameters or the user are unmeasured.
-fn measured_port(param: u64) -> Option<PortParams> {
+fn measured_port(param: u64, set: u8) -> Option<PortParams> {
     let mut words = [0_u32; 4];
     for (i, word) in words.iter_mut().enumerate() {
         // SAFETY: the guest's parameter block, by the call's contract.
@@ -270,7 +290,12 @@ fn measured_port(param: u64) -> Option<PortParams> {
         return None;
     }
     let channels = layout >> 8;
-    PORT_TYPES
+    let table: &[((u32, u32), u64)] = if set == TITLE_SET {
+        &TITLE_PORT_TYPES
+    } else {
+        &PORT_TYPES
+    };
+    table
         .iter()
         .find(|((measured, kind), _)| *measured == channels && *kind == fourth)
         .map(|&(_, answer)| PortParams::Numbered(answer))
@@ -283,7 +308,8 @@ fn measured_port(param: u64) -> Option<PortParams> {
 /// users are unmeasured and answer the placeholder.
 pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (context, param, port) = (args[0], args[1], args[2]);
-    let made = CONTEXT_MADE.load(Ordering::Acquire);
+    let set = CONTEXT_SET.load(Ordering::Acquire);
+    let made = set != NO_CONTEXT;
     // Eight channels of type 0 or 2 on a handle no context was made as are refused, writing
     // nothing (REQ-ac01, `report-1791826929.txt` 207-212).
     if (!made || context != 0) && port != 0 && eight_channels_of_type(param, &[0, 2]) {
@@ -292,7 +318,7 @@ pub(crate) fn port_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if !made || context != 0 || param == 0 || port == 0 {
         return u64::from(GuestError::Unimplemented.as_raw());
     }
-    let number = match measured_port(param) {
+    let number = match measured_port(param, set) {
         None => return u64::from(GuestError::Unimplemented.as_raw()),
         Some(PortParams::Numbered(0)) => NEXT_PORT.fetch_add(1, Ordering::Relaxed),
         Some(PortParams::Numbered(refused)) => return refused,
