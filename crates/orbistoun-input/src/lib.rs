@@ -41,6 +41,9 @@ guest_module! {
         "scePadSetVibration" => 2,
         "scePadSetVibrationForce" => 2,
         "scePadSetLightBar" => 2,
+        // (handle, info) and (handle)
+        "scePadGetControllerInformation" => 2,
+        "scePadResetOrientation" => 1,
         // The reading functions; `scePadReadExt` is declared and not implemented.
         "scePadReadState" => 2,
         "scePadReadStateExt" => 2,
@@ -154,6 +157,35 @@ fn pad_discard(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// The 28 bytes `scePadGetControllerInformation` wrote for the console's open pad (REQ-pu01,
+/// `000-boot/pad-ime-uds`, `report-1791801495.txt` 400-405): the float 44.86 first, then the
+/// half-words 1920 and 1080, two bytes of 13, a zero, two ones, and zeros to the end.
+const CONTROLLER_INFORMATION: [u8; 28] = [
+    0xa4, 0x70, 0x33, 0x42, 0x80, 0x07, 0x38, 0x04, 0x0d, 0x0d, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+/// `scePadGetControllerInformation(handle, info)`: for an open handle 0, with
+/// [`CONTROLLER_INFORMATION`] written and nothing past it; for one never issued `0x80920003`
+/// (REQ-pu01). A null `info` is unmeasured and answers the placeholder.
+fn pad_get_controller_information(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if ours(args[0]).is_none() {
+        return u64::from(
+            GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
+        );
+    }
+    if args[1] == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's information block, by the call's contract; written through the checked
+    // accessor.
+    if unsafe { orbistoun_mem::guest::write_bytes(args[1], &CONTROLLER_INFORMATION) } {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
 /// `scePadReadState(handle, into)` - what the pad is doing now.
 ///
 /// Writes the whole 120-byte extent every call, as measured (`changed 120`), so no stale bytes
@@ -236,6 +268,14 @@ const OWN: &[(&str, GuestFn)] = &[
     ("scePadSetVibration", pad_discard),
     ("scePadSetVibrationForce", pad_discard),
     ("scePadSetLightBar", pad_discard),
+    // `scePadResetOrientation(handle)`: 0 for an open handle, `0x80920003` for one never issued
+    // (REQ-pu01), which is what the discard answers.
+    ("scePadResetOrientation", pad_discard),
+    (
+        "scePadGetControllerInformation",
+        pad_get_controller_information,
+    ),
+    ("sceImeKeyboardGetResourceId", ime::keyboard_get_resource_id),
     ("scePadGetHandle", pad_refused_to_this_process),
     ("scePadSetProcessPrivilege", pad_refused_to_this_process),
 ];
@@ -403,6 +443,42 @@ mod tests {
             super::OK,
             "an invented handle is refused rather than quietly accepted"
         );
+    }
+
+    /// The controller information is the 28 measured bytes for an open handle, and nothing past
+    /// them; an invented handle is refused with `0x80920003` and resetting the orientation answers
+    /// as the handle does (REQ-pu01).
+    #[test]
+    fn controller_information_is_the_measured_record() {
+        let handle = super::pad_open(&args(0));
+        let mut info = [0xcc_u8; 0x80];
+        let mut argv = args(handle);
+        argv[1] = info.as_mut_ptr() as u64;
+        assert_eq!(call("scePadGetControllerInformation", &argv), 0);
+        assert_eq!(info[..28], super::CONTROLLER_INFORMATION);
+        assert_eq!(info[..4], 44.86_f32.to_le_bytes());
+        assert!(
+            info[28..].iter().all(|&b| b == 0xcc),
+            "28 bytes and no more"
+        );
+        argv[0] = handle + 10_000;
+        assert_eq!(call("scePadGetControllerInformation", &argv), 0x8092_0003);
+        assert_eq!(call("scePadResetOrientation", &args(handle)), 0);
+        assert_eq!(
+            call("scePadResetOrientation", &args(handle + 10_000)),
+            0x8092_0003
+        );
+    }
+
+    /// With no keyboard open, the resource id is refused with `0x80bc0002` and nothing written
+    /// (REQ-pu01).
+    #[test]
+    fn a_keyboard_resource_id_needs_an_open_keyboard() {
+        let mut out = [0xcc_u8; 32];
+        let mut argv = args(0x6d3e_0001);
+        argv[1] = out.as_mut_ptr() as u64;
+        assert_eq!(call("sceImeKeyboardGetResourceId", &argv), 0x80bc_0002);
+        assert!(out.iter().all(|&b| b == 0xcc));
     }
 
     /// Closing a pad does not hand its number back.

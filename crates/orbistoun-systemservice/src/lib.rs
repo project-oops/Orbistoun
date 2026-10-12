@@ -76,6 +76,7 @@ pub mod user {
             "sceUserServiceGetAccessibilityTriggerEffect" => 2,
             "sceUserServiceGetAccessibilityPressAndHoldDelay" => 2,
             "sceUserServiceGetAccessibilityChatTranscription" => 2,
+            "sceUserServiceGetAccessibilityZoomEnabled" => 2,
         }
     }
 }
@@ -545,11 +546,14 @@ const AGE_LEVEL: u32 = 0x15;
 const AGE_LEVEL_NOT_A_USER: u64 = 0x8096_0009;
 /// The accessibility settings the signed-in user reported in the same chain, each written as a
 /// word: chat transcription and press-and-hold delay `0`, trigger effect and vibration `1`.
-const ACCESSIBILITY: [(&str, u32); 4] = [
+/// Zoom `0` too, measured later (REQ-ag01, `000-boot/ag01-aux-calls`, `report-1791801495.txt`
+/// 433-434).
+const ACCESSIBILITY: [(&str, u32); 5] = [
     ("sceUserServiceGetAccessibilityChatTranscription", 0),
     ("sceUserServiceGetAccessibilityPressAndHoldDelay", 0),
     ("sceUserServiceGetAccessibilityTriggerEffect", 1),
     ("sceUserServiceGetAccessibilityVibration", 1),
+    ("sceUserServiceGetAccessibilityZoomEnabled", 0),
 ];
 
 /// `sceUserServiceGetAgeLevel(user, out)`: for the signed-in user answers `0x80960002` and writes
@@ -614,6 +618,10 @@ fn accessibility_trigger_effect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 fn accessibility_vibration(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     accessibility(ACCESSIBILITY[3].0, args)
+}
+
+fn accessibility_zoom_enabled(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    accessibility(ACCESSIBILITY[4].0, args)
 }
 
 /// `sceSystemServiceGetNoticeScreenSkipFlag(flag)`: writes one byte, 1, and answers 0 (REQ-cn10
@@ -750,6 +758,10 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     (
         "sceUserServiceGetAccessibilityPressAndHoldDelay",
         accessibility_press_and_hold_delay,
+    ),
+    (
+        "sceUserServiceGetAccessibilityZoomEnabled",
+        accessibility_zoom_enabled,
     ),
     (
         "sceSystemServiceGetNoticeScreenSkipFlag",

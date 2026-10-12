@@ -40,3 +40,18 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne REQ-ik01, reports/hardware/20261009-151440-eboot.obs.log, 101-input-ext/ime-keyboard-lifecycle."
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceImeKeyboardGetResourceId"
+arity = 2
+purpose = "(user, out): the resource id of a user's open keyboard."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pu01, link-bound, no keyboard opened): 0x80bc0002 for user 1 and for the signed-in user, nothing of a 32-byte out block written.",
+    "orbistoun answers 0x80bc0002 for a user with no keyboard open; with one open it is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0728Z-pu01, reports/hardware/report-1791801495.txt lines 390-423 (000-boot/pad-ime-uds)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-12"

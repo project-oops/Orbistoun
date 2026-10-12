@@ -315,3 +315,33 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log, 200-census/libScePad/scePadSetProcessPrivilege."
 found_in = ["CRFT00001"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "scePadGetControllerInformation"
+arity = 2
+purpose = "(handle, info): describes the controller behind a pad handle."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pu01, link-bound, a handle from scePadOpen): 0x0, 28 bytes written - a4703342 80073804 0d0d0001 01000000 then 12 zero bytes - and nothing past them in a 0x80-byte block; handle 0x7fffffff answered 0x80920003.",
+    "orbistoun writes the 28 measured bytes for a handle it issued and answers 0x80920003 for any other; a null info is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0728Z-pu01, reports/hardware/report-1791801495.txt lines 390-423 (000-boot/pad-ime-uds)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-12"
+
+[[function]]
+name = "scePadResetOrientation"
+arity = 1
+purpose = "(handle): resets the motion sensor's reference orientation."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pu01, link-bound): 0x0 for an open handle, 0x80920003 for handle 0x7fffffff.",
+    "orbistoun answers 0x0 for a handle it issued and 0x80920003 for any other; there is no motion sensor to reset.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0728Z-pu01, reports/hardware/report-1791801495.txt lines 390-423 (000-boot/pad-ime-uds)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-12"

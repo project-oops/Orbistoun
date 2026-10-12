@@ -71,12 +71,27 @@ pub(crate) fn keyboard_close(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceImeKeyboardGetResourceId(user, out)`: for a user with no keyboard open `0x80bc0002`, with
+/// nothing of `out` written, for user 1 and for the signed-in user alike (REQ-pu01,
+/// `000-boot/pad-ime-uds`, `report-1791801495.txt` 409-416). With a keyboard open it is
+/// unmeasured and answers the placeholder.
+pub(crate) fn keyboard_get_resource_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let user = args[0] & 0xffff_ffff;
+    match opened().lock() {
+        Ok(users) if users.contains(&user) => {
+            u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+        }
+        _ => NO_KEYBOARD_OPEN,
+    }
+}
+
 guest_module! {
     "libSceIme" {
         // (user)
         "sceImeKeyboardClose" => 1,
         "sceImeKeyboardGetInfo" => 6,
-        "sceImeKeyboardGetResourceId" => 6,
+        // (user, out)
+        "sceImeKeyboardGetResourceId" => 2,
         // (user, param)
         "sceImeKeyboardOpen" => 2,
         "sceImeUpdate" => 6,

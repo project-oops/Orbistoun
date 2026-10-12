@@ -135,3 +135,18 @@ known_by = "measured"
 cites = "obSCEne REQ-us01, reports/hardware/report-1791758178.txt lines 154-212 (000-boot/unity-user-service-chain); earlier REQ-cn10 rows, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceUserServiceGetAccessibilityZoomEnabled"
+arity = 2
+purpose = "Reads a user's zoom accessibility setting: (user, out)."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-ag01, 000-boot/ag01-aux-calls, link-bound): for the signed-in user 0x0, one word written, 0 (zoom off), the rest of an 8-byte block left as it was.",
+    "orbistoun answers as the other accessibility getters: 0x0 and 0 for its signed-in user, 0x80960009 with nothing written for any other value.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0635Z-ag01, reports/hardware/report-1791801495.txt lines 425-434 (000-boot/ag01-aux-calls)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-12"

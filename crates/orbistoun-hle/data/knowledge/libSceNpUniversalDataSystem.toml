@@ -28,3 +28,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T1745Z-np03, reports/hardware/report-1791758178.txt lines 223-266."
 found_in = ["PPSA03416-app0", "PPSA21564-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceNpUniversalDataSystemCreateHandle"
+arity = 1
+purpose = "(&handle): creates a reporting handle, writing its number to handle."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pu01, link-bound, after Initialize and CreateContext): 0x0, the low 32 bits of handle written 0x20176, the high half left as it was; a second call 0x0 and 0x20177.",
+    "orbistoun numbers handles from 0x20176, the next each call; a null handle is unmeasured and answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T0728Z-pu01, reports/hardware/report-1791801495.txt lines 390-423 (000-boot/pad-ime-uds)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-12"

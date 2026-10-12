@@ -33,6 +33,7 @@ fn the_getters_answer_as_a_fresh_process_measured() {
         ("sceUserServiceGetAccessibilityPressAndHoldDelay", 0),
         ("sceUserServiceGetAccessibilityTriggerEffect", 1),
         ("sceUserServiceGetAccessibilityVibration", 1),
+        ("sceUserServiceGetAccessibilityZoomEnabled", 0),
     ] {
         let mut out = [0xa5_u8; 0x40];
         assert_eq!(
