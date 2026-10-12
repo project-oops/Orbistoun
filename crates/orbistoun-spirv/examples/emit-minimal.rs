@@ -21,6 +21,11 @@ fn main() {
         "storage-write.spv",
         orbistoun_spirv::storage_buffer_write_module(0xABCD_1234, 4),
     );
+    // The list of a dispatch's stored words (D809), gathered on the device.
+    write(
+        "stored-word-compaction.spv",
+        orbistoun_spirv::stored_word_compaction_module(),
+    );
     // The mesh oracle: its stage, execution modes and output-count instruction were read
     // from a compiled reference.
     write(

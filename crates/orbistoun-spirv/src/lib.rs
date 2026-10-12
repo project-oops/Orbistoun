@@ -88,6 +88,8 @@ pub mod op {
     pub const ATOMIC_AND: u16 = 240;
     /// Ors a value into the word a pointer names, as one indivisible step.
     pub const ATOMIC_OR: u16 = 241;
+    /// Adds a value to the word a pointer names, as one indivisible step, answering what it held.
+    pub const ATOMIC_I_ADD: u16 = 234;
     /// A floating-point type.
     pub const TYPE_FLOAT: u16 = 22;
     /// A function type.
@@ -423,6 +425,8 @@ pub mod scope {
     pub const SUBGROUP: u32 = 3;
     /// The workgroup: every invocation of one dispatch group.
     pub const WORKGROUP: u32 = 2;
+    /// The device: every invocation of the dispatch, across all its groups.
+    pub const DEVICE: u32 = 1;
 }
 
 /// Memory semantics, for the barriers.
@@ -444,6 +448,8 @@ pub mod built_in {
     /// This workgroup's index within its dispatch (a `uvec3`): which draw of a batch a mesh
     /// workgroup is (D718).
     pub const WORKGROUP_ID: u32 = 26;
+    /// This invocation's index within the whole dispatch (a `uvec3`).
+    pub const GLOBAL_INVOCATION_ID: u32 = 28;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
     /// The depth a fragment shader writes in place of the rasterised one (a `float`).
@@ -936,6 +942,215 @@ pub fn storage_buffer_write_module(value: u32, elements: u32) -> Vec<u32> {
         &[element_ptr.0, chain.0, buffer.0, index.0, index.0],
     );
     b.function(op::STORE, &[chain.0, written.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+
+    b.check()
+        .expect("this crate built a module with identifiers that do not resolve");
+    b.finish()
+}
+
+/// The invocations in one group of [`stored_word_compaction_module`].
+pub const COMPACTION_GROUP: u32 = 64;
+
+/// Builds the compute shader that gathers a dispatch's stored words (D809) into a short list, so
+/// that what crosses back to the host is the words stored rather than the whole buffer and its
+/// write mask.
+///
+/// Set 0 binds the write mask at binding 0, the buffer at binding 1 and the list at binding 2. The
+/// push constants are the buffer's word count, then the list's capacity in pairs. Each invocation
+/// takes one word; a word its mask marks claims the next pair of the list with an atomic add on the
+/// list's first word, its count, and fills it with its index and its value when the pair is within
+/// the capacity. A count past the capacity says the list overflowed. The pairs are in no order.
+/// Hand-written, as the oracles are (D549): it runs on the host's own results, not the guest's.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn stored_word_compaction_module() -> Vec<u32> {
+    let mut b = Builder::new().with_version(VERSION_1_3);
+
+    let void = b.id();
+    let fn_type = b.id();
+    let uint = b.id();
+    let uvec3 = b.id();
+    let boolean = b.id();
+    let words = b.id();
+    let block = b.id();
+    let block_ptr = b.id();
+    let list = b.id();
+    let list_ptr = b.id();
+    let word_ptr = b.id();
+    let input_ptr = b.id();
+    let invocation = b.id();
+    let push = b.id();
+    let push_ptr = b.id();
+    let push_word_ptr = b.id();
+    let constants = b.id();
+    let mask = b.id();
+    let buffer = b.id();
+    let out = b.id();
+    let [zero, one, two] = [b.id(), b.id(), b.id()];
+    let main = b.id();
+    let [entry, within, marked, fits, end_fits, end_marked, end] =
+        [b.id(), b.id(), b.id(), b.id(), b.id(), b.id(), b.id()];
+
+    b.header(op::CAPABILITY, &[capability::SHADER]);
+    b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
+    let mut entry_point = vec![execution::GL_COMPUTE, main.0];
+    entry_point.extend(Builder::literal_string("main"));
+    entry_point.push(invocation.0);
+    b.header(op::ENTRY_POINT, &entry_point);
+    b.header(
+        op::EXECUTION_MODE,
+        &[main.0, mode::LOCAL_SIZE, COMPACTION_GROUP, 1, 1],
+    );
+
+    b.annotate(op::DECORATE, &[words.0, decoration::ARRAY_STRIDE, 4]);
+    b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
+    // The list: its count, then the pairs.
+    b.annotate(op::DECORATE, &[list.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[list.0, 0, decoration::OFFSET, 0]);
+    b.annotate(op::MEMBER_DECORATE, &[list.0, 1, decoration::OFFSET, 4]);
+    b.annotate(op::DECORATE, &[push.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[push.0, 0, decoration::OFFSET, 0]);
+    b.annotate(op::MEMBER_DECORATE, &[push.0, 1, decoration::OFFSET, 4]);
+    for (variable, binding) in [(mask, 0), (buffer, 1), (out, 2)] {
+        b.annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
+        b.annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
+    }
+    b.annotate(
+        op::DECORATE,
+        &[
+            invocation.0,
+            decoration::BUILT_IN,
+            built_in::GLOBAL_INVOCATION_ID,
+        ],
+    );
+
+    b.declare(op::TYPE_VOID, &[void.0]);
+    b.declare(op::TYPE_FUNCTION, &[fn_type.0, void.0]);
+    b.declare(op::TYPE_INT, &[uint.0, 32, 0]);
+    b.declare(op::TYPE_VECTOR, &[uvec3.0, uint.0, 3]);
+    b.declare(op::TYPE_BOOL, &[boolean.0]);
+    b.declare(op::CONSTANT, &[uint.0, zero.0, 0]);
+    b.declare(op::CONSTANT, &[uint.0, one.0, 1]);
+    b.declare(op::CONSTANT, &[uint.0, two.0, 2]);
+    b.declare(op::TYPE_RUNTIME_ARRAY, &[words.0, uint.0]);
+    b.declare(op::TYPE_STRUCT, &[block.0, words.0]);
+    b.declare(op::TYPE_STRUCT, &[list.0, uint.0, words.0]);
+    b.declare(op::TYPE_STRUCT, &[push.0, uint.0, uint.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[block_ptr.0, storage::STORAGE_BUFFER, block.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[list_ptr.0, storage::STORAGE_BUFFER, list.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[word_ptr.0, storage::STORAGE_BUFFER, uint.0],
+    );
+    b.declare(op::TYPE_POINTER, &[input_ptr.0, storage::INPUT, uvec3.0]);
+    b.declare(
+        op::TYPE_POINTER,
+        &[push_ptr.0, storage::PUSH_CONSTANT, push.0],
+    );
+    b.declare(
+        op::TYPE_POINTER,
+        &[push_word_ptr.0, storage::PUSH_CONSTANT, uint.0],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[block_ptr.0, mask.0, storage::STORAGE_BUFFER],
+    );
+    b.declare(
+        op::VARIABLE,
+        &[block_ptr.0, buffer.0, storage::STORAGE_BUFFER],
+    );
+    b.declare(op::VARIABLE, &[list_ptr.0, out.0, storage::STORAGE_BUFFER]);
+    b.declare(op::VARIABLE, &[input_ptr.0, invocation.0, storage::INPUT]);
+    b.declare(
+        op::VARIABLE,
+        &[push_ptr.0, constants.0, storage::PUSH_CONSTANT],
+    );
+
+    let [id3, id, count_at, count, inside] = [b.id(), b.id(), b.id(), b.id(), b.id()];
+    let [flag_at, flag, is_marked] = [b.id(), b.id(), b.id()];
+    let [counter, slot, capacity_at, capacity, room] = [b.id(), b.id(), b.id(), b.id(), b.id()];
+    let [value_at, value, first, first_at, second, second_at] =
+        [b.id(), b.id(), b.id(), b.id(), b.id(), b.id()];
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry.0]);
+    b.function(op::LOAD, &[uvec3.0, id3.0, invocation.0]);
+    b.function(op::COMPOSITE_EXTRACT, &[uint.0, id.0, id3.0, 0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[push_word_ptr.0, count_at.0, constants.0, zero.0],
+    );
+    b.function(op::LOAD, &[uint.0, count.0, count_at.0]);
+    b.function(op::ULESS_THAN, &[boolean.0, inside.0, id.0, count.0]);
+    b.function(op::SELECTION_MERGE, &[end.0, 0]);
+    b.function(op::BRANCH_CONDITIONAL, &[inside.0, within.0, end.0]);
+
+    // A word inside the buffer: is it marked stored?
+    b.function(op::LABEL, &[within.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[word_ptr.0, flag_at.0, mask.0, zero.0, id.0],
+    );
+    b.function(op::LOAD, &[uint.0, flag.0, flag_at.0]);
+    b.function(op::INOT_EQUAL, &[boolean.0, is_marked.0, flag.0, zero.0]);
+    b.function(op::SELECTION_MERGE, &[end_marked.0, 0]);
+    b.function(
+        op::BRANCH_CONDITIONAL,
+        &[is_marked.0, marked.0, end_marked.0],
+    );
+
+    // Marked: claim a pair. Device scope, no memory ordering: only the count is shared, and the
+    // pairs are read after the dispatch has finished.
+    b.function(op::LABEL, &[marked.0]);
+    b.function(op::ACCESS_CHAIN, &[word_ptr.0, counter.0, out.0, zero.0]);
+    b.function(
+        op::ATOMIC_I_ADD,
+        &[uint.0, slot.0, counter.0, one.0, zero.0, one.0],
+    );
+    b.function(
+        op::ACCESS_CHAIN,
+        &[push_word_ptr.0, capacity_at.0, constants.0, one.0],
+    );
+    b.function(op::LOAD, &[uint.0, capacity.0, capacity_at.0]);
+    b.function(op::ULESS_THAN, &[boolean.0, room.0, slot.0, capacity.0]);
+    b.function(op::SELECTION_MERGE, &[end_fits.0, 0]);
+    b.function(op::BRANCH_CONDITIONAL, &[room.0, fits.0, end_fits.0]);
+
+    // Within the capacity: the pair is the word's index and its value.
+    b.function(op::LABEL, &[fits.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[word_ptr.0, value_at.0, buffer.0, zero.0, id.0],
+    );
+    b.function(op::LOAD, &[uint.0, value.0, value_at.0]);
+    b.function(op::IMUL, &[uint.0, first.0, slot.0, two.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[word_ptr.0, first_at.0, out.0, one.0, first.0],
+    );
+    b.function(op::STORE, &[first_at.0, id.0]);
+    b.function(op::IADD, &[uint.0, second.0, first.0, one.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[word_ptr.0, second_at.0, out.0, one.0, second.0],
+    );
+    b.function(op::STORE, &[second_at.0, value.0]);
+    b.function(op::BRANCH, &[end_fits.0]);
+
+    b.function(op::LABEL, &[end_fits.0]);
+    b.function(op::BRANCH, &[end_marked.0]);
+    b.function(op::LABEL, &[end_marked.0]);
+    b.function(op::BRANCH, &[end.0]);
+    b.function(op::LABEL, &[end.0]);
     b.function(op::RETURN, &[]);
     b.function(op::FUNCTION_END, &[]);
 
@@ -1975,6 +2190,13 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     (
         op::ATOMIC_OR,
+        Some(1),
+        &[0, 2, 3, 4, 5],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::ATOMIC_I_ADD,
         Some(1),
         &[0, 2, 3, 4, 5],
         None,

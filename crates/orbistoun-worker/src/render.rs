@@ -553,6 +553,7 @@ pub fn execute_dispatch(
                 .map(|out| orbistoun_gpu::dispatch::BufferAfter {
                     words: out.words,
                     written: out.written,
+                    listed: out.stored,
                 })
                 .collect();
             (done.memory, done.escaped, done.stored, buffers)

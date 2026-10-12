@@ -532,16 +532,63 @@ pub enum BufferBefore {
 }
 
 /// One of a dispatch's own buffers after the run: its words, and - for one handed over unread - its
-/// write mask, word `i` non-zero where word `i` was stored to (D809).
+/// write mask, word `i` non-zero where word `i` was stored to (D809), or the list of what it stored.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BufferAfter {
     /// The words after.
     pub words: Vec<u32>,
     /// The write mask.
     pub written: Vec<u32>,
+    /// For one handed over unread whose stores the device gathered into a list: the indices of the
+    /// words stored, ascending, and their values in the same order. [`Self::words`] and
+    /// [`Self::written`] are then empty.
+    pub listed: Option<(Vec<u32>, Vec<u32>)>,
 }
 
 impl BufferAfter {
+    /// What a buffer handed over unread stored, as runs of consecutive words, each with its first
+    /// word's index and the values: from its list where the device gathered one, else from its
+    /// write mask and words.
+    #[must_use]
+    pub fn stored_words(&self) -> Vec<(usize, &[u32])> {
+        let Some((indices, values)) = &self.listed else {
+            return self
+                .stored_runs()
+                .into_iter()
+                .map(|(first, count)| (first, &self.words[first..first + count]))
+                .collect();
+        };
+        let mut runs = Vec::new();
+        let mut start = 0;
+        for at in 1..=indices.len() {
+            if at == indices.len() || indices[at] != indices[at - 1] + 1 {
+                runs.push((indices[start] as usize, &values[start..at]));
+                start = at;
+            }
+        }
+        runs
+    }
+
+    /// Whether a buffer handed over unread, of `words` words, had every one stored: its list holds
+    /// them all, or its mask marks them all.
+    #[must_use]
+    pub fn stored_whole(&self, words: usize) -> bool {
+        match &self.listed {
+            // Ascending and distinct, so as many as the buffer's words are all of them.
+            Some((indices, _)) => indices.len() == words,
+            None => self.stored_runs() == [(0, words)],
+        }
+    }
+
+    /// The words of a buffer handed over unread that it stored whole, as [`Self::stored_whole`]
+    /// says: its list's values, or its words.
+    #[must_use]
+    pub fn whole_words(&self) -> &[u32] {
+        self.listed
+            .as_ref()
+            .map_or(&self.words, |(_, values)| values)
+    }
+
     /// Whether word `index` was stored to.
     #[must_use]
     pub fn stored(&self, index: usize) -> bool {

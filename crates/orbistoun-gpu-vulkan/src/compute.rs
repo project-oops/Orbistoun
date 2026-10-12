@@ -1320,7 +1320,7 @@ pub fn dispatch_guest_with_buffers(
     });
     let buffers_after =
         orbistoun_gpu::perf::span(Span::ReadBackBuffers, || match (&dispatched, &traced) {
-            (Ok(_), Some(traced)) => traced.read(device),
+            (Ok(_), Some(traced)) => traced.read(device, (queue, family)),
             _ => Ok(Vec::new()),
         });
     let _releasing = SpanGuard::start(Span::DeviceRelease);

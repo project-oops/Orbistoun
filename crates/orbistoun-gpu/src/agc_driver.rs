@@ -934,29 +934,47 @@ fn buffer_writes(
     let mut writes = Vec::new();
     let mut fills = Vec::new();
     for ((&(address, bytes), before), after) in ranges.iter().zip(before).zip(after) {
-        let size = match before {
-            BufferBefore::Words(words) => words.len(),
-            BufferBefore::Unread(words) => (*words).max(1),
+        // A buffer read before the run writes the words it changed; one not read, the words it
+        // stored (D809), as its write mask or the device's list of them says.
+        let (runs, whole): (Vec<(usize, &[u32])>, bool) = match before {
+            BufferBefore::Words(words) => {
+                if after.words.len() != words.len() {
+                    return Err("the device answered a buffer of another size".to_owned());
+                }
+                let runs = changed_runs(words, &after.words)
+                    .into_iter()
+                    .map(|(first, count)| (first, &after.words[first..first + count]))
+                    .collect();
+                // Left holding one word throughout, it is a fill (D804), so the check covers all of
+                // it, not only what changed.
+                let whole = after
+                    .words
+                    .split_first()
+                    .is_some_and(|(&pattern, rest)| rest.iter().all(|&word| word == pattern));
+                (runs, whole)
+            }
+            BufferBefore::Unread(words) => {
+                let size = (*words).max(1);
+                if after.listed.is_none() && after.words.len() != size {
+                    return Err("the device answered a buffer of another size".to_owned());
+                }
+                let stored = after.stored_words();
+                if stored
+                    .iter()
+                    .any(|(first, values)| first + values.len() > size)
+                {
+                    return Err("the device stored past a buffer's end".to_owned());
+                }
+                // Stored whole with one word, it is a fill.
+                let whole = after.stored_whole(size)
+                    && after
+                        .whole_words()
+                        .split_first()
+                        .is_some_and(|(&pattern, rest)| rest.iter().all(|&word| word == pattern));
+                (stored, whole)
+            }
         };
-        if after.words.len() != size {
-            return Err("the device answered a buffer of another size".to_owned());
-        }
-        // A buffer read before the run writes the words it changed; one not read, the words its
-        // write mask says were stored (D809).
-        let runs = match before {
-            BufferBefore::Words(words) => changed_runs(words, &after.words),
-            BufferBefore::Unread(_) => after.stored_runs(),
-        };
-        let whole = match before {
-            BufferBefore::Words(_) => true,
-            BufferBefore::Unread(_) => runs == [(0, after.words.len())],
-        };
-        let after = &after.words;
-        if let Some((&pattern, rest)) = after.split_first()
-            && whole
-            && !runs.is_empty()
-            && rest.iter().all(|&word| word == pattern)
-        {
+        if whole && let Some(&(_, &[pattern, ..])) = runs.first() {
             fills.push(cp::Fill {
                 destination: address,
                 pattern,
@@ -964,11 +982,8 @@ fn buffer_writes(
             });
             continue;
         }
-        for (first, words) in runs {
-            let mut changed: Vec<u8> = after[first..first + words]
-                .iter()
-                .flat_map(|w| w.to_le_bytes())
-                .collect();
+        for (first, values) in runs {
+            let mut changed: Vec<u8> = values.iter().flat_map(|w| w.to_le_bytes()).collect();
             // The last word may run past the range's last byte, which is not the buffer's.
             let start = first as u64 * 4;
             changed.truncate(usize::try_from(bytes.saturating_sub(start)).unwrap_or(0));
@@ -994,12 +1009,17 @@ fn uniform_buffers(
         .iter()
         .zip(before.iter().zip(after))
         .filter_map(|(&(destination, count), (before, after))| {
-            if matches!(before, crate::dispatch::BufferBefore::Unread(_))
-                && after.stored_runs() != [(0, after.words.len())]
-            {
-                return None;
-            }
-            let (&first, rest) = after.words.split_first()?;
+            let held: &[u32] = match before {
+                // Not read: a fill only where it stored every word, from its mask or its list.
+                crate::dispatch::BufferBefore::Unread(words) => {
+                    if !after.stored_whole((*words).max(1)) {
+                        return None;
+                    }
+                    after.whole_words()
+                }
+                crate::dispatch::BufferBefore::Words(_) => &after.words,
+            };
+            let (&first, rest) = held.split_first()?;
             rest.iter().all(|&word| word == first).then_some(cp::Fill {
                 destination,
                 pattern: first,
@@ -3186,6 +3206,7 @@ mod tests {
         let after = [vec![0, 0, 0], vec![1, 2], vec![5, 5]].map(|words| BufferAfter {
             words,
             written: Vec::new(),
+            listed: None,
         });
         let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
         assert_eq!(
@@ -3210,13 +3231,40 @@ mod tests {
             BufferAfter {
                 words: vec![9, 0, 8, 7],
                 written: vec![1, 0, 1, 1],
+                listed: None,
             },
             BufferAfter {
                 words: vec![0, 0],
                 written: vec![1, 1],
+                listed: None,
             },
         ];
         let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
+        // The same stores as the device's lists of them (indices, then values), with no words or
+        // mask: the same writes and the same fill.
+        let listed =
+            [(vec![0, 2, 3], vec![9, 8, 7]), (vec![0, 1], vec![0, 0])].map(|list| BufferAfter {
+                listed: Some(list),
+                ..BufferAfter::default()
+            });
+        assert_eq!(
+            super::buffer_writes(&ranges, &before, &listed),
+            Ok((writes.clone(), fills.clone())),
+            "listed as masked"
+        );
+        assert_eq!(
+            super::uniform_buffers(&ranges, (&before, &listed)),
+            fills,
+            "the list stored whole is the fill"
+        );
+        let past = [BufferAfter {
+            listed: Some((vec![4], vec![1])),
+            ..BufferAfter::default()
+        }];
+        assert!(
+            super::buffer_writes(&ranges[..1], &before[..1], &past).is_err(),
+            "a word listed past the buffer is refused"
+        );
         assert_eq!(
             writes,
             [
@@ -3248,6 +3296,7 @@ mod tests {
         let after = [vec![0xFFFC_00F0, 0xFFFC_00F0], vec![1, 2], vec![]].map(|words| BufferAfter {
             words,
             written: Vec::new(),
+            listed: None,
         });
         assert_eq!(
             super::uniform_buffers(&ranges, (&before, &after)),
