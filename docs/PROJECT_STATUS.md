@@ -31,7 +31,7 @@ out of date.
 | obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
 | obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
 | PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
-| PPSA04263-app0 | entered | 148 | 68,036 | 100% | `image+0x2bf156c` | `7a9afb165e73b6f2` match |
+| PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
 | MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
 | MCUB00001 | entered | 67 | 50,348 | 100% | `ran to the time limit` | `ecc399008f7c33ff` new |
 | GCTS00001 | entered | 65 | 28,019 | 100% | `image+0x1b67c9` | `91f982d1d31cf359` new |

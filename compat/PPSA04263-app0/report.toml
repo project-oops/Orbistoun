@@ -17,17 +17,17 @@ frames = "local"
 
 [status]
 reach = "entered"
-outcome = "image+0x2bf156c"
-imports = 148
-calls = 68036
+outcome = "spent its call budget"
+imports = 213
+calls = 20000000
 standing = 100
 default_return = "unimplemented"
-unanswered = 5
+unanswered = 9
 limit_seconds = 120
-build = "v0.1.0 - 51cfb81"
-measured_on = "2026-10-09"
-link_plan = "7a9afb165e73b6f2"
-link_plan_stored = "match"
+build = "v0.1.0 - 9357b26"
+measured_on = "2026-10-13"
+link_plan = "5e4bff5a3efac2a2"
+link_plan_stored = "new"
 
 [experiment]
 reach = "entered"

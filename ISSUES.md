@@ -4,7 +4,7 @@ Open defects, gaps and unmeasured facts, one line each. Delete a line when it is
 
 ## Retail title walls
 
-- PPSA04263: an `int 0x41` assertion at image+0x2bf156c after `sceAgcDriverSetTFRing`, which orbistoun answers 0 without setting anything up.
+- PPSA04263: runs to its 20-million-call budget at `entered` with 213 imports, 93% of the calls `scePthreadYield`: a thread yields in a loop waiting on something nothing provides. The `int 0x41` assertion at image+0x2bf156c after `sceAgcDriverSetTFRing` no longer happens.
 - PPSA04263: the IME update and user-service game-preset stubs need measured values.
 - PPSA21564: runs its 120 s limit at `entered` with 263 imports and never flips. Its main thread loops at image+0xdd8e40: it calls image+0xdefa40 (library code linked into the executable; its errors are `0x8a84xxxx`) as `(0x11000000, 0, block, 0xa8)`, sleeps 1 ms, and leaves only when the block's quadword at +0x88 is non-zero. Every other thread is parked on a semaphore or condition. Before the wait it opens video output, registers its buffers, adds eight event-queue events and creates 1,276 shaders, but submits no command buffer and no flip; the loop itself calls no import (19,939 sleeps in 30 s, nothing else at that count), so it waits on memory something else should write. Forcing 0 from each unanswered boot-path import - `scePlayGoOpen`, `sceAcmContextCreate`, `sceRudpInit`, `sceNpEntitlementAccessInitialize`, and the unnamed libSceAgc `0xe486fe61994e8976` and `0x0a4e469ba741de7d` (33 calls each) - moves nothing (2026-10-12, 30 s each).
 - `libSceAmpr` serves construction, binding, reset and the APR file read (`crates/orbistoun-gpu/src/ampr.rs`); its other imports have no measured answer (`orbistoun-cli census --imports`).
