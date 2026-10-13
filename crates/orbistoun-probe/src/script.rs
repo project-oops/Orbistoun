@@ -272,7 +272,7 @@ pub struct Declared<'a> {
 }
 
 /// A spec to start a measurement of `function` from: resolve it, give every pointer-shaped
-/// argument a [`DRAFT_BLOCK`], call it, dump each block, then the same call with every pointer
+/// argument a block of `0x40` bytes filled `0xcc`, call it, dump each block, then the same call with every pointer
 /// argument null.
 ///
 /// `shape` is the argument signature a run recorded, such as `(u32, ptr, u64)`; an argument it

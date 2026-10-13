@@ -74,7 +74,16 @@ impl Gamepads {
     /// or `None` when there is no such pad or this host reads none.
     pub(crate) fn reading(&mut self, index: usize) -> Option<Reading> {
         self.open();
-        self.read(index)
+        #[cfg(windows)]
+        {
+            self.read(index)
+        }
+        // This host reads no gamepad, so every port answers a neutral pad.
+        #[cfg(not(windows))]
+        {
+            let _ = index;
+            None
+        }
     }
 
     #[cfg(windows)]
@@ -146,11 +155,6 @@ impl Gamepads {
             ],
             triggers: [travel(Pad::LeftTrigger2), travel(Pad::RightTrigger2)],
         })
-    }
-
-    #[cfg(not(windows))]
-    fn read(&mut self, _index: usize) -> Option<Reading> {
-        None
     }
 }
 
