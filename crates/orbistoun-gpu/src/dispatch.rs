@@ -353,6 +353,71 @@ pub fn place_window_except(
 mod tests {
     use super::*;
 
+    /// The runs a mask marks, found a chunk at a time, are the runs a word-by-word reading finds:
+    /// at chunk edges, at either end, a mask shorter or longer than the words, and with nothing or
+    /// everything marked.
+    #[test]
+    fn stored_runs_match_a_word_by_word_reading() {
+        let naive = |after: &BufferAfter| {
+            let mut runs = Vec::new();
+            let mut start = None;
+            for index in 0..after.words.len() {
+                match (after.stored(index), start) {
+                    (true, None) => start = Some(index),
+                    (false, Some(first)) => {
+                        runs.push((first, index - first));
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(first) = start {
+                runs.push((first, after.words.len().min(after.written.len()) - first));
+            }
+            runs
+        };
+        let chunk = STORED_CHUNK;
+        for len in [0_usize, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 5] {
+            let marks: [Vec<usize>; 5] = [
+                vec![],
+                vec![0, chunk - 1, chunk, chunk + 1],
+                vec![len.saturating_sub(1)],
+                vec![1, 2, 2 * chunk + 3],
+                (0..len).collect(),
+            ];
+            for marked in &marks {
+                // A mask word past the words, as the device leaves for a store that did not land,
+                // and one a word short.
+                for mask_len in [len + 1, len.saturating_sub(1)] {
+                    let mut written = vec![0_u32; mask_len];
+                    for &at in marked.iter().filter(|&&at| at < mask_len) {
+                        written[at] = 1;
+                    }
+                    if mask_len > len {
+                        written[len] = 1;
+                    }
+                    let after = BufferAfter {
+                        words: vec![0; len],
+                        written,
+                        listed: None,
+                    };
+                    assert_eq!(
+                        after.stored_runs(),
+                        naive(&after),
+                        "{len} words, mask of {mask_len}, {marked:?} marked"
+                    );
+                    if len > 0 {
+                        assert_eq!(
+                            after.stored_whole(len),
+                            naive(&after) == [(0, len)],
+                            "stored whole: {len} words, mask of {mask_len}, {marked:?} marked"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn write(register: u32, value: u32) -> RegisterWrite {
         RegisterWrite {
             packet_offset: 0,
@@ -531,6 +596,9 @@ pub enum BufferBefore {
     Unread(usize),
 }
 
+/// How many mask words [`BufferAfter::stored_runs`] looks at together where none is marked.
+const STORED_CHUNK: usize = 64;
+
 /// One of a dispatch's own buffers after the run: its words, and - for one handed over unread - its
 /// write mask, word `i` non-zero where word `i` was stored to (D809), or the list of what it stored.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -576,7 +644,17 @@ impl BufferAfter {
         match &self.listed {
             // Ascending and distinct, so as many as the buffer's words are all of them.
             Some((indices, _)) => indices.len() == words,
-            None => self.stored_runs() == [(0, words)],
+            // Every one of its words marked: asked word by word, it is answered at the first
+            // unmarked one - for a buffer not stored whole, nearly always the first - rather than
+            // after reading all of a mask PPSA28061's dispatches make 32 MiB long.
+            None => {
+                words > 0
+                    && self.words.len() == words
+                    && self
+                        .written
+                        .get(..words)
+                        .is_some_and(|marks| marks.iter().all(|&marked| marked != 0))
+            }
         }
     }
 
@@ -598,20 +676,31 @@ impl BufferAfter {
     /// The runs of consecutive words stored to, as `(first, count)`.
     #[must_use]
     pub fn stored_runs(&self) -> Vec<(usize, usize)> {
+        // The mask past the buffer's words, and any word it does not reach, marks nothing.
+        let words = self.words.len();
+        let mask = &self.written[..self.written.len().min(words)];
         let mut runs = Vec::new();
         let mut start = None;
-        for index in 0..self.words.len() {
-            match (self.stored(index), start) {
-                (true, None) => start = Some(index),
-                (false, Some(first)) => {
-                    runs.push((first, index - first));
-                    start = None;
+        // A chunk at a time, each looked at once: one with nothing marked outside a run is passed
+        // over whole, any other word by word.
+        for (chunk, marks) in mask.chunks(STORED_CHUNK).enumerate() {
+            if start.is_none() && marks.iter().all(|&marked| marked == 0) {
+                continue;
+            }
+            for (offset, &marked) in marks.iter().enumerate() {
+                let index = chunk * STORED_CHUNK + offset;
+                match (marked != 0, start) {
+                    (true, None) => start = Some(index),
+                    (false, Some(first)) => {
+                        runs.push((first, index - first));
+                        start = None;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         if let Some(first) = start {
-            runs.push((first, self.words.len() - first));
+            runs.push((first, mask.len() - first));
         }
         runs
     }

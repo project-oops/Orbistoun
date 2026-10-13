@@ -897,23 +897,42 @@ fn stored_image_writes(
 
 /// The runs of words that differ between `before` and `after`, as `(first word, words)`.
 fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> {
+    let len = before.len().min(after.len());
+    let (before, after) = (&before[..len], &after[..len]);
     let mut runs = Vec::new();
     let mut start = None;
-    for (index, (old, new)) in before.iter().zip(after).enumerate() {
-        match (old != new, start) {
-            (true, None) => start = Some(index),
-            (false, Some(first)) => {
-                runs.push((first, index - first));
-                start = None;
+    // A chunk at a time, each looked at once. Outside a run, a chunk that did not change is passed
+    // over in one comparison, which for words and bytes is a memory compare: PPSA28061's
+    // dispatches bind a 32 MiB buffer and change none of it. Any other chunk is compared element
+    // by element.
+    for (chunk, (old, new)) in before
+        .chunks(UNCHANGED_CHUNK)
+        .zip(after.chunks(UNCHANGED_CHUNK))
+        .enumerate()
+    {
+        if start.is_none() && old == new {
+            continue;
+        }
+        for (offset, (old, new)) in old.iter().zip(new).enumerate() {
+            let index = chunk * UNCHANGED_CHUNK + offset;
+            match (old != new, start) {
+                (true, None) => start = Some(index),
+                (false, Some(first)) => {
+                    runs.push((first, index - first));
+                    start = None;
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
     if let Some(first) = start {
-        runs.push((first, before.len().min(after.len()) - first));
+        runs.push((first, len - first));
     }
     runs
 }
+
+/// How many elements [`changed_runs`] compares at once where nothing has changed.
+const UNCHANGED_CHUNK: usize = 64;
 
 /// Bytes to write at a guest address.
 type GuestWrite = (u64, Vec<u8>);
@@ -3274,6 +3293,59 @@ mod tests {
     };
     use crate::dispatch::{BufferAfter, BufferBefore};
     use std::sync::{Mutex, PoisonError};
+
+    /// The runs found a chunk at a time are the runs an element-by-element comparison finds: at
+    /// chunk edges, across them, at either end, and with nothing or everything changed.
+    #[test]
+    fn changed_runs_match_an_element_by_element_comparison() {
+        let naive = |before: &[u32], after: &[u32]| {
+            let mut runs = Vec::new();
+            let mut start = None;
+            for (index, (old, new)) in before.iter().zip(after).enumerate() {
+                match (old != new, start) {
+                    (true, None) => start = Some(index),
+                    (false, Some(first)) => {
+                        runs.push((first, index - first));
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(first) = start {
+                runs.push((first, before.len().min(after.len()) - first));
+            }
+            runs
+        };
+        let chunk = super::UNCHANGED_CHUNK;
+        for len in [0_usize, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 5] {
+            let before: Vec<u32> = (0..len as u32).collect();
+            let changes: [Vec<usize>; 5] = [
+                vec![],
+                vec![0, chunk - 1, chunk, chunk + 1],
+                vec![len.saturating_sub(1)],
+                vec![1, 2, 2 * chunk + 3],
+                (0..len).collect(),
+            ];
+            for changed in &changes {
+                let mut after = before.clone();
+                for &at in changed.iter().filter(|&&at| at < len) {
+                    after[at] ^= 0xFFFF;
+                }
+                assert_eq!(
+                    super::changed_runs(&before, &after),
+                    naive(&before, &after),
+                    "{len} words, {changed:?} changed"
+                );
+                // A shorter after compares only as far as both reach.
+                let short = &after[..len.saturating_sub(1)];
+                assert_eq!(
+                    super::changed_runs(&before, short),
+                    naive(&before, short),
+                    "{len} words, one short"
+                );
+            }
+        }
+    }
 
     /// Neighbouring runs written back share a stretch; a wide gap, a run behind the stretch's start
     /// or one past its longest length starts another; and the runs keep their order.
