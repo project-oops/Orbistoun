@@ -779,7 +779,8 @@ const ULT_WORK_AREA_PER_OBJECT: u64 = 0x80;
 const ULT_WORK_AREA_HEADER: u64 = 0x100;
 
 /// The work-area sizes measured on hardware, by `(threads, second count)`: obSCEne
-/// `REQ-20261012T2016Z-5df8` (`report-1791878041.txt`) and, for the pool at (16, 16),
+/// `REQ-20261012T2016Z-5df8` (rows in `reports/hardware/latest_probe_run.log` of 2026-10-13 15:06,
+/// obSCEne `-3215`) and, for the pool at (16, 16),
 /// `REQ-20261013T0911Z-u1t2` - both `000-boot/sce-ult`, FW 12.40.
 const ULT_POOL_MEASURED: [((u64, u64), u64); 2] = [((16, 0), 0x440), ((16, 16), 0x640)];
 const ULT_RUNTIME_MEASURED: [((u64, u64), u64); 1] = [((16, 3), 0x1258)];

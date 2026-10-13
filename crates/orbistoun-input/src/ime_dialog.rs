@@ -1,7 +1,8 @@
 //! `libSceImeDialog` - the full-screen text-entry dialog over it.
 //!
 //! Served as obSCEne measured it on FW 12.40 (`REQ-20261012T1816Z-b874`, `000-boot/system-dialogs`,
-//! `report-1791878041.txt`): status 0 (none) before anything; `Init` refused `0x80bc0015` and the
+//! rows in `reports/hardware/latest_probe_run.log` of 2026-10-13 15:06 - obSCEne `-3215`):
+//! status 0 (none) before anything; `Init` refused `0x80bc0015` and the
 //! status left at 0; result, abort and terminate refused `0x80bc0107` (not in use) with the result
 //! block untouched. The refused `Init` was measured in a probe that had likely not initialised the
 //! common dialog; once this process has, as every title does first, `Init` is unmeasured and

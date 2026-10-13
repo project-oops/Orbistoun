@@ -269,7 +269,8 @@ The reader reports where each pointer leads and no further.
 **Source.** The OpenOrbis toolchain's `orbis/_types/png.h` (credited in
 [ACKNOWLEDGEMENTS.md](../ACKNOWLEDGEMENTS.md)) declares `libScePngDec`'s parameter blocks with
 their field widths and most fields unnamed. obSCEne's `000-boot/png-dec-enc`
-(`REQ-20261012T1818Z-2bfa`, `REQ-20261012T1822Z-8912`, `report-1791878041.txt`, FW 12.40)
+(`REQ-20261012T1818Z-2bfa`, `REQ-20261012T1822Z-8912`; rows in `reports/hardware/latest_probe_run.log`
+of 2026-10-13 15:06, obSCEne `-3215`; FW 12.40)
 exercised each field on the hardware: a size of 7 refused as a data size, a reserved word
 refused, a short pitch and a short buffer refused, two pixel formats written in two orders.
 
