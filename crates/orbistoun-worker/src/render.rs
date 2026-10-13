@@ -546,7 +546,7 @@ pub fn execute_draws(submission: &Submission, before: Before<'_>) -> bool {
 /// Runs a guest compute dispatch on the device, on the device thread, for the command processor
 /// (installed as its dispatch executor).
 pub fn execute_dispatch(
-    module: &[u32],
+    module: (&[u32], u64),
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
     (images, buffers): (
@@ -571,7 +571,7 @@ pub fn execute_dispatch(
         })
         .collect();
     on_device(|| {
-        orbistoun_gpu_vulkan::dispatch_guest_with_buffers(
+        orbistoun_gpu_vulkan::dispatch_guest_hashed(
             module,
             memory,
             (push, groups),

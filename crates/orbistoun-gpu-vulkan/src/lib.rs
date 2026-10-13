@@ -18,7 +18,7 @@ pub mod framebuffer;
 pub mod pipeline_cache;
 pub use compute::{
     Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest,
-    dispatch_guest_with_buffers, probe,
+    dispatch_guest_hashed, dispatch_guest_with_buffers, probe,
 };
 
 use std::collections::BTreeMap;

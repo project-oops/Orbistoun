@@ -972,7 +972,7 @@ pub struct Pipeline {
     /// Fills not yet matched against a depth target, which may clear one a later submission binds.
     depth_fills: crate::depth::PendingFills,
     /// Guest dispatch modules, by the program's bytes, its entry state and its window.
-    dispatch_modules: BTreeMap<u64, (Vec<u32>, orbistoun_translate::wavefront::ImageSources)>,
+    dispatch_modules: BTreeMap<u64, (DispatchModule, orbistoun_translate::wavefront::ImageSources)>,
     /// Each primitive shader's traced format words, by address and user-data count, with the hash
     /// of the bytes they were traced from ([`Self::format_words`]).
     format_words: BTreeMap<(u64, u32), (u64, Option<FormatWords>)>,
@@ -1003,12 +1003,18 @@ type FormatsResolved = (
     Option<orbistoun_translate::wavefront::BufferFormats>,
 );
 
+/// A translated compute module, shared rather than copied for each dispatch - a guest's run to half
+/// a megabyte - with its [`crate::content_hash`].
+type DispatchModule = (std::sync::Arc<[u32]>, u64);
+
 /// A guest compute dispatch made ready to run: its module, the window it was built against, and the
 /// push-constant block carrying its user data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedDispatch {
-    /// The translated module.
-    pub module: Vec<u32>,
+    /// The translated module, shared with the translation kept for it.
+    pub module: std::sync::Arc<[u32]>,
+    /// Its [`crate::content_hash`], which the device names its pipeline by.
+    pub module_hash: u64,
     /// The guest memory it reads and writes through its buffers; `None` for a program that
     /// addresses none.
     pub window: Option<Window>,
@@ -1124,7 +1130,7 @@ impl Pipeline {
         // The images' numeric types come from the descriptors the translation names, so a module
         // translated for float images whose images are integer ones is translated again for them.
         let mut integer_images = state.inputs.integer_images;
-        let (module, images) = loop {
+        let ((module, module_hash), images) = loop {
             let (module, sources) = self.dispatch_module(
                 (&decoded, program, address),
                 state,
@@ -1149,6 +1155,7 @@ impl Pipeline {
         };
         Ok(PreparedDispatch {
             module,
+            module_hash,
             window: window_or_none,
             images,
             // The whole block the module declares; a word the stream never wrote, which the
@@ -1239,7 +1246,7 @@ impl Pipeline {
             Option<orbistoun_translate::wavefront::BufferFormats>,
         ),
         integer_images: [bool; 2],
-    ) -> Result<(Vec<u32>, orbistoun_translate::wavefront::ImageSources), String> {
+    ) -> Result<(DispatchModule, orbistoun_translate::wavefront::ImageSources), String> {
         let count = u32::try_from(state.user_data.len()).unwrap_or(u32::MAX);
         let inputs = orbistoun_translate::wavefront::ComputeInputs {
             integer_images,
@@ -1319,9 +1326,11 @@ impl Pipeline {
                 format!("the compute program at {address:#x} could not be translated: {e}")
             })?;
             let sources = (translated.textures.clone(), translated.storage);
+            let hash = crate::content_hash(&translated.module);
+            let module = (std::sync::Arc::from(translated.module), hash);
             self.dispatch_modules
-                .insert(key, (translated.module.clone(), sources.clone()));
-            (translated.module, sources)
+                .insert(key, (module.clone(), sources.clone()));
+            (module, sources)
         })
     }
 

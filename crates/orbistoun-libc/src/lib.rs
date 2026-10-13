@@ -16,6 +16,7 @@ mod ctype;
 mod cxx;
 mod floats;
 pub mod heap_trace;
+pub mod jmp;
 mod locks;
 pub mod math;
 mod mspace;
@@ -174,8 +175,8 @@ guest_module! {
         "strtok" => 2, "strtok_r" => 3,
         "qsort" => 4, "bsearch" => 5,
         // `setlocale` takes a category and a locale name; `clock` takes nothing; `setjmp` takes the
-        // buffer it would save into.
-        "setlocale" => 2, "clock" => 0, "setjmp" => 1, "localeconv" => 0,
+        // buffer it saves into, and `longjmp` that buffer and the value to resume with.
+        "setlocale" => 2, "clock" => 0, "setjmp" => 1, "longjmp" => 2, "localeconv" => 0,
         "memset" => 3,
         "memcpy" => 3,
         "memmove" => 3,
@@ -2299,15 +2300,6 @@ fn localeconv(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     lconv.as_ptr() as u64
 }
 
-/// `setjmp(env)` - zero, because this is the direct return.
-///
-/// Saves nothing: a `longjmp` into this buffer would jump through uninitialised memory, and
-/// `longjmp` is not implemented. A non-zero answer would tell the guest it arrived via
-/// `longjmp`, so zero is the true answer about which return this is.
-fn setjmp(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    0
-}
-
 /// `bsearch(key, base, count, size, compare)` - the matching element, or null.
 ///
 /// Answers a pointer, so a miss is null and never an error code (D125).
@@ -3989,7 +3981,9 @@ fn core_implementations() -> &'static [(&'static str, GuestFn)] {
         ("bsearch", bsearch),
         ("setlocale", setlocale),
         ("clock", clock),
-        ("setjmp", setjmp),
+        // Leaves (`jmp`); these answer only when a diagnostic keeps the import traced.
+        ("setjmp", jmp::traced_setjmp),
+        ("longjmp", jmp::traced_longjmp),
         ("localeconv", localeconv),
         ("rand", rand),
         ("srand", srand),

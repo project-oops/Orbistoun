@@ -300,6 +300,8 @@ struct KeptPipeline {
     buffers_layout: Option<vk::DescriptorSetLayout>,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    /// Whether its module reaches the global data share (D789), so a dispatch binds it.
+    shares: bool,
 }
 
 /// A pipeline as one dispatch binds it: the pipeline, whether it is kept for later dispatches or
@@ -337,7 +339,15 @@ impl GlobalShare {
     /// The share for `module`: none where it does not declare the binding, and an error where it
     /// does and the session could not create the share.
     fn for_module(module: &[u32]) -> Result<Self, DispatchError> {
-        if !orbistoun_spirv::declares_binding(module, orbistoun_spirv::GDS_BINDING) {
+        Self::where_shared(orbistoun_spirv::declares_binding(
+            module,
+            orbistoun_spirv::GDS_BINDING,
+        ))
+    }
+
+    /// The share where `shared` says a module declares the binding, as a kept pipeline records.
+    fn where_shared(shared: bool) -> Result<Self, DispatchError> {
+        if !shared {
             return Ok(Self(None));
         }
         GLOBAL_SHARE
@@ -382,10 +392,12 @@ impl GlobalShare {
 }
 
 /// Builds a compute pipeline bound to one storage buffer at set 0, binding 0, with `buffers` - a
-/// dispatch's traced buffers (D746) - as set 1 where it has any.
+/// dispatch's traced buffers (D746) - as set 1 where it has any. `module` comes with its
+/// [`orbistoun_gpu::content_hash`], which names the pipeline among those kept: a guest's modules
+/// run to half a megabyte, and hashing one for every dispatch cost more than the dispatch.
 fn build_pipeline(
     device: &ash::Device,
-    module: &[u32],
+    (module, hash): (&[u32], u64),
     buffer: vk::Buffer,
     size: vk::DeviceSize,
     (memory_buffer, memory_offset, memory_size): (vk::Buffer, vk::DeviceSize, vk::DeviceSize),
@@ -395,17 +407,8 @@ fn build_pipeline(
         Option<vk::DescriptorSetLayout>,
     ),
 ) -> Result<BoundPipeline, DispatchError> {
-    let module = for_this_device(module);
-    // The global data share, where the module reaches it (D789).
-    let global_share = GlobalShare::for_module(&module)?;
     let image_bindings = images.layout_bindings();
-    let key = pipeline_key(
-        device,
-        &module,
-        &image_bindings,
-        buffers.is_some(),
-        push_bytes,
-    );
+    let key = pipeline_key(device, hash, &image_bindings, buffers.is_some(), push_bytes);
     let found = kept_pipelines()
         .lock()
         .ok()
@@ -413,6 +416,9 @@ fn build_pipeline(
     let (kept, held) = if let Some(kept) = found {
         (kept, true)
     } else {
+        let module = for_this_device(module);
+        // The global data share, where the module reaches it (D789).
+        let global_share = GlobalShare::for_module(&module)?;
         let made = make_pipeline(
             device,
             &module,
@@ -424,6 +430,7 @@ fn build_pipeline(
             .is_ok_and(|mut kept| kept.len() < KEPT_PIPELINES && kept.insert(key, made).is_none());
         (made, held)
     };
+    let global_share = GlobalShare::where_shared(kept.shares)?;
 
     let mut pool_sizes = vec![
         vk::DescriptorPoolSize::default()
@@ -493,19 +500,19 @@ fn kept_pipelines() -> &'static std::sync::Mutex<std::collections::HashMap<u64, 
 /// it.
 const KEPT_PIPELINES: usize = 512;
 
-/// What a compute pipeline is built from: the device, the module, the images' bindings, whether it
-/// binds a buffer set and its push-constant size. The global data share's binding follows from
-/// the module.
+/// What a compute pipeline is built from: the device, the module by its content hash, the images'
+/// bindings, whether it binds a buffer set and its push-constant size. The global data share's
+/// binding follows from the module.
 fn pipeline_key(
     device: &ash::Device,
-    module: &[u32],
+    module: u64,
     images: &[vk::DescriptorSetLayoutBinding<'_>],
     buffers: bool,
     push_bytes: u32,
 ) -> u64 {
     let mut shape = vec![
-        orbistoun_gpu::content_hash(module) as u32,
-        (orbistoun_gpu::content_hash(module) >> 32) as u32,
+        module as u32,
+        (module >> 32) as u32,
         u32::from(buffers),
         push_bytes,
         vk::Handle::as_raw(device.handle()) as u32,
@@ -599,6 +606,7 @@ fn make_pipeline(
         buffers_layout,
         layout,
         pipeline: pipelines[0],
+        shares: global_share.0.is_some(),
     })
 }
 
@@ -1010,7 +1018,7 @@ fn dispatch_core(
     device: &ash::Device,
     queue: vk::Queue,
     family: u32,
-    module: &[u32],
+    module: (&[u32], u64),
     binding0: &DispatchBuffer,
     binding1: &DispatchBuffer,
     (groups, push, images, buffers): (
@@ -1205,7 +1213,7 @@ pub fn dispatch(
         device,
         queue,
         family,
-        module,
+        (module, orbistoun_gpu::content_hash(module)),
         &binding0,
         &binding1,
         (
@@ -1258,7 +1266,7 @@ pub(crate) fn dispatch_bound(
         device,
         queue,
         family,
-        module,
+        (module, orbistoun_gpu::content_hash(module)),
         observation,
         window,
         (
@@ -1309,7 +1317,7 @@ pub(crate) fn dispatch_reading_window(
         device,
         queue,
         family,
-        module,
+        (module, orbistoun_gpu::content_hash(module)),
         &observation,
         window,
         (
@@ -1374,6 +1382,24 @@ pub fn dispatch_guest(
 /// No device, more buffers than a module declares, or a device that refused a step.
 pub fn dispatch_guest_with_buffers(
     module: &[u32],
+    memory: &[u32],
+    (push, groups): (&[u32], [u32; 3]),
+    images: &crate::compute_images::DispatchImages<'_>,
+    buffers: &[crate::compute_buffers::BufferIn<'_>],
+) -> Result<GuestDispatch, DispatchError> {
+    let hash = orbistoun_gpu::content_hash(module);
+    dispatch_guest_hashed((module, hash), memory, (push, groups), images, buffers)
+}
+
+/// [`dispatch_guest_with_buffers`], for a module whose [`orbistoun_gpu::content_hash`] the caller
+/// already holds, as a translation cache does: the hash names its pipeline, and computing it again
+/// for every dispatch cost more than the dispatch.
+///
+/// # Errors
+///
+/// As [`dispatch_guest_with_buffers`].
+pub fn dispatch_guest_hashed(
+    module: (&[u32], u64),
     memory: &[u32],
     (push, groups): (&[u32], [u32; 3]),
     images: &crate::compute_images::DispatchImages<'_>,

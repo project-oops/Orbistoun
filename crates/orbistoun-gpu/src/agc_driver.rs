@@ -801,14 +801,14 @@ fn draws_depth_only(submission: &Submission) -> bool {
         .is_some_and(|format| format.is_unbound())
 }
 
-/// Runs a guest compute dispatch's module over its window, images and buffers: the module, the
-/// window's words before, the push-constant block and the grid, the images it fetches from and
+/// Runs a guest compute dispatch's module over its window, images and buffers: the module with its
+/// [`crate::content_hash`], the window's words before, the push-constant block and the grid, the images it fetches from and
 /// stores to, and each of its own buffers' words before (D746). Answers the window's words after,
 /// whether any access escaped the window, the stored image's texels after, and each buffer's words
 /// after, or why the device could not run it. Installed by the worker, which owns the graphics
 /// device.
 pub type DispatchExecutor = fn(
-    &[u32],
+    (&[u32], u64),
     &[u32],
     (&[u32], [u32; 3]),
     (
@@ -1266,7 +1266,7 @@ impl GuestCp<'_> {
         })?;
         let (after, escaped, stored, buffers_after) = span(Span::DispatchExecute, || {
             execute(
-                &prepared.module,
+                (&prepared.module, prepared.module_hash),
                 &before,
                 (&prepared.push, prepared.groups),
                 (&prepared.images, &buffers_before),

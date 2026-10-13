@@ -2492,11 +2492,29 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 name = "setjmp"
 arity = 1
 purpose = "Saves a context to return to, and answers zero on the direct return."
-edge_cases = ["Answers zero. The placeholder 0x7fff0001 is NON-ZERO, and a non-zero setjmp tells the guest it arrived via longjmp - sending it down an error-recovery path it was never on. That is why one call was worth implementing (D562)."]
-known_by = "guest-observed"
-assumptions = ["It saves NOTHING. A real setjmp stores the callee-saved registers, the stack pointer and the return address; a longjmp into this buffer would jump through uninitialised memory and take the process with it. No title in the corpus imports longjmp, which is what makes this safe today and is exactly the condition to check before it stops being."]
-found_in = ["PPSA02664-app0"]
+edge_cases = [
+    "Answers zero on the direct return, having saved the callee-saved registers, the stack pointer, the return address and the x87 and MXCSR controls in FreeBSD amd64's layout (crates/orbistoun-libc/src/jmp.rs), as a leaf called straight from the stub, so the registers are still the guest's.",
+    "IL2CPP titles call it hundreds of thousands of times a run: a collector spills its callee-saved registers into the buffer with it, on the stack it then scans, so a reference held only in a register survives the scan only if setjmp really saves it.",
+    "When a diagnostic names it, the traced path answers zero with nothing saved: the trampoline has replaced the registers by then.",
+]
+known_by = "published"
+cites = "ISO/IEC 9899:2011 7.13.1.1; FreeBSD lib/libc/amd64/gen/_setjmp.S for the buffer layout."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA25872-app0", "PPSA28061-app0"]
 found_on = "2026-09-04"
+
+[[function]]
+name = "longjmp"
+arity = 2
+purpose = "Returns to the context setjmp saved: (env, value)."
+edge_cases = [
+    "Restores what setjmp saved and resumes the guest where that setjmp returned, which then answers value, or 1 for a value of 0.",
+    "A buffer this setjmp did not fill (no marker at +72) stops at ud2 rather than jumping through it.",
+    "When a diagnostic names it, the traced path answers the placeholder: it cannot resume the guest from there.",
+]
+known_by = "published"
+cites = "ISO/IEC 9899:2011 7.13.2.1; FreeBSD lib/libc/amd64/gen/_setjmp.S for the buffer layout."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA25872-app0", "PPSA28061-app0"]
+found_on = "2026-10-13"
 
 [[function]]
 name = "setlocale"
