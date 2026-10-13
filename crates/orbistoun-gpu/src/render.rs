@@ -23,6 +23,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
         RenderCommand::SetMoreColourOutputs(_) => "SetMoreColourOutputs",
+        RenderCommand::SetSampleCounting(_) => "SetSampleCounting",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",

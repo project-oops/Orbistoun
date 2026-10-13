@@ -292,6 +292,8 @@ pub struct VulkanBackend {
     /// Their output state for the next draw: the latest `SetMoreColourOutputs`. An attachment it
     /// does not reach writes every channel, unblended.
     more_outputs: Vec<orbistoun_gpu::ColourOutput>,
+    /// Whether the next draw counts the samples that pass: the latest `SetSampleCounting` (D827).
+    sample_counting: bool,
     /// Colour target zero's raster operation for the next draw: the latest `SetRasterOp`; `None`
     /// writes the colour unchanged.
     raster_op: Option<u8>,
@@ -385,6 +387,7 @@ impl VulkanBackend {
             blend_constants: None,
             more_targets: Vec::new(),
             more_outputs: Vec::new(),
+            sample_counting: false,
             raster_op: None,
             line_width: None,
             write_mask: None,
@@ -760,6 +763,8 @@ impl VulkanBackend {
             RenderCommand::SetBlendConstants(bits) => self.blend_constants = Some(*bits),
             // The colour attachments after the first's blend states and masks.
             RenderCommand::SetMoreColourOutputs(outputs) => self.more_outputs.clone_from(outputs),
+            // Whether draws count their passing samples.
+            RenderCommand::SetSampleCounting(on) => self.sample_counting = *on,
             // The raster operation.
             RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
             // The line width.
@@ -904,6 +909,16 @@ impl VulkanBackend {
         for resident in self.resident.values_mut() {
             resident.detach_more();
         }
+    }
+
+    /// The samples every draw that counts them has passed so far, once the draws recorded have run
+    /// (D827): what the guest's z-pass counters stand at. `None` where the device cannot count
+    /// them exactly, or could not be settled.
+    pub fn samples_passed(&mut self) -> Option<u64> {
+        framebuffer::samples_passed()
+            .inspect_err(|e| tracing::warn!("the samples passed could not be read: {e:?}"))
+            .ok()
+            .flatten()
     }
 
     /// What colour target `target` holds after the draws so far, read back from the device when
@@ -1418,6 +1433,7 @@ impl VulkanBackend {
                 blend_constants: self.blend_constants,
                 more: &more_outputs,
             },
+            counting: self.sample_counting,
             raster_op: self.raster_op,
             line_width: self.line_width,
             write_mask: self.write_mask,
@@ -1435,10 +1451,12 @@ impl VulkanBackend {
         };
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
-        if geometry_is_mesh || (!indexed && (start.depth.is_some() || !more_outputs.is_empty())) {
-            // A mesh draw, or a vertex draw with depth or with colour attachments after the first,
-            // draws on the resident attachment, where its depth attachment and its pass over the
-            // others are kept (D825). Only a mesh draw batches.
+        let resident_only = start.depth.is_some() || !more_outputs.is_empty() || start.counting;
+        if geometry_is_mesh || (!indexed && resident_only) {
+            // A mesh draw, or a vertex draw with depth, with colour attachments after the first or
+            // counting its samples, draws on the resident attachment, where its depth attachment,
+            // its pass over the others and its queries are kept (D825, D827). Only a mesh draw
+            // batches.
             let vertices = (!geometry_is_mesh).then_some(draw);
             self.draw_resident(
                 ((&geometry, &fragment), vertices),
@@ -1544,6 +1562,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
             | RenderCommand::SetBlend(_)
             | RenderCommand::SetBlendConstants(_)
             | RenderCommand::SetMoreColourOutputs(_)
+            | RenderCommand::SetSampleCounting(_)
             | RenderCommand::SetRasterOp(_)
             | RenderCommand::SetLineWidth(_)
             | RenderCommand::SetWriteMask(_)
@@ -1569,6 +1588,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
         RenderCommand::SetMoreColourOutputs(_) => "SetMoreColourOutputs",
+        RenderCommand::SetSampleCounting(_) => "SetSampleCounting",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",

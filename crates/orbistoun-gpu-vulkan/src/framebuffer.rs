@@ -2211,6 +2211,8 @@ pub(crate) struct Start<'a> {
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
     /// The blend constants, and the colour attachments after the first's output state.
     pub(crate) colour_extras: ColourExtras<'a>,
+    /// Whether the draw counts the samples that pass, for the guest's z-pass counters (D827).
+    pub(crate) counting: bool,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     pub(crate) raster_op: Option<u8>,
     /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
@@ -3074,6 +3076,8 @@ struct MeshBatch {
     key: BatchKey,
     state: BindState,
     draws: Vec<DrawWords>,
+    /// The open pass's occlusion query its draws are counted in, when they count samples.
+    query: Option<u32>,
 }
 
 /// What must be the same for a draw to join a batch: the pipeline (which carries its shaders,
@@ -3087,6 +3091,8 @@ pub(crate) struct BatchKey {
     /// The draw's buffers' set (D733).
     buffers: vk::DescriptorSet,
     fragment: DrawWords,
+    /// Whether its draws count the samples that pass (`DB_COUNT_CONTROL`, D827).
+    counting: bool,
 }
 
 impl BatchKey {
@@ -3125,13 +3131,17 @@ pub(crate) fn split_user_data(
 fn record_batch(
     instance: &ash::Instance,
     device: &ash::Device,
-    command: vk::CommandBuffer,
+    (command, pool): (vk::CommandBuffer, Option<vk::QueryPool>),
     batch: &MeshBatch,
 ) -> Result<(), DispatchError> {
     let offset = write_draw_data(&batch.draws).ok_or(DispatchError::Unsupported(
         "the draw-data buffer had no room for a batch it was checked to have room for".to_owned(),
     ))?;
     bind_for_draw(device, command, &batch.state, offset);
+    let counted = pool.zip(batch.query);
+    if let Some((pool, query)) = counted {
+        begin_count(device, command, (pool, query));
+    }
     issue_draw(
         instance,
         device,
@@ -3139,7 +3149,126 @@ fn record_batch(
         batch.state.geometry,
         u32::try_from(batch.draws.len()).unwrap_or(u32::MAX),
     );
+    if let Some((pool, query)) = counted {
+        // SAFETY: recording is open inside the pass the query began in.
+        unsafe { device.cmd_end_query(command, pool, query) };
+    }
     Ok(())
+}
+
+/// Occlusion queries a pass's pool holds: one for each batch or lone draw that counts samples.
+const QUERIES_PER_PASS: u32 = 1024;
+
+/// The samples every counted draw so far passed, summed when the device settles (D827).
+static SAMPLES_PASSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A pass's occlusion query pool and how many of its queries are taken.
+#[derive(Debug, Clone, Copy)]
+struct QueryRun {
+    pool: vk::QueryPool,
+    used: u32,
+}
+
+/// Pools of passes that have closed, with the queries each used, read when the device settles.
+fn closed_queries() -> &'static std::sync::Mutex<Vec<QueryRun>> {
+    static CLOSED: std::sync::Mutex<Vec<QueryRun>> = std::sync::Mutex::new(Vec::new());
+    &CLOSED
+}
+
+/// Pools read and ready for another pass.
+fn spare_query_pools() -> &'static std::sync::Mutex<Vec<vk::QueryPool>> {
+    static SPARE: std::sync::Mutex<Vec<vk::QueryPool>> = std::sync::Mutex::new(Vec::new());
+    &SPARE
+}
+
+/// Starts occlusion query `query` of `pool`: exact where the device counts exactly.
+fn begin_count(
+    device: &ash::Device,
+    command: vk::CommandBuffer,
+    (pool, query): (vk::QueryPool, u32),
+) {
+    let flags = if crate::compute::occlusion_precise() {
+        vk::QueryControlFlags::PRECISE
+    } else {
+        vk::QueryControlFlags::empty()
+    };
+    // SAFETY: recording is open inside a render pass, and the query was reset before the pass
+    // began and is begun once.
+    unsafe { device.cmd_begin_query(command, pool, query, flags) };
+}
+
+/// A pool of [`QUERIES_PER_PASS`] occlusion queries: a spare one, or a new one.
+fn query_pool(device: &ash::Device) -> Result<vk::QueryPool, DispatchError> {
+    if let Some(pool) = spare_query_pools()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+    {
+        return Ok(pool);
+    }
+    let info = vk::QueryPoolCreateInfo::default()
+        .query_type(vk::QueryType::OCCLUSION)
+        .query_count(QUERIES_PER_PASS);
+    // SAFETY: the device is live and the create info outlives the call.
+    unsafe { device.create_query_pool(&info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_query_pool", e))
+}
+
+/// Adds every closed pass's counted samples to [`SAMPLES_PASSED`] and spares its pool. The device
+/// must be idle.
+fn read_closed_queries(device: &ash::Device) {
+    let closed = std::mem::take(
+        &mut *closed_queries()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    for run in closed {
+        let mut counts = vec![0u64; run.used as usize];
+        // SAFETY: the pool is live, every query below `used` was begun and ended in a pass that has
+        // run, and the device is idle.
+        let read = unsafe {
+            device.get_query_pool_results(
+                run.pool,
+                0,
+                &mut counts,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            )
+        };
+        match read {
+            Ok(()) => {
+                SAMPLES_PASSED.fetch_add(
+                    counts.iter().sum::<u64>(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            Err(e) => tracing::warn!("a pass's occlusion queries could not be read: {e:?}"),
+        }
+        spare_query_pools()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(run.pool);
+    }
+}
+
+/// The samples every draw that counts them has passed so far, once every recorded draw has run
+/// (D827): what a guest's z-pass counters stand at. `None` where the device counts them only
+/// approximately.
+///
+/// # Errors
+///
+/// When there is no device, or settling it fails.
+pub(crate) fn samples_passed() -> Result<Option<u64>, DispatchError> {
+    if !crate::compute::occlusion_precise() {
+        return Ok(None);
+    }
+    let session = crate::compute::session()?;
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    settle(&session)?;
+    Ok(Some(
+        SAMPLES_PASSED.load(std::sync::atomic::Ordering::Relaxed),
+    ))
 }
 
 /// How a recording's attachment starts and ends.
@@ -3219,7 +3348,7 @@ fn render_resident(
     orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeRecord, || {
         render_resident_with(
             session,
-            (pass, bound.depth_clear),
+            (pass, bound.depth_clear, bound.counting),
             pipeline,
             cacheable.map(|(key, _)| key),
         )
@@ -3269,6 +3398,19 @@ struct OpenPass {
     clock: Option<u32>,
     /// Draws waiting to be recorded as one dispatch (D718).
     batch: Option<MeshBatch>,
+    /// Its occlusion queries, when draws in it count samples (D827).
+    queries: Option<QueryRun>,
+}
+
+impl OpenPass {
+    /// The next of its occlusion queries, or `None` when it has none left.
+    fn take_query(&mut self) -> Option<u32> {
+        let run = self.queries.as_mut()?;
+        (run.used < QUERIES_PER_PASS).then(|| {
+            run.used += 1;
+            run.used - 1
+        })
+    }
 }
 
 fn open_pass() -> &'static std::sync::Mutex<Option<OpenPass>> {
@@ -3503,10 +3645,22 @@ fn close_open_pass(session: &crate::compute::Session) -> Result<(), DispatchErro
     let device = &session.device;
     // The batch still waiting is the pass's last work (D718).
     if let Some(batch) = &open.batch {
-        record_batch(&session.instance, device, open.command, batch)?;
+        record_batch(
+            &session.instance,
+            device,
+            (open.command, open.queries.map(|run| run.pool)),
+            batch,
+        )?;
     }
     // SAFETY: the pass and the recording were opened by `begin_pass` and nothing else ended them.
     unsafe { device.cmd_end_render_pass(open.command) };
+    // Its counts are read once the device has run it.
+    if let Some(run) = open.queries {
+        closed_queries()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(run);
+    }
     if let Some(first) = open.clock {
         gpu_clock_end(device, open.command, first);
     }
@@ -3530,12 +3684,16 @@ fn close_open_pass(session: &crate::compute::Session) -> Result<(), DispatchErro
 fn pass_on(
     session: &crate::compute::Session,
     pass: DrawPass,
+    counting: bool,
 ) -> Result<vk::CommandBuffer, DispatchError> {
+    // A draw that counts samples needs a query the open pass still has; one with none, or none
+    // left, is closed and another opened with a pool (D827).
     if let Some(open) = open_pass()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         && open.framebuffer == pass.framebuffer
+        && (!counting || open.queries.is_some_and(|run| run.used < QUERIES_PER_PASS))
     {
         return Ok(open.command);
     }
@@ -3571,6 +3729,16 @@ fn pass_on(
         );
     }
     let clock = gpu_clock_start(session, command);
+    // Its queries reset before the pass begins, since a reset may not be recorded inside one.
+    let queries = if counting {
+        let pool = query_pool(device)?;
+        // SAFETY: recording is open outside any render pass, and nothing pending uses the pool:
+        // a spare one was read after the device settled.
+        unsafe { device.cmd_reset_query_pool(command, pool, 0, QUERIES_PER_PASS) };
+        Some(QueryRun { pool, used: 0 })
+    } else {
+        None
+    };
     let (width, height) = pass.extent;
     let pass_begin = vk::RenderPassBeginInfo::default()
         .render_pass(pass.render_pass)
@@ -3589,8 +3757,19 @@ fn pass_on(
         framebuffer: pass.framebuffer,
         clock,
         batch: None,
+        queries,
     });
     Ok(command)
+}
+
+/// The open pass's next occlusion query, with its pool: `None` when it has none left.
+fn take_open_query() -> Option<(vk::QueryPool, u32)> {
+    let mut open = open_pass()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let open = open.as_mut()?;
+    let query = open.take_query()?;
+    Some((open.queries?.pool, query))
 }
 
 /// Records the open pass's batch, if it has one, so what is recorded next comes after it (D718).
@@ -3602,7 +3781,12 @@ fn flush_batch(session: &crate::compute::Session) -> Result<(), DispatchError> {
         return Ok(());
     };
     match open.batch.take() {
-        Some(batch) => record_batch(&session.instance, &session.device, open.command, &batch),
+        Some(batch) => record_batch(
+            &session.instance,
+            &session.device,
+            (open.command, open.queries.map(|run| run.pool)),
+            &batch,
+        ),
         None => Ok(()),
     }
 }
@@ -3631,12 +3815,27 @@ fn batch_draw(
         return Ok(());
     }
     if let Some(batch) = open.batch.take() {
-        record_batch(&session.instance, &session.device, open.command, &batch)?;
+        record_batch(
+            &session.instance,
+            &session.device,
+            (open.command, open.queries.map(|run| run.pool)),
+            &batch,
+        )?;
     }
+    let query = if key.counting {
+        Some(open.take_query().ok_or_else(|| {
+            DispatchError::Unsupported(
+                "a batch that counts samples in a pass with no occlusion query left".to_owned(),
+            )
+        })?)
+    } else {
+        None
+    };
     open.batch = Some(MeshBatch {
         key: *key,
         state: *state,
         draws: vec![*draw],
+        query,
     });
     Ok(())
 }
@@ -3688,6 +3887,7 @@ pub(crate) fn settle(session: &crate::compute::Session) -> Result<(), DispatchEr
         .map_err(|e| DispatchError::Vulkan("device_wait_idle", e))?;
     forget_slot_fences(device);
     gpu_clock_read(device);
+    read_closed_queries(device);
     // Nothing recorded reads the draw data any more (D718).
     reset_draw_data();
     if buffers.is_empty() {
@@ -3796,7 +3996,7 @@ fn build_resident_pipeline(
 /// it when it does not.
 fn render_resident_with(
     session: &crate::compute::Session,
-    (pass, clear): (DrawPass, Option<crate::depth::DepthClear>),
+    (pass, clear, counting): (DrawPass, Option<crate::depth::DepthClear>, bool),
     pipeline: Option<Pipeline>,
     key: Option<u64>,
 ) -> Result<Drawn, DispatchError> {
@@ -3836,7 +4036,7 @@ fn render_resident_with(
     // once when asked for ([`read_buffer`]), and nothing reads a resident draw's storage image.
     orbistoun_gpu::perf::measure(orbistoun_gpu::perf::Phase::Execute, || {
         ensure_draw_room(session)?;
-        let command = pass_on(session, pass)?;
+        let command = pass_on(session, pass, counting)?;
         // The clear lands after the draws already batched and before this one.
         if let Some(clear) = clear {
             flush_batch(session)?;
@@ -3857,6 +4057,7 @@ fn render_resident_with(
                     window: (built.buffers[1].0, built.window_offset),
                     buffers: built.draw_buffers,
                     fragment,
+                    counting,
                 },
                 &built.bind_state(),
                 &geometry_words,
@@ -3868,7 +4069,15 @@ fn render_resident_with(
                     .to_owned(),
             ))?;
             bind_for_draw(device, command, &built.bind_state(), offset);
+            let counted = counting.then(take_open_query).flatten();
+            if let Some(counted) = counted {
+                begin_count(device, command, counted);
+            }
             issue_draw(instance, device, command, built.geometry, 1);
+            if let Some((pool, query)) = counted {
+                // SAFETY: recording is open inside the pass the query began in.
+                unsafe { device.cmd_end_query(command, pool, query) };
+            }
         }
         Ok::<_, DispatchError>(())
     })?;
@@ -4844,6 +5053,7 @@ pub(crate) fn draw_resident(
                 ),
                 buffers: buffers_set,
                 fragment,
+                counting: start.counting,
             }
         });
     if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
@@ -4876,6 +5086,7 @@ pub(crate) fn draw_resident(
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
             colour_extras: &start.colour_extras,
+            counting: start.counting,
             raster_op: start.raster_op,
             line_width: start.line_width,
             write_mask: start.write_mask,
@@ -4989,6 +5200,8 @@ struct Bound<'a> {
     /// The blend constants, and the colour attachments after the first's output state. By
     /// reference, so `Bound` stays cheap to pass by value.
     colour_extras: &'a ColourExtras<'a>,
+    /// Whether the draw counts the samples that pass (D827).
+    counting: bool,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     raster_op: Option<u8>,
     /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
@@ -5094,6 +5307,7 @@ impl Default for Bound<'_> {
             user_data: &NO_USER_DATA,
             blend: None,
             colour_extras: &NO_COLOUR_EXTRAS,
+            counting: false,
             raster_op: None,
             line_width: None,
             write_mask: None,

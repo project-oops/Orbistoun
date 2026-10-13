@@ -563,6 +563,19 @@ pub fn seed_more_targets(targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u3
     .unwrap_or(false)
 }
 
+/// The samples every draw that counts them has passed so far (D827): the
+/// [`orbistoun_gpu::agc_driver::SampleCounter`] the worker installs. On the device thread.
+pub fn samples_passed() -> Option<u64> {
+    on_device(|| {
+        live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(VulkanBackend::new)
+            .samples_passed()
+    })
+    .flatten()
+}
+
 /// What a colour attachment after the first holds after the draws, as linear `Rgba8` words (D825):
 /// the [`orbistoun_gpu::agc_driver::TargetReader`] the worker installs.
 pub fn read_target_frame(target: orbistoun_gpu::ResourceId) -> Option<Vec<u32>> {

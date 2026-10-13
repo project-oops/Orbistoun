@@ -990,6 +990,21 @@ fn dispatch_executor() -> &'static OnceLock<DispatchExecutor> {
     &EXECUTOR
 }
 
+/// The samples the draws carried out so far have passed while counting them (D827), once they have
+/// run; `None` when the device cannot count them exactly. Installed by the worker.
+pub type SampleCounter = fn() -> Option<u64>;
+
+fn sample_counter() -> &'static OnceLock<SampleCounter> {
+    static COUNTER: OnceLock<SampleCounter> = OnceLock::new();
+    &COUNTER
+}
+
+/// Installs what a `ZPASS_DONE` reads the samples passed from. Without it the event stops the
+/// command processor. First install wins.
+pub fn install_sample_counter(counter: SampleCounter) {
+    let _ = sample_counter().set(counter);
+}
+
 /// Installs the executor a submit carries out its compute dispatches with. Without one, a dispatch
 /// stops the command processor. First install wins.
 pub fn install_dispatch_executor(executor: DispatchExecutor) {
@@ -3096,6 +3111,12 @@ impl cp::CpMemory for GuestCp<'_> {
                 }
             }
         })
+    }
+
+    fn samples_passed(&mut self) -> Option<u64> {
+        // The draws before it have been carried out (each segment runs at its first draw); the
+        // device answers once they have run.
+        sample_counter().get().and_then(|count| count())
     }
 
     fn run_dispatch(&mut self, dispatch: &cp::Dispatch<'_>) -> bool {

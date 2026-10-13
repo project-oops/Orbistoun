@@ -397,6 +397,19 @@ pub(crate) struct DrawStateSent {
     cull: Option<u32>,
     /// The polygon offset last sent; `None` is no offset, which a stream starts with.
     bias: Option<DepthBias>,
+    /// Whether draws count their passing samples, as last sent; a stream starts not counting.
+    counting: bool,
+}
+
+/// `DB_COUNT_CONTROL` (`gfx103.json`, byte `0x28004`, dword `0xA001`).
+pub(crate) const DB_COUNT_CONTROL: u32 = 0xA001;
+
+/// Whether a `DB_COUNT_CONTROL` value has the depth block count the samples that pass:
+/// `ZPASS_ENABLE` (bits 8-11) set and `ZPASS_INCREMENT_DISABLE` (bit 0) clear (`gfx103.json`). The
+/// counters run under oops-gl's `0x11000100` and stand still under `0x0` (obSCEne `-4d19`).
+#[must_use]
+pub const fn counts_samples(control: u32) -> bool {
+    (control >> 8) & 0xF != 0 && control & 1 == 0
 }
 
 impl DrawStateSent {
@@ -432,6 +445,14 @@ impl DrawStateSent {
         if bias != self.bias {
             commands.push(RenderCommand::SetDepthBias(bias.unwrap_or_default()));
             self.bias = bias;
+        }
+        // Counting is sent only once a stream turns it on (D827).
+        let counting = sweep
+            .latest(at, DB_COUNT_CONTROL)
+            .is_some_and(counts_samples);
+        if counting != self.counting {
+            commands.push(RenderCommand::SetSampleCounting(counting));
+            self.counting = counting;
         }
         // A clear draw writes the clear value wherever it covers; the backend clears the whole
         // target, which is what a clear draw over the whole target does.
@@ -981,5 +1002,21 @@ mod tests {
             ),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod count_tests {
+    use super::counts_samples;
+
+    /// oops-gl's recipe counts, with or without its query's precision bits; zero, and the
+    /// increment-disable bit, do not (`gfx103.json` `DB_COUNT_CONTROL`, obSCEne `-4d19`).
+    #[test]
+    fn the_depth_block_counts_under_zpass_enable() {
+        assert!(counts_samples(0x1100_0100));
+        assert!(counts_samples(0x1100_0106));
+        assert!(!counts_samples(0));
+        assert!(!counts_samples(0x1100_0101));
+        assert!(!counts_samples(0x1100_0006));
     }
 }

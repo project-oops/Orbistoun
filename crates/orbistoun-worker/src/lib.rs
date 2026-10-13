@@ -529,6 +529,8 @@ fn install_presentation() {
         render::seed_more_targets,
         render::read_target_frame,
     );
+    // The z-pass counters a `ZPASS_DONE` dumps, from the device's occlusion queries (D827).
+    orbistoun_gpu::agc_driver::install_sample_counter(render::samples_passed);
     orbistoun_gpu::agc_driver::set_write_back_at_flip(
         orbistoun_env::TARGET_WRITEBACK.get().as_deref() != Some("submit"),
     );

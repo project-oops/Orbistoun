@@ -150,6 +150,12 @@ pub trait CpMemory {
     fn run_dispatch(&mut self, _dispatch: &Dispatch<'_>) -> bool {
         false
     }
+    /// The samples the draws carried out so far passed while they counted them (D827): what the
+    /// depth block's z-pass counters stand at for a `ZPASS_DONE` to write. `None` when nothing
+    /// counts them exactly, which leaves the event as a stop.
+    fn samples_passed(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// A run of a stream's draws with no memory work between them, carried out together (D729).
@@ -375,6 +381,7 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
             WRITE_DATA => crate::perf::span(crate::perf::Span::OtherMemory, || {
                 write_data(&body, memory, &mut result)
             }),
+            measured::EVENT_WRITE => event_write(&body, memory, &mut result),
             _ => Err(Stop::NeedsGpu),
         };
         if let Err(stop) = step {
@@ -677,6 +684,47 @@ fn write_data(
     Ok(())
 }
 
+/// `ZPASS_DONE`, the `EVENT_WRITE` event type that dumps the depth block's z-pass counters
+/// (`gfx103.json` `VGT_EVENT_TYPE`, 21).
+const ZPASS_DONE: u32 = 21;
+
+/// The render backends whose counters a `ZPASS_DONE` writes, sixteen bytes apart: sixteen, every
+/// slot with bit 63 set, measured on the console (obSCEne `-4d19`: `written-slots 0x10`,
+/// `enabled-rb-mask 0xffff`).
+const ZPASS_BACKENDS: u64 = 16;
+
+/// A counter slot's valid marker, bit 63, set on every slot `-4d19` read.
+const ZPASS_VALID: u64 = 1 << 63;
+
+/// `EVENT_WRITE`'s `ZPASS_DONE` (D827): each render backend's z-pass counter written at the
+/// destination, sixteen bytes apart, with its valid bit. The whole count is the first backend's
+/// and the rest stand still: how the console splits samples among its backends is not measured,
+/// while the sum a reader takes over them all - what `-4d19` measured equal to the pixels drawn -
+/// is exact. Any other event that carries an address needs the GPU.
+fn event_write(
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    let [initiator, addr_low, addr_high, ..] = *body else {
+        return Err(Stop::NeedsGpu);
+    };
+    if initiator & 0x3F != ZPASS_DONE {
+        return Err(Stop::NeedsGpu);
+    }
+    let count = memory.samples_passed().ok_or(Stop::NeedsGpu)?;
+    let destination = address(addr_low & !0x7, addr_high & 0xFFFF);
+    for backend in 0..ZPASS_BACKENDS {
+        let value = if backend == 0 { count } else { 0 } | ZPASS_VALID;
+        let at = destination + backend * 16;
+        if !memory.write(at, &value.to_le_bytes()) {
+            return Err(Stop::OutOfBounds(at));
+        }
+        result.bytes_written += 8;
+    }
+    Ok(())
+}
+
 /// `CP_STRMOUT_CNTL`'s dword offset (`R_0300FC_CP_STRMOUT_CNTL >> 2`).
 const CP_STRMOUT_CNTL: u32 = 0x300fc >> 2;
 /// Its `OFFSET_UPDATE_DONE` bit (`S_0084FC_OFFSET_UPDATE_DONE(1)`).
@@ -795,6 +843,8 @@ mod tests {
         clock: u64,
         /// Every release reported, `(address, context)`.
         released: Vec<(u64, u32)>,
+        /// What the samples-passed count answers; `None` counts nothing.
+        samples: Option<u64>,
     }
 
     impl Fake {
@@ -831,6 +881,53 @@ mod tests {
         fn released(&mut self, address: u64, context: u32) {
             self.released.push((address, context));
         }
+        fn samples_passed(&mut self) -> Option<u64> {
+            self.samples
+        }
+    }
+
+    /// A `ZPASS_DONE` writes sixteen backends' counters sixteen bytes apart, each with bit 63 set
+    /// and the whole count in the first (D827); with nothing to count it is a stop, and an event
+    /// with no address writes nothing.
+    #[test]
+    fn a_zpass_done_writes_sixteen_counters_with_the_count_in_the_first() {
+        let zpass = |dst: u64| -> Vec<u32> {
+            vec![
+                command_header(measured::EVENT_WRITE, 3),
+                0x115,
+                dst as u32,
+                (dst >> 32) as u32,
+            ]
+        };
+        let mut memory = Fake {
+            samples: Some(0x1234),
+            ..Fake::default()
+        };
+        let ran = execute(&bytes(&zpass(0x2008)), &mut memory);
+        assert_eq!(ran.stopped, Stopped::Completed);
+        assert_eq!(ran.bytes_written, 16 * 8);
+        assert_eq!(
+            [memory.word(0x2008), memory.word(0x200C)],
+            [0x1234, 1 << 31]
+        );
+        for backend in 1..16 {
+            let at = 0x2008 + backend * 16;
+            assert_eq!(
+                [memory.word(at), memory.word(at + 4)],
+                [0, 1 << 31],
+                "{backend}"
+            );
+        }
+        assert_eq!(
+            memory.word(0x2010),
+            0,
+            "the slot's other half is left alone"
+        );
+
+        let mut memory = Fake::default();
+        let ran = execute(&bytes(&zpass(0x2000)), &mut memory);
+        assert!(matches!(ran.stopped, Stopped::NeedsGpu { .. }));
+        assert_eq!(memory.word(0x2000), 0);
     }
 
     /// A release that lands reports its address and interrupt context id, which is how a flip

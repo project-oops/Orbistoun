@@ -693,6 +693,15 @@ pub(crate) fn depth_clip_control() -> bool {
     DEPTH_CLIP_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the session's device was created with `occlusion_query_precise`.
+static OCCLUSION_PRECISE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether an occlusion query counts samples exactly: the device enabled `occlusion_query_precise`.
+/// Without it a query may answer any non-zero number for a draw that passed.
+pub(crate) fn occlusion_precise() -> bool {
+    OCCLUSION_PRECISE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the session's device was created with `depth_bias_clamp`.
 static DEPTH_BIAS_CLAMP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -860,7 +869,10 @@ impl Session {
             // `wide_lines` serves a guest line wider than one pixel (`PA_SU_LINE_CNTL`).
             .wide_lines(available.wide_lines == vk::TRUE)
             // `depth_bias_clamp` serves a guest polygon offset with a clamp.
-            .depth_bias_clamp(available.depth_bias_clamp == vk::TRUE);
+            .depth_bias_clamp(available.depth_bias_clamp == vk::TRUE)
+            // `occlusion_query_precise` serves the guest's z-pass counters (`ZPASS_DONE`), which
+            // count samples exactly.
+            .occlusion_query_precise(available.occlusion_query_precise == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -917,6 +929,10 @@ impl Session {
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
         DEPTH_BIAS_CLAMP.store(
             wanted_features.depth_bias_clamp == vk::TRUE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        OCCLUSION_PRECISE.store(
+            wanted_features.occlusion_query_precise == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,
         );
         WIDE_LINES.store(

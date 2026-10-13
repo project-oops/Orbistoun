@@ -159,6 +159,11 @@ pub enum RenderCommand {
     /// [`Self::SetRenderTargets`] lists them from its second: what [`Self::SetBlend`] and
     /// [`Self::SetWriteMask`] are for the first. Emitted before a draw whenever any changed.
     SetMoreColourOutputs(Vec<ColourOutput>),
+    /// Whether the draws that follow count the samples that pass their depth and stencil tests,
+    /// as `DB_COUNT_CONTROL` stands at them: `ZPASS_ENABLE` set and `ZPASS_INCREMENT_DISABLE`
+    /// clear. A `ZPASS_DONE` reads the count (D827). Emitted before a draw whenever it changed,
+    /// and only once a stream turns counting on.
+    SetSampleCounting(bool),
     /// The depth and stencil tests the draws that follow run under, as the stream's
     /// `DB_DEPTH_CONTROL`, `DB_STENCIL_CONTROL` and `DB_STENCILREFMASK` pair stand at them.
     ///
