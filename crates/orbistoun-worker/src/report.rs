@@ -2446,7 +2446,12 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
                 handle: record.handle,
                 name: record.name,
                 finished: record.finished,
-                last_call: newest.map(|call| labelled(call.index as usize)),
+                // With its call site, as a blocked thread's has: a thread still calling is the one
+                // looping, and where it loops is what to read next.
+                last_call: newest.map(|call| match call.from {
+                    0 => labelled(call.index as usize),
+                    from => format!("{}, called from {from:#x}", labelled(call.index as usize)),
+                }),
                 last_sequence: newest.map(|call| call.sequence),
                 inside: inside
                     .iter()
