@@ -597,8 +597,19 @@ mod tests {
     fn an_unknown_model_is_re_resolved() {
         let catalog = Catalog::default();
         let host = gpu_host();
+        // A managed GPU entry, built here rather than taken from the seed: which entries a seed holds
+        // depends on whether the platform has a runtime to fetch (macOS has none).
         let mut config = Config::seeded_for(&catalog, &host);
-        config.integrations[0].source = "qwen1.5-42b".to_owned();
+        config.integrations = vec![Integration {
+            id: "managed".to_owned(),
+            name: "x".to_owned(),
+            kind: Kind::Managed,
+            source: "qwen1.5-42b".to_owned(),
+            model: None,
+            endpoint: None,
+            api_key: None,
+            device: Device::Gpu,
+        }];
         assert!(config.normalise(&catalog, &host));
         assert!(catalog.offline(&config.integrations[0].source).is_some());
         // A second pass changes nothing, or the repair would rewrite the file on every load.
