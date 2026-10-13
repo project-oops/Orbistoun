@@ -3170,6 +3170,7 @@ dependencies = [
  "orbistoun-kernel",
  "orbistoun-loader",
  "orbistoun-paths",
+ "orbistoun-perf",
  "orbistoun-probe",
  "orbistoun-proto",
  "orbistoun-report",

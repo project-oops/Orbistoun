@@ -84,15 +84,32 @@ pub(crate) fn lines(report: &PerfReport) -> (Vec<String>, Option<usize>) {
             .into_iter()
             .map(|(name, percent)| format!("{percent:>5.1}%  {name}")),
     );
+    // The finer spans, when the run measures them (D831): milliseconds of each second, most
+    // first. They nest, so they are listed apart from the shares above, which add up.
+    if !report.spans.is_empty() {
+        lines.push("spans, ms a second".to_owned());
+        lines.extend(
+            report
+                .spans
+                .iter()
+                .take(SPANS_SHOWN)
+                .map(|(name, ms, count)| {
+                    format!("{:>6.1}  {name} x{:.0}", ms / seconds, per_second(*count))
+                }),
+        );
+    }
     (lines, biggest)
 }
+
+/// How many spans the overlay lists.
+const SPANS_SHOWN: usize = 10;
 
 /// Draws the overlay in the top-left corner of `over`.
 pub(crate) fn draw(ui: &egui::Ui, over: egui::Rect, report: &PerfReport) {
     let (lines, biggest) = lines(report);
     let font = egui::FontId::monospace(13.0);
     let line_height = 16.0;
-    let width = 260.0;
+    let width = 320.0;
     let row = |index: usize| f32::from(u16::try_from(index).unwrap_or(u16::MAX));
     let height = line_height * row(lines.len()) + 12.0;
     let panel =
@@ -119,6 +136,31 @@ pub(crate) fn draw(ui: &egui::Ui, over: egui::Rect, report: &PerfReport) {
 mod tests {
     use orbistoun_proto::PerfReport;
 
+    /// Measured spans are listed a second at a time under the shares, most time first, and do not
+    /// move the highlight among the shares.
+    #[test]
+    fn measured_spans_are_listed_apart_from_the_shares() {
+        let report = PerfReport {
+            window_ms: 500.0,
+            flips: 10,
+            submissions: 10,
+            draws: 40,
+            phases: vec![("execute".to_owned(), 100.0)],
+            spans: vec![
+                ("cp: dispatch".to_owned(), 40.0, 5),
+                ("draw whole".to_owned(), 10.0, 20),
+            ],
+        };
+        let (lines, biggest) = super::lines(&report);
+        let header = lines
+            .iter()
+            .position(|line| line == "spans, ms a second")
+            .expect("a spans section");
+        assert_eq!(lines[header + 1].trim(), "80.0  cp: dispatch x10");
+        assert_eq!(lines[header + 2].trim(), "20.0  draw whole x40");
+        assert!(biggest.is_some_and(|index| index < header));
+    }
+
     /// Rates are per second and the unmeasured remainder is shown and can be the highlight.
     #[test]
     fn the_overlay_says_the_rate_and_where_the_rest_went() {
@@ -133,6 +175,7 @@ mod tests {
                 ("write target".to_owned(), 100.0),
                 ("present".to_owned(), 0.0),
             ],
+            spans: Vec::new(),
         };
         let (lines, biggest) = super::lines(&report);
         assert_eq!(lines[0], "20.0 fps");

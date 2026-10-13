@@ -619,6 +619,7 @@ impl App {
                 play: self.input_playback.clone(),
                 capture: self.input_capture.clone(),
             },
+            self.prefs.file.profiling.worker_env(),
         ));
     }
 

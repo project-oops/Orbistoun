@@ -233,6 +233,11 @@ pub struct PerfReport {
     /// Milliseconds spent in each measured phase, by name, in the order a frame passes through them.
     /// What is left of the window is the guest's own time and whatever nothing measures.
     pub phases: Vec<(String, f64)>,
+    /// The finer spans' milliseconds and occurrences in it, by name, most time first - when the
+    /// run measures them (`ORBISTOUN_PERF_DETAIL`, D831), and empty otherwise. Spans nest, so they
+    /// are not shares of the window to be summed.
+    #[serde(default)]
+    pub spans: Vec<(String, f64, u64)>,
 }
 
 /// How a frame's bytes are laid out in its region.

@@ -25,11 +25,13 @@ pub(crate) enum Pane {
     Pads,
     /// Background daemon payloads and autoload.
     Payloads,
+    /// The overlay's finer spans, and the Tracy profiler (D831).
+    Profiling,
 }
 
 impl Pane {
     /// Every pane, in the order they are listed.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 8] = [
         Self::General,
         Self::Payloads,
         Self::Entry,
@@ -37,6 +39,7 @@ impl Pane {
         Self::Memory,
         Self::Shell,
         Self::Pads,
+        Self::Profiling,
     ];
 
     /// The label in the pane list.
@@ -49,6 +52,7 @@ impl Pane {
             Self::Memory => "memory",
             Self::Shell => "shell",
             Self::Pads => "controllers",
+            Self::Profiling => "profiling",
         }
     }
 }
@@ -78,6 +82,50 @@ pub(crate) struct Preferences {
     /// A settings file that fails to parse falls back to defaults, including the library
     /// folder, so the library panel shows this to explain itself.
     pub(crate) load_error: Option<String>,
+    /// The Tracy tools the profiling pane found or is installing.
+    pub(crate) tracy: TracyTools,
+}
+
+/// The Tracy tools as the profiling pane knows them: looked for once, and again after an install.
+#[derive(Debug, Default)]
+pub(crate) struct TracyTools {
+    /// The tools found, with the version they report.
+    found: Option<(orbistoun_perf::Tools, Option<String>)>,
+    /// Whether they have been looked for since the pane last changed what it looks in.
+    searched: bool,
+    /// An install under way, answering when it finishes.
+    installing: Option<std::sync::mpsc::Receiver<Result<orbistoun_perf::Tools, String>>>,
+    /// What happened last, to show under the controls.
+    status: Option<String>,
+}
+
+impl TracyTools {
+    /// Looks where the profiling settings say, then under the data root, then on `PATH`, unless
+    /// already looked; and takes the answer of an install that finished.
+    fn refresh(&mut self, named: Option<&std::path::Path>, data_root: &std::path::Path) {
+        if let Some(installing) = &self.installing
+            && let Ok(done) = installing.try_recv()
+        {
+            self.installing = None;
+            self.searched = false;
+            self.status = Some(match done {
+                Ok(tools) => format!("installed in {}", tools.dir().display()),
+                Err(error) => format!("could not install: {error}"),
+            });
+        }
+        if self.searched {
+            return;
+        }
+        self.searched = true;
+        let candidates = named
+            .map(std::path::Path::to_path_buf)
+            .into_iter()
+            .chain([orbistoun_perf::Tools::default_dir(data_root)]);
+        self.found = orbistoun_perf::Tools::find(candidates).map(|tools| {
+            let version = tools.version();
+            (tools, version)
+        });
+    }
 }
 
 impl Preferences {
@@ -117,6 +165,7 @@ impl Preferences {
             open: false,
             status: load_error.clone().map(Err),
             load_error,
+            tracy: TracyTools::default(),
         }
     }
 
@@ -161,8 +210,88 @@ pub(crate) fn pane_contents(
         Pane::Memory => memory(ui, &mut prefs.file),
         Pane::Shell => shell(ui, &mut prefs.shell),
         Pane::Pads => pads(ui, &mut prefs.file.pads, live),
+        Pane::Profiling => profiling(ui, prefs),
     }
 }
+
+/// The pane for profiling a run (D831): the finer spans the overlay shows, and the Tracy
+/// profiler's client, its port and its tools.
+fn profiling(ui: &mut egui::Ui, prefs: &mut Preferences) {
+    ui.heading("profiling");
+    let settings = &mut prefs.file.profiling;
+    ui.checkbox(
+        &mut settings.detail,
+        "show where each submission's time goes in the overlay (F3)",
+    );
+    ui.checkbox(
+        &mut settings.tracy,
+        "start the Tracy profiler's client with each run",
+    );
+    ui.horizontal(|ui| {
+        ui.label("port");
+        let mut port = settings.port.unwrap_or(DEFAULT_TRACY_PORT);
+        if ui
+            .add(egui::DragValue::new(&mut port).range(1024..=65535))
+            .changed()
+        {
+            settings.port = (port != DEFAULT_TRACY_PORT).then_some(port);
+        }
+    });
+    ui.small(concat!(
+        "The client records only while the Tracy viewer or tracy-capture is connected, and opens ",
+        "its port only when this is on. orbistoun-cli perf records a run and ranks where its time ",
+        "went; orbistoun-cli bench does every title.",
+    ));
+    ui.separator();
+    let port = settings.port.unwrap_or(DEFAULT_TRACY_PORT);
+    let named = settings.tools.clone();
+    let tracy = &mut prefs.tracy;
+    tracy.refresh(named.as_deref(), &prefs.data_root);
+    match &tracy.found {
+        Some((tools, version)) => {
+            ui.label(format!(
+                "Tracy tools: {} ({})",
+                tools.dir().display(),
+                version.as_deref().unwrap_or("version unknown")
+            ));
+            if version.as_deref() != Some(orbistoun_perf::TRACY_VERSION) {
+                ui.small(format!(
+                    "This build's client speaks Tracy {}; a viewer of another version refuses it.",
+                    orbistoun_perf::TRACY_VERSION
+                ));
+            }
+            if ui.button("open the Tracy viewer").clicked() {
+                tracy.status = Some(match tools.open_viewer(None, Some(port)) {
+                    Ok(_) => format!("viewer opened, connecting to port {port}"),
+                    Err(error) => format!("could not open the viewer: {error}"),
+                });
+            }
+        }
+        None => {
+            ui.label("no Tracy tools found");
+        }
+    }
+    let label = format!("install Tracy {}", orbistoun_perf::TRACY_VERSION);
+    if tracy.installing.is_some() {
+        ui.add_enabled(false, egui::Button::new("installing..."));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    } else if ui.button(label).clicked() {
+        let dir = orbistoun_perf::Tools::default_dir(&prefs.data_root);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(orbistoun_perf::install(&dir));
+        });
+        tracy.installing = Some(receiver);
+        tracy.status = None;
+    }
+    if let Some(status) = &tracy.status {
+        ui.small(status);
+    }
+}
+
+/// The port the Tracy client listens on when none is set.
+const DEFAULT_TRACY_PORT: u16 = 8086;
 
 /// The pane for settings that are about this machine rather than the guest.
 fn general(ui: &mut egui::Ui, prefs: &mut Preferences) {

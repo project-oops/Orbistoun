@@ -3134,14 +3134,26 @@ impl WorkerHandle {
     /// Self-reinvocation rather than a separate binary: the worker is the same build, never a stale
     /// copy (D033).
     pub fn spawn_self() -> io::Result<Self> {
+        Self::spawn_self_with(&[])
+    }
+
+    /// [`Self::spawn_self`], the worker given `env` beside what it inherits: settings a front end
+    /// holds for its runs, such as profiling's (D831), which the worker reads from its environment.
+    pub fn spawn_self_with(env: &[(&str, String)]) -> io::Result<Self> {
         let exe = std::env::current_exe()?;
-        Self::spawn(&exe)
+        Self::spawn_with(&exe, env)
     }
 
     /// Spawns a specific executable in worker mode.
     pub fn spawn(exe: &Path) -> io::Result<Self> {
+        Self::spawn_with(exe, &[])
+    }
+
+    /// [`Self::spawn`], with `env` beside what the worker inherits.
+    pub fn spawn_with(exe: &Path, env: &[(&str, String)]) -> io::Result<Self> {
         let mut child = Command::new(exe)
             .arg(WORKER_FLAG)
+            .envs(env.iter().map(|(name, value)| (*name, value.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // stderr is inherited, so the worker's log reaches the same place the shim's does.

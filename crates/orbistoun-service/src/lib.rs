@@ -277,6 +277,43 @@ pub struct FileConfig {
     /// The main lever of the method: the oracle is often one bit per call site (answer `ok`, does
     /// the guest proceed?), so it is set from a file (D166).
     pub policy: StubPolicy,
+    /// Profiling a run with Tracy, for a front end to start its runs with (D831).
+    pub profiling: ProfilingSettings,
+}
+
+/// What a front end starts its runs with to profile them (D831): each is the variable a worker
+/// reads, written down so a window can keep it between sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ProfilingSettings {
+    /// Start the Tracy profiler's client with each run (`ORBISTOUN_TRACY`).
+    pub tracy: bool,
+    /// The port it listens on (`TRACY_PORT`); 8086 when unset.
+    pub port: Option<u16>,
+    /// Measure each submission's finer spans and stream them with each second's report
+    /// (`ORBISTOUN_PERF_DETAIL`).
+    pub detail: bool,
+    /// Where the Tracy tools are, before the copy installed under the data root
+    /// (`ORBISTOUN_TRACY_TOOLS`).
+    pub tools: Option<PathBuf>,
+}
+
+impl ProfilingSettings {
+    /// The environment a worker is started with for these: only what they turn on.
+    #[must_use]
+    pub fn worker_env(&self) -> Vec<(&'static str, String)> {
+        let mut env = Vec::new();
+        if self.tracy {
+            env.push((orbistoun_env::TRACY.name, "1".to_owned()));
+            if let Some(port) = self.port {
+                env.push(("TRACY_PORT", port.to_string()));
+            }
+        }
+        if self.detail {
+            env.push((orbistoun_env::PERF_DETAIL.name, "1".to_owned()));
+        }
+        env
+    }
 }
 
 /// Reads and validates the scripted pad a run's controller configuration names, if any.

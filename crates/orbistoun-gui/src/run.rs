@@ -205,6 +205,7 @@ pub(crate) fn start(
     budget: u64,
     traces_dir: std::path::PathBuf,
     input: RunInput,
+    env: Vec<(&'static str, String)>,
 ) -> InFlight {
     let (sender, receiver) = channel();
     let (stop_sender, stopper) = channel();
@@ -225,7 +226,7 @@ pub(crate) fn start(
     std::thread::spawn(move || {
         let finished = execute(
             &for_thread,
-            (limit, budget, input),
+            (limit, budget, input, &env),
             &traces_dir,
             (&stop_sender, &control_sender),
             &live,
@@ -252,7 +253,7 @@ pub(crate) fn start(
 /// Runs one guest and gathers everything worth showing.
 fn execute(
     module: &std::path::Path,
-    (limit, budget, input): (u64, u64, RunInput),
+    (limit, budget, input, env): (u64, u64, RunInput, &[(&'static str, String)]),
     traces_dir: &std::path::Path,
     (stop_sender, control_sender): (
         &std::sync::mpsc::Sender<orbistoun_worker::Stopper>,
@@ -260,7 +261,8 @@ fn execute(
     ),
     live: &Live,
 ) -> Finished {
-    let mut worker = match orbistoun_worker::WorkerHandle::spawn_self() {
+    // The profiling the preferences ask for reaches the worker as the variables it reads (D831).
+    let mut worker = match orbistoun_worker::WorkerHandle::spawn_self_with(env) {
         Ok(worker) => worker,
         Err(e) => return failed(format!("spawning a worker process: {e}")),
     };

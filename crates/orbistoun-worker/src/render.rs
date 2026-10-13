@@ -446,18 +446,25 @@ fn report_perf(sink: Option<fn(&Event)>) {
     };
     let taken = perf::take();
     let ms = |nanos: u64| std::time::Duration::from_nanos(nanos).as_secs_f64() * 1000.0;
-    // The finer spans, when `ORBISTOUN_PERF_DETAIL` asks for them: each one's time and count.
-    if perf::detail() {
-        let spans: Vec<String> = perf::Span::ALL
+    // The finer spans, when `ORBISTOUN_PERF_DETAIL` asks for them: each one's time and count,
+    // logged in report order and streamed most time first (D831).
+    let spans = if perf::detail() {
+        let mut spans: Vec<(String, f64, u64)> = perf::Span::ALL
             .iter()
             .zip(perf::take_spans())
             .filter(|(_, (_, counted))| *counted > 0)
-            .map(|(span, (spent, counted))| {
-                format!("{} {:.1} ms/{counted}", span.label(), ms(spent))
-            })
+            .map(|(span, (spent, counted))| (span.label().to_owned(), ms(spent), counted))
             .collect();
-        tracing::info!("perf detail: {}", spans.join(", "));
-    }
+        let logged: Vec<String> = spans
+            .iter()
+            .map(|(name, spent, counted)| format!("{name} {spent:.1} ms/{counted}"))
+            .collect();
+        tracing::info!("perf detail: {}", logged.join(", "));
+        spans.sort_by(|a, b| b.1.total_cmp(&a.1));
+        spans
+    } else {
+        Vec::new()
+    };
     let report = orbistoun_proto::PerfReport {
         window_ms: window.as_secs_f64() * 1000.0,
         flips: taken.counted(perf::Count::Flips),
@@ -474,6 +481,7 @@ fn report_perf(sink: Option<fn(&Event)>) {
                 (name.to_owned(), ms(taken.spent(phase)))
             })
             .collect(),
+        spans,
     };
     if let Some(sink) = sink {
         sink(&Event::Perf(report));
