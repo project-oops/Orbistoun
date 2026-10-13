@@ -94,6 +94,6 @@ construction and are not comparable with the table above:
 | Declared in a library that serves nothing | 40 across 5 libraries - names written down, no implementation |
 | Recorded behaviours | 1139 - 426 published, 255 measured, 126 guest-observed, 319 assumed |
 | Open questions a hardware probe could settle | 925 |
-| Symbol database | 30190 names - 717 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
+| Symbol database | 30191 names - 718 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->

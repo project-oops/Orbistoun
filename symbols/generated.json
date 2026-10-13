@@ -20867,6 +20867,7 @@
     "sceAgcDriverDeleteEqEvent",
     "sceAgcDriverDestroyQueue",
     "sceAgcDriverGetDefaultOwner",
+    "sceAgcDriverGetEqContextId",
     "sceAgcDriverGetResourceName",
     "sceAgcDriverGetResourceRegistrationMaxNameLength",
     "sceAgcDriverInitResourceRegistration",
@@ -155151,6 +155152,12 @@
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceAgcDriverGetEqContextId": {
+      "found": "generated",
+      "pattern": "prefix-module-verb-object-object",
+      "index": 28371810,
+      "on": "2026-10-13"
     },
     "sceAgcDriverGetResourceName": {
       "found": "generated",
