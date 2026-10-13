@@ -475,6 +475,7 @@ pub unsafe fn spawn(
             let exit = unsafe {
                 orbistoun_abi::enter::enter_guest_with_argument(start.entry, top, start.argument)
             };
+            run_thread_dtors();
             set_exit_value(handle, exit);
             finish(handle);
         };
@@ -531,6 +532,7 @@ pub unsafe fn spawn(
                 start.argument,
             )
         };
+        run_thread_dtors();
         set_exit_value(handle, exit);
         finish(handle);
     };
@@ -816,6 +818,24 @@ static ON_THREAD_START: OnceLock<fn()> = OnceLock::new();
 /// Installs the per-thread start hook. Called once, by the worker, before the guest is entered.
 pub fn install_thread_start(hook: fn()) {
     let _ = ON_THREAD_START.set(hook);
+}
+
+/// Runs the thread-local destructors libc registered with `_sceKernelSetThreadDtors`, on the
+/// ending thread, before its exit value is published to a joiner.
+///
+/// FreeBSD's thread exit runs `__cxa_thread_call_dtors()`, which takes no arguments, and libc
+/// hands the kernel its runner for that at start-up. That the console calls it at thread exit is
+/// assumed (obSCEne `REQ-20261013T1716Z-td01` measures it). The thread's TLS is still in place;
+/// the runner gets a stack of its own, the thread's entry having returned. Nothing registered,
+/// nothing runs.
+pub fn run_thread_dtors() {
+    let dtors = crate::thread_hooks().dtors;
+    if dtors == 0 {
+        return;
+    }
+    // SAFETY: `dtors` is the function pointer libc's own start-up handed
+    // `_sceKernelSetThreadDtors`, in its mapped, relocated code; it takes no arguments.
+    let _ = unsafe { call_guest(dtors, [0; 3]) };
 }
 
 /// Gives the calling host thread a handle if it does not already have one.

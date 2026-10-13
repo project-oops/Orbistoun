@@ -6281,15 +6281,17 @@ fn pthread_detach(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `pthread_exit(value)`: ends the calling thread, and never returns.
 ///
 /// On the main thread this ends the program, reported as a deliberate guest exit rather than a
-/// fault (D177). On any other thread it ends only that thread: guest frames cannot be unwound, so
-/// the thread is parked, which stops it executing guest code, and its stack is not reclaimed. The
-/// process's first thread is adopted rather than spawned, which is how the two are told apart.
+/// fault (D177). On any other thread it ends only that thread: its thread-local destructors run
+/// first, as on a return from its entry, then - guest frames cannot be unwound - the thread is
+/// parked, which stops it executing guest code, and its stack is not reclaimed. The process's
+/// first thread is adopted rather than spawned, which is how the two are told apart.
 ///
 /// Reference: POSIX.1-2008 `pthread_exit(3)`.
 fn pthread_exit(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if thread::current() == thread::adopt("main") {
         orbistoun_core::stop(orbistoun_core::StopReason::Exited, args[0])
     } else {
+        thread::run_thread_dtors();
         tracing::warn!(
             "a guest thread ended itself with pthread_exit - parked rather than unwound, because nothing here can unwind guest frames"
         );
@@ -6633,8 +6635,9 @@ fn set_application_heap_api(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The callbacks libc hands the kernel at start-up for a thread's end: its thread-local destructors,
 /// how many `atexit` handlers it holds, and where to report them.
 ///
-/// Kept, not called: a guest thread here ends by parking (see `pthread_exit`), so nothing runs
-/// a thread's destructors yet. What the hooks are for is FreeBSD's `__cxa_thread_atexit` path.
+/// What the hooks are for is FreeBSD's `__cxa_thread_atexit` path: a spawned thread runs `dtors`
+/// when it ends, by returning or by `pthread_exit` ([`thread::run_thread_dtors`]). The two atexit
+/// callbacks are kept, not called.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadHooks {
     /// `_sceKernelSetThreadDtors`'s callback.

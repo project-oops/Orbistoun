@@ -2654,12 +2654,13 @@ found_on = "2026-10-10"
 [[function]]
 name = "_sceKernelSetThreadDtors"
 arity = 1
-purpose = "(callback): one of the hooks libc registers at start-up for a thread's end; kept and 0 answered."
+purpose = "(callback): one of the hooks libc registers at start-up for a thread's end: its thread-local destructor runner. Kept, 0 answered, and entered with no arguments by each spawned thread as it ends."
 returns = "status"
 edge_cases = [
     "MEASURED: answered 0x0 for a null callback and for a valid one.",
-    "orbistoun keeps the callback (orbistoun_kernel::thread_hooks) but nothing calls it: a guest thread here ends by parking, so its thread-local destructors and atexit handlers are not run.",
+    "A spawned thread enters the callback once on its own thread as it ends, whether its entry returns or it calls scePthreadExit, before a joiner sees its exit value (orbistoun_kernel::thread::run_thread_dtors). The main thread's exit does not.",
 ]
+note = "Only the answer is measured. That a thread's end enters the callback, with no arguments, is FreeBSD's thread exit running __cxa_thread_call_dtors, not yet seen on the console; obSCEne REQ-20261013T1716Z-td01 measures it."
 found_by = "static"
 known_by = "measured"
 cites = "obSCEne 060-module/libc-startup-hooks, reports/hardware/20260927-084607-eboot.log lines 4561-4571."
