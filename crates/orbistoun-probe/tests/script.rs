@@ -175,6 +175,30 @@ fn a_spec_runs_and_its_transcript_reads_back() {
         dumped, "44332211cccccccc",
         "the word, then the untouched sentinel"
     );
+
+    // And as `probe --as-knowledge` reads it: one call to the resolved symbol, with what its block
+    // held after it, measured when the operator asserts the target.
+    let calls = read.spec_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        (calls[0].library.as_str(), calls[0].asked.symbol.as_str()),
+        ("libBench", "store")
+    );
+    assert_eq!(calls[0].blocks, [(0, "44332211cccccccc".to_owned())]);
+    let target = orbistoun_probe::Origin::asserted("console", "", true);
+    let entry = calls[0].knowledge(&target);
+    assert_eq!(
+        entry.known_by,
+        Some(orbistoun_hle::knowledge::Oracle::Measured)
+    );
+    assert!(
+        entry
+            .edge_cases
+            .iter()
+            .any(|e| e.ends_with("left argument 0 holding 44332211cccccccc")),
+        "{:?}",
+        entry.edge_cases
+    );
 }
 
 /// A name nothing bound stops the script at that step, with what was sent before it kept.

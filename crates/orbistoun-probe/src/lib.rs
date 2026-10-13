@@ -1675,6 +1675,122 @@ impl Asked {
     }
 }
 
+/// One call a call spec made to a function it resolved, with what the scratch blocks it was
+/// handed held when they were read back (`orbistoun_probe::script`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecCall {
+    /// The library the function was resolved in.
+    pub library: String,
+    /// The call, as an answer asked live.
+    pub asked: Asked,
+    /// Each argument that was a scratch block, by position, and the block's bytes as hex when it
+    /// was next read, before the function was called again.
+    pub blocks: Vec<(usize, String)>,
+}
+
+impl SpecCall {
+    /// The call as a knowledge entry: [`Asked::knowledge`], with what each block held after it.
+    pub fn knowledge(&self, origin: &Origin) -> FunctionKnowledge {
+        let mut entry = self.asked.knowledge(origin);
+        let arguments = self
+            .asked
+            .arguments
+            .iter()
+            .map(|argument| format!("{argument:#x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (position, hex) in &self.blocks {
+            entry.edge_cases.push(format!(
+                "({arguments}) left argument {position} holding {hex}"
+            ));
+        }
+        entry
+    }
+}
+
+impl Transcript {
+    /// Every call a call spec made to a function it resolved in this transcript, in order.
+    ///
+    /// Matched by address: a `call` to an address a `resolve` answered is a call to that symbol,
+    /// and an argument equal to an address a `scratch` answered is that block. A block's contents
+    /// after a call are the first `read` of it once the latest call handed it has been made.
+    pub fn spec_calls(&self) -> Vec<SpecCall> {
+        let value = |text: &str| hex(text);
+        let returned = |exchange: &Exchange| match exchange.outcome {
+            Some(Outcome::Returned(address)) => Some(address),
+            _ => None,
+        };
+        let mut resolved: BTreeMap<u64, (String, String)> = BTreeMap::new();
+        let mut blocks: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        let mut calls: Vec<SpecCall> = Vec::new();
+        for exchange in &self.exchanges {
+            match exchange.verb.as_str() {
+                "resolve" => {
+                    if let (Some(address), [library, symbol, ..]) =
+                        (returned(exchange), exchange.arguments.as_slice())
+                    {
+                        resolved.insert(address, (library.clone(), symbol.clone()));
+                    }
+                }
+                "scratch" => {
+                    if let Some(address) = returned(exchange) {
+                        blocks.insert(address);
+                    }
+                }
+                "call" => {
+                    let Some(target) = exchange.arguments.first().and_then(|a| value(a)) else {
+                        continue;
+                    };
+                    let Some((library, symbol)) = resolved.get(&target) else {
+                        continue;
+                    };
+                    let arguments: Vec<u64> = exchange
+                        .arguments
+                        .iter()
+                        .skip(1)
+                        .filter_map(|a| value(a))
+                        .collect();
+                    calls.push(SpecCall {
+                        library: library.clone(),
+                        asked: Asked {
+                            symbol: symbol.clone(),
+                            arguments,
+                            outcome: exchange.outcome.clone().unwrap_or(Outcome::Lost),
+                            usable: Use::RecordOnly,
+                        },
+                        blocks: Vec::new(),
+                    });
+                }
+                "read" => {
+                    let Some(address) = exchange.arguments.first().and_then(|a| value(a)) else {
+                        continue;
+                    };
+                    let Some(bytes) = exchange.records.iter().find_map(|record| match record {
+                        Record::Bytes { hex, .. } => Some(hex.clone()),
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    // The most recent call that was handed this block and has not been followed by
+                    // another call to the same function.
+                    let latest = calls.iter_mut().rev().find(|call| {
+                        call.asked.arguments.contains(&address) && blocks.contains(&address)
+                    });
+                    if let Some(call) = latest
+                        && let Some(position) =
+                            call.asked.arguments.iter().position(|&a| a == address)
+                        && !call.blocks.iter().any(|(p, _)| *p == position)
+                    {
+                        call.blocks.push((position, bytes));
+                    }
+                }
+                _ => {}
+            }
+        }
+        calls
+    }
+}
+
 /// What a corpus establishes, and how firmly.
 ///
 /// Counted by grade, because how many results are facts matters more than how many checks

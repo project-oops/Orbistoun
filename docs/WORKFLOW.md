@@ -270,7 +270,10 @@ library, NID and arity from the declaration, and gives a block to each argument 
 as a pointer, or failing that, one the knowledge entry calls `ptr`. It reads every block back,
 then repeats the call with every pointer null. Setting the integer arms is the asker's job. The
 session writes the same transcript `probe` reads, and a spec that stops partway keeps what it
-sent. `scratch` needs a probe that announces it (obSCEne `REQ-20261012T1848Z-3feb`).
+sent. `probe --as-knowledge` turns each call to a resolved function into an edge case of its
+entry: the arguments, what came back, and what each block held when next read. That entry is
+`measured` only when the operator asserts the target hardware. `scratch` needs a probe that
+announces it (obSCEne `REQ-20261012T1848Z-3feb`).
 
 ## What no measurement covers
 

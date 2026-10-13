@@ -775,6 +775,28 @@ fn print_knowledge(
             });
         file.functions.push(finding.knowledge(origin));
     }
+    // A call spec's calls, each call to one function folded into its entry: its arms are edge
+    // cases of one function, not entries of their own.
+    for call in transcript.spec_calls() {
+        let file = by_library.entry(call.library.clone()).or_insert_with(|| {
+            orbistoun_hle::knowledge::KnowledgeFile {
+                library: call.library.clone(),
+                functions: Vec::new(),
+            }
+        });
+        let entry = call.knowledge(origin);
+        match file.functions.iter_mut().find(|f| f.name == entry.name) {
+            Some(existing) => {
+                existing.edge_cases.extend(entry.edge_cases);
+                for assumption in entry.assumptions {
+                    if !existing.assumptions.contains(&assumption) {
+                        existing.assumptions.push(assumption);
+                    }
+                }
+            }
+            None => file.functions.push(entry),
+        }
+    }
     for (library, file) in by_library {
         println!(
             "
