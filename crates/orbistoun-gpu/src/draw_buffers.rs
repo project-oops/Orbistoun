@@ -110,8 +110,35 @@ const MOST_BYTES: u64 = 256 << 20;
 /// buffers, which a frame draws from again, and a bound for a guest streaming new ones every frame.
 const CACHE_BYTES: usize = 512 << 20;
 
+/// The most bytes a draw buffer has for [`BufferCache`] to compare it with what it kept rather
+/// than ask the host whether it was written: reading and comparing this many costs less than the
+/// asking.
+const COMPARED_BYTES: usize = 16 << 10;
+
+/// Why a draw buffer with nothing mapped at its base binds nothing.
+const UNMAPPED: &str = concat!(
+    "a draw buffer's range has no guest memory mapped at its base, so the bytes its ",
+    "reads reach are not there to bind (D733)"
+);
+
+/// `bytes` as a draw buffer at `address`: whole words, the tail past the bytes held zero - the
+/// module never reads a word the range does not start - and hashed. Only to the word the held bytes
+/// end in, so a range cut at its mapping (D795) is not filled out with zeros the guest never wrote.
+fn padded_buffer(address: u64, bytes: &[u8]) -> DrawBuffer {
+    let mut padded = bytes.to_vec();
+    padded.resize(bytes.len().div_ceil(4) * 4, 0);
+    let mut hasher = crate::ContentHasher::new(padded.len() / 4);
+    hasher.bytes(&padded);
+    DrawBuffer {
+        hash: hasher.finish(),
+        bytes: padded.into(),
+        base: address,
+    }
+}
+
 /// Guest bytes read for draws, by where they lie and how many, kept across submissions while the
-/// host's write tracking reports them unwritten, as texels are.
+/// host's write tracking reports them unwritten, as texels are - or, for a small range, while they
+/// compare equal.
 #[derive(Debug, Default)]
 pub struct BufferCache {
     /// Each range's bytes, when it was marked, and the generation it was kept at.
@@ -142,6 +169,12 @@ impl BufferCache {
             });
         }
         let span = length as u64;
+        // A small range is compared rather than watched: asking the host whether it was written is
+        // a system call or two, some microseconds, where reading and comparing a constant buffer's
+        // few hundred bytes takes a fraction of one - and a guest rewrites those every frame.
+        if length <= COMPARED_BYTES {
+            return self.read_compared(address, length, memory);
+        }
         if let Some((since, buffer, _)) = self.entries.get(&(address, length))
             && since.and_then(|since| orbistoun_mem::watch::written_since(address, span, since))
                 == Some(false)
@@ -150,23 +183,29 @@ impl BufferCache {
         }
         // Marked before the bytes are hashed, so a write racing the hash is seen next time.
         let since = orbistoun_mem::watch::mark(address, span);
-        let bytes = mapped_prefix(memory, address, length).ok_or(concat!(
-            "a draw buffer's range has no guest memory mapped at its base, so the bytes its ",
-            "reads reach are not there to bind (D733)"
-        ))?;
-        // Whole words, the tail past the bytes held zero: the module never reads a word the range
-        // does not start. Only to the word the held bytes end in, so a range cut at its mapping
-        // (D795) is not filled out with zeros the guest never wrote.
-        let mut padded = bytes.to_vec();
-        padded.resize(bytes.len().div_ceil(4) * 4, 0);
-        let mut hasher = crate::ContentHasher::new(padded.len() / 4);
-        hasher.bytes(&padded);
-        let buffer = DrawBuffer {
-            hash: hasher.finish(),
-            bytes: padded.into(),
-            base: address,
-        };
+        let bytes = mapped_prefix(memory, address, length).ok_or(UNMAPPED)?;
+        let buffer = padded_buffer(address, bytes);
         self.keep((address, length), since, buffer.clone());
+        Ok(buffer)
+    }
+
+    /// A small range's bytes, read now and kept as the same buffer, hash and all, while they are
+    /// the bytes kept before.
+    fn read_compared(
+        &mut self,
+        address: u64,
+        length: usize,
+        memory: &impl GuestMemory,
+    ) -> Result<DrawBuffer, &'static str> {
+        let bytes = mapped_prefix(memory, address, length).ok_or(UNMAPPED)?;
+        if let Some((_, buffer, _)) = self.entries.get(&(address, length))
+            && buffer.bytes.get(..bytes.len()) == Some(bytes)
+            && buffer.bytes.len() == bytes.len().div_ceil(4) * 4
+        {
+            return Ok(buffer.clone());
+        }
+        let buffer = padded_buffer(address, bytes);
+        self.keep((address, length), None, buffer.clone());
         Ok(buffer)
     }
 
@@ -728,6 +767,32 @@ mod cache_tests {
             "the oldest went first"
         );
         assert!(cache.bytes <= CACHE_BYTES);
+    }
+
+    /// A small range is compared, not watched: read again unchanged it is the very buffer kept,
+    /// and changed it is a new one, with its own hash.
+    #[test]
+    fn a_small_range_is_kept_while_its_bytes_compare_equal() {
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut memory = Memory((0..0x40_u32).map(|byte| byte as u8).collect());
+        let mut cache = BufferCache::default();
+        let first = cache.read(0x1000, 0x3e, &memory).expect("read");
+        let again = cache.read(0x1000, 0x3e, &memory).expect("read");
+        assert!(
+            std::sync::Arc::ptr_eq(&first.bytes, &again.bytes),
+            "the same buffer"
+        );
+        assert_eq!(first.bytes.len(), 0x40, "padded to whole words");
+        memory.0[0x10] ^= 0xff;
+        let changed = cache.read(0x1000, 0x3e, &memory).expect("read");
+        assert_ne!(changed.hash, first.hash, "a new buffer for new bytes");
+        assert_eq!(changed.bytes[0x10], 0x10 ^ 0xff);
     }
 }
 
