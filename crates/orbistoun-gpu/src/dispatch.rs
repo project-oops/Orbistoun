@@ -353,6 +353,29 @@ pub fn place_window_except(
 mod tests {
     use super::*;
 
+    /// A device's list of stored words comes out as runs of consecutive indices, each with its
+    /// values, and an empty list as none.
+    #[test]
+    fn a_list_of_stored_words_runs_where_its_indices_are_consecutive() {
+        let after = BufferAfter {
+            listed: Some((vec![0, 1, 2, 7, 9, 10], vec![10, 11, 12, 17, 19, 20])),
+            ..BufferAfter::default()
+        };
+        let runs: Vec<(usize, Vec<u32>)> = after
+            .stored_words()
+            .map(|(first, values)| (first, values.to_vec()))
+            .collect();
+        assert_eq!(
+            runs,
+            [(0, vec![10, 11, 12]), (7, vec![17]), (9, vec![19, 20])]
+        );
+        let empty = BufferAfter {
+            listed: Some((vec![], vec![])),
+            ..BufferAfter::default()
+        };
+        assert_eq!(empty.stored_words().count(), 0);
+    }
+
     /// The runs a mask marks, found a chunk at a time, are the runs a word-by-word reading finds:
     /// at chunk edges, at either end, a mask shorter or longer than the words, and with nothing or
     /// everything marked.
@@ -597,6 +620,32 @@ pub enum BufferBefore {
     Unread(usize),
 }
 
+/// A device's list of stored words as runs of consecutive indices, each its first index and values.
+struct ListedRuns<'a> {
+    indices: &'a [u32],
+    values: &'a [u32],
+}
+
+impl<'a> Iterator for ListedRuns<'a> {
+    type Item = (usize, &'a [u32]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let &first = self.indices.first()?;
+        let mut count = 1;
+        while self
+            .indices
+            .get(count)
+            .is_some_and(|&index| index == self.indices[count - 1].wrapping_add(1))
+        {
+            count += 1;
+        }
+        let values = self.values.get(..count)?;
+        self.indices = &self.indices[count..];
+        self.values = &self.values[count..];
+        Some((first as usize, values))
+    }
+}
+
 /// How many mask words [`BufferAfter::stored_runs`] looks at together where none is marked.
 const STORED_CHUNK: usize = 64;
 
@@ -621,24 +670,24 @@ impl BufferAfter {
     /// What a buffer handed over unread stored, as runs of consecutive words, each with its first
     /// word's index and the values: from its list where the device gathered one, else from its
     /// write mask and words.
-    #[must_use]
-    pub fn stored_words(&self) -> Vec<(usize, &[u32])> {
-        let Some((indices, values)) = &self.listed else {
-            return self
-                .stored_runs()
+    ///
+    /// Answered a run at a time rather than collected: PPSA25872's dispatches store some 34 000
+    /// scattered words to a buffer, and a fresh vector of their runs - most of a megabyte, its pages
+    /// new to the process - cost 0.27 ms of each.
+    pub fn stored_words(&self) -> impl Iterator<Item = (usize, &[u32])> + '_ {
+        let listed = self
+            .listed
+            .as_ref()
+            .map(|(indices, values)| ListedRuns { indices, values });
+        let masked = self.listed.is_none().then(|| {
+            self.stored_runs()
                 .into_iter()
                 .map(|(first, count)| (first, &self.words[first..first + count]))
-                .collect();
-        };
-        let mut runs = Vec::new();
-        let mut start = 0;
-        for at in 1..=indices.len() {
-            if at == indices.len() || indices[at] != indices[at - 1] + 1 {
-                runs.push((indices[start] as usize, &values[start..at]));
-                start = at;
-            }
-        }
-        runs
+        });
+        listed
+            .into_iter()
+            .flatten()
+            .chain(masked.into_iter().flatten())
     }
 
     /// Whether a buffer handed over unread, of `words` words, had every one stored: its list holds

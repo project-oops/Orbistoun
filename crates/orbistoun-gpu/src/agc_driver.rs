@@ -995,7 +995,50 @@ struct GuestWrites {
     runs: Vec<(u64, std::ops::Range<usize>)>,
 }
 
+/// The writes a finished dispatch wrote back, emptied and kept for the next. PPSA25872's
+/// dispatches write some 34 000 runs, and growing fresh vectors for them - their pages new to the
+/// process each time - cost 0.7 ms of a dispatch.
+fn spare_writes() -> &'static Mutex<GuestWrites> {
+    static SPARE: Mutex<GuestWrites> = Mutex::new(GuestWrites {
+        bytes: Vec::new(),
+        runs: Vec::new(),
+    });
+    &SPARE
+}
+
+/// The most bytes, runs and their bytes together, the kept writes hold on to.
+const SPARE_WRITES_BYTES_MOST: usize = 64 << 20;
+
 impl GuestWrites {
+    /// Empty writes, holding the room the last dispatch's took.
+    fn spare() -> Self {
+        spare_writes()
+            .lock()
+            .map(|mut spare| std::mem::take(&mut *spare))
+            .unwrap_or_default()
+    }
+
+    /// Empties these and keeps them for [`Self::spare`], unless they hold more room than is worth
+    /// keeping.
+    fn keep(mut self) {
+        let held = self.bytes.capacity()
+            + self.runs.capacity() * size_of::<(u64, std::ops::Range<usize>)>();
+        if held > SPARE_WRITES_BYTES_MOST {
+            return;
+        }
+        self.bytes.clear();
+        self.runs.clear();
+        if let Ok(mut spare) = spare_writes().lock() {
+            *spare = self;
+        }
+    }
+
+    /// Room for `runs` more runs of `bytes` bytes in all.
+    fn reserve(&mut self, runs: usize, bytes: usize) {
+        self.runs.reserve(runs);
+        self.bytes.reserve(bytes);
+    }
+
     /// A run of `bytes` at `at`.
     fn push(&mut self, at: u64, bytes: &[u8]) {
         let start = self.bytes.len();
@@ -1013,9 +1056,19 @@ impl GuestWrites {
     /// A run of `words`, little-endian, at `at`, cut at its first `most` bytes.
     fn push_words(&mut self, at: u64, words: &[u32], most: usize) {
         let start = self.bytes.len();
+        let bytes = most.min(words.len() * 4);
+        // Copied whole on a little-endian host, where a word's bytes in memory are its
+        // little-endian ones: PPSA25872's store-only buffers hand back some 34 000 runs a
+        // dispatch, and building each a byte at a time cost 0.3 ms of it.
+        #[cfg(target_endian = "little")]
         self.bytes
-            .extend(words.iter().flat_map(|word| word.to_le_bytes()));
-        self.bytes.truncate(start + most.min(words.len() * 4));
+            .extend_from_slice(&zerocopy::IntoBytes::as_bytes(words)[..bytes]);
+        #[cfg(not(target_endian = "little"))]
+        {
+            self.bytes
+                .extend(words.iter().flat_map(|word| word.to_le_bytes()));
+            self.bytes.truncate(start + bytes);
+        }
         self.runs.push((at, start..self.bytes.len()));
     }
 
@@ -1062,29 +1115,49 @@ impl GuestWrites {
 /// # Errors
 ///
 /// When the device answered another number of buffers, or one of another size.
+#[cfg(test)]
 fn buffer_writes(
     ranges: &[(u64, u64)],
     before: &[crate::dispatch::BufferBefore],
     after: &[crate::dispatch::BufferAfter],
 ) -> Result<(GuestWrites, Vec<cp::Fill>), String> {
+    let mut writes = GuestWrites::default();
+    let fills = buffer_writes_into(&mut writes, ranges, before, after)?;
+    Ok((writes, fills))
+}
+
+/// [`buffer_writes`], its writes added to `writes` rather than gathered on their own and copied
+/// over after, and answering its fills.
+///
+/// # Errors
+///
+/// As [`buffer_writes`].
+fn buffer_writes_into(
+    writes: &mut GuestWrites,
+    ranges: &[(u64, u64)],
+    before: &[crate::dispatch::BufferBefore],
+    after: &[crate::dispatch::BufferAfter],
+) -> Result<Vec<cp::Fill>, String> {
     use crate::dispatch::BufferBefore;
     if after.len() != before.len() {
         return Err("the device answered another number of buffers".to_owned());
     }
-    let mut writes = GuestWrites::default();
     let mut fills = Vec::new();
     for ((&(address, bytes), before), after) in ranges.iter().zip(before).zip(after) {
         // A buffer read before the run writes the words it changed; one not read, the words it
         // stored (D809), as its write mask or the device's list of them says.
-        let (runs, whole): (Vec<(usize, &[u32])>, bool) = match before {
+        // Taken a run at a time, never collected (see `BufferAfter::stored_words`).
+        type Runs<'a> = Box<dyn Iterator<Item = (usize, &'a [u32])> + 'a>;
+        let (runs, whole): (Runs<'_>, bool) = match before {
             BufferBefore::Words(words) => {
                 if after.words.len() != words.len() {
                     return Err("the device answered a buffer of another size".to_owned());
                 }
-                let runs = changed_runs(words, &after.words)
-                    .into_iter()
-                    .map(|(first, count)| (first, &after.words[first..first + count]))
-                    .collect();
+                let runs = Box::new(
+                    changed_runs(words, &after.words)
+                        .into_iter()
+                        .map(|(first, count)| (first, &after.words[first..first + count])),
+                );
                 // Left holding one word throughout, it is a fill (D804), so the check covers all of
                 // it, not only what changed.
                 let whole = after
@@ -1107,13 +1180,19 @@ fn buffer_writes(
                 if after.listed.is_none() && after.words.len() != size {
                     return Err("the device answered a buffer of another size".to_owned());
                 }
-                let stored = after.stored_words();
-                if stored
-                    .iter()
-                    .any(|(first, values)| first + values.len() > size)
-                {
+                // A mask covers the buffer's words and no more; a list is ascending, so its last
+                // index is its furthest, and each index has its value.
+                if after.listed.as_ref().is_some_and(|(indices, values)| {
+                    indices.len() != values.len()
+                        || indices.last().is_some_and(|&last| last as usize >= size)
+                }) {
                     return Err("the device stored past a buffer's end".to_owned());
                 }
+                // At most a run and a word for each listed word.
+                if let Some((indices, _)) = &after.listed {
+                    writes.reserve(indices.len(), indices.len() * 4);
+                }
+                let stored = Box::new(after.stored_words());
                 // Stored whole with one word, it is a fill.
                 let whole = after.stored_whole(size)
                     && after
@@ -1123,7 +1202,8 @@ fn buffer_writes(
                 (stored, whole)
             }
         };
-        if whole && let Some(&(_, &[pattern, ..])) = runs.first() {
+        let mut runs = runs.peekable();
+        if whole && let Some(&(_, &[pattern, ..])) = runs.peek() {
             fills.push(cp::Fill {
                 destination: address,
                 pattern,
@@ -1138,7 +1218,7 @@ fn buffer_writes(
             writes.push_words(address + start, values, most);
         }
     }
-    Ok((writes, fills))
+    Ok(fills)
 }
 
 /// Each of a dispatch's own buffers its run left holding one word throughout, as the fill it
@@ -1284,7 +1364,7 @@ impl GuestCp<'_> {
             return Err("the device answered a window of another size".to_owned());
         }
         let working_out = crate::perf::SpanGuard::start(Span::WriteBackChanges);
-        let mut writes = GuestWrites::default();
+        let mut writes = GuestWrites::spare();
         if let Some(base) = base {
             for (first, words) in changed_runs(&before, &after) {
                 writes.push_words(
@@ -1294,14 +1374,18 @@ impl GuestCp<'_> {
                 );
             }
         }
-        let (buffer_writes, buffer_fills) =
-            buffer_writes(&prepared.buffers, &buffers_before, &buffers_after)?;
-        writes.append(&buffer_writes);
+        let buffer_fills = buffer_writes_into(
+            &mut writes,
+            &prepared.buffers,
+            &buffers_before,
+            &buffers_after,
+        )?;
         writes.append(&stored_image_writes(&prepared.images, stored)?);
         drop(working_out);
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &buffer_fills)
         })?;
+        writes.keep();
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
         let fills = uniform_buffers(&prepared.buffers, (&buffers_before, &buffers_after));
         if !fills.is_empty()
