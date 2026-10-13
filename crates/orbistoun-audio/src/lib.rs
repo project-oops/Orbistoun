@@ -1,8 +1,9 @@
 //! Audio output HLE - `libSceAudioOut`.
 //!
 //! Guests often block on audio-buffer completion, so a port that never drains hangs the
-//! title with no audio symptom. Output is paced from the sample rate rather than a device:
-//! the output ports follow the contract obSCEne's `090-audio` checks measure on hardware.
+//! title with no audio symptom. The output ports follow the contract obSCEne's `090-audio`
+//! checks measure on hardware: with a host [`Sink`] installed a port's samples play on a device
+//! and the device paces it (D819); with none, a port paces itself by its sample rate.
 //! `audio_out2` serves its contexts and ports, and `ajm` its context set-up (initialise,
 //! register a codec, finalise); `ajm`'s instances and batches, `audio3d` and `audio_in` are
 //! declarations only.
