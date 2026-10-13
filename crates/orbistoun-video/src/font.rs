@@ -32,6 +32,9 @@ guest_module! {
         "sceFontSupportExternalFonts" => 3,
         // (library, 0, size)
         "sceFontAttachDeviceCacheBuffer" => 3,
+        // (font, code, surface, metrics, result), the position in xmm0/xmm1
+        "sceFontRenderCharGlyphImage" => 5,
+        "sceFontRenderCharGlyphImageHorizontal" => 5,
     }
 }
 
@@ -278,4 +281,25 @@ pub(crate) fn font_destroy_library(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's library pointer, cleared through the checked accessor.
     unsafe { guest::write_u64(args[0], 0) };
     OK
+}
+
+/// A glyph render with no font handle (measured, both render calls, both glyphs).
+const NO_FONT: u64 = 0x8046_0005;
+
+/// `sceFontRenderCharGlyphImage(font, code, surface, metrics, result)`, the position in two float
+/// registers: with a null font it answers `0x80460005` and writes nothing (obSCEne
+/// `REQ-20260926T1952Z-7795`, `130-layout/font-render-glyph`, `report-1791727748.txt` lines
+/// 5878-5911: 'A' and ' ', the blocks behind it still 0xcc). A real font is unmeasured, since no font
+/// was opened, and answers the placeholder.
+pub(crate) fn font_render_char_glyph_image(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        NO_FONT
+    } else {
+        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// `sceFontRenderCharGlyphImageHorizontal`: the same arguments and the same measured refusal.
+pub(crate) fn font_render_char_glyph_image_horizontal(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    font_render_char_glyph_image(args)
 }

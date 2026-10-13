@@ -100,3 +100,30 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T0040Z-fm09, reports/hardware/20261011-083754-eboot.obs.log lines 4953-4974; REQ-20261009T1530Z-fm05, reports/hardware/20261009-205500-complete.log lines 8121-8141."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceFontRenderCharGlyphImage"
+arity = 5
+purpose = "Renders one character's glyph from a font into a render surface: (font, code, surface, metrics, result), the pen position in two float registers."
+returns = "status"
+edge_cases = [
+    "With a null font it answers 0x80460005 and the blocks behind it are left as they were, for 'A' and ' ' alike.",
+    "With a font opened it is unmeasured and answers the placeholder: obSCEne's arm opened no font.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T1952Z-7795, 130-layout/font-render-glyph, report-1791727748.txt lines 5878-5911, FW 12.40"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceFontRenderCharGlyphImageHorizontal"
+arity = 5
+purpose = "The horizontal-layout form of sceFontRenderCharGlyphImage, with the same arguments."
+returns = "status"
+edge_cases = [
+    "With a null font it answers 0x80460005 and the blocks behind it are left as they were, for 'A' and ' ' alike.",
+    "With a font opened it is unmeasured and answers the placeholder; obSCEne REQ-20261013T1545Z-fr02 asks for the result and metrics blocks with a real font.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T1952Z-7795, 130-layout/font-render-glyph, report-1791727748.txt lines 5878-5911, FW 12.40"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-13"

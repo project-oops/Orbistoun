@@ -807,6 +807,14 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceFontSupportExternalFonts",
             font::font_support_external_fonts,
         ),
+        (
+            "sceFontRenderCharGlyphImage",
+            font::font_render_char_glyph_image,
+        ),
+        (
+            "sceFontRenderCharGlyphImageHorizontal",
+            font::font_render_char_glyph_image_horizontal,
+        ),
         ("sceVideoOutOpen", video_out_open),
         ("sceVideoOutClose", video_out_close),
         ("sceVideoOutRegisterBuffers", video_out_register_buffers),
