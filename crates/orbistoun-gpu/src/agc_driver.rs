@@ -557,7 +557,8 @@ impl GuestCp<'_> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let pipeline = live.as_ref().ok_or("no pipeline is live")?;
             pipeline
-                .writes_in_force(
+                .writes_as_submitted(
+                    whole,
                     &walked,
                     segment.stream,
                     Some(&whole.tables.over(&self.memory)),
@@ -595,7 +596,10 @@ impl GuestCp<'_> {
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
             // The registers as submitted: the tables read then, not what the guest has since
             // written to them.
-            let prepared = pipeline.submit(
+            // And over the register state the whole was prepared over, not what has been carried
+            // since (D821).
+            let prepared = pipeline.submit_over(
+                whole.carried_in.clone(),
                 &bytes,
                 Queue::Draw,
                 &[],
@@ -1071,9 +1075,17 @@ impl GuestCp<'_> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let pipeline = live.as_mut().ok_or("no pipeline is live")?;
-            // The registers in force: what earlier submissions left, then the stream's (D737).
-            let (writes, _) =
-                pipeline.writes_in_force(&walked, dispatch.stream, Some(&self.memory));
+            // The registers in force: what earlier submissions left, then the stream's (D737) - as
+            // the submission was prepared, when it is one (D821).
+            let (writes, _) = match self.submission {
+                Some(whole) => pipeline.writes_as_submitted(
+                    whole,
+                    &walked,
+                    dispatch.stream,
+                    Some(&self.memory),
+                ),
+                None => pipeline.writes_in_force(&walked, dispatch.stream, Some(&self.memory)),
+            };
             let state = crate::dispatch::state_at(
                 &writes,
                 dispatch.offset,

@@ -423,6 +423,10 @@ pub struct Submission {
     /// The tables the stream's indirect register loads read, as they stood when it was submitted:
     /// what its draw segments and the registers it carries forward read them from.
     pub tables: crate::registers::TableSnapshot,
+    /// The register state earlier submissions left, as it stood when this one was prepared: what
+    /// its draw segments and dispatches run under when it is carried out (D737), however far the
+    /// carried state has moved on by then (D821).
+    pub carried_in: BTreeMap<u32, u32>,
     /// Modules the commands refer to, for a backend that has not seen them before.
     pub modules: BTreeMap<ResourceId, Vec<u32>>,
     /// Colour render targets the commands select, by the id a [`RenderCommand::SetRenderTargets`]
@@ -1287,19 +1291,39 @@ impl Pipeline {
         stream: &[u8],
         tables: Option<&dyn GuestMemory>,
     ) -> (Vec<RegisterWrite>, usize) {
+        self.writes_over(&self.carried, walked, stream, tables)
+    }
+
+    /// [`Self::writes_in_force`] as `submission` was prepared: over the state earlier submissions
+    /// had left then ([`Submission::carried_in`]), not what has been carried since.
+    pub fn writes_as_submitted(
+        &self,
+        submission: &Submission,
+        walked: &PacketWalk,
+        stream: &[u8],
+        tables: Option<&dyn GuestMemory>,
+    ) -> (Vec<RegisterWrite>, usize) {
+        self.writes_over(&submission.carried_in, walked, stream, tables)
+    }
+
+    /// The register writes `stream` runs under over `carried`, and how many are its own.
+    fn writes_over(
+        &self,
+        carried: &BTreeMap<u32, u32>,
+        walked: &PacketWalk,
+        stream: &[u8],
+        tables: Option<&dyn GuestMemory>,
+    ) -> (Vec<RegisterWrite>, usize) {
         let own = register_writes_reading(walked, stream, &self.vocabulary, tables);
         let count = own.len();
         if !self.carries_state || last_clear(walked).is_some() {
             return (own, count);
         }
-        let carried = self
-            .carried
-            .iter()
-            .map(|(&register, &value)| RegisterWrite {
-                packet_offset: 0,
-                register,
-                value,
-            });
+        let carried = carried.iter().map(|(&register, &value)| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        });
         (carried.chain(own).collect(), count)
     }
 
@@ -1378,13 +1402,28 @@ impl Pipeline {
         registered: &[RegisteredShader],
         memory: &impl GuestMemory,
     ) -> Submission {
+        let carried = self.carried.clone();
+        self.submit_over(carried, stream, queue, registered, memory)
+    }
+
+    /// [`Self::submit`] over the register state `carried_in` rather than what has been carried: a
+    /// part of a submission prepared as it is carried out runs under the state the whole was
+    /// prepared over ([`Submission::carried_in`]).
+    pub fn submit_over(
+        &mut self,
+        carried_in: BTreeMap<u32, u32>,
+        stream: &[u8],
+        queue: Queue,
+        registered: &[RegisteredShader],
+        memory: &impl GuestMemory,
+    ) -> Submission {
         use crate::perf::{Span, span};
         let walked = span(Span::PrepareWalk, || walk(stream));
         // The tables its indirect loads name, read once, now: what it carries forward and its
         // draw segments read them from, whatever the guest writes there after.
         let tables = crate::registers::TableSnapshot::of(&walked, stream, memory);
         let (writes, own_writes) = span(Span::PrepareRegisters, || {
-            self.writes_in_force(&walked, stream, Some(&tables.over(memory)))
+            self.writes_over(&carried_in, &walked, stream, Some(&tables.over(memory)))
         });
         let inferred = shader_candidates(&writes, &self.vocabulary);
 
@@ -1395,6 +1434,7 @@ impl Pipeline {
                 ..SubmissionReport::default()
             },
             tables,
+            carried_in,
             ..Submission::default()
         };
 
@@ -7239,6 +7279,78 @@ mod tests {
                 .targets
                 .is_empty(),
             "a pipeline that does not carry state prepares each stream on its own"
+        );
+    }
+
+    /// A submission's parts prepared as it is carried out run under the state the whole was
+    /// prepared over, though the carried state has moved past it since: what it leaves is carried
+    /// before it runs (D821). Here the second stream draws before it resizes the target, and its
+    /// draw is prepared after its own resize has been carried; it still draws into the target the
+    /// first stream sized. STKT00001 drew a one-byte target as the four-byte one its stream set
+    /// next, refused the draw and aborted on the fence it never wrote.
+    #[test]
+    fn a_submission_runs_under_the_state_it_was_prepared_over() {
+        use super::Pipeline;
+        use crate::packet::build::{nop, set_context_register};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let bytes =
+            |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        let extents = |submission: &super::Submission| {
+            submission
+                .targets
+                .values()
+                .map(|e| (e.width, e.height))
+                .collect::<Vec<_>>()
+        };
+        // `CB_COLOR0_ATTRIB2`: 256 x 128, then 64 x 32.
+        let first = bytes(&set_context_register(0x3B0, (255 << 14) | 127));
+        let before = bytes(&nop());
+        let mut second = before.clone();
+        second.extend(bytes(&set_context_register(0x3B0, (63 << 14) | 31)));
+
+        let mut live = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Lane,
+            width: Width::default(),
+        })
+        .expect("a pipeline")
+        .carrying_register_state();
+        live.submit(&first, super::Queue::Draw, &[], &Nothing);
+        live.carry(&first, None);
+        let whole = live.submit(&second, super::Queue::Draw, &[], &Nothing);
+        live.carry(&second, None);
+
+        let part = live.submit_over(
+            whole.carried_in.clone(),
+            &before,
+            super::Queue::Draw,
+            &[],
+            &Nothing,
+        );
+        assert_eq!(
+            extents(&part),
+            vec![(256, 128)],
+            "the state it was prepared over"
+        );
+        let walked = crate::packet::walk(&before);
+        let (writes, own) = live.writes_as_submitted(&whole, &walked, &before, None);
+        assert_eq!(own, 0);
+        assert!(
+            writes
+                .iter()
+                .any(|w| w.register == 0xA3B0 && w.value == (255 << 14) | 127),
+            "the first stream's size, not the second's: {writes:?}"
+        );
+        assert_eq!(
+            extents(&live.submit(&before, super::Queue::Draw, &[], &Nothing)),
+            vec![(64, 32)],
+            "a new submission starts from everything carried"
         );
     }
 
