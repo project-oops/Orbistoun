@@ -357,23 +357,63 @@ pub fn socket_read(fd: u64, into: &mut [u8], wait: Wait) -> Result<usize, u32> {
             nonblocking,
         })) => {
             let restore = wait.forced_on_udp(socket, *nonblocking);
-            let answered = match socket.recv(into) {
-                Ok(n) => Ok(n),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    Err(orbistoun_core::errno::AGAIN)
-                }
-                Err(_) => Err(crate::socket::UNNAMED),
-            };
+            let answered = receive_datagram(into, |scratch| socket.recv(scratch).map(|n| (n, ())))
+                .map(|(n, ())| n);
             restore.put_back_udp(socket, *nonblocking);
             answered
+        }
+        Some(Target::Socket(crate::socket::Socket::Pending { kind, .. })) => {
+            Err(never_connected(*kind))
         }
         // A listener has no peer to read from: `ENOTCONN` on the hardware (obSCEne
         // `102-net/recv-would-block`).
         Some(Target::Socket(_)) => Err(orbistoun_core::errno::NOT_CONNECTED),
+        // A descriptor with nothing behind it that `read` cannot serve either: `EBADF` on a
+        // console (obSCEne `REQ-20261012T1816Z-c901`, `recvfrom-bad-fd`). `read` serves the
+        // standard streams and the kernel pipe from outside the table, so it is asked first.
+        None => {
+            drop(table);
+            read(fd, into).ok_or(orbistoun_core::errno::BAD_DESCRIPTOR)
+        }
         _ => {
             drop(table);
             read(fd, into).ok_or(crate::socket::UNNAMED)
         }
+    }
+}
+
+/// What a read answers on a socket that was never connected: a stream answered errno 61 on a
+/// console (obSCEne `REQ-20261012T1816Z-c901`, `recvfrom-unconnected-stream`, `0x8041013d`), where a
+/// listener answers 57. A datagram socket is unmeasured and answers 57 as a listener does.
+fn never_connected(kind: u64) -> u32 {
+    if kind == crate::socket::sock_stream() {
+        orbistoun_core::errno::NEVER_CONNECTED
+    } else {
+        orbistoun_core::errno::NOT_CONNECTED
+    }
+}
+
+/// The largest datagram a UDP socket can carry.
+const DATAGRAM_MAX: usize = 0x1_0000;
+
+/// Receives one datagram through `receive` and hands the guest as much as `into` holds, answering
+/// that count - the rest of the datagram is discarded. That is BSD's answer, and a console's: a
+/// 4-byte `sceNetRecvfrom` of a 13-byte datagram answered 4 and the next one would block (obSCEne
+/// `REQ-20261012T1816Z-c901`). A Windows host refuses a datagram longer than the buffer
+/// (`WSAEMSGSIZE`) instead, so the host is always given room for the largest one.
+fn receive_datagram<T>(
+    into: &mut [u8],
+    receive: impl FnOnce(&mut [u8]) -> std::io::Result<(usize, T)>,
+) -> Result<(usize, T), u32> {
+    let mut scratch = vec![0_u8; DATAGRAM_MAX];
+    match receive(&mut scratch) {
+        Ok((n, from)) => {
+            let kept = n.min(into.len());
+            into[..kept].copy_from_slice(&scratch[..kept]);
+            Ok((kept, from))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(orbistoun_core::errno::AGAIN),
+        Err(_) => Err(crate::socket::UNNAMED),
     }
 }
 
@@ -405,6 +445,11 @@ pub fn socket_write(fd: u64, bytes: &[u8], wait: Wait) -> Result<usize, u32> {
             socket,
             nonblocking,
         })) => {
+            // A datagram socket with no peer has nowhere to send without an address:
+            // `EDESTADDRREQ` on a console (obSCEne `REQ-20261012T1816Z-c901`, `sendto-to-null`).
+            if socket.peer_addr().is_err() {
+                return Err(orbistoun_core::errno::DESTINATION_REQUIRED);
+            }
             let restore = wait.forced_on_udp(socket, *nonblocking);
             let answered = match socket.send(bytes) {
                 Ok(n) => Ok(n),
@@ -496,6 +541,9 @@ pub fn socket_sendto(
             }
             crate::socket::Socket::Listener { .. } => Err(orbistoun_core::errno::NOT_CONNECTED),
         },
+        // No such descriptor, or one closed: `EBADF` on a console (obSCEne
+        // `REQ-20261012T1816Z-c901`, `sendto-bad-fd`, `sendto-closed-fd`).
+        None => Err(orbistoun_core::errno::BAD_DESCRIPTOR),
         _ => Err(crate::socket::UNNAMED),
     }
 }
@@ -515,13 +563,7 @@ pub fn socket_recvfrom(
                 nonblocking,
             } => {
                 let restore = wait.forced_on_udp(socket, *nonblocking);
-                let answered = match socket.recv_from(into) {
-                    Ok((n, from)) => Ok((n, from)),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        Err(orbistoun_core::errno::AGAIN)
-                    }
-                    Err(_) => Err(crate::socket::UNNAMED),
-                };
+                let answered = receive_datagram(into, |scratch| socket.recv_from(scratch));
                 restore.put_back_udp(socket, *nonblocking);
                 answered
             }
@@ -541,10 +583,10 @@ pub fn socket_recvfrom(
                 restore.put_back(stream, *nonblocking);
                 answered
             }
-            crate::socket::Socket::Listener { .. } | crate::socket::Socket::Pending { .. } => {
-                Err(orbistoun_core::errno::NOT_CONNECTED)
-            }
+            crate::socket::Socket::Pending { kind, .. } => Err(never_connected(*kind)),
+            crate::socket::Socket::Listener { .. } => Err(orbistoun_core::errno::NOT_CONNECTED),
         },
+        None => Err(orbistoun_core::errno::BAD_DESCRIPTOR),
         _ => Err(crate::socket::UNNAMED),
     }
 }

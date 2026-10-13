@@ -82,6 +82,8 @@ vendor_spellings! {
     vendor_getsockname => getsockname,
     vendor_send => send,
     vendor_recv => recv,
+    vendor_sendto => sendto,
+    vendor_recvfrom => recvfrom,
     vendor_close => close,
 }
 
@@ -156,6 +158,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNetGetsockname", vendor_getsockname),
         ("sceNetSend", vendor_send),
         ("sceNetRecv", vendor_recv),
+        ("sceNetSendto", vendor_sendto),
+        ("sceNetRecvfrom", vendor_recvfrom),
         ("sceNetSocketClose", vendor_close),
         // A byte swap cannot fail, so there is no errno to encode and the POSIX body is the whole
         // function.

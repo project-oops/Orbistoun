@@ -180,17 +180,32 @@ found_on = "2026-09-26"
 [[function]]
 name = "sceNetSendto"
 arity = 6
-purpose = "Writes to a socket with destination."
+purpose = "Writes to a socket with destination: (fd, buffer, length, flags, to, tolen)."
 returns = "count"
-known_by = "assumed"
+edge_cases = [
+    "A 13-byte datagram to a bound loopback socket answers 13; to an unroutable TEST-NET address also 13; zero bytes answers 0.",
+    "A destination with tolen 0 or 8 answers 0x80410116; a null destination on a socket with no peer 0x80410127; a bad or closed descriptor 0x80410109.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1816Z-c901, reports/report-1791836505.txt lines 992-1030 (000-boot/udp-loopback), FW 12.40"
+note = "The probe's unconnected-stream sendto row answered 13, which suggests it reused the datagram socket; it is not taken."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-09-27"
 
 [[function]]
 name = "sceNetRecvfrom"
 arity = 6
-purpose = "Reads from a socket and records the sender."
+purpose = "Reads from a socket and records the sender: (fd, buffer, length, flags, from, &fromlen)."
 returns = "count"
-known_by = "assumed"
+edge_cases = [
+    "A 13-byte datagram answers 13 into a 64-byte buffer, the rest untouched; from gets 16 bytes (sin_len 16, family 2, port, address, zero pad) and fromlen 16. Null from and fromlen are accepted.",
+    "A fromlen of 4 gets exactly four bytes of source and fromlen 4.",
+    "A 4-byte read of a 13-byte datagram answers 4, and the rest is discarded: the next non-blocking read answers 0x80410123.",
+    "Empty and non-blocking answers 0x80410123; a bad descriptor 0x80410109; a stream socket that never connected 0x8041013d.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1816Z-c901, reports/report-1791836505.txt lines 992-1030 (000-boot/udp-loopback), FW 12.40"
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-09-27"
 
 [[function]]

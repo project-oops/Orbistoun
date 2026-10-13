@@ -248,7 +248,10 @@ pub(crate) unsafe fn read_sockaddr(address: u64, length: u64) -> Option<SocketAd
 /// Writes a `sockaddr_in` where a guest asked for one, and updates its length.
 ///
 /// Both halves, as the interface does: a caller passes the room it has and reads back how
-/// much was used.
+/// much was used. Room short of the structure gets that many bytes and that length back, and
+/// nothing past it: a console's `sceNetRecvfrom` with a `fromlen` of 4 wrote four bytes and
+/// answered 4 (obSCEne `REQ-20261012T1816Z-c901`), as FreeBSD's `sockargs` truncation does. A
+/// null length leaves the room unstated and gets the whole structure.
 fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
     if address == 0 {
         // A caller that wants only the connection passes null, which is allowed.
@@ -257,8 +260,16 @@ fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
     let Ok(at) = usize::try_from(address) else {
         return false;
     };
-    // The whole structure, whichever form it is: a caller reads the family from it and
-    // decides how much to believe, so a short write would read as an address.
+    let len_at = usize::try_from(length_at).unwrap_or(0);
+    let room = if len_at == 0 {
+        u64::MAX
+    } else {
+        // SAFETY: a guest-supplied `socklen_t *`, read unaligned because nothing promises the
+        // guest aligned it.
+        u64::from(unsafe {
+            std::ptr::read_unaligned(std::ptr::with_exposed_provenance::<u32>(len_at))
+        })
+    };
     let mut bytes = [0_u8; SOCKADDR_IN6_LEN as usize];
     let written = match value {
         SocketAddr::V4(v4) => {
@@ -278,10 +289,10 @@ fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
             SOCKADDR_IN6_LEN
         }
     };
+    let written = written.min(room);
 
-    // SAFETY: a guest-supplied address under the identity mapping, where the guest said it
-    // has room for a `sockaddr` of the family it asks about, the same contract the real call
-    // has.
+    // SAFETY: a guest-supplied address under the identity mapping, as many bytes as the guest
+    // said it has room for, the same contract the real call has.
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -289,9 +300,7 @@ fn write_sockaddr(address: u64, length_at: u64, value: SocketAddr) -> bool {
             written as usize,
         );
     }
-    if let Ok(len_at) = usize::try_from(length_at)
-        && len_at != 0
-    {
+    if len_at != 0 {
         // SAFETY: a guest-supplied `socklen_t *`, written unaligned because nothing
         // promises the guest aligned it.
         unsafe {
@@ -664,14 +673,19 @@ pub fn recv(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
 
 /// `sendto(fd, buffer, length, flags, address, address_length)`: a write to a destination.
 ///
-/// If `address` is null or zero-length, behaves as `send`. Otherwise sends a datagram to `address`.
+/// If `address` is null, behaves as `send`. Otherwise sends a datagram to `address`, which must
+/// state at least a `sockaddr_in`'s length: a length of 0 or 8 is `EINVAL` on a console
+/// (obSCEne `REQ-20261012T1816Z-c901`), as in FreeBSD's `getsockaddr`.
 ///
 /// Reference: POSIX.1-2008 `sendto(2)`.
 pub fn sendto(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let Some(bytes) = guest_bytes(args[1], args[2]) else {
         return Err(UNNAMED);
     };
-    if args[4] == 0 || args[5] == 0 {
+    if args[4] != 0 && args[5] < SOCKADDR_IN_LEN {
+        return Err(orbistoun_core::errno::INVALID);
+    }
+    if args[4] == 0 {
         return crate::descriptor::socket_write(args[0], bytes, wait_for(args[3]))
             .map(|n| n as u64);
     }

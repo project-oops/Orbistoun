@@ -72,12 +72,20 @@ pub mod errno {
     /// Named from the number: 35 is `EAGAIN` in this platform's harvested headers, whatever gloss
     /// accompanied the measurement.
     pub const AGAIN: u32 = 35;
+    /// A send with no address on a datagram socket that has no peer. Observed as `0x8041_0127`
+    /// from `sceNetSendto` with a null destination (obSCEne `REQ-20261012T1816Z-c901`); 39 is
+    /// `EDESTADDRREQ` in the harvested headers.
+    pub const DESTINATION_REQUIRED: u32 = 39;
     /// The socket has no peer. Observed from a `recv` on a listening socket, which `libSceNet`
     /// answered `0x8041_0139` (obSCEne `102-net/recv-would-block`).
     ///
     /// Read through the vendor encoding rather than `errno` directly: 57 is the low byte under a
     /// base established by a different pair, and `ENOTCONN` is 57 in the harvested headers.
     pub const NOT_CONNECTED: u32 = 57;
+    /// A read on a stream socket that never connected. Observed as `0x8041_013d` from
+    /// `sceNetRecvfrom` (obSCEne `REQ-20261012T1816Z-c901`), where a listener answers 57; 61 is
+    /// `ECONNREFUSED` in the harvested headers, whatever the console means by it here.
+    pub const NEVER_CONNECTED: u32 = 61;
 
     // Published, not measured: the entries below come from a document rather than the hardware.
 
