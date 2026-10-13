@@ -3975,6 +3975,9 @@ fn bind_textures(
     let mut out = Vec::with_capacity(commands.len());
     let (mut words, mut fragment, mut stale) = (None, None, false);
     let mut read: TexturesRead = BTreeMap::new();
+    // And the user data's, the same way: a stream sets the same words before each of many draws,
+    // and asking the host whether a large texture was written since is not free.
+    let mut read_from_user: BTreeMap<UserTextureKey, Option<RenderCommand>> = BTreeMap::new();
     for command in commands.drain(..) {
         match &command {
             RenderCommand::SetUserData {
@@ -4022,7 +4025,12 @@ fn bind_textures(
                     // A descriptor still in the user data the stage was seeded with is read from
                     // those words, with a sampler beside it there.
                     if let Some(first) = source.user_data {
-                        let bound = user_data_texture(source, first, user, memory, texels)
+                        let bound = read_from_user
+                            .entry(user_texture_key(source, first, user))
+                            .or_insert_with(|| {
+                                user_data_texture(source, first, user, memory, texels)
+                            })
+                            .clone()
                             .filter(|bound| shaped_for(bound, source));
                         if bound.is_none() {
                             *unbound += 1;
@@ -4063,6 +4071,47 @@ fn bind_textures(
         out.push(command);
     }
     *commands = out;
+}
+
+/// Everything [`user_data_texture`] reads for a source: the source's slot, shape and saturation, the
+/// descriptor's words, the sampler's words where the user data holds them, and the address of the
+/// sampler where the table does. Equal keys bind the same texture in one submission.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct UserTextureKey {
+    slot: u32,
+    cube: bool,
+    compare: bool,
+    saturated: [bool; 2],
+    descriptor: Option<[u32; 8]>,
+    /// Whether the sampler is in the user data, and its words there where they all are.
+    sampler_in_user: bool,
+    sampler_words: Option<[u32; 4]>,
+    sampler_at: Option<u64>,
+}
+
+/// The [`UserTextureKey`] of `source`, whose descriptor starts at user-data word `first`.
+fn user_texture_key(source: &TextureSource, first: u32, user: &[u32]) -> UserTextureKey {
+    UserTextureKey {
+        slot: source.slot,
+        cube: source.cube,
+        compare: source.compare,
+        saturated: source.saturated,
+        descriptor: user_words(user, first),
+        sampler_in_user: source.sampler_user_data.is_some(),
+        sampler_words: source
+            .sampler_user_data
+            .and_then(|sampler| user_words(user, sampler)),
+        sampler_at: source
+            .sampler_offset
+            .filter(|_| source.sampler_user_data.is_none())
+            .map(|offset| table_address(source.table, user) + u64::from(offset)),
+    }
+}
+
+/// `N` user-data words from word `start`, where the user data holds them all.
+fn user_words<const N: usize>(user: &[u32], start: u32) -> Option<[u32; N]> {
+    let start = usize::try_from(start).ok()?;
+    user.get(start..start.checked_add(N)?)?.try_into().ok()
 }
 
 /// What a source whose descriptor is in a table binds: the null texture for a null descriptor, the
@@ -4149,11 +4198,7 @@ fn user_data_texture(
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    let words_from = |start: u32, count: usize| {
-        let start = usize::try_from(start).ok()?;
-        user.get(start..start.checked_add(count)?)
-    };
-    let descriptor: [u32; 8] = words_from(first, 8)?.try_into().ok()?;
+    let descriptor: [u32; 8] = user_words(user, first)?;
     if is_null_image(&descriptor) {
         return Some(null_texture(source.slot, source.cube));
     }
@@ -4161,8 +4206,7 @@ fn user_data_texture(
     // table the source names. [`None`] where it named none, and `Some(None)` where it cannot be read.
     let named = if let Some(sampler) = source.sampler_user_data {
         Some(
-            words_from(sampler, 4)
-                .and_then(|words| <[u32; 4]>::try_from(words).ok())
+            user_words(user, sampler)
                 .and_then(|words| crate::registers::decode_sampler_descriptor(words).ok()),
         )
     } else {
@@ -6095,6 +6139,95 @@ mod tests {
             (slot, target, sampling.depth_compare),
             (2, crate::depth::depth_target_id_at(0x7400_d8ed_0000), 3)
         );
+    }
+
+    /// A texture in the user data is read once a submission however many draws bind it, as one in a
+    /// table is: PPSA25872 sets the same words before each of its draws, and each read asked the
+    /// host whether its 64 MiB atlas had been written since - half a millisecond a draw. The words
+    /// are PPSA03416's shadow map, whose sampler is read from the table, so each read is seen.
+    #[test]
+    fn a_user_data_texture_is_read_once_a_submission() {
+        use super::{
+            RenderCommand, ShaderStage, TableBase, TableWord, TextureSource, bind_textures,
+        };
+        struct Memory(Vec<u8>, std::cell::Cell<usize>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                self.1.set(self.1.get() + 1);
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0_u8; 0x20];
+        for (i, word) in [2_u32 | 2 << 3 | 6 << 12, 0, 1 << 20 | 1 << 22, 0]
+            .iter()
+            .enumerate()
+        {
+            bytes[0x10 + i * 4..0x14 + i * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        let memory = Memory(bytes, std::cell::Cell::new(0));
+        let mut words = [0_u32; super::USER_DATA_WORDS];
+        words[28] = 0x1000;
+        words[8..16].copy_from_slice(&[
+            0x00d6_f900,
+            0xc070_0074,
+            0x03ff_c3ff,
+            0x9180_0924,
+            0,
+            0x0070_0000,
+            0,
+            0,
+        ]);
+        let shader = ResourceId(1);
+        let sources = std::collections::BTreeMap::from([(
+            shader,
+            vec![TextureSource {
+                slot: 2,
+                table_offset: None,
+                table: TableBase {
+                    low: TableWord::UserData(28),
+                    high: TableWord::UserData(29),
+                },
+                sampler_offset: Some(0x10),
+                user_data: Some(8),
+                sampler_user_data: None,
+                cube: false,
+                compare: true,
+                saturated: [false; 2],
+            }],
+        )]);
+        let draw = RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        };
+        let set = RenderCommand::SetUserData {
+            stage: ShaderStage::Fragment,
+            words,
+        };
+        let mut commands = vec![
+            set.clone(),
+            RenderCommand::BindShader {
+                stage: ShaderStage::Fragment,
+                shader,
+            },
+            draw.clone(),
+            set,
+            draw,
+        ];
+        let mut unbound = 0;
+        bind_textures(
+            &mut commands,
+            (&sources, &mut super::TexelCache::new()),
+            &memory,
+            (&mut unbound, &mut None),
+        );
+        let bound = commands
+            .iter()
+            .filter(|command| matches!(command, RenderCommand::BindDepthTexture { .. }))
+            .count();
+        assert_eq!((unbound, bound), (0, 2), "bound before each draw");
+        assert_eq!(memory.1.get(), 1, "the sampler read once");
     }
 
     /// A depth compare whose descriptor is in the user data and whose sampler was loaded from the
