@@ -77,6 +77,68 @@ fn device_or_skip(test: &str) -> bool {
     }
 }
 
+/// Every test that runs a shader skips when there is no device, and names itself doing so.
+#[test]
+fn every_test_that_dispatches_skips_without_a_device() {
+    // A test cannot be skipped from inside a helper, so each one returns on
+    // `device_or_skip` itself. One that forgets passes on a machine with a device and
+    // fails on a runner without one. Read from this file's own source, so it needs no
+    // device and catches the omission where it is written.
+    const SOURCE: &str = include_str!("execute.rs");
+    let mut items: Vec<(&str, bool, &str)> = Vec::new();
+    let starts: Vec<usize> = SOURCE
+        .match_indices("\nfn ")
+        .map(|(at, _)| at + 1)
+        .collect();
+    for (i, &start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(SOURCE.len());
+        let text = &SOURCE[start..end];
+        let name = &text[3..text.find('(').expect("a function has a parameter list")];
+        let is_test = SOURCE[..start].ends_with("#[test]\n");
+        items.push((name, is_test, text));
+    }
+
+    let calls = |text: &str, name: &str| {
+        text.match_indices(&format!("{name}(")).any(|(at, _)| {
+            !text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    };
+    // The helpers that reach a device: those calling `dispatch`, and those calling them.
+    let mut dispatching = vec!["dispatch"];
+    loop {
+        let before = dispatching.len();
+        for &(name, is_test, text) in &items {
+            if !is_test
+                && !dispatching.contains(&name)
+                && dispatching.iter().any(|helper| calls(text, helper))
+            {
+                dispatching.push(name);
+            }
+        }
+        if dispatching.len() == before {
+            break;
+        }
+    }
+
+    let unguarded: Vec<&str> = items
+        .iter()
+        .filter(|&&(name, is_test, text)| {
+            is_test
+                && dispatching.iter().any(|helper| calls(text, helper))
+                && !text.contains(&format!("device_or_skip(\"{name}\")"))
+        })
+        .map(|&(name, ..)| name)
+        .collect();
+    assert!(
+        unguarded.is_empty(),
+        "these tests run a shader without `if !device_or_skip(\"<own name>\") {{ return; }}`, \
+         so they fail where no Vulkan driver exists: {unguarded:?}"
+    );
+}
+
 /// Assembles a guest instruction stream, translates it, runs it, returns the registers.
 fn run(words: &[u32]) -> Vec<u32> {
     let table = EncodingTable::builtin().expect("encodings");
@@ -5390,7 +5452,7 @@ fn every_supported_name_exists_on_this_target() {
 /// third, wrapping. A shift of 36 is a shift of 4.
 #[test]
 fn a_shift_then_add_uses_the_low_five_bits_and_wraps() {
-    if !device_or_skip("v_lshl_add_u32") {
+    if !device_or_skip("a_shift_then_add_uses_the_low_five_bits_and_wraps") {
         return;
     }
     // Vector register sources are 256 + n in the shared numbering.
@@ -5416,7 +5478,7 @@ fn a_shift_then_add_uses_the_low_five_bits_and_wraps() {
 /// through all three ranges - zero, below thirty-two, and thirty-two and above.
 #[test]
 fn a_sixty_four_bit_right_shift_crosses_the_halves() {
-    if !device_or_skip("v_lshrrev_b64") {
+    if !device_or_skip("a_sixty_four_bit_right_shift_crosses_the_halves") {
         return;
     }
     let value: u64 = 0x8765_4321_0fed_cba9;
@@ -6832,6 +6894,9 @@ fn the_local_share_takes_pairs_bytes_and_ors() {
 /// second source is the reference that masks (aco_select_nir_alu.cpp:3303).
 #[test]
 fn a_masked_sum_with_a_zero_first_source_sums_the_second() {
+    if !device_or_skip("a_masked_sum_with_a_zero_first_source_sums_the_second") {
+        return;
+    }
     let mut program = Vec::new();
     program.extend(v_mov_literal(1, 0x0001_0203));
     program.extend(vop3("v_msad_u8", 2, [128, VGPR_0 + 1, 128], 0, 0));
