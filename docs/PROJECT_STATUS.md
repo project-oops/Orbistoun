@@ -28,6 +28,7 @@ out of date.
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
+| GLTC00001 | flipped | 24 | 19,886 | 100% | `ran to the time limit` | `1785f6a8b01771d2` new |
 | PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
 | MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
@@ -35,9 +36,8 @@ out of date.
 | GCTS00001 | entered | 65 | 28,019 | 100% | `image+0x1b67c9` | `91f982d1d31cf359` new |
 | DRIP00001 | entered | 62 | 63,336 | 100% | `ran to the time limit` | `5e02052f2e0b06cd` new |
 | MESA00001 | entered | 32 | 353 | 99% | `ran to the time limit` | `a072d7cef4f013a8` new |
-| GLTC00001 | entered | 24 | 37,342 | 100% | `ran to the time limit` | `1785f6a8b01771d2` new |
+| GLTP00001 | entered | 20 | 101,253 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
 | GLPB00001 | entered | 18 | 30,048 | 100% | `ran to the time limit` | `297884c655c12e41` new |
-| GLTP00001 | entered | 16 | 36,793 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
 | dist | entered | 0 | 0 | 100% | `0x1` | - |
 
 Under a measured policy - stubs answering by name, so these reach further by

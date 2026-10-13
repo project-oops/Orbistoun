@@ -18,13 +18,13 @@ frames = "local"
 [status]
 reach = "entered"
 outcome = "ran to the time limit"
-imports = 16
-calls = 36793
+imports = 20
+calls = 101253
 standing = 100
 default_return = "unimplemented"
 unanswered = 0
 limit_seconds = 20
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
+build = "v0.1.0 - 42d9701"
+measured_on = "2026-10-13"
 link_plan = "a86c33e902240eaa"
 link_plan_stored = "new"

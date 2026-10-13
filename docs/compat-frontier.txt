@@ -19,6 +19,7 @@ GLCB00001              presented   32 imports (25 answered)    4146360 calls  10
 NETT00001              presented   31 imports (26 answered)      32473 calls  100% standing   ran to the time limit
 GALR00001              presented   27 imports (25 answered)      24999 calls  100% standing   ran to the time limit
 PADV00001              presented   21 imports (19 answered)      33982 calls  100% standing   ran to the time limit
+GLTC00001              flipped     24 imports (24 answered)      19886 calls  100% standing   ran to the time limit
 PPSA21564-app0         entered    263 imports (243 answered)    1201761 calls  100% standing   ran to the time limit
 PPSA04263-app0         entered    213 imports (204 answered)   20000000 calls  100% standing   spent its call budget
 MDEM00001              entered     89 imports (74 answered)      74759 calls  100% standing   ran to the time limit
@@ -26,7 +27,6 @@ MCUB00001              entered     67 imports (61 answered)      50348 calls  10
 GCTS00001              entered     65 imports (58 answered)      28019 calls  100% standing   image+0x1b67c9
 DRIP00001              entered     62 imports (56 answered)      63336 calls  100% standing   ran to the time limit
 MESA00001              entered     32 imports (30 answered)        353 calls   99% standing   ran to the time limit
-GLTC00001              entered     24 imports (22 answered)      37342 calls  100% standing   ran to the time limit
+GLTP00001              entered     20 imports (20 answered)     101253 calls  100% standing   ran to the time limit
 GLPB00001              entered     18 imports (18 answered)      30048 calls  100% standing   ran to the time limit
-GLTP00001              entered     16 imports (16 answered)      36793 calls  100% standing   ran to the time limit
 dist                   entered      0 imports (0 answered)          0 calls  100% standing   0x1

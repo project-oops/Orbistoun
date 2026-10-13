@@ -16,15 +16,17 @@ frames = "local"
 [settings]
 
 [status]
-reach = "entered"
+reach = "flipped"
 outcome = "ran to the time limit"
 imports = 24
-calls = 37342
+calls = 19886
 standing = 100
 default_return = "unimplemented"
-unanswered = 2
+frames = 238
+unanswered = 0
 limit_seconds = 20
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
+build = "v0.1.0 - 42d9701"
+measured_on = "2026-10-13"
 link_plan = "1785f6a8b01771d2"
 link_plan_stored = "new"
+shown = true
