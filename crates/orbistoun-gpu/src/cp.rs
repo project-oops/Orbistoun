@@ -1574,7 +1574,7 @@ mod tests {
         let flush_wait = |register: u32| {
             vec![
                 command_header(WAIT_REG_MEM, 6),
-                WAIT_EQUAL,
+                super::WAIT_EQUAL,
                 register,
                 0,
                 1,
