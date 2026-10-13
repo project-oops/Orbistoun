@@ -1946,6 +1946,7 @@ pub(crate) fn draw_vertices(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
+            blend_constants: start.blend_constants,
             raster_op: start.raster_op,
             line_width: start.line_width,
             write_mask: start.write_mask,
@@ -1980,6 +1981,8 @@ pub(crate) struct Start<'a> {
     pub(crate) textures: [Option<TextureWords<'a>>; MAX_TEXTURES],
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
+    /// The blend constants, each an `f32`'s bits; `None` when the stream set none.
+    pub(crate) blend_constants: Option<&'a [u32; 4]>,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     pub(crate) raster_op: Option<u8>,
     /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
@@ -2201,13 +2204,21 @@ pub(crate) fn logic_op(
     ))))
 }
 
+/// The blend constants a pipeline is built with: the stream's, each an `f32` from its bits, or zero
+/// when it set none (no factor then reads them; [`blend_attachment`] refuses one that would).
+pub(crate) fn blend_constants(constants: Option<[u32; 4]>) -> [f32; 4] {
+    constants.unwrap_or_default().map(f32::from_bits)
+}
+
 /// The colour-blend attachment state a guest's `CB_BLEND0_CONTROL` asks for, or the name of what it
 /// asks for that this cannot honour exactly.
 ///
 /// Factors and combine functions map one to one (`gfx103.json` `BlendOp`/`CombFunc` onto Vulkan's).
-/// Refused rather than approximated: the constant-colour factors (the blend constant registers are
-/// not decoded), the dual-source ones, the two `BOTH_*` forms and any reserved code. With
-/// `SEPARATE_ALPHA_BLEND` off, alpha is blended with the colour factors, as the hardware does.
+/// The constant-colour factors read the stream's `CB_BLEND_RED`..`ALPHA`, which the pipeline is
+/// built with ([`blend_constants`]). Refused rather than approximated: a constant-colour factor
+/// when the stream set no constants, the dual-source factors, the two `BOTH_*` forms and any
+/// reserved code. With `SEPARATE_ALPHA_BLEND` off, alpha is blended with the colour factors, as the
+/// hardware does.
 ///
 /// `write_mask` is the channels written, red in bit 0 to alpha in bit 3 - Vulkan's own
 /// `ColorComponentFlags` bits - or every channel when the guest set none.
@@ -2217,6 +2228,7 @@ pub(crate) fn logic_op(
 /// The name of the first part of the state with no exact Vulkan equivalent.
 pub(crate) fn blend_attachment(
     blend: Option<orbistoun_gpu::BlendControl>,
+    constants: Option<[u32; 4]>,
     write_mask: Option<u8>,
 ) -> Result<vk::PipelineColorBlendAttachmentState, &'static str> {
     use orbistoun_gpu::{BlendFactor as F, CombineFunc as C};
@@ -2245,9 +2257,15 @@ pub(crate) fn blend_attachment(
             F::ConstantColor
             | F::OneMinusConstantColor
             | F::ConstantAlpha
-            | F::OneMinusConstantAlpha => {
-                return Err("a constant-colour blend factor (the blend constants are not decoded)");
+            | F::OneMinusConstantAlpha
+                if constants.is_none() =>
+            {
+                return Err("a constant-colour blend factor with no blend constants set");
             }
+            F::ConstantColor => vk::BlendFactor::CONSTANT_COLOR,
+            F::OneMinusConstantColor => vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR,
+            F::ConstantAlpha => vk::BlendFactor::CONSTANT_ALPHA,
+            F::OneMinusConstantAlpha => vk::BlendFactor::ONE_MINUS_CONSTANT_ALPHA,
             F::Src1Color | F::InvSrc1Color | F::Src1Alpha | F::InvSrc1Alpha => {
                 return Err("a dual-source blend factor");
             }
@@ -4286,10 +4304,13 @@ fn create_graphics_pipeline(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     // The guest's blend state, or opaque with every channel written when it set none. A state that
     // does not map is refused before a draw reaches here (`VulkanBackend`).
-    let blend_attachments = [blend_attachment(bound.blend, bound.write_mask)
-        .map_err(|what| DispatchError::Unsupported(what.to_owned()))?];
-    let mut blend =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let constants = bound.blend_constants.copied();
+    let attachment = blend_attachment(bound.blend, constants, bound.write_mask)
+        .map_err(|what| DispatchError::Unsupported(what.to_owned()))?;
+    let blend_attachments = [attachment];
+    let mut blend = vk::PipelineColorBlendStateCreateInfo::default()
+        .attachments(&blend_attachments)
+        .blend_constants(blend_constants(constants));
     if let Some(op) = logic_op(bound.raster_op, bound.blend, bound.encoding)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?
     {
@@ -4582,6 +4603,7 @@ pub(crate) fn draw_resident(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
+            blend_constants: start.blend_constants,
             raster_op: start.raster_op,
             line_width: start.line_width,
             write_mask: start.write_mask,
@@ -4692,6 +4714,8 @@ struct Bound<'a> {
     user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
     /// Colour target zero's blend state; `None` draws opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// The blend constants, each an `f32`'s bits; `None` when the stream set none.
+    blend_constants: Option<&'a [u32; 4]>,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     raster_op: Option<u8>,
     /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
@@ -4796,6 +4820,7 @@ impl Default for Bound<'_> {
             initial: None,
             user_data: &NO_USER_DATA,
             blend: None,
+            blend_constants: None,
             raster_op: None,
             line_width: None,
             write_mask: None,
@@ -5259,6 +5284,35 @@ pub fn draw_with_windows(
 #[cfg(test)]
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
+
+    /// The four constant-colour factors map to Vulkan's once the stream set blend constants, and
+    /// are refused without them; the constants reach the pipeline as the floats their bits are.
+    #[test]
+    fn constant_blend_factors_need_and_use_the_blend_constants() {
+        use ash::vk::BlendFactor as V;
+        // `CB_BLEND0_CONTROL`: source factor in bits 0:4, destination in 8:12, enable bit 30.
+        for (code, factor) in [
+            (13, V::CONSTANT_COLOR),
+            (14, V::ONE_MINUS_CONSTANT_COLOR),
+            (19, V::CONSTANT_ALPHA),
+            (20, V::ONE_MINUS_CONSTANT_ALPHA),
+        ] {
+            let blend = orbistoun_gpu::decode_blend_control(code | (1 << 8) | (1 << 30));
+            assert!(
+                super::blend_attachment(Some(blend), None, None).is_err(),
+                "{code}"
+            );
+            let state = super::blend_attachment(Some(blend), Some([0; 4]), None).expect("maps");
+            assert_eq!(
+                state.src_color_blend_factor.as_raw(),
+                factor.as_raw(),
+                "{code}"
+            );
+        }
+        let bits = [0.25f32, 0.5, 0.75, 1.0].map(f32::to_bits);
+        assert_eq!(super::blend_constants(Some(bits)).map(f32::to_bits), bits);
+        assert_eq!(super::blend_constants(None).map(f32::to_bits), [0; 4]);
+    }
 
     /// Two pipelines' resources bind one texture in a slot neither draw filled: the session's
     /// default, not one made per pipeline. A slot a draw filled has its own.

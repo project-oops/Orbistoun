@@ -282,6 +282,10 @@ pub struct VulkanBackend {
     /// Colour target zero's blend state for the next draw: the latest `SetBlend`; `None` draws
     /// opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// The blend constants for the next draw, each an `f32`'s bits: the latest
+    /// `SetBlendConstants`; `None` when the stream set none, and a constant-colour factor is then
+    /// refused.
+    blend_constants: Option<[u32; 4]>,
     /// Colour target zero's raster operation for the next draw: the latest `SetRasterOp`; `None`
     /// writes the colour unchanged.
     raster_op: Option<u8>,
@@ -372,6 +376,7 @@ impl VulkanBackend {
             textures: [const { None }; framebuffer::MAX_TEXTURES],
             draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
+            blend_constants: None,
             raster_op: None,
             line_width: None,
             write_mask: None,
@@ -741,6 +746,8 @@ impl VulkanBackend {
             }
             // The blend state.
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
+            // The blend constants a constant-colour factor reads.
+            RenderCommand::SetBlendConstants(bits) => self.blend_constants = Some(*bits),
             // The raster operation.
             RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
             // The line width.
@@ -1060,6 +1067,7 @@ impl VulkanBackend {
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
+        self.blend_constants.hash(&mut hasher);
         self.raster_op.hash(&mut hasher);
         self.line_width.hash(&mut hasher);
         self.depth_bias.hash(&mut hasher);
@@ -1274,7 +1282,8 @@ impl VulkanBackend {
         &self,
         encoding: orbistoun_gpu::TargetEncoding,
     ) -> Result<Option<[f32; 3]>, &'static str> {
-        framebuffer::blend_attachment(self.blend, self.write_mask).map(drop)?;
+        framebuffer::blend_attachment(self.blend, self.blend_constants, self.write_mask)
+            .map(drop)?;
         framebuffer::logic_op(self.raster_op, self.blend, encoding)?;
         depth::depth_bias(self.depth_bias, self.cull)
     }
@@ -1312,6 +1321,7 @@ impl VulkanBackend {
             None => (None, None),
         };
         let block = self.user_data;
+        let blend_constants = self.blend_constants;
         let textures = self.textures.clone();
         let draw_buffers = self.draw_buffers.clone();
         let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
@@ -1325,6 +1335,7 @@ impl VulkanBackend {
                 .each_ref()
                 .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
+            blend_constants: blend_constants.as_ref(),
             raster_op: self.raster_op,
             line_width: self.line_width,
             write_mask: self.write_mask,
@@ -1453,6 +1464,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
         RenderCommand::SetViewport(_)
             | RenderCommand::SetViewportTransform(_)
             | RenderCommand::SetBlend(_)
+            | RenderCommand::SetBlendConstants(_)
             | RenderCommand::SetRasterOp(_)
             | RenderCommand::SetLineWidth(_)
             | RenderCommand::SetWriteMask(_)
@@ -1476,6 +1488,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
+        RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
@@ -2902,14 +2915,23 @@ mod tests {
         backend
             .execute(&RenderCommand::SetBlend(constant))
             .expect("set blend");
-        assert!(matches!(
-            backend.execute(&RenderCommand::Draw {
-                vertices: 3,
-                instances: 1,
-                first_vertex: 0,
-            }),
-            Err(BackendError::Unsupported { .. })
-        ));
+        let draw = RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        };
+        assert!(
+            matches!(
+                backend.execute(&draw),
+                Err(BackendError::Unsupported { .. })
+            ),
+            "with no blend constants set"
+        );
+        // With the stream's `CB_BLEND_RED`..`ALPHA` set, the factor reads them.
+        backend
+            .execute(&RenderCommand::SetBlendConstants([0.5f32.to_bits(); 4]))
+            .expect("set constants");
+        assert!(backend.execute(&draw).is_ok(), "with blend constants set");
     }
 
     /// The guest's raster operation writes through a logic op.

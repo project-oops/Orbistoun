@@ -3647,6 +3647,20 @@ fn stage_user_data(
     words
 }
 
+/// `CB_BLEND_RED`, `CB_BLEND_GREEN`, `CB_BLEND_BLUE` and `CB_BLEND_ALPHA`, the constants a
+/// constant-colour blend factor reads (`gfx103.json`: bytes `0x28414`-`0x28420`, dwords
+/// `0xA105`-`0xA108`, on the same scheme as `CB_BLEND0_CONTROL`'s `0xA1E0`).
+const CB_BLEND_CONSTANTS: [u32; 4] = [0xA105, 0xA106, 0xA107, 0xA108];
+
+/// The colour output state last emitted as commands, so a draw emits only what changed.
+#[derive(Default)]
+struct ColourOutputSent {
+    blend: Option<u32>,
+    constants: Option<[u32; 4]>,
+    rop: Option<u8>,
+    mask: Option<u8>,
+}
+
 /// Colour target zero's output state in force at a draw, as commands where it changed since
 /// `sent`: the blend state, when the stream set one, as `SetBlend`, its raster operation, when the
 /// stream set `CB_COLOR_CONTROL`, as `SetRasterOp`, and the channels the draw
@@ -3655,28 +3669,38 @@ fn stage_user_data(
 fn push_colour_output(
     commands: &mut Vec<RenderCommand>,
     mut latest: impl FnMut(u32) -> Option<u32>,
-    (blend_sent, rop_sent, sent): (&mut Option<u32>, &mut Option<u8>, &mut Option<u8>),
+    sent: &mut ColourOutputSent,
     unmasked_one_byte_draws: &mut usize,
 ) {
     if let Some(value) = latest(crate::registers::CB_BLEND0_CONTROL)
-        && *blend_sent != Some(value)
+        && sent.blend != Some(value)
     {
         commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
-        *blend_sent = Some(value);
+        sent.blend = Some(value);
+    }
+    // The blend constants, once the stream has written any of them; one it has not is zero, the
+    // register's value after `CLEAR_STATE`.
+    let constants = CB_BLEND_CONSTANTS.map(&mut latest);
+    if constants.iter().any(Option::is_some) {
+        let constants = constants.map(|value| value.unwrap_or(0));
+        if sent.constants != Some(constants) {
+            commands.push(RenderCommand::SetBlendConstants(constants));
+            sent.constants = Some(constants);
+        }
     }
     if let Some(rop) = latest(crate::registers::CB_COLOR_CONTROL).map(crate::registers::raster_op)
-        && *rop_sent != Some(rop)
+        && sent.rop != Some(rop)
     {
         commands.push(RenderCommand::SetRasterOp(rop));
-        *rop_sent = Some(rop);
+        sent.rop = Some(rop);
     }
     let info = latest(crate::registers::CB_COLOR0_INFO);
     match latest(crate::registers::CB_TARGET_MASK) {
         Some(mask) => {
             let channels = crate::registers::colour_write_mask(mask, info.unwrap_or(0));
-            if *sent != Some(channels) {
+            if sent.mask != Some(channels) {
                 commands.push(RenderCommand::SetWriteMask(channels));
-                *sent = Some(channels);
+                sent.mask = Some(channels);
             }
         }
         None if info.is_some_and(|info| {
@@ -3703,9 +3727,7 @@ fn push_geometry_commands(
     (unmodelled_viewports, unmasked_one_byte_draws): (&mut usize, &mut usize),
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
-    let mut blend_sent = None;
-    let mut mask_sent = None;
-    let mut rop_sent = None;
+    let mut colour_sent = ColourOutputSent::default();
     let mut line_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
@@ -3735,7 +3757,7 @@ fn push_geometry_commands(
         push_colour_output(
             commands,
             |register| sweep.latest(at, register),
-            (&mut blend_sent, &mut rop_sent, &mut mask_sent),
+            &mut colour_sent,
             unmasked_one_byte_draws,
         );
         // The line width in force at this draw, when the stream set one and it changed.
