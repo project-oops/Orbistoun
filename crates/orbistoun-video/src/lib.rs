@@ -9,6 +9,7 @@ use orbistoun_hle::guest_module;
 pub mod av_player;
 pub mod font;
 pub mod png_dec;
+pub mod png_enc;
 pub mod queued;
 pub mod recording;
 
@@ -790,6 +791,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("scePngDecParseHeader", png_dec::parse_header),
         ("scePngDecDecode", png_dec::decode),
         ("scePngDecDelete", png_dec::delete),
+        ("scePngEncQueryMemorySize", png_enc::query_memory_size),
+        ("scePngEncCreate", png_enc::create),
+        ("scePngEncEncode", png_enc::encode),
+        ("scePngEncDelete", png_enc::delete),
         ("sceFontMemoryInit", font::font_memory_init),
         ("sceFontMemoryTerm", font::font_memory_term),
         ("sceFontSelectLibraryFt", font::font_select_library_ft),

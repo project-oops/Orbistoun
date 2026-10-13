@@ -3490,6 +3490,7 @@ name = "orbistoun-video"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "miniz_oxide",
  "orbistoun-core",
  "orbistoun-env",
  "orbistoun-hle",

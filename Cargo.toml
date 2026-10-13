@@ -173,6 +173,8 @@ cpal = "0.16"
 # console refuses one.
 png = "0.18"
 crc32fast = "1.5"
+# libScePngEnc deflates the PNG it writes with the deflate `png` already brings in.
+miniz_oxide = "0.8"
 
 # Decoding title icons. PNG only and no default features: the one job is turning
 # `sce_sys/icon0.png` into pixels, and the rest of the format zoo is weight for

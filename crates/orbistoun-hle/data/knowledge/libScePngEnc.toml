@@ -1,0 +1,56 @@
+library = "libScePngEnc"
+
+[[function]]
+name = "scePngEncQueryMemorySize"
+purpose = "The memory an encoder of a width and filter count needs."
+arguments = [{ name = "param", kind = "ptr", note = "{size = 16, attribute, max_width, max_filter}" }]
+edge_cases = [
+    "Answers 0x45c70 + (2 + max_filter) * round_up(max_width * 4, 32) at all twenty measured points: widths 1, 4, 64 and 4096, filters 0 to 4 (0x45cb0 at width 1 and 4 with no filter, 0x45e70 to 0x46270 at width 64, 0x4dc70 to 0x5dc70 at width 4096, 0x20 more for each filter at the narrow widths).",
+    "A size field of 12, 24 or 32 answers 0x80690102; attribute 1 answers 0x80690103.",
+    "Width 0, or a filter count above 4, answers the placeholder: unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1545Z-5071, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-184500.log (FW 12.40)"
+note = "The resolution's summary says the size does not depend on the filter count; its own rows show 0x20, 0x100 and 0x4000 more per filter at widths 4, 64 and 4096, and the rows are what is served."
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngEncCreate"
+purpose = "Makes an encoder in memory the caller supplies."
+edge_cases = [
+    "Answers 0 and hands back the memory's base as the handle, having written a context there: itself at +0, the parameter size 16 at +8, the attribute at +12, the width at +16, the filter count at +20, and a work size at +24 - 0x46200 for width 64 and four filters.",
+    "A size field other than 16 answers 0x80690102; attribute 1 answers 0x80690103.",
+    "Memory short of the queried size answers the placeholder: unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1545Z-5071, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-184500.log (FW 12.40)"
+note = "The work size was measured at one width and filter count, where it is the memory size less 0x70; that difference is taken for every other."
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngEncEncode"
+purpose = "Encodes the caller's image as a PNG into the caller's buffer."
+arguments = [
+    { name = "handle", kind = "u64" },
+    { name = "param", kind = "ptr", note = "{image, png, image size, png size, width, height, pitch, u16 pixel format, u16 colour space, u16 bit depth, u16 clut, u16 filter, u16 compression}" },
+    { name = "output_info", kind = "ptr", note = "{png size, rows}" },
+]
+edge_cases = [
+    "Answers the PNG's length and writes it, with the image's rows, to the output information: 0x88 and 4 for a 4x4 RGBA image at compression 0.",
+    "The PNG's header is an 8-bit RGBA IHDR of the image's width and height (measured bytes, checksum 0xa9f19e7e for 4x4).",
+    "The filter mask's bits choose Sub, Up, Average and Paeth: masks 1, 4 and 8 filtered the first row Sub, Average and Paeth; mask 2 wrote it unfiltered, Up with no row above; mask 15 chose Sub there.",
+    "A pitch below width * 4 answers 0x80690103; an image address off 4-byte alignment answers 0x80690101; an output buffer too small for the PNG answers 0x80690110.",
+    "A pixel format, colour space, bit depth or palette other than 8-bit RGBA, a filter mask of 0 or above 15, a compression above 9, or an image wider than the encoder answers the placeholder: unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1545Z-5071, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-184500.log (FW 12.40)"
+note = "The compressed bytes are this host's deflate's, so a length can differ from the console's for the same image: at compression 9 the console wrote 0x5c to 0x88 bytes for the 4x4 image depending on the filter. The filter choice for rows after the first, and for a mask of several filters, follows the lowest sum of signed-magnitude bytes, which the one measured multi-filter row agrees with."
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngEncDelete"
+purpose = "Ends an encoder."
+edge_cases = ["A live handle answers 0; deleting it again answers 0x80690104."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1545Z-5071, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-184500.log (FW 12.40)"
+found_on = "2026-10-13"
