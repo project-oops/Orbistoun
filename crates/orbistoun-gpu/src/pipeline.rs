@@ -916,7 +916,28 @@ pub struct Pipeline {
     /// Each primitive shader's traced format words, by address and user-data count, with the hash
     /// of the bytes they were traced from ([`Self::format_words`]).
     format_words: BTreeMap<(u64, u32), (u64, Option<FormatWords>)>,
+    /// The formats [`Self::draw_buffer_formats`] last resolved and what it resolved them for, kept
+    /// while one submission's draws are bound ([`Self::bind_shaders`]). A draw split
+    /// into chunks asks again for every chunk with the same program, words and counts, and the
+    /// submission's memory and programs do not change while it is prepared.
+    formats_memo: FormatsMemo,
 }
+
+/// Whether [`Pipeline::draw_buffer_formats`] keeps what it resolves, and what it kept.
+#[derive(Debug)]
+enum FormatsMemo {
+    /// Outside a submission's draws: every call resolves.
+    Off,
+    /// While a submission's draws are bound: the last resolution, if any.
+    Kept(Option<Box<FormatsResolved>>),
+}
+
+/// What [`Pipeline::draw_buffer_formats`] was asked - the program, the user-data words and the
+/// system scalars - and what it answered.
+type FormatsResolved = (
+    (u64, [u32; USER_DATA_WORDS], Vec<(u32, u32)>),
+    Option<orbistoun_translate::wavefront::BufferFormats>,
+);
 
 /// A guest compute dispatch made ready to run: its module, the window it was built against, and the
 /// push-constant block carrying its user data.
@@ -985,6 +1006,7 @@ impl Pipeline {
             depth_fills: crate::depth::PendingFills::default(),
             dispatch_modules: BTreeMap::new(),
             format_words: BTreeMap::new(),
+            formats_memo: FormatsMemo::Off,
         })
     }
 
@@ -2225,8 +2247,15 @@ impl Pipeline {
             previous_shaders = shaders;
             previous_chunks = chunked;
         }
-        self.draw_widths = None;
+        self.end_draws();
         (per_draw, per_draw_chunks)
+    }
+
+    /// Forgets what held only while one submission's draws were bound: their wave widths and the
+    /// formats kept for their chunks.
+    fn end_draws(&mut self) {
+        self.draw_widths = None;
+        self.formats_memo = FormatsMemo::Off;
     }
 
     /// Prepares and binds the reconciled candidates before any draw. Returns every (stage, address)
@@ -2240,6 +2269,8 @@ impl Pipeline {
         submission: &mut Submission,
     ) -> ByGeometry {
         let _binding = crate::perf::SpanGuard::start(crate::perf::Span::ShadersUpFront);
+        // Formats resolved for one draw serve its other chunks, until this submission's draws end.
+        self.formats_memo = FormatsMemo::Kept(None);
         let mut by_geometry = ByGeometry::default();
         for &candidate in candidates {
             let key = (candidate.stage as u32, candidate.address);
@@ -2710,15 +2741,28 @@ impl Pipeline {
         (words, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
         memory: &impl GuestMemory,
     ) -> Option<orbistoun_translate::wavefront::BufferFormats> {
-        let traced = self.format_words(address)?;
-        let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
-        for (slot, source) in traced.iter().enumerate() {
-            formats.set(
-                slot,
-                crate::draw_buffers::resolve_fourth_word(source, (words, system), memory),
-            );
+        if let FormatsMemo::Kept(Some(kept)) = &self.formats_memo
+            && let ((at, held_words, held_system), formats) = &**kept
+            && *at == address
+            && held_words == words
+            && held_system.as_slice() == system
+        {
+            return *formats;
         }
-        Some(formats)
+        let formats = self.format_words(address).map(|traced| {
+            let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
+            for (slot, source) in traced.iter().enumerate() {
+                formats.set(
+                    slot,
+                    crate::draw_buffers::resolve_fourth_word(source, (words, system), memory),
+                );
+            }
+            formats
+        });
+        if let FormatsMemo::Kept(kept) = &mut self.formats_memo {
+            *kept = Some(Box::new(((address, *words, system.to_vec()), formats)));
+        }
+        formats
     }
 
     /// Where each of a primitive shader's buffers' fourth descriptor word comes from, by slot, for
@@ -6643,6 +6687,71 @@ mod tests {
                 .map(|f| f.get(0)),
             Some(Some(0x2222_2222)),
             "the rewritten program's descriptor"
+        );
+    }
+
+    /// While a submission's draws are bound, a draw's chunks asking for the same program's formats
+    /// with the same words are served what was resolved for the first - here even after the
+    /// program is replaced, which cannot happen within one submission - and outside that the
+    /// program is traced as it now stands.
+    #[test]
+    fn a_draws_chunks_share_the_formats_resolved_for_it() {
+        use super::{Pipeline, USER_DATA_WORDS};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let program = |descriptor: u32| -> Vec<u8> {
+            // buffer_load_format_xyzw v0, v5, s[descriptor..+3], 0 idxen; s_endpgm.
+            [
+                0xe00c_2000_u32,
+                0x8000_0005 | (descriptor / 4) << 16,
+                0xbf81_0000,
+            ]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect()
+        };
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        pipeline.user_data[0].first_register = 8;
+        pipeline.user_data[0].count = 20;
+        let mut words = [0u32; USER_DATA_WORDS];
+        words[15] = 0x1111_1111;
+        words[19] = 0x2222_2222;
+        let address = 0x40_0000;
+        let format = |pipeline: &mut Pipeline, words: &[u32; USER_DATA_WORDS]| {
+            pipeline
+                .draw_buffer_formats(address, (words, &[]), &Nothing)
+                .and_then(|f| f.get(0))
+        };
+        pipeline.decoded.insert(address, program(20));
+        pipeline.formats_memo = super::FormatsMemo::Kept(None);
+        assert_eq!(format(&mut pipeline, &words), Some(0x1111_1111));
+        pipeline.decoded.insert(address, program(24));
+        assert_eq!(
+            format(&mut pipeline, &words),
+            Some(0x1111_1111),
+            "the draw's own"
+        );
+        words[0] = 1;
+        assert_eq!(
+            format(&mut pipeline, &words),
+            Some(0x2222_2222),
+            "other words are resolved again"
+        );
+        pipeline.formats_memo = super::FormatsMemo::Off;
+        words[0] = 0;
+        assert_eq!(
+            format(&mut pipeline, &words),
+            Some(0x2222_2222),
+            "and traced as it stands"
         );
     }
 
