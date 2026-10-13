@@ -19,6 +19,9 @@ when every fence was written.
 The registers a submission leaves are now carried before it is carried out, in both modes, not
 after. The next submission is prepared from them, and an asynchronous one may be prepared before
 the last has run. Their indirect loads read the tables as submitted, which this order matches.
+A submission keeps the carried state it was prepared over (`carried_in`), and everything prepared
+or read while it is carried out - its draw segments (D729), their target runs, its dispatches -
+runs over that, never over the live carried state, which by then holds its own last writes.
 
 **Why:** with the guest waiting on every submission's device work, CPU and GPU time added
 instead of overlapping; hardware queues a buffer and runs it alongside the CPU. PPSA02664 makes
