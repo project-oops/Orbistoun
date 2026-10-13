@@ -880,6 +880,8 @@ pub struct Pipeline {
     /// the answer reads the whole decoded program, and a shader already translated is bound again
     /// at every submission without its decode.
     per_lane: BTreeMap<u64, bool>,
+    /// The texels a dispatch image last detiled to, with the surface and bytes they came from.
+    detiled: DetiledImages,
     /// Shaders whose translation, keyed as [`Self::cache`] is, found it needs a draw's geometry
     /// (D730), with their bytes and the reason: tried before every draw is bound, at every
     /// submission, and a whole translation each time to reach the same answer.
@@ -995,6 +997,7 @@ impl Pipeline {
             cache: BTreeMap::new(),
             decoded: BTreeMap::new(),
             per_lane: BTreeMap::new(),
+            detiled: DetiledImages::default(),
             needs_geometry: BTreeMap::new(),
             bases: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
@@ -1070,7 +1073,7 @@ impl Pipeline {
                 (placed, formats),
                 integer_images,
             )?;
-            let images = dispatch_images(state, &sources, memory)?;
+            let images = dispatch_images(state, &sources, memory, &mut self.detiled)?;
             let wanted = [
                 images
                     .fetched
@@ -1827,6 +1830,7 @@ fn dispatch_images(
     state: &crate::dispatch::DispatchState,
     (textures, storage): &orbistoun_translate::wavefront::ImageSources,
     memory: &impl GuestMemory,
+    detiled: &mut DetiledImages,
 ) -> Result<DispatchImages, String> {
     if textures.len() > 1 {
         return Err("the program fetches from more than one image, and one is bound".to_owned());
@@ -1836,7 +1840,9 @@ fn dispatch_images(
         let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
         let (width, height) = surface.extent();
         let texels = match surface_keys(&descriptor, format, memory)? {
-            crate::dcc::Keys::Uncompressed => surface.detile(&read_spanned(&surface, memory)?),
+            crate::dcc::Keys::Uncompressed => {
+                detiled.detile(&surface, &read_spanned(&surface, memory)?)
+            }
             crate::dcc::Keys::Clear0000 => {
                 vec![0; width as usize * height as usize * format.words() as usize]
             }
@@ -1860,7 +1866,7 @@ fn dispatch_images(
         let spanned = read_spanned(&surface, memory)?;
         let (width, height) = surface.extent();
         let texels = match surface_keys(&descriptor, format, memory)? {
-            crate::dcc::Keys::Uncompressed => surface.detile(&spanned),
+            crate::dcc::Keys::Uncompressed => detiled.detile(&surface, &spanned),
             crate::dcc::Keys::Clear0000 => {
                 let chain = surface_layout(&descriptor, format).and_then(|layout| {
                     usize::try_from(layout.chain_bytes(
@@ -1903,6 +1909,39 @@ fn dispatch_images(
         images.stored_surface = Some((surface, spanned));
     }
     Ok(images)
+}
+
+/// The texels dispatch images last detiled to, each with the surface and the bytes it came from: a
+/// detile is a function of the two, and MDEM00001's dispatches read the same images every frame -
+/// comparing their bytes costs a fraction of swizzling every texel again.
+#[derive(Debug, Default)]
+struct DetiledImages(Vec<(DispatchSurface, Vec<u8>, Vec<u32>)>);
+
+/// How many detiled images are kept: a dispatch binds two, and a frame runs a few.
+const DETILED_KEPT: usize = 8;
+
+impl DetiledImages {
+    /// `spanned`, `surface`'s bytes, detiled: the texels kept for them where the surface and the
+    /// bytes are the ones kept, else detiled now and kept.
+    fn detile(&mut self, surface: &DispatchSurface, spanned: &[u8]) -> Vec<u32> {
+        if let Some(at) = self
+            .0
+            .iter()
+            .position(|(kept, bytes, _)| kept == surface && bytes.as_slice() == spanned)
+        {
+            // The most recent last, so the oldest goes first.
+            let entry = self.0.remove(at);
+            let texels = entry.2.clone();
+            self.0.push(entry);
+            return texels;
+        }
+        let texels = surface.detile(spanned);
+        if self.0.len() >= DETILED_KEPT {
+            self.0.remove(0);
+        }
+        self.0.push((*surface, spanned.to_vec(), texels.clone()));
+        texels
+    }
 }
 
 /// The image a dispatch source names: its descriptor read from the user data or its table,
@@ -7178,6 +7217,47 @@ mod tests {
         let mut three_d = bytes;
         three_d[12..16].copy_from_slice(&((0xa_u32 << 28) | 0xfac).to_le_bytes());
         assert!(read_texture(table, 0, &Memory(three_d), &mut cache).is_none());
+    }
+
+    /// A dispatch image detiled again from the same surface and bytes is the texels kept for them,
+    /// as a fresh detile would make; new bytes, or another surface over the same bytes, are
+    /// detiled anew.
+    #[test]
+    fn a_dispatch_image_is_detiled_again_only_for_new_bytes() {
+        use super::{DetiledImages, DispatchSurface};
+        let surface = DispatchSurface::Linear {
+            base: 0x1000,
+            width: 3,
+            height: 2,
+            pitch: 64,
+            bytes_per_texel: 4,
+        };
+        let narrow = DispatchSurface::Linear {
+            base: 0x1000,
+            width: 2,
+            height: 2,
+            pitch: 64,
+            bytes_per_texel: 4,
+        };
+        let mut spanned: Vec<u8> = (0..67_u32).flat_map(u32::to_le_bytes).collect();
+        let mut detiled = DetiledImages::default();
+        assert_eq!(detiled.detile(&surface, &spanned), surface.detile(&spanned));
+        assert_eq!(
+            detiled.detile(&surface, &spanned),
+            surface.detile(&spanned),
+            "kept"
+        );
+        assert_eq!(
+            detiled.detile(&narrow, &spanned),
+            narrow.detile(&spanned),
+            "another surface"
+        );
+        spanned[4] = 0xff;
+        assert_eq!(
+            detiled.detile(&surface, &spanned),
+            vec![0, 0xff, 2, 64, 65, 66],
+            "new bytes"
+        );
     }
 
     /// A linear dispatch image spans its rows at their pitch, the last ending at its width; its
