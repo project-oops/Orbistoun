@@ -114,8 +114,10 @@ fn answer(code: u32, link: Option<&crate::host::Link>) -> Option<([u8; INFO_BYTE
                 None => refused,
             }
         }
-        // A measured code whose value the host cannot supply: no link out, or no gateway.
-        (2..=4 | 14..=16, _) => refused,
+        // A measured code whose value the host cannot supply: no link out, or no gateway. The DNS
+        // codes too: with no link they fell through to the unmeasured arm and left the buffer
+        // alone, which only a host with no link out (the macOS CI runner) showed.
+        (2..=4 | 14..=18, _) => refused,
         _ => return None,
     };
     Some((info, rc))
@@ -136,5 +138,19 @@ fn get_info(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         u64::from(rc)
     } else {
         u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// With no link out, every measured code whose value comes from the link is refused with a
+    /// zeroed buffer - the DNS codes included - rather than left unanswered.
+    #[test]
+    fn with_no_link_the_link_codes_are_refused_with_a_zeroed_buffer() {
+        for code in [2, 3, 4, 14, 15, 16, 17, 18] {
+            let (info, rc) = super::answer(code, None).expect("a measured code is answered");
+            assert_ne!(rc, 0, "code {code} refused");
+            assert!(info.iter().all(|&b| b == 0), "code {code} zeroed");
+        }
     }
 }
