@@ -40,3 +40,69 @@ known_by = "guest-observed"
 cites = "oops-sdk src/net/netctl.c (oops_net_ctl_term), which runs on hardware"
 found_in = ["OPSY00001"]
 found_on = "2026-09-26"
+
+[[function]]
+name = "sceNetCtlRegisterCallback"
+arity = 3
+purpose = "Registers a state-change callback: (fn, arg, &cid)."
+returns = "status"
+edge_cases = [
+    "After sceNetCtlInit, seven registrations answer 0 and write ids 1 to 7; the eighth and ninth answer 0x80412103 with cid untouched.",
+    "A null fn or a null cid answers 0x80412107.",
+    "A registration before sceNetCtlInit answered 0 too.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-074b, reports/hardware/report-1791836505.txt lines 915-989 (000-boot/netctl-callbacks), FW 12.40"
+note = "A function already registered is accepted again here: the probe's duplicate arm ran with the table full, so its 0x80412103 does not separate a duplicate from a full table."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceNetCtlUnregisterCallback"
+arity = 1
+purpose = "Removes a registered callback: (cid)."
+returns = "status"
+edge_cases = ["A held id answers 0; the same id again 0x80412104; 8 and -1 answer 0x80412105."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-074b, reports/hardware/report-1791836505.txt lines 915-989 (000-boot/netctl-callbacks), FW 12.40"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceNetCtlCheckCallback"
+arity = 0
+purpose = "Delivers pending state-change events to the registered callbacks on the calling thread."
+returns = "status"
+edge_cases = ["Three calls on the registering thread answered 0 and invoked no callback, the state unchanged."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-074b, reports/hardware/report-1791836505.txt lines 915-989 (000-boot/netctl-callbacks), FW 12.40"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceNetCtlGetState"
+arity = 1
+purpose = "Reads the connection state: (&state)."
+returns = "status"
+edge_cases = [
+    "A connected console answered 0 and wrote 3 (IP obtained), before sceNetCtlInit too; a null slot answers 0x80412107.",
+    "orbistoun answers 3 when the host has a link out; with none the state is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-074b, reports/hardware/report-1791836505.txt lines 915-989 (000-boot/netctl-callbacks), FW 12.40"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceNetCtlGetResult"
+arity = 2
+purpose = "Reads the result of a state-change event: (event, &result)."
+returns = "status"
+edge_cases = [
+    "Event 1 answers 0 and writes 0; events 2 and 3 answer 0x8041210f with the slot untouched; a null slot answers 0x80412107.",
+    "Other events are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-074b, reports/hardware/report-1791836505.txt lines 915-989 (000-boot/netctl-callbacks), FW 12.40"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"

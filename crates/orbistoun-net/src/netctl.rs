@@ -14,6 +14,15 @@ guest_module! {
         "sceNetCtlGetInfo" => 2,
         "sceNetCtlInit" => 0,
         "sceNetCtlTerm" => 0,
+        // (fn, arg, &cid)
+        "sceNetCtlRegisterCallback" => 3,
+        // (cid)
+        "sceNetCtlUnregisterCallback" => 1,
+        "sceNetCtlCheckCallback" => 0,
+        // (&state)
+        "sceNetCtlGetState" => 1,
+        // (event, &result)
+        "sceNetCtlGetResult" => 2,
     }
 }
 
@@ -24,6 +33,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNetCtlGetInfo", get_info),
         ("sceNetCtlInit", init),
         ("sceNetCtlTerm", term),
+        ("sceNetCtlRegisterCallback", register_callback),
+        ("sceNetCtlUnregisterCallback", unregister_callback),
+        ("sceNetCtlCheckCallback", check_callback),
+        ("sceNetCtlGetState", get_state),
+        ("sceNetCtlGetResult", get_result),
     ]
 }
 
@@ -138,6 +152,122 @@ fn get_info(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         u64::from(rc)
     } else {
         u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
+/// A null callback, id slot, state slot or result slot (measured, `-074b`).
+const INVALID_ADDR: u64 = 0x8041_2107;
+/// Every callback slot taken (measured: the eighth registration after init).
+const CALLBACK_MAX: u64 = 0x8041_2103;
+/// An id in range whose slot is free (measured: an id unregistered once already).
+const ID_NOT_FOUND: u64 = 0x8041_2104;
+/// An id outside the slots (measured: 8 and -1).
+const INVALID_ID: u64 = 0x8041_2105;
+/// A result for an event that has not happened (measured: events 2 and 3).
+const NOT_AVAILABLE: u64 = 0x8041_210f;
+
+/// How many callbacks a process can hold: ids 1 to 7 (measured).
+const CALLBACK_SLOTS: usize = 7;
+
+/// The state a console with an address reports: 3, IP obtained (measured).
+const STATE_IP_OBTAINED: u32 = 3;
+
+/// The registered callbacks, by id less one: the function and its argument. Nothing calls them:
+/// `sceNetCtlCheckCallback` delivered no event on a console whose state did not change.
+fn callbacks() -> &'static std::sync::Mutex<[Option<(u64, u64)>; CALLBACK_SLOTS]> {
+    static CALLBACKS: std::sync::Mutex<[Option<(u64, u64)>; CALLBACK_SLOTS]> =
+        std::sync::Mutex::new([None; CALLBACK_SLOTS]);
+    &CALLBACKS
+}
+
+/// `sceNetCtlRegisterCallback(fn, arg, &cid)`: the lowest free id from 1 into `cid` and 0;
+/// `0x80412103` with `cid` untouched once seven are held; `0x80412107` for a null `fn` or `cid`
+/// (obSCEne `REQ-20261012T1822Z-074b`, `000-boot/netctl-callbacks`, `report-1791836505.txt`
+/// lines 915-989). A function already registered is taken again: the duplicate arm was measured
+/// with every slot already full, so its refusal says nothing about duplicates.
+fn register_callback(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let [function, argument, cid, ..] = *args;
+    if function == 0 || cid == 0 {
+        return INVALID_ADDR;
+    }
+    let mut slots = callbacks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(free) = slots.iter().position(Option::is_none) else {
+        return CALLBACK_MAX;
+    };
+    let id = u32::try_from(free + 1).unwrap_or(u32::MAX);
+    // SAFETY: the guest's id slot, by the call's contract; written through the checked accessor.
+    if !unsafe { guest::write_u32(cid, id) } {
+        return INVALID_ADDR;
+    }
+    slots[free] = Some((function, argument));
+    0
+}
+
+/// `sceNetCtlUnregisterCallback(cid)`: 0 for a held id, `0x80412104` for a free one, `0x80412105`
+/// outside 1 to 7 (measured).
+fn unregister_callback(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let id = args[0] as u32;
+    let Some(index) = (id as usize)
+        .checked_sub(1)
+        .filter(|&index| index < CALLBACK_SLOTS)
+    else {
+        return INVALID_ID;
+    };
+    let mut slots = callbacks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slots[index].take().is_some() {
+        0
+    } else {
+        ID_NOT_FOUND
+    }
+}
+
+/// `sceNetCtlCheckCallback()`: 0, delivering nothing - three calls on the registering thread
+/// invoked no callback (measured). The state never changes here, so there is nothing to deliver.
+fn check_callback(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
+/// `sceNetCtlGetState(&state)`: 3, IP obtained, when the host has a link out, as a connected console
+/// answered (measured); `0x80412107` for a null slot. With no link the state is unmeasured and
+/// answers the placeholder.
+fn get_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return INVALID_ADDR;
+    }
+    if crate::host::link().is_none() {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    // SAFETY: the guest's state slot, by the call's contract; written through the checked accessor.
+    if unsafe { guest::write_u32(args[0], STATE_IP_OBTAINED) } {
+        0
+    } else {
+        INVALID_ADDR
+    }
+}
+
+/// `sceNetCtlGetResult(event, &result)`: event 1 writes 0 and answers 0; events 2 and 3 answer
+/// `0x8041210f` with the slot untouched; a null slot `0x80412107` (measured). Other events are
+/// unmeasured.
+fn get_result(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let [event, result, ..] = *args;
+    if result == 0 {
+        return INVALID_ADDR;
+    }
+    match event as u32 {
+        1 => {
+            // SAFETY: the guest's result slot, by the call's contract.
+            if unsafe { guest::write_u32(result, 0) } {
+                0
+            } else {
+                INVALID_ADDR
+            }
+        }
+        2 | 3 => NOT_AVAILABLE,
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
     }
 }
 
