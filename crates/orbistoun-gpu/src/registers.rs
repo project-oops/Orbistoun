@@ -2892,6 +2892,36 @@ const PA_SC_GENERIC_SCISSOR_TL: u32 = 0xA090;
 /// See [`PA_SC_GENERIC_SCISSOR_TL`].
 const PA_SC_GENERIC_SCISSOR_BR: u32 = 0xA091;
 
+/// `PA_SC_VPORT_SCISSOR_0_TL` and `_BR`: the first viewport's scissor, laid out as the window
+/// scissor's corners (`0x28250`, `0x28254`, gfx10, `src/amd/registers/gfx10.json:3693-3702` in the
+/// collection's Mesa tree). oops-sdk's GL puts its scissor box here and nowhere else
+/// (`gl_draw.c:3040`, `:3126`).
+const PA_SC_VPORT_SCISSOR_0_TL: u32 = 0xA094;
+/// See [`PA_SC_VPORT_SCISSOR_0_TL`].
+const PA_SC_VPORT_SCISSOR_0_BR: u32 = 0xA095;
+
+/// `PA_SC_MODE_CNTL_0` (`0x28A48`, `gfx10.json:5436`), whose `VPORT_SCISSOR_ENABLE` (bit 1,
+/// `gfx10.json:13698`) makes the viewport scissor clip as well.
+const PA_SC_MODE_CNTL_0: u32 = 0xA292;
+/// `PA_SC_MODE_CNTL_0.VPORT_SCISSOR_ENABLE`.
+const VPORT_SCISSOR_ENABLE: u32 = 1 << 1;
+
+impl Scissor {
+    /// The part of `self` inside `other` too: what two scissors clipping together leave.
+    #[must_use]
+    pub fn intersection(self, other: Self) -> Self {
+        let (left, top) = (self.x.max(other.x), self.y.max(other.y));
+        let right = (self.x + self.width).min(other.x + other.width);
+        let bottom = (self.y + self.height).min(other.y + other.height);
+        Self {
+            x: left,
+            y: top,
+            width: right.saturating_sub(left),
+            height: bottom.saturating_sub(top),
+        }
+    }
+}
+
 /// Decodes a scissor rectangle from its top-left and bottom-right register values.
 ///
 /// The layout is `PA_SC_WINDOW_SCISSOR_TL`/`_BR` (`src/amd/registers/gfx10.json` in oops-mesa),
@@ -2911,31 +2941,34 @@ pub fn decode_scissor(top_left: u32, bottom_right: u32) -> Scissor {
 }
 
 /// The scissor from `latest`, the value each register holds at some point in a stream, or
-/// [`None`] when only one corner or neither is set: the missing corner is not guessed (D010). What
-/// a draw is restricted to is the scissor in force at it.
+/// [`None`] when no scissor has both corners set: a missing corner is not guessed (D010). What a
+/// draw is restricted to is the scissor in force at it.
+///
+/// The generic scissor, and the first viewport's where `PA_SC_MODE_CNTL_0` enables it: the
+/// hardware clips to every scissor enabled, so two set give their intersection.
 #[must_use]
 pub fn scissor_from(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<Scissor> {
-    Some(decode_scissor(
-        latest(PA_SC_GENERIC_SCISSOR_TL)?,
-        latest(PA_SC_GENERIC_SCISSOR_BR)?,
-    ))
+    let mut corners = |tl, br| Some(decode_scissor(latest(tl)?, latest(br)?));
+    let generic = corners(PA_SC_GENERIC_SCISSOR_TL, PA_SC_GENERIC_SCISSOR_BR);
+    let viewport = corners(PA_SC_VPORT_SCISSOR_0_TL, PA_SC_VPORT_SCISSOR_0_BR)
+        .filter(|_| latest(PA_SC_MODE_CNTL_0).is_some_and(|mode| mode & VPORT_SCISSOR_ENABLE != 0));
+    match (generic, viewport) {
+        (Some(generic), Some(viewport)) => Some(generic.intersection(viewport)),
+        (one, other) => one.or(other),
+    }
 }
 
-/// The scissor from the live `GENERIC_SCISSOR` writes, or [`None`] when the stream set only one
-/// corner or neither: the missing corner is not guessed (D010). The most recent write to each wins.
+/// The scissor from the live writes, as [`scissor_from`] reads it, or [`None`] when no scissor has
+/// both corners: a missing corner is not guessed (D010). The most recent write to each wins.
 #[must_use]
 pub fn scissor_at(writes: &[RegisterWrite]) -> Option<Scissor> {
-    let live = |register: u32| {
+    scissor_from(|register: u32| {
         writes
             .iter()
             .rev()
             .find(|write| write.register == register)
             .map(|write| write.value)
-    };
-    Some(decode_scissor(
-        live(PA_SC_GENERIC_SCISSOR_TL)?,
-        live(PA_SC_GENERIC_SCISSOR_BR)?,
-    ))
+    })
 }
 
 /// Decodes an image resource descriptor from its eight dwords, in register order.
@@ -4997,5 +5030,43 @@ mod tests {
             scissor_at(&[write(0xA090, 0x8000_0000)]).is_none(),
             "the bottom-right corner was never written"
         );
+    }
+
+    /// The first viewport's scissor clips too where `PA_SC_MODE_CNTL_0` enables it, with the
+    /// generic one: the two intersect. oops-sdk's GL leaves the generic scissor whole and puts
+    /// `glScissor`'s box in the viewport's.
+    #[test]
+    fn an_enabled_viewport_scissor_clips_with_the_generic_one() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let generic = [write(0xA090, 0x8000_0000), write(0xA091, 0x0438_0780)];
+        // (0, 540)-(960, 1080): GL's lower-left quarter of a 1920 x 1080 target.
+        let viewport = [write(0xA094, 0x821C_0000), write(0xA095, 0x0438_03C0)];
+        let quarter = Scissor {
+            x: 0,
+            y: 540,
+            width: 960,
+            height: 540,
+        };
+        let mut writes = generic.to_vec();
+        writes.extend(viewport);
+        assert_eq!(
+            scissor_at(&writes),
+            Some(Scissor {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
+            "not enabled: the generic scissor alone"
+        );
+        writes.push(write(0xA292, 0x0000_0002));
+        assert_eq!(scissor_at(&writes), Some(quarter), "enabled: both clip");
+        let mut alone = viewport.to_vec();
+        alone.push(write(0xA292, 0x0000_0002));
+        assert_eq!(scissor_at(&alone), Some(quarter), "the viewport's alone");
     }
 }
