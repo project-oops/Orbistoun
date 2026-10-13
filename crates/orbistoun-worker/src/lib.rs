@@ -2434,18 +2434,12 @@ fn build_tls_block(
     // SAFETY: sets the calling thread's `fs` base to the block just built, which is what that
     // thread reads its thread-locals through.
     unsafe { orbistoun_abi::thread_pointer::install(tp) }.map_err(Error::ThreadPointerInstall)?;
-    match orbistoun_abi::thread_pointer::current() {
-        Some(v) if v == tp => {
-            // Remembered so the fault handler can restore it after a host context switch drops it
-            // (D433).
-            tls_backstop::remember(tp);
-            Ok(tp)
-        }
-        other => Err(Error::ThreadPointerMismatch {
-            read: other,
-            written: tp,
-        }),
-    }
+    // Remembered so the fault handler can restore it after a host context switch drops it (D433).
+    // `install` has read it back already. A second read here lost the same race again on PPSA25872,
+    // reading zero, and refused a pointer that was valid - leaving the backstop nothing to restore
+    // and the thread to fault on its first thread-local read.
+    tls_backstop::remember(tp);
+    Ok(tp)
 }
 
 /// Installs the guest thread pointer for the thread about to enter, when the image declares

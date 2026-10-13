@@ -113,15 +113,6 @@ pub enum Error {
     #[error("could not install the thread pointer: {0}")]
     ThreadPointerInstall(orbistoun_abi::thread_pointer::Unsupported),
 
-    /// The thread pointer read back differently from what was written.
-    #[error("the thread pointer read back as {read:x?}, not the {written:#x} that was written")]
-    ThreadPointerMismatch {
-        /// What the thread pointer read back as, if it could be read at all.
-        read: Option<u64>,
-        /// What was written.
-        written: u64,
-    },
-
     /// The image's thread-local layout could not be read.
     #[error("could not read the thread-local layout: {0}")]
     TlsLayout(#[source] orbistoun_loader::LoadError),
