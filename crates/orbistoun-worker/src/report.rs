@@ -2619,6 +2619,7 @@ fn collected_dumps() -> Vec<ArgumentDump> {
             } else {
                 String::new()
             },
+            returned: d.returned,
         })
         .collect()
 }

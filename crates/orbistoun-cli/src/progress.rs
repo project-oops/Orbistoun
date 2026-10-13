@@ -143,17 +143,28 @@ fn dump_line(d: &orbistoun_report::trace::ArgumentDump) -> String {
             format!("  \"{}\"", d.text)
         };
         return format!(
-            "      arg{} = {:#x} -> {} = {}{}",
-            d.slot, d.value, d.at, d.bytes, text
+            "      arg{} = {:#x} -> {} = {}{}{}",
+            d.slot,
+            d.value,
+            d.at,
+            d.bytes,
+            text,
+            d.moment()
         );
     }
     if d.at.is_empty() {
         // A scalar: a size, a flag, a count.
-        return format!("      arg{} = {:#x}", d.slot, d.value);
+        return format!("      arg{} = {:#x}{}", d.slot, d.value, d.moment());
     }
     // Address-shaped with nothing readable there. Said explicitly, because otherwise it renders
     // like a scalar: a pointer that is wrong, or into a region this run never declared.
-    format!("      arg{} = {:#x} -> {}", d.slot, d.value, d.at)
+    format!(
+        "      arg{} = {:#x} -> {}{}",
+        d.slot,
+        d.value,
+        d.at,
+        d.moment()
+    )
 }
 
 /// How many findings a run prints when nothing says otherwise.

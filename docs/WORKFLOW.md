@@ -335,8 +335,10 @@ ORBISTOUN_WRITE=0x6abac2f3dc6f8cee:0:0x11000000 ./bin/orbistoun run <title>
 ```
 
 Dumps are attached to unimplemented calls by default; `ORBISTOUN_DUMP` forces them where the
-implementation is the suspect, scalars included (D179). Only the stack is writable by a forced
-write: the image's runs are protected after relocation.
+implementation is the suspect, scalars included (D179). A named import's dumped calls are dumped
+twice: as the guest made the call, and as it returned, marked `(on return, rax ...)`, so an
+out-parameter shows what the implementation wrote beside what it answered. Only the stack is
+writable by a forced write: the image's runs are protected after relocation.
 
 `ORBISTOUN_WATCH` and `ORBISTOUN_WATCHPOINT` compose. The first copies a region before the run
 and diffs it afterwards, naming the words nobody wrote; the second arms an x86 debug register

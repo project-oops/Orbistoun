@@ -291,7 +291,7 @@ pub const DLSYM_STUBS: Var = Var {
 pub const DUMP: Var = Var {
     name: "ORBISTOUN_DUMP",
     kind: Kind::Diagnostic,
-    summary: "dump arguments for these imports even though something implements them",
+    summary: "dump arguments for these imports even though something implements them, at the call and again as it returns",
     example: "memalign,0x6abac2f3dc6f8cee",
     read_by: "orbistoun-worker",
     effect: Effect::Observes,

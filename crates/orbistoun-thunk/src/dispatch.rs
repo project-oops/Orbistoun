@@ -836,6 +836,11 @@ static DUMP_POINTING: [AtomicU8; MAX_DUMPS] = [const { AtomicU8::new(0) }; MAX_D
 /// The bytes themselves, as words.
 static DUMP_DATA: [[AtomicU64; DUMP_WORDS]; MAX_DUMPS] =
     [const { [const { AtomicU64::new(0) }; DUMP_WORDS] }; MAX_DUMPS];
+/// What the call answered in `rax`, plus one so zero means the dump was taken at the call.
+static DUMP_RETURNED: [AtomicU64; MAX_DUMPS] = [const { AtomicU64::new(0) }; MAX_DUMPS];
+/// Whether the dump was taken as the call returned: `DUMP_RETURNED` cannot say so alone, since
+/// `u64::MAX` plus one wraps to zero.
+static DUMP_AFTER: [AtomicU8; MAX_DUMPS] = [const { AtomicU8::new(0) }; MAX_DUMPS];
 /// How many calls of each import have been dumped so far.
 static DUMPED_PER_IMPORT: std::sync::OnceLock<Box<[AtomicU64]>> = std::sync::OnceLock::new();
 
@@ -860,8 +865,13 @@ pub struct ArgumentDump {
     /// A scalar argument is evidence too: a size, flag or count is recorded, not only pointers into
     /// mapped memory. See [`Pointing`].
     pub pointing: Pointing,
-    /// The bytes, as they were at the moment of the call.
+    /// The bytes, as they were at the moment of the call, or as it returned for a dump with
+    /// [`Self::returned`].
     pub bytes: [u8; DUMP_BYTES],
+    /// `None` for a dump taken as the guest made the call; for one taken as the call returned,
+    /// what it answered in `rax`. Only an import named with `ORBISTOUN_DUMP` is dumped on return,
+    /// so an out-parameter shows what the implementation wrote there.
+    pub returned: Option<u64>,
 }
 
 /// Where a forced write is allowed to land.
@@ -1043,25 +1053,35 @@ fn apply_writes(table: &std::sync::OnceLock<Box<[ForcedWrite]>>, index: u64, arg
     }
 }
 
-/// Captures whatever the guest is pointing at, for a call nothing implements.
+/// Captures whatever the guest is pointing at, for a call nothing implements, and answers whether
+/// this call was one of the import's dumped calls.
 ///
 /// At call time because the contents do not survive: a stack frame is reused within microseconds,
 /// and reading it at summary time would give a precisely wrong answer. Bounded on every axis
 /// (imports, calls, arguments, total dumps) and allocation-free (D194).
-fn dump_arguments(index: u64, args: *const u64) {
+fn dump_arguments(index: u64, args: *const u64) -> bool {
     let Ok(slot) = usize::try_from(index) else {
-        return;
+        return false;
     };
     let Some(counters) = DUMPED_PER_IMPORT.get() else {
-        return;
+        return false;
     };
     let Some(counter) = counters.get(slot) else {
-        return;
+        return false;
     };
     if counter.fetch_add(1, Ordering::Relaxed) >= u64::from(DUMPS_PER_IMPORT) {
-        return;
+        return false;
     }
+    dump_slots(index, args, None);
+    true
+}
 
+/// Records each argument of one call and what it points at: as the guest made the call when
+/// `returned` is `None`, or as the call returned, having answered `returned`.
+///
+/// The argument registers are read where the trampoline spilled them, which a handler does not
+/// write, so a dump on return reads the same addresses the guest passed.
+fn dump_slots(index: u64, args: *const u64, returned: Option<u64>) {
     for position in 0..SAVED_ARGUMENT_REGISTERS {
         // SAFETY: the caller guarantees six readable values, and `position` is below six.
         let slot = unsafe { args.add(position) };
@@ -1101,6 +1121,8 @@ fn dump_arguments(index: u64, args: *const u64) {
         DUMP_ADDRESS[at].store(value, Ordering::Relaxed);
         DUMP_POINTING[at].store(pointing.code(), Ordering::Relaxed);
         DUMP_SLOT[at].store(position as u64, Ordering::Relaxed);
+        DUMP_AFTER[at].store(u8::from(returned.is_some()), Ordering::Relaxed);
+        DUMP_RETURNED[at].store(returned.unwrap_or(0), Ordering::Relaxed);
         // Written last, so a reader never sees a populated import pointing at stale bytes.
         DUMP_IMPORT[at].store(index.wrapping_add(1), Ordering::Relaxed);
     }
@@ -1207,6 +1229,8 @@ pub fn argument_dumps() -> Vec<ArgumentDump> {
             address: DUMP_ADDRESS[at].load(Ordering::Relaxed),
             pointing: Pointing::from_code(DUMP_POINTING[at].load(Ordering::Relaxed)),
             bytes,
+            returned: (DUMP_AFTER[at].load(Ordering::Relaxed) != 0)
+                .then(|| DUMP_RETURNED[at].load(Ordering::Relaxed)),
         });
     }
     out
@@ -1457,10 +1481,10 @@ unsafe extern "sysv64" fn on_guest_call(
 
     // Only for calls nothing implements, which keeps dumping off the hot path (D194). A forced list
     // narrows the dump to itself: somebody who names an import is asking about that import.
-    if is_forced(index as usize) || (handler.is_none() && !anything_forced()) {
-        dump_arguments(index, args);
-    }
-    if is_forced(index as usize) {
+    let forced = is_forced(index as usize);
+    let dumped =
+        (forced || (handler.is_none() && !anything_forced())) && dump_arguments(index, args);
+    if forced {
         capture_caller_stack(sequence, index, entry_rsp);
     }
 
@@ -1477,6 +1501,13 @@ unsafe extern "sysv64" fn on_guest_call(
     // unchanged, so they still satisfy the contract the trampoline established.
     let answer = unsafe { resolve(index, args, entry_rsp, handler, floats) };
     leave_import(outer);
+
+    // A named import's dumped calls are dumped again as they return, so an out-parameter shows
+    // what was written there, beside the answer. Not for the unasked dumps of unimplemented
+    // imports: a stub writes nothing.
+    if forced && dumped {
+        dump_slots(index, args, Some(answer));
+    }
 
     record_return(sequence, answer);
 

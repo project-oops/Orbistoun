@@ -1288,7 +1288,16 @@ fn pointer_arguments(trace: &CallTrace, label: &str) -> Vec<String> {
         .dumps
         .iter()
         .filter(|d| d.label == label && !d.bytes.is_empty())
-        .map(|d| format!("arg{} = {:#x} -> {} = {}", d.slot, d.value, d.at, d.bytes))
+        .map(|d| {
+            format!(
+                "arg{} = {:#x} -> {} = {}{}",
+                d.slot,
+                d.value,
+                d.at,
+                d.bytes,
+                d.moment()
+            )
+        })
         .collect()
 }
 
@@ -1316,14 +1325,20 @@ fn captured(trace: &CallTrace, already: &[Finding]) -> Vec<Finding> {
         .map(|label| {
             // No evidence lines of its own: the printer already renders every dump whose label
             // appears in `what`, and repeating them would read as two calls.
-            let calls = trace.dumps.iter().filter(|d| d.label == label).count();
+            let calls = trace
+                .dumps
+                .iter()
+                .filter(|d| d.label == label && d.returned.is_none())
+                .count();
             Finding {
                 gap: Gap::Captured,
                 // A recording, not an inference: these are the bytes that were there.
                 confidence: Confidence::Certain,
                 subject: Some(label.to_owned()),
                 what: format!("{label} was asked about, and here is what it was passed"),
-                evidence: vec![format!("{calls} captured argument value(s), listed below")],
+                evidence: vec![format!(
+                    "{calls} captured argument value(s), listed below, then each as the call returned"
+                )],
                 action: Some(
                     concat!(
                         "compare each against what the implementation expects - a dump is ",
@@ -1758,6 +1773,7 @@ mod tests {
             value: 0x6000_0000_0010,
             bytes: "00 01 02 03".to_owned(),
             text: String::new(),
+            returned: None,
         };
 
         let mut unasked = empty();

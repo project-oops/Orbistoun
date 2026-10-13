@@ -466,6 +466,20 @@ pub struct ArgumentDump {
     /// The same bytes as text, where they read as text.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
+    /// `None` for a dump taken as the guest made the call; for one taken as the call returned,
+    /// what it answered in `rax`, the bytes then being what the call left there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned: Option<u64>,
+}
+
+impl ArgumentDump {
+    /// How a line names when the bytes were read: nothing for a dump at the call, and the answer
+    /// for one on return, so the two dumps of one call read as before and after.
+    #[must_use]
+    pub fn moment(&self) -> String {
+        self.returned
+            .map_or_else(String::new, |rax| format!("  (on return, rax {rax:#x})"))
+    }
 }
 
 /// What formatted writes managed.
