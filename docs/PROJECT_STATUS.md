@@ -28,8 +28,6 @@ out of date.
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
 | PPSA25872-app0 | flipped | 333 | 8,694,966 | 100% | `ran to the time limit` | `5bd2fd6f67e9fe3d` match |
-| obscene | flipped | 193 | 280,274 | 100% | `ran to the time limit` | - |
-| obscene-payload | flipped | 187 | 4,914 | 100% | `0x5e2d` | - |
 | PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
 | MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
@@ -72,7 +70,6 @@ construction and are not comparable with the table above:
 - **kstuff-toggle_0.6** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **kstuff_v1.6.7** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **nanoDNS_0.4** reached 0 imports, ending at `0x1`, with 1 function answered by name
-- **obscene** reached 193 imports, ending at `ran to the time limit`, with 1 function answered by name
 - **pldmgr_v0.5.1** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **prosperous** reached 0 imports, ending at `0x1`, with 1 function answered by name
 - **ps5-app-dumper_v1.11** reached 0 imports, ending at `0x1`, with 1 function answered by name
