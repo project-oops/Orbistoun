@@ -869,11 +869,11 @@ pub fn last_dispatch_refusal() -> Option<String> {
 fn stored_image_writes(
     images: &crate::pipeline::DispatchImages,
     stored: Option<Vec<u32>>,
-) -> Result<Vec<(u64, Vec<u8>)>, String> {
-    let mut writes = Vec::new();
+) -> Result<GuestWrites, String> {
+    let mut writes = GuestWrites::default();
     if let Some(expand) = images.stored_keys_to_expand {
         let (base, bytes) = expand.surface;
-        writes.push((base, vec![0; bytes]));
+        writes.push_repeated(base, 0, bytes);
     }
     if let Some((surface, spanned_before)) = &images.stored_surface {
         let texels = stored.ok_or("the device did not answer the stored image")?;
@@ -882,15 +882,15 @@ fn stored_image_writes(
             .tile(&texels, &mut spanned)
             .map_err(|e| format!("the stored image could not be tiled back: {e}"))?;
         for (first, bytes) in changed_runs(spanned_before, &spanned) {
-            writes.push((
+            writes.push(
                 surface.base() + first as u64,
-                spanned[first..first + bytes].to_vec(),
-            ));
+                &spanned[first..first + bytes],
+            );
         }
     }
     if let Some(expand) = images.stored_keys_to_expand {
         let (keys, bytes) = expand.keys;
-        writes.push((keys, vec![crate::dcc::KEY_UNCOMPRESSED; bytes]));
+        writes.push_repeated(keys, crate::dcc::KEY_UNCOMPRESSED, bytes);
     }
     Ok(writes)
 }
@@ -934,8 +934,74 @@ fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> 
 /// How many elements [`changed_runs`] compares at once where nothing has changed.
 const UNCHANGED_CHUNK: usize = 64;
 
-/// Bytes to write at a guest address.
-type GuestWrite = (u64, Vec<u8>);
+/// Runs of bytes to write into guest memory, in order: each run's address and where its bytes lie
+/// in one buffer they all share. A dispatch's changes come back as thousands of runs of a word or
+/// two - PPSA25872's, eleven thousand a dispatch - and one allocation each cost more than the
+/// writing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GuestWrites {
+    bytes: Vec<u8>,
+    runs: Vec<(u64, std::ops::Range<usize>)>,
+}
+
+impl GuestWrites {
+    /// A run of `bytes` at `at`.
+    fn push(&mut self, at: u64, bytes: &[u8]) {
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(bytes);
+        self.runs.push((at, start..self.bytes.len()));
+    }
+
+    /// A run of `count` bytes of `value` at `at`.
+    fn push_repeated(&mut self, at: u64, value: u8, count: usize) {
+        let start = self.bytes.len();
+        self.bytes.resize(start + count, value);
+        self.runs.push((at, start..self.bytes.len()));
+    }
+
+    /// A run of `words`, little-endian, at `at`, cut at its first `most` bytes.
+    fn push_words(&mut self, at: u64, words: &[u32], most: usize) {
+        let start = self.bytes.len();
+        self.bytes
+            .extend(words.iter().flat_map(|word| word.to_le_bytes()));
+        self.bytes.truncate(start + most.min(words.len() * 4));
+        self.runs.push((at, start..self.bytes.len()));
+    }
+
+    /// Every run of `other` after these.
+    fn append(&mut self, other: &Self) {
+        let offset = self.bytes.len();
+        self.bytes.extend_from_slice(&other.bytes);
+        self.runs.extend(
+            other
+                .runs
+                .iter()
+                .map(|(at, range)| (*at, range.start + offset..range.end + offset)),
+        );
+    }
+
+    /// Run `index`: its address and its bytes.
+    fn run(&self, index: usize) -> (u64, &[u8]) {
+        let (at, range) = &self.runs[index];
+        (*at, &self.bytes[range.clone()])
+    }
+
+    /// Runs `range`, each its address and its bytes.
+    fn runs_in(&self, range: std::ops::Range<usize>) -> impl Iterator<Item = (u64, &[u8])> {
+        range.map(|index| self.run(index))
+    }
+
+    /// Each run as its address and its own bytes, for a test to compare.
+    #[cfg(test)]
+    fn pairs(&self) -> Vec<(u64, Vec<u8>)> {
+        (0..self.runs.len())
+            .map(|index| {
+                let (at, bytes) = self.run(index);
+                (at, bytes.to_vec())
+            })
+            .collect()
+    }
+}
 
 /// What a dispatch's own buffers write back (D746): each one's changed words, at its guest range,
 /// the last cut where the range ends inside it - and, for a buffer it changed and left holding one
@@ -949,12 +1015,12 @@ fn buffer_writes(
     ranges: &[(u64, u64)],
     before: &[crate::dispatch::BufferBefore],
     after: &[crate::dispatch::BufferAfter],
-) -> Result<(Vec<GuestWrite>, Vec<cp::Fill>), String> {
+) -> Result<(GuestWrites, Vec<cp::Fill>), String> {
     use crate::dispatch::BufferBefore;
     if after.len() != before.len() {
         return Err("the device answered another number of buffers".to_owned());
     }
-    let mut writes = Vec::new();
+    let mut writes = GuestWrites::default();
     let mut fills = Vec::new();
     for ((&(address, bytes), before), after) in ranges.iter().zip(before).zip(after) {
         // A buffer read before the run writes the words it changed; one not read, the words it
@@ -1015,11 +1081,10 @@ fn buffer_writes(
             continue;
         }
         for (first, values) in runs {
-            let mut changed: Vec<u8> = values.iter().flat_map(|w| w.to_le_bytes()).collect();
             // The last word may run past the range's last byte, which is not the buffer's.
             let start = first as u64 * 4;
-            changed.truncate(usize::try_from(bytes.saturating_sub(start)).unwrap_or(0));
-            writes.push((address + start, changed));
+            let most = usize::try_from(bytes.saturating_sub(start)).unwrap_or(0);
+            writes.push_words(address + start, values, most);
         }
     }
     Ok((writes, fills))
@@ -1168,20 +1233,20 @@ impl GuestCp<'_> {
             return Err("the device answered a window of another size".to_owned());
         }
         let working_out = crate::perf::SpanGuard::start(Span::WriteBackChanges);
-        let mut writes: Vec<(u64, Vec<u8>)> = Vec::new();
+        let mut writes = GuestWrites::default();
         if let Some(base) = base {
             for (first, words) in changed_runs(&before, &after) {
-                let bytes = after[first..first + words]
-                    .iter()
-                    .flat_map(|w| w.to_le_bytes())
-                    .collect();
-                writes.push((base + first as u64 * 4, bytes));
+                writes.push_words(
+                    base + first as u64 * 4,
+                    &after[first..first + words],
+                    usize::MAX,
+                );
             }
         }
         let (buffer_writes, buffer_fills) =
             buffer_writes(&prepared.buffers, &buffers_before, &buffers_after)?;
-        writes.extend(buffer_writes);
-        writes.extend(stored_image_writes(&prepared.images, stored)?);
+        writes.append(&buffer_writes);
+        writes.append(&stored_image_writes(&prepared.images, stored)?);
         drop(working_out);
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &buffer_fills)
@@ -2467,7 +2532,7 @@ impl GuestCp<'_> {
     /// may have been written by the guest since it was read.
     fn write_back_dispatch(
         &mut self,
-        writes: &[GuestWrite],
+        writes: &GuestWrites,
         fills: &[cp::Fill],
     ) -> Result<(), String> {
         let writable = write_lookup().get();
@@ -2482,9 +2547,9 @@ impl GuestCp<'_> {
         let each_run = || {
             stretches.iter().zip(&whole).all(|((_, runs), &whole)| {
                 whole
-                    || writes[runs.clone()]
-                        .iter()
-                        .all(|(at, bytes)| allowed(*at, bytes.len() as u64))
+                    || writes
+                        .runs_in(runs.clone())
+                        .all(|(at, bytes)| allowed(at, bytes.len() as u64))
             })
         };
         if !each_run()
@@ -2495,7 +2560,7 @@ impl GuestCp<'_> {
             return Err("it wrote guest memory that is not writable".to_owned());
         }
         for ((range, runs), whole) in stretches.into_iter().zip(whole) {
-            if !self.write_stretch(range, &writes[runs], whole) {
+            if !self.write_stretch(range, (writes, runs), whole) {
                 return Err("a write back into guest memory was refused".to_owned());
             }
         }
@@ -2513,7 +2578,7 @@ impl GuestCp<'_> {
     fn write_stretch(
         &mut self,
         (first, end): (u64, u64),
-        runs: &[GuestWrite],
+        (writes, runs): (&GuestWrites, std::ops::Range<usize>),
         whole: bool,
     ) -> bool {
         let length = end - first;
@@ -2521,11 +2586,13 @@ impl GuestCp<'_> {
             return false;
         }
         if !whole {
-            return runs.iter().all(|(at, bytes)| write_guest(*at, bytes));
+            return writes
+                .runs_in(runs)
+                .all(|(at, bytes)| write_guest(at, bytes));
         }
         unprotect_overlapping(first, length);
-        for (at, bytes) in runs {
-            let Ok(dest) = usize::try_from(*at) else {
+        for (at, bytes) in writes.runs_in(runs) {
+            let Ok(dest) = usize::try_from(at) else {
                 return false;
             };
             // SAFETY: the installed lookup vouched that `[first, end)`, which holds this run, lies
@@ -2545,14 +2612,15 @@ impl GuestCp<'_> {
 
 /// `writes` cut into stretches of consecutive, neighbouring runs, in order: each stretch's byte
 /// range and the runs it holds.
-fn stretches(writes: &[GuestWrite]) -> Vec<((u64, u64), std::ops::Range<usize>)> {
+fn stretches(writes: &GuestWrites) -> Vec<((u64, u64), std::ops::Range<usize>)> {
+    let runs = &writes.runs;
     let mut stretches = Vec::new();
     let mut start = 0;
-    while start < writes.len() {
-        let first = writes[start].0;
-        let mut end = first.saturating_add(writes[start].1.len() as u64);
+    while start < runs.len() {
+        let first = runs[start].0;
+        let mut end = first.saturating_add(runs[start].1.len() as u64);
         let mut stop = start + 1;
-        while let Some((at, bytes)) = writes.get(stop) {
+        while let Some((at, bytes)) = runs.get(stop) {
             let after = at.saturating_add(bytes.len() as u64);
             if *at < first
                 || *at > end.saturating_add(RUN_GAP)
@@ -3376,8 +3444,12 @@ mod tests {
             run(0x8000, 4),
             run(0x8000 + super::RUN_STRETCH, 4),
         ];
+        let mut listed = super::GuestWrites::default();
+        for (at, bytes) in &writes {
+            listed.push(*at, bytes);
+        }
         assert_eq!(
-            super::stretches(&writes),
+            super::stretches(&listed),
             [
                 ((0x1000, 0x2008), 0..3),
                 ((0x9000, 0x9004), 3..4),
@@ -3429,7 +3501,7 @@ mod tests {
                 count: 10,
             }]
         );
-        assert_eq!(writes, [(0x2004, 2u32.to_le_bytes().to_vec())]);
+        assert_eq!(writes.pairs(), [(0x2004, 2u32.to_le_bytes().to_vec())]);
     }
 
     /// A buffer the program only stores to was not read (D809): the words its write mask marks are
@@ -3482,7 +3554,7 @@ mod tests {
             "a word listed past the buffer is refused"
         );
         assert_eq!(
-            writes,
+            writes.pairs(),
             [
                 (0x1000, 9u32.to_le_bytes().to_vec()),
                 (0x1008, [8u32.to_le_bytes(), 7u32.to_le_bytes()].concat()),
@@ -3521,7 +3593,7 @@ mod tests {
         };
         assert_eq!(
             super::buffer_writes(&ranges, &before, &after),
-            Ok((Vec::new(), vec![fill]))
+            Ok((super::GuestWrites::default(), vec![fill]))
         );
         assert_eq!(super::uniform_buffers(&ranges, (&before, &after)), [fill]);
     }
@@ -3894,7 +3966,9 @@ mod tests {
         };
         let mut texels = vec![0u32; 16 * 8];
         texels[5] = 0x42;
-        let writes = super::stored_image_writes(&images, Some(texels)).expect("writes");
+        let writes = super::stored_image_writes(&images, Some(texels))
+            .expect("writes")
+            .pairs();
         assert_eq!(
             writes[0],
             (BASE, vec![0; 0x3_0000]),
