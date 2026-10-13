@@ -202,12 +202,12 @@ struct OpcodeOperandsFile {
 #[derive(Debug, Clone, Default)]
 pub struct EncodingTable {
     encodings: Vec<Encoding>,
-    per_opcode: std::collections::BTreeMap<(String, u32), Vec<OperandSlot>>,
+    per_opcode: ByFamily<Vec<OperandSlot>>,
     /// The name the reference assembler gave each solved opcode.
     ///
     /// Opcode numbers move between architecture generations and names mostly do not, so
     /// a translator dispatching on names survives a retarget (D139).
-    names: std::collections::BTreeMap<(String, u32), String>,
+    names: ByFamily<String>,
     /// The reverse: name to where it lives on this target.
     by_name: std::collections::BTreeMap<String, (String, u32)>,
     /// The architecture generation every loaded table declares, once they agree.
@@ -254,6 +254,43 @@ fn hex_u32<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::
     }
 }
 
+/// A value per (family, opcode), looked up by a borrowed family name. Keyed by family first so a
+/// lookup - made for every instruction a decode or an analysis visits - allocates nothing, where a
+/// `(String, u32)` key built a `String` per lookup. Iterates in (family, opcode) order.
+#[derive(Debug, Clone)]
+struct ByFamily<T>(std::collections::BTreeMap<String, std::collections::BTreeMap<u32, T>>);
+
+impl<T> Default for ByFamily<T> {
+    fn default() -> Self {
+        Self(std::collections::BTreeMap::new())
+    }
+}
+
+impl<T> ByFamily<T> {
+    fn get(&self, family: &str, opcode: u32) -> Option<&T> {
+        self.0.get(family)?.get(&opcode)
+    }
+
+    fn insert(&mut self, family: &str, opcode: u32, value: T) {
+        self.0
+            .entry(family.to_owned())
+            .or_default()
+            .insert(opcode, value);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&str, u32, &T)> {
+        self.0.iter().flat_map(|(family, opcodes)| {
+            opcodes
+                .iter()
+                .map(move |(opcode, value)| (family.as_str(), *opcode, value))
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.0.values().map(std::collections::BTreeMap::len).sum()
+    }
+}
+
 impl EncodingTable {
     /// Parses a table from TOML.
     ///
@@ -284,8 +321,8 @@ impl EncodingTable {
         encodings.sort_by_key(|e| core::cmp::Reverse(e.specificity()));
         Ok(Self {
             encodings,
-            per_opcode: std::collections::BTreeMap::new(),
-            names: std::collections::BTreeMap::new(),
+            per_opcode: ByFamily::default(),
+            names: ByFamily::default(),
             by_name: std::collections::BTreeMap::new(),
             target: file.target,
         })
@@ -297,7 +334,7 @@ impl EncodingTable {
     pub fn names(&self) -> impl Iterator<Item = (&str, u32, &str)> {
         self.names
             .iter()
-            .map(|((family, opcode), name)| (family.as_str(), *opcode, name.as_str()))
+            .map(|(family, opcode, name)| (family, opcode, name.as_str()))
     }
 
     /// The architecture generation these tables describe.
@@ -371,11 +408,11 @@ impl EncodingTable {
                 )));
             }
             self.names
-                .insert((entry.family.clone(), entry.opcode), entry.mnemonic.clone());
+                .insert(&entry.family, entry.opcode, entry.mnemonic.clone());
             self.by_name
                 .insert(entry.mnemonic, (entry.family.clone(), entry.opcode));
             self.per_opcode
-                .insert((entry.family, entry.opcode), entry.operands);
+                .insert(&entry.family, entry.opcode, entry.operands);
         }
         Ok(())
     }
@@ -385,9 +422,7 @@ impl EncodingTable {
     /// Preferred over the family layout, since most families have no shape shared by
     /// every opcode (D097).
     pub fn operands_for(&self, family: &str, opcode: u32) -> Option<&[OperandSlot]> {
-        self.per_opcode
-            .get(&(family.to_owned(), opcode))
-            .map(Vec::as_slice)
+        self.per_opcode.get(family, opcode).map(Vec::as_slice)
     }
 
     /// Adds names observed from compiled fixtures.
@@ -404,8 +439,7 @@ impl EncodingTable {
         let table = crate::MnemonicTable::load(toml_text)?;
         self.require_same_target(table.target(), "the instruction name table")?;
         for (family, opcode, name) in table.entries() {
-            let key = (family.to_owned(), opcode);
-            if let Some(existing) = self.names.get(&key)
+            if let Some(existing) = self.names.get(family, opcode)
                 && existing != name
             {
                 return Err(ShaderError::Table(format!(
@@ -416,7 +450,7 @@ impl EncodingTable {
                     family, opcode, existing, name
                 )));
             }
-            self.names.insert(key, name.to_owned());
+            self.names.insert(family, opcode, name.to_owned());
             self.by_name
                 .entry(name.to_owned())
                 .or_insert_with(|| (family.to_owned(), opcode));
@@ -426,9 +460,7 @@ impl EncodingTable {
 
     /// The name of an opcode on this target, if it has been probed.
     pub fn mnemonic_for(&self, family: &str, opcode: u32) -> Option<&str> {
-        self.names
-            .get(&(family.to_owned(), opcode))
-            .map(String::as_str)
+        self.names.get(family, opcode).map(String::as_str)
     }
 
     /// Where an instruction lives on this target, by name.
