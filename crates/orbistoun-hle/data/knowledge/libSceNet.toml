@@ -209,3 +209,19 @@ returns = "status"
 known_by = "guest-observed"
 found_on = "2026-09-28"
 
+
+[[function]]
+name = "sceNetInetPton"
+arity = 3
+purpose = "Reads an address's text into its bytes: (family, src, dst)."
+returns = "count"
+edge_cases = [
+    "Family 2: 1 and four bytes for dotted decimal of four parts each at most 255; '01.2.3.4', '256.1.1.1', '1.2.3', '1.2.3.4.5', ' 1.2.3.4' and '' answer 0 with dst untouched; '1.2.3.4 ' reads, trailing whitespace tolerated.",
+    "Family 28: 1 and sixteen bytes for '::1', '::ffff:1.2.3.4', 'fe80::1:2' and eight full groups; '1::2::3', '12345::1' and nine groups answer 0.",
+    "Families 99 and 1 answer 0x8041012f (errno 0x2f); a null src 0x80410116 (errno 0x16); a null dst with good text answers 1. Text that fails leaves errno as it was.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1816Z-7af9, reports/report-1791836505.txt lines 837-907 (000-boot/net-inet-pton), FW 12.40"
+note = "orbistoun does not write the errno a refusal sets, because sceNetErrnoLoc is not served."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-13"

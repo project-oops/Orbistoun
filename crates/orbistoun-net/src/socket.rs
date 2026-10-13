@@ -7,7 +7,7 @@
 //!
 //! Arities other than `6` are the types obSCEne's `src/probe/sections/net.c` calls through:
 //! they establish the first N arguments, not that there is no further one. The resolvers,
-//! datagram calls, `sceNetErrnoLoc` and `sceNetInetPton` are declared and unserved.
+//! datagram calls and `sceNetErrnoLoc` are declared and unserved.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_fs::socket::{self as bodies, Answer};
@@ -63,6 +63,61 @@ vendor_spellings! {
     vendor_close => close,
 }
 
+/// The address families `sceNetInetPton` reads: IPv4, and this platform's IPv6 (28).
+const PTON_INET: u64 = 2;
+const PTON_INET6: u64 = 28;
+
+/// The longest text `sceNetInetPton` reads; a valid address is far shorter.
+const PTON_TEXT_MAX: usize = 64;
+
+/// The address bytes `text` spells in `family`, or `None` for text that is not one - as a console
+/// read the arms obSCEne measured (`REQ-20261012T1816Z-7af9`, `000-boot/net-inet-pton`,
+/// `report-1791836505.txt` lines 837-907). IPv4 is four decimal parts of at most 255 with no
+/// leading zero (`01.2.3.4` is refused), and trailing whitespace is tolerated (`1.2.3.4 ` reads)
+/// while leading whitespace is not. IPv6 is RFC 4291 text with at most one `::` and an optional
+/// dotted tail, which Rust's parser reads the same on every measured arm.
+fn pton(family: u64, text: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(text).ok()?;
+    match family {
+        PTON_INET => text
+            .trim_end_matches(|c: char| c.is_ascii_whitespace())
+            .parse::<std::net::Ipv4Addr>()
+            .ok()
+            .map(|address| address.octets().to_vec()),
+        _ => text
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|address| address.octets().to_vec()),
+    }
+}
+
+/// `sceNetInetPton(family, src, dst)`: 1 with the 4 or 16 address bytes written, 0 for text that
+/// is no address with `dst` untouched, `0x8041012f` for a family other than 2 or 28 (99 and 1
+/// measured), `0x80410116` for a null `src`. A null `dst` with good text answers 1 and writes
+/// nothing (measured). The errno each refusal sets (`0x2f`, `0x16`) is not written:
+/// `sceNetErrnoLoc` is not served.
+fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let [family, src, dst, ..] = *args;
+    if family != PTON_INET && family != PTON_INET6 {
+        return u64::from(GuestError::vendor_in(NET_ERROR_BASE, 0x2f).as_raw());
+    }
+    if src == 0 {
+        return u64::from(GuestError::vendor_in(NET_ERROR_BASE, 0x16).as_raw());
+    }
+    // SAFETY: the guest's text, read through the checked accessor up to its terminator.
+    let Some(text) = (unsafe { orbistoun_mem::guest::read_cstr(src, PTON_TEXT_MAX) }) else {
+        return 0;
+    };
+    let Some(address) = pton(family, &text) else {
+        return 0;
+    };
+    // SAFETY: the guest's destination, as many bytes as the family's address.
+    if dst != 0 && !unsafe { orbistoun_mem::guest::write_bytes(dst, &address) } {
+        return u64::from(GuestError::vendor_in(NET_ERROR_BASE, 0x16).as_raw());
+    }
+    1
+}
+
 /// Implementations this module provides, by symbol name.
 ///
 /// The names obSCEne's `102-net/resolve` calls, plus `sceNetGetsockname`, which a server
@@ -83,6 +138,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         // A byte swap cannot fail, so there is no errno to encode and the POSIX body is the whole
         // function.
         ("sceNetHtons", bodies::htons),
+        ("sceNetInetPton", inet_pton),
     ]
 }
 
@@ -94,7 +150,8 @@ guest_module! {
         "sceNetErrnoLoc" => 6,
         "sceNetGetsockname" => 3,
         "sceNetHtons" => 1,
-        "sceNetInetPton" => 6,
+        // (family, src, dst)
+        "sceNetInetPton" => 3,
         "sceNetInit" => 1,
         "sceNetListen" => 2,
         // (name, size, flags) and (pool): served by `pool.rs`.
