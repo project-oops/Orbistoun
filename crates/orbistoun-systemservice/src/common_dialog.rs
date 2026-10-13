@@ -33,6 +33,16 @@ pub(crate) fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// Whether this process has initialised the common dialog.
+///
+/// The system dialogs obSCEne measured (ErrorDialog, ImeDialog) were measured in a process that
+/// may not have: their opens were refused, and whether that refusal stands once a title has
+/// initialised the common dialog, as every title does first, is unmeasured.
+#[must_use]
+pub fn initialized() -> bool {
+    INITIALIZED.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Implementations this module provides for `libSceCommonDialog`.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[("sceCommonDialogInitialize", initialize)]

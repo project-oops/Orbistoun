@@ -19,7 +19,8 @@ purpose = "Shows an error dialog for an error code."
 arguments = [{ name = "param", kind = "ptr", note = "Its first word states its size, which must be 16; the error code follows." }]
 edge_cases = [
     "A parameter stating a size other than 16 answers 0x80ed0003.",
-    "A parameter stating 16, with error code 0x80020001, answers 0x80ed0007: a retail process with no display layer of its own is shown no dialog.",
+    "A parameter stating 16, with error code 0x80020001, answers 0x80ed0007 in the measured process, which had likely not initialised the common dialog (obSCEne reads it as a process with no display layer being shown nothing).",
+    "Once this process has initialised the common dialog, as every title does first, a well-formed open answers the placeholder: unmeasured.",
     "Before Initialize, or with a null parameter, it answers the placeholder: unmeasured.",
 ]
 known_by = "measured"

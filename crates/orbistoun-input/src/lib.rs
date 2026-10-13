@@ -277,6 +277,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 
 /// This file's own implementations; [`implementations`] adds the keyboard's.
 const OWN: &[(&str, GuestFn)] = &[
+    ("sceImeDialogAbort", ime_dialog::abort),
+    ("sceImeDialogGetResult", ime_dialog::get_result),
+    ("sceImeDialogGetStatus", ime_dialog::get_status),
+    ("sceImeDialogInit", ime_dialog::init),
+    ("sceImeDialogTerm", ime_dialog::term),
     ("scePadInit", pad_init),
     ("sceImeUpdate", ime::update),
     ("sceImeKeyboardOpen", ime::keyboard_open),
@@ -437,6 +442,7 @@ mod tests {
                     .imports
                     .iter()
                     .chain(super::ime::MODULE.imports)
+                    .chain(super::ime_dialog::MODULE.imports)
                     .chain(super::keyboard::MODULE.imports)
                     .any(|i| i.name == *name),
                 "{name} is served but not declared"
