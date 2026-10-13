@@ -7036,6 +7036,68 @@ fn the_cross_lane_reads_take_the_lanes_they_name() {
     }
 }
 
+/// `v_mov_b32_dpp vD, vS quad_perm:[..]`: a DPP16 move whose control is `permute`, two bits per
+/// lane of the quad, with every row and bank enabled and `bound_ctrl` as given.
+fn v_mov_quad_perm(dst: u32, src: u32, permute: [u32; 4], bound_zero: bool) -> [u32; 2] {
+    let control = permute
+        .iter()
+        .enumerate()
+        .fold(0, |word, (place, from)| word | (from << (2 * place)));
+    [
+        v_mov_code(dst, 0xfa),
+        src | (control << 8) | (u32::from(bound_zero) << 19) | (0xff << 24),
+    ]
+}
+
+/// A DPP quad permute of `v_mov_b32` gives each lane the value of the lane of its quad the
+/// permute names: neighbours swapped, and the even lanes broadcast, the pattern a horizontal
+/// derivative reads.
+#[test]
+fn a_quad_permute_moves_the_lane_it_names() {
+    if !device_or_skip("a_quad_permute_moves_the_lane_it_names") {
+        return;
+    }
+    let mut program = lane_index_into(0).to_vec();
+    program.extend(v_mov_quad_perm(2, 0, [1, 0, 3, 2], false));
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let lane = lane as u32;
+        assert_eq!(*stored, lane ^ 1, "swapped, lane {lane}");
+    }
+
+    let mut program = lane_index_into(0).to_vec();
+    program.extend(v_mov_quad_perm(2, 0, [0, 0, 2, 2], false));
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let lane = lane as u32;
+        assert_eq!(*stored, lane & !1, "the even lane, lane {lane}");
+    }
+
+    // A two-source instruction permutes only its first source: `v_subrev_nc_u32_dpp v2, v0, v0
+    // quad_perm:[1,1,3,3]` is each lane's own index less its quad's odd neighbour's.
+    let [_, dpp] = v_mov_quad_perm(2, 0, [1, 1, 3, 3], false);
+    let mut program = lane_index_into(0).to_vec();
+    program.extend([head("v_subrev_nc_u32_e32") | (2 << 17) | 0xfa, dpp]);
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let lane = lane as u32;
+        assert_eq!(
+            *stored,
+            lane.wrapping_sub(lane | 1),
+            "own index less the odd neighbour's, lane {lane}"
+        );
+    }
+}
+
 /// A SOP1 instruction: `name sD, <source code>`.
 fn sop1(name: &str, dst: u32, source: u32) -> u32 {
     head(name) | (dst << 16) | source

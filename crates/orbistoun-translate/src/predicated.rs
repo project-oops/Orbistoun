@@ -22,8 +22,10 @@ use crate::wavefront::Window;
 
 /// Vector registers the register file holds.
 ///
-/// The architecture's maximum, so a shader indexing high registers cannot run off the end.
-pub const REGISTER_COUNT: u32 = 256;
+/// The architecture's maximum, so a shader indexing high registers cannot run off the end, and
+/// one more past every register an instruction can name: where a DPP form's permuted first source
+/// is staged ([`model::DPP_STAGING_REGISTER`]).
+pub const REGISTER_COUNT: u32 = 257;
 
 /// How many registers of each file are copied into the storage buffer for inspection.
 ///

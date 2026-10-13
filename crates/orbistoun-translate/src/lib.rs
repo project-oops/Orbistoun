@@ -653,13 +653,15 @@ pub fn translate_with_user_data(
     for instruction in &decode.instructions {
         if let Some(marker) = modifier_of(instruction, encodings)
             && !model::sdwa_translated(marker, instruction, encodings)
+            && !model::dpp_translated(marker, instruction, encodings)
         {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
                 detail: concat!(
                     "the instruction carries an SDWA or DPP modifier word, which selects parts ",
                     "of its operands or other lanes' values; only SDWA on the integer ",
-                    "instructions `model::SDWA_INTEGER` names is translated"
+                    "instructions `model::SDWA_INTEGER` names, and a quad permute of a one- or ",
+                    "two-source vector instruction's first source, are translated"
                 ),
             });
         }

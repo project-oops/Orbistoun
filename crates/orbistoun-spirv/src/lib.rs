@@ -81,6 +81,12 @@ pub mod op {
     ///
     /// Reads one lane's register from another when one invocation is one lane.
     pub const GROUP_NON_UNIFORM_SHUFFLE: u16 = 345;
+    /// Another invocation's value of an operand, by its index within this invocation's quad: in a
+    /// fragment shader, the pixels of a 2x2 block, top-left 0, top-right 1, bottom-left 2,
+    /// bottom-right 3.
+    ///
+    /// Reads a pixel's neighbour where a guest instruction permutes a quad's lanes.
+    pub const GROUP_NON_UNIFORM_QUAD_BROADCAST: u16 = 365;
     /// Waits until every invocation of the scope reaches it, making the memory the semantics name
     /// visible across them.
     pub const CONTROL_BARRIER: u16 = 224;
@@ -406,6 +412,8 @@ pub mod capability {
     pub const GROUP_NON_UNIFORM_BALLOT: u32 = 64;
     /// Invocations may read each other's values by index.
     pub const GROUP_NON_UNIFORM_SHUFFLE: u32 = 65;
+    /// Invocations may read each other's values within their quad.
+    pub const GROUP_NON_UNIFORM_QUAD: u32 = 68;
     /// 16-bit floating-point types and arithmetic.
     ///
     /// Widens a packed half through a real 16-bit float type, using the driver's IEEE conversion
@@ -2271,6 +2279,14 @@ static SHAPES: &[ShapeEntry] = &[
     // Result type, result, an execution-scope identifier, the value and the invocation index.
     (
         op::GROUP_NON_UNIFORM_SHUFFLE,
+        Some(1),
+        &[0, 2, 3, 4],
+        None,
+        RestStride::Every,
+    ),
+    // Result type, result, an execution-scope identifier, the value and the index in the quad.
+    (
+        op::GROUP_NON_UNIFORM_QUAD_BROADCAST,
         Some(1),
         &[0, 2, 3, 4],
         None,

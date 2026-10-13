@@ -750,6 +750,20 @@ pub trait Model {
         None
     }
 
+    /// This invocation's place in its quad, 0 to 3, where an invocation is one pixel whose quad
+    /// neighbours are other invocations: a fragment module that permutes a quad's lanes. `None`
+    /// for every other model, whose lanes are its own.
+    fn quad_position(&mut self) -> Option<Id> {
+        None
+    }
+
+    /// `value` as the invocation at place `from` in this invocation's quad holds it, where
+    /// [`Self::quad_position`] answers.
+    fn quad_broadcast(&mut self, value: Id, from: u32) -> Option<Id> {
+        let _ = (value, from);
+        None
+    }
+
     /// A flat read takes the attribute's flat twin where the draw gave it one (D742).
     fn attribute_input(&self, _attribute: u32, _flat: bool) -> Option<(Id, Id)> {
         None
@@ -2250,6 +2264,12 @@ pub fn instruction<M: Model + ?Sized>(
         });
     }
     let name = name.as_str();
+
+    // A DPP16 form: the instruction with its first source read from another lane of its quad.
+    // Admitted only as `dpp_translated` describes, before translation began.
+    if let Some(word) = dpp_word(model.encodings(), instruction) {
+        return dpp_form(model, instruction, (name, word));
+    }
 
     // An SDWA form: the same operation over selected parts of its sources, placed into part of
     // its destination. Admitted only for `SDWA_INTEGER` and `SDWA_FLOAT`, before translation began.
@@ -6525,6 +6545,205 @@ fn sdwa_float_unary<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// The first-source code that marks an instruction's DPP16 form, its second word the DPP fields.
+const DPP16_MARKER: u32 = 250;
+
+/// The families whose DPP16 form is translated: the one- and two-source vector instructions,
+/// whose first source the DPP word replaces.
+const DPP_FAMILIES: [&str; 2] = ["VOP1", "VOP2"];
+
+/// The vector register a DPP form's permuted first source is staged in before the instruction
+/// itself runs: one past the 256 an instruction can name, so no guest register is overwritten.
+pub const DPP_STAGING_REGISTER: u32 = 256;
+
+/// Whether an instruction's modifier - `marker`, from its first source - is a DPP16 form this
+/// translates: a one- or two-source vector instruction whose word is a quad permute with every
+/// row and bank enabled and no source modifier (see `dpp_quad_permute`).
+#[must_use]
+pub fn dpp_translated(marker: u32, instruction: &Instruction, encodings: &EncodingTable) -> bool {
+    marker == DPP16_MARKER
+        && instruction
+            .encoding
+            .and_then(|index| encodings.encodings().get(usize::from(index)))
+            .is_some_and(|family| DPP_FAMILIES.contains(&family.name.as_str()))
+        && instruction.second_word.and_then(dpp_quad_permute).is_some()
+}
+
+/// An instruction's DPP16 modifier word, when it carries one.
+pub(crate) fn dpp_word(encodings: &EncodingTable, instruction: &Instruction) -> Option<u32> {
+    let family = encodings
+        .encodings()
+        .get(usize::from(instruction.encoding?))?;
+    (family.modifier_selected(&[instruction.word]) == Some(DPP16_MARKER))
+        .then_some(instruction.second_word)
+        .flatten()
+}
+
+/// The lane of its quad each lane of a quad reads, from a DPP16 word whose control (16:8) is a
+/// quad permute - below 0x100, two bits per lane - with every row (31:28) and bank (27:24)
+/// enabled and no source negate or absolute value (23:20), as AMD's published RDNA instruction
+/// set lays the word out. Any other word - a row shift, rotate, mirror or share, or a masked
+/// row or bank - is `None`.
+fn dpp_quad_permute(word: u32) -> Option<[u32; 4]> {
+    let control = (word >> 8) & 0x1ff;
+    let modifiers = (word >> 20) & 0xf;
+    let banks = (word >> 24) & 0xf;
+    let rows = word >> 28;
+    (control < 0x100 && modifiers == 0 && banks == 0xf && rows == 0xf)
+        .then(|| [0, 1, 2, 3].map(|place| (control >> (2 * place)) & 3))
+}
+
+/// An instruction in its DPP16 form, `op_dpp d, v, .. quad_perm:[a,b,c,d]`: the instruction, with
+/// each lane's first source `v` taken from the lane of its quad the permute names (AMD's published
+/// RDNA instruction set, DPP16). A source lane the execution mask leaves out is not read unless
+/// `FETCH_INACTIVE` (18) is set; then under `BOUND_CTRL` (19) the source reads 0, and otherwise
+/// the lane is not written at all.
+///
+/// The permuted source is staged in [`DPP_STAGING_REGISTER`] and the instruction translated as
+/// though it named that register; a lane the rule leaves unwritten then gets its destination back.
+/// An instruction that writes a lane mask, such as a carry, is refused.
+fn dpp_form<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (name, word): (&str, u32),
+) -> Result<(), TranslateError> {
+    let (Some(Operand::Vector(destination)), Some(_), Some(permute)) = (
+        instruction.operands.first(),
+        instruction.operands.get(1),
+        dpp_quad_permute(word),
+    ) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a DPP form other than a quad permute of a source into a vector register is not translated",
+        });
+    };
+    if touches_mask(instruction, name) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a DPP form that reads or writes a lane mask is not translated",
+        });
+    }
+    let destination = u32::from(*destination);
+    let (fetch_inactive, bound_zero) = ((word >> 18) & 1 == 1, (word >> 19) & 1 == 1);
+    let zero = model.constant(0);
+
+    // The permuted source, staged; and, where a lane whose source did not run is left unwritten,
+    // each destination lane as it was.
+    let fetched = permuted_first_source(model, instruction, word, permute)?;
+    let mut kept = Vec::new();
+    for (lane, value, running) in fetched {
+        let running = model.compare(op::INOT_EQUAL, running, zero);
+        let value = if !fetch_inactive && bound_zero {
+            model.select(running, value, zero)
+        } else {
+            value
+        };
+        model.write_vector_lane(DPP_STAGING_REGISTER, lane, value);
+        if !fetch_inactive && !bound_zero {
+            let before = model.read_source(instruction, &instruction.operands[0], lane)?;
+            kept.push((lane, before, running));
+        }
+    }
+
+    // The instruction itself, reading its first source from the staged register. The word's
+    // first-source field names an ordinary register so the form is not seen again; the operand
+    // list is what translation reads.
+    let mut plain = instruction.clone();
+    plain.operands[1] = Operand::Vector(DPP_STAGING_REGISTER as u16);
+    plain.word = (plain.word & !0x1ff) | 0x100;
+    plain.second_word = None;
+    self::instruction(model, &plain)?;
+
+    for (lane, before, running) in kept {
+        let now = model.read_source(&plain, &plain.operands[0], lane)?;
+        let value = model.select(running, now, before);
+        model.write_vector_lane(destination, lane, value);
+    }
+    Ok(())
+}
+
+/// Each running lane's DPP first source - the source register at the lane of its quad the permute
+/// names - with that source lane's execution bit, before anything is written.
+///
+/// In a fragment module one invocation is one pixel (D716), and the lanes of its quad are the
+/// host's own 2x2 quad, which the guest numbers as Vulkan does: top-left, top-right, bottom-left,
+/// bottom-right. There the neighbour's register and execution bit are read by quad broadcast.
+/// Elsewhere every lane is the module's, read by index.
+fn permuted_first_source<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    word: u32,
+    permute: [u32; 4],
+) -> Result<Vec<(u32, Id, Id)>, TranslateError> {
+    let source_register = word & 0xff;
+    let source = Operand::Vector(source_register as u16);
+    let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+    let (one, thirty_one) = (model.constant(1), model.constant(31));
+    let unavailable = || TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "a quad permute needs every lane of the quad",
+    };
+
+    // Every lane's value and its source's execution bit first: each reads the source before any
+    // lane writes the destination.
+    let mut fetched = Vec::new();
+    if let Some(place) = model.quad_position() {
+        let own = model.read_source(instruction, &source, 0)?;
+        let own_running = model.binary(op::BITWISE_AND, running_low, one);
+        let mut chosen = None;
+        for at in (0..4_u32).rev() {
+            let value = model
+                .quad_broadcast(own, permute[at as usize])
+                .ok_or_else(unavailable)?;
+            let running = model
+                .quad_broadcast(own_running, permute[at as usize])
+                .ok_or_else(unavailable)?;
+            chosen = Some(match chosen {
+                None => (value, running),
+                Some((other, other_running)) => {
+                    let here = model.constant(at);
+                    let here = model.compare(op::IEQUAL, place, here);
+                    (
+                        model.select(here, value, other),
+                        model.select(here, running, other_running),
+                    )
+                }
+            });
+        }
+        let (value, running) = chosen.ok_or_else(unavailable)?;
+        fetched.push((0, value, running));
+    } else {
+        for lane in running_lanes(model) {
+            let (from, half) = if let Some(index) = model.lane_index() {
+                // One invocation per lane (D760): its place in its quad, at run time.
+                let (three, two) = (model.constant(3), model.constant(2));
+                let place = model.binary(op::BITWISE_AND, index, three);
+                let shift = model.binary(op::IMUL, place, two);
+                let control = model.constant((word >> 8) & 0xff);
+                let select = model.binary(op::SHIFT_RIGHT_LOGICAL, control, shift);
+                let select = model.binary(op::BITWISE_AND, select, three);
+                let base = model.binary(op::ISUB, index, place);
+                let from = model.add(base, select);
+                let thirty_two = model.constant(32);
+                let upper = model.compare(op::UGREATER_THAN_EQUAL, from, thirty_two);
+                (from, model.select(upper, running_high, running_low))
+            } else {
+                let from = (lane & !3) | permute[(lane & 3) as usize];
+                let half = if lane < 32 { running_low } else { running_high };
+                (model.constant(from), half)
+            };
+            let value = model
+                .read_vector_at(source_register, from)
+                .ok_or_else(unavailable)?;
+            let bit = model.binary(op::BITWISE_AND, from, thirty_one);
+            let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, half, bit);
+            let running = model.binary(op::BITWISE_AND, shifted, one);
+            fetched.push((lane, value, running));
+        }
+    }
+    Ok(fetched)
 }
 
 /// An instruction's SDWA modifier word, when it carries one.

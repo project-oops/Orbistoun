@@ -13,6 +13,8 @@ translated instruction reads another lane, so lane zero's result is unchanged. S
 known-inactive lanes is the hardware's own behaviour. The instruction stream cannot say which
 width it was compiled for, and translating a 32-lane wave as 64 simulates lanes that do not
 exist.
+Amended by D822: an instruction that reads another lane of its quad reads it from the host's
+quad neighbour.
 
 **Rejected:**
 - Simulating every lane: most of the work is for lanes that write nothing.

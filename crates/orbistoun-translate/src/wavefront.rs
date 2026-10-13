@@ -1563,6 +1563,9 @@ pub struct Wavefront<'a> {
     /// This invocation's lane when each invocation is one lane (D760); `None` where one invocation
     /// simulates the wave.
     invocation: Option<Id>,
+    /// A fragment module that reads its quad's other lanes: this invocation's index in its
+    /// subgroup, whose low two bits are its place in its quad. `None` everywhere else.
+    quad_invocation: Option<Id>,
     /// Where the lanes exchange masks and values when the wave is wider than the host's subgroup
     /// (D760): a two-word mask and a word per lane, in workgroup memory. `None` where a subgroup
     /// ballot and shuffle reach every lane, or one invocation is the whole wave.
@@ -2120,8 +2123,14 @@ fn declare_user_data_source(
 }
 
 /// What a module is prepared against beside its stage: the guest-memory window, the user data,
-/// the draw buffers it reads, and whether it exports depth ([`exports_depth`]).
-type StageContext<'b> = (Window, UserData, &'b crate::draw_buffers::DrawBuffers, bool);
+/// the draw buffers it reads, whether it exports depth ([`exports_depth`]), and whether it reads
+/// its quad's other lanes ([`reads_quad`]).
+type StageContext<'b> = (
+    Window,
+    UserData,
+    &'b crate::draw_buffers::DrawBuffers,
+    (bool, bool),
+);
 
 impl Wavefront<'_> {
     /// A pointer to the global data share's word at `byte_address`, declaring the share at
@@ -2196,7 +2205,7 @@ impl<'a> Wavefront<'a> {
                 Window::default(),
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
-                false,
+                (false, false),
             ),
         )
     }
@@ -2213,7 +2222,7 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data, buffers, writes_depth): StageContext<'_>,
+        (window, user_data, buffers, (writes_depth, reads_quad)): StageContext<'_>,
     ) -> Self {
         let mut b = Builder::new().with_version(module_version(stage));
 
@@ -2248,6 +2257,17 @@ impl<'a> Wavefront<'a> {
             declare_state(&mut b, &ids, (modelled, user_data.local_words), window);
         let lane_ids =
             per_lane.map(|shape| PerLane::declare(&mut b, (u32_type, ids.local_ptr), shape));
+        // A fragment module that reads its quad's other lanes reads them as the host's quad
+        // neighbours, and finds its own place in the quad from its subgroup index.
+        let quad_input = (stage == Stage::Fragment && reads_quad).then(|| {
+            for needed in [
+                capability::GROUP_NON_UNIFORM,
+                capability::GROUP_NON_UNIFORM_QUAD,
+            ] {
+                b.header(op::CAPABILITY, &[needed]);
+            }
+            declare_lane_input(&mut b, u32_type, false)
+        });
         let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
         let indexed = user_data.geometry.is_some_and(|g| g.indices.is_some());
         let reads_buffers = !buffers.served.is_empty() || indexed;
@@ -2270,6 +2290,7 @@ impl<'a> Wavefront<'a> {
         interface.extend(output.interface());
         interface.extend(mesh_reserved.interface(stage));
         interface.extend(dispatch.map(compute_inputs::DispatchState::interface));
+        interface.extend(quad_input.map(|input| input.0));
         if stage == Stage::Mesh {
             interface.extend(mesh_interface(
                 (&ids, &files),
@@ -2283,6 +2304,11 @@ impl<'a> Wavefront<'a> {
         b.function(op::LABEL, &[ids.entry_block.0]);
         let mut this = Self {
             invocation: lane_ids.map(|lane| lane.load(&mut b, u32_type)),
+            quad_invocation: quad_input.map(|input| {
+                let loaded = b.id();
+                b.function(op::LOAD, &[u32_type.0, loaded.0, input.0]);
+                loaded
+            }),
             stage,
             output,
             inputs,
@@ -3681,6 +3707,24 @@ impl Model for Wavefront<'_> {
 
     fn lane_index(&mut self) -> Option<Id> {
         self.invocation
+    }
+
+    fn quad_position(&mut self) -> Option<Id> {
+        let invocation = self.quad_invocation?;
+        let three = self.constant(3);
+        Some(self.binary(op::BITWISE_AND, invocation, three))
+    }
+
+    fn quad_broadcast(&mut self, value: Id, from: u32) -> Option<Id> {
+        self.quad_invocation?;
+        let scope = Self::constant(self, orbistoun_spirv::scope::SUBGROUP);
+        let index = self.constant(from);
+        let read = self.builder.id();
+        self.builder.function(
+            op::GROUP_NON_UNIFORM_QUAD_BROADCAST,
+            &[self.u32_type.0, read.0, scope.0, value.0, index.0],
+        );
+        Some(read)
     }
 
     fn merge_local(&mut self, word_index: Id, (keep, set): (Id, Id), lane: u32) -> bool {
@@ -5101,6 +5145,16 @@ pub fn exports_depth(decode: &Decode, encodings: &EncodingTable) -> bool {
     })
 }
 
+/// Whether a shader reads its quad's other lanes: any DPP16 form, which needs the quad
+/// capability and the subgroup index declared before the entry point is.
+#[must_use]
+pub fn reads_quad(decode: &Decode, encodings: &EncodingTable) -> bool {
+    decode
+        .instructions
+        .iter()
+        .any(|instruction| model::dpp_word(encodings, instruction).is_some())
+}
+
 /// The channels of colour attachment zero a pixel shader's exports write, red in bit 0 to alpha in
 /// bit 3: the union of every `exp mrt0`'s `EN` field (`aco_assembler.cpp:1005`). A channel outside
 /// it holds whatever the output held, so a draw that writes it to its target is not the guest's.
@@ -5275,7 +5329,10 @@ pub fn translate_with_user_data(
             window,
             user_data,
             &buffers,
-            exports_depth(decode, encodings),
+            (
+                exports_depth(decode, encodings),
+                reads_quad(decode, encodings),
+            ),
         ),
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
