@@ -476,12 +476,19 @@ fn refused_submission() -> &'static Mutex<Option<Submission>> {
 }
 
 /// Passes `drawn` through, keeping `submission` when it was refused and none was kept before.
+///
+/// The first refusal's reason is logged: the command processor stops at the segment's first draw
+/// as needing the GPU and keeps no reason, and every submission after it waits behind it, so a
+/// run whose later frames are all empty is explained by this one line.
 fn keeping_refused(submission: &Submission, drawn: Result<(), String>) -> Result<(), String> {
-    if drawn.is_err() {
-        refused_submission()
+    if let Err(why) = &drawn {
+        let mut kept = refused_submission()
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_or_insert_with(|| submission.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if kept.is_none() {
+            tracing::warn!("a draw segment was refused, and nothing after it retires: {why}");
+            *kept = Some(submission.clone());
+        }
     }
     drawn
 }
