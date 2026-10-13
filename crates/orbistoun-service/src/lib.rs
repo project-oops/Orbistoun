@@ -3057,14 +3057,13 @@ argument = \"zero\"
     /// An absolute library root is used as given.
     #[test]
     fn absolute_library_root_is_used_as_given() {
+        // Absolute on whatever host runs the test: a drive letter is absolute only on Windows.
+        let root = std::env::temp_dir().join("games");
         let settings = LibrarySettings {
-            root: r"D:\games\ps".to_owned(),
+            root: root.to_string_lossy().into_owned(),
             ..LibrarySettings::default()
         };
-        assert_eq!(
-            settings.resolve(Path::new(r"C:\data\orbistoun")),
-            Path::new(r"D:\games\ps")
-        );
+        assert_eq!(settings.resolve(&std::env::temp_dir().join("data")), root);
     }
 
     /// A missing library says which folder was missing.
