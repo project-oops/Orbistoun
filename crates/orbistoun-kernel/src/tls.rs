@@ -130,6 +130,25 @@ mod tests {
         assert!(other.is_some_and(|b| b != first), "each thread has its own");
     }
 
+    /// Two title modules with thread-locals, numbered by link order as the executable's
+    /// neighbours are, each get a block of their own: neither's variables reach into the other's.
+    #[test]
+    fn two_title_modules_get_blocks_that_do_not_overlap() {
+        super::register_module(12, 0x300, vec![0xaa; 0x10]);
+        super::register_module(13, 0x2000, vec![0xbb; 0x10]);
+        let a = super::address_of(12, 0, None).expect("module 12 has a block");
+        let b = super::address_of(13, 0, None).expect("module 13 has a block");
+        assert!(
+            a + 0x300 <= b || b + 0x2000 <= a,
+            "blocks {a:#x}+0x300 and {b:#x}+0x2000 overlap"
+        );
+        // SAFETY: `a` is a block just reserved for this thread, at least 16 bytes long.
+        let first = unsafe { orbistoun_mem::guest::read_u32(a) };
+        // SAFETY: as for `a`.
+        let second = unsafe { orbistoun_mem::guest::read_u32(b) };
+        assert_eq!((first, second), (Some(0xaaaa_aaaa), Some(0xbbbb_bbbb)));
+    }
+
     /// An index the loader never relocated names no module, and is not answered with a block.
     #[test]
     fn an_unregistered_module_has_no_block() {
