@@ -177,7 +177,9 @@ deterministic limit, rather than on the clock. Before them the preview runs twic
 that budget, and how many imports the three runs differ by is the margin a rerun must clear - a
 title whose threads interleave differently from run to run still differs by a few. A rerun that
 got less far than all three - a lower rung, or fewer imports - depended on the answer. One within
-the margin did not. One that got further than all three had the answer in its way. Only the
+the margin did not. One that got further than all three had the answer in its way. A rerun that
+moved either way is run twice more, and a function whose three runs disagree is listed as
+unsettled rather than ranked. Only the
 rung and the imports are compared, since calls and frames move with a run's timing. The result
 goes to the record's `[preview_dependence]` section, with the budget and the margin, the
 furthest set back first: the

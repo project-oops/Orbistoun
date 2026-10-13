@@ -393,7 +393,21 @@ fn rank_preview(
     for (i, name) in answered.iter().enumerate() {
         println!();
         println!("== {}/{} {title}, refusing {name}", i + 1, answered.len());
-        reruns.push((name.clone(), run(Some(name))?));
+        let mut runs = vec![run(Some(name))?];
+        // A rerun that moved is repeated, so a title whose threads interleave differently from run
+        // to run is not ranked on one draw.
+        if classify(runs[0].as_ref(), reference, spread) != std::cmp::Ordering::Equal {
+            for again in 2..=REPEATS {
+                println!();
+                println!(
+                    "== {}/{} {title}, refusing {name} again ({again}/{REPEATS})",
+                    i + 1,
+                    answered.len()
+                );
+                runs.push(run(Some(name))?);
+            }
+        }
+        reruns.push((name.clone(), runs));
     }
     // SAFETY: as above; no worker is running.
     unsafe { std::env::remove_var(orbistoun_env::WITHHOLD.name) };
@@ -408,6 +422,7 @@ fn rank_preview(
     for (heading, names) in [
         ("depended on", &ranked.depended),
         ("in the way", &ranked.harmful),
+        ("unsettled", &ranked.unsettled),
         ("unneeded", &ranked.unneeded),
     ] {
         println!("  {heading} ({})", names.len());
@@ -427,31 +442,66 @@ fn reach_line(status: &orbistoun_overrides::Status) -> String {
     format!("{} at {} imports", status.reach.label(), status.imports)
 }
 
-/// Sorts a preview's reruns, each by the function it refused, against the lowest of the runs of the
-/// preview that refused nothing.
-///
-/// Imports within `spread` of it - how far those runs differed - count as the same reach, so a
-/// rerun is ranked only by what refusing changed. A rerun that left no trace ended the worker
-/// before it could write one, which is a dependence too, and the furthest set back of all.
-fn rank_reruns(
+/// How many times a rerun that moved is run in all before it is believed.
+const REPEATS: usize = 3;
+
+/// Whether a rerun got less far than the preview, as far, or further: imports within `spread` of
+/// it count as as far, and a rerun that left no trace got less far than any.
+fn classify(
+    rerun: Option<&orbistoun_overrides::Status>,
     preview: &orbistoun_overrides::Status,
     spread: usize,
-    reruns: Vec<(String, Option<orbistoun_overrides::Status>)>,
-) -> orbistoun_overrides::PreviewDependence {
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    let against = |r: &orbistoun_overrides::Status| match r.reach_against(preview) {
-        Ordering::Greater if r.imports <= preview.imports + spread && r.reach == preview.reach => {
+    let Some(r) = rerun else {
+        return Ordering::Less;
+    };
+    match r.reach_against(preview) {
+        Ordering::Greater if r.reach == preview.reach && r.imports <= preview.imports + spread => {
             Ordering::Equal
         }
         other => other,
-    };
+    }
+}
+
+/// Sorts a preview's reruns, each by the function it refused, against the lowest of the runs of the
+/// preview that refused nothing.
+///
+/// Each function comes with every run made refusing it: one when it changed nothing, [`REPEATS`]
+/// when it moved. Runs that disagree leave it unsettled rather than ranked. A rerun that left no
+/// trace ended the worker before it could write one, which is a dependence too, and the furthest
+/// set back of all.
+fn rank_reruns(
+    preview: &orbistoun_overrides::Status,
+    spread: usize,
+    reruns: Vec<(String, Vec<Option<orbistoun_overrides::Status>>)>,
+) -> orbistoun_overrides::PreviewDependence {
+    use std::cmp::Ordering;
     let mut depended: Vec<(Option<orbistoun_overrides::Status>, String)> = Vec::new();
-    let (mut unneeded, mut harmful) = (Vec::new(), Vec::new());
-    for (name, rerun) in reruns {
-        match rerun.as_ref().map(|r| (against(r), r)) {
-            Some((Ordering::Equal, _)) => unneeded.push(name),
-            Some((Ordering::Greater, r)) => harmful.push(format!("{name}: {}", reach_line(r))),
-            Some((Ordering::Less, _)) | None => depended.push((rerun, name)),
+    let (mut unneeded, mut harmful, mut unsettled) = (Vec::new(), Vec::new(), Vec::new());
+    for (name, runs) in reruns {
+        let classes: Vec<Ordering> = runs
+            .iter()
+            .map(|r| classify(r.as_ref(), preview, spread))
+            .collect();
+        let Some(&first) = classes.first() else {
+            continue;
+        };
+        if classes.iter().any(|&c| c != first) {
+            let behind = classes.iter().filter(|&&c| c == Ordering::Less).count();
+            let ahead = classes.iter().filter(|&&c| c == Ordering::Greater).count();
+            unsettled.push(format!(
+                "{name}: of {} runs, {behind} less far, {ahead} further, {} the same",
+                classes.len(),
+                classes.len() - behind - ahead
+            ));
+            continue;
+        }
+        let rerun = runs.into_iter().next().flatten();
+        match (first, &rerun) {
+            (Ordering::Equal, _) => unneeded.push(name),
+            (Ordering::Greater, Some(r)) => harmful.push(format!("{name}: {}", reach_line(r))),
+            _ => depended.push((rerun, name)),
         }
     }
     // The furthest set back first: no trace at all, then the lowest rung and fewest imports.
@@ -471,6 +521,7 @@ fn rank_reruns(
             .collect(),
         unneeded,
         harmful,
+        unsettled,
         preview: reach_line(preview),
         spread,
         calls: 0,
@@ -1239,15 +1290,24 @@ mod tests {
             &preview,
             3,
             vec![
-                ("sceA".to_owned(), Some(reach(200, 9))),
-                ("sceB".to_owned(), Some(reach(261, 7))),
-                ("sceC".to_owned(), None),
-                ("sceD".to_owned(), Some(reach(103, 9))),
-                ("sceE".to_owned(), Some(flipped)),
-                // Within the three imports two runs of the preview differed by: nothing changed.
-                ("sceF".to_owned(), Some(reach(264, 9))),
-                ("sceG".to_owned(), Some(reach(265, 9))),
+                ("sceA".to_owned(), vec![Some(reach(200, 9)); 3]),
+                ("sceB".to_owned(), vec![Some(reach(261, 7))]),
+                ("sceC".to_owned(), vec![None; 3]),
+                ("sceD".to_owned(), vec![Some(reach(103, 9)); 3]),
+                ("sceE".to_owned(), vec![Some(flipped); 3]),
+                // Within the three imports the runs of the preview differed by: nothing changed.
+                ("sceF".to_owned(), vec![Some(reach(264, 9))]),
+                ("sceG".to_owned(), vec![Some(reach(265, 9)); 3]),
+                // Set back once, then as far twice: not ranked on one draw.
+                (
+                    "sceH".to_owned(),
+                    vec![None, Some(reach(262, 9)), Some(reach(261, 9))],
+                ),
             ],
+        );
+        assert_eq!(
+            ranked.unsettled,
+            ["sceH: of 3 runs, 1 less far, 0 further, 2 the same"]
         );
         assert_eq!(
             ranked.depended,

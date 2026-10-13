@@ -1033,6 +1033,10 @@ pub struct PreviewDependence {
     /// in the way.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harmful: Vec<String>,
+    /// The functions whose refusal moved the title in one run and not alike in its repeats: what a
+    /// title whose threads interleave differently from run to run cannot rank.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled: Vec<String>,
     /// What the preview reached, which each rerun was ranked against: the lowest of three runs of
     /// it refusing nothing.
     pub preview: String,
