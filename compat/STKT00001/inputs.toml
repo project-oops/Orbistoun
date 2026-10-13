@@ -1,0 +1,349 @@
+# SuperTuxKart with a controller connected from its first flip, south pressed and released every
+# sixty flips from flip 120: its first-run dialog takes a press, and so does each menu after.
+# Written by hand, not captured.
+
+[[step]]
+at_flip = 1
+
+[[step]]
+at_flip = 120
+buttons = ["south"]
+
+[[step]]
+at_flip = 123
+
+[[step]]
+at_flip = 180
+buttons = ["south"]
+
+[[step]]
+at_flip = 183
+
+[[step]]
+at_flip = 240
+buttons = ["south"]
+
+[[step]]
+at_flip = 243
+
+[[step]]
+at_flip = 300
+buttons = ["south"]
+
+[[step]]
+at_flip = 303
+
+[[step]]
+at_flip = 360
+buttons = ["south"]
+
+[[step]]
+at_flip = 363
+
+[[step]]
+at_flip = 420
+buttons = ["south"]
+
+[[step]]
+at_flip = 423
+
+[[step]]
+at_flip = 480
+buttons = ["south"]
+
+[[step]]
+at_flip = 483
+
+[[step]]
+at_flip = 540
+buttons = ["south"]
+
+[[step]]
+at_flip = 543
+
+[[step]]
+at_flip = 600
+buttons = ["south"]
+
+[[step]]
+at_flip = 603
+
+[[step]]
+at_flip = 660
+buttons = ["south"]
+
+[[step]]
+at_flip = 663
+
+[[step]]
+at_flip = 720
+buttons = ["south"]
+
+[[step]]
+at_flip = 723
+
+[[step]]
+at_flip = 780
+buttons = ["south"]
+
+[[step]]
+at_flip = 783
+
+[[step]]
+at_flip = 840
+buttons = ["south"]
+
+[[step]]
+at_flip = 843
+
+[[step]]
+at_flip = 900
+buttons = ["south"]
+
+[[step]]
+at_flip = 903
+
+[[step]]
+at_flip = 960
+buttons = ["south"]
+
+[[step]]
+at_flip = 963
+
+[[step]]
+at_flip = 1020
+buttons = ["south"]
+
+[[step]]
+at_flip = 1023
+
+[[step]]
+at_flip = 1080
+buttons = ["south"]
+
+[[step]]
+at_flip = 1083
+
+[[step]]
+at_flip = 1140
+buttons = ["south"]
+
+[[step]]
+at_flip = 1143
+
+[[step]]
+at_flip = 1200
+buttons = ["south"]
+
+[[step]]
+at_flip = 1203
+
+[[step]]
+at_flip = 1260
+buttons = ["south"]
+
+[[step]]
+at_flip = 1263
+
+[[step]]
+at_flip = 1320
+buttons = ["south"]
+
+[[step]]
+at_flip = 1323
+
+[[step]]
+at_flip = 1380
+buttons = ["south"]
+
+[[step]]
+at_flip = 1383
+
+[[step]]
+at_flip = 1440
+buttons = ["south"]
+
+[[step]]
+at_flip = 1443
+
+[[step]]
+at_flip = 1500
+buttons = ["south"]
+
+[[step]]
+at_flip = 1503
+
+[[step]]
+at_flip = 1560
+buttons = ["south"]
+
+[[step]]
+at_flip = 1563
+
+[[step]]
+at_flip = 1620
+buttons = ["south"]
+
+[[step]]
+at_flip = 1623
+
+[[step]]
+at_flip = 1680
+buttons = ["south"]
+
+[[step]]
+at_flip = 1683
+
+[[step]]
+at_flip = 1740
+buttons = ["south"]
+
+[[step]]
+at_flip = 1743
+
+[[step]]
+at_flip = 1800
+buttons = ["south"]
+
+[[step]]
+at_flip = 1803
+
+[[step]]
+at_flip = 1860
+buttons = ["south"]
+
+[[step]]
+at_flip = 1863
+
+[[step]]
+at_flip = 1920
+buttons = ["south"]
+
+[[step]]
+at_flip = 1923
+
+[[step]]
+at_flip = 1980
+buttons = ["south"]
+
+[[step]]
+at_flip = 1983
+
+[[step]]
+at_flip = 2040
+buttons = ["south"]
+
+[[step]]
+at_flip = 2043
+
+[[step]]
+at_flip = 2100
+buttons = ["south"]
+
+[[step]]
+at_flip = 2103
+
+[[step]]
+at_flip = 2160
+buttons = ["south"]
+
+[[step]]
+at_flip = 2163
+
+[[step]]
+at_flip = 2220
+buttons = ["south"]
+
+[[step]]
+at_flip = 2223
+
+[[step]]
+at_flip = 2280
+buttons = ["south"]
+
+[[step]]
+at_flip = 2283
+
+[[step]]
+at_flip = 2340
+buttons = ["south"]
+
+[[step]]
+at_flip = 2343
+
+[[step]]
+at_flip = 2400
+buttons = ["south"]
+
+[[step]]
+at_flip = 2403
+
+[[step]]
+at_flip = 2460
+buttons = ["south"]
+
+[[step]]
+at_flip = 2463
+
+[[step]]
+at_flip = 2520
+buttons = ["south"]
+
+[[step]]
+at_flip = 2523
+
+[[step]]
+at_flip = 2580
+buttons = ["south"]
+
+[[step]]
+at_flip = 2583
+
+[[step]]
+at_flip = 2640
+buttons = ["south"]
+
+[[step]]
+at_flip = 2643
+
+[[step]]
+at_flip = 2700
+buttons = ["south"]
+
+[[step]]
+at_flip = 2703
+
+[[step]]
+at_flip = 2760
+buttons = ["south"]
+
+[[step]]
+at_flip = 2763
+
+[[step]]
+at_flip = 2820
+buttons = ["south"]
+
+[[step]]
+at_flip = 2823
+
+[[step]]
+at_flip = 2880
+buttons = ["south"]
+
+[[step]]
+at_flip = 2883
+
+[[step]]
+at_flip = 2940
+buttons = ["south"]
+
+[[step]]
+at_flip = 2943
+
+[[step]]
+at_flip = 3000
+buttons = ["south"]
+
+[[step]]
+at_flip = 3003

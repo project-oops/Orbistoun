@@ -4,7 +4,7 @@ PPSA25872-app0         presented  378 imports (366 answered)   22349725 calls  1
 obscene-probe-prospero-native presented  223 imports (211 answered)      39546 calls  100% standing   ran to the time limit
 PPSA99980              presented  215 imports (206 answered)     416694 calls  100% standing   ran to the time limit
 PPSA28061-app0         presented  165 imports (159 answered)   20457365 calls  100% standing   ran to the time limit
-STKT00001              presented  149 imports (144 answered)    7557561 calls  100% standing   ran to the time limit
+STKT00001              presented  150 imports (149 answered)    7911373 calls  100% standing   ran to the time limit
 CRFT00001              presented  106 imports (100 answered)     345461 calls  100% standing   ran to the time limit
 TSHP00001              presented   72 imports (68 answered)    3421974 calls  100% standing   ran to the time limit
 SOHK00001              presented   72 imports (67 answered)    4303539 calls  100% standing   ran to the time limit
