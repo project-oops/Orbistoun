@@ -4724,6 +4724,29 @@ fn write_descriptor_set(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
+/// A pipeline's two stages: the geometry stage, vertex or mesh, specialised with the user clip
+/// planes (D830), and the fragment stage.
+fn pipeline_stages<'a>(
+    (vertex, fragment): (vk::ShaderModule, vk::ShaderModule),
+    geometry: Geometry,
+    specialization: &'a vk::SpecializationInfo<'a>,
+) -> [vk::PipelineShaderStageCreateInfo<'a>; 2] {
+    [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(match geometry {
+                Geometry::Vertex(_) => vk::ShaderStageFlags::VERTEX,
+                Geometry::Mesh { .. } => vk::ShaderStageFlags::MESH_EXT,
+            })
+            .module(vertex)
+            .name(ENTRY)
+            .specialization_info(specialization),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fragment)
+            .name(ENTRY),
+    ]
+}
+
 /// Creates the graphics pipeline from its stages and fixed-function state.
 fn create_graphics_pipeline(
     device: &ash::Device,
@@ -4734,26 +4757,12 @@ fn create_graphics_pipeline(
     geometry: Geometry,
     bound: Bound<'_>,
 ) -> Result<vk::Pipeline, DispatchError> {
-    let (vertex, fragment) = modules;
     let (width, height) = size;
     let (entries, planes) = clip_plane_specialization(&bound.extras.clip_planes);
     let specialization = vk::SpecializationInfo::default()
         .map_entries(&entries)
         .data(&planes);
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(match geometry {
-                Geometry::Vertex(_) => vk::ShaderStageFlags::VERTEX,
-                Geometry::Mesh { .. } => vk::ShaderStageFlags::MESH_EXT,
-            })
-            .module(vertex)
-            .name(ENTRY)
-            .specialization_info(&specialization),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fragment)
-            .name(ENTRY),
-    ];
+    let stages = pipeline_stages(modules, geometry, &specialization);
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
