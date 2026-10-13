@@ -332,6 +332,36 @@ found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-12"
 
 [[function]]
+name = "scePadResetLightBar"
+arity = 1
+purpose = "(handle): returns the light bar to the system's colour."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pd02, link-bound, on a handle from scePadOpen for the initial user): 0x0; handle 0x7fffffff answered 0x80920003.",
+    "orbistoun answers 0x0 for a handle it issued and 0x80920003 for any other; there is no light bar.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1500Z-pd02, reports/hardware/report-20261013-172400.log lines 3444-3445 (000-boot/ux01-calls)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePadSetTriggerEffect"
+arity = 2
+purpose = "(handle, param): sets the adaptive triggers' effect from a parameter block."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pd02, link-bound, on a handle from scePadOpen for the initial user): 0x0 with a 0x80-byte block zeroed but its first byte 3; 0x80920001 with a null block; 0x80920003 for handle 0x7fffffff.",
+    "orbistoun answers so and discards the effect; a never-issued handle with a null block is unmeasured, and the handle is checked first.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1500Z-pd02, reports/hardware/report-20261013-172400.log lines 3446-3448 (000-boot/ux01-calls)."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-13"
+
+[[function]]
 name = "scePadResetOrientation"
 arity = 1
 purpose = "(handle): resets the motion sensor's reference orientation."

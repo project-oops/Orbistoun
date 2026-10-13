@@ -41,6 +41,9 @@ guest_module! {
         "scePadSetVibration" => 2,
         "scePadSetVibrationForce" => 2,
         "scePadSetLightBar" => 2,
+        // (handle) and (handle, param)
+        "scePadResetLightBar" => 1,
+        "scePadSetTriggerEffect" => 2,
         // (handle, info) and (handle)
         "scePadGetControllerInformation" => 2,
         // (handle, info)
@@ -155,6 +158,26 @@ fn pad_discard(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return u64::from(
             GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
         );
+    }
+    OK
+}
+
+/// What `scePadSetTriggerEffect` answers a null `param` on an open pad (REQ-pd02,
+/// `000-boot/ux01-calls`, `report-20261013-172400.log` 3447): the pad's invalid-argument code.
+const PAD_INVALID_ARGUMENT: u64 = PAD_ERROR_BASE as u64 | 0x01;
+
+/// `scePadSetTriggerEffect(handle, param)`: 0 for an open handle with a parameter block, as the
+/// console answered one whose first byte was 3; `0x80920001` for a null block and `0x80920003`
+/// for a handle never issued (REQ-pd02). The effect is discarded: there are no adaptive triggers.
+/// A never-issued handle with a null block was not measured; the handle is checked first.
+fn pad_set_trigger_effect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if ours(args[0]).is_none() {
+        return u64::from(
+            GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
+        );
+    }
+    if args[1] == 0 {
+        return PAD_INVALID_ARGUMENT;
     }
     OK
 }
@@ -301,6 +324,10 @@ const OWN: &[(&str, GuestFn)] = &[
     ("scePadSetVibration", pad_discard),
     ("scePadSetVibrationForce", pad_discard),
     ("scePadSetLightBar", pad_discard),
+    // `scePadResetLightBar(handle)`: 0 for an open handle, `0x80920003` for one never issued
+    // (REQ-pd02), which is what the discard answers.
+    ("scePadResetLightBar", pad_discard),
+    ("scePadSetTriggerEffect", pad_set_trigger_effect),
     // `scePadResetOrientation(handle)`: 0 for an open handle, `0x80920003` for one never issued
     // (REQ-pu01), which is what the discard answers.
     ("scePadResetOrientation", pad_discard),
@@ -466,6 +493,34 @@ mod tests {
             super::pad_is_valid_handle(&args(handle + 10_000)),
             0,
             "a number nobody issued is not ours"
+        );
+    }
+
+    /// The light bar reset and the trigger effect answer as the console did on an open pad: 0,
+    /// `0x80920003` for handle 0x7fffffff, and for a null trigger block `0x80920001` (REQ-pd02).
+    #[test]
+    fn the_light_bar_reset_and_trigger_effect_answer_as_measured() {
+        let call = |name: &str, first: u64, second: u64| {
+            let (_, f) = super::implementations()
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name} is implemented"));
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = first;
+            args[1] = second;
+            f(&args)
+        };
+        let handle = super::pad_open(&args(0));
+        let mut param = [0_u8; 0x80];
+        param[0] = 3;
+        let block = param.as_mut_ptr() as u64;
+        assert_eq!(call("scePadResetLightBar", handle, 0), 0);
+        assert_eq!(call("scePadResetLightBar", 0x7fff_ffff, 0), 0x8092_0003);
+        assert_eq!(call("scePadSetTriggerEffect", handle, block), 0);
+        assert_eq!(call("scePadSetTriggerEffect", handle, 0), 0x8092_0001);
+        assert_eq!(
+            call("scePadSetTriggerEffect", 0x7fff_ffff, block),
+            0x8092_0003
         );
     }
 
