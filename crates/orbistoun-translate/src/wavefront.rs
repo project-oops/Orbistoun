@@ -22,8 +22,10 @@ use crate::predicated::{MEMORY_WORDS, OBSERVED_REGISTERS, OBSERVED_WORDS, REGIST
 use crate::{TranslateError, Width};
 
 mod compute_inputs;
+mod input_controls;
 mod pixel_inputs;
 pub use compute_inputs::{ComputeInputs, PartialGroups};
+pub use input_controls::{INPUT_CONTROLS, InputControls};
 pub use orbistoun_spirv::MAX_TEXTURES;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
 
@@ -397,6 +399,11 @@ pub struct UserData {
     /// `None` when the stream set none, and then no vector register is seeded.
     #[serde(default)]
     pub pixel_inputs: Option<PixelInputs>,
+    /// Where each attribute a pixel shader interpolates comes from (`SPI_PS_INPUT_CNTL_*`): the
+    /// vertex output it reads, a constant, and whether it is flat. `None` when the stream wrote
+    /// none, and then attribute `n` reads output `n`, interpolated as its instruction says.
+    #[serde(default)]
+    pub input_controls: Option<InputControls>,
     /// A guest compute dispatch's entry state. With it a compute module seeds the workgroup and
     /// thread ids and keeps its memory exact, refusing by flag what it cannot place; without it a
     /// compute module is the register-observing harness it always was.
@@ -958,24 +965,58 @@ fn reserve_attribute_inputs(
     b: &mut Builder,
     stage: Stage,
     attributes: &[(u32, Interpolation)],
-) -> Vec<(u32, Interpolation, Id)> {
+    controls: Option<InputControls>,
+) -> Vec<ReservedAttribute> {
     if stage != Stage::Fragment {
         return Vec::new();
     }
     attributes
         .iter()
-        .map(|(attr, how)| (*attr, *how, b.id()))
+        .map(|&(attribute, how)| {
+            // Checked before the module was begun (`check_input_controls`), so a refusal here is
+            // not reached; the attribute's own output stands in.
+            let source = controls.map_or(input_controls::Source::Output(attribute), |controls| {
+                controls
+                    .source(attribute)
+                    .unwrap_or(input_controls::Source::Output(attribute))
+            });
+            let flat = controls.is_some_and(|controls| controls.flat(attribute));
+            ReservedAttribute {
+                attribute,
+                how: if flat { Interpolation::Flat } else { how },
+                variable: b.id(),
+                source,
+            }
+        })
         .collect()
 }
 
-/// Declares one `vec4` fragment input per attribute the shader interpolates.
+/// One attribute a fragment module reads, reserved before the header: where it reads from, and
+/// how it is interpolated.
+struct ReservedAttribute {
+    attribute: u32,
+    how: Interpolation,
+    variable: Id,
+    source: input_controls::Source,
+}
+
+impl ReservedAttribute {
+    /// Whether the entry point's interface names it: an input does, a constant is a module
+    /// variable and below SPIR-V 1.4 must not be listed.
+    fn is_input(&self) -> bool {
+        matches!(self.source, input_controls::Source::Output(_))
+    }
+}
+
+/// Declares one `vec4` per attribute the shader interpolates: a fragment input at the location of
+/// the vertex output it reads, or a constant where its control names one.
 ///
-/// Location `n` is attribute `n`: the attribute index is an operand of the instruction, and a
-/// fragment input's location names the same slot. Empty for a compute module.
+/// Attribute `n` reads output `n` unless the stream's `SPI_PS_INPUT_CNTL_n` names another
+/// ([`InputControls`]). Empty for a compute module.
 fn declare_attribute_inputs(
     b: &mut Builder,
-    vec4: Id,
-    reserved: &[(u32, Interpolation, Id)],
+    (f32_type, vec4): (Id, Id),
+    reserved: &[ReservedAttribute],
 ) -> BTreeMap<u32, Id> {
     let mut inputs = BTreeMap::new();
     if reserved.is_empty() {
@@ -983,19 +1024,67 @@ fn declare_attribute_inputs(
     }
     let input_ptr = b.id();
     b.declare(op::TYPE_POINTER, &[input_ptr.0, INPUT, vec4.0]);
-    for (attribute, how, variable) in reserved {
-        b.annotate(
-            op::DECORATE,
-            &[variable.0, decoration::LOCATION, *attribute],
-        );
-        // Smooth is what an undecorated input does, so it takes no decoration.
-        if *how == Interpolation::Flat {
-            b.annotate(op::DECORATE, &[variable.0, decoration::FLAT]);
+    let mut constant_ptr = None;
+    for input in reserved {
+        let variable = input.variable;
+        match input.source {
+            input_controls::Source::Output(location) => {
+                b.annotate(op::DECORATE, &[variable.0, decoration::LOCATION, location]);
+                // Smooth is what an undecorated input does, so it takes no decoration.
+                if input.how == Interpolation::Flat {
+                    b.annotate(op::DECORATE, &[variable.0, decoration::FLAT]);
+                }
+                b.declare(op::VARIABLE, &[input_ptr.0, variable.0, INPUT]);
+            }
+            input_controls::Source::Constant(value) => {
+                let pointer = *constant_ptr.get_or_insert_with(|| {
+                    let pointer = b.id();
+                    b.declare(op::TYPE_POINTER, &[pointer.0, PRIVATE, vec4.0]);
+                    pointer
+                });
+                let components: Vec<u32> = value
+                    .iter()
+                    .map(|component| {
+                        let id = b.id();
+                        b.declare(op::CONSTANT, &[f32_type.0, id.0, component.to_bits()]);
+                        id.0
+                    })
+                    .collect();
+                let whole = b.id();
+                let mut composite = vec![vec4.0, whole.0];
+                composite.extend(components);
+                b.declare(op::CONSTANT_COMPOSITE, &composite);
+                b.declare(op::VARIABLE, &[pointer.0, variable.0, PRIVATE, whole.0]);
+            }
         }
-        b.declare(op::VARIABLE, &[input_ptr.0, variable.0, INPUT]);
-        inputs.insert(*attribute, *variable);
+        inputs.insert(input.attribute, variable);
     }
     inputs
+}
+
+/// Refuses, before a module is begun, an attribute whose control names what is not translated
+/// ([`InputControls`]), and a remap alongside flat twins (D742), whose locations are the
+/// attributes' own.
+fn check_input_controls(
+    attributes: &[(u32, Interpolation)],
+    user_data: &UserData,
+) -> Result<(), TranslateError> {
+    let Some(controls) = user_data.input_controls else {
+        return Ok(());
+    };
+    if user_data.flat_twins.is_some() && !controls.is_identity() {
+        return Err(TranslateError::Unsupported {
+            offset: 0,
+            detail: concat!(
+                "a pixel shader that reads an attribute both flat and interpolated, with inputs ",
+                "the stream routes to other outputs, which is not translated"
+            ),
+        });
+    }
+    for (attribute, _) in attributes {
+        controls.source(*attribute)?;
+    }
+    Ok(())
 }
 
 /// Declares the `vec4` colour output a fragment module exports to, and answers it with its type.
@@ -2340,7 +2429,8 @@ impl<'a> Wavefront<'a> {
         let output_ptr = b.id();
         // Reserved before the header for the same reason: every input the entry point touches must
         // be named in its interface, and a driver does not reliably reject a module that omits one.
-        let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
+        let input_ids =
+            reserve_attribute_inputs(&mut b, stage, attributes, user_data.input_controls);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
         let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
@@ -2349,7 +2439,7 @@ impl<'a> Wavefront<'a> {
         let output =
             FragmentOutputs::declare(&mut b, (f32_type, vec4), output_ptr, (output, depth, stage))
                 .with_more_colour(&mut b, output_ptr, more_colour);
-        let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
+        let inputs = declare_attribute_inputs(&mut b, (f32_type, vec4), &input_ids);
         system.declare(&mut b, vec4, bool_type);
         let mesh = declare_mesh_outputs(
             &mut b,
@@ -2389,7 +2479,11 @@ impl<'a> Wavefront<'a> {
 
         // Every variable this module has. From 1.4 the entry point names all of them; below that
         // only the inputs and outputs.
-        let mut interface: Vec<u32> = input_ids.iter().map(|(_, _, id)| id.0).collect();
+        let mut interface: Vec<u32> = input_ids
+            .iter()
+            .filter(|input| input.is_input())
+            .map(|input| input.variable.0)
+            .collect();
         interface.extend(system.interface());
         interface.extend(output.interface());
         interface.extend(mesh_reserved.interface(stage));
@@ -5586,6 +5680,9 @@ pub fn translate_with_user_data(
         return Err(TranslateError::Unsupported { offset: 0, detail });
     }
     let attributes = interpolated_attributes(decode, encodings, user_data.flat_twins)?;
+    if stage == Stage::Fragment {
+        check_input_controls(&attributes, &user_data)?;
+    }
     let mut parameters = exported_parameters(decode, encodings);
     // A primitive shader exports each parameter with a flat twin at the twin's location too
     // (D742).

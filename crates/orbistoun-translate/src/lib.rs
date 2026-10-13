@@ -756,6 +756,7 @@ mod tests {
                     block_offset: 16,
                     dx10_clamp: None,
                     pixel_inputs: None,
+                    input_controls: None,
                     compute: None,
                     geometry: None,
                     window_space: crate::wavefront::WindowSpace::Clip,

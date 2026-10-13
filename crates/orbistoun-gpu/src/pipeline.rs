@@ -1490,6 +1490,7 @@ impl Pipeline {
             block_offset: 0,
             dx10_clamp: state.dx10_clamp,
             pixel_inputs: None,
+            input_controls: None,
             compute: Some(inputs),
             geometry: None,
             window_space: WindowSpace::Clip,
@@ -5769,6 +5770,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             block_offset: 0,
             dx10_clamp: clamps[0],
             pixel_inputs: None,
+            input_controls: None,
             compute: None,
             geometry: None,
             window_space: WindowSpace::Clip,
@@ -5784,8 +5786,9 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             count: counts[1],
             block_offset: USER_DATA_STAGE_WORDS,
             dx10_clamp: clamps[1],
-            // Set by `set_environment` for every backend.
+            // Set by `set_environment` for every backend, with the input controls.
             pixel_inputs: None,
+            input_controls: None,
             compute: None,
             geometry: None,
             window_space: WindowSpace::Clip,
@@ -5857,6 +5860,9 @@ impl Pipeline {
         // Which vector registers the pixel shader starts with: built-in inputs on the host, so
         // every backend supplies them whether or not it feeds user data.
         self.user_data[1].pixel_inputs = crate::pixel_inputs::decode(writes);
+        // Where each attribute the pixel shader interpolates comes from: the stream's link of the
+        // two stages, which a module translated without it would take as each attribute's own.
+        self.user_data[1].input_controls = crate::pixel_inputs::decode_controls(writes);
     }
 
     /// Places the window at the constant base the vertex-stage candidate's shader forms (D711).

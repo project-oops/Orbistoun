@@ -7,7 +7,9 @@
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::draw_with;
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
-use orbistoun_spirv::{interpolated_vertex_module, passthrough_fragment_module};
+use orbistoun_spirv::{
+    interpolated_vertex_module, interpolating_vertex_module, passthrough_fragment_module,
+};
 use orbistoun_translate::wavefront::{Stage, translate_for};
 use orbistoun_translate::{TranslateError, Width};
 
@@ -218,4 +220,86 @@ fn an_interpolation_without_a_fragment_input_is_refused() {
             "not exist in it"
         )
     );
+}
+
+/// [`interpolating_shader`] translated for a draw whose stream wrote `control` to
+/// `SPI_PS_INPUT_CNTL_0`, the register for the attribute it reads.
+fn translated_with_control(control: u32) -> Result<Vec<u32>, TranslateError> {
+    use orbistoun_translate::wavefront::{
+        InputControls, MeshPrimitive, UserData, Window, translate_with_user_data,
+    };
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(&interpolating_shader(), &encodings, &operands);
+    let mut controls = InputControls::default();
+    controls.0[0] = Some(control);
+    translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            input_controls: Some(controls),
+            ..UserData::default()
+        },
+    )
+    .map(|(module, _, _)| module)
+}
+
+/// The one colour a draw left over its whole frame, or `None` where it is not one colour.
+fn uniform(
+    frame: &orbistoun_gpu_vulkan::framebuffer::Pixels,
+    (width, height): (u32, u32),
+) -> Option<[u8; 4]> {
+    let first = frame.at(0, 0)?;
+    (0..height)
+        .all(|y| (0..width).all(|x| frame.at(x, y) == Some(first)))
+        .then_some(first)
+}
+
+/// An attribute reads the vertex output its `SPI_PS_INPUT_CNTL` names (`OFFSET`, bits 5:0), not
+/// the one of its own number: attribute 0 routed to output 1 is output 1's green, where the
+/// identity would be output 0's blue. `OFFSET` `0x20` reads the constant `DEFAULT_VAL` names
+/// instead, and the fourth `DEFAULT_VAL`, whose constant Mesa's sources disagree on, is refused.
+#[test]
+fn an_attribute_reads_the_output_its_control_names() {
+    if !device_or_skip("an_attribute_reads_the_output_its_control_names") {
+        return;
+    }
+    let (width, height) = (8, 5);
+    let (blue, green) = ([0.0, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+    let clear = [1.0, 0.0, 0.0, 1.0];
+    let vertex = interpolating_vertex_module(&[[blue; 3], [green; 3]]);
+    let draw = |control| {
+        let module = translated_with_control(control).expect("the routed interpolation translated");
+        let frame = draw_with(&vertex, &module, clear, width, height).expect("the draw ran");
+        uniform(&frame, (width, height))
+    };
+    assert_eq!(draw(0), Some([0, 0, 255, 255]), "its own output");
+    assert_eq!(draw(1), Some([0, 255, 0, 255]), "the output OFFSET names");
+    // `0001`, opaque black, and `1110`, white with no alpha.
+    assert_eq!(draw(0x120), Some([0, 0, 0, 255]), "DEFAULT_VAL 1");
+    assert_eq!(draw(0x220), Some([255, 255, 255, 0]), "DEFAULT_VAL 2");
+    assert!(translated_with_control(0x320).is_err(), "DEFAULT_VAL 3");
+}
+
+/// `FLAT_SHADE` (bit 10) takes the provoking vertex's value for an attribute the shader
+/// interpolates: corners of three colours draw as the first corner's, everywhere.
+#[test]
+fn a_flat_shaded_attribute_reads_one_corner() {
+    if !device_or_skip("a_flat_shaded_attribute_reads_one_corner") {
+        return;
+    }
+    let (width, height) = (8, 5);
+    let corners = [
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+    ];
+    let vertex = interpolated_vertex_module(corners);
+    let module = translated_with_control(0x400).expect("the flat interpolation translated");
+    let frame =
+        draw_with(&vertex, &module, [0.0, 0.0, 0.0, 1.0], width, height).expect("the draw ran");
+    assert_eq!(uniform(&frame, (width, height)), Some([255, 0, 0, 255]));
 }
