@@ -45,6 +45,13 @@ measured = "one allocation of 0x1000 bytes through the allocate callback, freed 
 cites = "obSCEne REQ-20261012T0445Z-av01, report-1791801495.txt, 000-boot/avplayer-lifecycle"
 
 [[refuted]]
+area = "libSceVideodec2"
+function = "sceVideodec2ReleaseComputeQueue"
+predicted = "0x811d0202 (queue error) for a null queue"
+measured = "0x811d0110 for a null queue"
+cites = "obSCEne REQ-20261012T1822Z-df0a, reports/hardware/report-20261013-172400.log line 11497 (107-videodec/oracle-census)"
+
+[[refuted]]
 area = "libSceJson2"
 function = "sce::Json::MemAllocator::MemAllocator()"
 predicted = "returns this and writes nothing"
