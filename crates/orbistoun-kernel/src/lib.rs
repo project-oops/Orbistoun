@@ -771,23 +771,39 @@ const ULT_WORK_AREA_PER_OBJECT: u64 = 0x80;
 /// A fixed part of the work area, so a request for nothing still gets a real block.
 const ULT_WORK_AREA_HEADER: u64 = 0x100;
 
+/// The work-area sizes measured on hardware, by `(threads, second count)`: obSCEne
+/// `REQ-20261012T2016Z-5df8`, `000-boot/sce-ult`, `report-1791878041.txt` (FW 12.40).
+const ULT_POOL_MEASURED: [((u64, u64), u64); 1] = [((16, 0), 0x440)];
+const ULT_RUNTIME_MEASURED: [((u64, u64), u64); 1] = [((16, 3), 0x1258)];
+
+/// A measured size where the counts were measured, and orbistoun's own proportional number
+/// elsewhere ([`ULT_WORK_AREA_PER_OBJECT`]): a size is a number the caller spends, so an
+/// unmeasured request is still answered with a usable one rather than a placeholder (D564).
+fn ult_work_area_size(measured: &[((u64, u64), u64)], args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let counts = (args[0], args[1]);
+    measured.iter().find(|(at, _)| *at == counts).map_or_else(
+        || {
+            ULT_WORK_AREA_HEADER
+                + counts
+                    .0
+                    .saturating_add(counts.1)
+                    .saturating_mul(ULT_WORK_AREA_PER_OBJECT)
+        },
+        |&(_, size)| size,
+    )
+}
+
 /// `sceUltWaitingQueueResourcePoolGetWorkAreaSize(threads, syncObjects)`.
 ///
 /// Arity two, read off the guest's calls: the third register holds a leftover.
 fn ult_pool_work_area_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    ULT_WORK_AREA_HEADER
-        + args[0]
-            .saturating_add(args[1])
-            .saturating_mul(ULT_WORK_AREA_PER_OBJECT)
+    ult_work_area_size(&ULT_POOL_MEASURED, args)
 }
 
 /// `sceUltUlthreadRuntimeGetWorkAreaSize(threads, workerThreads)`, arity two on the same
-/// evidence.
+/// evidence. PPSA28061's own request, (16, 3), is the measured one.
 fn ult_runtime_work_area_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    ULT_WORK_AREA_HEADER
-        + args[0]
-            .saturating_add(args[1])
-            .saturating_mul(ULT_WORK_AREA_PER_OBJECT)
+    ult_work_area_size(&ULT_RUNTIME_MEASURED, args)
 }
 
 /// `sceUltInitialize(...)`: brings the library up.
@@ -7230,6 +7246,21 @@ fn deliver_resolved_file(buffer: u64) {
 
 #[cfg(test)]
 mod tests {
+    /// The Ult sizers answer what the console measured at the counts it was measured with
+    /// (obSCEne `-5df8`) - PPSA28061's own runtime request among them - and a usable proportional
+    /// size elsewhere, never a placeholder.
+    #[test]
+    fn ult_work_areas_are_the_measured_sizes_where_measured() {
+        let sizes = |f: fn(&[u64; 6]) -> u64, a, b| f(&[a, b, 0, 0, 0, 0]);
+        assert_eq!(sizes(super::ult_runtime_work_area_size, 16, 3), 0x1258);
+        assert_eq!(sizes(super::ult_pool_work_area_size, 16, 0), 0x440);
+        let unmeasured = sizes(super::ult_pool_work_area_size, 16, 16);
+        assert!(
+            unmeasured > 0 && unmeasured < 0x1_0000,
+            "a usable size: {unmeasured:#x}"
+        );
+    }
+
     /// The NID-only call links to the NID the guest imports and answers what the census measured,
     /// whatever it is passed.
     #[test]

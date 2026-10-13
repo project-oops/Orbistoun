@@ -158,9 +158,12 @@ note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and
 name = "sceUltUlthreadRuntimeGetWorkAreaSize"
 arity = 2
 purpose = "How much memory a caller must set aside for a fibre runtime."
-edge_cases = ["Arity two on the same evidence as the pool sizer. PPSA28061 asks for 16 threads and 3 worker threads (D564)."]
+edge_cases = [
+    "Arity two on the same evidence as the pool sizer. PPSA28061 asks for 16 threads and 3 worker threads (D564).",
+    "(16, 3) - PPSA28061's own request - answers 0x1258 (4696 bytes) on FW 12.40 (obSCEne REQ-20261012T2016Z-5df8, 000-boot/sce-ult, report-1791878041.txt; libSceUlt loaded with sceKernelLoadStartModule(\"libSceUlt.sprx\")).",
+]
 known_by = "guest-observed"
-assumptions = ["The size is orbistoun's own number for the same reason the pool's is."]
+assumptions = ["Any pair of counts but the measured (16, 3) answers orbistoun's own proportional number: one point does not give the console's formula."]
 found_in = [
     "PPSA02664-app0",
     "PPSA28061-app0",
@@ -175,9 +178,10 @@ purpose = "How much memory a caller must set aside for a waiting-queue resource 
 edge_cases = [
     "Arity two, fixed by the run: the third register holds 0x7fff0001, orbistoun's own placeholder left by an earlier stub - the evidence that fixed sceKernelCreateEqueue (D516) and scePthreadSetaffinity (D523). PPSA28061 asks for 16 threads and 16 sync objects.",
     "Unimplemented, this answered the placeholder AS A SIZE and PPSA28061 passed it straight to malloc - 0x7fff0001 is 2 GiB, and this emulator served it. A size is a number the caller spends, so a placeholder here is not a loud failure but a very quiet 4 GiB across the two sizing calls (D564).",
+    "(16, 0) answers 0x440 (1088 bytes) on FW 12.40 (obSCEne REQ-20261012T2016Z-5df8, report-1791878041.txt); PPSA28061's (16, 16) is unmeasured.",
 ]
 known_by = "guest-observed"
-assumptions = ["The size is orbistoun's own number, not a measurement: it owns the constructor too and stores nothing in the block, so this is chosen to be non-zero and proportional to the request. A console that needs more would have its constructor reject a block this size, and nothing here would see that."]
+assumptions = ["Except the measured (16, 0), the size is orbistoun's own number: it owns the constructor too and stores nothing in the block, so this is chosen to be non-zero and proportional to the request. A console that needs more would have its constructor reject a block this size, and nothing here would see that."]
 found_in = [
     "PPSA02664-app0",
     "PPSA28061-app0",
