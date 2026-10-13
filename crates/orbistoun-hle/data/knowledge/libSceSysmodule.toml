@@ -6,16 +6,15 @@ arity = 1
 purpose = "Reports whether a system module is loaded."
 returns = "status"
 edge_cases = [
-    "Measured on hardware: obSCEne `060-module/sysmodule-query` reported pass, value 0x805a1000. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
-    "Answers loaded for any non-zero module id: nothing here tracks which modules a title actually loaded, so a guest checking for one it never requested is told it is present.",
-    "A zero id answers the measured unloaded code rather than reporting a non-module as present.",
-    "Measured on hardware (obSCEne REQ-20261012T1943Z-41aa, 000-boot/sysmodule-isloaded-lifecycle, report-1791836505.txt lines 30-49): id 0xb4 (AppContent) is already loaded in a fresh process - IsLoaded answers 0 before LoadModule, after it, and after UnloadModule, which also answers 0 and leaves it loaded. Ids 0x0e and 0x80 answer 0x805a1000 at every step, LoadModule and UnloadModule included; 0 and 0x7fff answer 0x805a1000 too. The console never answered 0x805a1001.",
-    "So this function's answer of 0 for 0xb4 matches the console. PPSA04263 calls IsLoaded(0xb4) and loads 0xb4 itself only on 0x805a1001 (eboot.bin file offsets 0x4d3fba, 0x1994a55), a branch the console's answer never takes either.",
+    "0xb4, 0x1b and 0x1c answer 0x805a1001 (unloaded) in a fresh process, 0 once sceSysmoduleLoadModule loaded them, and 0x805a1001 again after sceSysmoduleUnloadModule.",
+    "0x07 and 0x96 answer 0 from the start and still 0 after an unload.",
+    "0, 0x08, 0x0e, 0x15, 0x24, 0x80 and 0x7fff answer 0x805a1000: they name no module on FW 12.40.",
+    "PPSA04263 calls IsLoaded(0xb4) and loads 0xb4, with that library's init, only on 0x805a1001 (eboot.bin file offsets 0x4d3fba, 0x1994a55).",
+    "An earlier sweep (REQ-20261012T1943Z-41aa, report-1791836505.txt lines 30-49) found 0xb4 already loaded at its first step; the probe process had loaded it before, which the fresh-process sweep shows is not a title's starting state.",
 ]
-assumptions = [
-    "Which other ids a title's process has loaded at start is unestablished; the console answers 0x805a1000 for 0x0e, 0x80 and 0x7fff where this function answers 0.",
-]
-known_by = "assumed"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1600Z-sm41, reports/hardware/report-20261013-172400.log lines 1950-1990 (000-boot/sysmodule-isloaded-lifecycle), FW 12.40"
+note = "Ids no measurement covers answer 0, loaded, as D125 has every library resolved before the guest runs."
 found_on = "2026-09-01"
 
 [[function]]
@@ -23,16 +22,26 @@ name = "sceSysmoduleLoadModule"
 arity = 1
 purpose = "Loads a system module the guest names by id, so its exports resolve."
 returns = "status"
-known_by = "assumed"
+edge_cases = [
+    "Answers 0 for 0xb4, 0x1b, 0x1c, 0x07 and 0x96, after which IsLoaded answers 0.",
+    "Answers 0x805a1000 for 0x08, 0x0e, 0x15, 0x24 and 0x80.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1600Z-sm41, reports/hardware/report-20261013-172400.log lines 1950-1990 (000-boot/sysmodule-isloaded-lifecycle), FW 12.40"
+note = "The modules are already linked in this emulator, so the load is recorded rather than performed."
 found_on = "2026-09-01"
-note = "The modules are already linked in this emulator, so this reports success rather than doing the load a real system would."
 
 [[function]]
 name = "sceSysmoduleUnloadModule"
 arity = 1
 purpose = "Unloads a system module the guest loaded by id."
 returns = "status"
-known_by = "assumed"
+edge_cases = [
+    "Answers 0 for a loaded module; 0xb4, 0x1b and 0x1c then answer unloaded, while 0x07 and 0x96 stay loaded.",
+    "Answers 0x805a1000 for an id that names no module.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1600Z-sm41, reports/hardware/report-20261013-172400.log lines 1950-1990 (000-boot/sysmodule-isloaded-lifecycle), FW 12.40"
 found_on = "2026-09-01"
 
 [[function]]

@@ -658,35 +658,104 @@ fn user_service_get_initial_user(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// What the sysmodule calls answer, as a console answered them in a fresh process (obSCEne
+/// `REQ-20261013T1600Z-sm41`, `000-boot/sysmodule-isloaded-lifecycle`,
+/// `reports/hardware/report-20261013-172400.log` lines 1950-1990, FW 12.40).
+///
+/// Every library a title imports is resolved before the guest runs, so a load here pages nothing
+/// in (D125); what the calls track is whether the guest has asked. Identifiers no measurement
+/// covers keep D125's answer, loaded, so they move nothing.
+mod sysmodule_state {
+    use std::collections::BTreeSet;
+    use std::sync::Mutex;
+
+    /// `SCE_SYSMODULE_ERROR_INVALID_ID`: an identifier that names no module, from every call.
+    pub(super) const INVALID_ID: u64 = 0x805a_1000;
+    /// `SCE_SYSMODULE_ERROR_UNLOADED`: a module that exists and is not loaded.
+    pub(super) const UNLOADED: u64 = 0x805a_1001;
+
+    /// Identifiers every call refused with [`INVALID_ID`].
+    const INVALID: [u64; 7] = [0, 0x08, 0x0e, 0x15, 0x24, 0x80, 0x7fff];
+    /// Modules loaded before the process asked, which stay loaded through an unload.
+    const PRELOADED: [u64; 2] = [0x07, 0x96];
+    /// Modules that answered [`UNLOADED`] until loaded, and again after an unload. 0xb4 is the one
+    /// PPSA04263 loads, and its own init with it, only on that answer.
+    const ON_REQUEST: [u64; 3] = [0x1b, 0x1c, 0xb4];
+
+    /// The [`ON_REQUEST`] modules the guest has loaded and not unloaded.
+    fn loaded() -> &'static Mutex<BTreeSet<u64>> {
+        static LOADED: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+        &LOADED
+    }
+
+    pub(super) fn is_invalid(id: u64) -> bool {
+        INVALID.contains(&id)
+    }
+
+    /// Whether `id` is loaded: [`ON_REQUEST`] modules only once the guest loaded them.
+    pub(super) fn is_loaded(id: u64) -> bool {
+        !ON_REQUEST.contains(&id)
+            || loaded()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&id)
+    }
+
+    pub(super) fn load(id: u64) {
+        if ON_REQUEST.contains(&id) {
+            loaded()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id);
+        }
+    }
+
+    /// Unloads `id`; a [`PRELOADED`] module stays loaded, as it did on the console.
+    pub(super) fn unload(id: u64) {
+        if !PRELOADED.contains(&id) {
+            loaded()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+        }
+    }
+}
+
 /// `sceSysmoduleLoadModule(id)` - brings a system module in so its functions can be called.
 ///
-/// Always succeeds: the loader resolves every library a title imports before the guest runs, so
-/// the requested module is already callable. Answers `0`; a positive placeholder would read as a
-/// module handle the guest might dereference.
-fn sysmodule_load_module(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
-}
-
-/// `sceSysmoduleUnloadModule(id)` - a no-op that succeeds, since loading paged nothing in.
-fn sysmodule_unload_module(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
-}
-
-/// `SCE_SYSMODULE_ERROR_UNLOADED` - answered for an identifier that names no loaded module.
-///
-/// Measured: `sceSysmoduleIsLoaded(0)` answers the sysmodule error base `0x805a_0000` with its
-/// unloaded code (obSCEne's `060-module/sysmodule-query`).
-const SYSMODULE_UNLOADED: u64 = 0x805a_1000;
-
-/// `sceSysmoduleIsLoaded(id)` - whether a module is loaded.
-///
-/// A valid identifier answers `0` (loaded), since the loader resolves every module. Identifier 0
-/// is not a loadable module and answers the measured [`SYSMODULE_UNLOADED`].
-fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[0] == 0 {
-        return SYSMODULE_UNLOADED;
+/// Answers `0` and records the load; an identifier that names no module answers `0x805a1000`
+/// (measured). A positive placeholder would read as a module handle the guest might dereference.
+fn sysmodule_load_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let id = args[0] & 0xffff_ffff;
+    if sysmodule_state::is_invalid(id) {
+        return sysmodule_state::INVALID_ID;
     }
+    sysmodule_state::load(id);
     OK
+}
+
+/// `sceSysmoduleUnloadModule(id)` - answers `0` and records the unload, or `0x805a1000` for an
+/// identifier that names no module (measured).
+fn sysmodule_unload_module(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let id = args[0] & 0xffff_ffff;
+    if sysmodule_state::is_invalid(id) {
+        return sysmodule_state::INVALID_ID;
+    }
+    sysmodule_state::unload(id);
+    OK
+}
+
+/// `sceSysmoduleIsLoaded(id)` - `0` for a loaded module, `0x805a1001` for one not loaded, and
+/// `0x805a1000` for an identifier that names no module (measured; see [`sysmodule_state`]).
+fn sysmodule_is_loaded(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let id = args[0] & 0xffff_ffff;
+    if sysmodule_state::is_invalid(id) {
+        sysmodule_state::INVALID_ID
+    } else if sysmodule_state::is_loaded(id) {
+        OK
+    } else {
+        sysmodule_state::UNLOADED
+    }
 }
 
 /// Implementations this crate provides, by symbol name. Names rather than hashes, so the table can

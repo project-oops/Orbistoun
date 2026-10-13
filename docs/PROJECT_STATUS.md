@@ -9,6 +9,7 @@ out of date.
 |---|---|---|---|---|---|---|
 | PPSA03416-app0 | presented | 426 | 23,836,657 | 100% | `ran to the time limit` | `a4248793965ec937` new |
 | PPSA02664-app0 | presented | 399 | 14,884,460 | 100% | `ran to the time limit` | `4065a087cae374b7` new |
+| PPSA25872-app0 | presented | 378 | 22,349,725 | 100% | `ran to the time limit` | `d3481aff73f97ddc` new |
 | obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
 | PPSA28061-app0 | presented | 165 | 20,457,365 | 100% | `ran to the time limit` | `376eae5b08b1225f` new |
@@ -27,7 +28,6 @@ out of date.
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
-| PPSA25872-app0 | flipped | 333 | 8,694,966 | 100% | `ran to the time limit` | `5bd2fd6f67e9fe3d` match |
 | PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
 | MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
@@ -89,8 +89,8 @@ construction and are not comparable with the table above:
 |---|---|
 | Functions declared / implemented | 1257 / 1141 |
 | Declared in a library that serves nothing | 40 across 5 libraries - names written down, no implementation |
-| Recorded behaviours | 1165 - 426 published, 279 measured, 126 guest-observed, 321 assumed |
-| Open questions a hardware probe could settle | 927 |
+| Recorded behaviours | 1165 - 426 published, 282 measured, 126 guest-observed, 318 assumed |
+| Open questions a hardware probe could settle | 924 |
 | Symbol database | 30191 names - 718 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
