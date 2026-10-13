@@ -44,8 +44,8 @@ shell view's footer.
 ## What it does not handle yet
 
 The pipeline refuses what nobody has measured rather than guessing, and every refusal names
-its reason in the run report. `orbistoun-cli census --refusals` ranks the shader refusals the
-runs recorded by how many titles reach them: that ranking is outstanding GPU work, and each
+its reason in the run report. `orbistoun-cli census --refusals` ranks the shader and backend
+refusals the runs recorded by how many titles reach them: that ranking is outstanding GPU work, and each
 reason is settled by an obSCEne measurement before it is implemented
 ([THE_LOOP.md](../THE_LOOP.md#the-capability-sub-loop)).
 

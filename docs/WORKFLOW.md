@@ -288,9 +288,10 @@ executable and the modules it ships - whose knowledge entry is missing or not
 `measured`/`published`: library, name or hash, its `known_by`, whether orbistoun implements
 it, the calls the persisted traces recorded, and the titles that import it. Imports the
 title's own modules answer are left out; loading those is the work, not measuring them.
-`census --refusals` lists the shader refusals the persisted traces recorded, keyed by the
-translator's reason with stage and address stripped; a trace keeps its first submission's
-failures. Both rank by titles reached, then by volume.
+`census --refusals` lists what the persisted traces recorded refusing, by layer: the
+translator's shader failures (a trace keeps its first submission's) and the graphics backend's
+refused commands over the whole run, each keyed by reason with stage and address stripped. Both
+tables rank by titles reached, then by volume.
 
 The census is what a capability request is filed from: group its rows by library or GPU
 layer and file one obSCEne request per group, with any reference emulator's answers attached

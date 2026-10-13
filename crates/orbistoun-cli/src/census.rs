@@ -31,10 +31,13 @@ pub(crate) struct ImportRow {
 /// One shader refusal reason and the titles whose runs hit it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct RefusalRow {
-    /// The translator's reason, with the stage and address stripped.
+    /// Which layer refused: `shader` for the translator, `backend` for the graphics backend.
+    pub layer: &'static str,
+    /// The reason, with any stage and address stripped.
     pub reason: String,
-    /// How many shaders were refused for it, across every trace.
-    pub shaders: usize,
+    /// How many times it was refused across every trace: shaders for the translator, commands for
+    /// the backend.
+    pub count: u64,
     /// The guests whose traces carried it.
     pub titles: BTreeSet<String>,
 }
@@ -96,13 +99,14 @@ fn rank_imports(rows: &mut [ImportRow]) {
     });
 }
 
-/// Ranks refusal rows: most titles first, then most shaders, then by reason.
+/// Ranks refusal rows: most titles first, then most refusals, then by layer and reason.
 fn rank_refusals(rows: &mut [RefusalRow]) {
     rows.sort_by(|a, b| {
         b.titles
             .len()
             .cmp(&a.titles.len())
-            .then(b.shaders.cmp(&a.shaders))
+            .then(b.count.cmp(&a.count))
+            .then_with(|| a.layer.cmp(b.layer))
             .then_with(|| a.reason.cmp(&b.reason))
     });
 }
@@ -240,24 +244,32 @@ fn gather_refusals(
     traces: &[orbistoun_report::trace::CallTrace],
     filter: &[String],
 ) -> Vec<RefusalRow> {
-    let mut rows: BTreeMap<String, RefusalRow> = BTreeMap::new();
+    let mut rows: BTreeMap<(&'static str, String), RefusalRow> = BTreeMap::new();
+    let mut add = |layer: &'static str, reason: String, count: u64, title: &str| {
+        let row = rows
+            .entry((layer, reason.clone()))
+            .or_insert_with(|| RefusalRow {
+                layer,
+                reason,
+                count: 0,
+                titles: BTreeSet::new(),
+            });
+        row.count = row.count.saturating_add(count);
+        row.titles.insert(title.to_owned());
+    };
     for trace in traces {
         let title = trace_title(&trace.module);
         if !selected(&title, filter) {
             continue;
         }
-        let Some(submission) = &trace.submission else {
-            continue;
-        };
-        for failure in &submission.shader_failures {
-            let reason = refusal_reason(failure);
-            let row = rows.entry(reason.clone()).or_insert_with(|| RefusalRow {
-                reason,
-                shaders: 0,
-                titles: BTreeSet::new(),
-            });
-            row.shaders += 1;
-            row.titles.insert(title.clone());
+        if let Some(submission) = &trace.submission {
+            for failure in &submission.shader_failures {
+                add("shader", refusal_reason(failure), 1, &title);
+            }
+        }
+        // The backend's refusals are tallied over the whole run (D705), not one submission.
+        for (reason, count) in &trace.gpu_refusals {
+            add("backend", refusal_reason(reason), *count, &title);
         }
     }
     let mut rows: Vec<RefusalRow> = rows.into_values().collect();
@@ -310,15 +322,19 @@ fn print_imports(rows: &[ImportRow], titles: usize, top: usize) {
 fn print_refusals(rows: &[RefusalRow], top: usize) {
     println!();
     println!(
-        "{} shader refusal reason(s) in the persisted traces - each trace keeps its first submission's failures",
+        "{} refusal reason(s) in the persisted traces - shader failures from each trace's first submission, backend refusals over the whole run",
         rows.len()
     );
-    println!("{:>6}  {:>7}  REASON  [TITLES]", "TITLES", "SHADERS");
+    println!(
+        "{:>6}  {:>9}  {:<7}  REASON  [TITLES]",
+        "TITLES", "REFUSED", "LAYER"
+    );
     for row in rows.iter().take(top) {
         println!(
-            "{:>6}  {:>7}  {}  [{}]",
+            "{:>6}  {:>9}  {:<7}  {}  [{}]",
             row.titles.len(),
-            row.shaders,
+            row.count,
+            row.layer,
             row.reason,
             joined(&row.titles)
         );
@@ -472,17 +488,23 @@ mod tests {
         assert_eq!(order, ["wide", "middle", "often"]);
     }
 
-    /// Refusals rank the same way: titles reached, then how many shaders.
+    /// Refusals rank the same way: titles reached, then how many were refused, whichever layer.
     #[test]
-    fn refusals_rank_by_titles_reached_then_shaders() {
-        let row = |reason: &str, reach: &[&str], shaders: usize| RefusalRow {
+    fn refusals_rank_by_titles_reached_then_count() {
+        let row = |layer: &'static str, reason: &str, reach: &[&str], count: u64| RefusalRow {
+            layer,
             reason: reason.to_owned(),
-            shaders,
+            count,
             titles: titles(reach),
         };
-        let mut rows = vec![row("many", &["A"], 40), row("wide", &["A", "B"], 2)];
+        let mut rows = vec![
+            row("backend", "many", &["A"], 40),
+            row("shader", "wide", &["A", "B"], 2),
+            row("shader", "some", &["A"], 7),
+        ];
         rank_refusals(&mut rows);
-        assert_eq!(rows[0].reason, "wide");
+        let order: Vec<&str> = rows.iter().map(|r| r.reason.as_str()).collect();
+        assert_eq!(order, ["wide", "many", "some"]);
     }
 
     /// A trace counts toward the title whose directory holds its module.
