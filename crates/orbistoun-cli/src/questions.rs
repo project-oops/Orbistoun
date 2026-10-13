@@ -226,3 +226,65 @@ struct SharedAsk {
     /// not a share of anything.
     calls: u64,
 }
+
+/// `questions --spec <function>` - a draft call spec for one function, for `session --script`.
+///
+/// The library, NID and arity come from its declaration; which arguments are pointers comes from
+/// the first argument signature any stored run recorded for it, or else from the argument kinds its
+/// knowledge entry records.
+///
+/// # Errors
+///
+/// When no library declares the function.
+pub(crate) fn cmd_question_spec(
+    service: &orbistoun_service::Service,
+    function: &str,
+) -> anyhow::Result<()> {
+    let declared = service
+        .declared_symbols()
+        .into_iter()
+        .find(|d| d.symbol == function)
+        .ok_or_else(|| anyhow::anyhow!("no library declares {function}"))?;
+    let shape = recorded_shape(function).or_else(|| {
+        let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
+        let entry = knowledge.functions().find(|f| f.name == function)?;
+        (!entry.arguments.is_empty()).then(|| {
+            let kinds: Vec<&str> = entry.arguments.iter().map(|a| a.kind.as_str()).collect();
+            format!("({})", kinds.join(", "))
+        })
+    });
+    print!(
+        "{}",
+        orbistoun_probe::script::draft(
+            &orbistoun_probe::script::Declared {
+                library: &declared.library,
+                symbol: &declared.symbol,
+                nid: declared.nid,
+                arity: declared.arity,
+            },
+            shape.as_deref(),
+        )
+    );
+    Ok(())
+}
+
+/// The first argument signature a stored run recorded for `function`, by its bare name.
+fn recorded_shape(function: &str) -> Option<String> {
+    let dir = orbistoun_paths::Paths::resolve().traces_dir();
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| serde_json::from_str::<orbistoun_report::trace::CallTrace>(&text).ok())
+        .find_map(|trace| {
+            trace
+                .calls
+                .into_iter()
+                .find(|call| {
+                    call.label.rsplit("::").next() == Some(function) && !call.shape.is_empty()
+                })
+                .map(|call| call.shape)
+        })
+}

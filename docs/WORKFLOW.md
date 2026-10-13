@@ -244,6 +244,34 @@ compares a run under orbistoun with the same probe's transcript from the hardwar
 the checks that disagree. Sending and supervising the probe is Prosperous's job (see
 [THE_LOOP.md](THE_LOOP.md#probing-on-the-hardware)).
 
+### Call specs
+
+Most questions for the hardware have one shape: find a function, give it buffers filled with a
+byte nothing writes by chance, call it with each set of arguments, and dump the buffers. A call
+spec says that as data, so asking needs a file rather than new probe code:
+
+```bash
+orbistoun-cli questions --spec <function> > spec.toml     # a draft for one function
+orbistoun-cli session <host> --key <key> --out run.obs --script spec.toml
+orbistoun-cli probe run.obs --device <name>
+```
+
+A spec is a list of steps, each doing one thing. `as` names a step's result for later steps:
+
+| Step | Does | `as` binds |
+|---|---|---|
+| `resolve = { library = "...", symbol = "..." }` | looks the function up | its address |
+| `scratch = { bytes = 0x40, fill = 0xcc }` | takes a probe-owned block filled with `fill` | its address |
+| `call = <value>`, `args = [<value>, ...]` | calls with up to six integer arguments | the return value |
+| `read = <value>`, `bytes = <n>` | dumps memory | - |
+
+A value is a number, a `0x` string, or a name bound earlier. `questions --spec` takes the
+library, NID and arity from the declaration, and gives a block to each argument a run recorded
+as a pointer, or failing that, one the knowledge entry calls `ptr`. It reads every block back,
+then repeats the call with every pointer null. Setting the integer arms is the asker's job. The
+session writes the same transcript `probe` reads, and a spec that stops partway keeps what it
+sent. `scratch` needs a probe that announces it (obSCEne `REQ-20261012T1848Z-3feb`).
+
 ## What no measurement covers
 
 ```bash

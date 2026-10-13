@@ -3321,7 +3321,9 @@ version = "0.1.0"
 dependencies = [
  "orbistoun-hle",
  "orbistoun-nid",
+ "serde",
  "thiserror 2.0.20",
+ "toml 0.8.23",
 ]
 
 [[package]]

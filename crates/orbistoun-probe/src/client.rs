@@ -192,6 +192,19 @@ impl<S: Read + Write> Client<S> {
         self.command("read", &[&format!("{address:#x}"), &format!("{length:#x}")])
     }
 
+    /// Looks a symbol up at run time: the address as [`Outcome::Returned`], or
+    /// [`Outcome::Absent`] when the library has no such symbol.
+    pub fn resolve(&mut self, library: &str, symbol: &str) -> Result<Answer, ClientError> {
+        self.command("resolve", &[library, symbol])
+    }
+
+    /// Asks for a probe-owned block of `size` bytes, every one `fill`: its address as
+    /// [`Outcome::Returned`]. A call writes into it and a [`Client::read`] dumps it, so what a
+    /// function stores is measured without new probe code.
+    pub fn scratch(&mut self, size: u64, fill: u8) -> Result<Answer, ClientError> {
+        self.command("scratch", &[&format!("{size:#x}"), &format!("{fill:#04x}")])
+    }
+
     /// Closes the session cleanly.
     ///
     /// A session that ends without this is recorded as such, as a fact rather than an error.
@@ -323,6 +336,7 @@ fn capability_for(verb: &str) -> Option<Capability> {
         "blob" | "run" => Some(Capability::Blob),
         "reset" => Some(Capability::Reset),
         "report" => Some(Capability::Report),
+        "scratch" => Some(Capability::Scratch),
         _ => None,
     }
 }

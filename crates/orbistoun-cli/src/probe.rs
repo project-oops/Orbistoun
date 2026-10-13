@@ -137,12 +137,21 @@ pub(crate) fn cmd_session(
     address: &str,
     key: Option<&str>,
     out: &std::path::Path,
-    device: Option<&str>,
-    firmware: Option<&str>,
-    is_target: bool,
+    (device, firmware, is_target): (Option<&str>, Option<&str>, bool),
     budget: u64,
+    script: Option<&std::path::Path>,
 ) -> Result<()> {
     use std::io::Write as _;
+
+    // Read before connecting: a spec that does not parse sends nothing.
+    let script = script
+        .map(|path| {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            orbistoun_probe::script::Script::parse(&text)
+                .with_context(|| format!("reading the spec {}", path.display()))
+        })
+        .transpose()?;
 
     let address = if address.contains(':') {
         address.to_owned()
@@ -158,8 +167,18 @@ pub(crate) fn cmd_session(
         .map_err(|e| anyhow::anyhow!("negotiating with {address}: {e}"))?;
     println!("session {session}");
 
+    if let Some(script) = &script {
+        // A spec that stops partway still leaves everything it sent in the transcript.
+        match orbistoun_probe::script::run(&mut client, script) {
+            Ok(answers) => {
+                for answer in &answers {
+                    println!("step {} {:?} {}", answer.seq, answer.outcome, answer.detail);
+                }
+            }
+            Err(e) => println!("the spec stopped: {e}"),
+        }
     // Only what the probe announced: a reserved verb it does not implement is not sent.
-    if client.can(&orbistoun_probe::Capability::Report) {
+    } else if client.can(&orbistoun_probe::Capability::Report) {
         match client.report() {
             Ok(answer) => println!("report {}", answer.outcome),
             // A command that did not answer is the finding, not a client error. It is recorded and

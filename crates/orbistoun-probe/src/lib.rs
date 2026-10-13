@@ -13,6 +13,7 @@
 
 pub mod client;
 pub mod respond;
+pub mod script;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -52,6 +53,9 @@ pub enum Capability {
     Report,
     /// Submit work to the graphics device.
     Gpu,
+    /// Hand out probe-owned scratch memory, filled with a byte, for a call to write into and a
+    /// read to dump - so a spec runs without new probe code (obSCEne `REQ-20261012T1848Z-3feb`).
+    Scratch,
     /// A token this version does not know. Carried verbatim.
     Other(String),
 }
@@ -68,6 +72,7 @@ impl Capability {
             "reset" => Self::Reset,
             "report" => Self::Report,
             "gpu" => Self::Gpu,
+            "scratch" => Self::Scratch,
             other => Self::Other(other.to_owned()),
         }
     }

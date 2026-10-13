@@ -32,6 +32,7 @@ impl Capability {
             Self::Reset => "reset",
             Self::Report => "report",
             Self::Gpu => "gpu",
+            Self::Scratch => "scratch",
             Self::Other(token) => token,
         }
     }
@@ -346,6 +347,27 @@ pub trait Answers {
         let _ = (address, length);
         Err(Refusal::Unsupported)
     }
+
+    /// Looks a symbol up: its address, or [`None`] when the library has no such symbol.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Unsupported`] when nothing can be resolved.
+    fn resolve(&mut self, library: &str, symbol: &str) -> Result<Option<u64>, Refusal> {
+        let _ = (library, symbol);
+        Err(Refusal::Unsupported)
+    }
+
+    /// Hands out a block of `size` bytes, each `fill`, owned by the responder for the session:
+    /// its address.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Unsupported`] when this backend owns no memory to give.
+    fn scratch(&mut self, size: u64, fill: u8) -> Result<u64, Refusal> {
+        let _ = (size, fill);
+        Err(Refusal::Unsupported)
+    }
 }
 
 /// Serves the command protocol over one stream.
@@ -450,6 +472,8 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
             "report" => self.report(seq).map(|()| false),
             "call" => self.call(seq, args).map(|()| false),
             "read" => self.read(seq, args).map(|()| false),
+            "resolve" => self.resolve(seq, args).map(|()| false),
+            "scratch" => self.scratch(seq, args).map(|()| false),
             _ => self.refuse(seq, &Refusal::UnknownVerb).map(|()| false),
         }
     }
@@ -558,6 +582,48 @@ impl<S: Read + Write, A: Answers> Responder<S, A> {
                     detail: format!("{} bytes", bytes.len()),
                 })
             }
+            Err(reason) => self.emit(&Record::Refused { seq, reason }),
+        }
+    }
+
+    /// Looks a symbol up: `done` carrying the address, or `done` with `absent`.
+    fn resolve(&mut self, seq: u64, args: &[String]) -> std::io::Result<()> {
+        let (Some(library), Some(symbol)) = (args.first(), args.get(1)) else {
+            return self.refuse(seq, &Refusal::BadArgument);
+        };
+        self.ack(seq, "resolve")?;
+        match self.answers.resolve(library, symbol) {
+            Ok(Some(address)) => self.emit(&Record::Done {
+                seq,
+                outcome: Outcome::Returned(address),
+                detail: format!("{library}::{symbol}"),
+            }),
+            Ok(None) => self.emit(&Record::Done {
+                seq,
+                outcome: Outcome::Absent,
+                detail: format!("{library}::{symbol}"),
+            }),
+            Err(reason) => self.emit(&Record::Refused { seq, reason }),
+        }
+    }
+
+    /// Hands out a scratch block: `done` carrying its address.
+    fn scratch(&mut self, seq: u64, args: &[String]) -> std::io::Result<()> {
+        let size = args.first().and_then(|a| crate::hex(a));
+        let fill = args
+            .get(1)
+            .and_then(|f| crate::hex(f))
+            .and_then(|f| u8::try_from(f).ok());
+        let (Some(size), Some(fill)) = (size, fill) else {
+            return self.refuse(seq, &Refusal::BadArgument);
+        };
+        self.ack(seq, "scratch")?;
+        match self.answers.scratch(size, fill) {
+            Ok(address) => self.emit(&Record::Done {
+                seq,
+                outcome: Outcome::Returned(address),
+                detail: format!("{size:#x} bytes of {fill:#04x}"),
+            }),
             Err(reason) => self.emit(&Record::Refused { seq, reason }),
         }
     }

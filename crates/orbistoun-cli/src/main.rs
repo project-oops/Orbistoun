@@ -40,7 +40,7 @@ use crate::module::{
 };
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
-use crate::questions::cmd_questions;
+use crate::questions::{cmd_question_spec, cmd_questions};
 use crate::run::{cmd_handoff, cmd_link, cmd_native_build, cmd_run};
 use crate::shaders::cmd_shaders;
 use crate::status::cmd_status;
@@ -383,6 +383,11 @@ enum Command {
         /// sample can speak for the group (D538).
         #[arg(long)]
         premises: bool,
+        /// Instead of the list, print a draft call spec for this function: resolve it, a block
+        /// filled 0xcc for every pointer-shaped argument a run recorded, the call, the blocks read
+        /// back, and a null arm - for `session --script` (docs/WORKFLOW.md, "Call specs").
+        #[arg(long, value_name = "FUNCTION")]
+        spec: Option<String>,
     },
     /// Rank what to implement next, across every guest run so far.
     ///
@@ -574,6 +579,11 @@ enum Command {
         /// Seconds to wait for any one command before calling it a timeout.
         #[arg(long, default_value_t = 30)]
         budget: u64,
+        /// A call spec to run instead of the probe's compiled-in report: steps that resolve a
+        /// function, take scratch blocks filled with a byte, call it, and read the blocks back
+        /// (docs/WORKFLOW.md, "Call specs").
+        #[arg(long)]
+        script: Option<std::path::PathBuf>,
     },
     /// Read a probe transcript or corpus and report what it establishes.
     ///
@@ -1159,7 +1169,11 @@ fn dispatch_reports(command: &Command, service: &Service) -> Result<()> {
             top,
             json,
             premises,
-        } => cmd_questions(top, json, premises),
+            ref spec,
+        } => match spec {
+            Some(function) => cmd_question_spec(service, function)?,
+            None => cmd_questions(top, json, premises),
+        },
         Command::Worklist { top, static_gap } => {
             if static_gap {
                 cmd_worklist_static(service, top);
@@ -1327,14 +1341,14 @@ fn dispatch_probe(command: Command) -> Result<()> {
             firmware,
             is_target,
             budget,
+            script,
         } => cmd_session(
             &address,
             key.as_deref(),
             &out,
-            device.as_deref(),
-            firmware.as_deref(),
-            is_target,
+            (device.as_deref(), firmware.as_deref(), is_target),
             budget,
+            script.as_deref(),
         ),
         _ => unreachable!("dispatch_probe is only reached for probe commands"),
     }
