@@ -55,8 +55,10 @@ pub mod ult {
             "_sceUltConditionVariableWait" => 1,
             "_sceUltConditionVariableDestroy" => 1,
             // (ulthread, name, entry, arg, context, sizeContext) in registers; a runtime and optParam
-            // follow on the stack. Only the first is used.
+            // follow on the stack, and neither is read.
             "_sceUltUlthreadCreate" => 6,
+            // (ulthread, status)
+            "sceUltUlthreadJoin" => 2,
             // Arity two, read off the guest's calls: the third register holds a leftover.
             "sceUltWaitingQueueResourcePoolGetWorkAreaSize" => 2,
             "sceUltUlthreadRuntimeGetWorkAreaSize" => 2,
@@ -758,8 +760,9 @@ fn thrd_sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 // libSceUlt mutexes: ordinary named mutexes on the same `sync` primitives as the pthread and
 // `_Mtx_*` families, declared in the `ult` module. The guest stores the handle in the first word
-// of its `SceUltMutex`, so `mutex_at` resolves it as for pthread. Created `Allowed`, as the
-// `_Mtx_*` family is (D431). Success is zero.
+// of its `SceUltMutex`, so `mutex_at` resolves it as for pthread. Created `Errorcheck`, not
+// recursive: the console refuses an owner's second lock with `0x80810006` (obSCEne
+// `REQ-20261013T0911Z-u1t2`). Success is zero.
 
 /// How much memory an Ult object needs behind it, per thing it was sized for.
 ///
@@ -772,8 +775,9 @@ const ULT_WORK_AREA_PER_OBJECT: u64 = 0x80;
 const ULT_WORK_AREA_HEADER: u64 = 0x100;
 
 /// The work-area sizes measured on hardware, by `(threads, second count)`: obSCEne
-/// `REQ-20261012T2016Z-5df8`, `000-boot/sce-ult`, `report-1791878041.txt` (FW 12.40).
-const ULT_POOL_MEASURED: [((u64, u64), u64); 1] = [((16, 0), 0x440)];
+/// `REQ-20261012T2016Z-5df8` (`report-1791878041.txt`) and, for the pool at (16, 16),
+/// `REQ-20261013T0911Z-u1t2` - both `000-boot/sce-ult`, FW 12.40.
+const ULT_POOL_MEASURED: [((u64, u64), u64); 2] = [((16, 0), 0x440), ((16, 16), 0x640)];
 const ULT_RUNTIME_MEASURED: [((u64, u64), u64); 1] = [((16, 3), 0x1258)];
 
 /// A measured size where the counts were measured, and orbistoun's own proportional number
@@ -846,14 +850,24 @@ fn ult_construct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `_sceUltMutexCreate(mutex, name, optParam)`: constructs a named mutex where the guest asked.
+/// What an Ult mutex answers a lock it cannot take now: a self-relock by its owner, or a trylock
+/// while held (obSCEne `REQ-20261013T0911Z-u1t2`, `000-boot/sce-ult`, FW 12.40).
+const ULT_BUSY: u64 = 0x8081_0006;
+
+/// What an Ult mutex answers an unlock by a thread that does not hold it (the same measurement).
+const ULT_NOT_OWNER: u64 = 0x8081_0005;
+
+/// `_sceUltMutexCreate(mutex, name, pool, optParam)`: constructs a named mutex where the guest
+/// asked. The console needs a resource pool as the third argument; nothing here reads it.
 fn ult_mutex_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (out, name) = (args[0], args[1]);
     if out == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     // SAFETY: an address the guest passed for this call, valid by its contract.
-    let handle = sync::create(sync::Recursion::Allowed, &unsafe { read_name(name) });
+    // Not recursive: the console refuses its owner's second lock (measured), which
+    // `Errorcheck`'s deadlock answer carries to `ult_mutex_lock`.
+    let handle = sync::create(sync::Recursion::Errorcheck, &unsafe { read_name(name) });
     // SAFETY: an address the guest passed for this call, valid by its contract.
     if !unsafe { guest::write_u64(out, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
@@ -868,6 +882,8 @@ fn ult_mutex_lock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     match sync::acquire(handle, thread::adopt("main"), sync::Blocking::Forever) {
         Some(sync::Acquisition::Locked) => OK,
+        // The owner locking again (measured).
+        Some(sync::Acquisition::Deadlock) => ULT_BUSY,
         _ => u64::from(GuestError::InvalidArgument.as_raw()),
     }
 }
@@ -879,7 +895,7 @@ fn ult_mutex_unlock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     match sync::unlock(handle, thread::adopt("main")) {
         Some(true) => OK,
-        _ => u64::from(GuestError::vendor(orbistoun_core::errno::NOT_OWNER).as_raw()),
+        _ => ULT_NOT_OWNER,
     }
 }
 
@@ -890,9 +906,7 @@ fn ult_mutex_trylock(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     match sync::acquire(handle, thread::adopt("main"), sync::Blocking::Never) {
         Some(sync::Acquisition::Locked) => OK,
-        Some(sync::Acquisition::Busy | sync::Acquisition::Deadlock) => {
-            u64::from(GuestError::vendor(orbistoun_core::errno::BUSY).as_raw())
-        }
+        Some(sync::Acquisition::Busy | sync::Acquisition::Deadlock) => ULT_BUSY,
         None => u64::from(GuestError::InvalidHandle.as_raw()),
     }
 }
@@ -1002,12 +1016,18 @@ fn next_ult_thread() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// `_sceUltUlthreadCreate(ulthread, name, entry, arg, context, sizeContext, ...)`: creates a
-/// cooperative thread.
+/// `_sceUltUlthreadCreate(ulthread, name, entry, arg, context, sizeContext, runtime, optParam)`:
+/// creates a user-level thread, and here does not run it.
 ///
-/// Created, not run. A libSceUlt thread runs only when the running thread yields to the
-/// scheduler, and no scheduler is built, so this records the thread and answers success. Running
-/// the entry synchronously instead would hang on the first blocking wait the worker makes.
+/// The console runs it at once (obSCEne `REQ-20261013T0911Z-u1t2`, `000-boot/sce-ult`, FW
+/// 12.40): on a runtime worker, with its stack inside the caller's context block, before the
+/// creator looks. Run that way here - a guest thread per ulthread - PPSA28061 went back from
+/// `presented` at 157 imports to a fault after 99: one of its ulthreads calls the function at
+/// image+0xff7e0 with a null second argument and writes through it at `+0x574`, so something it
+/// reads is not ready when it runs here. Until that is understood the thread is recorded and not
+/// run, which keeps the title where it was. Its contexts are 8 KiB, 8 KiB, 32 KiB and 8 MiB, and
+/// orbistoun's own code runs on a guest thread's stack, so the small ones will need a stack of its
+/// own when they do run.
 fn ult_ulthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let out = args[0];
     if out == 0 {
@@ -7254,7 +7274,8 @@ mod tests {
         let sizes = |f: fn(&[u64; 6]) -> u64, a, b| f(&[a, b, 0, 0, 0, 0]);
         assert_eq!(sizes(super::ult_runtime_work_area_size, 16, 3), 0x1258);
         assert_eq!(sizes(super::ult_pool_work_area_size, 16, 0), 0x440);
-        let unmeasured = sizes(super::ult_pool_work_area_size, 16, 16);
+        assert_eq!(sizes(super::ult_pool_work_area_size, 16, 16), 0x640);
+        let unmeasured = sizes(super::ult_pool_work_area_size, 16, 32);
         assert!(
             unmeasured > 0 && unmeasured < 0x1_0000,
             "a usable size: {unmeasured:#x}"
@@ -8821,6 +8842,7 @@ mod tests {
         "_sceUltConditionVariableWait",
         "_sceUltConditionVariableDestroy",
         "_sceUltUlthreadCreate",
+        "sceUltUlthreadJoin",
         // The runtime and pool setup: declared in the `ult` module, implemented beside the table that
         // holds them.
         "sceUltInitialize",

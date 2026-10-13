@@ -44,9 +44,14 @@ found_on = "2026-09-01"
 [[function]]
 name = "_sceUltMutexCreate"
 arity = 3
-purpose = "Constructs a named user-level-thread mutex where the guest asked, storing a handle in its first word."
+purpose = "Constructs a named user-level-thread mutex where the guest asked, storing a handle in its first word: (mutex, name, pool, optParam)."
 returns = "status"
-known_by = "assumed"
+edge_cases = [
+    "Answers 0 given an initialised resource pool as its third argument.",
+    "The mutex is not recursive: its owner's second lock is refused 0x80810006.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
 found_on = "2026-09-01"
 note = 'An ordinary mutex on the shared sync primitives; the JSON initialiser creates one named "ultmtx" during static init (PPSA28061), and a stub answering the placeholder stranded it.'
 
@@ -85,11 +90,26 @@ found_on = "2026-09-01"
 [[function]]
 name = "_sceUltUlthreadCreate"
 arity = 6
-purpose = "Creates a cooperative user-level thread with an entry function; created but not yet scheduled."
+purpose = "Starts a user-level thread: (ulthread, name, entry, arg, context, sizeContext) in registers, the runtime and option block on the stack."
 returns = "status"
-known_by = "assumed"
+edge_cases = [
+    "Answers 0, and the entry runs on a runtime worker thread, not the creator's, with its stack inside the caller's context block (a local at 0x9a5054 in a 0x99d080..0x9a5080 block).",
+    "The entry had already run when the creator looked straight after create returned.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
 found_on = "2026-09-01"
-note = "Records the thread as created and returns success without running its entry - cooperative threads run only when yielded to, and no scheduler is built yet. A title that creates a worker and continues (the JSON initialiser) proceeds; one that yields expecting it to run reaches a named gap."
+note = "Served as a real guest thread on the caller's context block (crates/orbistoun-kernel/src/lib.rs ult_ulthread_create), so it runs alongside the creator; that it has always started before create returns is not promised here."
+
+[[function]]
+name = "sceUltUlthreadJoin"
+arity = 2
+purpose = "Waits for a user-level thread to end and writes the value it ended with."
+edge_cases = ["Answers 0 and writes the 32-bit exit value - 0x1234 for an entry ending with it - into exactly four bytes; the bytes around it are untouched."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-13"
 
 [[function]]
 name = "_sceUltUlthreadRuntimeCreate"
@@ -178,10 +198,11 @@ purpose = "How much memory a caller must set aside for a waiting-queue resource 
 edge_cases = [
     "Arity two, fixed by the run: the third register holds 0x7fff0001, orbistoun's own placeholder left by an earlier stub - the evidence that fixed sceKernelCreateEqueue (D516) and scePthreadSetaffinity (D523). PPSA28061 asks for 16 threads and 16 sync objects.",
     "Unimplemented, this answered the placeholder AS A SIZE and PPSA28061 passed it straight to malloc - 0x7fff0001 is 2 GiB, and this emulator served it. A size is a number the caller spends, so a placeholder here is not a loud failure but a very quiet 4 GiB across the two sizing calls (D564).",
-    "(16, 0) answers 0x440 (1088 bytes) on FW 12.40 (obSCEne REQ-20261012T2016Z-5df8, report-1791878041.txt); PPSA28061's (16, 16) is unmeasured.",
+    "(16, 0) answers 0x440 (1088 bytes) on FW 12.40 (obSCEne REQ-20261012T2016Z-5df8, report-1791878041.txt).",
+    "(16, 16) - PPSA28061's own request - answers 0x640 (1600 bytes) on FW 12.40 (obSCEne REQ-20261013T0911Z-u1t2).",
 ]
 known_by = "guest-observed"
-assumptions = ["Except the measured (16, 0), the size is orbistoun's own number: it owns the constructor too and stores nothing in the block, so this is chosen to be non-zero and proportional to the request. A console that needs more would have its constructor reject a block this size, and nothing here would see that."]
+assumptions = ["Except the measured (16, 0) and (16, 16), the size is orbistoun's own number: it owns the constructor too and stores nothing in the block, so this is chosen to be non-zero and proportional to the request. A console that needs more would have its constructor reject a block this size, and nothing here would see that."]
 found_in = [
     "PPSA02664-app0",
     "PPSA28061-app0",
@@ -196,10 +217,11 @@ purpose = "Locks a ULT mutex - the export without the leading underscore."
 returns = "status"
 edge_cases = [
     "Implemented as _sceUltMutexLock, taking the mutex _sceUltMutexCreate made. PPSA28061 locks through this name 10916 times in a run.",
+    "Answers 0 for a free mutex; its owner locking it again answers 0x80810006, and so does a trylock while it is held.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The underscore-less export behaves as the underscored one; nothing on the target has confirmed it."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40 - measured through this export"
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
 
@@ -210,10 +232,11 @@ purpose = "Unlocks a ULT mutex - the export without the leading underscore."
 returns = "status"
 edge_cases = [
     "Implemented as _sceUltMutexUnlock, taking the mutex _sceUltMutexCreate made. PPSA28061 locks through this name 10916 times in a run.",
+    "Answers 0 for the holder; an unlock of a mutex nobody holds answers 0x80810005.",
 ]
 found_by = "generated"
-known_by = "assumed"
-assumptions = ["The underscore-less export behaves as the underscored one; nothing on the target has confirmed it."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40 - measured through this export"
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
 
