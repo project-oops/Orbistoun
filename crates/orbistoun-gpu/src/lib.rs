@@ -197,6 +197,7 @@ use orbistoun_hle::guest_module;
 
 pub mod agc;
 pub mod agc_driver;
+mod agc_merge;
 pub mod ampr;
 
 guest_module! {

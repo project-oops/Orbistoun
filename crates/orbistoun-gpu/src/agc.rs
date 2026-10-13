@@ -20,6 +20,10 @@ guest_module! {
         // (record, vs, ps, ptr, registers, 4), as PPSA02664, PPSA03416 and PPSA28061 call them.
         "0x71040c4df8235e1d" => 6,
         "0x8a6f69da59a5b375" => 6,
+        // The shader-pair merge and its sizes: (out, A, B, aux, n, 0), as PPSA04263 and PPSA21564
+        // call them (`agc_merge`).
+        "0x0a4e469ba741de7d" => 6,
+        "0xe486fe61994e8976" => 6,
         // Packet-size queries, answered as measured (`measured_size!`).
         "sceAgcAcbAcquireMemGetSize" => 6,
         "sceAgcDcbAcquireMemGetSize" => 6,
@@ -350,9 +354,12 @@ const PRIM_STATE_LIST_BYTES: usize = 0x10;
 /// as above).
 const SEC_STATE_LIST_BYTES: usize = 0x18;
 
-/// `sceAgcCreatePrimState(prim_state, sec_state, null, vs, topology)`.
+/// `sceAgcCreatePrimState(prim_state, sec_state, gs, vs, topology)`.
 ///
 /// Fills the two register lists as `166-agc/create-prim-state` measured them, and returns `0`.
+/// With a geometry shader (`gs` non-null), `prim_state` is written zero and names no register:
+/// the output primitive is the geometry shader's (obSCEne `REQ-20261013T1900Z-ps04`,
+/// `166-agc/update-prim-state`, `create-geom`).
 /// `sec_state` holds user-config `(offset, value)` pairs: `GE_USER_VGPR_EN` named at `+0x8`, and
 /// `VGT_PRIMITIVE_TYPE` at `+0x10` with the topology (arg4) in the low five bits of `+0x14`, which a
 /// title copies into an indirect register load. `prim_state` names `VGT_GS_OUT_PRIM_TYPE` at `+0x8`
@@ -364,6 +371,7 @@ fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if prim_state == 0 || sec_state == 0 {
         return BAD_ARGUMENT;
     }
+    let geometry = args[2] != 0;
     // SAFETY: `sec_state` is the guest-owned buffer the call fills, at least as long as the list a
     // title copies out of it.
     unsafe { guest::write_bytes(sec_state, &[0; SEC_STATE_LIST_BYTES]) };
@@ -379,27 +387,44 @@ fn create_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // SAFETY: `+0x14` is a dword of the same buffer.
     unsafe { set_topology(sec_state, topology) };
+    if geometry {
+        return OK;
+    }
     // SAFETY: `prim_state` is the guest-owned 64-byte routing block; `+0x8` is a dword in it.
     unsafe {
         guest::write_u32(prim_state.wrapping_add(0x8), VGT_GS_OUT_PRIM_TYPE_OFFSET);
     }
+    // SAFETY: as above.
+    unsafe { set_out_primitive(prim_state, topology) };
+    OK
+}
+
+/// Writes the output primitive a measured topology maps to at `prim_state + 0xc`; an unmeasured
+/// topology leaves it.
+///
+/// # Safety
+///
+/// `prim_state` must be a guest-owned block at least 0x10 bytes long.
+unsafe fn set_out_primitive(prim_state: u64, topology: u32) {
     if let Some(&(_, out)) = MEASURED_OUT_PRIMITIVES
         .iter()
         .find(|(input, _)| *input == topology)
     {
-        // SAFETY: `+0xc` is a dword of the same block.
+        // SAFETY: `+0xc` is a dword of the block, by the caller's contract.
         unsafe {
             guest::write_u32(prim_state.wrapping_add(0xc), out);
         }
     }
-    OK
 }
 
 /// `sceAgcUpdatePrimState(prim_state, sec_state, topology)`.
 ///
-/// Updates the topology (arg2) in the low five bits of `sec_state + 0x14` and returns `0`
-/// (`166-agc/update-prim-state`). The routing word at `prim_state + 0xc` is not written, its value
-/// being unmeasured.
+/// Updates the topology (arg2) in the low five bits of `sec_state + 0x14`, writes the output
+/// primitive it maps to at `prim_state + 0xc`, and returns `0`. Both are measured for topologies 1,
+/// 2, 5, 7, 17 and 4, whether or not the state was made with a geometry shader. `prim_state + 0x8`
+/// is left: it names `VGT_GS_OUT_PRIM_TYPE` after a create without one and stays zero after one
+/// with (obSCEne `REQ-20261013T1900Z-ps04`, `166-agc/update-prim-state`,
+/// `reports/hardware/report-20261013-184500.log`).
 fn update_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (prim_state, sec_state, topology) = (args[0], args[1], args[2] as u32);
     if prim_state == 0 || sec_state == 0 {
@@ -407,6 +432,8 @@ fn update_prim_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
     // SAFETY: `sec_state` is the guest-owned buffer; `+0x14` is a readable, writable dword.
     unsafe { set_topology(sec_state, topology) };
+    // SAFETY: `prim_state` is the guest-owned block the create filled.
+    unsafe { set_out_primitive(prim_state, topology) };
     OK
 }
 
@@ -1449,6 +1476,8 @@ fn cb_nop_get_size(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
     ("0x7d86501b8094ef57", agc_packet_payload),
     ("0x6dd715e95973a4fc", index_type_6dd715e9),
+    ("0x0a4e469ba741de7d", crate::agc_merge::merge_shaders),
+    ("0xe486fe61994e8976", crate::agc_merge::merged_sizes),
     ("sceAgcDcbWriteData", dcb_write_data),
     (
         "sceAgcWriteDataPatchSetAddressOrOffset",
@@ -1978,6 +2007,52 @@ mod tests {
             prim[0x10..].iter().all(|&byte| byte == 0xa5),
             "past prim_state's list"
         );
+    }
+
+    /// An update writes the output primitive at `prim_state + 0xc` and the topology in
+    /// `sec_state`, from a state made without a geometry shader and from one made with one, whose
+    /// `prim_state` the create leaves zero (`REQ-20261013T1900Z-ps04`, `166-agc/update-prim-state`).
+    #[test]
+    fn an_update_moves_the_output_primitive_as_measured() {
+        let vs = [0u8; 0x40];
+        for geometry in [0, vs.as_ptr() as u64] {
+            let mut prim = [0u8; 0x10];
+            let mut sec = [0u8; 0x18];
+            let mut args = [0u64; GUEST_ARG_REGISTERS];
+            args[0] = prim.as_mut_ptr() as u64;
+            args[1] = sec.as_mut_ptr() as u64;
+            args[2] = geometry;
+            args[3] = vs.as_ptr() as u64;
+            args[4] = 4;
+            assert_eq!(create_prim_state(&args), OK);
+            let named = if geometry == 0 { 0x29b_u32 } else { 0 };
+            let expect_create = if geometry == 0 { 2_u32 } else { 0 };
+            assert_eq!(prim[8..12], named.to_le_bytes(), "create, gs {geometry:#x}");
+            assert_eq!(prim[12..16], expect_create.to_le_bytes());
+            for (topology, out) in [(1, 0), (2, 1), (5, 2), (7, 3), (17, 4), (4, 2)] {
+                let update = [
+                    prim.as_mut_ptr() as u64,
+                    sec.as_mut_ptr() as u64,
+                    topology,
+                    0,
+                    0,
+                    0,
+                ];
+                assert_eq!(update_prim_state(&update), OK);
+                assert_eq!(prim[..8], [0; 8]);
+                assert_eq!(prim[8..12], named.to_le_bytes(), "{topology}");
+                assert_eq!(
+                    prim[12..16],
+                    u32::try_from(out).unwrap().to_le_bytes(),
+                    "{topology}"
+                );
+                assert_eq!(sec[0x10..0x14], 0x242_u32.to_le_bytes());
+                assert_eq!(
+                    sec[0x14..0x18],
+                    u32::try_from(topology).unwrap().to_le_bytes()
+                );
+            }
+        }
     }
 
     /// The DMA patches write a 64-bit address's halves into their two dwords, the high half over

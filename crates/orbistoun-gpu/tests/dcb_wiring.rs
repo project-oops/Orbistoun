@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        87,
+        89,
         concat!(
             "the wired builder count changed - this test is where the count lives, so update ",
             "this number"

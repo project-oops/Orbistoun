@@ -178,6 +178,7 @@ edge_cases = [
     "MEASURED (obSCEne 9a41): writes the primitive topology into the low five bits of sec_state+0x14. Real arity is 5 (prim_state, sec_state, null, vs, topology); the declaration's 6 is the trampoline capture, so no arity is recorded here.",
     "MEASURED (166-agc/create-prim-state, zeroed 64-byte buffers, eight topologies): sec_state's first 32 bytes are the words 0, 0, 0x262, 0, 0x242, topology, 0, 0 - user-config (offset, value) pairs GE_USER_VGPR_EN then VGT_PRIMITIVE_TYPE, which a title copies into an indirect register load with sceAgcSetUcRegIndirectPatchAddRegisters(patch, 3, sec_state); prim_state's are 0, 0, 0x29b, out, 0, 0, 0, 0 - VGT_GS_OUT_PRIM_TYPE with out 0 for topology 1, 1 for 2, 2 for 4, 5, 6 and 9, 3 for 7 and 4 for 17.",
     "MEASURED (166-agc/create-prim-state, arms topo-4-a5 and topo-17-a5, buffers filled with 0xa5, reports/hardware/20261009-104652-eboot.obs.log): the call writes prim_state's first 0x10 bytes and sec_state's first 0x18, its zero words included, and nothing after them; the topology dword is written whole. orbistoun writes exactly those (D781). A topology not measured leaves the output primitive zero.",
+    "With a geometry shader as the third argument, prim_state's 0x10 bytes are all zero - no VGT_GS_OUT_PRIM_TYPE pair - while sec_state is written as without one (REQ-20261013T1900Z-ps04, create-geom, reports/hardware/report-20261013-184500.log).",
 ]
 known_by = "measured"
 cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state; reports/hardware/20261007-113500-eboot.obs.log lines 10585-10616, section 166-agc/create-prim-state."
@@ -731,9 +732,12 @@ found_on = "2026-09-12"
 [[function]]
 name = "sceAgcUpdatePrimState"
 purpose = "Updates the primitive topology in an existing primitive-state block."
-edge_cases = ["MEASURED (obSCEne 9a41): rewrites the low five bits of sec_state+0x14 with the new topology; the sweep recorded topo-orig 4 -> topo-updated 1. Real arity is 3 (prim_state, sec_state, topology); the declaration's 6 is the trampoline capture."]
+edge_cases = [
+    "MEASURED (obSCEne 9a41): rewrites the low five bits of sec_state+0x14 with the new topology; the sweep recorded topo-orig 4 -> topo-updated 1. Real arity is 3 (prim_state, sec_state, topology); the declaration's 6 is the trampoline capture.",
+    "It also writes the output primitive at prim_state+0xc as the create maps it - topologies 1, 2, 5, 7, 17 and 4 to 0, 1, 2, 3, 4 and 2 - and leaves prim_state+0x8: 0x29b after a create without a geometry shader, still zero after one with (REQ-20261013T1900Z-ps04).",
+]
 known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/update-prim-state."
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, and REQ-20261013T1900Z-ps04, reports/hardware/report-20261013-184500.log, section 166-agc/update-prim-state."
 found_on = "2026-09-12"
 
 [[function]]
@@ -1111,11 +1115,13 @@ name = "0x0a4e469ba741de7d"
 purpose = "An unnamed libSceAgc call PPSA21564 makes 31 times during set-up: (u64, u64, u64, 0, ...)."
 edge_cases = [
     "MEASURED (200-census/libSceAgc/0x0a4e469ba741de7d, NID fd5Bp5tGTgo): 0x8a6c0008 with every argument a buffer, with the real shape over 0xa5-filled records, with shader objects sceAgcCreateShader had just made, and with the vertex shader alone; nothing written in any. All arguments zero faulted (signal 11).",
-    "No success path has been measured, so it is not implemented.",
+    "On PPSA04263's own pair - shader A stage 5, B stage 7 - (out, A, B, aux, n, 0) answers 0 for n 4 and 1: out gets B's first 0x60 bytes with +0x08 cleared, +0x20 pointing at aux and the stage byte at +0x5a 3; aux gets B's SH register list, ten {reg, value} pairs, with PGM_LO/HI from A's code address, A's two 0x100 values in B's first two 0x100 entries, and RSRC1's VGPR and RSRC2's user-SGPR fields from A.",
+    "With A and B swapped it answers 0x8a6c0008.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261009T1130Z-cn11, reports/hardware/20261009-205500-complete.log lines 16996-17017."
-found_in = ["PPSA21564-app0"]
+cites = "obSCEne REQ-20261009T1130Z-cn11 (reports/hardware/20261009-205500-complete.log lines 16996-17017) and REQ-20261013T1800Z-sp02 (reports/hardware/report-20261013-184500.log, 200-census/libSceAgc/ppsa04263-shader-pair)."
+note = "Served by crates/orbistoun-gpu/src/agc_merge.rs. One pair was measured, so three rules are generalised from it: the VGPR and user-SGPR fields take the larger of the two shaders' (A's was larger), and A's 0x100 values fill B's in order. obSCEne REQ-20261013T2000Z-sp03 asks for a second pair."
+found_in = ["PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-09"
 
 [[function]]
@@ -1123,11 +1129,12 @@ name = "0xe486fe61994e8976"
 purpose = "An unnamed libSceAgc call PPSA21564 makes 31 times beside 0x0a4e469ba741de7d: (ptr, u64, u64, u64, u64, 0)."
 edge_cases = [
     "MEASURED (200-census/libSceAgc/0xe486fe61994e8976, NID dolOmWH+huQ): 0x8a6c0008 with shader objects sceAgcCreateShader had just made and with the vertex shader alone; nothing written.",
-    "No success path has been measured, so it is not implemented.",
+    "On PPSA04263's own pair - shader A stage 5, B stage 7 - (out, A, B, state, n, 0) answers 0 for n 4 and 1 and writes {u64 0x50, u64 4} to out, leaving state untouched: B's SH register count (10) times eight - the bytes of the list 0x0a4e469ba741de7d writes - and B's CX register count. Swapped, 0x8a6c0008.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261009T1130Z-cn11, reports/hardware/20261009-205500-complete.log, 200-census/libSceAgc/0xe486fe61994e8976."
-found_in = ["PPSA21564-app0"]
+cites = "obSCEne REQ-20261009T1130Z-cn11 (reports/hardware/20261009-205500-complete.log) and REQ-20261013T1800Z-sp02 (reports/hardware/report-20261013-184500.log, 200-census/libSceAgc/ppsa04263-shader-pair)."
+note = "Served by crates/orbistoun-gpu/src/agc_merge.rs. That both sizes come from B is generalised from the one measured pair."
+found_in = ["PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-09"
 
 [[function]]
