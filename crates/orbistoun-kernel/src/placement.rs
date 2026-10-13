@@ -8,6 +8,13 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlacementError {
     /// The host refused the mask, with the OS's own error.
+    #[cfg_attr(
+        not(any(windows, target_os = "linux")),
+        allow(
+            dead_code,
+            reason = "constructed only on a host with an affinity call; a test names it everywhere"
+        )
+    )]
     Refused(String),
     /// This host has no call that sets a thread's affinity.
     #[cfg_attr(

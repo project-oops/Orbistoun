@@ -248,8 +248,10 @@ fn is_our_guest(module: &str) -> bool {
 /// payload name for one of ours (`dist`). The census attributes each direct syscall with it,
 /// because the aggregate census totals every module's trace.
 fn guest_label(module: &str) -> String {
+    // Both separators whatever this host uses: a trace keeps the path as the recording host wrote
+    // it, and one recorded on Windows is read on Linux too.
     let parts: Vec<&str> = module
-        .split(['/', std::path::MAIN_SEPARATOR])
+        .split(['/', '\\'])
         .filter(|p| !p.is_empty())
         .collect();
     match parts.as_slice() {
