@@ -222,6 +222,20 @@ edge_cases = [
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261012T1816Z-7af9, reports/report-1791836505.txt lines 837-907 (000-boot/net-inet-pton), FW 12.40"
-note = "orbistoun does not write the errno a refusal sets, because sceNetErrnoLoc is not served."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceNetErrnoLoc"
+arity = 0
+purpose = "The address of the library's errno."
+returns = "pointer"
+edge_cases = [
+    "Two calls on one thread answered the same address.",
+    "A failing sceNetSocketClose(9999) wrote 9 there; a sceNetInetPton that then succeeded left it 9.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1816Z-7af9, reports/report-1791836505.txt lines 837-907 (000-boot/net-inet-pton), FW 12.40"
+note = "orbistoun keeps one slot per thread, apart from libc's errno; no second thread was compared."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-13"

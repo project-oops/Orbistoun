@@ -83,3 +83,23 @@ fn the_refusals_answer_as_measured() {
     regs[..3].copy_from_slice(&[2, source.as_ptr() as u64, 0]);
     assert_eq!(call(&regs), 1, "null dst with good text");
 }
+
+/// `sceNetErrnoLoc` answers one address on a thread; a failing close writes 9 there and a
+/// succeeding `sceNetInetPton` leaves it; a refused family writes `0x2f`.
+#[test]
+fn the_errno_slot_is_written_by_failure_only() {
+    let location = implementation("sceNetErrnoLoc");
+    let none = [0_u64; GUEST_ARG_REGISTERS];
+    let slot = location(&none);
+    assert_eq!(location(&none), slot, "the same address on a thread");
+    let mut close = none;
+    close[0] = 9999;
+    assert_eq!(implementation("sceNetSocketClose")(&close), 0x8041_0109);
+    // SAFETY: the slot sceNetErrnoLoc answered, this thread's own.
+    let read = || unsafe { *(slot as usize as *const i32) };
+    assert_eq!(read(), 9);
+    assert_eq!(pton(2, "192.168.1.1").0, 1);
+    assert_eq!(read(), 9, "a success leaves it");
+    assert_eq!(pton(99, "192.168.1.1").0, 0x8041_012f);
+    assert_eq!(read(), 0x2f);
+}

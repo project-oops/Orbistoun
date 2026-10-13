@@ -7,7 +7,8 @@
 //!
 //! Arities other than `6` are the types obSCEne's `src/probe/sections/net.c` calls through:
 //! they establish the first N arguments, not that there is no further one. The resolvers,
-//! datagram calls and `sceNetErrnoLoc` are declared and unserved.
+//! datagram calls are declared and unserved. A failure also writes its errno to the slot
+//! `sceNetErrnoLoc` answers.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_fs::socket::{self as bodies, Answer};
@@ -23,8 +24,29 @@ use super::NET_ERROR_BASE;
 fn as_vendor(answer: Answer) -> u64 {
     match answer {
         Ok(value) => value,
-        Err(errno) => u64::from(GuestError::vendor_in(NET_ERROR_BASE, errno).as_raw()),
+        Err(errno) => refuse(errno),
     }
+}
+
+thread_local! {
+    /// This library's errno, the slot `sceNetErrnoLoc` answers. A failing call writes it and a
+    /// succeeding one leaves it (measured, `-7af9`). Per thread is assumed: only two calls on one
+    /// thread were compared, and they answered the same address.
+    static NET_ERRNO: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+/// A failure in this library's spelling, `0x8041_0100 | errno`, with the errno written to the
+/// slot `sceNetErrnoLoc` answers.
+fn refuse(errno: u32) -> u64 {
+    NET_ERRNO.with(|slot| slot.set(i32::try_from(errno).unwrap_or(i32::MAX)));
+    u64::from(GuestError::vendor_in(NET_ERROR_BASE, errno).as_raw())
+}
+
+/// `sceNetErrnoLoc()`: the address of this thread's library errno - the same address on every call
+/// from a thread (measured: `ptrs-equal 1`). A failing `sceNetSocketClose(9999)` wrote 9 there and
+/// a `sceNetInetPton` that then succeeded left it 9.
+fn errno_location(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    NET_ERRNO.with(|slot| slot.as_ptr() as usize as u64)
 }
 
 /// One `GuestFn` per errno-bearing body, in this library's spelling.
@@ -94,15 +116,15 @@ fn pton(family: u64, text: &[u8]) -> Option<Vec<u8>> {
 /// `sceNetInetPton(family, src, dst)`: 1 with the 4 or 16 address bytes written, 0 for text that
 /// is no address with `dst` untouched, `0x8041012f` for a family other than 2 or 28 (99 and 1
 /// measured), `0x80410116` for a null `src`. A null `dst` with good text answers 1 and writes
-/// nothing (measured). The errno each refusal sets (`0x2f`, `0x16`) is not written:
-/// `sceNetErrnoLoc` is not served.
+/// nothing (measured). Each refusal writes its errno (`0x2f`, `0x16`, measured); text that is no
+/// address leaves it.
 fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let [family, src, dst, ..] = *args;
     if family != PTON_INET && family != PTON_INET6 {
-        return u64::from(GuestError::vendor_in(NET_ERROR_BASE, 0x2f).as_raw());
+        return refuse(0x2f);
     }
     if src == 0 {
-        return u64::from(GuestError::vendor_in(NET_ERROR_BASE, 0x16).as_raw());
+        return refuse(0x16);
     }
     // SAFETY: the guest's text, read through the checked accessor up to its terminator.
     let Some(text) = (unsafe { orbistoun_mem::guest::read_cstr(src, PTON_TEXT_MAX) }) else {
@@ -113,7 +135,7 @@ fn inet_pton(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     };
     // SAFETY: the guest's destination, as many bytes as the family's address.
     if dst != 0 && !unsafe { orbistoun_mem::guest::write_bytes(dst, &address) } {
-        return u64::from(GuestError::vendor_in(NET_ERROR_BASE, 0x16).as_raw());
+        return refuse(0x16);
     }
     1
 }
@@ -139,6 +161,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         // function.
         ("sceNetHtons", bodies::htons),
         ("sceNetInetPton", inet_pton),
+        ("sceNetErrnoLoc", errno_location),
     ]
 }
 
@@ -147,7 +170,7 @@ guest_module! {
         "sceNetAccept" => 3,
         "sceNetBind" => 3,
         "sceNetConnect" => 3,
-        "sceNetErrnoLoc" => 6,
+        "sceNetErrnoLoc" => 0,
         "sceNetGetsockname" => 3,
         "sceNetHtons" => 1,
         // (family, src, dst)
