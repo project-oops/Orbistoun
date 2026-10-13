@@ -13,3 +13,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261007T0850Z-fm02, reports/hardware/20261007-102530-eboot.obs.log lines 4379-4409 (130-layout/font-create-library-ft)"
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceFontSelectRendererFt"
+arity = 1
+purpose = "Selects the FreeType-backed renderer implementation: answers the selection a renderer is created over."
+returns = "pointer"
+edge_cases = [
+    "sceFontSelectRendererFt(0) answers a pointer; sceFontSelectRendererFt(1) answers null.",
+    "orbistoun answers a pointer to a zeroed block it owns for 0 (D151), null otherwise.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1730Z-fr03, reports/hardware/report-20261013-184500.log lines 13814-13855 (130-layout/font-render-glyph), FW 12.40"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-13"

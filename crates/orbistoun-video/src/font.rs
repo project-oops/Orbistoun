@@ -10,6 +10,7 @@ pub mod ft {
     guest_module! {
         "libSceFontFt" {
             "sceFontSelectLibraryFt" => 1,
+            "sceFontSelectRendererFt" => 1,
         }
     }
 }
@@ -32,6 +33,10 @@ guest_module! {
         "sceFontSupportExternalFonts" => 3,
         // (library, 0, size)
         "sceFontAttachDeviceCacheBuffer" => 3,
+        // (memory, selection, edition, &renderer)
+        "sceFontCreateRendererWithEdition" => 4,
+        // (&renderer)
+        "sceFontDestroyRenderer" => 1,
         // (font, code, surface, metrics, result), the position in xmm0/xmm1
         "sceFontRenderCharGlyphImage" => 5,
         "sceFontRenderCharGlyphImageHorizontal" => 5,
@@ -136,6 +141,50 @@ pub(crate) fn font_create_library_with_edition(args: &[u64; GUEST_ARG_REGISTERS]
         .insert(library, Library { memory, cache: 0 });
     // SAFETY: as above.
     unsafe { guest::write_u64(out, library) };
+    OK
+}
+
+/// The bytes of a renderer object the measurement dumped (`renderer-obj-100h`).
+const RENDERER_BYTES: u64 = 0x100;
+
+/// `sceFontSelectRendererFt(value)`: 0 answers a pointer to the FreeType renderer selection, 1
+/// answers null (obSCEne `REQ-20261013T1730Z-fr03`, `130-layout/font-render-glyph`,
+/// `reports/hardware/report-20261013-184500.log` lines 13814-13815). The selection is the
+/// library's; here a zeroed block, made once (D151). Any other value is unmeasured and answers null.
+pub(crate) fn font_select_renderer_ft(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    static SELECTION: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    if args[0] != 0 {
+        return 0;
+    }
+    SELECTION.get_or_init(|| zeroed_block(0x40)).unwrap_or(0)
+}
+
+/// `sceFontCreateRendererWithEdition(memory, selection, edition, &renderer)`: over a font memory
+/// object, writes a renderer pointer and answers 0, for PPSA21564's edition
+/// `0x0700100000000000`; a null memory object or a null `&renderer` answers `0x80460002` (`fr03`,
+/// lines 13816-13822). The renderer is the library's own object; here a zeroed block of its
+/// measured size, owned here (D151).
+pub(crate) fn font_create_renderer_with_edition(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (memory, out) = (args[0], args[3]);
+    if memory == 0 || out == 0 {
+        return INVALID_ARGUMENT;
+    }
+    let Some(renderer) = zeroed_block(RENDERER_BYTES) else {
+        return u64::from(orbistoun_core::GuestError::NoMemory.as_raw());
+    };
+    // SAFETY: the guest's out-parameter, written through the checked accessor.
+    if unsafe { guest::write_u64(out, renderer) } {
+        OK
+    } else {
+        INVALID_ARGUMENT
+    }
+}
+
+/// `sceFontDestroyRenderer(&renderer)`: clears `renderer` and answers 0 (`fr03`, lines
+/// 13854-13855). The block is not reused.
+pub(crate) fn font_destroy_renderer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's renderer pointer, cleared through the checked accessor.
+    unsafe { guest::write_u64(args[0], 0) };
     OK
 }
 

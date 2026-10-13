@@ -35,3 +35,27 @@ fn a_render_with_no_font_is_refused_and_writes_nothing() {
         }
     }
 }
+
+/// A renderer is created over a font memory object in PPSA21564's shape and destroyed, and a
+/// null memory object or out-pointer is refused `0x80460002` (`REQ-20261013T1730Z-fr03`).
+#[test]
+fn a_renderer_is_created_and_destroyed_as_measured() {
+    let selection = call("sceFontSelectRendererFt", [0; 6]);
+    assert_ne!(selection, 0);
+    assert_eq!(call("sceFontSelectRendererFt", [1, 0, 0, 0, 0, 0]), 0);
+    let memory = [0_u8; 0x40];
+    let mut renderer = 0_u64;
+    let out = std::ptr::addr_of_mut!(renderer) as u64;
+    let create = |memory: u64, out: u64| {
+        call(
+            "sceFontCreateRendererWithEdition",
+            [memory, selection, 0x0700_1000_0000_0000, out, 0, 0],
+        )
+    };
+    assert_eq!(create(memory.as_ptr() as u64, out), 0);
+    assert_ne!(renderer, 0);
+    assert_eq!(create(0, out), 0x8046_0002);
+    assert_eq!(create(memory.as_ptr() as u64, 0), 0x8046_0002);
+    assert_eq!(call("sceFontDestroyRenderer", [out, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(renderer, 0);
+}

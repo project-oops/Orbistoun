@@ -127,3 +127,30 @@ known_by = "measured"
 cites = "obSCEne REQ-20260926T1952Z-7795, 130-layout/font-render-glyph, report-1791727748.txt lines 5878-5911, FW 12.40"
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-13"
+
+[[function]]
+name = "sceFontCreateRendererWithEdition"
+arity = 4
+purpose = "Creates a font renderer over a font memory object: (memory, selection, edition, &renderer)."
+returns = "status"
+edge_cases = [
+    "Over a font memory object, with sceFontSelectRendererFt(0)'s selection and PPSA21564's edition 0x0700100000000000, answers 0 and writes a renderer pointer.",
+    "A null memory object, or a null &renderer, answers 0x80460002.",
+    "PPSA21564 asserts on any other answer (FontSystem.cpp line 100, 'sceFontCreateRenderer 0x%08x(%d)').",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1730Z-fr03, reports/hardware/report-20261013-184500.log lines 13814-13855 (130-layout/font-render-glyph), FW 12.40"
+note = "The console's renderer object is 0x100 bytes of its own state; orbistoun hands out a zeroed block of that size (D151)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceFontDestroyRenderer"
+arity = 1
+purpose = "Destroys a font renderer: (&renderer)."
+returns = "status"
+edge_cases = ["Answers 0 and clears the renderer pointer."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1730Z-fr03, reports/hardware/report-20261013-184500.log lines 13814-13855 (130-layout/font-render-glyph), FW 12.40"
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-13"

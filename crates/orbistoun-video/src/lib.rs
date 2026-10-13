@@ -793,6 +793,12 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceFontMemoryInit", font::font_memory_init),
         ("sceFontMemoryTerm", font::font_memory_term),
         ("sceFontSelectLibraryFt", font::font_select_library_ft),
+        ("sceFontSelectRendererFt", font::font_select_renderer_ft),
+        (
+            "sceFontCreateRendererWithEdition",
+            font::font_create_renderer_with_edition,
+        ),
+        ("sceFontDestroyRenderer", font::font_destroy_renderer),
         (
             "sceFontCreateLibraryWithEdition",
             font::font_create_library_with_edition,
