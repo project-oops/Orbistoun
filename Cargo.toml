@@ -116,6 +116,11 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # Kept for the crates that build their own subscriber. `oops-log` is the one that should be
 # installing it - see below - and this stays only until nothing else does.
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The Tracy profiler's client, only in a build with the `tracy` feature (D829). Its crash handler,
+# system tracing and sampling are off: the crash handler would install an exception handler beside
+# the one guest-page guards answer (D717, D720, D824), and sampling walks guest stacks through ETW,
+# which cannot. `ondemand` records only while a viewer is connected; `broadcast` lets one find it.
+tracy-client = { version = "0.19", default-features = false, features = ["enable", "ondemand", "broadcast"] }
 
 # Shared with the rest of the collection, rather than a fifth copy here. `oops-build` replaces
 # what `orbistoun-env::build` used to do itself; `oops-log` replaces the subscriber that was

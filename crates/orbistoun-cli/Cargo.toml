@@ -46,6 +46,10 @@ tracing = { workspace = true }
 image = { workspace = true }
 sha2 = { workspace = true }
 
+[features]
+# The Tracy profiler's zones, in the worker this binary runs (D829).
+tracy = ["orbistoun-worker/tracy"]
+
 [dev-dependencies]
 # Temp directories for the provenance guard tests: each writes a throwaway module
 # and a throwaway ceiling, because a guard is only trustworthy once it has been

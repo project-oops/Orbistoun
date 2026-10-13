@@ -801,19 +801,45 @@ impl Session {
         })
     }
 
-    /// Picks the first physical device and its first queue family that can compute.
+    /// Picks the physical device `ORBISTOUN_GPU` names (D828) and its first queue family that can
+    /// compute.
     fn compute_family(
         instance: &ash::Instance,
     ) -> Result<(vk::PhysicalDevice, u32), (&'static str, vk::Result)> {
         // SAFETY: the instance is live.
-        let physical = unsafe { instance.enumerate_physical_devices() }
-            .map_err(|e| ("enumerate_physical_devices", e))?
-            .into_iter()
-            .next()
-            .ok_or((
-                "enumerate_physical_devices",
-                vk::Result::ERROR_INITIALIZATION_FAILED,
-            ))?;
+        let devices = unsafe { instance.enumerate_physical_devices() }
+            .map_err(|e| ("enumerate_physical_devices", e))?;
+        let described: Vec<(vk::PhysicalDeviceType, String)> = devices
+            .iter()
+            .map(|&device| {
+                // SAFETY: the handle came from enumeration on this live instance.
+                let properties = unsafe { instance.get_physical_device_properties(device) };
+                let name = properties.device_name_as_c_str().map_or_else(
+                    |_| String::new(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                (properties.device_type, name)
+            })
+            .collect();
+        let choice = DeviceChoice::parse(orbistoun_env::GPU.get().as_deref());
+        let chosen = choice.pick(&described).ok_or((
+            if described.is_empty() {
+                "enumerate_physical_devices"
+            } else {
+                "ORBISTOUN_GPU names no device this host has"
+            },
+            vk::Result::ERROR_INITIALIZATION_FAILED,
+        ))?;
+        let physical = devices[chosen];
+        let (kind, name) = &described[chosen];
+        let kind = match *kind {
+            vk::PhysicalDeviceType::DISCRETE_GPU => "discrete",
+            vk::PhysicalDeviceType::INTEGRATED_GPU => "integrated",
+            vk::PhysicalDeviceType::VIRTUAL_GPU => "virtual",
+            vk::PhysicalDeviceType::CPU => "software",
+            _ => "other",
+        };
+        tracing::info!("graphics device {chosen}: {name} ({kind}), as {choice:?} chose");
 
         // SAFETY: the handle came from enumeration on this live instance.
         let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
@@ -1007,6 +1033,85 @@ impl Session {
                 == vk::TRUE,
             compressed_textures: wanted_features.texture_compression_bc == vk::TRUE,
         }
+    }
+}
+
+/// Which of the host's GPUs runs the guest's graphics and compute, as `ORBISTOUN_GPU` names it
+/// (D828).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeviceChoice {
+    /// The first discrete GPU, or the first device where there is none - a handheld's only GPU is
+    /// integrated. What an unset variable means.
+    Discrete,
+    /// The first integrated GPU, and nothing else: a weak GPU on purpose, to measure a low-end
+    /// host on a desktop.
+    Integrated,
+    /// The device at this place in the host's enumeration, as `vulkaninfo --summary` lists it.
+    Index(usize),
+    /// The first device whose name holds this, compared without case.
+    Named(String),
+}
+
+impl DeviceChoice {
+    /// The choice a value of `ORBISTOUN_GPU` makes; unset, [`Self::Discrete`].
+    pub(crate) fn parse(value: Option<&str>) -> Self {
+        let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Self::Discrete;
+        };
+        match value.to_ascii_lowercase().as_str() {
+            "discrete" => Self::Discrete,
+            "integrated" => Self::Integrated,
+            other => other
+                .parse()
+                .map_or_else(|_| Self::Named(other.to_owned()), Self::Index),
+        }
+    }
+
+    /// Which of `devices` - each its type and name, in the host's order - it picks; `None` where it
+    /// names one the host does not have, which the session reports rather than running elsewhere.
+    pub(crate) fn pick(&self, devices: &[(vk::PhysicalDeviceType, String)]) -> Option<usize> {
+        let first = |kind: vk::PhysicalDeviceType| devices.iter().position(|(t, _)| *t == kind);
+        match self {
+            Self::Discrete => first(vk::PhysicalDeviceType::DISCRETE_GPU)
+                .or_else(|| (!devices.is_empty()).then_some(0)),
+            Self::Integrated => first(vk::PhysicalDeviceType::INTEGRATED_GPU),
+            Self::Index(index) => (*index < devices.len()).then_some(*index),
+            Self::Named(part) => devices
+                .iter()
+                .position(|(_, name)| name.to_ascii_lowercase().contains(part.as_str())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod device_choice_tests {
+    use super::DeviceChoice;
+    use ash::vk::PhysicalDeviceType as Type;
+
+    /// A desktop with an integrated GPU listed second, as this project's development host lists
+    /// them, and a handheld with only an integrated one.
+    #[test]
+    fn each_choice_picks_the_device_it_names() {
+        let desktop = [
+            (Type::DISCRETE_GPU, "NVIDIA GeForce RTX 5070 Ti".to_owned()),
+            (Type::INTEGRATED_GPU, "AMD Radeon(TM) Graphics".to_owned()),
+        ];
+        let handheld = [(Type::INTEGRATED_GPU, "AMD Custom GPU 0405".to_owned())];
+        let pick = |value: Option<&str>, devices: &[(Type, String)]| {
+            DeviceChoice::parse(value).pick(devices)
+        };
+        assert_eq!(pick(None, &desktop), Some(0));
+        assert_eq!(pick(Some(" "), &desktop), Some(0), "blank is unset");
+        assert_eq!(pick(None, &handheld), Some(0), "no discrete: the first");
+        assert_eq!(pick(Some("Integrated"), &desktop), Some(1));
+        assert_eq!(pick(Some("integrated"), &handheld), Some(0));
+        assert_eq!(pick(Some("1"), &desktop), Some(1));
+        assert_eq!(pick(Some("radeon"), &desktop), Some(1));
+        assert_eq!(pick(Some("RTX"), &desktop), Some(0));
+        assert_eq!(pick(Some("2"), &desktop), None, "no third device");
+        assert_eq!(pick(Some("intel"), &desktop), None, "no such name");
+        assert_eq!(pick(Some("integrated"), &desktop[..1]), None);
+        assert_eq!(pick(None, &[]), None);
     }
 }
 

@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # Removing a float-controls declaration a device cannot honour.
 orbistoun-spirv = { workspace = true }
+# Which host GPU runs the guest's work, `ORBISTOUN_GPU` (D828).
+orbistoun-env = { workspace = true }
 # A batch's draw words, written into the mapped draw-data buffer as bytes (D718).
 zerocopy = { workspace = true }
 

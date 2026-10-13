@@ -9,6 +9,118 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Every phase's label, once: [`Phase::label`] and, in a `tracy` build, its profiler zone are both
+/// made from it, so a phase added has both.
+macro_rules! phase_labels {
+    ($phase:expr, $as:ident) => {
+        match $phase {
+            Phase::Prepare => $as!("prepare"),
+            Phase::ReadTarget => $as!("read target"),
+            Phase::Build => $as!("build"),
+            Phase::Seed => $as!("seed"),
+            Phase::Execute => $as!("execute"),
+            Phase::ReadBack => $as!("read back"),
+            Phase::Release => $as!("release"),
+            Phase::DrawOther => $as!("draw setup"),
+            Phase::WriteTarget => $as!("write target"),
+            Phase::Present => $as!("present"),
+            Phase::Submit => $as!("submit (total)"),
+            Phase::Gpu => $as!("gpu busy"),
+        }
+    };
+}
+
+/// Every span's label, once, as [`phase_labels`] is for phases.
+macro_rules! span_labels {
+    ($span:expr, $as:ident) => {
+        match $span {
+            Span::SubmitCall => $as!("submit call"),
+            Span::QueueFull => $as!("queue full"),
+            Span::CommandProcessor => $as!("command processor"),
+            Span::RunDraws => $as!("run draws"),
+            Span::ExecuteHandOff => $as!("execute hand-off"),
+            Span::ExecuteOnDevice => $as!("execute on device"),
+            Span::Copy => $as!("dma copy"),
+            Span::KeepSnapshot => $as!("keep snapshot"),
+            Span::DiscardSnapshot => $as!("discard snapshot"),
+            Span::OtherMemory => $as!("other memory work"),
+            Span::FlipWriteBack => $as!("flip write-back"),
+            Span::CarryOut => $as!("carry out"),
+            Span::Drive => $as!("drive"),
+            Span::SubmitDraws => $as!("submit draws"),
+            Span::ExecutorLog => $as!("executor log"),
+            Span::GuestWindow => $as!("guest window"),
+            Span::DrawCommand => $as!("draw command"),
+            Span::StateCommand => $as!("state command"),
+            Span::DrawJoined => $as!("draw joined"),
+            Span::DrawWhole => $as!("draw whole"),
+            Span::WholeWindow => $as!("whole: window"),
+            Span::WholePipeline => $as!("whole: pipeline"),
+            Span::WholeRecord => $as!("whole: record"),
+            Span::PrepareWalk => $as!("prepare: walk"),
+            Span::PrepareRegisters => $as!("prepare: registers"),
+            Span::PrepareEnvironment => $as!("prepare: environment"),
+            Span::PrepareWindow => $as!("prepare: window"),
+            Span::PrepareShaders => $as!("prepare: shaders"),
+            Span::PrepareGeometry => $as!("prepare: geometry"),
+            Span::PrepareTextures => $as!("prepare: textures"),
+            Span::TextureCensus => $as!("textures: census"),
+            Span::TextureBind => $as!("textures: bind"),
+            Span::BufferBind => $as!("textures: buffers"),
+            Span::TextureKept => $as!("textures: kept"),
+            Span::TextureUnwatched => $as!("textures: unwatched"),
+            Span::TextureSwizzle => $as!("textures: swizzle"),
+            Span::CpWalk => $as!("cp: walk"),
+            Span::CpDispatch => $as!("cp: dispatch"),
+            Span::DispatchPrepare => $as!("dispatch: prepare"),
+            Span::DispatchRead => $as!("dispatch: read"),
+            Span::DispatchExecute => $as!("dispatch: execute"),
+            Span::DispatchWriteBack => $as!("dispatch: write back"),
+            Span::DeviceSetup => $as!("device: setup"),
+            Span::DevicePipeline => $as!("device: pipeline"),
+            Span::DeviceRun => $as!("device: run"),
+            Span::DeviceReadBack => $as!("device: read back window"),
+            Span::ReadBackImage => $as!("device: read back image"),
+            Span::ReadBackBuffers => $as!("device: read back buffers"),
+            Span::DeviceRelease => $as!("device: release"),
+            Span::WriteBackChanges => $as!("write back: changes"),
+            Span::WriteBackGuest => $as!("write back: guest"),
+            Span::SettlePending => $as!("settle pending frame"),
+            Span::ShadersUpFront => $as!("shaders: up front"),
+        }
+    };
+}
+
+/// A label as itself.
+macro_rules! as_label {
+    ($label:literal) => {
+        $label
+    };
+}
+
+/// A label as a Tracy zone of that name (D829): one static location per label.
+#[cfg(feature = "tracy")]
+macro_rules! as_zone {
+    ($label:literal) => {
+        tracy_client::span_location!($label)
+    };
+}
+
+/// A Tracy zone for `location` on this thread until the answer is dropped, while a profiler build
+/// runs (D829); nothing otherwise.
+#[cfg(feature = "tracy")]
+fn zone(location: &'static tracy_client::SpanLocation) -> Option<tracy_client::Span> {
+    tracy_client::Client::running().map(|client| client.span(location, 0))
+}
+
+/// Starts the Tracy client in a `tracy` build (D829): a viewer or `tracy-capture` may then connect,
+/// and zones are recorded while one is. Does nothing in any other build.
+pub fn start_profiler() {
+    // The handle is a token: the client runs for the process whether it is kept or not.
+    #[cfg(feature = "tracy")]
+    let _client = tracy_client::Client::start();
+}
+
 /// A part of presenting a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -61,20 +173,13 @@ impl Phase {
 
     /// What to call it on screen.
     pub const fn label(self) -> &'static str {
-        match self {
-            Self::Prepare => "prepare",
-            Self::ReadTarget => "read target",
-            Self::Build => "build",
-            Self::Seed => "seed",
-            Self::Execute => "execute",
-            Self::ReadBack => "read back",
-            Self::Release => "release",
-            Self::DrawOther => "draw setup",
-            Self::WriteTarget => "write target",
-            Self::Present => "present",
-            Self::Submit => "submit (total)",
-            Self::Gpu => "gpu busy",
-        }
+        phase_labels!(self, as_label)
+    }
+
+    /// Its zone in the Tracy profiler (D829), named as [`Self::label`] names it.
+    #[cfg(feature = "tracy")]
+    fn zone(self) -> &'static tracy_client::SpanLocation {
+        phase_labels!(self, as_zone)
     }
 }
 
@@ -97,6 +202,8 @@ static COUNTED: [AtomicU64; COUNTS] = [const { AtomicU64::new(0) }; COUNTS];
 
 /// Runs `work`, adding its time to `phase`.
 pub fn measure<T>(phase: Phase, work: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "tracy")]
+    let _zone = zone(phase.zone());
     let started = std::time::Instant::now();
     let out = work();
     add(phase, started.elapsed());
@@ -134,6 +241,13 @@ pub fn close_first_frame() -> Option<Snapshot> {
 /// Counts one of `what`.
 pub fn count(what: Count) {
     COUNTED[what as usize].fetch_add(1, Ordering::Relaxed);
+    // A guest flip ends a frame in the profiler's timeline (D829).
+    #[cfg(feature = "tracy")]
+    if what == Count::Flips
+        && let Some(client) = tracy_client::Client::running()
+    {
+        client.frame_mark();
+    }
 }
 
 /// What was measured since the last [`take`].
@@ -345,61 +459,13 @@ impl Span {
 
     /// What to call it in the report.
     pub const fn label(self) -> &'static str {
-        match self {
-            Self::SubmitCall => "submit call",
-            Self::QueueFull => "queue full",
-            Self::CommandProcessor => "command processor",
-            Self::RunDraws => "run draws",
-            Self::ExecuteHandOff => "execute hand-off",
-            Self::ExecuteOnDevice => "execute on device",
-            Self::Copy => "dma copy",
-            Self::KeepSnapshot => "keep snapshot",
-            Self::DiscardSnapshot => "discard snapshot",
-            Self::OtherMemory => "other memory work",
-            Self::FlipWriteBack => "flip write-back",
-            Self::CarryOut => "carry out",
-            Self::Drive => "drive",
-            Self::SubmitDraws => "submit draws",
-            Self::ExecutorLog => "executor log",
-            Self::GuestWindow => "guest window",
-            Self::DrawCommand => "draw command",
-            Self::StateCommand => "state command",
-            Self::DrawJoined => "draw joined",
-            Self::DrawWhole => "draw whole",
-            Self::WholeWindow => "whole: window",
-            Self::WholePipeline => "whole: pipeline",
-            Self::WholeRecord => "whole: record",
-            Self::PrepareWalk => "prepare: walk",
-            Self::PrepareRegisters => "prepare: registers",
-            Self::PrepareEnvironment => "prepare: environment",
-            Self::PrepareWindow => "prepare: window",
-            Self::PrepareShaders => "prepare: shaders",
-            Self::PrepareGeometry => "prepare: geometry",
-            Self::PrepareTextures => "prepare: textures",
-            Self::TextureCensus => "textures: census",
-            Self::TextureBind => "textures: bind",
-            Self::BufferBind => "textures: buffers",
-            Self::TextureKept => "textures: kept",
-            Self::TextureUnwatched => "textures: unwatched",
-            Self::TextureSwizzle => "textures: swizzle",
-            Self::CpWalk => "cp: walk",
-            Self::CpDispatch => "cp: dispatch",
-            Self::DispatchPrepare => "dispatch: prepare",
-            Self::DispatchRead => "dispatch: read",
-            Self::DispatchExecute => "dispatch: execute",
-            Self::DispatchWriteBack => "dispatch: write back",
-            Self::DeviceSetup => "device: setup",
-            Self::DevicePipeline => "device: pipeline",
-            Self::DeviceRun => "device: run",
-            Self::DeviceReadBack => "device: read back window",
-            Self::ReadBackImage => "device: read back image",
-            Self::ReadBackBuffers => "device: read back buffers",
-            Self::DeviceRelease => "device: release",
-            Self::WriteBackChanges => "write back: changes",
-            Self::WriteBackGuest => "write back: guest",
-            Self::SettlePending => "settle pending frame",
-            Self::ShadersUpFront => "shaders: up front",
-        }
+        span_labels!(self, as_label)
+    }
+
+    /// Its zone in the Tracy profiler (D829), named as [`Self::label`] names it.
+    #[cfg(feature = "tracy")]
+    fn zone(self) -> &'static tracy_client::SpanLocation {
+        span_labels!(self, as_zone)
     }
 }
 
@@ -420,18 +486,31 @@ pub fn detail() -> bool {
 
 /// A [`Span`] measured from [`SpanGuard::start`] until the guard is dropped, for a stretch with
 /// several ways out.
-#[derive(Debug)]
 pub struct SpanGuard {
     span: Span,
     started: Option<std::time::Instant>,
+    /// Its Tracy zone, in a profiler build (D829), ended with the guard.
+    #[cfg(feature = "tracy")]
+    _zone: Option<tracy_client::Span>,
+}
+
+impl std::fmt::Debug for SpanGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpanGuard")
+            .field("span", &self.span)
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SpanGuard {
-    /// Starts measuring `span`, when detail is on.
+    /// Starts measuring `span`, when detail is on, and its Tracy zone in a profiler build.
     pub fn start(span: Span) -> Self {
         Self {
             span,
             started: detail().then(std::time::Instant::now),
+            #[cfg(feature = "tracy")]
+            _zone: zone(span.zone()),
         }
     }
 }
@@ -448,6 +527,8 @@ impl Drop for SpanGuard {
 
 /// Runs `work`, adding its time to `span` when detail is on.
 pub fn span<T>(span: Span, work: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "tracy")]
+    let _zone = zone(span.zone());
     if !detail() {
         return work();
     }

@@ -35,6 +35,10 @@ image = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 gilrs = { workspace = true }
 
+[features]
+# The Tracy profiler's zones, in the worker this binary runs (D829).
+tracy = ["orbistoun-worker/tracy"]
+
 [dev-dependencies]
 # Temp directories for the capture tests, which write a real PNG and read it back.
 tempfile = { workspace = true }

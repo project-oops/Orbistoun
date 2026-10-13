@@ -156,6 +156,22 @@ pub const TARGET_WRITEBACK: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// Which of the host's GPUs runs the guest's graphics and compute (D828).
+///
+/// Unset, the first discrete GPU, or the first device where there is none. `integrated` takes the
+/// integrated GPU on purpose - on a desktop, a weak GPU to measure a low-end host on. A number is
+/// the device's place in the host's enumeration, as `vulkaninfo --summary` lists it, and anything
+/// else is part of a device's name. A choice the host has no device for stops the device from
+/// opening, rather than running somewhere else.
+pub const GPU: Var = Var {
+    name: "ORBISTOUN_GPU",
+    kind: Kind::Setting,
+    summary: "which host GPU runs the guest: discrete (default), integrated, an index from vulkaninfo --summary, or part of a device's name",
+    example: "integrated",
+    effect: Effect::Observes,
+    read_by: "orbistoun-gpu-vulkan",
+};
+
 /// Sample where the guest's main thread is, about once a millisecond, and print the counts every
 /// few seconds.
 pub const PROFILE: Var = Var {
@@ -727,6 +743,7 @@ pub const REGISTRY: &[Var] = &[
     DATA_DIR,
     SANDBOX,
     TARGET_WRITEBACK,
+    GPU,
     PERF_DETAIL,
     TRACE_SUBMITS,
     PROFILE,
@@ -815,6 +832,7 @@ mod tests {
         super::DATA_DIR,
         super::SANDBOX,
         super::TARGET_WRITEBACK,
+        super::GPU,
         super::PERF_DETAIL,
         super::TRACE_SUBMITS,
         super::PROFILE,

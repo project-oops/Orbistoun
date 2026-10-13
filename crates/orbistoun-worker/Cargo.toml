@@ -51,6 +51,10 @@ zerocopy = { workspace = true }
 # A title's `filesystem_view` setting, merged from its shipped record and the user's file.
 orbistoun-overrides = { workspace = true }
 
+[features]
+# The Tracy profiler's zones (D829).
+tracy = ["orbistoun-gpu/tracy"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 # The -36c0 render test builds a submission from a captured DCB, which needs the translation

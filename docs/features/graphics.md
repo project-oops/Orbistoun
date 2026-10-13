@@ -54,6 +54,7 @@ reason is settled by an obSCEne measurement before it is implemented
 | Variable | Does |
 |---|---|
 | `ORBISTOUN_TARGET_WRITEBACK=flip\|submit` | write a drawn target back at the flip (default) or after every submission |
+| `ORBISTOUN_GPU=discrete\|integrated\|<index>\|<name>` | which host GPU runs the guest: the first discrete one (default), the integrated one, a device by its `vulkaninfo --summary` index, or by part of its name (D828) |
 | `ORBISTOUN_TRACE_SUBMITS=1` | print a line for every submission whose draws ran; refusals are printed regardless |
 | `ORBISTOUN_PERF_DETAIL=1` | print each submission span's time once a second, beside the performance phases |
 | `ORBISTOUN_PROFILE=<n>` | sample the guest's main and device threads and print where they spend their time |
@@ -61,4 +62,13 @@ reason is settled by an obSCEne measurement before it is implemented
 
 ```bash
 orbistoun-cli shaders <directory> --top 10   # rank the instructions that block translation across a directory of shader binaries
+```
+
+A build with the `tracy` feature streams the same phases and spans to the
+[Tracy](https://github.com/wolfpld/tracy) profiler, version 0.14.1, as zones on the thread that
+ran them, with a frame at each guest flip (D829). It records only while the viewer or
+`tracy-capture` is connected, on TCP port 8086, which may be on another machine:
+
+```bash
+cargo build --release -p orbistoun-cli --features tracy
 ```

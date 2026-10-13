@@ -29,6 +29,12 @@ zerocopy = { workspace = true }
 orbistoun-mem = { workspace = true }
 # The stack area of the call in progress, for builders with more than six arguments.
 orbistoun-thunk = { workspace = true }
+# The perf spans as Tracy zones, in a `tracy` build (D829).
+tracy-client = { workspace = true, optional = true }
+
+[features]
+# Streams the perf phases and spans to the Tracy profiler (D829). Off in every default build.
+tracy = ["dep:tracy-client"]
 
 [dev-dependencies]
 # Registering a module, to see which NID a declared name links to.
