@@ -677,8 +677,27 @@ fn write_data(
     Ok(())
 }
 
+/// `CP_STRMOUT_CNTL`'s dword offset (`R_0300FC_CP_STRMOUT_CNTL >> 2`).
+const CP_STRMOUT_CNTL: u32 = 0x300fc >> 2;
+/// Its `OFFSET_UPDATE_DONE` bit (`S_0084FC_OFFSET_UPDATE_DONE(1)`).
+const OFFSET_UPDATE_DONE: u32 = 1;
+
+/// Whether a register wait is the one a streamout flush ends with: equal to `OFFSET_UPDATE_DONE` in
+/// `CP_STRMOUT_CNTL`, under that mask. Mesa's `ac_cmdbuf_flush_vgt_streamout`
+/// (`amd/common/ac_cmdbuf.c:1013-1047`) clears the register, writes the `SO_VGTSTREAMOUT_FLUSH`
+/// event, and waits for the command processor to set the bit when the streamout offsets are
+/// updated. Here a submission is carried out in order with nothing still running beside it, so the
+/// flush is complete by the time the wait is reached, and the bit the wait asks for is set.
+fn is_streamout_flush_wait(function: u32, register: u32, reference: u32, mask: u32) -> bool {
+    function & 0x7 == WAIT_EQUAL
+        && register == CP_STRMOUT_CNTL
+        && reference == OFFSET_UPDATE_DONE
+        && mask == OFFSET_UPDATE_DONE
+}
+
 /// `WAIT_REG_MEM`: function and space, address, reference, mask (`sid.h:90-94`). Only a memory wait
-/// can be checked here; a register wait needs the GPU's registers.
+/// can be checked here; a register wait needs the GPU's registers, except the streamout flush's
+/// ([`is_streamout_flush_wait`]).
 fn wait_reg_mem(
     body: &[u32],
     memory: &mut dyn CpMemory,
@@ -688,6 +707,10 @@ fn wait_reg_mem(
         return Err(Stop::Malformed);
     };
     if function & WAIT_MEM_SPACE == 0 {
+        if is_streamout_flush_wait(function, addr_low, reference, mask) {
+            result.waits += 1;
+            return Ok(());
+        }
         return Err(Stop::NeedsGpu);
     }
     let polled = address(addr_low & !0x3, addr_high);
@@ -1541,6 +1564,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The register wait a streamout flush ends with, as `ac_cmdbuf_flush_vgt_streamout` writes it
+    /// (equal, `CP_STRMOUT_CNTL`, reference and mask `OFFSET_UPDATE_DONE`, poll 4), holds, and the
+    /// release after it runs; any other register wait still needs the GPU.
+    #[test]
+    fn a_streamout_flush_wait_holds_and_other_register_waits_stop() {
+        let flush_wait = |register: u32| {
+            vec![
+                command_header(WAIT_REG_MEM, 6),
+                WAIT_EQUAL,
+                register,
+                0,
+                1,
+                1,
+                4,
+            ]
+        };
+        let mut stream = flush_wait(0x300fc >> 2);
+        stream.extend(release(0x1000, 1, 0x1111_1111));
+        let mut memory = Fake::default();
+        let done = execute(&bytes(&stream), &mut memory);
+        assert!(matches!(done.stopped, Stopped::Completed), "{done:?}");
+        assert_eq!(memory.word(0x1000), 0x1111_1111, "the fence after it");
+
+        let done = execute(&bytes(&flush_wait(0x2000)), &mut memory);
+        assert!(matches!(done.stopped, Stopped::NeedsGpu { .. }), "{done:?}");
     }
 
     /// A wait that cannot hold stops the stream; memory out of bounds is refused, not written.
