@@ -34,6 +34,7 @@ fn the_getters_answer_as_a_fresh_process_measured() {
         ("sceUserServiceGetAccessibilityTriggerEffect", 1),
         ("sceUserServiceGetAccessibilityVibration", 1),
         ("sceUserServiceGetAccessibilityZoomEnabled", 0),
+        ("sceUserServiceGetAccessibilityZoomFollowFocus", 1),
     ] {
         let mut out = [0xa5_u8; 0x40];
         assert_eq!(
@@ -58,4 +59,35 @@ fn the_getters_answer_as_a_fresh_process_measured() {
         );
         assert!(out.iter().all(|&b| b == 0xa5), "nothing written");
     }
+}
+
+/// Zoom follow-focus refuses users 0, -1 and 0x12345678 with `0x80960009`, leaving the slot as it
+/// was, and a null out pointer for the signed-in user with `0x80960005` (REQ-8b13,
+/// `000-boot/user-service-zoom-follow-focus`, `report-1791833977.txt` lines 724-734).
+#[test]
+fn zoom_follow_focus_refuses_as_measured() {
+    let mut id = 0_u32;
+    call(
+        "sceUserServiceGetInitialUser",
+        &[std::ptr::addr_of_mut!(id) as u64],
+    );
+    for user in [0, u64::from(u32::MAX), 0x1234_5678] {
+        let mut out = [0xcc_u8; 8];
+        assert_eq!(
+            call(
+                "sceUserServiceGetAccessibilityZoomFollowFocus",
+                &[user, out.as_mut_ptr() as u64]
+            ),
+            0x8096_0009,
+            "user {user:#x}"
+        );
+        assert_eq!(out, [0xcc; 8]);
+    }
+    assert_eq!(
+        call(
+            "sceUserServiceGetAccessibilityZoomFollowFocus",
+            &[u64::from(id), 0]
+        ),
+        0x8096_0005
+    );
 }

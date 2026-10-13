@@ -150,3 +150,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261012T0635Z-ag01, reports/hardware/report-1791801495.txt lines 425-434 (000-boot/ag01-aux-calls)."
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceUserServiceGetAccessibilityZoomFollowFocus"
+arity = 2
+purpose = "Reads whether zoom follows the focus for a user: (user, out)."
+returns = "status"
+edge_cases = [
+    "For the signed-in user 0x0, one 32-bit word written, 1, the rest of an 8-byte 0xcc slot left as it was.",
+    "Users 0, -1 and 0x12345678 answer 0x80960009 with nothing written; a null out pointer for the signed-in user answers 0x80960005.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-8b13, reports/report-1791833977.txt lines 724-734 (000-boot/user-service-zoom-follow-focus), FW 12.40"
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-13"
