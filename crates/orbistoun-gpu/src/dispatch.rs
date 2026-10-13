@@ -400,6 +400,7 @@ mod tests {
                         words: vec![0; len],
                         written,
                         listed: None,
+                        whole: None,
                     };
                     assert_eq!(
                         after.stored_runs(),
@@ -611,6 +612,9 @@ pub struct BufferAfter {
     /// words stored, ascending, and their values in the same order. [`Self::words`] and
     /// [`Self::written`] are then empty.
     pub listed: Option<(Vec<u32>, Vec<u32>)>,
+    /// For one handed over unread whose every word the device found stored with one value - a
+    /// clear - that value. Its words, mask and list are then empty.
+    pub whole: Option<u32>,
 }
 
 impl BufferAfter {

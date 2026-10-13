@@ -958,10 +958,14 @@ pub const COMPACTION_GROUP: u32 = 64;
 /// write mask.
 ///
 /// Set 0 binds the write mask at binding 0, the buffer at binding 1 and the list at binding 2. The
-/// push constants are the buffer's word count, then the list's capacity in pairs. Each invocation
-/// takes one word; a word its mask marks claims the next pair of the list with an atomic add on the
-/// list's first word, its count, and fills it with its index and its value when the pair is within
-/// the capacity. A count past the capacity says the list overflowed. The pairs are in no order.
+/// push constants are the buffer's word count, the list's capacity in pairs, and the words one row
+/// of groups covers: a buffer needing more groups than one dimension may hold is dispatched as rows
+/// of them. The list is a count, a flag, the buffer's first word, then the pairs. Each invocation
+/// takes one word; a word its mask marks claims the next pair with an atomic add on the count, and
+/// fills it with its index and its value when the pair is within the capacity, and a word stored
+/// with a value other than the first word's sets the flag. A count past the capacity says the list
+/// overflowed; a count of every word with the flag clear says the buffer was stored whole with one
+/// value - a clear - whatever the capacity. The pairs are in no order.
 /// Hand-written, as the oracles are (D549): it runs on the host's own results, not the guest's.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -988,10 +992,11 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
     let mask = b.id();
     let buffer = b.id();
     let out = b.id();
-    let [zero, one, two] = [b.id(), b.id(), b.id()];
+    let [zero, one, two, three] = [b.id(), b.id(), b.id(), b.id()];
     let main = b.id();
     let [entry, within, marked, fits, end_fits, end_marked, end] =
         [b.id(), b.id(), b.id(), b.id(), b.id(), b.id(), b.id()];
+    let [at_first, past_first, differs, past_differs] = [b.id(), b.id(), b.id(), b.id()];
 
     b.header(op::CAPABILITY, &[capability::SHADER]);
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
@@ -1007,13 +1012,18 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
     b.annotate(op::DECORATE, &[words.0, decoration::ARRAY_STRIDE, 4]);
     b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
     b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
-    // The list: its count, then the pairs.
+    // The list: its count, the flag, the first word, then the pairs.
     b.annotate(op::DECORATE, &[list.0, decoration::BLOCK]);
-    b.annotate(op::MEMBER_DECORATE, &[list.0, 0, decoration::OFFSET, 0]);
-    b.annotate(op::MEMBER_DECORATE, &[list.0, 1, decoration::OFFSET, 4]);
+    for (member, offset) in [(0, 0), (1, 4), (2, 8), (3, 12)] {
+        b.annotate(
+            op::MEMBER_DECORATE,
+            &[list.0, member, decoration::OFFSET, offset],
+        );
+    }
     b.annotate(op::DECORATE, &[push.0, decoration::BLOCK]);
     b.annotate(op::MEMBER_DECORATE, &[push.0, 0, decoration::OFFSET, 0]);
     b.annotate(op::MEMBER_DECORATE, &[push.0, 1, decoration::OFFSET, 4]);
+    b.annotate(op::MEMBER_DECORATE, &[push.0, 2, decoration::OFFSET, 8]);
     for (variable, binding) in [(mask, 0), (buffer, 1), (out, 2)] {
         b.annotate(op::DECORATE, &[variable.0, decoration::DESCRIPTOR_SET, 0]);
         b.annotate(op::DECORATE, &[variable.0, decoration::BINDING, binding]);
@@ -1035,10 +1045,11 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
     b.declare(op::CONSTANT, &[uint.0, zero.0, 0]);
     b.declare(op::CONSTANT, &[uint.0, one.0, 1]);
     b.declare(op::CONSTANT, &[uint.0, two.0, 2]);
+    b.declare(op::CONSTANT, &[uint.0, three.0, 3]);
     b.declare(op::TYPE_RUNTIME_ARRAY, &[words.0, uint.0]);
     b.declare(op::TYPE_STRUCT, &[block.0, words.0]);
-    b.declare(op::TYPE_STRUCT, &[list.0, uint.0, words.0]);
-    b.declare(op::TYPE_STRUCT, &[push.0, uint.0, uint.0]);
+    b.declare(op::TYPE_STRUCT, &[list.0, uint.0, uint.0, uint.0, words.0]);
+    b.declare(op::TYPE_STRUCT, &[push.0, uint.0, uint.0, uint.0]);
     b.declare(
         op::TYPE_POINTER,
         &[block_ptr.0, storage::STORAGE_BUFFER, block.0],
@@ -1076,15 +1087,35 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
     );
 
     let [id3, id, count_at, count, inside] = [b.id(), b.id(), b.id(), b.id(), b.id()];
+    let [column, row, row_at, row_words, row_start] = [b.id(), b.id(), b.id(), b.id(), b.id()];
     let [flag_at, flag, is_marked] = [b.id(), b.id(), b.id()];
     let [counter, slot, capacity_at, capacity, room] = [b.id(), b.id(), b.id(), b.id(), b.id()];
     let [value_at, value, first, first_at, second, second_at] =
         [b.id(), b.id(), b.id(), b.id(), b.id(), b.id()];
+    let [
+        is_first,
+        base_word_at,
+        base_word,
+        kept_at,
+        other,
+        flag_out,
+        flagged,
+    ] = [b.id(), b.id(), b.id(), b.id(), b.id(), b.id(), b.id()];
 
     b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
     b.function(op::LABEL, &[entry.0]);
     b.function(op::LOAD, &[uvec3.0, id3.0, invocation.0]);
-    b.function(op::COMPOSITE_EXTRACT, &[uint.0, id.0, id3.0, 0]);
+    // The word: across the row of groups, then down the rows, as many words to a row as the third
+    // push constant says - more groups than one dimension may hold are dispatched as rows.
+    b.function(op::COMPOSITE_EXTRACT, &[uint.0, column.0, id3.0, 0]);
+    b.function(op::COMPOSITE_EXTRACT, &[uint.0, row.0, id3.0, 1]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[push_word_ptr.0, row_at.0, constants.0, two.0],
+    );
+    b.function(op::LOAD, &[uint.0, row_words.0, row_at.0]);
+    b.function(op::IMUL, &[uint.0, row_start.0, row.0, row_words.0]);
+    b.function(op::IADD, &[uint.0, id.0, row_start.0, column.0]);
     b.function(
         op::ACCESS_CHAIN,
         &[push_word_ptr.0, count_at.0, constants.0, zero.0],
@@ -1094,8 +1125,26 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
     b.function(op::SELECTION_MERGE, &[end.0, 0]);
     b.function(op::BRANCH_CONDITIONAL, &[inside.0, within.0, end.0]);
 
-    // A word inside the buffer: is it marked stored?
+    // A word inside the buffer. The first word's invocation keeps its value in the list.
     b.function(op::LABEL, &[within.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[word_ptr.0, base_word_at.0, buffer.0, zero.0, zero.0],
+    );
+    b.function(op::LOAD, &[uint.0, base_word.0, base_word_at.0]);
+    b.function(op::IEQUAL, &[boolean.0, is_first.0, id.0, zero.0]);
+    b.function(op::SELECTION_MERGE, &[past_first.0, 0]);
+    b.function(
+        op::BRANCH_CONDITIONAL,
+        &[is_first.0, at_first.0, past_first.0],
+    );
+    b.function(op::LABEL, &[at_first.0]);
+    b.function(op::ACCESS_CHAIN, &[word_ptr.0, kept_at.0, out.0, two.0]);
+    b.function(op::STORE, &[kept_at.0, base_word.0]);
+    b.function(op::BRANCH, &[past_first.0]);
+
+    // Is it marked stored?
+    b.function(op::LABEL, &[past_first.0]);
     b.function(
         op::ACCESS_CHAIN,
         &[word_ptr.0, flag_at.0, mask.0, zero.0, id.0],
@@ -1108,9 +1157,31 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
         &[is_marked.0, marked.0, end_marked.0],
     );
 
-    // Marked: claim a pair. Device scope, no memory ordering: only the count is shared, and the
-    // pairs are read after the dispatch has finished.
+    // Marked. A value other than the first word's sets the flag - an atomic only where one differs,
+    // so a clear costs none.
     b.function(op::LABEL, &[marked.0]);
+    b.function(
+        op::ACCESS_CHAIN,
+        &[word_ptr.0, value_at.0, buffer.0, zero.0, id.0],
+    );
+    b.function(op::LOAD, &[uint.0, value.0, value_at.0]);
+    b.function(op::INOT_EQUAL, &[boolean.0, other.0, value.0, base_word.0]);
+    b.function(op::SELECTION_MERGE, &[past_differs.0, 0]);
+    b.function(
+        op::BRANCH_CONDITIONAL,
+        &[other.0, differs.0, past_differs.0],
+    );
+    b.function(op::LABEL, &[differs.0]);
+    b.function(op::ACCESS_CHAIN, &[word_ptr.0, flag_out.0, out.0, one.0]);
+    b.function(
+        op::ATOMIC_OR,
+        &[uint.0, flagged.0, flag_out.0, one.0, zero.0, one.0],
+    );
+    b.function(op::BRANCH, &[past_differs.0]);
+
+    // Claim a pair. Device scope, no memory ordering: only the count and the flag are shared, and
+    // the list is read after the dispatch has finished.
+    b.function(op::LABEL, &[past_differs.0]);
     b.function(op::ACCESS_CHAIN, &[word_ptr.0, counter.0, out.0, zero.0]);
     b.function(
         op::ATOMIC_I_ADD,
@@ -1127,21 +1198,16 @@ pub fn stored_word_compaction_module() -> Vec<u32> {
 
     // Within the capacity: the pair is the word's index and its value.
     b.function(op::LABEL, &[fits.0]);
-    b.function(
-        op::ACCESS_CHAIN,
-        &[word_ptr.0, value_at.0, buffer.0, zero.0, id.0],
-    );
-    b.function(op::LOAD, &[uint.0, value.0, value_at.0]);
     b.function(op::IMUL, &[uint.0, first.0, slot.0, two.0]);
     b.function(
         op::ACCESS_CHAIN,
-        &[word_ptr.0, first_at.0, out.0, one.0, first.0],
+        &[word_ptr.0, first_at.0, out.0, three.0, first.0],
     );
     b.function(op::STORE, &[first_at.0, id.0]);
     b.function(op::IADD, &[uint.0, second.0, first.0, one.0]);
     b.function(
         op::ACCESS_CHAIN,
-        &[word_ptr.0, second_at.0, out.0, one.0, second.0],
+        &[word_ptr.0, second_at.0, out.0, three.0, second.0],
     );
     b.function(op::STORE, &[second_at.0, value.0]);
     b.function(op::BRANCH, &[end_fits.0]);

@@ -976,6 +976,15 @@ fn buffer_writes(
                     .is_some_and(|(&pattern, rest)| rest.iter().all(|&word| word == pattern));
                 (runs, whole)
             }
+            // Stored whole with one value, as the device found: a fill, with nothing read back.
+            BufferBefore::Unread(_) if let Some(pattern) = after.whole => {
+                fills.push(cp::Fill {
+                    destination: address,
+                    pattern,
+                    count: bytes,
+                });
+                continue;
+            }
             BufferBefore::Unread(words) => {
                 let size = (*words).max(1);
                 if after.listed.is_none() && after.words.len() != size {
@@ -1034,6 +1043,13 @@ fn uniform_buffers(
         .filter_map(|(&(destination, count), (before, after))| {
             let held: &[u32] = match before {
                 // Not read: a fill only where it stored every word, from its mask or its list.
+                crate::dispatch::BufferBefore::Unread(_) if let Some(pattern) = after.whole => {
+                    return Some(cp::Fill {
+                        destination,
+                        pattern,
+                        count,
+                    });
+                }
                 crate::dispatch::BufferBefore::Unread(words) => {
                     if !after.stored_whole((*words).max(1)) {
                         return None;
@@ -3402,6 +3418,7 @@ mod tests {
             words,
             written: Vec::new(),
             listed: None,
+            whole: None,
         });
         let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
         assert_eq!(
@@ -3427,11 +3444,13 @@ mod tests {
                 words: vec![9, 0, 8, 7],
                 written: vec![1, 0, 1, 1],
                 listed: None,
+                whole: None,
             },
             BufferAfter {
                 words: vec![0, 0],
                 written: vec![1, 1],
                 listed: None,
+                whole: None,
             },
         ];
         let (writes, fills) = super::buffer_writes(&ranges, &before, &after).expect("same shapes");
@@ -3440,6 +3459,7 @@ mod tests {
         let listed =
             [(vec![0, 2, 3], vec![9, 8, 7]), (vec![0, 1], vec![0, 0])].map(|list| BufferAfter {
                 listed: Some(list),
+                whole: None,
                 ..BufferAfter::default()
             });
         assert_eq!(
@@ -3454,6 +3474,7 @@ mod tests {
         );
         let past = [BufferAfter {
             listed: Some((vec![4], vec![1])),
+            whole: None,
             ..BufferAfter::default()
         }];
         assert!(
@@ -3482,6 +3503,29 @@ mod tests {
         );
     }
 
+    /// A buffer not read whose every word the device found stored with one value - a clear - comes
+    /// back as that value alone, and is written back as a fill of its whole range, and counted one
+    /// (D750), with no words to compare.
+    #[test]
+    fn a_clear_the_device_found_is_a_fill() {
+        let ranges = [(0x1000, 4096)];
+        let before = [BufferBefore::Unread(1024)];
+        let after = [BufferAfter {
+            whole: Some(0xFFFC_00F0),
+            ..BufferAfter::default()
+        }];
+        let fill = crate::cp::Fill {
+            destination: 0x1000,
+            pattern: 0xFFFC_00F0,
+            count: 4096,
+        };
+        assert_eq!(
+            super::buffer_writes(&ranges, &before, &after),
+            Ok((Vec::new(), vec![fill]))
+        );
+        assert_eq!(super::uniform_buffers(&ranges, (&before, &after)), [fill]);
+    }
+
     /// A dispatch's buffer left holding one word throughout is a fill of it, whatever it held
     /// before; one with two words in it is not (D750).
     #[test]
@@ -3492,6 +3536,7 @@ mod tests {
             words,
             written: Vec::new(),
             listed: None,
+            whole: None,
         });
         assert_eq!(
             super::uniform_buffers(&ranges, (&before, &after)),

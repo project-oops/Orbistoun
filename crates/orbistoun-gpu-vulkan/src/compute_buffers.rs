@@ -76,9 +76,10 @@ const LISTED_FROM_WORDS: usize = 4096;
 /// so a list that fits is a sixteenth of the buffer, against the buffer and its mask whole.
 const LIST_SHARE: usize = 32;
 
-/// The most groups one gathering dispatch runs, the least `maxComputeWorkGroupCount[0]` a device
-/// may offer; a buffer needing more is read back whole.
-const LIST_GROUPS_MOST: usize = 65_535;
+/// The groups in one row of a gathering dispatch, the least `maxComputeWorkGroupCount[0]` a device
+/// may offer; a buffer needing more is gathered by as many rows as it takes (PPSA28061's 32 MiB
+/// buffer takes two).
+const LIST_ROW_GROUPS: u32 = 65_535;
 
 /// How many dispatches a buffer of a size whose list overflowed is read back whole before a list
 /// is tried for that size again. A buffer a program stores whole - a clear - overflows every time,
@@ -92,12 +93,11 @@ fn unlisted_sizes() -> &'static std::sync::Mutex<std::collections::HashMap<usize
     UNLISTED.get_or_init(Default::default)
 }
 
-/// Whether a buffer of `words` words handed over unread keeps a list this time: large enough, few
-/// enough groups, and no recent overflow at its size - which counts that dispatch down.
+/// Whether a buffer of `words` words handed over unread keeps a list this time: large enough, its
+/// words countable in a push constant, and no recent overflow at its size - which counts that
+/// dispatch down.
 fn lists(words: usize) -> bool {
-    if words < LISTED_FROM_WORDS
-        || words.div_ceil(orbistoun_spirv::COMPACTION_GROUP as usize) > LIST_GROUPS_MOST
-    {
+    if words < LISTED_FROM_WORDS || u32::try_from(words).is_err() {
         return false;
     }
     let Ok(mut unlisted) = unlisted_sizes().lock() else {
@@ -322,7 +322,7 @@ fn gathering(device: &ash::Device) -> Result<Gathering, DispatchError> {
     let push = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)
-        .size(8)];
+        .size(12)];
     let set_layouts = [set_layout];
     let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
@@ -389,6 +389,10 @@ pub struct BufferOut {
     /// [`Self::written`] are then empty: the words not listed are the zeros the device cleared them
     /// to.
     pub stored: Option<(Vec<u32>, Vec<u32>)>,
+    /// For a buffer handed over unread whose every word the device found stored with one value - a
+    /// clear - that value, and nothing else: [`Self::words`], [`Self::written`] and
+    /// [`Self::stored`] are then empty.
+    pub whole: Option<u32>,
 }
 
 impl BoundBuffers {
@@ -503,10 +507,11 @@ impl BoundBuffers {
                 unsafe { device.cmd_fill_buffer(command, mask.bound.0, 0, vk::WHOLE_SIZE, 0) };
             }
             if let Some(list) = &slot.list {
-                // Its count, from zero; the pairs past the count are never read.
+                // Its count and its flag, from zero; the first word is written by the gathering,
+                // and the pairs past the count are never read.
                 //
-                // SAFETY: as above, and the list holds at least its count's word.
-                unsafe { device.cmd_fill_buffer(command, list.bound.0, 0, 4, 0) };
+                // SAFETY: as above, and the list holds at least those two words.
+                unsafe { device.cmd_fill_buffer(command, list.bound.0, 0, 8, 0) };
             }
             if slot.unread {
                 // SAFETY: as above.
@@ -605,6 +610,13 @@ impl BoundBuffers {
                     &[],
                 );
             }
+            // Rows of groups, as many as the buffer takes.
+            let groups = words.div_ceil(orbistoun_spirv::COMPACTION_GROUP);
+            let (across, down) = (
+                groups.min(LIST_ROW_GROUPS),
+                groups.div_ceil(LIST_ROW_GROUPS),
+            );
+            let row_words = across * orbistoun_spirv::COMPACTION_GROUP;
             // SAFETY: recording is open, and the range is the one the layout declares.
             unsafe {
                 device.cmd_push_constants(
@@ -612,19 +624,12 @@ impl BoundBuffers {
                     gathering.layout,
                     vk::ShaderStageFlags::COMPUTE,
                     0,
-                    zerocopy::IntoBytes::as_bytes(&[words, list.capacity]),
+                    zerocopy::IntoBytes::as_bytes(&[words, list.capacity, row_words]),
                 );
             }
-            // SAFETY: recording is open and a pipeline is bound; the group count is within the
-            // least any device offers (`LIST_GROUPS_MOST`).
-            unsafe {
-                device.cmd_dispatch(
-                    command,
-                    words.div_ceil(orbistoun_spirv::COMPACTION_GROUP),
-                    1,
-                    1,
-                );
-            };
+            // SAFETY: recording is open and a pipeline is bound; each dimension's group count is
+            // within the least any device offers (`LIST_ROW_GROUPS`).
+            unsafe { device.cmd_dispatch(command, across, down, 1) };
         }
         memory_barrier(
             device,
@@ -659,12 +664,16 @@ impl BoundBuffers {
             .map(|slot| {
                 if let Some(list) = &slot.list {
                     let held = read_back(device, &list.staging)?;
-                    if let Some(stored) = listed_words(&held, slot.staging.words)? {
-                        return Ok(BufferOut {
-                            words: Vec::new(),
-                            written: Vec::new(),
-                            stored: Some(stored),
-                        });
+                    let answered = |stored, whole| BufferOut {
+                        words: Vec::new(),
+                        written: Vec::new(),
+                        stored,
+                        whole,
+                    };
+                    match gathered(&held, slot.staging.words)? {
+                        Gathered::Listed(stored) => return Ok(answered(Some(stored), None)),
+                        Gathered::Whole(value) => return Ok(answered(None, Some(value))),
+                        Gathered::Overflowed => {}
                     }
                     // More stores than the list holds: the buffer and its mask after all, and the
                     // next few of this size are read back whole from the start.
@@ -686,6 +695,7 @@ impl BoundBuffers {
                     words: read_back(device, &slot.staging)?,
                     written,
                     stored: None,
+                    whole: None,
                 })
             })
             .collect()
@@ -792,7 +802,8 @@ impl Slot {
         // A large buffer handed over unread gathers its stored words into a list on the device.
         let list = if unread && lists(words) {
             let capacity = words / LIST_SHARE;
-            let list_words = 1 + 2 * capacity;
+            // The count, the flag and the first word, then the pairs.
+            let list_words = 3 + 2 * capacity;
             let list_size = (list_words * 4) as vk::DeviceSize;
             let (staging, staging_memory, _) =
                 buffer_in(context, list_size, STAGING_USAGE, STAGED_IN)?;
@@ -983,16 +994,33 @@ fn copy_back(
     recorded
 }
 
-/// What a list holds, read from its host copy, as the indices stored, ascending, and their values in
-/// the same order: `None` when more words were stored than it had room for. Refused where an index
-/// lies past the buffer's `words`.
-fn listed_words(list: &[u32], words: usize) -> Result<Option<Listed>, DispatchError> {
-    let (&count, pairs) = list
-        .split_first()
-        .ok_or_else(|| DispatchError::Unsupported("an empty list".to_owned()))?;
+/// What the gathering found in a buffer handed over unread.
+#[derive(Debug, PartialEq, Eq)]
+enum Gathered {
+    /// The words stored, which the list held.
+    Listed(Listed),
+    /// Every word stored, all with this value: a clear.
+    Whole(u32),
+    /// More words stored than the list held, not all of them with one value.
+    Overflowed,
+}
+
+/// What a list holds, read from its host copy - its count, its flag, the buffer's first word, then
+/// the pairs - for a buffer of `words` words. Listed words come as the indices stored, ascending,
+/// and their values in the same order; a list naming an index past the buffer is refused.
+fn gathered(list: &[u32], words: usize) -> Result<Gathered, DispatchError> {
+    let [count, differs, first, ref pairs @ ..] = *list else {
+        return Err(DispatchError::Unsupported(
+            "a list without its header".to_owned(),
+        ));
+    };
     let count = count as usize;
+    // Stored whole with one value, whatever room the list had.
+    if words > 0 && count == words && differs == 0 {
+        return Ok(Gathered::Whole(first));
+    }
     if count > pairs.len() / 2 {
-        return Ok(None);
+        return Ok(Gathered::Overflowed);
     }
     // Each pair as one integer, its index above its value, so a plain sort orders them by index.
     let mut keyed: Vec<u64> = pairs[..count * 2]
@@ -1008,7 +1036,7 @@ fn listed_words(list: &[u32], words: usize) -> Result<Option<Listed>, DispatchEr
             "the device listed a word past its buffer".to_owned(),
         ));
     }
-    Ok(Some(
+    Ok(Gathered::Listed(
         keyed
             .into_iter()
             .map(|key| ((key >> 32) as u32, key as u32))
@@ -1112,10 +1140,18 @@ mod tests {
             family,
             ..
         } = *session;
-        // Listed, with room for 8192 / 32 = 256 pairs.
+        // Listed, with room for 8192 / 32 = 256 pairs: within it, past it; and a buffer gathered by
+        // two rows of groups, its stores in the second row.
         let words = 8192;
-        let first = 16_u32;
-        for stretch in [100_u32, 1000] {
+        let row = (super::LIST_ROW_GROUPS * orbistoun_spirv::COMPACTION_GROUP) as usize;
+        // And a clear: every word of a buffer of a size no other case uses stored with one value.
+        let cleared = 3 * 4096;
+        for (words, first, stretch) in [
+            (cleared, 0_u32, cleared as u32),
+            (words, 16_u32, 100_u32),
+            (words, 16, 1000),
+            (row + 512, row as u32 + 100, 200),
+        ] {
             let bound = BoundBuffers::create(
                 (instance, physical, device),
                 &[super::BufferIn::Unread(words)],
@@ -1162,8 +1198,16 @@ mod tests {
             bound.destroy(device);
             let stored: (Vec<u32>, Vec<u32>) =
                 (first..first + stretch).map(|i| (i, 0xABCD)).unzip();
-            if stretch <= 256 {
-                assert_eq!(out[0].stored.as_ref(), Some(&stored), "listed");
+            if stretch as usize == words {
+                assert_eq!(out[0].whole, Some(0xABCD), "a clear: its value alone");
+                assert_eq!(out[0].stored, None);
+                assert!(out[0].words.is_empty() && out[0].written.is_empty());
+            } else if stretch as usize <= words / super::LIST_SHARE {
+                assert_eq!(
+                    out[0].stored.as_ref(),
+                    Some(&stored),
+                    "listed: {words} words"
+                );
                 assert!(out[0].words.is_empty(), "and nothing else");
             } else {
                 assert_eq!(out[0].stored, None, "overflowed");

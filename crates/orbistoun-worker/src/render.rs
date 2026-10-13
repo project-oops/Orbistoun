@@ -586,6 +586,7 @@ pub fn execute_dispatch(
                     words: out.words,
                     written: out.written,
                     listed: out.stored,
+                    whole: out.whole,
                 })
                 .collect();
             (done.memory, done.escaped, done.stored, buffers)
