@@ -4273,8 +4273,14 @@ fn table_texture(
     if let Some(depth) = depth_texture(at, source, sampler_at, memory) {
         return Some(depth);
     }
+    // A compare of anything else: a linear depth texture the guest uploaded, or nothing.
     if source.compare {
-        return None;
+        let words = read_descriptor(at, memory)?;
+        let sampling = match sampler_at {
+            Some(at) => Some(read_sampler(at, memory)?),
+            None => None,
+        };
+        return linear_depth_compare(words, source, sampling, memory);
     }
     let mut bound = read_texture(at, source.slot, memory, texels)?;
     if let Some(sampler_at) = sampler_at {
@@ -4300,8 +4306,12 @@ fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
     match bound {
         // A depth target is sampled flat, compared or not (D816, D817).
         RenderCommand::BindDepthTexture { .. } => !source.cube && !source.volume,
-        RenderCommand::BindTexture { faces, .. } => {
-            (*faces == CUBE_FACES) == source.cube && !source.volume && !source.compare
+        // A flat image's or a cube's texels, or a linear depth texture's depths compared.
+        RenderCommand::BindTexture {
+            faces, encoding, ..
+        } => {
+            let compared = *encoding == crate::backend::TextureEncoding::DepthCompare;
+            (*faces == CUBE_FACES) == source.cube && !source.volume && compared == source.compare
         }
         // A volume's slices only under a module that samples three coordinates (D823).
         RenderCommand::BindVolumeTexture { .. } => source.volume && !source.compare,
@@ -4371,7 +4381,7 @@ fn user_data_texture(
         return Some(depth);
     }
     if source.compare {
-        return None;
+        return linear_depth_compare(descriptor, source, named.flatten(), memory);
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
     if let Some(decoded) = named {
@@ -4477,16 +4487,77 @@ fn depth_texture(
     sampler_at: Option<u64>,
     memory: &impl GuestMemory,
 ) -> Option<RenderCommand> {
-    let bytes = memory.read(at, 32)?;
-    let mut words = [0_u32; 8];
-    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
-        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
+    let words = read_descriptor(at, memory)?;
     let sampling = match sampler_at {
         Some(at) => Some(read_sampler(at, memory)?),
         None => None,
     };
     depth_texture_from(words, source, sampling)
+}
+
+/// The eight words of the image descriptor at `at`.
+fn read_descriptor(at: u64, memory: &impl GuestMemory) -> Option<[u32; 8]> {
+    let bytes = memory.read(at, 32)?;
+    let mut words = [0_u32; 8];
+    for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Some(words)
+}
+
+/// `32_FLOAT`, the image format of a depth texture a GL guest uploads as texels (`gfx10-rsrc.json`).
+const FORMAT_32_FLOAT: u32 = 22;
+
+/// What a compare source samples when its descriptor is a linear `32_FLOAT` image of one level in
+/// guest memory rather than a depth target: its depths, read as they lie, compared through the
+/// sampler the module names - a GL `shadow2D` against a depth texture the guest uploaded. The
+/// sampler is required, and must be one the module's coordinates were saturated for (D743).
+/// [`None`] for any other descriptor or sampler.
+fn linear_depth_compare(
+    words: [u32; 8],
+    source: &TextureSource,
+    sampling: Option<crate::registers::TextureSampling>,
+    memory: &impl GuestMemory,
+) -> Option<RenderCommand> {
+    let descriptor = decode_image_descriptor(words);
+    let sampling = sampling?;
+    if !source.compare
+        || source.cube
+        || source.volume
+        || descriptor.format != FORMAT_32_FLOAT
+        || descriptor.tiling != SwizzleMode::Linear
+        || words[3] >> 28 != IMAGE_TYPE_2D
+        || descriptor.levels > 1
+        || sampling.saturated() != source.saturated
+    {
+        return None;
+    }
+    let DispatchSurface::Linear {
+        base,
+        width,
+        height,
+        pitch,
+        ..
+    } = linear_surface(&descriptor, words[4], 4)?
+    else {
+        return None;
+    };
+    let (w, h, row_bytes) = (width as usize, height as usize, pitch as usize * 4);
+    let bytes = memory.read(base, row_bytes * (h - 1) + w * 4)?;
+    let texels: std::sync::Arc<[u32]> = face_rows(bytes, (w, h, 1), (row_bytes, 0))
+        .flat_map(|row| row.chunks_exact(4))
+        .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+        .collect();
+    Some(RenderCommand::BindTexture {
+        slot: source.slot,
+        hash: crate::content_hash(&texels),
+        texels,
+        width,
+        height,
+        sampling,
+        encoding: crate::backend::TextureEncoding::DepthCompare,
+        faces: 1,
+    })
 }
 
 /// What a source samples when its descriptor is a flat depth surface - a depth swizzle and a depth
@@ -6843,6 +6914,73 @@ mod tests {
                 &mut super::TexelCache::new()
             )
             .is_none()
+        );
+    }
+
+    /// A compare of a linear `32_FLOAT` image - a depth texture a GL guest uploaded - binds its
+    /// depths as they lie, compared through the module's sampler, and only for a compare; without a
+    /// sampler it binds nothing.
+    #[test]
+    fn a_linear_float_depth_texture_is_compared_through_its_sampler() {
+        use super::{RenderCommand, TextureSource, linear_depth_compare, shaped_for};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; 256];
+        bytes[..4].copy_from_slice(&0.25f32.to_bits().to_le_bytes());
+        bytes[4..8].copy_from_slice(&0.75f32.to_bits().to_le_bytes());
+        // 2 x 1, 32_FLOAT, linear 2D, custom pitch 64 (DEPTH 0x3f), one level: GLTP00001's shape.
+        let words = [
+            0x100,
+            (22 << 20) | (1 << 30),
+            1 << 31,
+            0x9000_0fac,
+            0x3f,
+            0x40_0000,
+            0,
+            0,
+        ];
+        let compare = TextureSource {
+            compare: true,
+            ..TextureSource::default()
+        };
+        let sampling = crate::registers::TextureSampling {
+            depth_compare: 1,
+            ..crate::registers::TextureSampling::default()
+        };
+        let memory = Memory(bytes);
+        let bound = linear_depth_compare(words, &compare, Some(sampling), &memory);
+        let Some(
+            ref command @ RenderCommand::BindTexture {
+                ref texels,
+                width: 2,
+                height: 1,
+                encoding: crate::backend::TextureEncoding::DepthCompare,
+                sampling: bound_sampling,
+                ..
+            },
+        ) = bound
+        else {
+            panic!("bound: {bound:?}");
+        };
+        assert_eq!(
+            texels.to_vec(),
+            [0.25f32.to_bits(), 0.75f32.to_bits()],
+            "the depths as they lie"
+        );
+        assert_eq!(bound_sampling, sampling, "through the module's sampler");
+        assert!(shaped_for(command, &compare));
+        assert!(
+            !shaped_for(command, &TextureSource::default()),
+            "not handed to a sample that does not compare"
+        );
+        assert!(
+            linear_depth_compare(words, &compare, None, &memory).is_none(),
+            "a compare needs its sampler"
         );
     }
 
