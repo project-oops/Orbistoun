@@ -159,6 +159,57 @@ pub fn drawn_frame_presented() -> bool {
     DRAWN_FRAME_PRESENTED.load(Ordering::Relaxed)
 }
 
+/// Whether a flip found a picture in a buffer orbistoun did not draw into, put there by the guest's
+/// own code - a GL context that draws offscreen and copies its frame into the scanout buffer with
+/// the CPU. Looked for at the flip, where the buffer can be read, rather than at the report, where
+/// a drawn run's guarded pages cannot be.
+static MEMORY_FRAME_PRESENTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// When a flipped buffer orbistoun did not draw into was last read to look for a picture.
+static FLIPPED_LOOKED_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Whether a flip found the guest's own picture in a buffer orbistoun did not draw into: the
+/// memory half of `Reach::Presented`, for a run that drew.
+pub fn memory_frame_presented() -> bool {
+    MEMORY_FRAME_PRESENTED.load(Ordering::Relaxed)
+}
+
+/// Looks for a picture in the buffer just flipped, which orbistoun did not draw into, if none has
+/// been seen and a look is due: its `width * height` pixels at four bytes each, once what is
+/// deferred into them has been carried out, any byte not zero (D694's test).
+fn look_in_the_flipped_buffer(address: u64, shape: orbistoun_video::BufferShape) {
+    if MEMORY_FRAME_PRESENTED.load(Ordering::Relaxed) {
+        return;
+    }
+    let due = FLIPPED_LOOKED_AT.lock().is_ok_and(|mut last| {
+        let due = last.is_none_or(|at| at.elapsed() >= PICTURE_LOOK_INTERVAL);
+        if due {
+            *last = Some(std::time::Instant::now());
+        }
+        due
+    });
+    let length = u64::from(shape.width) * u64::from(shape.height) * 4;
+    if !due
+        || length == 0
+        || !orbistoun_kernel::is_guest_readable(address, length)
+        || !orbistoun_gpu::agc_driver::carry_out_before_reading(address, length)
+    {
+        return;
+    }
+    let (Ok(at), Ok(length)) = (usize::try_from(address), usize::try_from(length)) else {
+        return;
+    };
+    // SAFETY: `[address, address + length)` is readable guest memory (checked above) under the
+    // identity mapping, and the guest mappings live for the process; anything deferred into it was
+    // carried out above, so no page of it is guarded. The bytes are only read.
+    let bytes =
+        unsafe { std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), length) };
+    if holds_a_picture(bytes) {
+        MEMORY_FRAME_PRESENTED.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Whether a frame's bytes hold a picture: any byte not zero. A frame cleared to zero and flipped
 /// is a flip, not a presentation.
 fn holds_a_picture(bytes: &[u8]) -> bool {
@@ -236,6 +287,8 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     }
     if written && drawn_into == Some(address) {
         look_for_a_picture();
+    } else if drawn_into != Some(address) {
+        look_in_the_flipped_buffer(address, shape);
     }
     // Decided on every flip, window or not, so a headless run's record can say whether the window
     // would have shown what was flipped.

@@ -2207,6 +2207,10 @@ fn flipped_frame_source() -> Option<&'static str> {
     if crate::render::drawn_frame_presented() {
         return Some(orbistoun_report::trace::PRESENTED_BY_DRAWN);
     }
+    // The guest's own picture in a buffer it flipped, found at the flip, where it could be read.
+    if crate::render::memory_frame_presented() {
+        return Some(orbistoun_report::trace::PRESENTED_BY_MEMORY);
+    }
     // A drawn run's targets, or any page a deferred copy guards, fault on a read from here, which
     // may be a fault handler already.
     if crate::render::any_frame_drawn() || orbistoun_gpu::agc_driver::guards_guest_memory() {
