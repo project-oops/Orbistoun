@@ -31,7 +31,7 @@ use orbistoun_mem::guest;
 ///
 /// A nested module because each `guest_module!` names its declaration `MODULE`. libSceUlt is a
 /// cooperative-threading (fibre) library; its mutexes are ordinary mutexes under a vendor name
-/// and stand on their own. The fibre scheduler (`_sceUltUlthreadCreate`) is not built.
+/// and stand on their own, and each ulthread runs as a guest thread of its own.
 pub mod ult {
     use orbistoun_hle::guest_module;
 
@@ -47,7 +47,10 @@ pub mod ult {
             // The exports without the underscore take the same mutex; PPSA28061 locks through them.
             "sceUltMutexLock" => 1,
             "sceUltMutexUnlock" => 1,
+            "sceUltMutexDestroy" => 1,
             "sceUltConditionVariableSignal" => 1,
+            "sceUltConditionVariableWait" => 1,
+            "sceUltConditionVariableDestroy" => 1,
             // (cv, name, mutex, optParam): the mutex is bound here rather than at each wait.
             "_sceUltConditionVariableCreate" => 4,
             "_sceUltConditionVariableSignal" => 1,
@@ -55,7 +58,7 @@ pub mod ult {
             "_sceUltConditionVariableWait" => 1,
             "_sceUltConditionVariableDestroy" => 1,
             // (ulthread, name, entry, arg, context, sizeContext) in registers; a runtime and optParam
-            // follow on the stack, and neither is read.
+            // follow on the stack (the console's seventh and eighth), and neither is read.
             "_sceUltUlthreadCreate" => 6,
             // (ulthread, status)
             "sceUltUlthreadJoin" => 2,
@@ -68,6 +71,7 @@ pub mod ult {
             "_sceUltUlthreadRuntimeCreate" => 6,
             // Three values whose meaning is not established; none is read.
             "sceUltInitialize" => 3,
+            "sceUltFinalize" => 0,
         }
     }
 }
@@ -818,6 +822,12 @@ fn ult_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// `sceUltFinalize()`: takes the library down. Its objects live in this crate's tables, which
+/// outlive it, so there is nothing to release.
+fn ult_finalize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    OK
+}
+
 /// `_sceUltWaitingQueueResourcePoolCreate(pool, name, threads, syncObjects, workArea, optParam)`.
 ///
 /// Constructs a named pool where the guest asked. The handle goes in the object's first word, as
@@ -1007,35 +1017,80 @@ fn ult_cond_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// A handle for a created libSceUlt thread.
-///
-/// A non-zero monotonic counter: the threads are created but not run, so nothing dereferences it.
-fn next_ult_thread() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
 /// `_sceUltUlthreadCreate(ulthread, name, entry, arg, context, sizeContext, runtime, optParam)`:
-/// creates a user-level thread, and here does not run it.
+/// creates a user-level thread and runs it.
 ///
-/// The console runs it at once (obSCEne `REQ-20261013T0911Z-u1t2`, `000-boot/sce-ult`, FW
-/// 12.40): on a runtime worker, with its stack inside the caller's context block, before the
-/// creator looks. Run that way here - a guest thread per ulthread - PPSA28061 went back from
-/// `presented` at 157 imports to a fault after 99: one of its ulthreads calls the function at
-/// image+0xff7e0 with a null second argument and writes through it at `+0x574`, so something it
-/// reads is not ready when it runs here. Until that is understood the thread is recorded and not
-/// run, which keeps the title where it was. Its contexts are 8 KiB, 8 KiB, 32 KiB and 8 MiB, and
-/// orbistoun's own code runs on a guest thread's stack, so the small ones will need a stack of its
-/// own when they do run.
+/// The console runs it at once (obSCEne `REQ-20261013T0911Z-u1t2`, `000-boot/sce-ult`, FW 12.40):
+/// on a runtime worker rather than the creator, its entry having run before the creator looks.
+/// Here it is a guest thread of its own, as `scePthreadCreate` makes, and the creator yields once
+/// so the entry starts first. The thread's handle goes in the ulthread object's first word, where
+/// [`ult_ulthread_join`] reads it back.
+///
+/// On the console the entry's stack lies inside the caller's context block. Here it does not:
+/// orbistoun's own code runs on a guest thread's stack, and PPSA28061's contexts go down to 8 KiB,
+/// so each ulthread gets a stack of the default size instead, and the context block is left
+/// untouched.
+///
+/// A first attempt at running them faulted PPSA28061 after 99 imports: its ulthreads wait for work
+/// with `sceUltConditionVariableWait`, which was not exported, and its refusing stub returned at
+/// once, so a ulthread went on to work it had not been given. The spellings without the underscore
+/// are exported beside the others now.
 fn ult_ulthread_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    let out = args[0];
-    if out == 0 {
+    let (out, name, entry, argument) = (args[0], args[1], args[2], args[3]);
+    if out == 0 || entry == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     // SAFETY: an address the guest passed for this call, valid by its contract.
-    if !unsafe { guest::write_u64(out, next_ult_thread()) } {
+    let name = unsafe { read_name(name) };
+    let start = thread::Start { entry, argument };
+    // SAFETY: `entry` is a guest address the guest itself is asking to have called, in a fully
+    // relocated image - the contract `scePthreadCreate` has. The body runs guest instructions on a
+    // stack of its own, so an overrun hits a guard page rather than host frames.
+    let spawned = unsafe {
+        thread::spawn(
+            start,
+            &name,
+            thread::Affinity::default(),
+            0,
+            orbistoun_mem::stack::DEFAULT_STACK_SIZE,
+            None,
+        )
+    };
+    let Ok(handle) = spawned else {
+        // Reported, not swallowed: a guest told its ulthread started when it did not would join it
+        // forever.
+        return u64::from(GuestError::Unimplemented.as_raw());
+    };
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    if !unsafe { guest::write_u64(out, handle) } {
         return u64::from(GuestError::InvalidArgument.as_raw());
+    }
+    // The entry runs before the creator goes on, on the console.
+    std::thread::yield_now();
+    OK
+}
+
+/// `sceUltUlthreadJoin(ulthread, status)`: waits for a ulthread to end and writes what its entry
+/// returned where the guest asked - four bytes, as the console writes (obSCEne
+/// `REQ-20261013T0911Z-u1t2`: an 0xcc-filled block read back `cccccccc34120000cccccccc`).
+fn ult_ulthread_join(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (ulthread, status) = (args[0], args[1]);
+    // SAFETY: an address the guest passed for this call, valid by its contract.
+    let Some(handle) = (ulthread != 0)
+        .then(|| unsafe { guest::read_u64(ulthread) })
+        .flatten()
+    else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    // Checked before use: the word is the guest's, and an arbitrary value is not a thread.
+    if !thread::is_issued(handle) || !thread::join(handle) {
+        return u64::from(GuestError::InvalidHandle.as_raw());
+    }
+    if status != 0 {
+        // The low half of the entry's return value.
+        let value = thread::exit_value(handle) as u32;
+        // SAFETY: an address the guest passed for this call, valid by its contract.
+        unsafe { guest::write_u32(status, value) };
     }
     OK
 }
@@ -6971,9 +7026,14 @@ const TABLE: &[(&str, GuestFn)] = &[
     // libSceUlt mutexes, declared in the `ult` module.
     ("sceUltMutexLock", ult_mutex_lock),
     ("sceUltMutexUnlock", ult_mutex_unlock),
+    ("sceUltMutexDestroy", ult_mutex_destroy),
     ("sceUltConditionVariableSignal", ult_cond_signal),
+    ("sceUltConditionVariableWait", ult_cond_wait),
+    ("sceUltConditionVariableDestroy", ult_cond_destroy),
     ("_sceUltMutexCreate", ult_mutex_create),
     ("sceUltInitialize", ult_initialize),
+    ("sceUltFinalize", ult_finalize),
+    ("sceUltUlthreadJoin", ult_ulthread_join),
     (
         "sceUltWaitingQueueResourcePoolGetWorkAreaSize",
         ult_pool_work_area_size,
@@ -8894,7 +8954,10 @@ mod tests {
         "_sceUltMutexDestroy",
         "sceUltMutexLock",
         "sceUltMutexUnlock",
+        "sceUltMutexDestroy",
         "sceUltConditionVariableSignal",
+        "sceUltConditionVariableWait",
+        "sceUltConditionVariableDestroy",
         "_sceUltConditionVariableCreate",
         "_sceUltConditionVariableSignal",
         "_sceUltConditionVariableSignalAll",
@@ -8905,6 +8968,7 @@ mod tests {
         // The runtime and pool setup: declared in the `ult` module, implemented beside the table that
         // holds them.
         "sceUltInitialize",
+        "sceUltFinalize",
         "sceUltWaitingQueueResourcePoolGetWorkAreaSize",
         "sceUltUlthreadRuntimeGetWorkAreaSize",
         "_sceUltWaitingQueueResourcePoolCreate",
