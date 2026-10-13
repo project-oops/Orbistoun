@@ -13,7 +13,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const RANGE_STRIDE: u64 = 0x0000_0100_0000_0000;
 
 /// Where the first crate's range begins, far from anything a normal process maps.
-pub const FIRST_RANGE: u64 = 0x0000_6000_0000_0000;
+///
+/// Except on macOS, whose allocator keeps its small-allocation zone at `0x6000_0000_0000`: there a
+/// test's first reservation met the process's own heap, so the ranges start lower.
+pub const FIRST_RANGE: u64 = if cfg!(target_os = "macos") {
+    0x0000_3000_0000_0000
+} else {
+    0x0000_6000_0000_0000
+};
 
 /// Distance between the address one test gets and the next within a range.
 pub const TEST_STRIDE: u64 = 0x0000_0000_0100_0000;
