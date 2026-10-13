@@ -108,28 +108,45 @@ fn fmodf(_ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTER
     ret_f32(arg_f32(floats, 0) % arg_f32(floats, 1))
 }
 
+/// The longest number at the start of the guest's string at `text`, after C's whitespace, as the
+/// bytes it spans (whitespace included) and its value; `None` where none parses.
+///
+/// Read as bytes, so every count is a guest byte count: a number is ASCII, and only the ASCII
+/// run after the whitespace is tried. Rust's parser rejects a trailing suffix, so each prefix
+/// is tried and the longest that parses wins, as C specifies. Text past the number may be any
+/// encoding - PPSA21564 converts localised strings ending in a full-width `！`.
+fn longest_number<T: std::str::FromStr>(text: u64) -> Option<(usize, T)> {
+    /// The longest text read; a number is far shorter.
+    const MOST: usize = 4096;
+    // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract, read
+    // through the checked accessor up to its terminator.
+    let bytes = unsafe { orbistoun_mem::guest::read_cstr(text, MOST) }?;
+    let skipped = bytes
+        .iter()
+        .take_while(|&&b| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+        .count();
+    let ascii = bytes[skipped..]
+        .iter()
+        .take_while(|b| b.is_ascii() && !b.is_ascii_whitespace())
+        .count();
+    let run = std::str::from_utf8(&bytes[skipped..skipped + ascii]).ok()?;
+    (1..=run.len()).rev().find_map(|end| {
+        run[..end]
+            .parse::<T>()
+            .ok()
+            .map(|value| (skipped + end, value))
+    })
+}
+
 /// `strtod(text, end)` - reads an integer register and answers in `xmm0`.
 ///
 /// `end` is written when supplied, since a caller walks a list of numbers with it. Rust's
 /// parser rejects a trailing suffix, so the longest parsable prefix is found, as C specifies.
 fn strtod(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
-    // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
-    let Some(text) = (unsafe { orbistoun_mem::guest::read_path(ints[0]) }) else {
-        return ret(0.0);
-    };
-    let trimmed = text.trim_start();
-    let skipped = text.len() - trimmed.len();
-    // Longest prefix that parses, which is what C specifies and Rust's `parse` does not.
-    let mut best: Option<(usize, f64)> = None;
-    for end in 1..=trimmed.len() {
-        if let Ok(value) = trimmed[..end].parse::<f64>() {
-            best = Some((end, value));
-        }
-    }
     // When nothing converts, the end pointer is the original string: leading whitespace alone is
     // not consumed, so a caller can tell "no number here" by the pointer not moving. The integer
     // family answers the same way.
-    let (consumed, value) = best.map_or((0, 0.0), |(end, value)| (skipped + end, value));
+    let (consumed, value) = longest_number::<f64>(ints[0]).unwrap_or((0, 0.0));
     if ints[1] != 0 {
         if let Ok(at) = usize::try_from(ints[1]) {
             let end_pointer = ints[0].saturating_add(consumed as u64);
@@ -213,20 +230,8 @@ fn sincosf(ints: &[u64; GUEST_ARG_REGISTERS], floats: &[u64; GUEST_FLOAT_REGISTE
 /// Parsed as an `f32` rather than narrowed from an `f64`: narrowing rounds twice, and a value
 /// exactly between two `f32`s would land on the wrong one.
 fn strtof(ints: &[u64; GUEST_ARG_REGISTERS], _floats: &[u64; GUEST_FLOAT_REGISTERS]) -> u64 {
-    // SAFETY: the guest's text argument, a NUL-terminated string by the call's contract.
-    let Some(text) = (unsafe { orbistoun_mem::guest::read_path(ints[0]) }) else {
-        return ret_f32(0.0);
-    };
-    let trimmed = text.trim_start();
-    let skipped = text.len() - trimmed.len();
-    let mut best: Option<(usize, f32)> = None;
-    for end in 1..=trimmed.len() {
-        if let Ok(value) = trimmed[..end].parse::<f32>() {
-            best = Some((end, value));
-        }
-    }
     // When nothing converts, the end pointer is the original string, as in `strtod`.
-    let (consumed, value) = best.map_or((0, 0.0), |(end, value)| (skipped + end, value));
+    let (consumed, value) = longest_number::<f32>(ints[0]).unwrap_or((0, 0.0));
     if ints[1] != 0 {
         if let Ok(at) = usize::try_from(ints[1]) {
             let end_pointer = ints[0].saturating_add(consumed as u64);

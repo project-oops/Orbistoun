@@ -357,6 +357,28 @@ fn a_conversion_reports_where_it_stopped() {
     );
 }
 
+/// Text past the number may be any encoding: a full-width `！` after a number (PPSA21564's
+/// localised strings) or before one is read, not a panic, and the end pointer counts bytes.
+#[test]
+fn text_past_the_number_may_be_any_encoding() {
+    for (input, value, consumed) in [("1.5！", 1.5, 3), ("！1.5", 0.0, 0), (" 7！！", 7.0, 2)] {
+        let text = Text::new(input);
+        let mut end: u64 = 0;
+        let slot = std::ptr::from_mut(&mut end).expose_provenance() as u64;
+        assert_eq!(
+            f64::from_bits(call_mixed("strtod", text.at(), slot)),
+            value,
+            "strtod({input:?})"
+        );
+        assert_eq!(end, text.at() + consumed, "strtod({input:?})");
+        assert_eq!(
+            f32::from_bits(call_mixed("strtof", text.at(), 0) as u32),
+            value as f32,
+            "strtof({input:?})"
+        );
+    }
+}
+
 /// Nothing parsable is zero, and the end pointer does not move.
 #[test]
 fn a_conversion_that_parses_nothing_consumes_nothing() {
