@@ -34,33 +34,37 @@ fn a_longjmp_resumes_where_setjmp_returned() {
     let longjmp = table.address_of(1).expect("in range");
 
     for (value, answered) in [(42_u64, 42_u64), (0, 1)] {
+        // The value rides in the buffer's last word, past what setjmp writes: everything live
+        // across the `setjmp` call must be in a callee-saved register or memory, since the call
+        // may change the rest.
         let mut env = [0_u64; 12];
+        env[11] = value;
         let resumed: u64;
         let kept: u64;
         // SAFETY: both addresses are leaf-linked stubs following the System V convention. The
-        // stack pointer is kept in a callee-saved register, and `longjmp` restores it with the
-        // rest, so control and the stack come back to the instruction after the `setjmp` call;
-        // everything the callees may change is declared clobbered.
+        // buffer and the `longjmp` stub are in callee-saved registers, which `longjmp` restores to
+        // what they held at `setjmp`; the stack pointer is kept in another, so control and the
+        // stack come back to the instruction after the `setjmp` call. Everything the callees may
+        // change is declared clobbered.
         unsafe {
             core::arch::asm!(
                 "mov r12, rsp",
                 "and rsp, -16",
                 "mov r13, 0x5eed",
-                "mov rdi, {env}",
+                "mov rdi, r14",
                 "call {setjmp}",
                 "test rax, rax",
                 "jnz 2f",
                 "mov r13, 0xbad",
-                "mov rdi, {env}",
-                "mov rsi, {value}",
-                "call {longjmp}",
+                "mov rdi, r14",
+                "mov rsi, qword ptr [r14 + 88]",
+                "call r15",
                 "ud2",
                 "2:",
                 "mov rsp, r12",
-                env = in(reg) env.as_mut_ptr(),
                 setjmp = in(reg) setjmp,
-                longjmp = in(reg) longjmp,
-                value = in(reg) value,
+                in("r14") env.as_mut_ptr(),
+                in("r15") longjmp,
                 out("r12") _,
                 out("r13") kept,
                 out("rax") resumed,

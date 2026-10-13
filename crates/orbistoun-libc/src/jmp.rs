@@ -16,8 +16,8 @@
 //! Each leaf runs under `orbistoun_thunk`'s `leaf_entry`, which pushed the guest's `rbp` and keeps
 //! its own `rsp` in `rbp`: so `[rbp]` is the guest's `rbp`, `[rbp + 8]` the guest's return address
 //! and `rbp + 16` the guest's stack pointer once its call returns. That frame is the contract these
-//! read; on the traced path, when a diagnostic names either import, [`traced_setjmp`] saves nothing
-//! and [`traced_longjmp`] answers the placeholder.
+//! read; on the traced path, when a diagnostic names either import, `traced_setjmp` saves nothing
+//! and `traced_longjmp` answers the placeholder.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError};
 
