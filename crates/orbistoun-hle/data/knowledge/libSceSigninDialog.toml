@@ -6,11 +6,11 @@ arity = 6
 purpose = "Initialises the sign-in dialog, once per process."
 returns = "status"
 edge_cases = [
-    "Answers 0, and again after sceSigninDialogTerminate (measured initialize, terminate, second-init, each 0x0).",
-    "A second call while initialised is unmeasured and answers the placeholder.",
+    "Answers 0, and again after sceSigninDialogTerminate.",
+    "A second call while initialised answers 0x81350002.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20260926T1952Z-737e, 070-user/signin-dialog-lifecycle, report-1791727748.txt lines 3898-3908, FW 12.40"
+cites = "obSCEne REQ-20260926T1952Z-737e and REQ-20261013T1500Z-sd02, 070-user/signin-dialog-lifecycle, reports/hardware/report-20261013-184500.log, FW 12.40"
 found_in = ["PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-13"
 
@@ -21,7 +21,7 @@ purpose = "(param): opens the sign-in dialog; the parameter is {u32 size = 0x10;
 returns = "status"
 edge_cases = ["orbistoun shows nothing and answers 0, the dialog running (D791); before initialising, while one runs, or with no parameter it answers the placeholder."]
 known_by = "assumed"
-assumptions = ["The shell's answer (D791): the open shows system UI, so obSCEne's measurement ran only the unattended arm."]
+assumptions = ["The shell's answer (D791): the open shows system UI, so obSCEne's measurements ran only the unattended arms."]
 found_in = ["PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-13"
 
@@ -31,11 +31,12 @@ arity = 0
 purpose = "Advances the dialog and returns its state; there is no out-parameter."
 returns = "count"
 edge_cases = [
-    "orbistoun answers none 0, initialised 1, running 2 or finished 3; a running dialog is reported running once and then finished, as a user who dismissed it and carried on offline would leave it (D791).",
-    "PPSA21564 and PPSA04263 compare the answer with 3; answered 0 by an undeclared import, their wait never ends.",
+    "Returns 0 before sceSigninDialogInitialize and after sceSigninDialogTerminate, and 1 once initialised, the status itself in the return register.",
+    "A running dialog is reported running (2) once and then finished (3), as a user who dismissed it and carried on offline would leave it (D791); those two values are the common dialog's and unmeasured here, since opening shows system UI.",
+    "PPSA21564 and PPSA04263 compare the answer with 3.",
 ]
-known_by = "assumed"
-assumptions = ["The status values are the common dialog's; obSCEne's lifecycle measurement recorded only return codes, not the status (re-filed)."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1500Z-sd02, 070-user/signin-dialog-lifecycle, reports/hardware/report-20261013-184500.log, FW 12.40"
 found_in = ["PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-13"
 
@@ -44,8 +45,12 @@ name = "sceSigninDialogGetStatus"
 arity = 0
 purpose = "Returns the dialog's state without advancing it."
 returns = "count"
-known_by = "assumed"
-assumptions = ["The same values as sceSigninDialogUpdateStatus, read without advancing a running dialog."]
+edge_cases = [
+    "Returns 0 before initialising and after terminating, and 1 once initialised.",
+    "A running dialog reads running without being advanced (D791).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1500Z-sd02, 070-user/signin-dialog-lifecycle, reports/hardware/report-20261013-184500.log, FW 12.40"
 found_on = "2026-10-13"
 
 [[function]]
@@ -55,7 +60,7 @@ purpose = "Closes an open sign-in dialog."
 returns = "status"
 edge_cases = ["orbistoun answers 0 for an opened dialog, which then reports finished; with nothing open, the placeholder."]
 known_by = "assumed"
-assumptions = ["Unmeasured: a closed dialog reports finished, as a dismissed one does."]
+assumptions = ["Unmeasured: sd02's close row is marked not-possible, so its 0x80020003 is not taken as the console's answer."]
 found_on = "2026-10-13"
 
 [[function]]
@@ -64,10 +69,10 @@ arity = 0
 purpose = "Ends the sign-in dialog library's use in this process."
 returns = "status"
 edge_cases = [
-    "Answers 0 once initialised, after which Initialize answers 0 again (measured).",
-    "Before initialising it is unmeasured and answers the placeholder.",
+    "Answers 0 once initialised, after which Initialize answers 0 again.",
+    "Before any initialise it answers 0x81350001.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20260926T1952Z-737e, 070-user/signin-dialog-lifecycle, report-1791727748.txt lines 3898-3908, FW 12.40"
+cites = "obSCEne REQ-20260926T1952Z-737e and REQ-20261013T1500Z-sd02, 070-user/signin-dialog-lifecycle, reports/hardware/report-20261013-184500.log, FW 12.40"
 found_in = ["PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-13"

@@ -1,12 +1,17 @@
 //! `libSceSigninDialog` - the system sign-in dialog.
 //!
-//! Initialise and terminate are as obSCEne measured them on FW 12.40
-//! (`REQ-20260926T1952Z-737e`, `070-user/signin-dialog-lifecycle`, `report-1791727748.txt`): each
-//! answers 0, and the library initialises again after terminating. The status values are the
-//! common dialog's (none 0, initialised 1, running 2, finished 3), and a dialog opened is the
-//! shell's answer (D791): shown to nobody, reported running once and then finished, as a user who
-//! dismissed it at once and carried on offline would leave it. Those are assumed until the status
-//! arm is measured. The result of a finished dialog is declared and unimplemented.
+//! The lifecycle is as obSCEne measured it on FW 12.40 (`REQ-20260926T1952Z-737e` and
+//! `REQ-20261013T1500Z-sd02`, `070-user/signin-dialog-lifecycle`,
+//! `reports/hardware/report-20261013-184500.log`):
+//! - Initialise and terminate each answer 0, and the library initialises again after terminating.
+//! - A second initialise answers `0x81350002`, and a terminate before any initialise `0x81350001`.
+//! - Both status calls return the status itself: 0 before initialising and after terminating, 1
+//!   once initialised.
+//!
+//! A dialog opened is the shell's answer (D791): shown to nobody, reported running (2) once and
+//! then finished (3), as a user who dismissed it at once and carried on offline would leave it.
+//! Those two values, Open and Close are assumed, since opening shows system UI. The result of a
+//! finished dialog is declared and unimplemented.
 //!
 //! Every unmeasured arity is `6`, the trampoline's full capture, not a claim about how many
 //! arguments a function takes: a wrong arity only degrades a trace, while a wrong name is
@@ -58,8 +63,13 @@ fn reported(state: u32) -> u64 {
     })
 }
 
-/// `sceSigninDialogInitialize()`: 0, measured the first time and again after a terminate. A
-/// second call while initialised is unmeasured and answers the placeholder.
+/// A second initialise (`sd02`, `init-double-rc`).
+const ALREADY_INITIALIZED: u64 = 0x8135_0002;
+/// A terminate before any initialise (`sd02`, `term-before-init-rc`).
+const NOT_INITIALIZED: u64 = 0x8135_0001;
+
+/// `sceSigninDialogInitialize()`: 0 the first time and again after a terminate; `0x81350002`
+/// while initialised (measured).
 fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     match STATE.compare_exchange(
         status::NONE,
@@ -68,7 +78,7 @@ fn initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         Ordering::Acquire,
     ) {
         Ok(_) => 0,
-        Err(_) => unmeasured(),
+        Err(_) => ALREADY_INITIALIZED,
     }
 }
 
@@ -128,11 +138,11 @@ fn close(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if closed { 0 } else { unmeasured() }
 }
 
-/// `sceSigninDialogTerminate()`: 0 once initialised, measured, after which the library
-/// initialises again. Before initialising it answers the placeholder.
+/// `sceSigninDialogTerminate()`: 0 once initialised, after which the library initialises again;
+/// `0x81350001` before initialising (measured).
 fn terminate(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if STATE.swap(status::NONE, Ordering::AcqRel) == status::NONE {
-        unmeasured()
+        NOT_INITIALIZED
     } else {
         0
     }
@@ -160,6 +170,8 @@ mod tests {
     fn the_signin_dialog_lifecycle() {
         let none = [0_u64; GUEST_ARG_REGISTERS];
         assert_eq!(super::get_status(&none), 0, "none before initialising");
+        assert_eq!(super::update_status(&none), 0);
+        assert_eq!(super::terminate(&none), 0x8135_0001, "nothing to terminate");
         assert_eq!(super::initialize(&none), 0);
         assert_eq!(super::update_status(&none), 1, "initialised");
         let param = [0x10_u8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -179,7 +191,7 @@ mod tests {
             0,
             "initialises again, as measured"
         );
-        assert_ne!(super::initialize(&none), 0, "not twice");
+        assert_eq!(super::initialize(&none), 0x8135_0002, "not twice");
         assert_eq!(super::terminate(&none), 0);
     }
 }
