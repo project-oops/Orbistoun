@@ -121,16 +121,19 @@ found_on = "2026-10-13"
 [[function]]
 name = "_sceUltUlthreadRuntimeCreate"
 arity = 6
-purpose = "Constructs a named fibre runtime in memory the caller supplied."
-edge_cases = ["The same shape as the pool constructor. PPSA28061 builds one called 'sample runtime' immediately after a 'waiting queue' (D564)."]
-known_by = "guest-observed"
-assumptions = ["Constructing a runtime is not running threads on it. _sceUltUlthreadCreate remains unbuilt, so a guest that gets this far and then creates a fibre stops there instead - which is a better place to stop than a 2 GiB allocation."]
+purpose = "Constructs a named fibre runtime in memory the caller supplied: (runtime, name, maxThreads, workers, workArea, optParam) in registers, and workAreaSize on the stack."
+edge_cases = [
+    "Answers 0 with a null option block, and with one _sceUltUlthreadRuntimeOptParamInitialize filled (magic 'ubilamtl\\0cig' first); a zeroed 0x80-byte block answers 0x80810004.",
+    "The console needs at least 0x1000 bytes of runtime object. PPSA28061 builds one called 'sample runtime' (16 threads, 3 workers) immediately after a 'waiting queue' (D564).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
+note = "orbistoun keeps the runtime in its own table and runs each ulthread as a guest thread of its own (8a47181), not on the runtime's workers; the work area is not written."
 found_in = [
     "PPSA02664-app0",
     "PPSA28061-app0",
 ]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "_sceUltWaitingQueueResourcePoolCreate"
@@ -139,15 +142,16 @@ purpose = "Constructs a named pool of waiting-queue resources in memory the call
 edge_cases = [
     "Six from the run: the object, a name, two counts, the work area the caller allocated, and an optional parameter. PPSA28061 names it 'waiting queue' (D564).",
     "The handle goes in the object's first word, which is this library's own convention here - _sceUltMutexCreate follows it and the guest reads it back from there.",
+    "Answers 0 for (pool, name, 16, 16, workArea, NULL) on the console.",
 ]
-known_by = "guest-observed"
-assumptions = ["The work area is accepted and never written to. An Ult object's state lives in this crate's table, the way every handle family here works."]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
+note = "The work area is accepted and never written to: an Ult object's state lives in orbistoun's own table, the way every handle family here works."
 found_in = [
     "PPSA02664-app0",
     "PPSA28061-app0",
 ]
 found_on = "2026-09-03"
-note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
 
 [[function]]
 name = "sceUltConditionVariableSignal"

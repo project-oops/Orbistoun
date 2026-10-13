@@ -838,11 +838,27 @@ fn ult_pool_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     ult_construct(args)
 }
 
-/// `_sceUltUlthreadRuntimeCreate(runtime, name, threads, workerThreads, workArea, optParam)`.
-///
-/// The same shape as the pool. Constructing a runtime does not run threads on it; see
-/// [`ult_ulthread_create`].
+/// The first twelve bytes `_sceUltUlthreadRuntimeOptParamInitialize` writes into an option block,
+/// which a runtime create checks (obSCEne `REQ-20261013T0911Z-u1t2`, `000-boot/sce-ult`).
+const ULT_RUNTIME_OPT_MAGIC: [u8; 12] = *b"ubilamtl\0cig";
+
+/// What libSceUlt answers an argument it refuses: a runtime option block without its magic.
+const ULT_INVALID_ARGUMENT: u64 = 0x8081_0004;
+
+/// `_sceUltUlthreadRuntimeCreate(runtime, name, threads, workerThreads, workArea, optParam,
+/// workAreaSize)`, the size on the stack. A null option block answers 0, and so does one
+/// `_sceUltUlthreadRuntimeOptParamInitialize` filled; a block without its magic (zeroed, as
+/// measured) answers `0x80810004` (`u1t2`). Ulthreads run on their own threads, not on the
+/// runtime's workers; see [`ult_ulthread_create`].
 fn ult_runtime_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let opt = args[5];
+    if opt != 0 {
+        let mut magic = [0_u8; 12];
+        // SAFETY: the guest's option block, read through the checked accessor.
+        if !unsafe { guest::read_into(opt, &mut magic) } || magic != ULT_RUNTIME_OPT_MAGIC {
+            return ULT_INVALID_ARGUMENT;
+        }
+    }
     ult_construct(args)
 }
 

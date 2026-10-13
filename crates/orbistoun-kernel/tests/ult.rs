@@ -33,3 +33,30 @@ fn an_ult_mutex_refuses_as_measured() {
     assert_eq!(call("sceUltMutexUnlock", &[at]), 0);
     assert_eq!(call("sceUltMutexUnlock", &[at]), 0x8081_0005, "not held");
 }
+
+/// A runtime is created with no option block and with an initialised one; a zeroed block is
+/// refused `0x80810004` (`u1t2` arm 1).
+#[test]
+fn a_runtime_option_block_needs_its_magic() {
+    let name = b"sample runtime\0";
+    let create = |opt: u64| {
+        let mut runtime = [0_u8; 0x1000];
+        call(
+            "_sceUltUlthreadRuntimeCreate",
+            &[
+                runtime.as_mut_ptr() as u64,
+                name.as_ptr() as u64,
+                16,
+                3,
+                0,
+                opt,
+            ],
+        )
+    };
+    assert_eq!(create(0), 0, "no option block");
+    let zeroed = [0_u8; 0x80];
+    assert_eq!(create(zeroed.as_ptr() as u64), 0x8081_0004, "zeroed");
+    let mut initialised = [0_u8; 0x80];
+    initialised[..12].copy_from_slice(b"ubilamtl\0cig");
+    assert_eq!(create(initialised.as_ptr() as u64), 0, "initialised");
+}
