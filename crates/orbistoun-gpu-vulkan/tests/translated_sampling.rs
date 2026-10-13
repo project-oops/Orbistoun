@@ -529,6 +529,58 @@ fn a_translated_cube_sample_reads_the_face_and_texel_it_names() {
     }
 }
 
+/// A cube sample reads the face its register names even where its coordinates lie outside ACO's
+/// `[1, 2]`: oops-sdk's GL biases them by a half, into `[0, 1]`, and a coordinate taken as `sc`
+/// less 1.5 there would tip the major axis onto another face. Only the face is asserted; where the
+/// hardware samples within it for such a coordinate is unmeasured.
+#[test]
+fn a_cube_sample_keeps_its_face_outside_acos_coordinate_range() {
+    if !device_or_skip("a_cube_sample_keeps_its_face_outside_acos_coordinate_range") {
+        return;
+    }
+    let texel = |face: u32| [face * 40, 0, 255 - face * 40, 255];
+    let texels: Vec<u32> = (0..6)
+        .flat_map(|face| (0..4).map(move |_| texel(face)))
+        .map(|[r, g, b, a]| r | g << 8 | b << 16 | a << 24)
+        .collect();
+    // The coordinate sweeps zero to one across the frame.
+    let corners = [
+        [0.0, 0.0, 0.0, 1.0],
+        [2.0, 0.0, 0.0, 1.0],
+        [0.0, 2.0, 0.0, 1.0],
+    ];
+    let vertex = interpolated_vertex_module(corners);
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    for face in 0..6u32 {
+        #[allow(clippy::cast_precision_loss)]
+        let decoded = decode(&cube_sampling_shader(face as f32), &encodings, &operands);
+        let (module, _) = translate_for(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            Stage::Fragment,
+            Window::default(),
+        )
+        .expect("the cube sample translated");
+        let drawn = draw_with_cube_texture(
+            (&vertex, &module),
+            [1.0, 0.0, 1.0, 1.0],
+            (8, 8),
+            (&texels, 2),
+        )
+        .expect("the cube draw ran");
+        for (x, y) in [(1, 1), (6, 1), (1, 6), (3, 3)] {
+            let want = texel(face).map(|c| u8::try_from(c).expect("a byte"));
+            assert_eq!(
+                drawn.at(x, y),
+                Some(want),
+                "face {face}, pixel ({x}, {y}) should be on its face"
+            );
+        }
+    }
+}
+
 /// A guest shader that samples at a level it names, and exports what came back.
 ///
 /// Three moves fill the address registers, the coordinate and then the level last, and

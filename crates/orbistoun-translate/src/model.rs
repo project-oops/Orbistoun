@@ -9190,10 +9190,21 @@ fn sample_coordinate<M: Model + ?Sized>(
 /// and the face, `cube_amd`'s id. Inverting `cube_amd` with the major component one half gives the
 /// direction a host cube samples at the same place: each coordinate less 1.5 is then that face's
 /// `sc` or `tc` itself.
+///
+/// The face is the register's, whatever the coordinates hold: each is clamped to just inside the
+/// face, so a coordinate outside ACO's range - oops-sdk's GL biases by a half instead, landing in
+/// `[0, 1]` - cannot tip the major axis onto another face. Where the hardware samples within a
+/// face for such a coordinate is unmeasured (obSCEne `REQ-20261013T1930Z-cb01`).
 fn cube_direction<M: Model + ?Sized>(model: &mut M, across: Id, down: Id, face: Id) -> [Id; 3] {
     let middle = model.constant(1.5f32.to_bits());
-    let along = model.f32_binary(op::FSUB, across, middle);
-    let upward = model.f32_binary(op::FSUB, down, middle);
+    // The largest float below a half, so a clamped coordinate never ties the major axis.
+    let inside = model.constant(0x3EFF_FFFF);
+    let outside = model.constant(0x3EFF_FFFF | 0x8000_0000);
+    let [along, upward] = [across, down].map(|at| {
+        let centred = model.f32_binary(op::FSUB, at, middle);
+        let low = model.f32_ext_binary(GLSL_FMAX, centred, outside);
+        model.f32_ext_binary(GLSL_FMIN, low, inside)
+    });
     let sign = model.constant(0x8000_0000);
     let [against, downward] =
         [along, upward].map(|value| model.binary(op::BITWISE_XOR, value, sign));
