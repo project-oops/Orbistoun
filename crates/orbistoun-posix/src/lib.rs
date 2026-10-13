@@ -300,8 +300,9 @@ guest_module! {
         "sem_trywait" => 1,
         "sem_post" => 1,
         "sem_destroy" => 1,
-        "sched_get_priority_max" => 0,
-        "sched_get_priority_min" => 0,
+        // (policy)
+        "sched_get_priority_max" => 1,
+        "sched_get_priority_min" => 1,
         "posix_sysconf" => 1,
         "pipe" => 1,
     }
@@ -694,6 +695,8 @@ const DELEGATED: &[(&str, &str)] = &[
     ("pthread_yield", "pthread_yield"),
     ("posix_pthread_yield", "pthread_yield"),
     ("sched_yield", "sched_yield"),
+    ("sched_get_priority_max", "sched_get_priority_max"),
+    ("sched_get_priority_min", "sched_get_priority_min"),
     ("pthread_getconcurrency", "pthread_getconcurrency"),
     ("pthread_setconcurrency", "pthread_setconcurrency"),
     // The POSIX timed condition wait and the once-only initialiser: POSIX-named implementations

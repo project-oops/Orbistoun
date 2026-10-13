@@ -3284,3 +3284,29 @@ known_by = "assumed"
 assumptions = ["That the underscored and public spellings are one function on this platform, as they are on FreeBSD."]
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sched_get_priority_max"
+arity = 1
+purpose = "The highest priority a scheduling policy allows: (policy)."
+returns = "count"
+edge_cases = [
+    "Policies 1 and 3 answer 0x2ff (767); 0, 2 and 99 answer -1 in the full register.",
+    "Other policies are unmeasured and answer the placeholder; the errno beside a -1 is unmeasured and left as it was.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1827Z-1a71, reports/report-1791833977.txt lines 696-723 (000-boot/hardware-queries), FW 12.40"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sched_get_priority_min"
+arity = 1
+purpose = "The lowest priority a scheduling policy allows: (policy)."
+returns = "count"
+edge_cases = [
+    "Policies 1 and 3 answer 0x100 (256); 0, 2 and 99 answer -1 in the full register.",
+    "Other policies are unmeasured and answer the placeholder; the errno beside a -1 is unmeasured and left as it was.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1827Z-1a71, reports/report-1791833977.txt lines 696-723 (000-boot/hardware-queries), FW 12.40"
+found_on = "2026-10-13"

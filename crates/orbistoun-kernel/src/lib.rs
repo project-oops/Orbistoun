@@ -260,7 +260,7 @@ guest_module! {
         "sceKernelAprWaitCommandBuffer" => 6,
         "sceKernelReadTsc" => 0,
         "sceKernelGetTscFrequency" => 0,
-        "sceKernelGetCpuFrequency" => 1,
+        "sceKernelGetCpuFrequency" => 0,
         "sceKernelGetCpuTemperature" => 1,
         "sceKernelGetCurrentFanDuty" => 1,
         "sceKernelGetSocSensorTemperature" => 2,
@@ -5195,6 +5195,57 @@ fn sched_yield(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
+/// The placeholder for an argument no measurement covers.
+fn unmeasured() -> u64 {
+    u64::from(GuestError::Unimplemented.as_raw())
+}
+
+/// The priority range a console's `sched_get_priority_max`/`_min` answer for a policy: 256..=767
+/// for policies 1 and 3, and -1 (the full register) for 0, 2 and 99 (obSCEne
+/// `REQ-20261012T1827Z-1a71`, `000-boot/hardware-queries`, `report-1791833977.txt` lines 710-719).
+/// Any other policy is unmeasured. So is the errno beside a -1, which is left as it was.
+fn sched_priority_bounds(policy: u64) -> Option<(u64, u64)> {
+    match policy {
+        1 | 3 => Some((0x100, 0x2ff)),
+        0 | 2 | 99 => Some((u64::MAX, u64::MAX)),
+        _ => None,
+    }
+}
+
+/// `sched_get_priority_max(policy)`, as the console answers it; see [`sched_priority_bounds`].
+fn sched_get_priority_max(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    sched_priority_bounds(args[0] & 0xffff_ffff).map_or_else(unmeasured, |(_, max)| max)
+}
+
+/// `sched_get_priority_min(policy)`, as the console answers it; see [`sched_priority_bounds`].
+fn sched_get_priority_min(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    sched_priority_bounds(args[0] & 0xffff_ffff).map_or_else(unmeasured, |(min, _)| min)
+}
+
+/// What a console's `sceKernelGetCpuFrequency()` answered from a title's process, twice a second
+/// apart: 0 (`1a71`, `GetCpuFrequency-1`/`-2`, `rax 0x0`).
+fn kernel_get_cpu_frequency(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
+/// The refusal a title's process gets for a temperature (`1a71`): `0x80020002`, nothing written.
+const NO_TEMPERATURE: u64 = 0x8002_0002;
+
+/// `sceKernelGetCpuTemperature(out)`: `0x80020002` with the out block untouched, and with a null
+/// one (`1a71`, `GetCpuTemperature`, `GetCpuTemperature-null`).
+fn kernel_get_cpu_temperature(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    NO_TEMPERATURE
+}
+
+/// `sceKernelGetSocSensorTemperature(sensor, out)`: `0x80020002` with the out block untouched for
+/// sensors 0, 1 and 0xff, and for sensor 0 with a null out (`1a71`). Other sensors are unmeasured.
+fn kernel_get_soc_sensor_temperature(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match args[0] & 0xffff_ffff {
+        0 | 1 | 0xff => NO_TEMPERATURE,
+        _ => unmeasured(),
+    }
+}
+
 /// `pthread_getconcurrency()`: the concurrency level a guest asked for.
 ///
 /// Reference: POSIX.1-2008. Zero unless the guest has set one, meaning "the system decides".
@@ -6798,6 +6849,14 @@ const TABLE: &[(&str, GuestFn)] = &[
     ("pthread_yield", pthread_yield),
     ("scePthreadYield", pthread_yield),
     ("sched_yield", sched_yield),
+    ("sched_get_priority_max", sched_get_priority_max),
+    ("sched_get_priority_min", sched_get_priority_min),
+    ("sceKernelGetCpuFrequency", kernel_get_cpu_frequency),
+    ("sceKernelGetCpuTemperature", kernel_get_cpu_temperature),
+    (
+        "sceKernelGetSocSensorTemperature",
+        kernel_get_soc_sensor_temperature,
+    ),
     ("pthread_getconcurrency", pthread_getconcurrency),
     ("pthread_setconcurrency", pthread_setconcurrency),
     // The POSIX timed wait and once-only initialiser.
@@ -8893,6 +8952,8 @@ mod tests {
         "pthread_rwlockattr_settype_np",
         "pthread_yield",
         "sched_yield",
+        "sched_get_priority_max",
+        "sched_get_priority_min",
         "pthread_getconcurrency",
         "pthread_setconcurrency",
         // The attribute accessors and `pthread_equal`, with no vendor twins: declared in the POSIX

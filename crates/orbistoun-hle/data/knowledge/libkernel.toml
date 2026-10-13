@@ -2722,3 +2722,36 @@ known_by = "measured"
 cites = "obSCEne reports/hardware/20261007-113500-eboot.obs.log lines 12156-12170, check 200-census/libkernel/0x7ad80543eef3176c."
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-11"
+
+[[function]]
+name = "sceKernelGetCpuFrequency"
+arity = 0
+purpose = "Reports the CPU's clock frequency."
+returns = "count"
+edge_cases = ["Answered 0 in rax from a title's process, twice a second apart."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1827Z-1a71, reports/report-1791833977.txt lines 696-723 (000-boot/hardware-queries), FW 12.40"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceKernelGetCpuTemperature"
+arity = 1
+purpose = "Reads the CPU temperature: (out)."
+returns = "status"
+edge_cases = ["Refused 0x80020002 from a title's process, the 32-byte out block untouched; a null out is refused the same."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1827Z-1a71, reports/report-1791833977.txt lines 696-723 (000-boot/hardware-queries), FW 12.40"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceKernelGetSocSensorTemperature"
+arity = 2
+purpose = "Reads one SoC sensor's temperature: (sensor, out)."
+returns = "status"
+edge_cases = [
+    "Sensors 0, 1 and 0xff are refused 0x80020002 from a title's process, the out block untouched; sensor 0 with a null out the same.",
+    "Other sensors are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1827Z-1a71, reports/report-1791833977.txt lines 696-723 (000-boot/hardware-queries), FW 12.40"
+found_on = "2026-10-13"
