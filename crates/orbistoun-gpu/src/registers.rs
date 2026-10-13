@@ -1883,6 +1883,20 @@ pub fn blend_control_at(writes: &[RegisterWrite]) -> Option<BlendControl> {
     Some(decode_blend_control(value))
 }
 
+/// `CB_COLOR_CONTROL`, a context register at index `0xA202`: `src/amd/registers/gfx103.json` in
+/// oops-mesa maps it at byte `165896` = `0x28808` and puts `ROP3` in bits 16:23.
+pub(crate) const CB_COLOR_CONTROL: u32 = 0xA202;
+
+/// The raster operation `CB_COLOR_CONTROL` leaves a colour target's writes under: `ROP3`, a truth
+/// table over pattern, source and destination, each bit the result for the inputs that select it
+/// (pattern `0xF0`, source `0xCC`, destination `0xAA`). `0xCC` writes the source unchanged, which
+/// radeonsi sets whenever no logic op is on (`si_state.c:365-369`); a GL logic op `f` is set as
+/// `f | f << 4`, the same table whatever the pattern.
+#[must_use]
+pub const fn raster_op(value: u32) -> u8 {
+    (value >> 16) as u8
+}
+
 /// The register that carries colour buffer zero's tiling and layout attributes.
 ///
 /// `CB_COLOR0_ATTRIB3`, a context register at index `0xA3B8`: `src/amd/registers/gfx103.json` in
@@ -4511,6 +4525,16 @@ mod tests {
             stencil_control_at(&[write(0xA000, 0x1)]).is_none(),
             "DB_STENCIL_CONTROL was never written"
         );
+    }
+
+    /// `ROP3` is bits 16:23 of `CB_COLOR_CONTROL`: the oops-sdk's copy word (`0x00CC0010`,
+    /// `CB_NORMAL` with `ROP3_COPY`) and GL's invert as radeonsi sets it (`5 | 5 << 4`).
+    #[test]
+    fn the_raster_op_is_colour_control_bits_16_to_23() {
+        assert_eq!(super::raster_op(0x00CC_0010), 0xCC);
+        assert_eq!(super::raster_op(0x0055_0010), 0x55);
+        assert_eq!(super::raster_op(0xFF00_FFFF), 0x00);
+        assert_eq!(super::CB_COLOR_CONTROL, 0x28808 / 4);
     }
 
     #[test]

@@ -606,6 +606,14 @@ pub(crate) fn depth_clip_control() -> bool {
     DEPTH_CLIP_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the session's device was created with `logic_op`.
+static LOGIC_OP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a pipeline may write through a logic op: the device enabled `logic_op`.
+pub(crate) fn logic_op() -> bool {
+    LOGIC_OP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the session's device was created with `sampler_anisotropy`.
 static SAMPLER_ANISOTROPY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -735,7 +743,9 @@ impl Session {
             // SPIR-V spells as the `Geometry` capability.
             .geometry_shader(available.geometry_shader == vk::TRUE)
             // `sampler_anisotropy` serves a guest sampler that filters anisotropically (D775).
-            .sampler_anisotropy(available.sampler_anisotropy == vk::TRUE);
+            .sampler_anisotropy(available.sampler_anisotropy == vk::TRUE)
+            // `logic_op` serves a guest raster operation other than copy (`CB_COLOR_CONTROL`).
+            .logic_op(available.logic_op == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -790,6 +800,10 @@ impl Session {
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
+        LOGIC_OP.store(
+            wanted_features.logic_op == vk::TRUE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         SAMPLER_ANISOTROPY.store(
             wanted_features.sampler_anisotropy == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,

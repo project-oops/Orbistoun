@@ -3308,13 +3308,14 @@ fn stage_user_data(
 }
 
 /// Colour target zero's output state in force at a draw, as commands where it changed since
-/// `sent`: the blend state, when the stream set one, as `SetBlend`, and the channels the draw
+/// `sent`: the blend state, when the stream set one, as `SetBlend`, its raster operation, when the
+/// stream set `CB_COLOR_CONTROL`, as `SetRasterOp`, and the channels the draw
 /// writes, when it set a target mask, as `SetWriteMask`. A one-byte target with no target mask is
 /// counted: a drawer would write every channel of the frame standing in for it.
 fn push_colour_output(
     commands: &mut Vec<RenderCommand>,
     mut latest: impl FnMut(u32) -> Option<u32>,
-    (blend_sent, sent): (&mut Option<u32>, &mut Option<u8>),
+    (blend_sent, rop_sent, sent): (&mut Option<u32>, &mut Option<u8>, &mut Option<u8>),
     unmasked_one_byte_draws: &mut usize,
 ) {
     if let Some(value) = latest(crate::registers::CB_BLEND0_CONTROL)
@@ -3322,6 +3323,12 @@ fn push_colour_output(
     {
         commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
         *blend_sent = Some(value);
+    }
+    if let Some(rop) = latest(crate::registers::CB_COLOR_CONTROL).map(crate::registers::raster_op)
+        && *rop_sent != Some(rop)
+    {
+        commands.push(RenderCommand::SetRasterOp(rop));
+        *rop_sent = Some(rop);
     }
     let info = latest(crate::registers::CB_COLOR0_INFO);
     match latest(crate::registers::CB_TARGET_MASK) {
@@ -3358,6 +3365,7 @@ fn push_geometry_commands(
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
     let mut blend_sent = None;
     let mut mask_sent = None;
+    let mut rop_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
     let mut scissor_sent = None;
@@ -3386,7 +3394,7 @@ fn push_geometry_commands(
         push_colour_output(
             commands,
             |register| sweep.latest(at, register),
-            (&mut blend_sent, &mut mask_sent),
+            (&mut blend_sent, &mut rop_sent, &mut mask_sent),
             unmasked_one_byte_draws,
         );
         // The depth, stencil and cull state in force at this draw, and a clear it asks for.

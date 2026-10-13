@@ -1878,6 +1878,7 @@ pub(crate) fn draw_vertices(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
+            raster_op: start.raster_op,
             write_mask: start.write_mask,
             viewport: start.viewport,
             cull: start.cull,
@@ -1909,6 +1910,8 @@ pub(crate) struct Start<'a> {
     pub(crate) textures: [Option<TextureWords<'a>>; MAX_TEXTURES],
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
+    /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
+    pub(crate) raster_op: Option<u8>,
     /// The channels colour target zero's draws write; `None` writes every one.
     pub(crate) write_mask: Option<u8>,
     /// The guest's clip-to-pixel transform; `None` maps clip space over the whole attachment, `+y`
@@ -2053,6 +2056,46 @@ fn viewport_within_limits(
         )));
     }
     Ok(())
+}
+
+/// The Vulkan logic op a guest's `ROP3` asks for: [`None`] for none set and for `0xCC`, which writes
+/// the source unchanged.
+///
+/// A table that ignores the pattern has its two halves equal, as radeonsi sets a GL logic op
+/// (`si_state.c:366`). Within a half, bit `2s + d` is the result for source bit `s` and destination
+/// bit `d` (source `0xCC`, destination `0xAA`); Vulkan numbers its sixteen ops with the result for
+/// those inputs in bit `3 - (2s + d)` (`VkLogicOp`: `AND` is 1, `COPY` 3, `NO_OP` 5, `NOR` 8), so the
+/// op is the half bit-reversed.
+///
+/// # Errors
+///
+/// A table that reads the pattern; one under blending, whose order against the blend is not
+/// decoded; one on a target that is not eight-bit unsigned normalized, which Vulkan writes without
+/// it; and any on a device without the `logicOp` feature.
+pub(crate) fn logic_op(
+    raster_op: Option<u8>,
+    blend: Option<orbistoun_gpu::BlendControl>,
+    encoding: TargetEncoding,
+) -> Result<Option<vk::LogicOp>, &'static str> {
+    const COPY: u8 = 0xCC;
+    let Some(rop) = raster_op.filter(|&rop| rop != COPY) else {
+        return Ok(None);
+    };
+    if rop >> 4 != rop & 0xF {
+        return Err("a raster operation that reads the pattern");
+    }
+    if blend.is_some_and(|b| b.enable) {
+        return Err("a raster operation under blending");
+    }
+    if encoding != TargetEncoding::Unorm8 {
+        return Err("a raster operation on a target that is not eight-bit unorm");
+    }
+    if !crate::compute::logic_op() {
+        return Err("a raster operation on a device without logicOp");
+    }
+    Ok(Some(vk::LogicOp::from_raw(i32::from(
+        (rop & 0xF).reverse_bits() >> 4,
+    ))))
 }
 
 /// The colour-blend attachment state a guest's `CB_BLEND0_CONTROL` asks for, or the name of what it
@@ -4129,7 +4172,13 @@ fn create_graphics_pipeline(
     // does not map is refused before a draw reaches here (`VulkanBackend`).
     let blend_attachments = [blend_attachment(bound.blend, bound.write_mask)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?];
-    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let mut blend =
+        vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    if let Some(op) = logic_op(bound.raster_op, bound.blend, bound.encoding)
+        .map_err(|what| DispatchError::Unsupported(what.to_owned()))?
+    {
+        blend = blend.logic_op_enable(true).logic_op(op);
+    }
 
     let info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)
@@ -4417,6 +4466,7 @@ pub(crate) fn draw_resident(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
+            raster_op: start.raster_op,
             write_mask: start.write_mask,
             viewport: start.viewport,
             resident: Some(resident),
@@ -4524,6 +4574,8 @@ struct Bound<'a> {
     user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
     /// Colour target zero's blend state; `None` draws opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
+    raster_op: Option<u8>,
     /// The channels colour target zero's draws write; `None` writes every one.
     write_mask: Option<u8>,
     /// Whether the texture gets the harness's sentinel second level ([`COARSE_TEXEL`]), for a test
@@ -4621,6 +4673,7 @@ impl Default for Bound<'_> {
             initial: None,
             user_data: &NO_USER_DATA,
             blend: None,
+            raster_op: None,
             write_mask: None,
             coarse_level: false,
             viewport: None,

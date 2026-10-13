@@ -126,6 +126,10 @@ pub enum RenderCommand {
     /// Emitted before a draw whenever the value in force changed: blend is per-draw state, not
     /// frame state.
     SetBlend(crate::registers::BlendControl),
+    /// The raster operation colour target zero's draws that follow write through, as the stream's
+    /// `CB_COLOR_CONTROL` `ROP3` stands at them ([`crate::registers::raster_op`]); without one
+    /// a draw writes its colour unchanged (`0xCC`). Emitted before a draw whenever it changed.
+    SetRasterOp(u8),
     /// Which channels of colour target zero the draws that follow write, red in bit 0 to alpha in
     /// bit 3: `CB_TARGET_MASK` as it stands at them, limited to the channels the target's format
     /// holds ([`crate::registers::colour_write_mask`]). Emitted before a draw whenever it changed;

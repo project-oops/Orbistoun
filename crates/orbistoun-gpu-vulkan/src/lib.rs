@@ -279,6 +279,9 @@ pub struct VulkanBackend {
     /// Colour target zero's blend state for the next draw: the latest `SetBlend`; `None` draws
     /// opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
+    /// Colour target zero's raster operation for the next draw: the latest `SetRasterOp`; `None`
+    /// writes the colour unchanged.
+    raster_op: Option<u8>,
     /// The channels colour target zero's next draw writes: the latest `SetWriteMask`; `None`
     /// writes every one.
     write_mask: Option<u8>,
@@ -361,6 +364,7 @@ impl VulkanBackend {
             textures: [const { None }; framebuffer::MAX_TEXTURES],
             draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
+            raster_op: None,
             write_mask: None,
             current_depth: None,
             depth_stencil: None,
@@ -680,6 +684,8 @@ impl VulkanBackend {
             }
             // The blend state.
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
+            // The raster operation.
+            RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
             // The channels written.
             RenderCommand::SetWriteMask(mask) => self.write_mask = Some(*mask),
             // The depth and stencil tests, applied when a depth target is bound.
@@ -994,6 +1000,7 @@ impl VulkanBackend {
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
+        self.raster_op.hash(&mut hasher);
         self.write_mask.hash(&mut hasher);
         self.current_depth.is_some().hash(&mut hasher);
         // And the target's encoding: its pass's attachment format.
@@ -1217,7 +1224,10 @@ impl VulkanBackend {
         let target = self.current_target;
         // A blend state with no exact Vulkan equivalent refuses the draw by name rather than
         // drawing it opaque or approximately.
-        if let Err(what) = framebuffer::blend_attachment(self.blend, self.write_mask) {
+        let encoding = self.encoding_of(target);
+        if let Err(what) = framebuffer::blend_attachment(self.blend, self.write_mask)
+            .and(framebuffer::logic_op(self.raster_op, self.blend, encoding))
+        {
             self.refused += 1;
             return Err(BackendError::Unsupported { command: what });
         }
@@ -1245,6 +1255,7 @@ impl VulkanBackend {
                 .each_ref()
                 .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
+            raster_op: self.raster_op,
             write_mask: self.write_mask,
             viewport: self.viewport_transform,
             sampling: textures
@@ -1370,6 +1381,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
         RenderCommand::SetViewport(_)
             | RenderCommand::SetViewportTransform(_)
             | RenderCommand::SetBlend(_)
+            | RenderCommand::SetRasterOp(_)
             | RenderCommand::SetWriteMask(_)
             | RenderCommand::SetDepthStencil(_)
             | RenderCommand::SetCull(_)
@@ -1389,6 +1401,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
+        RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
@@ -2762,6 +2775,76 @@ mod tests {
             }),
             Err(BackendError::Unsupported { .. })
         ));
+    }
+
+    /// The guest's raster operation writes through a logic op.
+    ///
+    /// Green over the whole attachment, then red with `ROP3` set. GL's invert (`0x55`, as radeonsi
+    /// sets `GL_INVERT`) leaves the inverse of the green whatever the red; exclusive or (`0x66`)
+    /// leaves the two combined; copy (`0xCC`) leaves the red. A table that reads the pattern
+    /// (`0xF0`) refuses the draw by name.
+    #[test]
+    fn a_guest_raster_op_writes_through_a_logic_op() {
+        use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
+
+        if !super::probe().is_available() {
+            return;
+        }
+        let vertex = orbistoun_spirv::fullscreen_triangle_vertex_module();
+        let green = orbistoun_spirv::constant_colour_fragment_module([0.0, 1.0, 0.0, 1.0]);
+        let red = orbistoun_spirv::constant_colour_fragment_module([1.0, 0.0, 0.0, 1.0]);
+
+        let draw = |rop: u8| {
+            let mut backend = VulkanBackend::new();
+            for (id, module) in [(95, &vertex), (96, &green), (97, &red)] {
+                backend
+                    .ensure_resident(ResourceId(id), Resource::Shader(module))
+                    .expect("resident");
+            }
+            backend
+                .execute(&RenderCommand::BindShader {
+                    stage: ShaderStage::Vertex,
+                    shader: ResourceId(95),
+                })
+                .expect("bind vertex");
+            for fragment in [96, 97] {
+                if fragment == 97 {
+                    backend
+                        .execute(&RenderCommand::SetRasterOp(rop))
+                        .expect("set raster op");
+                }
+                backend
+                    .execute(&RenderCommand::BindShader {
+                        stage: ShaderStage::Fragment,
+                        shader: ResourceId(fragment),
+                    })
+                    .expect("bind fragment");
+                backend.execute(&RenderCommand::Draw {
+                    vertices: 3,
+                    instances: 1,
+                    first_vertex: 0,
+                })?;
+            }
+            Ok::<_, BackendError>(
+                backend
+                    .last_frame()
+                    .expect("a frame")
+                    .at(super::RENDER_WIDTH / 2, super::RENDER_HEIGHT / 2)
+                    .expect("the centre"),
+            )
+        };
+
+        let copied = draw(0xCC).expect("copy draws");
+        assert_eq!(copied[..3], [255, 0, 0], "copy leaves the source");
+        let inverted = draw(0x55).expect("invert draws");
+        assert_eq!(
+            inverted[..3],
+            [255, 0, 255],
+            "invert leaves the inverse of the green"
+        );
+        let combined = draw(0x66).expect("exclusive or draws");
+        assert_eq!(combined[..3], [255, 255, 0], "exclusive or leaves both");
+        assert!(matches!(draw(0xF0), Err(BackendError::Unsupported { .. })));
     }
 
     /// A frame's draws accumulate on their target.
