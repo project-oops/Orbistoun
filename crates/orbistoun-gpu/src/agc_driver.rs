@@ -877,6 +877,20 @@ fn stored_image_writes(
     }
     if let Some((surface, spanned_before)) = &images.stored_surface {
         let texels = stored.ok_or("the device did not answer the stored image")?;
+        let before = images
+            .stored
+            .as_ref()
+            .map(|stored| stored.texels.as_slice());
+        if let Some(changed) = before.and_then(|before| changed_texels(surface, before, &texels)) {
+            for (slot, texel) in changed {
+                writes.push(surface.base() + u64::from(slot) * 4, &texel.to_le_bytes());
+            }
+            if let Some(expand) = images.stored_keys_to_expand {
+                let (keys, bytes) = expand.keys;
+                writes.push_repeated(keys, crate::dcc::KEY_UNCOMPRESSED, bytes);
+            }
+            return Ok(writes);
+        }
         let mut spanned = spanned_before.clone();
         surface
             .tile(&texels, &mut spanned)
@@ -894,6 +908,43 @@ fn stored_image_writes(
     }
     Ok(writes)
 }
+
+/// A stored image's texels that changed, each as the word of the surface it lies in and its value
+/// after, in address order - where each texel is a word of its own and few enough changed that
+/// writing them one by one costs less than tiling every texel back and comparing the bytes.
+/// MDEM00001's dispatches change some thirty texels of an image a frame, and the tiling took 0.35
+/// ms of each. `None` where it does not apply, and the caller tiles the image back whole.
+fn changed_texels(
+    surface: &crate::pipeline::DispatchSurface,
+    before: &[u32],
+    after: &[u32],
+) -> Option<Vec<(u32, u32)>> {
+    if before.len() != after.len() {
+        return None;
+    }
+    let most = before.len() / CHANGED_TEXELS_FEWEST_PART;
+    let mut changed = Vec::new();
+    for (first, words) in changed_runs(before, after) {
+        if changed.len() + words > most {
+            return None;
+        }
+        changed.extend(first..first + words);
+    }
+    if changed.is_empty() {
+        return Some(Vec::new());
+    }
+    let slots = surface.texel_slots()?;
+    let mut written: Vec<(u32, u32)> = changed
+        .into_iter()
+        .map(|index| Some((*slots.get(index)?, after[index])))
+        .collect::<Option<_>>()?;
+    written.sort_unstable_by_key(|&(slot, _)| slot);
+    Some(written)
+}
+
+/// The share of a stored image's texels past which [`changed_texels`] gives way to tiling it whole:
+/// one in this many.
+const CHANGED_TEXELS_FEWEST_PART: usize = 8;
 
 /// The runs of words that differ between `before` and `after`, as `(first word, words)`.
 fn changed_runs<T: PartialEq>(before: &[T], after: &[T]) -> Vec<(usize, usize)> {
@@ -3982,6 +4033,60 @@ mod tests {
         );
         assert_eq!(writes[2], (0x9000, vec![crate::dcc::KEY_UNCOMPRESSED; 3]));
         assert_eq!(writes.len(), 3);
+    }
+
+    /// A stored image with a few texels changed writes back those texels where they lie, leaving
+    /// memory exactly as tiling the whole image back would - and with no texel changed, nothing.
+    #[test]
+    fn a_few_changed_texels_write_back_as_tiling_the_image_would() {
+        use crate::pipeline::{DispatchImages, DispatchSurface, DispatchTexels, TexelFormat};
+        let (width, height) = (64u32, 32u32);
+        let surface = DispatchSurface::Tiled(super::ColourTarget {
+            base: BASE,
+            width,
+            height,
+            pipe_bank_xor: 3,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        });
+        let before: Vec<u32> = (0..width * height)
+            .map(|i| i.wrapping_mul(0x9E37_79B9))
+            .collect();
+        let mut spanned = vec![0; surface.bytes()];
+        surface.tile(&before, &mut spanned).expect("tiled");
+        let stored = DispatchTexels {
+            texels: before.clone(),
+            format: TexelFormat::Rgba8,
+            width,
+            height,
+        };
+        let known = DispatchImages {
+            stored: Some(stored),
+            stored_surface: Some((surface, spanned.clone())),
+            ..DispatchImages::default()
+        };
+        let whole = DispatchImages {
+            stored: None,
+            ..known.clone()
+        };
+        let applied = |writes: super::GuestWrites| {
+            let mut memory = spanned.clone();
+            for (at, bytes) in writes.pairs() {
+                let at = usize::try_from(at - BASE).expect("in the surface");
+                memory[at..at + bytes.len()].copy_from_slice(&bytes);
+            }
+            memory
+        };
+        let mut after = before.clone();
+        for index in [0, 1, 2, 65, 700, 2047] {
+            after[index] ^= 0x0102_0304;
+        }
+        let few = super::stored_image_writes(&known, Some(after.clone())).expect("writes");
+        assert_eq!(few.runs.len(), 6, "one write a texel");
+        let tiled = super::stored_image_writes(&whole, Some(after)).expect("writes");
+        assert_eq!(applied(few), applied(tiled));
+        let none = super::stored_image_writes(&known, Some(before)).expect("writes");
+        assert!(none.runs.is_empty());
     }
 
     /// A uniform target is handed over exactly as detiling the same memory would hand it.

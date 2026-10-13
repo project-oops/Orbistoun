@@ -1814,7 +1814,55 @@ impl DispatchSurface {
             }
         }
     }
+
+    /// For each texel, row-major, the word of the bytes it spans that holds it - where every texel
+    /// is four bytes, a word of its own. Worked out once a surface, by tiling each texel's own
+    /// index, and kept: a dispatch that changes a few texels of a stored image writes those back
+    /// through it rather than tiling every texel again to find them.
+    #[must_use]
+    pub fn texel_slots(&self) -> Option<std::sync::Arc<[u32]>> {
+        use std::sync::{Arc, Mutex, PoisonError};
+        static KEPT: Mutex<Vec<(DispatchSurface, Arc<[u32]>)>> = Mutex::new(Vec::new());
+        let four_bytes = match self {
+            Self::Tiled(target) => target.layout.texel_log2() == 2,
+            Self::Linear {
+                bytes_per_texel, ..
+            } => *bytes_per_texel == 4,
+        };
+        if !four_bytes {
+            return None;
+        }
+        let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, slots)) = kept.iter().find(|(surface, _)| surface == self) {
+            return Some(Arc::clone(slots));
+        }
+        let (width, height) = self.extent();
+        let texels = u32::try_from(width as usize * height as usize).ok()?;
+        // No texel's index is all ones, so a word left so holds none.
+        let indices: Vec<u32> = (0..texels).collect();
+        let mut spanned = vec![0xFF; self.bytes()];
+        self.tile(&indices, &mut spanned).ok()?;
+        let mut slots = vec![u32::MAX; texels as usize];
+        for (word, index) in words_of_bytes(&spanned).into_iter().enumerate() {
+            if index != u32::MAX {
+                *slots.get_mut(index as usize)? = u32::try_from(word).ok()?;
+            }
+        }
+        // Every texel placed, each in a word of its own.
+        if slots.contains(&u32::MAX) {
+            return None;
+        }
+        let slots: Arc<[u32]> = slots.into();
+        if kept.len() >= TEXEL_SLOTS_KEPT {
+            kept.remove(0);
+        }
+        kept.push((*self, Arc::clone(&slots)));
+        Some(slots)
+    }
 }
+
+/// How many surfaces' texel slots are kept.
+const TEXEL_SLOTS_KEPT: usize = 4;
 
 /// Little-endian words from bytes, a trailing partial word dropped.
 fn words_of_bytes(bytes: &[u8]) -> Vec<u32> {
