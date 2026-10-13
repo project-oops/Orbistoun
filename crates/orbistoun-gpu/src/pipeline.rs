@@ -792,6 +792,45 @@ struct DrawKey {
     fragment_words: [u32; USER_DATA_WORDS],
 }
 
+/// How many programs [`DecodedPrograms`] keeps for one address.
+const VERSIONS_KEPT: usize = 8;
+
+/// The bytes each shader address decoded to, end-of-program included: the last few programs seen
+/// there, the one most recently found there first. A GL layer that writes each draw's program
+/// into one slot puts a different program at the same address from draw to draw, and decoding is
+/// a function of the bytes, so a program seen there before is not decoded again.
+#[derive(Debug, Default)]
+struct DecodedPrograms(BTreeMap<u64, Vec<Vec<u8>>>);
+
+impl DecodedPrograms {
+    /// The program most recently found at `address`.
+    fn get(&self, address: u64) -> Option<&Vec<u8>> {
+        self.0.get(&address)?.first()
+    }
+
+    /// Records `bytes` as the program now at `address`.
+    fn insert(&mut self, address: u64, bytes: Vec<u8>) {
+        let versions = self.0.entry(address).or_default();
+        versions.retain(|known| *known != bytes);
+        versions.insert(0, bytes);
+        versions.truncate(VERSIONS_KEPT);
+    }
+
+    /// The bytes of a program kept for `address` that memory holds there now, made the one
+    /// [`Self::get`] answers; `None` where memory holds none of them.
+    fn held<'m>(&mut self, address: u64, memory: &'m impl GuestMemory) -> Option<&'m [u8]> {
+        let versions = self.0.get_mut(&address)?;
+        let (at, bytes) = versions.iter().enumerate().find_map(|(at, known)| {
+            memory
+                .read(guest_address_of(address), known.len())
+                .filter(|bytes| *bytes == known.as_slice())
+                .map(|bytes| (at, bytes))
+        })?;
+        versions[..=at].rotate_right(1);
+        Some(bytes)
+    }
+}
+
 /// Each chunk's module beside its plan (D741); empty where the draw is drawn whole.
 fn chunks_of(modules: &[ResourceId], plans: &[ChunkPlan]) -> Vec<Chunk> {
     if modules.len() != plans.len() {
@@ -894,7 +933,7 @@ pub struct Pipeline {
     /// Shader bytes, by content hash, to the resource holding the translation.
     cache: BTreeMap<u64, Cached>,
     /// The bytes each shader address decoded to, end-of-program included.
-    decoded: BTreeMap<u64, Vec<u8>>,
+    decoded: DecodedPrograms,
     /// Whether a primitive shader runs one invocation per lane (D760), by its bytes' content hash:
     /// the answer reads the whole decoded program, and a shader already translated is bound again
     /// at every submission without its decode.
@@ -1014,7 +1053,7 @@ impl Pipeline {
             draw_widths: None,
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
-            decoded: BTreeMap::new(),
+            decoded: DecodedPrograms::default(),
             per_lane: BTreeMap::new(),
             detiled: DetiledImages::default(),
             needs_geometry: BTreeMap::new(),
@@ -2426,7 +2465,7 @@ impl Pipeline {
     fn work_out_flat_twins(&self, candidates: &[Candidate]) -> Option<FlatTwins> {
         let program = |stage: ShaderStage| {
             let candidate = candidates.iter().find(|c| c.stage == stage)?;
-            let bytes = self.decoded.get(&candidate.address)?;
+            let bytes = self.decoded.get(candidate.address)?;
             Some(decode_program(bytes, &self.encodings, &self.operands))
         };
         let fragment = program(ShaderStage::Fragment)?;
@@ -2938,7 +2977,7 @@ impl Pipeline {
     /// and a frame draws one program thousands of times. A program rewritten in place is traced
     /// again.
     fn format_words(&mut self, address: u64) -> Option<FormatWords> {
-        let shader = self.decoded.get(&address)?;
+        let shader = self.decoded.get(address)?;
         let key = (address, self.user_data[0].count);
         // The whole program's hash: a rewrite can change one word in the middle.
         let content = content_hash(shader);
@@ -3220,10 +3259,7 @@ impl Pipeline {
     ) -> Result<Prepared, PrepareFailure> {
         // A shader already decoded at this address with the same bytes is not decoded again: a
         // decode is a function of the bytes.
-        if let Some(known) = self.decoded.get(&address)
-            && let Some(bytes) = memory.read(guest_address_of(address), known.len())
-            && bytes == known.as_slice()
-        {
+        if let Some(bytes) = self.decoded.held(address, memory) {
             return self.prepare_decoded(
                 address,
                 stage,
@@ -6189,6 +6225,33 @@ mod tests {
         );
     }
 
+    /// A program written over another at one address, and the first written back, is found without
+    /// decoding either again, and the one found is the one the address answers: 2S2H's GL layer
+    /// puts each draw's program in the same slot, and 25500 of 40000 preparations decoded again
+    /// when only the last program there was kept.
+    #[test]
+    fn programs_taking_turns_at_one_address_are_each_found() {
+        use super::DecodedPrograms;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (first, second) = (vec![1_u8; 12], vec![2_u8; 8]);
+        let mut decoded = DecodedPrograms::default();
+        decoded.insert(0x1000, first.clone());
+        decoded.insert(0x1000, second.clone());
+        assert_eq!(decoded.get(0x1000), Some(&second), "the last one written");
+        let memory = Memory(first.clone());
+        assert_eq!(decoded.held(0x1000, &memory), Some(&first[..]));
+        assert_eq!(decoded.get(0x1000), Some(&first), "the one found there now");
+        let memory = Memory(second.clone());
+        assert_eq!(decoded.held(0x1000, &memory), Some(&second[..]));
+        assert_eq!(decoded.held(0x1000, &Memory(vec![3; 12])), None);
+    }
+
     /// A texture in the user data is read once a submission however many draws bind it, as one in a
     /// table is: PPSA25872 sets the same words before each of its draws, and each read asked the
     /// host whether its 64 MiB atlas had been written since - half a millisecond a draw. The words
@@ -7994,7 +8057,7 @@ mod tests {
         let (first, fresh) = prepare(&mut pipeline, &original);
         assert!(fresh, "the first sight of a shader translates it");
         assert_eq!(prepare(&mut pipeline, &original), (first, false));
-        let decoded = pipeline.decoded.get(&AT).map_or(0, Vec::len);
+        let decoded = pipeline.decoded.get(AT).map_or(0, Vec::len);
 
         let mut rewritten = 0xbe82_03ffu32.to_le_bytes().to_vec();
         rewritten.extend(0x1234u32.to_le_bytes());
@@ -8005,7 +8068,7 @@ mod tests {
             "a rewritten shader translates again"
         );
         assert_eq!(
-            pipeline.decoded.get(&AT).map(Vec::as_slice),
+            pipeline.decoded.get(AT).map(Vec::as_slice),
             Some(&rewritten[..decoded + 8]),
             "and its decode, one move longer, replaces the earlier one"
         );
