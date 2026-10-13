@@ -204,14 +204,6 @@ fn user_service_terminate(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceErrorDialogInitialize()` - sets up the system error-dialog subsystem.
-///
-/// Answers `OK`, as an SDK `*Initialize` does, without claiming a dialog was shown. Arity is the
-/// trampoline's six, not a claim about the real signature.
-fn error_dialog_initialize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    OK
-}
-
 /// `sceSystemServiceHideSplashScreen()` - dismisses the boot splash once a title is ready to draw.
 ///
 /// Nothing displays a splash layer here, so hiding it is a no-op that succeeds, like
@@ -780,7 +772,12 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         "sceSystemServiceGetHdrToneMapLuminance",
         get_hdr_tone_map_luminance,
     ),
-    ("sceErrorDialogInitialize", error_dialog_initialize),
+    ("sceErrorDialogInitialize", error_dialog::initialize),
+    ("sceErrorDialogOpen", error_dialog::open),
+    ("sceErrorDialogGetStatus", error_dialog::get_status),
+    ("sceErrorDialogUpdateStatus", error_dialog::update_status),
+    ("sceErrorDialogClose", error_dialog::close),
+    ("sceErrorDialogTerminate", error_dialog::terminate),
     ("sceSystemServiceParamGetInt", param_get_int),
     ("sceSystemServiceHideSplashScreen", hide_splash_screen),
     (
@@ -976,13 +973,6 @@ mod tests {
                 "{name} is implemented but not declared in guest_module!"
             );
         }
-    }
-
-    /// The error-dialog init answers `OK` and reads none of its arguments.
-    #[test]
-    fn error_dialog_initialize_answers_ok() {
-        let args = [0_u64; GUEST_ARG_REGISTERS];
-        assert_eq!(super::error_dialog_initialize(&args), super::OK);
     }
 
     /// The splash and flag actions answer `OK` without reading any argument slot.

@@ -2,6 +2,61 @@ library = "libSceErrorDialog"
 
 [[function]]
 name = "sceErrorDialogInitialize"
+purpose = "Brings the system error dialog up for this process."
+edge_cases = [
+    "The first call answers 0x0; a second while initialised answers 0x80ed0002.",
+    "After sceErrorDialogTerminate it initialises again (orbistoun's reading of a terminate; the repeat after it is unmeasured).",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, report-1791878041.txt (FW 12.40)"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
-note = "Implemented (commit 3212e2a) as an honest init: answers OK (0x0), the way an SDK *Initialize does on its first call, without claiming a dialog was ever shown - the same reasoning that let libSceAudioOut's init leave SERVES_NOTHING. known_by: assumed - the OK return is the near-universal *Initialize convention, not a hardware measurement; retire it against an obSCEne probe of this export if one is run. Handler: crates/orbistoun-systemservice/src/lib.rs error_dialog_initialize. Writes nothing and dereferences no argument, so no argument guard is needed."
+note = "Handler: crates/orbistoun-systemservice/src/error_dialog.rs."
+
+[[function]]
+name = "sceErrorDialogOpen"
+purpose = "Shows an error dialog for an error code."
+arguments = [{ name = "param", kind = "ptr", note = "Its first word states its size, which must be 16; the error code follows." }]
+edge_cases = [
+    "A parameter stating a size other than 16 answers 0x80ed0003.",
+    "A parameter stating 16, with error code 0x80020001, answers 0x80ed0007: a retail process with no display layer of its own is shown no dialog.",
+    "Before Initialize, or with a null parameter, it answers the placeholder: unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceErrorDialogGetStatus"
+purpose = "The dialog's state."
+edge_cases = [
+    "Answers 1 - initialised, not running - after Initialize, after the refused Open, and after Close.",
+    "Before Initialize it answers the placeholder: unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceErrorDialogUpdateStatus"
+purpose = "Advances the dialog and reports its state."
+edge_cases = ["Answers 1 after the refused Open, as GetStatus does."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceErrorDialogClose"
+purpose = "Closes the dialog."
+edge_cases = ["Answers 0x0; the status stays 1 afterwards."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceErrorDialogTerminate"
+purpose = "Takes the error dialog down for this process."
+edge_cases = ["Answers 0x0 after Close."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
