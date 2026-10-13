@@ -18,7 +18,7 @@ use orbistoun_gpu_vulkan::dispatch_guest;
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_translate::Width;
 use orbistoun_translate::wavefront::{
-    ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+    ComputeInputs, MeshPrimitive, PartialGroups, Stage, UserData, Window, translate_with_user_data,
 };
 
 fn device_or_skip(what: &str) -> bool {
@@ -68,6 +68,15 @@ fn translated(program: &[u32]) -> Vec<u32> {
 
 /// The program translated for images whose numeric types are these: fetched, stored.
 fn translated_for(program: &[u32], integer_images: [bool; 2]) -> Vec<u32> {
+    translated_with(program, integer_images, None)
+}
+
+/// The program translated for these image types, with a last group that runs only some threads.
+fn translated_with(
+    program: &[u32],
+    integer_images: [bool; 2],
+    partial: Option<PartialGroups>,
+) -> Vec<u32> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
     let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -85,7 +94,7 @@ fn translated_for(program: &[u32], integer_images: [bool; 2]) -> Vec<u32> {
                 thread_id_components: 2,
                 threads: [SIDE, SIDE, 1],
                 unwritten_user_data: 0,
-                partial: None,
+                partial,
                 integer_images,
             }),
             ..UserData::default()
@@ -131,6 +140,63 @@ fn a_dispatch_copies_one_image_into_another() {
         .expect("dispatched");
         assert!(!done.escaped, "{form}");
         assert_eq!(done.stored.as_deref(), Some(source.as_slice()), "{form}");
+    }
+}
+
+/// Threads a partial last group runs along x.
+const RUN: u32 = 3;
+
+/// A last group that runs some of its threads stores only theirs: every other texel keeps what it
+/// held. radeonsi reads one pixel back with one thread of 64 (`glReadPixels`), and the 63 that do
+/// not run never compute their coordinates - under `a16` they all point at the origin, where a
+/// store from each would put zero over the one texel the copy is for.
+#[test]
+fn an_inactive_thread_stores_nothing() {
+    if !device_or_skip("partial-group image copy") {
+        return;
+    }
+    let source: Vec<u32> = (0..SIDE * SIDE).map(|i| 0xff00_0000 | (i + 1)).collect();
+    let kept = 0xdead_beef_u32;
+    for (form, program) in [("whole", &COPY[..]), ("a16 d16", &COPY_A16_D16[..])] {
+        let destination = vec![kept; (SIDE * SIDE) as usize];
+        let module = translated_with(
+            program,
+            [false; 2],
+            Some(PartialGroups {
+                last: [0, 0, 0],
+                threads: [RUN, SIDE, 1],
+            }),
+        );
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                fetched: Some(DispatchImage {
+                    texels: &source,
+                    format: DispatchFormat::Rgba8,
+                    width: SIDE,
+                    height: SIDE,
+                }),
+                stored: Some(DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgba8,
+                    width: SIDE,
+                    height: SIDE,
+                }),
+            },
+        )
+        .expect("dispatched");
+        let expected: Vec<u32> = (0..SIDE * SIDE)
+            .map(|i| {
+                if i % SIDE < RUN {
+                    source[i as usize]
+                } else {
+                    kept
+                }
+            })
+            .collect();
+        assert_eq!(done.stored.as_deref(), Some(expected.as_slice()), "{form}");
     }
 }
 

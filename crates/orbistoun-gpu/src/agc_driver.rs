@@ -1050,11 +1050,24 @@ fn stored_image_writes(
         writes.push_repeated(base, 0, bytes);
     }
     if let Some((surface, spanned_before)) = &images.stored_surface {
-        let texels = stored.ok_or("the device did not answer the stored image")?;
-        let before = images
+        let mut texels = stored.ok_or("the device did not answer the stored image")?;
+        let mut before = images
             .stored
             .as_ref()
-            .map(|stored| stored.texels.as_slice());
+            .map(|stored| std::borrow::Cow::Borrowed(stored.texels.as_slice()));
+        // Texels a descriptor reorders were read into the shader's order; memory keeps its own.
+        if let Some(order) = images.stored_order {
+            for texel in &mut texels {
+                *texel = crate::pipeline::to_memory_channels(*texel, order);
+            }
+            before = before.map(|before| {
+                before
+                    .iter()
+                    .map(|&texel| crate::pipeline::to_memory_channels(texel, order))
+                    .collect()
+            });
+        }
+        let before = before.as_deref();
         if let Some(changed) = before.and_then(|before| changed_texels(surface, before, &texels)) {
             for (slot, texel) in changed {
                 writes.push(surface.base() + u64::from(slot) * 4, &texel.to_le_bytes());
@@ -1528,12 +1541,13 @@ impl GuestCp<'_> {
     /// Carries out a compute dispatch: reads its state from the stream, prepares its program, runs
     /// it over its window as guest memory holds it now, and writes back exactly the words it
     /// changed. Nothing is written unless the whole dispatch ran exactly.
-    fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
-        use crate::perf::{Span, span};
-        let execute = dispatch_executor()
-            .get()
-            .ok_or("no device is installed to run it")?;
-        let prepared = span(Span::DispatchPrepare, || {
+    /// The dispatch at `dispatch`, translated and with its images read from guest memory as it
+    /// holds them now.
+    fn prepare_dispatch(
+        &self,
+        dispatch: &cp::Dispatch<'_>,
+    ) -> Result<crate::pipeline::PreparedDispatch, String> {
+        crate::perf::span(crate::perf::Span::DispatchPrepare, || {
             let walked = crate::packet::walk(dispatch.stream);
             let mut live = live_pipeline()
                 .lock()
@@ -1557,7 +1571,30 @@ impl GuestCp<'_> {
                 dispatch.initiator,
             )?;
             pipeline.prepare_dispatch(&state, &self.memory)
-        })?;
+        })
+    }
+
+    fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
+        use crate::perf::{Span, span};
+        let execute = dispatch_executor()
+            .get()
+            .ok_or("no device is installed to run it")?;
+        let mut prepared = self.prepare_dispatch(dispatch)?;
+        // An image the dispatch reads or stores that lies in a target whose frame is still on the
+        // device is read from memory that does not hold the draws yet (D714): the frame goes in
+        // first and the images are read again, as radeonsi's copy of its colour target into a
+        // readback buffer after `glFinish` sees the draws on hardware.
+        if let Some((target, _)) = pending_target()
+            && prepared
+                .images
+                .read_spans()
+                .any(|(address, length)| overlaps_target(target, address, length))
+        {
+            if !write_back_pending(self) {
+                return Err("the frame on the target it reads could not be written back".to_owned());
+            }
+            prepared = self.prepare_dispatch(dispatch)?;
+        }
         let ((base, before), buffers_before) = span(Span::DispatchRead, || {
             // A program with no buffer runs over one word nobody reads, and writes nothing back
             // there.
@@ -4506,8 +4543,38 @@ mod tests {
         assert_eq!(few.runs.len(), 6, "one write a texel");
         let tiled = super::stored_image_writes(&whole, Some(after)).expect("writes");
         assert_eq!(applied(few), applied(tiled));
-        let none = super::stored_image_writes(&known, Some(before)).expect("writes");
+        let none = super::stored_image_writes(&known, Some(before.clone())).expect("writes");
         assert!(none.runs.is_empty());
+
+        // Read through selects that swap red and blue, the image went to the device in the
+        // shader's order; what comes back goes into memory in memory's own.
+        let order = [2, 1, 0, 3];
+        let swapped = |texels: &[u32]| -> Vec<u32> {
+            texels
+                .iter()
+                .map(|&t| t & 0xff00_ff00 | (t & 0xff) << 16 | (t >> 16) & 0xff)
+                .collect()
+        };
+        let reordered = DispatchImages {
+            stored: Some(DispatchTexels {
+                texels: swapped(&before),
+                format: TexelFormat::Rgba8,
+                width,
+                height,
+            }),
+            stored_order: Some(order),
+            ..known.clone()
+        };
+        let mut written = before.clone();
+        written[65] = 0x4433_2211;
+        let writes =
+            super::stored_image_writes(&reordered, Some(swapped(&written))).expect("writes");
+        assert_eq!(writes.runs.len(), 1, "the one texel the shader changed");
+        assert_eq!(
+            applied(writes),
+            applied(super::stored_image_writes(&whole, Some(written)).expect("writes")),
+            "memory as if no selects had reordered it"
+        );
     }
 
     /// A uniform target is handed over exactly as detiling the same memory would hand it.

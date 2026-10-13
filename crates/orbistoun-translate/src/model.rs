@@ -9436,13 +9436,42 @@ fn image_store<M: Model + ?Sized>(
         let mut construct = vec![stored.value.0, value.0];
         construct.extend(components.iter().map(|id| id.0));
         builder.function(op::COMPOSITE_CONSTRUCT, &construct);
+        // An inactive lane stores nothing. Its registers hold whatever an earlier write left there,
+        // often nothing at all: radeonsi's one-texel readback copy runs a single thread of 64, and
+        // the other 63, whose coordinates were never computed, would store zero over its texel.
+        let merge = open_if_active(model, lane);
+        let builder = model.builder();
         let bound = builder.id();
         builder.function(op::LOAD, &[stored.image.0, bound.0, stored.variable.0]);
         builder.function(op::IMAGE_WRITE, &[bound.0, coordinate.0, value.0]);
+        close_if_active(model, merge);
     }
 
     model.count();
     Ok(())
+}
+
+/// Opens a block that runs only while `lane` is active in the execution mask, returning the merge
+/// [`close_if_active`] closes it at; `None`, opening nothing, for a model with no execution mask,
+/// whose every lane runs.
+fn open_if_active<M: Model + ?Sized>(model: &mut M, lane: u32) -> Option<Id> {
+    let (low, high) = model.read_lane_mask(EXEC_LOW_HALF).ok()?;
+    let active = model.lane_bit(low, high, lane);
+    let b = model.builder();
+    let (body, merge) = (b.id(), b.id());
+    b.function(op::SELECTION_MERGE, &[merge.0, 0]);
+    b.function(op::BRANCH_CONDITIONAL, &[active.0, body.0, merge.0]);
+    b.function(op::LABEL, &[body.0]);
+    Some(merge)
+}
+
+/// Closes a block [`open_if_active`] opened.
+fn close_if_active<M: Model + ?Sized>(model: &mut M, merge: Option<Id>) {
+    if let Some(merge) = merge {
+        let b = model.builder();
+        b.function(op::BRANCH, &[merge.0]);
+        b.function(op::LABEL, &[merge.0]);
+    }
 }
 
 /// One vector register number as the decoder spells it.

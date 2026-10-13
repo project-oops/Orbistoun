@@ -1884,14 +1884,31 @@ fn last_clear(walked: &PacketWalk) -> Option<u32> {
 pub struct DispatchImages {
     /// The fetched image.
     pub fetched: Option<DispatchTexels>,
+    /// Where the fetched image was read: its first byte and the bytes it spans.
+    pub fetched_span: Option<(u64, u64)>,
     /// The stored image, as it was before the dispatch.
     pub stored: Option<DispatchTexels>,
+    /// Where each channel of the stored image lies in memory, where its descriptor reorders them:
+    /// its texels, before and after, are in the shader's order ([`to_memory_channels`]).
+    pub stored_order: Option<[u8; 4]>,
     /// Where the stored image lies, and the bytes it spanned before the dispatch.
     pub stored_surface: Option<(DispatchSurface, Vec<u8>)>,
     /// The stored image's compression keys, when they were all cleared: it was read as the zeros
     /// they mean, and once every texel is written back they are marked uncompressed - expanded, a
     /// state the hardware's own writes leave.
     pub stored_keys_to_expand: Option<KeysToExpand>,
+}
+
+impl DispatchImages {
+    /// The guest memory its images were read from, as (first byte, bytes): the fetched image's and
+    /// the stored one's.
+    pub fn read_spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.fetched_span.into_iter().chain(
+            self.stored_surface
+                .as_ref()
+                .map(|(surface, _)| (surface.base(), surface.bytes() as u64)),
+        )
+    }
 }
 
 /// A compressed image's cleared keys, and the surface they cover - every level of its chain, since
@@ -2172,11 +2189,18 @@ fn dispatch_images(
     }
     let mut images = DispatchImages::default();
     if let Some(source) = textures.first() {
-        let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
+        let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
         let (width, height) = surface.extent();
         let texels = match surface_keys(&descriptor, format, memory)? {
             crate::dcc::Keys::Uncompressed => {
-                detiled.detile(&surface, &read_spanned(&surface, memory)?)
+                let texels = detiled.detile(&surface, &read_spanned(&surface, memory)?);
+                match order {
+                    Some(order) => texels
+                        .into_iter()
+                        .map(|texel| to_shader_channels(texel, order))
+                        .collect(),
+                    None => texels,
+                }
             }
             crate::dcc::Keys::Clear0000 => {
                 vec![0; width as usize * height as usize * format.words() as usize]
@@ -2195,13 +2219,24 @@ fn dispatch_images(
             width,
             height,
         });
+        images.fetched_span = Some((surface.base(), surface.bytes() as u64));
     }
     if let Some(source) = storage {
-        let (surface, descriptor, format) = dispatch_image_surface(state, source, memory)?;
+        let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
         let spanned = read_spanned(&surface, memory)?;
         let (width, height) = surface.extent();
+        images.stored_order = order;
         let texels = match surface_keys(&descriptor, format, memory)? {
-            crate::dcc::Keys::Uncompressed => detiled.detile(&surface, &spanned),
+            crate::dcc::Keys::Uncompressed => {
+                let texels = detiled.detile(&surface, &spanned);
+                match order {
+                    Some(order) => texels
+                        .into_iter()
+                        .map(|texel| to_shader_channels(texel, order))
+                        .collect(),
+                    None => texels,
+                }
+            }
             crate::dcc::Keys::Clear0000 => {
                 let chain = surface_layout(&descriptor, format).and_then(|layout| {
                     usize::try_from(layout.chain_bytes(
@@ -2279,13 +2314,22 @@ impl DetiledImages {
     }
 }
 
+/// A dispatch image as its descriptor places it: where it lies, the descriptor, its texel format,
+/// and its channels' order where the descriptor reorders them ([`channel_order`]).
+type DispatchImageSurface = (
+    DispatchSurface,
+    ImageDescriptor,
+    TexelFormat,
+    Option<[u8; 4]>,
+);
+
 /// The image a dispatch source names: its descriptor read from the user data or its table,
 /// decoded, and placed.
 fn dispatch_image_surface(
     state: &crate::dispatch::DispatchState,
     source: &TextureSource,
     memory: &impl GuestMemory,
-) -> Result<(DispatchSurface, ImageDescriptor, TexelFormat), String> {
+) -> Result<DispatchImageSurface, String> {
     use orbistoun_translate::wavefront::TableWord;
     let user = |index: u32| {
         state
@@ -2342,7 +2386,7 @@ fn dispatch_image_surface(
                 }
             )
         })?;
-        return Ok((surface, descriptor, format));
+        return Ok((surface, descriptor, format, channel_order(format, words[3])));
     }
     let surface = surface_layout(&descriptor, format)
         .and_then(|layout| {
@@ -2365,7 +2409,51 @@ fn dispatch_image_surface(
                 descriptor.base_level,
             )
         })?;
-    Ok((DispatchSurface::Tiled(surface), descriptor, format))
+    Ok((
+        DispatchSurface::Tiled(surface),
+        descriptor,
+        format,
+        channel_order(format, words[3]),
+    ))
+}
+
+/// Where each channel a dispatch reads or writes lies in an `8_8_8_8_UNORM` texel in memory: byte
+/// `order[i]` holds the shader's channel `i`. Taken from the descriptor's destination selects
+/// (`SQ_IMG_RSRC_WORD3`), which radeonsi fills from the view format's own swizzle - a `B8G8R8A8`
+/// view of a colour target selects `Z, Y, X, W` (`si_make_texture_descriptor`) - and which a store
+/// honours as a load does, or radeonsi's copy from a BGRA target into an RGBA readback image would
+/// swap red and blue on hardware. [`None`] for the selects as they are, and for anything other than
+/// a reordering of the four channels, which is read as before.
+fn channel_order(format: TexelFormat, word3: u32) -> Option<[u8; 4]> {
+    let selects = destination_selects(word3);
+    if format != TexelFormat::Rgba8 || selects == IDENTITY_SELECTS {
+        return None;
+    }
+    let mut order = [0_u8; 4];
+    let mut seen = 0_u32;
+    for (slot, select) in order.iter_mut().zip(selects) {
+        let byte = select.checked_sub(SELECT_X).filter(|byte| *byte < 4)?;
+        seen |= 1 << byte;
+        *slot = u8::try_from(byte).ok()?;
+    }
+    (seen == 0xF).then_some(order)
+}
+
+/// `texel` as a shader sees it through `order`: channel `i` from byte `order[i]`.
+fn to_shader_channels(texel: u32, order: [u8; 4]) -> u32 {
+    let bytes = texel.to_le_bytes();
+    u32::from_le_bytes(order.map(|byte| bytes[usize::from(byte)]))
+}
+
+/// A texel a shader wrote through `order` as memory holds it: channel `i` into byte `order[i]`.
+#[must_use]
+pub fn to_memory_channels(texel: u32, order: [u8; 4]) -> u32 {
+    let channels = texel.to_le_bytes();
+    let mut bytes = [0_u8; 4];
+    for (channel, byte) in channels.into_iter().zip(order) {
+        bytes[usize::from(byte)] = channel;
+    }
+    u32::from_le_bytes(bytes)
 }
 
 /// The texel format a dispatch image's descriptor names, where it is one bound here.
@@ -7518,6 +7606,32 @@ mod tests {
             texture_from_words(words(11), 0, &memory, &mut super::TexelCache::new()).is_none(),
             "two cubes are an array, not read"
         );
+    }
+
+    /// A dispatch image's selects reorder an `8_8_8_8_UNORM` texel's channels: radeonsi's BGRA view
+    /// of a colour target selects `Z, Y, X, W` (`0x99b0_0f2e`, DRIP00001's readback copy), so a
+    /// shader reading channel 0 gets memory's byte 2, and writing it back puts it there again.
+    /// Selects as they are, constants, repeats and other formats are left alone.
+    #[test]
+    fn a_dispatch_image_reads_its_channels_in_the_order_its_selects_name() {
+        use super::{TexelFormat, channel_order, to_memory_channels, to_shader_channels};
+        let bgra = 0x99b0_0f2e;
+        let order = channel_order(TexelFormat::Rgba8, bgra).expect("a reordering");
+        assert_eq!(order, [2, 1, 0, 3]);
+        // Memory holds B, G, R, A in bytes 0-3: 0x40 blue, 0x80 green, 0xff red.
+        let memory = 0xffff_8040_u32;
+        let shader = to_shader_channels(memory, order);
+        assert_eq!(shader.to_le_bytes(), [0xff, 0x80, 0x40, 0xff], "R, G, B, A");
+        assert_eq!(to_memory_channels(shader, order), memory);
+        // `X, Y, Z, W`, an alpha of one, a repeat and a one-byte format.
+        for (format, word3) in [
+            (TexelFormat::Rgba8, 0x9050_0fac),
+            (TexelFormat::Rgba8, 0x9050_03ac),
+            (TexelFormat::Rgba8, 0x9050_0924),
+            (TexelFormat::R8, bgra),
+        ] {
+            assert_eq!(channel_order(format, word3), None, "{word3:#x}");
+        }
     }
 
     /// A pixel shader that samples through a descriptor and sampler still in its user data binds the
