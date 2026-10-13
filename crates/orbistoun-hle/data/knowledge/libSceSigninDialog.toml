@@ -1,0 +1,73 @@
+library = "libSceSigninDialog"
+
+[[function]]
+name = "sceSigninDialogInitialize"
+arity = 6
+purpose = "Initialises the sign-in dialog, once per process."
+returns = "status"
+edge_cases = [
+    "Answers 0, and again after sceSigninDialogTerminate (measured initialize, terminate, second-init, each 0x0).",
+    "A second call while initialised is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T1952Z-737e, 070-user/signin-dialog-lifecycle, report-1791727748.txt lines 3898-3908, FW 12.40"
+found_in = ["PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceSigninDialogOpen"
+arity = 1
+purpose = "(param): opens the sign-in dialog; the parameter is {u32 size = 0x10; s32 userId; u64 reserved}."
+returns = "status"
+edge_cases = ["orbistoun shows nothing and answers 0, the dialog running (D791); before initialising, while one runs, or with no parameter it answers the placeholder."]
+known_by = "assumed"
+assumptions = ["The shell's answer (D791): the open shows system UI, so obSCEne's measurement ran only the unattended arm."]
+found_in = ["PPSA04263-app0", "PPSA21564-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceSigninDialogUpdateStatus"
+arity = 0
+purpose = "Advances the dialog and returns its state; there is no out-parameter."
+returns = "count"
+edge_cases = [
+    "orbistoun answers none 0, initialised 1, running 2 or finished 3; a running dialog is reported running once and then finished, as a user who dismissed it and carried on offline would leave it (D791).",
+    "PPSA21564 and PPSA04263 compare the answer with 3; answered 0 by an undeclared import, their wait never ends.",
+]
+known_by = "assumed"
+assumptions = ["The status values are the common dialog's; obSCEne's lifecycle measurement recorded only return codes, not the status (re-filed)."]
+found_in = ["PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceSigninDialogGetStatus"
+arity = 0
+purpose = "Returns the dialog's state without advancing it."
+returns = "count"
+known_by = "assumed"
+assumptions = ["The same values as sceSigninDialogUpdateStatus, read without advancing a running dialog."]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceSigninDialogClose"
+arity = 0
+purpose = "Closes an open sign-in dialog."
+returns = "status"
+edge_cases = ["orbistoun answers 0 for an opened dialog, which then reports finished; with nothing open, the placeholder."]
+known_by = "assumed"
+assumptions = ["Unmeasured: a closed dialog reports finished, as a dismissed one does."]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceSigninDialogTerminate"
+arity = 0
+purpose = "Ends the sign-in dialog library's use in this process."
+returns = "status"
+edge_cases = [
+    "Answers 0 once initialised, after which Initialize answers 0 again (measured).",
+    "Before initialising it is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20260926T1952Z-737e, 070-user/signin-dialog-lifecycle, report-1791727748.txt lines 3898-3908, FW 12.40"
+found_in = ["PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0"]
+found_on = "2026-10-13"

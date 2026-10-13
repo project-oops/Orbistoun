@@ -117,6 +117,10 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../data/knowledge/libSceMsgDialog.native.toml"),
     ),
     (
+        "libSceSigninDialog",
+        include_str!("../data/knowledge/libSceSigninDialog.toml"),
+    ),
+    (
         "libSceShare",
         include_str!("../data/knowledge/libSceShare.toml"),
     ),

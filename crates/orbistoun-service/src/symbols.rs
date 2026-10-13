@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 56] {
+pub(crate) fn modules() -> [ModuleDesc; 57] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -79,6 +79,7 @@ pub(crate) fn modules() -> [ModuleDesc; 56] {
         orbistoun_systemservice::rtc::MODULE,
         orbistoun_systemservice::remoteplay::MODULE,
         orbistoun_systemservice::save_data::MODULE,
+        orbistoun_systemservice::signin_dialog::MODULE,
         orbistoun_systemservice::web_browser_dialog::MODULE,
         orbistoun_video::av_player::MODULE,
         orbistoun_video::font::MODULE,
@@ -149,6 +150,7 @@ pub(crate) fn implementations() -> Vec<(&'static str, orbistoun_core::GuestFn)> 
     // Registered beside its declaration, as the Agc modules are.
     all.extend_from_slice(orbistoun_systemservice::common_dialog::implementations());
     all.extend_from_slice(orbistoun_systemservice::msg_dialog::implementations());
+    all.extend_from_slice(orbistoun_systemservice::signin_dialog::implementations());
     all.extend_from_slice(orbistoun_systemservice::share::implementations());
     all.extend_from_slice(orbistoun_systemservice::remoteplay::implementations());
     all.extend_from_slice(orbistoun_systemservice::content_export::implementations());
