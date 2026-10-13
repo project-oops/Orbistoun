@@ -214,7 +214,13 @@ impl Service {
         let Some(file) = self.link_plan_file(path) else {
             return summary;
         };
-        let key = PlanKey::for_executable(bytes, orbistoun_env::build::line());
+        let key = PlanKey::for_executable(bytes, orbistoun_env::build::line()).with_modules(
+            title
+                .placed
+                .images()
+                .iter()
+                .map(|(library, _)| library.as_str()),
+        );
         let settled = if relink {
             orbistoun_loader::plan::relink(&file, &key, plan)
         } else {

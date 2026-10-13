@@ -280,9 +280,29 @@ pub struct PlanKey {
     pub build: String,
     /// The host CPU features linking may depend on.
     pub host: String,
+    /// Which of the title's own modules linked, by library name in placement order, as a digest:
+    /// a module newly found or no longer shipped changes the plan without the loader being wrong,
+    /// so it is an input, not a mismatch. Empty for a key from before it was recorded.
+    #[serde(default)]
+    pub modules: String,
 }
 
 impl PlanKey {
+    /// This key, for a title whose own modules are `libraries`, in placement order.
+    #[must_use]
+    pub fn with_modules<'a>(mut self, libraries: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut hash = Sha256::new();
+        for library in libraries {
+            hash.update((library.len() as u64).to_le_bytes());
+            hash.update(library.as_bytes());
+        }
+        self.modules.clear();
+        for byte in &hash.finalize()[..8] {
+            let _ = write!(self.modules, "{byte:02x}");
+        }
+        self
+    }
+
     /// The key for an executable's bytes, linked by `build` on this host.
     #[must_use]
     pub fn for_executable(bytes: &[u8], build: String) -> Self {
@@ -294,6 +314,7 @@ impl PlanKey {
             executable,
             build,
             host: host_features(),
+            modules: String::new(),
         }
     }
 }
@@ -518,6 +539,25 @@ mod tests {
         assert_eq!(standing, Standing::New);
         let now = super::load(&path).unwrap();
         assert_eq!((now.key, now.plan), (rebuilt, fresh));
+    }
+
+    /// A title that links another set of its own modules under one build is a changed input, not
+    /// a mismatch: a plugin newly found reads `new` (inbox `-37da`). The same set, in the same
+    /// order, is the same key.
+    #[test]
+    fn another_module_set_is_a_new_key_not_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link-plan.json");
+        let without = key().with_modules(["libc"]);
+        super::settle(&path, &without, &LinkPlan::default()).unwrap();
+        let with_plugin = key().with_modules(["libc", "libplugin"]);
+        let fresh = LinkPlan {
+            modules: vec![module(Vec::new())],
+        };
+        let (standing, _) = super::settle(&path, &with_plugin, &fresh).unwrap();
+        assert_eq!(standing, Standing::New);
+        assert_eq!(key().with_modules(["libc", "libplugin"]), with_plugin);
+        assert_ne!(key().with_modules(["libplugin", "libc"]), with_plugin);
     }
 
     /// A changed value, a slot only the stored plan wrote and one only the fresh plan wrote are
