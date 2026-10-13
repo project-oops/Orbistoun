@@ -26,6 +26,8 @@ orbistoun-overrides = { workspace = true }
 orbistoun-submit = { workspace = true }
 orbistoun-corpus = { workspace = true }
 orbistoun-report = { workspace = true }
+# A run recorded with the Tracy profiler, and read back (D831).
+orbistoun-perf = { workspace = true }
 # The dispatcher. Deliberately *not* `orbistoun-propose`, which carries a model runtime this
 # binary has no use for - the crate boundary is what keeps candle and reqwest out of the CLI,
 # rather than a feature flag nobody re-checks (D293).
@@ -47,6 +49,9 @@ image = { workspace = true }
 sha2 = { workspace = true }
 
 [features]
+# The Tracy profiler's client, built in and started only when a run asks (D829, D831): dormant, it
+# costs a span one check whether it runs, which no benchmark could tell from noise.
+default = ["tracy"]
 # The Tracy profiler's zones, in the worker this binary runs (D829).
 tracy = ["orbistoun-worker/tracy"]
 

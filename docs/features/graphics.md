@@ -64,11 +64,28 @@ reason is settled by an obSCEne measurement before it is implemented
 orbistoun-cli shaders <directory> --top 10   # rank the instructions that block translation across a directory of shader binaries
 ```
 
-A build with the `tracy` feature streams the same phases and spans to the
-[Tracy](https://github.com/wolfpld/tracy) profiler, version 0.14.1, as zones on the thread that
-ran them, with a frame at each guest flip (D829). It records only while the viewer or
-`tracy-capture` is connected, on TCP port 8086, which may be on another machine:
+### Profiling with Tracy
+
+Every build carries the [Tracy](https://github.com/wolfpld/tracy) profiler's client, version
+0.14.1, dormant until asked for (D829, D831). Asked for, it streams the same phases and spans as
+zones on the thread that ran them, a frame at each guest flip, and each frame's time as a plot.
 
 ```bash
-cargo build --release -p orbistoun-cli --features tracy
+orbistoun-cli perf --install-tracy            # fetch the Tracy tools into the data root, once
+orbistoun-cli perf <title> --seconds 30       # record a run, rank where its time went
+orbistoun-cli perf <title> --open             # ... and open the recording in the Tracy viewer
+orbistoun-cli bench --seconds 30              # every title in turn, ranked across them
+ORBISTOUN_TRACY=1 orbistoun-cli run <title>   # just start the client, for a viewer to connect
 ```
+
+`perf` keeps the recording and its report in the title's `perf` directory and reports frame times
+(median, p95, p99, worst) and the zones by self time - what to make faster - and by total time -
+where the time sits. A zone that hands work to another thread and waits for it, such as `execute
+hand-off`, counts the wait as its own time, because the work's zone is on the other thread.
+`bench` replays each title's pad script, runs homebrew on the host clock, skips a title while
+something else keeps the GPU busy, and compares against the last benchmark.
+
+| Variable | Does |
+|---|---|
+| `ORBISTOUN_TRACY=1` | start the Tracy client in the worker, on `TRACY_PORT` (8086 unset) |
+| `ORBISTOUN_TRACY_TOOLS=<dir>` | where the Tracy tools are, before the installed copy and `PATH` |

@@ -1,0 +1,20 @@
+[package]
+publish = false
+name = "orbistoun-perf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Profiling a run with Tracy - finding and installing its tools, capturing a run, and reading a capture back as a ranked report."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

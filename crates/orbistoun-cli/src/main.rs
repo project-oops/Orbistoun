@@ -13,6 +13,7 @@ mod frames;
 mod learn;
 mod module;
 mod names;
+mod perf;
 mod probe;
 mod progress;
 mod questions;
@@ -322,6 +323,49 @@ enum Command {
     Knows {
         /// A function name, or a fragment to match. Omit for a summary.
         pattern: Option<String>,
+    },
+    /// Run a title with the Tracy profiler's client and record it, then rank where its time went
+    /// (D831).
+    ///
+    /// The recording and its report go in the title's `perf` directory; nothing is written to its
+    /// compat record. Needs a build with the `tracy` feature and the Tracy tools, which
+    /// `--install-tracy` fetches.
+    Perf {
+        /// Path to a guest executable. Omit with `--install-tracy` to install the tools alone.
+        path: Option<std::path::PathBuf>,
+        /// Seconds of the run to record.
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// How many zones each ranking lists.
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        /// Play this pad script on player 1, as `run --input` does.
+        #[arg(long)]
+        input: Option<std::path::PathBuf>,
+        /// Run on the host clock, as a staged homebrew build is played.
+        #[arg(long)]
+        host_clock: bool,
+        /// Open the recording in the Tracy viewer afterwards.
+        #[arg(long)]
+        open: bool,
+        /// Fetch the Tracy tools this build's client speaks into the data root first.
+        #[arg(long)]
+        install_tracy: bool,
+    },
+    /// Record every title in the library in turn and rank the costs across them, beside the last
+    /// benchmark (D831).
+    ///
+    /// Each title replays its compat record's pad script when it has one; staged homebrew runs on
+    /// the host clock. A title is skipped while something else keeps the GPU busy.
+    Bench {
+        /// Only these titles, by their directory names.
+        titles: Vec<String>,
+        /// Seconds of each title to record.
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// How many zones the ranking across titles lists.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
     },
     /// Answer the conformance probe's command protocol, so one driver can drive either.
     ///
@@ -938,6 +982,25 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             service,
         )?,
         Command::Serve { bind, no_key, once } => cmd_serve(service, &bind, no_key, once)?,
+        Command::Perf {
+            path,
+            seconds,
+            top,
+            input,
+            host_clock,
+            open,
+            install_tracy,
+        } => perf::cmd_perf(
+            path.as_deref(),
+            (seconds, top),
+            (input.as_deref(), host_clock),
+            (open, install_tracy),
+        )?,
+        Command::Bench {
+            titles,
+            seconds,
+            top,
+        } => perf::cmd_bench(&titles, seconds, top)?,
         Command::Turn { .. }
         | Command::Run { .. }
         | Command::Link { .. }

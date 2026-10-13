@@ -172,6 +172,31 @@ pub const GPU: Var = Var {
     read_by: "orbistoun-gpu-vulkan",
 };
 
+/// Start the Tracy profiler's client in the worker (D829), so the Tracy viewer or `tracy-capture`
+/// can connect and record every perf phase and span as a zone, with a frame at each guest flip.
+///
+/// Off, nothing is started and no port is opened. The port is Tracy's own `TRACY_PORT`, 8086 when
+/// unset. A build without the client says so rather than starting nothing quietly.
+pub const TRACY: Var = Var {
+    name: "ORBISTOUN_TRACY",
+    kind: Kind::Setting,
+    summary: "1 starts the Tracy profiler's client in the worker, for the Tracy viewer or tracy-capture to connect to (TRACY_PORT, default 8086)",
+    example: "1",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
+/// Where the Tracy tools are (D831), before the copy `orbistoun-cli perf --install-tracy` puts under
+/// the data root and `PATH`.
+pub const TRACY_TOOLS: Var = Var {
+    name: "ORBISTOUN_TRACY_TOOLS",
+    kind: Kind::Setting,
+    summary: "a directory holding tracy-capture, tracy-csvexport and tracy-profiler, searched before the installed copy and PATH",
+    example: "X:/toolchains/tracy",
+    effect: Effect::Observes,
+    read_by: "orbistoun-cli",
+};
+
 /// Sample where the guest's main thread is, about once a millisecond, and print the counts every
 /// few seconds.
 pub const PROFILE: Var = Var {
@@ -744,6 +769,8 @@ pub const REGISTRY: &[Var] = &[
     SANDBOX,
     TARGET_WRITEBACK,
     GPU,
+    TRACY,
+    TRACY_TOOLS,
     PERF_DETAIL,
     TRACE_SUBMITS,
     PROFILE,
@@ -833,6 +860,8 @@ mod tests {
         super::SANDBOX,
         super::TARGET_WRITEBACK,
         super::GPU,
+        super::TRACY,
+        super::TRACY_TOOLS,
         super::PERF_DETAIL,
         super::TRACE_SUBMITS,
         super::PROFILE,

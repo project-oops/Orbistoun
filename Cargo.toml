@@ -56,6 +56,7 @@ members = [
     # download and pinning logic so the CLI stays a shim (D034).
     "crates/orbistoun-corpus",
     "crates/orbistoun-paths",
+    "crates/orbistoun-perf",
     "crates/orbistoun-proto",
     "crates/orbistoun-service",
 
@@ -289,6 +290,7 @@ orbistoun-elf = { path = "crates/orbistoun-elf" }
 orbistoun-nid = { path = "crates/orbistoun-nid" }
 orbistoun-mem = { path = "crates/orbistoun-mem" }
 orbistoun-paths = { path = "crates/orbistoun-paths" }
+orbistoun-perf = { path = "crates/orbistoun-perf" }
 orbistoun-overrides = { path = "crates/orbistoun-overrides" }
 orbistoun-submit = { path = "crates/orbistoun-submit" }
 orbistoun-corpus = { path = "crates/orbistoun-corpus" }

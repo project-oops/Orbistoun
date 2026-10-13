@@ -3018,6 +3018,7 @@ dependencies = [
  "orbistoun-nid",
  "orbistoun-overrides",
  "orbistoun-paths",
+ "orbistoun-perf",
  "orbistoun-probe",
  "orbistoun-proto",
  "orbistoun-report",
@@ -3333,6 +3334,15 @@ version = "0.1.0"
 dependencies = [
  "oops-paths",
  "orbistoun-env",
+ "tempfile",
+]
+
+[[package]]
+name = "orbistoun-perf"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

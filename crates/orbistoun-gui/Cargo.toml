@@ -36,6 +36,8 @@ image = { workspace = true }
 gilrs = { workspace = true }
 
 [features]
+# The Tracy profiler's client, built in and started only when a run asks (D829, D831).
+default = ["tracy"]
 # The Tracy profiler's zones, in the worker this binary runs (D829).
 tracy = ["orbistoun-worker/tracy"]
 

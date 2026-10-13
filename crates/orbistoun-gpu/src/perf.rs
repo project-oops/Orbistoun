@@ -115,11 +115,13 @@ fn zone(location: &'static tracy_client::SpanLocation) -> Option<tracy_client::S
 
 /// Starts the Tracy client in a `tracy` build (D829): a viewer or `tracy-capture` may then connect,
 /// and zones are recorded while one is. Only the process that calls this runs one - the worker, not
-/// the launcher that spawned it. Does nothing in any other build.
-pub fn start_profiler() {
+/// the launcher that spawned it - and until one does, each span asks only whether a client runs.
+/// Answers whether this build has the client to start.
+pub fn start_profiler() -> bool {
     // The handle is a token: once started, the client runs for the rest of the process.
     #[cfg(feature = "tracy")]
     let _client = tracy_client::Client::start();
+    cfg!(feature = "tracy")
 }
 
 /// A part of presenting a frame.
@@ -242,13 +244,27 @@ pub fn close_first_frame() -> Option<Snapshot> {
 /// Counts one of `what`.
 pub fn count(what: Count) {
     COUNTED[what as usize].fetch_add(1, Ordering::Relaxed);
-    // A guest flip ends a frame in the profiler's timeline (D829).
+    // A guest flip ends a frame in the profiler's timeline (D829), and plots how long it took.
     #[cfg(feature = "tracy")]
     if what == Count::Flips
         && let Some(client) = tracy_client::Client::running()
     {
         client.frame_mark();
+        if let Some(ms) = since_last_flip_ms() {
+            client.plot(tracy_client::plot_name!("frame ms"), ms);
+        }
     }
+}
+
+/// Milliseconds since the previous guest flip, `None` at the first: the frame time a profiler
+/// plots (D829). A lock once a frame, taken only while a profiler client runs.
+#[cfg(feature = "tracy")]
+fn since_last_flip_ms() -> Option<f64> {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let now = std::time::Instant::now();
+    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = last.replace(now)?;
+    Some(now.duration_since(previous).as_secs_f64() * 1e3)
 }
 
 /// What was measured since the last [`take`].
