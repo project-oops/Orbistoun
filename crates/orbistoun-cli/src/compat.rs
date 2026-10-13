@@ -84,6 +84,9 @@ fn compat_rows(
                 reproduce: file.reproduce.clone(),
                 inputs,
                 frame_match: file.frame_match.clone(),
+                preview_reach: file.preview.as_ref().map(|preview| {
+                    orbistoun_overrides::preview_cell(preview, file.preview_dependence.as_ref())
+                }),
             },
             file.title,
             notes,

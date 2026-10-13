@@ -454,6 +454,20 @@ pub struct Row {
     pub inputs: bool,
     /// How its frames compared with the console's, where somebody compared them.
     pub frame_match: Option<FrameMatch>,
+    /// How far its permissive preview got, as a table cell ([`preview_cell`]), where one ran.
+    pub preview_reach: Option<String>,
+}
+
+/// A preview's reach for a table cell: its rung and imports, and - where its zero answers were
+/// ranked - how many the title was found to depend on, so a reader sees how far the refusals
+/// stand between the honest row and this one, and how many of them matter.
+#[must_use]
+pub fn preview_cell(preview: &Status, dependence: Option<&PreviewDependence>) -> String {
+    let reached = format!("{} at {}", preview.reach.label(), preview.imports);
+    match dependence {
+        Some(ranked) => format!("{reached}, needs {}", ranked.depended.len()),
+        None => reached,
+    }
 }
 
 impl Row {
@@ -485,9 +499,9 @@ pub fn render_markdown(rows: &[Row]) -> String {
 
     let mut out = String::new();
     out.push_str(
-        "| Title | Reach | Imports | Answered | Calls | Standing | Outcome | From | Measured | On hardware |\n",
+        "| Title | Reach | Imports | Answered | Calls | Standing | Outcome | From | Measured | On hardware | Preview |\n",
     );
-    out.push_str("|---|---|--:|--:|--:|--:|---|---|---|---|\n");
+    out.push_str("|---|---|--:|--:|--:|--:|---|---|---|---|---|\n");
     for r in &ranked {
         let mark = if r.screenshot.is_some() { " 📷" } else { "" };
         // Linked to the page, so the table leads to it.
@@ -509,7 +523,7 @@ pub fn render_markdown(rows: &[Row]) -> String {
         };
         let _ = writeln!(
             out,
-            "| {}{} | {} | {} | {} | {} | {}% | {} | {} | {} | {} |",
+            "| {}{} | {} | {} | {} | {} | {}% | {} | {} | {} | {} | {} |",
             shown,
             mark,
             reach,
@@ -521,6 +535,7 @@ pub fn render_markdown(rows: &[Row]) -> String {
             from,
             md_cell(&r.status.measured_on),
             r.on_hardware(),
+            r.preview_reach.as_deref().unwrap_or("-"),
         );
     }
 
@@ -1613,6 +1628,7 @@ reason = "..."
                 reproduce: None,
                 inputs: false,
                 frame_match: None,
+                preview_reach: None,
             },
             Row {
                 name: None,
@@ -1624,6 +1640,7 @@ reason = "..."
                 reproduce: None,
                 inputs: false,
                 frame_match: None,
+                preview_reach: None,
             },
         ];
         let md = render_markdown(&rows);
@@ -1664,6 +1681,7 @@ reason = "..."
             reproduce: None,
             inputs: false,
             frame_match: None,
+            preview_reach: None,
         };
         assert!(
             !super::render_title_page(&row, &super::Title::default(), "").contains("Link plan")
@@ -1679,6 +1697,20 @@ reason = "..."
     /// A comparison with the console's frames round-trips through the record, and is shown in the
     /// table and on the page only where one was made, so a record without one renders exactly as
     /// before.
+    #[test]
+    fn a_previews_reach_is_a_cell_saying_how_many_answers_it_needs() {
+        let preview = status(Reach::Entered, 263, 1_204_532);
+        assert_eq!(super::preview_cell(&preview, None), "entered at 263");
+        let ranked = super::PreviewDependence {
+            depended: vec!["sceNpGetState: entered at 218 imports".to_owned()],
+            ..super::PreviewDependence::default()
+        };
+        assert_eq!(
+            super::preview_cell(&preview, Some(&ranked)),
+            "entered at 263, needs 1"
+        );
+    }
+
     #[test]
     fn a_frame_match_is_recorded_and_shown_only_where_one_was_made() {
         let compared = super::FrameMatch {
@@ -1714,6 +1746,7 @@ reason = "..."
             reproduce: None,
             inputs: false,
             frame_match: None,
+            preview_reach: None,
         };
         let plain_table = render_markdown(std::slice::from_ref(&row));
         let plain_page = super::render_title_page(&row, &super::Title::default(), "");
@@ -1751,6 +1784,7 @@ reason = "..."
             reproduce: None,
             inputs: false,
             frame_match: None,
+            preview_reach: None,
         };
         let before = super::render_title_page(&row, &super::Title::default(), "");
         assert!(!before.contains("Presented by") && !before.contains("Shown in the window"));
@@ -1803,6 +1837,7 @@ reason = "..."
             reproduce: None,
             inputs: false,
             frame_match: None,
+            preview_reach: None,
         };
         assert_eq!(row.on_hardware(), "unknown");
         assert!(render_markdown(std::slice::from_ref(&row)).contains("| unknown |"));
@@ -1843,6 +1878,7 @@ reason = "..."
             reproduce: None,
             inputs: false,
             frame_match: None,
+            preview_reach: None,
         }];
         let md = render_markdown(&rows);
         assert!(md.contains("## Screenshots"));
@@ -2168,6 +2204,7 @@ reason = "..."
                 reproduce: None,
                 inputs: false,
                 frame_match: None,
+                preview_reach: None,
             })
             .collect();
         let table = render_markdown(&rows);
@@ -2414,6 +2451,7 @@ reason = "..."
             reproduce: Some(reproduce(frames)),
             inputs: true,
             frame_match: None,
+            preview_reach: None,
         };
         let committed = render_title_page(
             &row(Some("compat/T0001/frames.png"), FramesKept::Committed),
