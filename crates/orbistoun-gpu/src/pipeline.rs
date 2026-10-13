@@ -360,6 +360,9 @@ pub struct SubmissionReport {
     /// Draws that write a colour channel their pixel shader never exports, which would hold
     /// whatever the shader's output held.
     pub unexported_channel_draws: usize,
+    /// Draws whose pixel shader exports to a colour target (`mrtK`) the submission binds no colour
+    /// buffer for, so what it exports there would be drawn nowhere.
+    pub unbound_export_draws: usize,
     /// Draws running a shader that reads or writes guest memory while no window is mapped, so the
     /// module would read zeros where the guest's data is, and the first such access, by name and
     /// offset.
@@ -509,6 +512,18 @@ fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], d
 
 /// The shaders one draw runs, by stage.
 type DrawShaders = Vec<(ShaderStage, ResourceId)>;
+
+/// How many colour buffers the commands bind: the latest [`RenderCommand::SetRenderTargets`]'s.
+fn bound_colour_targets(commands: &[RenderCommand]) -> usize {
+    commands
+        .iter()
+        .rev()
+        .find_map(|command| match command {
+            RenderCommand::SetRenderTargets { colour, .. } => Some(colour.len()),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
 
 /// How many draws a stage's shader was not prepared for: a draw on the draw queue missing its
 /// geometry or its pixel shader, a stage the guest registered aside, since that one is bound once
@@ -1001,7 +1016,7 @@ pub struct Pipeline {
     /// by, from which a draw's system registers are seeded on the host (D800).
     assemblies: BTreeMap<ResourceId, Assembly>,
     /// The colour channels each translated pixel shader exports, by its resource.
-    colour_channels: BTreeMap<ResourceId, u8>,
+    colour_channels: BTreeMap<ResourceId, [u8; 8]>,
     /// Texels read from guest memory, shared across submissions while their bytes are unchanged.
     texels: TexelCache,
     /// Each translated module's draw buffers, in slot order (D733).
@@ -1640,8 +1655,7 @@ impl Pipeline {
         });
         submission.report.unwindowed_draws =
             self.unwindowed_draws(&per_draw, &submission.guest_memory);
-        submission.report.unexported_channel_draws =
-            self.unexported_channel_draws(&per_draw, &draws, &writes);
+        self.count_export_refusals(&mut submission, &per_draw, (&draws, &writes));
         submission.report.unshaded_draws = unshaded_draws(&per_draw, queue, registered);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
@@ -2846,7 +2860,7 @@ impl Pipeline {
         if stage == Stage::Fragment {
             self.colour_channels.insert(
                 resource,
-                orbistoun_translate::wavefront::exported_colour_channels(decoded, &self.encodings),
+                orbistoun_translate::wavefront::exported_target_channels(decoded, &self.encodings),
             );
         }
         if !buffers.sources.is_empty() {
@@ -2910,7 +2924,39 @@ impl Pipeline {
                 let info = sweep
                     .latest(at, crate::registers::CB_COLOR0_INFO)
                     .unwrap_or(0);
-                crate::registers::colour_write_mask(mask, info) & !exported != 0
+                crate::registers::colour_write_mask(mask, info) & !exported[0] != 0
+            })
+            .count()
+    }
+
+    /// Counts the draws whose pixel shader's exports do not match the colour buffers they write:
+    /// [`SubmissionReport::unexported_channel_draws`] and
+    /// [`SubmissionReport::unbound_export_draws`].
+    fn count_export_refusals(
+        &self,
+        submission: &mut Submission,
+        per_draw: &[DrawShaders],
+        (draws, writes): (&[DrawCall], &[RegisterWrite]),
+    ) {
+        submission.report.unexported_channel_draws =
+            self.unexported_channel_draws(per_draw, draws, writes);
+        submission.report.unbound_export_draws =
+            self.unbound_export_draws(per_draw, bound_colour_targets(&submission.commands));
+    }
+
+    /// How many draws run a pixel shader that writes channels to a colour target past the `bound`
+    /// the submission binds colour buffers for: `mrtK` is the `K`th bound one.
+    fn unbound_export_draws(&self, per_draw: &[DrawShaders], bound: usize) -> usize {
+        per_draw
+            .iter()
+            .filter(|shaders| {
+                shaders.iter().any(|(stage, resource)| {
+                    *stage == ShaderStage::Fragment
+                        && self
+                            .colour_channels
+                            .get(resource)
+                            .is_some_and(|channels| channels.iter().skip(bound).any(|&c| c != 0))
+                })
             })
             .count()
     }

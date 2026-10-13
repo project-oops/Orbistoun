@@ -6,6 +6,8 @@
 A translated `exp` becomes a store of four bitcast lane-zero components to a `Location 0` output
 of a `Fragment` module, whose epilogue skips the observation window. A module with no colour
 output, any target other than `mrt0`, and the compressed, done and write-mask fields are refused.
+Amended by D825: `mrtK` writes the output at `Location K`, bound to the `K`th colour buffer
+`SPI_SHADER_COL_FORMAT` formats.
 
 **Why:** a fragment module's oracle is the attachment, so the observation window is redundant
 there. A vector register holds the colour's bit pattern, so an arithmetic conversion would scale

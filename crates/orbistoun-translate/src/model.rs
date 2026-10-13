@@ -700,11 +700,13 @@ pub trait Model {
     /// A constant of the given value, declared once however often it is used.
     fn constant(&mut self, value: u32) -> Id;
 
-    /// The colour output this module exports to, and its vector type, if it has one.
+    /// The colour output export `target` (`mrt0` to `mrt7`) writes, and its vector type, if the
+    /// module has one: a fragment module declares `mrt0`'s always and another target's when one
+    /// of its exports names it, at the location of the same number.
     ///
     /// [`None`] for every module that is not a fragment shader, which makes an export into a
     /// compute dispatch a refusal (D553).
-    fn colour_output(&self) -> Option<(Id, Id)> {
+    fn colour_output(&self, _target: u32) -> Option<(Id, Id)> {
         None
     }
 
@@ -2018,11 +2020,13 @@ fn mesh_primitive_export<M: Model + ?Sized>(
     Ok(())
 }
 
-/// The only export target translated: `mrt0`, colour attachment zero.
+/// `mrt0`, the colour output at location zero, which every fragment module declares.
 ///
-/// Which attachment another target selects is register state the guest writes, which is not
-/// invented (D104), so other targets are refused by name.
-const MRT0: i64 = 0;
+/// `mrtK` writes the output at location `K`; which colour buffer it reaches is register state the
+/// pipeline binds from what the guest wrote, never invented here (D104).
+const MRT0: u32 = 0;
+/// `mrt7`, the last colour target an export can name.
+pub(crate) const MRT7: u32 = 7;
 
 /// An export's `COMPR` bit, in its first word: the sources carry packed halves
 /// (`aco_assembler.cpp:1001` in the collection's Mesa tree).
@@ -2062,7 +2066,7 @@ fn discard_inactive<M: Model + ?Sized>(model: &mut M, instruction: &Instruction)
 ///
 /// - A module with no colour output: a compute dispatch has nowhere to export to
 ///   ([`Model::colour_output`]).
-/// - Any target but `mrt0`; see [`MRT0`].
+/// - A target past `mrt7` that is no other kind of export; see [`MRT0`].
 /// - A compressed export that enables fewer than all four channels. The mask and the compressed
 ///   bit are read from the instruction's first word. A compressed export is unpacked from its two
 ///   half-packed sources. An uncompressed one that enables some channels stores those, and keeps
@@ -2105,7 +2109,7 @@ fn export<M: Model + ?Sized>(
         return mesh_primitive_export(model, instruction, a);
     }
 
-    let Some((vec4, colour)) = model.colour_output() else {
+    let Some((vec4, colour)) = model.colour_output(0) else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "an export needs somewhere to go: a colour attachment at the fragment 
@@ -2129,14 +2133,7 @@ fn export<M: Model + ?Sized>(
     if *target == EXPORT_MRTZ {
         return depth_export(model, instruction, a);
     }
-    if *target != MRT0 {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "only mrt0 is translated - which attachment another target selects is 
-                     register state a guest writes, and inventing it would render a frame that 
-                     looks right and is not (D104)",
-        });
-    }
+    let (vec4, colour) = colour_target_output(model, instruction, *target, (vec4, colour))?;
 
     // The channels written (`EN`, bits 0-3, `aco_assembler.cpp:1005`). No channel is an export that
     // writes nothing, such as one raised only to end the wave, so nothing is stored. A compressed
@@ -2186,6 +2183,33 @@ fn export<M: Model + ?Sized>(
     let value = only_enabled(builder, (vec4, colour), value, enabled);
     builder.function(op::STORE, &[colour.0, value.0]);
     Ok(())
+}
+
+/// The colour output export `target` writes: `mrtK` is the output at location `K`. Which colour
+/// buffer that is - the `K`th one `SPI_SHADER_COL_FORMAT` gives a format - is the pipeline's to bind
+/// from the registers the guest wrote (D553). `mrt0`'s is `zero`.
+fn colour_target_output<M: Model + ?Sized>(
+    model: &M,
+    instruction: &Instruction,
+    target: i64,
+    zero: (Id, Id),
+) -> Result<(Id, Id), TranslateError> {
+    match u32::try_from(target) {
+        Ok(MRT0) => Ok(zero),
+        Ok(other @ ..=MRT7) => model
+            .colour_output(other)
+            .ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "an export to a colour target the module declared no output for",
+            }),
+        _ => Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "an export to a target that is no colour target, position, parameter, ",
+                "primitive, depth or null"
+            ),
+        }),
+    }
 }
 
 /// `exp mrtz`: the depth a pixel replaces its rasterised one with, from the first source - Z, the

@@ -10,6 +10,7 @@
 //! layer detects those writes and synthesises the transfers.
 
 mod backend;
+pub mod colour_slots;
 pub mod cp;
 pub mod dcc;
 pub mod depth;

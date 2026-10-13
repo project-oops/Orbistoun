@@ -301,3 +301,68 @@ fn a_shader_s_exported_channels_are_its_exports_enables() {
         0xF
     );
 }
+
+/// The `Location` decorations a module puts on its `Output` variables, sorted: the colour
+/// attachments its exports write.
+fn output_locations(module: &[u32]) -> Vec<u32> {
+    const OP_VARIABLE: u32 = 59;
+    const OP_DECORATE: u32 = 71;
+    const LOCATION: u32 = 30;
+    const OUTPUT: u32 = 3;
+    let mut outputs = Vec::new();
+    let mut locations = Vec::new();
+    let mut at = 5;
+    while at < module.len() {
+        let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xFFFF);
+        let operands = &module[at + 1..at + count.max(1)];
+        match (opcode, operands) {
+            (OP_VARIABLE, [_, id, OUTPUT, ..]) => outputs.push(*id),
+            (OP_DECORATE, [id, LOCATION, location]) => locations.push((*id, *location)),
+            _ => {}
+        }
+        at += count.max(1);
+    }
+    let mut found: Vec<u32> = locations
+        .into_iter()
+        .filter(|(id, _)| outputs.contains(id))
+        .map(|(_, location)| location)
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+/// `exp mrt1` writes the output at location one, beside `mrt0`'s at location zero: which colour
+/// buffer that is, the pipeline binds from `SPI_SHADER_COL_FORMAT`. A shader exporting to `mrt0`
+/// alone declares location zero only. oops-gl's second draw buffer exports this way
+/// (`exp mrt0 ... compr vm`, then `exp mrt1, v4, v5 done compr vm`).
+#[test]
+fn an_mrt1_export_writes_the_output_at_location_one() {
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let mut bytes = export_shader([0.0, 0.0, 1.0, 1.0]);
+    bytes.truncate(bytes.len() - 4);
+    // `exp mrt1 v3, v2, v1, v0 done vm`: target 1 at bit 4.
+    bytes.extend((0xF800_001Fu32 | (1 << 11) | (1 << 12)).to_le_bytes());
+    bytes.extend(0x0001_0203u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    let translate = |bytes: &[u8]| {
+        let decoded = decode(bytes, &encodings, &operands);
+        translate_for(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            Stage::Fragment,
+            orbistoun_translate::wavefront::Window::default(),
+        )
+        .map(|(module, _)| module)
+    };
+    let both = translate(&bytes).expect("an mrt1 export translates");
+    assert_eq!(output_locations(&both), vec![0, 1]);
+    let alone = translate(&export_shader([0.0, 0.0, 1.0, 1.0])).expect("translates");
+    assert_eq!(output_locations(&alone), vec![0]);
+    let decoded = decode(&bytes, &encodings, &operands);
+    assert_eq!(
+        orbistoun_translate::wavefront::exported_target_channels(&decoded, &encodings),
+        [0xF, 0xF, 0, 0, 0, 0, 0, 0]
+    );
+}

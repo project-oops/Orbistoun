@@ -1021,11 +1021,29 @@ fn reserve_fragment_outputs(
     (output, (fragment && writes_depth).then(|| b.id()))
 }
 
+/// Reserves a fragment module's colour outputs past `mrt0`'s: one for each target from `mrt1` to
+/// `mrt7` that `targets` (bit `K` for `mrtK`, [`exported_colour_targets`]) has an export to. None
+/// for any other stage.
+fn reserve_more_colour_outputs(b: &mut Builder, stage: Stage, targets: u8) -> [Option<Id>; 8] {
+    let mut more = [None; 8];
+    if stage == Stage::Fragment {
+        for (target, slot) in more.iter_mut().enumerate().skip(1) {
+            if targets & (1 << target) != 0 {
+                *slot = Some(b.id());
+            }
+        }
+    }
+    more
+}
+
 /// What a fragment module writes, each variable with its type.
 #[derive(Debug, Clone, Copy)]
 struct FragmentOutputs {
-    /// The `vec4` colour output, declared for every fragment module.
+    /// The `vec4` colour output `mrt0` writes, declared for every fragment module.
     colour: Option<(Id, Id)>,
+    /// The `vec4` colour outputs `mrt1` to `mrt7` write, by target, declared for each the module
+    /// exports to; element zero is always empty.
+    more_colour: [Option<Id>; 8],
     /// The `float` `FragDepth` output, declared for one that exports depth.
     depth: Option<(Id, Id)>,
 }
@@ -1041,8 +1059,26 @@ impl FragmentOutputs {
     ) -> Self {
         Self {
             colour: declare_colour_output(b, (f32_type, vec4), output_ptr, (colour, stage)),
+            more_colour: [None; 8],
             depth: depth.map(|variable| declare_depth_output(b, f32_type, variable)),
         }
+    }
+
+    /// Declares the colour outputs [`reserve_more_colour_outputs`] reserved, each a `vec4` at the
+    /// location of its target's number: location `K` is the colour attachment a render pass lists
+    /// `K`th, the one the pipeline binds `mrtK`'s colour buffer to.
+    fn with_more_colour(mut self, b: &mut Builder, output_ptr: Id, more: [Option<Id>; 8]) -> Self {
+        if self.colour.is_none() {
+            return self;
+        }
+        for (location, variable) in (0u32..).zip(more) {
+            if let Some(variable) = variable {
+                b.annotate(op::DECORATE, &[variable.0, decoration::LOCATION, location]);
+                b.declare(op::VARIABLE, &[output_ptr.0, variable.0, OUTPUT]);
+            }
+        }
+        self.more_colour = more;
+        self
     }
 
     /// The variables the entry point's interface names.
@@ -1051,6 +1087,12 @@ impl FragmentOutputs {
             .into_iter()
             .chain(self.depth)
             .map(|(_, variable)| variable.0)
+            .chain(
+                self.more_colour
+                    .into_iter()
+                    .flatten()
+                    .map(|variable| variable.0),
+            )
     }
 }
 
@@ -2130,7 +2172,7 @@ type StageContext<'b> = (
     Window,
     UserData,
     &'b crate::draw_buffers::DrawBuffers,
-    (bool, bool),
+    (bool, bool, u8),
 );
 
 impl Wavefront<'_> {
@@ -2206,7 +2248,7 @@ impl<'a> Wavefront<'a> {
                 Window::default(),
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
-                (false, false),
+                (false, false, 0),
             ),
         )
     }
@@ -2223,7 +2265,7 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data, buffers, (writes_depth, reads_quad)): StageContext<'_>,
+        (window, user_data, buffers, (writes_depth, reads_quad, colour_targets)): StageContext<'_>,
     ) -> Self {
         let mut b = Builder::new().with_version(module_version(stage));
 
@@ -2234,6 +2276,7 @@ impl<'a> Wavefront<'a> {
         // The colour and depth outputs of a fragment module, reserved before the entry point
         // because its interface must name them.
         let (output, depth) = reserve_fragment_outputs(&mut b, stage, writes_depth);
+        let more_colour = reserve_more_colour_outputs(&mut b, stage, colour_targets);
         let vec4 = b.id();
         let output_ptr = b.id();
         // Reserved before the header for the same reason: every input the entry point touches must
@@ -2245,7 +2288,8 @@ impl<'a> Wavefront<'a> {
         emit_header(&mut b, (stage, primitive, per_lane), main, (output, depth));
         declare_base_types(&mut b, &ids);
         let output =
-            FragmentOutputs::declare(&mut b, (f32_type, vec4), output_ptr, (output, depth, stage));
+            FragmentOutputs::declare(&mut b, (f32_type, vec4), output_ptr, (output, depth, stage))
+                .with_more_colour(&mut b, output_ptr, more_colour);
         let inputs = declare_attribute_inputs(&mut b, vec4, &input_ids);
         system.declare(&mut b, vec4, bool_type);
         let mesh = declare_mesh_outputs(
@@ -3475,8 +3519,18 @@ impl Model for Wavefront<'_> {
         self.dx10_clamp
     }
 
-    fn colour_output(&self) -> Option<(Id, Id)> {
-        self.output.colour
+    fn colour_output(&self, target: u32) -> Option<(Id, Id)> {
+        let (vec4, colour) = self.output.colour?;
+        match target {
+            0 => Some((vec4, colour)),
+            _ => self
+                .output
+                .more_colour
+                .get(usize::try_from(target).ok()?)
+                .copied()
+                .flatten()
+                .map(|variable| (vec4, variable)),
+        }
     }
 
     fn depth_output(&self) -> Option<(Id, Id)> {
@@ -5180,19 +5234,47 @@ pub fn reads_quad(decode: &Decode, encodings: &EncodingTable) -> bool {
 /// it holds whatever the output held, so a draw that writes it to its target is not the guest's.
 #[must_use]
 pub fn exported_colour_channels(decode: &Decode, encodings: &EncodingTable) -> u8 {
-    let mut channels = 0;
+    exported_target_channels(decode, encodings)[0]
+}
+
+/// [`exported_colour_channels`] for each colour target, `mrt0` to `mrt7` by number.
+#[must_use]
+pub fn exported_target_channels(decode: &Decode, encodings: &EncodingTable) -> [u8; 8] {
+    let mut channels = [0; 8];
     for instruction in &decode.instructions {
         let named = instruction
             .encoding
             .and_then(|i| encodings.encodings().get(usize::from(i)))
             .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
         if named == Some("exp")
-            && let Some(Operand::Immediate(0)) = instruction.operands.first()
+            && let Some(Operand::Immediate(target)) = instruction.operands.first()
+            && let Some(slot) = usize::try_from(*target)
+                .ok()
+                .and_then(|target| channels.get_mut(target))
         {
-            channels |= (instruction.word & 0xF) as u8;
+            *slot |= (instruction.word & 0xF) as u8;
         }
     }
     channels
+}
+
+/// The colour targets a pixel shader exports to, bit `K` for `mrtK`: every `exp` that names one,
+/// whatever channels it enables.
+#[must_use]
+pub fn exported_colour_targets(decode: &Decode, encodings: &EncodingTable) -> u8 {
+    let mut targets = 0;
+    for instruction in &decode.instructions {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        if named == Some("exp")
+            && let Some(Operand::Immediate(target @ 0..=7)) = instruction.operands.first()
+        {
+            targets |= 1 << target;
+        }
+    }
+    targets
 }
 
 /// The buffers a draw binds for this module (D733): traced for a draw's stage when the caller binds
@@ -5352,6 +5434,7 @@ pub fn translate_with_user_data(
             (
                 exports_depth(decode, encodings),
                 reads_quad(decode, encodings),
+                exported_colour_targets(decode, encodings),
             ),
         ),
     );
