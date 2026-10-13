@@ -206,9 +206,32 @@ pub fn is_contained(relative: &str) -> bool {
 /// `Path::exists` on a Windows host is case-insensitive and would report a wrong-case name
 /// present that the platform answers `ENOENT` for. Only the guest-supplied components are
 /// checked. On a case-sensitive host this is a plain `exists`.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
     !is_hidden(root, &root.join(rest)) && root.join(rest).exists()
+}
+
+/// The macOS half: its default filesystem is case-insensitive too, and `canonicalize` there does
+/// not report the on-disk case, so each guest component is looked for, exactly, in its parent
+/// directory's listing.
+#[cfg(target_os = "macos")]
+fn exists_case_sensitive(root: &Path, rest: &str) -> bool {
+    if is_hidden(root, &root.join(rest)) {
+        return false;
+    }
+    let mut at = root.to_path_buf();
+    for component in rest.split('/').filter(|c| !c.is_empty()) {
+        let listed = std::fs::read_dir(&at).is_ok_and(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name().to_str() == Some(component))
+        });
+        if !listed {
+            return false;
+        }
+        at.push(component);
+    }
+    at.exists()
 }
 
 /// The Windows half: `canonicalize` returns the path's real on-disk case, so a wrong-case

@@ -290,7 +290,7 @@ mod mount_tests {
         orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
         let _ = super::initialize3(&[0; GUEST_ARG_REGISTERS]);
 
-        let name = b"SaveData0 ";
+        let name = b"SaveData0\0";
         let mut param = [0_u8; 0x40];
         param[..4].copy_from_slice(&crate::signed_in_user().to_le_bytes());
         param[8..16].copy_from_slice(&(name.as_ptr() as u64).to_le_bytes());
@@ -309,12 +309,12 @@ mod mount_tests {
 
         param[0x20..0x24].copy_from_slice(&(1_u32 | 4).to_le_bytes());
         assert_eq!(super::mount3(&args), 0, "created");
-        assert_eq!(&result[..11], b"/savedata0 ");
+        assert_eq!(&result[..11], b"/savedata0\0");
         assert_eq!(result[0x10..0x18], [0; 8], "no blocks required");
         assert_eq!(result[0x1c..0x20], 1_u32.to_le_bytes(), "created");
         assert!(orbistoun_fs::mount::is_directory("/savedata0"));
 
-        let point = b"/savedata0 ";
+        let point = b"/savedata0\0";
         let mut umount = [0_u64; GUEST_ARG_REGISTERS];
         umount[1] = point.as_ptr() as u64;
         assert_eq!(super::umount2(&umount), 0);

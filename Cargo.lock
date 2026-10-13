@@ -3066,6 +3066,7 @@ dependencies = [
  "orbistoun-mem",
  "orbistoun-nid",
  "orbistoun-thunk",
+ "rustix 1.1.4",
  "socket2",
  "tracing",
  "windows-sys 0.61.2",

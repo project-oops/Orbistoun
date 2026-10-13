@@ -26,3 +26,7 @@ socket2 = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
+
+# `statfs` asks the host how big a mount is: `statvfs` on a Unix host.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }

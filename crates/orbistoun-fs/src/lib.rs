@@ -338,8 +338,19 @@ fn host_capacity(path: &std::path::Path) -> Option<(u64, u64)> {
     (ok != 0).then_some((available, total))
 }
 
-/// Away from Windows this is not wired, and says so rather than answering a number.
-#[cfg(not(windows))]
+/// On a Unix host, from `statvfs`: the blocks available to an unprivileged caller and the
+/// filesystem's total, each in fragment-size units.
+#[cfg(unix)]
+fn host_capacity(path: &std::path::Path) -> Option<(u64, u64)> {
+    let stat = rustix::fs::statvfs(path).ok()?;
+    Some((
+        stat.f_bavail.saturating_mul(stat.f_frsize),
+        stat.f_blocks.saturating_mul(stat.f_frsize),
+    ))
+}
+
+/// On any other host this is not wired, and says so rather than answering a number.
+#[cfg(not(any(windows, unix)))]
 fn host_capacity(_path: &std::path::Path) -> Option<(u64, u64)> {
     None
 }
