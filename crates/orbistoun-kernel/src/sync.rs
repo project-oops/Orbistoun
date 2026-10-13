@@ -434,11 +434,20 @@ struct GuestCond {
     name: String,
     /// The host primitive.
     signal: Condvar,
-    /// How many wakes are owed.
+    /// How many wakes are owed, and how many threads wait.
     ///
     /// Counted rather than relying on the host notify alone, so a signal sent before anybody waits
     /// is kept.
-    pending: Mutex<u64>,
+    pending: Mutex<CondState>,
+}
+
+/// A condition variable's owed wakes and waiting threads.
+#[derive(Debug, Default)]
+struct CondState {
+    /// Wakes not yet taken: each lets one waiter return.
+    owed: u64,
+    /// Threads inside [`cond_wait`] now.
+    waiting: u64,
 }
 
 fn conds() -> &'static Mutex<BTreeMap<CondHandle, Arc<GuestCond>>> {
@@ -460,7 +469,7 @@ pub fn create_cond(name: &str) -> CondHandle {
             Arc::new(GuestCond {
                 name: name.to_owned(),
                 signal: Condvar::new(),
-                pending: Mutex::new(0),
+                pending: Mutex::new(CondState::default()),
             }),
         );
     }
@@ -489,10 +498,11 @@ pub fn cond_wait(handle: CondHandle, timeout: Option<Duration>) -> Option<bool> 
         };
         // A span so large the clock cannot represent the moment becomes no deadline at all.
         let deadline = timeout.and_then(|span| Instant::now().checked_add(span));
-        loop {
-            if *pending > 0 {
-                *pending -= 1;
-                return true;
+        pending.waiting += 1;
+        let woken = loop {
+            if pending.owed > 0 {
+                pending.owed -= 1;
+                break true;
             }
             // A signal raised on this thread runs with the lock dropped, and the wait goes on: a
             // signal is not a wake (D652).
@@ -517,10 +527,12 @@ pub fn cond_wait(handle: CondHandle, timeout: Option<Duration>) -> Option<bool> 
                 return false;
             };
             pending = next;
-            if outcome.timed_out() && *pending == 0 {
-                return false;
+            if outcome.timed_out() && pending.owed == 0 {
+                break false;
             }
-        }
+        };
+        pending.waiting -= 1;
+        woken
     })
 }
 
@@ -530,19 +542,21 @@ pub fn cond_signal(handle: CondHandle) -> Option<bool> {
         let Ok(mut pending) = c.pending.lock() else {
             return false;
         };
-        *pending += 1;
+        pending.owed += 1;
         c.signal.notify_one();
         true
     })
 }
 
-/// Wakes every waiter.
+/// Wakes every waiter: one owed wake for each thread waiting now, or one owed for a waiter still
+/// to come when none is - so a broadcast to two waiters wakes both, where one wake owed let the
+/// first take it and the other sleep on.
 pub fn cond_broadcast(handle: CondHandle) -> Option<bool> {
     with_cond(handle, |c| {
         let Ok(mut pending) = c.pending.lock() else {
             return false;
         };
-        *pending += 1;
+        pending.owed = pending.owed.max(pending.waiting.max(1));
         c.signal.notify_all();
         true
     })

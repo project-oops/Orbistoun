@@ -401,14 +401,9 @@ fn a_signal_before_anybody_waits_is_not_lost() {
     assert!(sync::cond_destroy(c));
 }
 
-/// One signal wakes one waiter, however many the notify reaches.
-///
-/// `cond_broadcast` calls the host's `notify_all`, so both waiters wake; the signal count
-/// decides that only one leaves the wait. This stands in for a spurious wake, which cannot be
-/// provoked on demand.
-#[test]
-fn one_signal_releases_one_waiter_even_though_the_notify_reaches_both() {
-    let c = sync::create_cond("one-of-two");
+/// Two threads waiting on one condition variable, and what each returns once `wake` has run.
+fn two_waiters_after(wake: impl FnOnce(sync::CondHandle)) -> [Option<bool>; 2] {
+    let c = sync::create_cond("two-waiters");
     let (tx, rx) = std::sync::mpsc::channel();
     for _ in 0..2 {
         let tx = tx.clone();
@@ -417,22 +412,40 @@ fn one_signal_releases_one_waiter_even_though_the_notify_reaches_both() {
         });
     }
     drop(tx);
-
     // Long enough for both to be inside the wait before anything is owed.
     std::thread::sleep(Duration::from_millis(60));
-    assert_eq!(sync::cond_broadcast(c), Some(true));
-
+    wake(c);
     let first = rx.recv_timeout(PATIENCE).expect("one waiter returns");
     let second = rx.recv_timeout(PATIENCE).expect("and so does the other");
+    sync::cond_destroy(c);
     let mut both = [first, second];
     both.sort_by_key(|a| *a == Some(true));
+    both
+}
+
+/// A broadcast wakes every thread waiting: POSIX `pthread_cond_broadcast` unblocks all of them.
+/// One wake owed for the lot let the first take it and the rest sleep on; SuperTuxKart's loading
+/// stalled on some runs and not others, its main thread waiting on a Mesa queue fence whose
+/// worker never woke.
+#[test]
+fn a_broadcast_wakes_every_waiter() {
+    let both = two_waiters_after(|c| {
+        assert_eq!(sync::cond_broadcast(c), Some(true));
+    });
+    assert_eq!(both, [Some(true), Some(true)], "both were woken");
+}
+
+/// One signal wakes one waiter: the other waits out its deadline.
+#[test]
+fn one_signal_releases_one_waiter() {
+    let both = two_waiters_after(|c| {
+        assert_eq!(sync::cond_signal(c), Some(true));
+    });
     assert_eq!(
         both,
         [Some(false), Some(true)],
         "exactly one was signalled; the other waited out its deadline"
     );
-
-    sync::cond_destroy(c);
 }
 
 /// A wait with nothing to wake it reports the timeout rather than hanging.
