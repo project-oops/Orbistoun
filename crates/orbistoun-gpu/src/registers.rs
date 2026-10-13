@@ -1883,6 +1883,18 @@ pub fn blend_control_at(writes: &[RegisterWrite]) -> Option<BlendControl> {
     Some(decode_blend_control(value))
 }
 
+/// `PA_SU_LINE_CNTL`, a context register at index `0xA282`: `src/amd/registers/gfx103.json` in
+/// oops-mesa maps it at byte `166408` = `0x28A08` and gives it one field, `WIDTH`, bits 0:15.
+pub(crate) const PA_SU_LINE_CNTL: u32 = 0xA282;
+
+/// The width in pixels `PA_SU_LINE_CNTL` draws lines at. `WIDTH` is half the width in 12.4 fixed
+/// point: radeonsi writes `si_pack_float_12p4(line_width / 2)`, sixteenths of a pixel
+/// (`si_state.c:28-31`, `961`), so the width is `WIDTH / 8`.
+#[must_use]
+pub fn line_width(value: u32) -> f32 {
+    f32::from((value & 0xFFFF) as u16) / 8.0
+}
+
 /// `CB_COLOR_CONTROL`, a context register at index `0xA202`: `src/amd/registers/gfx103.json` in
 /// oops-mesa maps it at byte `165896` = `0x28808` and puts `ROP3` in bits 16:23.
 pub(crate) const CB_COLOR_CONTROL: u32 = 0xA202;
@@ -4535,6 +4547,16 @@ mod tests {
         assert_eq!(super::raster_op(0x0055_0010), 0x55);
         assert_eq!(super::raster_op(0xFF00_FFFF), 0x00);
         assert_eq!(super::CB_COLOR_CONTROL, 0x28808 / 4);
+    }
+
+    /// `WIDTH` is half the line width in sixteenths: radeonsi's word for a GL width of 4 is 32,
+    /// and the oops-sdk's default word 8 is one pixel.
+    #[test]
+    fn the_line_width_is_twice_the_half_width_in_sixteenths() {
+        assert!((super::line_width(32) - 4.0).abs() < f32::EPSILON);
+        assert!((super::line_width(8) - 1.0).abs() < f32::EPSILON);
+        assert!((super::line_width(0xFFFF_0010) - 2.0).abs() < f32::EPSILON);
+        assert_eq!(super::PA_SU_LINE_CNTL, 0x28A08 / 4);
     }
 
     #[test]

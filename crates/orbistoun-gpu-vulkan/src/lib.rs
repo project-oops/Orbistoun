@@ -282,6 +282,9 @@ pub struct VulkanBackend {
     /// Colour target zero's raster operation for the next draw: the latest `SetRasterOp`; `None`
     /// writes the colour unchanged.
     raster_op: Option<u8>,
+    /// `PA_SU_LINE_CNTL`'s `WIDTH` for the next draw: the latest `SetLineWidth`; `None` draws
+    /// lines one pixel wide.
+    line_width: Option<u16>,
     /// The channels colour target zero's next draw writes: the latest `SetWriteMask`; `None`
     /// writes every one.
     write_mask: Option<u8>,
@@ -365,6 +368,7 @@ impl VulkanBackend {
             draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
             raster_op: None,
+            line_width: None,
             write_mask: None,
             current_depth: None,
             depth_stencil: None,
@@ -686,6 +690,8 @@ impl VulkanBackend {
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
             // The raster operation.
             RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
+            // The line width.
+            RenderCommand::SetLineWidth(width) => self.line_width = Some(*width),
             // The channels written.
             RenderCommand::SetWriteMask(mask) => self.write_mask = Some(*mask),
             // The depth and stencil tests, applied when a depth target is bound.
@@ -1001,6 +1007,7 @@ impl VulkanBackend {
         // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
         self.raster_op.hash(&mut hasher);
+        self.line_width.hash(&mut hasher);
         self.write_mask.hash(&mut hasher);
         self.current_depth.is_some().hash(&mut hasher);
         // And the target's encoding: its pass's attachment format.
@@ -1256,6 +1263,7 @@ impl VulkanBackend {
                 .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
             raster_op: self.raster_op,
+            line_width: self.line_width,
             write_mask: self.write_mask,
             viewport: self.viewport_transform,
             sampling: textures
@@ -1382,6 +1390,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
             | RenderCommand::SetViewportTransform(_)
             | RenderCommand::SetBlend(_)
             | RenderCommand::SetRasterOp(_)
+            | RenderCommand::SetLineWidth(_)
             | RenderCommand::SetWriteMask(_)
             | RenderCommand::SetDepthStencil(_)
             | RenderCommand::SetCull(_)
@@ -1402,6 +1411,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
+        RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
@@ -2000,6 +2010,63 @@ mod tests {
             Some([0, 255, 0, 255]),
             "the mesh shader emitted a triangle, shaded green - the module routed to the mesh path"
         );
+    }
+
+    /// A guest's line is as wide as its `PA_SU_LINE_CNTL` says.
+    ///
+    /// A mesh line across the middle of the frame, drawn without a width and then with `WIDTH` 32
+    /// (radeonsi's word for a GL width of 4): the rows two above and one below the centre are the
+    /// line's only when it is four pixels wide. Skips where the device has no mesh stage or no wide
+    /// lines.
+    #[test]
+    fn a_guest_line_is_drawn_at_its_line_control_width() {
+        use orbistoun_gpu::{Resource, ResourceId, ShaderStage};
+
+        if !super::mesh_stage_available() || !crate::compute::wide_lines() {
+            return;
+        }
+        let green = [0.0, 1.0, 0.0, 1.0];
+        let line =
+            orbistoun_spirv::line_mesh_module(green, [[-1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]]);
+        let fragment = orbistoun_spirv::passthrough_fragment_module();
+        let draw = |width: Option<u16>| {
+            let mut backend = VulkanBackend::new();
+            for (id, module) in [(50, &line), (51, &fragment)] {
+                backend
+                    .ensure_resident(ResourceId(id), Resource::Shader(module))
+                    .expect("resident");
+            }
+            for (stage, shader) in [(ShaderStage::Vertex, 50), (ShaderStage::Fragment, 51)] {
+                backend
+                    .execute(&RenderCommand::BindShader {
+                        stage,
+                        shader: ResourceId(shader),
+                    })
+                    .expect("bind");
+            }
+            if let Some(width) = width {
+                backend
+                    .execute(&RenderCommand::SetLineWidth(width))
+                    .expect("set line width");
+            }
+            backend
+                .execute(&RenderCommand::Draw {
+                    vertices: 2,
+                    instances: 1,
+                    first_vertex: 0,
+                })
+                .expect("the line draws");
+            let frame = backend.last_frame().expect("a frame");
+            let (x, y) = (super::RENDER_WIDTH / 2, super::RENDER_HEIGHT / 2);
+            [y - 2, y + 1].map(|row| frame.at(x, row) == Some([0, 255, 0, 255]))
+        };
+
+        assert_eq!(
+            draw(None),
+            [false, false],
+            "a line with no width is one pixel"
+        );
+        assert_eq!(draw(Some(32)), [true, true], "WIDTH 32 is four pixels");
     }
 
     /// A mesh draw's guest-memory window is fed from the frame and read back through the executor.

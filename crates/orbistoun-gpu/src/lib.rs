@@ -187,7 +187,7 @@ pub use registers::{
     decode_compare_func, decode_depth_control, decode_image_descriptor, decode_primitive_topology,
     decode_sampler_descriptor, decode_scissor, decode_stencil_control, decode_stencil_op,
     decode_swizzle_mode, decode_target_mask, depth_control_at, dispatch_calls, draw_calls,
-    primitive_topology_at, raster_op, register_writes, scissor_at, shader_candidates,
+    line_width, primitive_topology_at, raster_op, register_writes, scissor_at, shader_candidates,
     stencil_control_at, target_mask_at,
 };
 pub use render::{FrameOutcome, drive};

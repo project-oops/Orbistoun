@@ -130,6 +130,11 @@ pub enum RenderCommand {
     /// `CB_COLOR_CONTROL` `ROP3` stands at them ([`crate::registers::raster_op`]); without one
     /// a draw writes its colour unchanged (`0xCC`). Emitted before a draw whenever it changed.
     SetRasterOp(u8),
+    /// The width in pixels of the lines the draws that follow rasterize, as the stream's
+    /// `PA_SU_LINE_CNTL` stands at them ([`crate::registers::line_width`]); without one a line is
+    /// one pixel wide. Emitted before a draw whenever the register changed. Raw bits, so the
+    /// command stays hashable: `WIDTH` as the register holds it.
+    SetLineWidth(u16),
     /// Which channels of colour target zero the draws that follow write, red in bit 0 to alpha in
     /// bit 3: `CB_TARGET_MASK` as it stands at them, limited to the channels the target's format
     /// holds ([`crate::registers::colour_write_mask`]). Emitted before a draw whenever it changed;

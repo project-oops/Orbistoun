@@ -1879,6 +1879,7 @@ pub(crate) fn draw_vertices(
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
             raster_op: start.raster_op,
+            line_width: start.line_width,
             write_mask: start.write_mask,
             viewport: start.viewport,
             cull: start.cull,
@@ -1912,6 +1913,8 @@ pub(crate) struct Start<'a> {
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     pub(crate) raster_op: Option<u8>,
+    /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
+    pub(crate) line_width: Option<u16>,
     /// The channels colour target zero's draws write; `None` writes every one.
     pub(crate) write_mask: Option<u8>,
     /// The guest's clip-to-pixel transform; `None` maps clip space over the whole attachment, `+y`
@@ -2056,6 +2059,18 @@ fn viewport_within_limits(
         )));
     }
     Ok(())
+}
+
+/// The width a pipeline rasterizes lines at: `PA_SU_LINE_CNTL`'s ([`orbistoun_gpu::line_width`]),
+/// within the device's range when it has `wideLines`, and one pixel - the only width Vulkan allows
+/// without it - otherwise or when the stream set none.
+fn drawn_line_width(width: Option<u16>) -> f32 {
+    match width {
+        Some(width) if crate::compute::wide_lines() => {
+            orbistoun_gpu::line_width(u32::from(width)).clamp(1.0, crate::compute::max_line_width())
+        }
+        _ => 1.0,
+    }
 }
 
 /// The Vulkan logic op a guest's `ROP3` asks for: [`None`] for none set and for `0xCC`, which writes
@@ -4158,7 +4173,7 @@ fn create_graphics_pipeline(
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(cull_mode)
         .front_face(front_face)
-        .line_width(1.0);
+        .line_width(drawn_line_width(bound.line_width));
     // Depth and stencil state only for a pass with a depth attachment; a state that does not map is
     // refused before a draw reaches here.
     let depth_stencil = bound
@@ -4467,6 +4482,7 @@ pub(crate) fn draw_resident(
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
             raster_op: start.raster_op,
+            line_width: start.line_width,
             write_mask: start.write_mask,
             viewport: start.viewport,
             resident: Some(resident),
@@ -4576,6 +4592,8 @@ struct Bound<'a> {
     blend: Option<orbistoun_gpu::BlendControl>,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     raster_op: Option<u8>,
+    /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
+    line_width: Option<u16>,
     /// The channels colour target zero's draws write; `None` writes every one.
     write_mask: Option<u8>,
     /// Whether the texture gets the harness's sentinel second level ([`COARSE_TEXEL`]), for a test
@@ -4674,6 +4692,7 @@ impl Default for Bound<'_> {
             user_data: &NO_USER_DATA,
             blend: None,
             raster_op: None,
+            line_width: None,
             write_mask: None,
             coarse_level: false,
             viewport: None,

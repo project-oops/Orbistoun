@@ -2533,8 +2533,8 @@ pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     let mut b = Builder::new().with_version(VERSION_1_4);
 
     let ids = MeshIds::new(&mut b);
-    emit_mesh_header(&mut b, &ids);
-    declare_mesh_types(&mut b, &ids);
+    emit_mesh_header(&mut b, &ids, MeshShape::Triangle);
+    declare_mesh_types(&mut b, &ids, MeshShape::Triangle);
     let MeshIds {
         void,
         fn_type,
@@ -2604,6 +2604,83 @@ pub fn triangle_mesh_module(corners: [[f32; 4]; 3]) -> Vec<u32> {
     b.function(op::RETURN, &[]);
     b.function(op::FUNCTION_END, &[]);
     b.finish()
+}
+
+/// A mesh shader that emits one line of one colour between two clip-space points.
+///
+/// [`triangle_mesh_module`]'s module with `OutputLinesEXT` and `PrimitiveLineIndicesEXT` over a
+/// two-index primitive in place of the triangle's (`SPV_EXT_mesh_shader`): the oracle for a line a
+/// guest's primitive shader emits, which rasterizes at the pipeline's line width.
+#[must_use]
+pub fn line_mesh_module(colour: [f32; 4], ends: [[f32; 4]; 2]) -> Vec<u32> {
+    let mut b = Builder::new().with_version(VERSION_1_4);
+
+    let ids = MeshIds::new(&mut b);
+    emit_mesh_header(&mut b, &ids, MeshShape::Line);
+    declare_mesh_types(&mut b, &ids, MeshShape::Line);
+    let MeshIds {
+        void,
+        fn_type,
+        f32_type,
+        vec4,
+        vertices,
+        colours,
+        indices,
+        output_vec4,
+        output_uvec3,
+        zero,
+        one,
+        two,
+        triangle,
+        main,
+        entry_block,
+        ..
+    } = ids;
+
+    let position_ids: Vec<Id> = ends
+        .into_iter()
+        .map(|place| constant_vec4(&mut b, f32_type, vec4, place))
+        .collect();
+    let colour_id = constant_vec4(&mut b, f32_type, vec4, colour);
+
+    b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
+    b.function(op::LABEL, &[entry_block.0]);
+    // Two vertices, one primitive.
+    b.function(op::SET_MESH_OUTPUTS_EXT, &[two.0, one.0]);
+    for (slot, place) in [zero, one].into_iter().zip(position_ids) {
+        let position_ptr = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[output_vec4.0, position_ptr.0, vertices.0, slot.0, zero.0],
+        );
+        b.function(op::STORE, &[position_ptr.0, place.0]);
+        let colour_ptr = b.id();
+        b.function(
+            op::ACCESS_CHAIN,
+            &[output_vec4.0, colour_ptr.0, colours.0, slot.0],
+        );
+        b.function(op::STORE, &[colour_ptr.0, colour_id.0]);
+    }
+    // `output_uvec3` and `triangle` are the two-component index pointer and the line `(0, 1)`
+    // here ([`declare_mesh_types`]).
+    let index_ptr = b.id();
+    b.function(
+        op::ACCESS_CHAIN,
+        &[output_uvec3.0, index_ptr.0, indices.0, zero.0],
+    );
+    b.function(op::STORE, &[index_ptr.0, triangle.0]);
+    b.function(op::RETURN, &[]);
+    b.function(op::FUNCTION_END, &[]);
+    b.finish()
+}
+
+/// The primitive a mesh oracle emits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MeshShape {
+    /// One triangle: `OutputTrianglesEXT`, three indices.
+    Triangle,
+    /// One line: `OutputLinesEXT`, two indices.
+    Line,
 }
 
 /// The identifiers the mesh oracle reserves before it writes anything, in reservation order.
@@ -2692,7 +2769,7 @@ impl MeshIds {
 }
 
 /// Writes the mesh oracle's capability, extension, entry point, execution modes and decorations.
-fn emit_mesh_header(b: &mut Builder, ids: &MeshIds) {
+fn emit_mesh_header(b: &mut Builder, ids: &MeshIds, shape: MeshShape) {
     let MeshIds {
         per_vertex,
         vertices,
@@ -2721,7 +2798,14 @@ fn emit_mesh_header(b: &mut Builder, ids: &MeshIds) {
         op::EXECUTION_MODE,
         &[main.0, mode::OUTPUT_PRIMITIVES_EXT, 1],
     );
-    b.header(op::EXECUTION_MODE, &[main.0, mode::OUTPUT_TRIANGLES_EXT]);
+    let (output, indices_built_in) = match shape {
+        MeshShape::Triangle => (
+            mode::OUTPUT_TRIANGLES_EXT,
+            built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
+        ),
+        MeshShape::Line => (mode::OUTPUT_LINES_EXT, built_in::PRIMITIVE_LINE_INDICES_EXT),
+    };
+    b.header(op::EXECUTION_MODE, &[main.0, output]);
 
     // The per-vertex outputs are a block with the position as a member; a bare `vec4` array
     // decorated `Position` is the vertex-stage shape.
@@ -2733,16 +2817,13 @@ fn emit_mesh_header(b: &mut Builder, ids: &MeshIds) {
     b.annotate(op::DECORATE, &[colours.0, decoration::LOCATION, 0]);
     b.annotate(
         op::DECORATE,
-        &[
-            indices.0,
-            decoration::BUILT_IN,
-            built_in::PRIMITIVE_TRIANGLE_INDICES_EXT,
-        ],
+        &[indices.0, decoration::BUILT_IN, indices_built_in],
     );
 }
 
-/// Declares the mesh oracle's types, constants and output variables.
-fn declare_mesh_types(b: &mut Builder, ids: &MeshIds) {
+/// Declares the mesh oracle's types, constants and output variables. For a line, `uvec3` is a
+/// two-component vector and `triangle` the line's indices `(0, 1)`.
+fn declare_mesh_types(b: &mut Builder, ids: &MeshIds, shape: MeshShape) {
     let MeshIds {
         void,
         fn_type,
@@ -2774,7 +2855,8 @@ fn declare_mesh_types(b: &mut Builder, ids: &MeshIds) {
     b.declare(op::TYPE_FLOAT, &[f32_type.0, 32]);
     b.declare(op::TYPE_INT, &[u32_type.0, 32, 0]);
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
-    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, 3]);
+    let index_width = if shape == MeshShape::Line { 2 } else { 3 };
+    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, index_width]);
 
     b.declare(op::CONSTANT, &[u32_type.0, zero.0, 0]);
     b.declare(op::CONSTANT, &[u32_type.0, one.0, 1]);
@@ -2817,10 +2899,17 @@ fn declare_mesh_types(b: &mut Builder, ids: &MeshIds) {
         op::TYPE_POINTER,
         &[output_uvec3.0, storage::OUTPUT, uvec3.0],
     );
-    b.declare(
-        op::CONSTANT_COMPOSITE,
-        &[uvec3.0, triangle.0, zero.0, one.0, two.0],
-    );
+    if shape == MeshShape::Line {
+        b.declare(
+            op::CONSTANT_COMPOSITE,
+            &[uvec3.0, triangle.0, zero.0, one.0],
+        );
+    } else {
+        b.declare(
+            op::CONSTANT_COMPOSITE,
+            &[uvec3.0, triangle.0, zero.0, one.0, two.0],
+        );
+    }
 }
 
 /// How many vertices the mesh oracle emits. Three, because it draws one triangle.

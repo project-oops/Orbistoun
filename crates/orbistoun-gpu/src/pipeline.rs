@@ -3366,6 +3366,7 @@ fn push_geometry_commands(
     let mut blend_sent = None;
     let mut mask_sent = None;
     let mut rop_sent = None;
+    let mut line_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
     let mut transform_sent = None;
     let mut scissor_sent = None;
@@ -3397,6 +3398,15 @@ fn push_geometry_commands(
             (&mut blend_sent, &mut rop_sent, &mut mask_sent),
             unmasked_one_byte_draws,
         );
+        // The line width in force at this draw, when the stream set one and it changed.
+        if let Some(width) = sweep
+            .latest(at, crate::registers::PA_SU_LINE_CNTL)
+            .map(|value| (value & 0xFFFF) as u16)
+            && line_sent != Some(width)
+        {
+            commands.push(RenderCommand::SetLineWidth(width));
+            line_sent = Some(width);
+        }
         // The depth, stencil and cull state in force at this draw, and a clear it asks for.
         depth_sent.push(&mut sweep, at, depth_target, commands);
         // The clip-to-pixel transform in force at this draw, when the stream set one and it

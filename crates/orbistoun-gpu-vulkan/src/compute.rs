@@ -606,6 +606,22 @@ pub(crate) fn depth_clip_control() -> bool {
     DEPTH_CLIP_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the session's device was created with `wide_lines`.
+static WIDE_LINES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The widest line the session's device rasterizes, as `f32` bits: `lineWidthRange`'s upper end.
+static MAX_LINE_WIDTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Whether a pipeline may rasterize lines wider than one pixel: the device enabled `wide_lines`.
+pub(crate) fn wide_lines() -> bool {
+    WIDE_LINES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The widest line a pipeline may ask for, when [`wide_lines`] holds.
+pub(crate) fn max_line_width() -> f32 {
+    f32::from_bits(MAX_LINE_WIDTH.load(std::sync::atomic::Ordering::Relaxed)).max(1.0)
+}
+
 /// Whether the session's device was created with `logic_op`.
 static LOGIC_OP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -745,7 +761,9 @@ impl Session {
             // `sampler_anisotropy` serves a guest sampler that filters anisotropically (D775).
             .sampler_anisotropy(available.sampler_anisotropy == vk::TRUE)
             // `logic_op` serves a guest raster operation other than copy (`CB_COLOR_CONTROL`).
-            .logic_op(available.logic_op == vk::TRUE);
+            .logic_op(available.logic_op == vk::TRUE)
+            // `wide_lines` serves a guest line wider than one pixel (`PA_SU_LINE_CNTL`).
+            .wide_lines(available.wide_lines == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -800,6 +818,16 @@ impl Session {
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
+        WIDE_LINES.store(
+            wanted_features.wide_lines == vk::TRUE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        // SAFETY: the handle came from enumeration on this live instance.
+        let limits = unsafe { instance.get_physical_device_properties(physical) }.limits;
+        MAX_LINE_WIDTH.store(
+            limits.line_width_range[1].to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         LOGIC_OP.store(
             wanted_features.logic_op == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,

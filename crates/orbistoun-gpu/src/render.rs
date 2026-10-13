@@ -22,6 +22,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetUserData { .. } => "SetUserData",
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
+        RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
