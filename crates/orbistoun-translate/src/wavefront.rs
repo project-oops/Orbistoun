@@ -1269,19 +1269,19 @@ struct MeshReserved {
     vertices: Id,
     indices: Id,
     parameters: BTreeMap<u32, Id>,
-    /// A rectangle list's copies of what it emits, declared once the mesh outputs are.
-    rectangles: Option<RectangleCopies>,
+    /// Where the program's exports are staged until it has run, declared once the mesh outputs are.
+    staged: Option<StagedOutputs>,
 }
 
 impl MeshReserved {
     /// Reserves ids for a mesh module's outputs, or nothing at another stage.
-    fn new(b: &mut Builder, stage: Stage, primitive: MeshPrimitive, locations: &[u32]) -> Self {
+    fn new(b: &mut Builder, stage: Stage, locations: &[u32]) -> Self {
         if stage != Stage::Mesh {
             return Self {
                 vertices: Id(0),
                 indices: Id(0),
                 parameters: BTreeMap::new(),
-                rectangles: None,
+                staged: None,
             };
         }
         Self {
@@ -1291,7 +1291,7 @@ impl MeshReserved {
                 .iter()
                 .map(|location| (*location, b.id()))
                 .collect(),
-            rectangles: RectangleCopies::reserve(b, stage, primitive, locations),
+            staged: Some(StagedOutputs::reserve(b, locations)),
         }
     }
 
@@ -1302,20 +1302,24 @@ impl MeshReserved {
         }
         let mut ids = vec![self.vertices.0, self.indices.0];
         ids.extend(self.parameters.values().map(|id| id.0));
-        ids.extend(self.rectangles.iter().flat_map(RectangleCopies::interface));
+        ids.extend(self.staged.iter().flat_map(StagedOutputs::interface));
         ids
     }
 
-    /// Declares a rectangle list's copies, once the mesh outputs they mirror are declared.
-    fn declare_rectangles(
+    /// Declares the staging, once the mesh outputs it mirrors are declared.
+    fn declare_staged(
         &self,
         b: &mut Builder,
         mesh: Option<&MeshOutputs>,
         vec4: Id,
         ids: &Reserved,
-    ) -> Option<RectangleCopies> {
-        let (copies, outputs) = self.rectangles.clone().zip(mesh)?;
-        Some(copies.declare(b, (ids.u32_type, vec4, outputs.index_type), ids.counter_ptr))
+    ) -> Option<StagedOutputs> {
+        let (staged, outputs) = self.staged.clone().zip(mesh)?;
+        Some(staged.declare(
+            b,
+            (ids.u32_type, vec4, outputs.index_type),
+            (ids.counter_ptr, ids.counter_zero),
+        ))
     }
 }
 
@@ -1339,38 +1343,41 @@ fn declare_base_types(b: &mut Builder, ids: &Reserved) {
     b.declare(op::TYPE_BOOL, &[ids.bool_type.0]);
 }
 
-/// A rectangle-list mesh module's own copy of what it emitted, which its outputs cannot be read
-/// back for: each lane's position, parameters and primitive indices, and the declared counts. The
-/// fourth corner of each rectangle is formed from them once the program has run.
+/// A mesh module's private copy of what the program exports - each lane's position, parameters and
+/// primitive indices, and the counts its allocation request declared - written to the outputs only
+/// once the program has run.
+///
+/// `OpSetMeshOutputsEXT` must come before every output write on every path to it
+/// (`SPV_EXT_mesh_shader`). The program runs as a loop over its blocks, with the allocation request
+/// in one arm and the exports in others, so no point inside the loop precedes them all. The
+/// epilogue after the loop does: it declares the counts, then writes what was staged
+/// ([`Wavefront::emit_mesh_outputs`]). Writing outputs before the declaration is a module AMD's
+/// driver faulted compiling (a null read in `amdvlk64.dll`) and NVIDIA's ran. A rectangle's fourth
+/// corner is formed from the same copies.
 #[derive(Debug, Clone)]
-struct RectangleCopies {
+struct StagedOutputs {
     /// `vec4` per lane: the positions.
     positions: Id,
     /// `vec4` per lane, per exported parameter location.
     parameters: BTreeMap<u32, Id>,
-    /// `uvec3` per lane: the primitive's three corners.
+    /// One index element per lane: the primitive's corners.
     indices: Id,
-    /// The vertex count the allocation request declared.
+    /// The vertex count the allocation request declared; zero until it does.
     vertices: Id,
-    /// The primitive count it declared.
+    /// The primitive count it declared; zero until it does.
     primitives: Id,
     /// Pointer to one `vec4` of a copy.
     vec4_ptr: Id,
-    /// Pointer to one `uvec3` of the index copy.
+    /// Pointer to one element of the index copy.
     index_ptr: Id,
     /// Pointer to one private word.
     word_ptr: Id,
 }
 
-impl RectangleCopies {
-    /// Reserves the copies' variables, or nothing for any other module: the entry point lists them.
-    fn reserve(
-        b: &mut Builder,
-        stage: Stage,
-        primitive: MeshPrimitive,
-        locations: &[u32],
-    ) -> Option<Self> {
-        (stage == Stage::Mesh && primitive == MeshPrimitive::Rectangles).then(|| Self {
+impl StagedOutputs {
+    /// Reserves the staging's variables: the entry point lists them.
+    fn reserve(b: &mut Builder, locations: &[u32]) -> Self {
+        Self {
             positions: b.id(),
             parameters: locations
                 .iter()
@@ -1382,7 +1389,7 @@ impl RectangleCopies {
             vec4_ptr: Id(0),
             index_ptr: Id(0),
             word_ptr: Id(0),
-        })
+        }
     }
 
     /// Every variable the entry point must list.
@@ -1397,12 +1404,13 @@ impl RectangleCopies {
         ids
     }
 
-    /// Declares the reserved variables as private storage, one element per lane.
+    /// Declares the reserved variables as private storage, one element per lane, and the counts as
+    /// words starting at zero: a program that never requests an allocation emits nothing.
     fn declare(
         mut self,
         b: &mut Builder,
-        (u32_type, vec4, uvec3): (Id, Id, Id),
-        word_ptr: Id,
+        (u32_type, vec4, index_type): (Id, Id, Id),
+        (word_ptr, zero): (Id, Id),
     ) -> Self {
         let lanes = b.id();
         b.declare(op::CONSTANT, &[u32_type.0, lanes.0, MESH_SLOTS]);
@@ -1414,20 +1422,20 @@ impl RectangleCopies {
         self.index_ptr = b.id();
         b.declare(op::TYPE_ARRAY, &[vec4_array.0, vec4.0, lanes.0]);
         b.declare(op::TYPE_POINTER, &[vec4_array_ptr.0, PRIVATE, vec4_array.0]);
-        b.declare(op::TYPE_ARRAY, &[index_array.0, uvec3.0, lanes.0]);
+        b.declare(op::TYPE_ARRAY, &[index_array.0, index_type.0, lanes.0]);
         b.declare(
             op::TYPE_POINTER,
             &[index_array_ptr.0, PRIVATE, index_array.0],
         );
         b.declare(op::TYPE_POINTER, &[self.vec4_ptr.0, PRIVATE, vec4.0]);
-        b.declare(op::TYPE_POINTER, &[self.index_ptr.0, PRIVATE, uvec3.0]);
+        b.declare(op::TYPE_POINTER, &[self.index_ptr.0, PRIVATE, index_type.0]);
         b.declare(op::VARIABLE, &[vec4_array_ptr.0, self.positions.0, PRIVATE]);
         for variable in self.parameters.values() {
             b.declare(op::VARIABLE, &[vec4_array_ptr.0, variable.0, PRIVATE]);
         }
         b.declare(op::VARIABLE, &[index_array_ptr.0, self.indices.0, PRIVATE]);
         for word in [self.vertices, self.primitives] {
-            b.declare(op::VARIABLE, &[word_ptr.0, word.0, PRIVATE]);
+            b.declare(op::VARIABLE, &[word_ptr.0, word.0, PRIVATE, zero.0]);
         }
         self.word_ptr = word_ptr;
         self
@@ -1625,8 +1633,8 @@ pub struct Wavefront<'a> {
     uvec4: Option<Id>,
     /// What a mesh module writes, or [`None`] at any other stage.
     mesh: Option<MeshOutputs>,
-    /// A rectangle-list mesh module's copies of what it emitted, or [`None`] for any other.
-    rectangles: Option<RectangleCopies>,
+    /// A mesh module's staged exports, or [`None`] at any other stage.
+    staged: Option<StagedOutputs>,
     /// Whether a mesh module's position export is in window space (D731); see
     /// [`UserData::window_space`].
     window_space: WindowSpace,
@@ -2334,7 +2342,7 @@ impl<'a> Wavefront<'a> {
         // be named in its interface, and a driver does not reliably reject a module that omits one.
         let input_ids = reserve_attribute_inputs(&mut b, stage, attributes);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
-        let mesh_reserved = MeshReserved::new(&mut b, stage, primitive, parameters);
+        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
         emit_header(&mut b, (stage, primitive, per_lane), main, (output, depth));
         declare_base_types(&mut b, &ids);
@@ -2364,7 +2372,7 @@ impl<'a> Wavefront<'a> {
             }
             declare_lane_input(&mut b, u32_type, false)
         });
-        let rectangles = mesh_reserved.declare_rectangles(&mut b, mesh.as_ref(), vec4, &ids);
+        let staged = mesh_reserved.declare_staged(&mut b, mesh.as_ref(), vec4, &ids);
         let indexed = user_data.geometry.is_some_and(|g| g.indices.is_some());
         let reads_buffers = !buffers.served.is_empty() || indexed;
         let user_data_source =
@@ -2413,7 +2421,7 @@ impl<'a> Wavefront<'a> {
             saturated: user_data.saturated,
             uvec4: None,
             mesh,
-            rectangles,
+            staged,
             window_space: user_data.window_space,
             buffer_formats: user_data.buffer_formats,
             primitive,
@@ -3228,18 +3236,6 @@ impl<'a> Wavefront<'a> {
         active
     }
 
-    /// Stores four components as a `vec4` through a pointer.
-    ///
-    /// Unmasked, because a mesh module's output storage must not be read and a select needs the old
-    /// value. This is safe when the emitted vertices are the low lanes, as a primitive shader
-    /// arranges them: it narrows the mask to `(1 << n) - 1`, so an inactive lane's slot is past the
-    /// declared count and never read. A sparse vertex mask would write a vertex it did not mean to
-    /// emit; the mask is a runtime value, so this is an assumption rather than a check (D688).
-    fn store_vec4(&mut self, pointer: Id, components: [Id; 4]) {
-        let value = self.composite_vec4(components);
-        self.builder.function(op::STORE, &[pointer.0, value.0]);
-    }
-
     /// Writes vertex `slot`'s distance inside each user clip plane: `dot(plane, position)` over
     /// the clip-space position it was given, which the host clips where it is negative, as the
     /// guest's clipper does against `PA_CL_UCP_*` (D830).
@@ -3409,11 +3405,136 @@ impl<'a> Wavefront<'a> {
                 self.write_observation(member, OBSERVED_REGISTERS + register, value);
             }
         }
-        self.complete_rectangles();
+        self.emit_mesh_outputs();
         self.builder.function(op::RETURN, &[]);
         self.builder.function(op::FUNCTION_END, &[]);
         self.builder.check()?;
         Ok((self.builder.finish(), self.translated))
+    }
+
+    /// A mesh module's epilogue: declares the counts the program's allocation request set, writes
+    /// each lane's staged exports to the slots within them, then completes a rectangle list.
+    ///
+    /// Every invocation reaches it once the program has run, so the declaration precedes every
+    /// output write on every path, as the format requires ([`StagedOutputs`]).
+    ///
+    /// Exports are staged unmasked, and a lane's slot is written when it is within the counts.
+    /// That is exact when the emitted vertices are the low lanes, as a primitive shader arranges
+    /// them: it narrows the mask to `(1 << n) - 1`, so an inactive lane's slot is past the count. A
+    /// sparse vertex mask would emit a vertex it did not mean to; the mask is a runtime value, so
+    /// this is an assumption rather than a check (D688).
+    fn emit_mesh_outputs(&mut self) {
+        let (Some(staged), Some(mesh)) = (self.staged.clone(), self.mesh.clone()) else {
+            return;
+        };
+        let u32_type = self.u32_type;
+        let vertices = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, vertices.0, staged.vertices.0]);
+        let primitives = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, primitives.0, staged.primitives.0]);
+        let declared = if self.primitive == MeshPrimitive::Rectangles {
+            // Each rectangle adds its fourth corner after the emitted vertices, and a second
+            // triangle.
+            let total = self.builder.id();
+            self.builder
+                .function(op::IADD, &[u32_type.0, total.0, vertices.0, primitives.0]);
+            let doubled = self.builder.id();
+            self.builder.function(
+                op::IADD,
+                &[u32_type.0, doubled.0, primitives.0, primitives.0],
+            );
+            [total, doubled]
+        } else {
+            [vertices, primitives]
+        };
+        self.builder
+            .function(op::SET_MESH_OUTPUTS_EXT, &[declared[0].0, declared[1].0]);
+
+        let member = Self::constant(self, 0);
+        // The lanes this invocation staged: the whole wave, or its own one lane (D760).
+        for lane in 0..self.modelled.min(MESH_SLOTS) {
+            let slot = self.lane_slot(lane);
+            let element = Self::constant(self, lane);
+
+            // The lane's vertex, when the request counted it.
+            let merge = self.open_below(slot, vertices);
+            let position = self.load_staged(staged.vec4_ptr, staged.positions, element, self.vec4);
+            let target = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[mesh.vec4_ptr.0, target.0, mesh.vertices.0, slot.0, member.0],
+            );
+            self.builder.function(op::STORE, &[target.0, position.0]);
+            let components = self.extract_vec4(position);
+            self.write_clip_distances(&mesh, slot, components);
+            for (location, copy) in &staged.parameters {
+                let Some(output) = mesh.parameters.get(location).copied() else {
+                    continue;
+                };
+                let value = self.load_staged(staged.vec4_ptr, *copy, element, self.vec4);
+                let target = self.builder.id();
+                self.builder.function(
+                    op::ACCESS_CHAIN,
+                    &[mesh.vec4_ptr.0, target.0, output.0, slot.0],
+                );
+                self.builder.function(op::STORE, &[target.0, value.0]);
+            }
+            self.close_below(merge);
+
+            // Its primitive, likewise. A rectangle's first triangle is its three corners; its second
+            // follows it.
+            let merge = self.open_below(slot, primitives);
+            let at = if self.primitive == MeshPrimitive::Rectangles {
+                Self::constant(self, 2 * lane)
+            } else {
+                slot
+            };
+            let corners =
+                self.load_staged(staged.index_ptr, staged.indices, element, mesh.index_type);
+            let target = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[mesh.index_ptr.0, target.0, mesh.indices.0, at.0],
+            );
+            self.builder.function(op::STORE, &[target.0, corners.0]);
+            self.close_below(merge);
+        }
+        self.complete_rectangles();
+    }
+
+    /// Opens a block run only when `value < bound`, returning the merge [`Self::close_below`]
+    /// closes it at.
+    fn open_below(&mut self, value: Id, bound: Id) -> Id {
+        let below = self.builder.id();
+        self.builder.function(
+            op::ULESS_THAN,
+            &[self.bool_type.0, below.0, value.0, bound.0],
+        );
+        let (body, merge) = (self.builder.id(), self.builder.id());
+        self.builder.function(op::SELECTION_MERGE, &[merge.0, 0]);
+        self.builder
+            .function(op::BRANCH_CONDITIONAL, &[below.0, body.0, merge.0]);
+        self.builder.function(op::LABEL, &[body.0]);
+        merge
+    }
+
+    /// Closes a block [`Self::open_below`] opened.
+    fn close_below(&mut self, merge: Id) {
+        self.builder.function(op::BRANCH, &[merge.0]);
+        self.builder.function(op::LABEL, &[merge.0]);
+    }
+
+    /// Element `element` of a staged copy, of type `element_type`.
+    fn load_staged(&mut self, pointer: Id, copy: Id, element: Id, element_type: Id) -> Id {
+        let at = self.builder.id();
+        self.builder
+            .function(op::ACCESS_CHAIN, &[pointer.0, at.0, copy.0, element.0]);
+        let value = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[element_type.0, value.0, at.0]);
+        value
     }
 
     /// A rectangle-list module's epilogue: for each declared primitive, the fourth corner as the
@@ -3424,9 +3545,12 @@ impl<'a> Wavefront<'a> {
     /// the copies' length: an index past the vertices a lane holds is the guest's fault, and reading
     /// past a private array would be the host's.
     fn complete_rectangles(&mut self) {
-        let (Some(copies), Some(mesh)) = (self.rectangles.clone(), self.mesh.clone()) else {
+        let (Some(copies), Some(mesh)) = (self.staged.clone(), self.mesh.clone()) else {
             return;
         };
+        if self.primitive != MeshPrimitive::Rectangles {
+            return;
+        }
         let (u32_type, bool_type) = (self.u32_type, self.bool_type);
         let vertices = self.builder.id();
         self.builder
@@ -3649,60 +3773,27 @@ impl Model for Wavefront<'_> {
         self.output.depth
     }
 
+    // The four hooks below stage what the program exports; the outputs are written once it has
+    // run, after the counts are declared (`emit_mesh_outputs`).
+
     fn set_mesh_outputs(&mut self, vertices: Id, primitives: Id) -> Option<()> {
-        self.mesh.as_ref()?;
-        let (vertices, primitives) = match self.rectangles.clone() {
-            None => (vertices, primitives),
-            // Each rectangle adds its fourth corner after the emitted vertices, and a second
-            // triangle.
-            Some(copies) => {
-                self.builder
-                    .function(op::STORE, &[copies.vertices.0, vertices.0]);
-                self.builder
-                    .function(op::STORE, &[copies.primitives.0, primitives.0]);
-                let u32_type = self.u32_type;
-                let total = self.builder.id();
-                self.builder
-                    .function(op::IADD, &[u32_type.0, total.0, vertices.0, primitives.0]);
-                let doubled = self.builder.id();
-                self.builder.function(
-                    op::IADD,
-                    &[u32_type.0, doubled.0, primitives.0, primitives.0],
-                );
-                (total, doubled)
-            }
-        };
+        let staged = self.staged.clone()?;
         self.builder
-            .function(op::SET_MESH_OUTPUTS_EXT, &[vertices.0, primitives.0]);
+            .function(op::STORE, &[staged.vertices.0, vertices.0]);
+        self.builder
+            .function(op::STORE, &[staged.primitives.0, primitives.0]);
         Some(())
     }
 
     fn write_mesh_position(&mut self, lane: u32, components: [Id; 4]) -> Option<()> {
-        let mesh = self.mesh.clone()?;
+        let staged = self.staged.clone()?;
         let components = match self.window_space {
             WindowSpace::Clip => components,
             WindowSpace::Divided => self.window_to_clip(components),
             WindowSpace::Undivided => self.undivided_window_to_clip(components),
         };
-        let slot = self.lane_slot(lane);
-        let member = Self::constant(self, 0);
-        let pointer = self.builder.id();
-        self.builder.function(
-            op::ACCESS_CHAIN,
-            &[
-                mesh.vec4_ptr.0,
-                pointer.0,
-                mesh.vertices.0,
-                slot.0,
-                member.0,
-            ],
-        );
-        self.store_vec4(pointer, components);
-        self.write_clip_distances(&mesh, slot, components);
-        if let Some(copies) = self.rectangles.clone() {
-            let value = self.composite_vec4(components);
-            self.copy_element(copies.positions, copies.vec4_ptr, lane, value);
-        }
+        let value = self.composite_vec4(components);
+        self.copy_element(staged.positions, staged.vec4_ptr, lane, value);
         Some(())
     }
 
@@ -3721,36 +3812,18 @@ impl Model for Wavefront<'_> {
             self.write_mesh_parameter(twin, lane, components)?;
         }
         let mesh = self.mesh.clone()?;
-        let variable = *mesh.parameters.get(&location)?;
-        let slot = self.lane_slot(lane);
-        let pointer = self.builder.id();
-        self.builder.function(
-            op::ACCESS_CHAIN,
-            &[mesh.vec4_ptr.0, pointer.0, variable.0, slot.0],
-        );
-        self.store_vec4(pointer, components);
-        if let Some(copies) = self.rectangles.clone()
-            && let Some(copy) = copies.parameters.get(&location).copied()
-        {
-            let value = self.composite_vec4(components);
-            self.copy_element(copy, copies.vec4_ptr, lane, value);
-        }
+        let staged = self.staged.clone()?;
+        // A location the module declares no output for is refused, staged or not.
+        mesh.parameters.get(&location)?;
+        let copy = *staged.parameters.get(&location)?;
+        let value = self.composite_vec4(components);
+        self.copy_element(copy, staged.vec4_ptr, lane, value);
         Some(())
     }
 
     fn write_mesh_indices(&mut self, lane: u32, indices: &[Id]) -> Option<()> {
         let mesh = self.mesh.clone()?;
-        // A rectangle's first triangle is its three corners; its second follows it.
-        let slot = if self.rectangles.is_some() {
-            Self::constant(self, 2 * lane)
-        } else {
-            self.lane_slot(lane)
-        };
-        let pointer = self.builder.id();
-        self.builder.function(
-            op::ACCESS_CHAIN,
-            &[mesh.index_ptr.0, pointer.0, mesh.indices.0, slot.0],
-        );
+        let staged = self.staged.clone()?;
 
         // A point's index element is the scalar index; a line or triangle composes a vector of two
         // or three. The caller supplies exactly `index_width` of them.
@@ -3763,11 +3836,7 @@ impl Model for Wavefront<'_> {
             self.builder.function(op::COMPOSITE_CONSTRUCT, &operands);
             composite
         };
-        // Unmasked, as `store_vec4` explains: a mesh module's outputs cannot be read.
-        self.builder.function(op::STORE, &[pointer.0, value.0]);
-        if let Some(copies) = self.rectangles.clone() {
-            self.copy_element(copies.indices, copies.index_ptr, lane, value);
-        }
+        self.copy_element(staged.indices, staged.index_ptr, lane, value);
         Some(())
     }
 

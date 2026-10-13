@@ -1116,6 +1116,103 @@ mod tests {
         assert_eq!(three_wide, 1, "one uvec3, whoever asks for it");
     }
 
+    /// A mesh module declares its output counts once, after the program has run, and writes every
+    /// output after that: `SPV_EXT_mesh_shader` forbids a path to an output write that does not
+    /// pass `OpSetMeshOutputsEXT`. The program runs as a loop over its blocks, so the allocation
+    /// request and the exports inside it put the declaration on some paths only, which AMD's driver
+    /// faulted compiling (a null read in `amdvlk64.dll`, MDEM00001) and NVIDIA's ran.
+    #[test]
+    fn a_mesh_module_declares_its_counts_before_any_output_is_written() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        const END: u32 = 0xBF81_0000;
+        // Opcodes and the `Output` storage class, as the format numbers them.
+        let (variable, access_chain, store, loop_merge, label, set_mesh_outputs, output) =
+            (59, 65, 62, 246, 248, 5295, 3);
+        let program = [
+            // m0 = three vertices, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
+            0xbefc_03ff,
+            0x0000_1003,
+            0xbf90_0009,
+            // s_cbranch_scc0 +1 over an s_nop: a second block, so the program runs as a loop
+            0xbf84_0001,
+            0xbf80_0000,
+            // v2, v3, v4 = 0; v12 = 1.0
+            0x7e04_0280,
+            0x7e06_0280,
+            0x7e08_0280,
+            0x7e18_02f2,
+            // exp prim v1 = 0 | 1 << 10 | 2 << 20
+            0x7e02_02ff,
+            0x0020_0400,
+            0xf800_0941,
+            0x0000_0001,
+            // exp pos0 v2, v3, v4, v12 done
+            0xf800_08cf,
+            0x0c04_0302,
+            END,
+        ];
+        let (table, operands) = tables();
+        let decoded = decode(&stream(&program), &table, &operands);
+        let module = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Mesh, MeshPrimitive::Triangles),
+            Window::default(),
+            UserData::default(),
+        )
+        .expect("the primitive shader translates")
+        .module;
+
+        // Each instruction's position, opcode and operands, after the five-word header.
+        let mut instructions = Vec::new();
+        let mut at = 5;
+        while at < module.len() {
+            let length = ((module[at] >> 16) as usize).max(1);
+            instructions.push((module[at] & 0xFFFF, &module[at + 1..at + length]));
+            at += length;
+        }
+        let outputs: Vec<u32> = instructions
+            .iter()
+            .filter(|(opcode, words)| *opcode == variable && words.get(2) == Some(&output))
+            .map(|(_, words)| words[1])
+            .collect();
+        let output_pointers: Vec<u32> = instructions
+            .iter()
+            .filter(|(opcode, words)| *opcode == access_chain && outputs.contains(&words[2]))
+            .map(|(_, words)| words[1])
+            .collect();
+        let position = |wanted: &dyn Fn(u32, &[u32]) -> bool| -> Vec<usize> {
+            (0..instructions.len())
+                .filter(|&i| wanted(instructions[i].0, instructions[i].1))
+                .collect()
+        };
+        let declared = position(&|opcode, _| opcode == set_mesh_outputs);
+        let stores =
+            position(&|opcode, words| opcode == store && output_pointers.contains(&words[0]));
+        let loops = position(&|opcode, _| opcode == loop_merge);
+        assert_eq!(declared.len(), 1, "one declaration of the counts");
+        assert!(!stores.is_empty(), "the exports reach the outputs");
+        assert!(
+            !loops.is_empty(),
+            "the fixture runs as a loop over its blocks"
+        );
+        // The loop's merge block: everything after it runs once, after the program.
+        let merge = instructions[loops[0]].1[0];
+        let after_loop = position(&|opcode, words| opcode == label && words[0] == merge)[0];
+        assert!(
+            declared[0] > after_loop,
+            "the counts are declared inside the program's loop, on some paths only"
+        );
+        assert!(
+            stores.iter().all(|&store| store > declared[0]),
+            "an output is written before the counts are declared"
+        );
+    }
+
     /// A descriptor loaded through an address the program formed is found where it was formed:
     /// radeonsi's blit pixel shader moves user-data word 3 into `s0` and the constant 4 into `s1`,
     /// then loads its image descriptor from `s[0:1] + 0x400`. A pair holding anything else - here
