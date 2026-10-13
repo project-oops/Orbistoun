@@ -330,6 +330,22 @@ fn decode_prefix(
     ),
     &'static str,
 > {
+    let (encodings, operands) = tables()?;
+    let bytes: Vec<u8> = prefix.iter().flat_map(|word| word.to_le_bytes()).collect();
+    Ok((
+        encodings,
+        orbistoun_shader::decode_program(&bytes, encodings, operands),
+    ))
+}
+
+/// The shader tables, loaded once.
+fn tables() -> Result<
+    (
+        &'static orbistoun_shader::EncodingTable,
+        &'static orbistoun_shader::OperandTable,
+    ),
+    &'static str,
+> {
     static TABLES: std::sync::OnceLock<
         Option<(
             orbistoun_shader::EncodingTable,
@@ -345,11 +361,7 @@ fn decode_prefix(
         })
         .as_ref()
         .ok_or("the shader encoding tables did not load")?;
-    let bytes: Vec<u8> = prefix.iter().flat_map(|word| word.to_le_bytes()).collect();
-    Ok((
-        encodings,
-        orbistoun_shader::decode_program(&bytes, encodings, operands),
-    ))
+    Ok((encodings, operands))
 }
 
 /// The guest range a primitive shader's global loads read for a draw of `vertices` vertices with
@@ -429,7 +441,7 @@ fn run_global_loads(
     /// Programs prepared for runs, by their words: each is decoded and sliced once.
     type Programs = std::collections::HashMap<Vec<u32>, std::sync::Arc<LaneProgram>>;
     static PROGRAMS: std::sync::OnceLock<std::sync::Mutex<Programs>> = std::sync::OnceLock::new();
-    let (encodings, _) = decode_prefix(&[])?;
+    let (encodings, _) = tables()?;
     let programs = PROGRAMS.get_or_init(Default::default);
     let known = programs
         .lock()

@@ -773,6 +773,10 @@ fn draw_chunks(draw: &DrawCall, whole: GeometryInputs, lanes: u32) -> Vec<ChunkP
     chunk_plans(whole, address, lanes)
 }
 
+/// How many pairs of programs [`Pipeline::draw_flat_twins`] keeps its answer for before it starts
+/// again: a title's every pair, and a bound for one streaming new programs every frame.
+const FLAT_TWINS_KEPT: usize = 4096;
+
 /// What a draw's shaders are chosen by besides its registers: whether a primitive shader is
 /// prepared per geometry, and the geometry where one is, and whether the pixel stage's words count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -792,42 +796,81 @@ struct DrawKey {
     fragment_words: [u32; USER_DATA_WORDS],
 }
 
-/// How many programs [`DecodedPrograms`] keeps for one address.
+/// How many programs [`ProgramVersions`] keeps for one address.
 const VERSIONS_KEPT: usize = 8;
 
-/// The bytes each shader address decoded to, end-of-program included: the last few programs seen
-/// there, the one most recently found there first. A GL layer that writes each draw's program
-/// into one slot puts a different program at the same address from draw to draw, and decoding is
-/// a function of the bytes, so a program seen there before is not decoded again.
-#[derive(Debug, Default)]
-struct DecodedPrograms(BTreeMap<u64, Vec<Vec<u8>>>);
+/// The last few programs seen at each shader address, end-of-program included, the one most
+/// recently found there first, each with what was worked out from its bytes. A GL layer that writes
+/// each draw's program into one slot puts a different program at the same address from draw to
+/// draw, and what is worked out from a program is a function of its bytes, so a program seen there
+/// before is not worked out again.
+#[derive(Debug)]
+struct ProgramVersions<T>(BTreeMap<u64, Vec<(Vec<u8>, T)>>);
 
-impl DecodedPrograms {
-    /// The program most recently found at `address`.
-    fn get(&self, address: u64) -> Option<&Vec<u8>> {
+impl<T> Default for ProgramVersions<T> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<T> ProgramVersions<T> {
+    /// The program most recently found at `address`, and what was worked out from it.
+    fn current(&self, address: u64) -> Option<&(Vec<u8>, T)> {
         self.0.get(&address)?.first()
     }
 
-    /// Records `bytes` as the program now at `address`.
-    fn insert(&mut self, address: u64, bytes: Vec<u8>) {
+    /// Records `bytes`, and `value` worked out from them, as the program now at `address`.
+    fn insert_with(&mut self, address: u64, bytes: Vec<u8>, value: T) {
         let versions = self.0.entry(address).or_default();
-        versions.retain(|known| *known != bytes);
-        versions.insert(0, bytes);
+        versions.retain(|(known, _)| *known != bytes);
+        versions.insert(0, (bytes, value));
         versions.truncate(VERSIONS_KEPT);
     }
 
-    /// The bytes of a program kept for `address` that memory holds there now, made the one
-    /// [`Self::get`] answers; `None` where memory holds none of them.
-    fn held<'m>(&mut self, address: u64, memory: &'m impl GuestMemory) -> Option<&'m [u8]> {
+    /// The bytes of a program kept for `address` that memory holds there now, and what was worked
+    /// out from them, made the one [`Self::current`] answers; `None` where memory holds none of
+    /// them.
+    fn held_with<'m>(
+        &mut self,
+        address: u64,
+        memory: &'m impl GuestMemory,
+    ) -> Option<(&'m [u8], &T)> {
         let versions = self.0.get_mut(&address)?;
-        let (at, bytes) = versions.iter().enumerate().find_map(|(at, known)| {
+        let (at, bytes) = versions.iter().enumerate().find_map(|(at, (known, _))| {
             memory
                 .read(guest_address_of(address), known.len())
                 .filter(|bytes| *bytes == known.as_slice())
                 .map(|bytes| (at, bytes))
         })?;
         versions[..=at].rotate_right(1);
-        Some(bytes)
+        Some((bytes, &versions[0].1))
+    }
+}
+
+/// The bytes each shader address decoded to, with their content hash.
+type DecodedPrograms = ProgramVersions<u64>;
+
+impl ProgramVersions<u64> {
+    /// The program most recently found at `address`.
+    fn get(&self, address: u64) -> Option<&Vec<u8>> {
+        self.current(address).map(|(bytes, _)| bytes)
+    }
+
+    /// The content hash of the program most recently found at `address`.
+    fn hash(&self, address: u64) -> Option<u64> {
+        self.current(address).map(|&(_, hash)| hash)
+    }
+
+    /// Records `bytes` as the program now at `address`.
+    fn insert(&mut self, address: u64, bytes: Vec<u8>) {
+        let hash = content_hash(&bytes);
+        self.insert_with(address, bytes, hash);
+    }
+
+    /// The bytes of a program kept for `address` that memory holds there now, made the one
+    /// [`Self::get`] answers; `None` where memory holds none of them.
+    fn held<'m>(&mut self, address: u64, memory: &'m impl GuestMemory) -> Option<&'m [u8]> {
+        self.held_with(address, memory).map(|(bytes, _)| bytes)
     }
 }
 
@@ -944,9 +987,8 @@ pub struct Pipeline {
     /// (D730), with their bytes and the reason: tried before every draw is bound, at every
     /// submission, and a whole translation each time to reach the same answer.
     needs_geometry: BTreeMap<u64, (Vec<u8>, String)>,
-    /// The constant base each vertex program address formed, with the program bytes it was found
-    /// in.
-    bases: BTreeMap<u64, (Vec<u8>, Option<u64>)>,
+    /// The constant base each vertex program formed, by the address it was found at.
+    bases: ProgramVersions<Option<u64>>,
     /// Each translated module's texture sources, by its resource.
     texture_sources: BTreeMap<ResourceId, Vec<TextureSource>>,
     /// The translated modules whose shaders read or write guest memory, which reach it only
@@ -981,9 +1023,9 @@ pub struct Pipeline {
     /// into chunks asks again for every chunk with the same program, words and counts, and the
     /// submission's memory and programs do not change while it is prepared.
     formats_memo: FormatsMemo,
-    /// [`Self::draw_flat_twins`]'s answer for each pair of programs - pixel, then primitive - a
-    /// submission's draws have named so far, kept until its draws end ([`Self::end_draws`]):
-    /// working it out decodes both programs, and a frame draws the same pair thousands of times.
+    /// [`Self::draw_flat_twins`]'s answer for each pair of programs - pixel, then primitive - by
+    /// their content hashes: working it out decodes both, it is a function of their bytes, and a
+    /// frame draws the same pair thousands of times across its submissions.
     flat_twins_kept: BTreeMap<(Option<u64>, Option<u64>), Option<FlatTwins>>,
 }
 
@@ -1063,7 +1105,7 @@ impl Pipeline {
             per_lane: BTreeMap::new(),
             detiled: DetiledImages::default(),
             needs_geometry: BTreeMap::new(),
-            bases: BTreeMap::new(),
+            bases: ProgramVersions::default(),
             texture_sources: BTreeMap::new(),
             memory_readers: BTreeMap::new(),
             index_readers: std::collections::BTreeSet::new(),
@@ -2405,12 +2447,11 @@ impl Pipeline {
         (per_draw, per_draw_chunks)
     }
 
-    /// Forgets what held only while one submission's draws were bound: their wave widths, the
-    /// formats kept for their chunks and the flat twins kept for their programs.
+    /// Forgets what held only while one submission's draws were bound: their wave widths and the
+    /// formats kept for their chunks.
     fn end_draws(&mut self) {
         self.draw_widths = None;
         self.formats_memo = FormatsMemo::Off;
-        self.flat_twins_kept.clear();
     }
 
     /// Prepares and binds the reconciled candidates before any draw. Returns every (stage, address)
@@ -2455,17 +2496,20 @@ impl Pipeline {
     /// and every attribute its pixel shader reads, so neither stage's own locations move. `None`
     /// where the pixel shader reads no attribute both ways, or either program is not yet decoded.
     fn draw_flat_twins(&mut self, candidates: &[Candidate]) -> Option<FlatTwins> {
-        let address = |stage: ShaderStage| {
+        let hash = |stage: ShaderStage| {
             candidates
                 .iter()
                 .find(|c| c.stage == stage)
-                .map(|c| c.address)
+                .and_then(|c| self.decoded.hash(c.address))
         };
-        let pair = (address(ShaderStage::Fragment), address(ShaderStage::Vertex));
+        let pair = (hash(ShaderStage::Fragment), hash(ShaderStage::Vertex));
         if let Some(&twins) = self.flat_twins_kept.get(&pair) {
             return twins;
         }
         let twins = self.work_out_flat_twins(candidates);
+        if self.flat_twins_kept.len() >= FLAT_TWINS_KEPT {
+            self.flat_twins_kept.clear();
+        }
         self.flat_twins_kept.insert(pair, twins);
         twins
     }
@@ -5247,22 +5291,22 @@ impl Pipeline {
             .iter()
             .filter(|candidate| candidate.stage == ShaderStage::Vertex)
             .find_map(|candidate| {
-                let address = guest_address_of(candidate.address);
                 // The base is a function of the program's bytes: one already found for these same
                 // bytes at this address is that answer.
-                if let Some((known, base)) = self.bases.get(&address)
-                    && memory.read(address, known.len()) == Some(known.as_slice())
-                {
-                    return *base;
+                if let Some((_, &base)) = self.bases.held_with(candidate.address, memory) {
+                    return base;
                 }
-                let bytes = read_window(memory, address)?;
+                let bytes = read_window(memory, guest_address_of(candidate.address))?;
                 let decoded = decode_program(bytes, &self.encodings, &self.operands);
                 let base = constant_address_base(&decoded, &self.encodings);
                 // Only a program that ended is known by its bytes: one that ran off its window would
                 // decode differently were more of it mapped.
                 if decoded.terminated {
-                    self.bases
-                        .insert(address, (bytes[..decoded.consumed].to_vec(), base));
+                    self.bases.insert_with(
+                        candidate.address,
+                        bytes[..decoded.consumed].to_vec(),
+                        base,
+                    );
                 }
                 base
             })
@@ -7062,11 +7106,11 @@ mod tests {
         );
     }
 
-    /// A pair of programs' flat twins are worked out once while a submission's draws are bound -
-    /// here kept even past the pixel program being replaced, which cannot happen within one
-    /// submission - and worked out again once its draws end.
+    /// A pair of programs' flat twins are worked out once for their bytes and kept across
+    /// submissions, as 2S2H draws the same pairs in submission after submission; a program written
+    /// over another at the same address is its own pair, answered for itself at once.
     #[test]
-    fn a_program_pair_s_flat_twins_are_worked_out_once_per_submission() {
+    fn a_program_pair_s_flat_twins_are_kept_by_their_bytes() {
         use super::{Candidate, Pipeline, ShaderStage};
         use orbistoun_translate::{Fidelity, Strategy, Width};
         let bytes =
@@ -7084,21 +7128,25 @@ mod tests {
             address: fragment,
             stage: ShaderStage::Fragment,
         }];
-        pipeline.decoded.insert(fragment, mixed);
+        pipeline.decoded.insert(fragment, mixed.clone());
         assert!(
             pipeline.draw_flat_twins(&candidates).is_some(),
             "attribute 0 is mixed"
         );
+        pipeline.end_draws();
+        assert_eq!(
+            pipeline.flat_twins_kept.len(),
+            1,
+            "kept past the submission"
+        );
         pipeline.decoded.insert(fragment, smooth);
         assert!(
-            pipeline.draw_flat_twins(&candidates).is_some(),
-            "kept for the submission"
-        );
-        pipeline.end_draws();
-        assert!(
             pipeline.draw_flat_twins(&candidates).is_none(),
-            "worked out again after"
+            "the program written over it, answered for itself"
         );
+        pipeline.decoded.insert(fragment, mixed);
+        assert!(pipeline.draw_flat_twins(&candidates).is_some());
+        assert_eq!(pipeline.flat_twins_kept.len(), 2, "each pair once");
     }
 
     /// While a submission's draws are bound, a draw's chunks asking for the same program's formats
