@@ -921,6 +921,10 @@ pub struct Pipeline {
     /// into chunks asks again for every chunk with the same program, words and counts, and the
     /// submission's memory and programs do not change while it is prepared.
     formats_memo: FormatsMemo,
+    /// [`Self::draw_flat_twins`]'s answer for each pair of programs - pixel, then primitive - a
+    /// submission's draws have named so far, kept until its draws end ([`Self::end_draws`]):
+    /// working it out decodes both programs, and a frame draws the same pair thousands of times.
+    flat_twins_kept: BTreeMap<(Option<u64>, Option<u64>), Option<FlatTwins>>,
 }
 
 /// Whether [`Pipeline::draw_buffer_formats`] keeps what it resolves, and what it kept.
@@ -1007,6 +1011,7 @@ impl Pipeline {
             dispatch_modules: BTreeMap::new(),
             format_words: BTreeMap::new(),
             formats_memo: FormatsMemo::Off,
+            flat_twins_kept: BTreeMap::new(),
         })
     }
 
@@ -2251,11 +2256,12 @@ impl Pipeline {
         (per_draw, per_draw_chunks)
     }
 
-    /// Forgets what held only while one submission's draws were bound: their wave widths and the
-    /// formats kept for their chunks.
+    /// Forgets what held only while one submission's draws were bound: their wave widths, the
+    /// formats kept for their chunks and the flat twins kept for their programs.
     fn end_draws(&mut self) {
         self.draw_widths = None;
         self.formats_memo = FormatsMemo::Off;
+        self.flat_twins_kept.clear();
     }
 
     /// Prepares and binds the reconciled candidates before any draw. Returns every (stage, address)
@@ -2299,7 +2305,24 @@ impl Pipeline {
     /// (D742): one location each, from the first above every parameter its primitive shader exports
     /// and every attribute its pixel shader reads, so neither stage's own locations move. `None`
     /// where the pixel shader reads no attribute both ways, or either program is not yet decoded.
-    fn draw_flat_twins(&self, candidates: &[Candidate]) -> Option<FlatTwins> {
+    fn draw_flat_twins(&mut self, candidates: &[Candidate]) -> Option<FlatTwins> {
+        let address = |stage: ShaderStage| {
+            candidates
+                .iter()
+                .find(|c| c.stage == stage)
+                .map(|c| c.address)
+        };
+        let pair = (address(ShaderStage::Fragment), address(ShaderStage::Vertex));
+        if let Some(&twins) = self.flat_twins_kept.get(&pair) {
+            return twins;
+        }
+        let twins = self.work_out_flat_twins(candidates);
+        self.flat_twins_kept.insert(pair, twins);
+        twins
+    }
+
+    /// [`Self::draw_flat_twins`] worked out from the programs.
+    fn work_out_flat_twins(&self, candidates: &[Candidate]) -> Option<FlatTwins> {
         let program = |stage: ShaderStage| {
             let candidate = candidates.iter().find(|c| c.stage == stage)?;
             let bytes = self.decoded.get(&candidate.address)?;
@@ -6687,6 +6710,45 @@ mod tests {
                 .map(|f| f.get(0)),
             Some(Some(0x2222_2222)),
             "the rewritten program's descriptor"
+        );
+    }
+
+    /// A pair of programs' flat twins are worked out once while a submission's draws are bound -
+    /// here kept even past the pixel program being replaced, which cannot happen within one
+    /// submission - and worked out again once its draws end.
+    #[test]
+    fn a_program_pair_s_flat_twins_are_worked_out_once_per_submission() {
+        use super::{Candidate, Pipeline, ShaderStage};
+        use orbistoun_translate::{Fidelity, Strategy, Width};
+        let bytes =
+            |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        // attr0.x interpolated and attr0.y flat (D742), then attr0.x interpolated alone.
+        let mixed = bytes(&[0xC808_0000, 0xC809_0001, 0xC80E_0102, 0xBF81_0000]);
+        let smooth = bytes(&[0xC808_0000, 0xC809_0001, 0xBF81_0000]);
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        })
+        .expect("a pipeline");
+        let fragment = 0x50_0000;
+        let candidates = [Candidate {
+            address: fragment,
+            stage: ShaderStage::Fragment,
+        }];
+        pipeline.decoded.insert(fragment, mixed);
+        assert!(
+            pipeline.draw_flat_twins(&candidates).is_some(),
+            "attribute 0 is mixed"
+        );
+        pipeline.decoded.insert(fragment, smooth);
+        assert!(
+            pipeline.draw_flat_twins(&candidates).is_some(),
+            "kept for the submission"
+        );
+        pipeline.end_draws();
+        assert!(
+            pipeline.draw_flat_twins(&candidates).is_none(),
+            "worked out again after"
         );
     }
 
