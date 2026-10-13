@@ -380,10 +380,10 @@ fn an_image_that_is_not_two_dimensional_is_refused() {
     let encodings = EncodingTable::builtin().expect("the shipped encoding table");
     let operands = OperandTable::builtin().expect("the shipped operand table");
 
-    // Every code but two dimensions and a cube, which a sample reads (D811): 1D, 2D, 3D, cube, 1D
-    // array, 2D array, 2D multi-sampled, 2D multi-sampled array, in the order a disassembler prints
-    // them and the measured first bytes 0x00 to 0x38 put them.
-    for code in (0..8u32).filter(|code| *code != 1 && *code != CUBE) {
+    // Every code but two dimensions, three and a cube, which a sample reads (D811, D823): 1D, 2D,
+    // 3D, cube, 1D array, 2D array, 2D multi-sampled, 2D multi-sampled array, in the order a
+    // disassembler prints them and the measured first bytes 0x00 to 0x38 put them.
+    for code in (0..8u32).filter(|code| ![1, 2, CUBE].contains(code)) {
         let mut words = image_sample_words(39);
         words[0] = (words[0] & !(0b111 << 3)) | (code << 3);
         let mut bytes = Vec::new();
@@ -581,6 +581,58 @@ fn a_cube_sample_keeps_its_face_outside_acos_coordinate_range() {
     }
 }
 
+/// A sample of a three-dimensional image translates: three address registers, `dim:3D`, read as a
+/// position across, down and deep into a binding declared `Dim3D` (D823), and the texture it reads
+/// is reported as a volume, so nothing flat is bound under it.
+#[test]
+fn a_volume_sample_translates_to_a_three_dimensional_binding() {
+    use orbistoun_translate::{Fidelity, Strategy};
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let mut bytes = Vec::new();
+    for channel in 0u32..2 {
+        bytes.extend((0xC800_0000u32 | (channel << 18) | (channel << 8)).to_le_bytes());
+    }
+    // v_mov_b32 v2, 0.5: the depth.
+    bytes.extend((0x7E00_0000u32 | (1 << 9) | (2 << 17) | 0xf0).to_le_bytes());
+    let [first, second] = image_sample_words(39);
+    bytes.extend(((first & !(0b111 << 3)) | (2 << 3)).to_le_bytes());
+    bytes.extend(second.to_le_bytes());
+    bytes.extend(0xF800_000Fu32.to_le_bytes());
+    bytes.extend(0x0706_0504u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    let decoded = decode(&bytes, &encodings, &operands);
+    let translated = orbistoun_translate::translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Wavefront,
+            width: Width::Wave64,
+        },
+        (Stage::Fragment, MeshPrimitive::default()),
+        Window::default(),
+        UserData::default(),
+    )
+    .expect("the volume sample translated");
+    assert!(
+        translated.textures.iter().all(|t| t.volume && !t.cube),
+        "{:?}",
+        translated.textures
+    );
+    let module = &translated.module;
+    // OpTypeImage (25): result, sampled type, then Dim, which is 2 for Dim3D.
+    let mut at = 5;
+    let mut dims = Vec::new();
+    while at < module.len() {
+        let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
+        if opcode == 25 {
+            dims.push(module[at + 3]);
+        }
+        at += count.max(1);
+    }
+    assert_eq!(dims, [2], "one Dim3D image");
+}
+
 /// A guest shader that samples at a level it names, and exports what came back.
 ///
 /// Three moves fill the address registers, the coordinate and then the level last, and
@@ -770,6 +822,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 sampler_user_data: None,
                 saturated: [false; 2],
                 cube: false,
+                volume: false,
                 compare: false,
             },
             TextureSource {
@@ -781,6 +834,7 @@ fn two_textures_from_the_descriptor_table_translate_with_their_offsets() {
                 sampler_user_data: None,
                 saturated: [false; 2],
                 cube: false,
+                volume: false,
                 compare: false,
             },
         ]
@@ -1262,6 +1316,7 @@ fn a_sampler_loaded_from_the_table_is_reported_with_its_offset() {
             sampler_user_data: None,
             saturated: [false; 2],
             cube: false,
+            volume: false,
             compare: false,
         }]
     );

@@ -335,6 +335,10 @@ const IMAGE_DIMENSION: (u32, u32) = (3, 0b111);
 /// 2D multi-sampled, 2D multi-sampled array. Measured from the same eight encodings.
 const IMAGE_DIMENSION_2D: u32 = 1;
 
+/// The dimensionality code for a three-dimensional image, third in the same order
+/// (`dim:SQ_RSRC_IMG_3D`).
+const IMAGE_DIMENSION_3D: u32 = 2;
+
 /// The dimensionality code for a cube, fourth in the same order (`dim:SQ_RSRC_IMG_CUBE`).
 const IMAGE_DIMENSION_CUBE: u32 = 3;
 
@@ -369,11 +373,10 @@ pub struct Texture {
     /// Which coordinates, across then down, a sample saturates first: those its sampler clamps to
     /// half a border (D743).
     pub saturate: [bool; 2],
-    /// Whether the binding is a cube: sampled with a three-component direction, and
-    /// [`coordinate`](Self::coordinate) is that direction's type (D811).
-    pub cube: bool,
-    /// Whether the binding is a depth texture sampled against a reference (D816).
-    pub compare: bool,
+    /// The shape the binding is declared as: a cube, sampled with a three-component direction that
+    /// [`coordinate`](Self::coordinate) is the type of (D811); a three-dimensional image, sampled at
+    /// three coordinates (D823); or a depth texture sampled against a reference (D816).
+    pub shape: ImageShape,
 }
 
 /// What a translated texture store needs from the model.
@@ -784,13 +787,13 @@ pub trait Model {
     /// `at` is the sampling instruction's offset, which says which load reached its descriptor
     /// registers where the shader reuses them for another texture.
     ///
-    /// `cube` is whether the instruction samples a cube, which the binding is then declared as, and
-    /// `compare` whether it samples a depth texture against a reference (D816).
+    /// `shape` is the shape of image the instruction samples, which the binding is then declared
+    /// as: a cube, a volume, or compared against a reference (D811, D816, D823).
     fn sampled_image(
         &mut self,
         _descriptor: u32,
         _sampler: Option<u32>,
-        (_at, _cube, _compare): (u32, bool, bool),
+        (_at, _shape): (u32, ImageShape),
     ) -> Result<Texture, &'static str> {
         Err(concat!(
             "this model has no texture to sample - a sampled image is bound by a graphics ",
@@ -8670,12 +8673,14 @@ struct ImageAccess {
 }
 
 /// The shape of image an access samples, beyond a flat image's.
-#[derive(Clone, Copy)]
-struct ImageShape {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImageShape {
     /// A cube, its address a face's two coordinates and the face (D811).
-    cube: bool,
+    pub cube: bool,
+    /// A three-dimensional image, its address three coordinates (D823).
+    pub volume: bool,
     /// A depth texture compared against a reference, the first address element (D816).
-    compare: bool,
+    pub compare: bool,
 }
 
 /// `A16` and `D16`: whether an image access's address elements, and its components, are sixteen
@@ -8700,17 +8705,18 @@ const IMAGE_LAYOUT_FIELDS: u32 = 1 << 15 | 1 << 16 | 1 << 17;
 /// and so on (`aco_assembler.cpp:744-777`, `:813-821`). The first is the second word's `VADDR`.
 const IMAGE_NSA: (u32, u32) = (1, 0x3);
 
-/// The most address registers a translated access reads: two coordinates, a cube's face and a
-/// level.
+/// The most address registers a translated access reads: two coordinates, a cube's face or a
+/// volume's depth, and a level.
 const MAX_ADDRESS_REGISTERS: usize = 4;
 
-/// Address registers a two-dimensional access uses, by instruction.
+/// Address registers an access uses, by instruction.
 ///
-/// Two elements for a coordinate and three where the level is one of them: the assembler refuses
-/// an address operand whose register count does not match the instruction's dimensionality field.
-/// Sixteen-bit elements pack two to a register.
-const fn address_registers(levelled: bool, a16: bool, (cube, compare): (bool, bool)) -> u32 {
-    let elements: u32 = 2 + cube as u32 + levelled as u32 + compare as u32;
+/// Two elements for a coordinate, a third for a cube's face or a volume's depth, and one more where
+/// the level is one of them: the assembler refuses an address operand whose register count does not
+/// match the instruction's dimensionality field. Sixteen-bit elements pack two to a register.
+const fn address_registers(levelled: bool, a16: bool, shape: ImageShape) -> u32 {
+    let elements: u32 =
+        2 + (shape.cube || shape.volume) as u32 + levelled as u32 + shape.compare as u32;
     if a16 { elements.div_ceil(2) } else { elements }
 }
 
@@ -8796,15 +8802,20 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // image of another dimensionality would sample somewhere else.
     let (shift, mask) = IMAGE_DIMENSION;
     let dimension = (instruction.word >> shift) & mask;
-    let cube = dimension == IMAGE_DIMENSION_CUBE && name.starts_with("image_sample");
+    let is_sample = name.starts_with("image_sample");
     // A compare's reference comes first, as ACO places it ahead of the coordinates
     // (`aco_select_nir.cpp`, the MIMG address after any offset and bias).
-    let compare = name == "image_sample_c_lz";
-    if dimension != IMAGE_DIMENSION_2D && !cube {
+    let shape = ImageShape {
+        cube: dimension == IMAGE_DIMENSION_CUBE && is_sample,
+        volume: dimension == IMAGE_DIMENSION_3D && is_sample,
+        compare: name == "image_sample_c_lz",
+    };
+    let (cube, volume, compare) = (shape.cube, shape.volume, shape.compare);
+    if dimension != IMAGE_DIMENSION_2D && !cube && !volume {
         return Err(refuse(concat!(
-            "only a two-dimensional image is translated - this instruction's coordinate has a ",
-            "different number of components, and reading two of them would sample a place the ",
-            "guest did not name"
+            "only a two-dimensional image, a cube or a sampled volume is translated - this ",
+            "instruction's coordinate has another number of components, and reading two of them ",
+            "would sample a place the guest did not name"
         )));
     }
 
@@ -8861,14 +8872,14 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             "instruction does not have"
         )));
     }
-    if compare && (cube || mask != 1) {
+    if compare && (cube || volume || mask != 1) {
         return Err(refuse(
-            "a depth-compare sample of a cube, or of more than one channel, is not translated",
+            "a depth-compare sample of a cube, a volume or more than one channel is not translated",
         ));
     }
 
     // The address registers and the components coming back both have to fit.
-    let used = address_registers(levelled, a16, (cube, compare));
+    let used = address_registers(levelled, a16, shape);
     let addresses = address_list(instruction, u32::from(*address), used).ok_or_else(|| {
         refuse(concat!(
             "an image access whose address registers run past the register file, or whose ",
@@ -8894,7 +8905,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             address: a16,
             data: d16,
         },
-        shape: ImageShape { cube, compare },
+        shape,
     })
 }
 
@@ -8984,16 +8995,16 @@ fn image_sample<M: Model + ?Sized>(
         fetches,
         levelled,
         halves,
-        shape: ImageShape { cube, compare },
+        shape,
     } = image_access(instruction, name)?;
-    let a16 = halves.address;
+    let (cube, compare, a16) = (shape.cube, shape.compare, halves.address);
 
     let texture = model
-        .sampled_image(descriptor, sampler, (instruction.offset, cube, compare))
+        .sampled_image(descriptor, sampler, (instruction.offset, shape))
         .map_err(refuse)?;
-    if cube && texture.saturate != [false; 2] {
+    if (cube || shape.volume) && texture.saturate != [false; 2] {
         return Err(refuse(
-            "a cube sampled through a half-border clamp, which is not translated",
+            "a cube or volume through a half-border clamp is not translated",
         ));
     }
 
@@ -9009,7 +9020,7 @@ fn image_sample<M: Model + ?Sized>(
         // The level, where the instruction takes one from a register: the last address element. A
         // fetch's level is an integer, a sample's a float.
         let level = if levelled {
-            let at = 2 + u32::from(cube);
+            let at = 2 + u32::from(cube || shape.volume);
             let bits = address_element(model, instruction, (&addresses, a16), at, lane)?;
             if fetches { bits } else { model.as_float(bits) }
         } else if fetches {
@@ -9148,7 +9159,7 @@ fn sample_coordinate<M: Model + ?Sized>(
 ) -> Result<Id, TranslateError> {
     // Two dimensions from consecutive elements; the dimensionality field was checked. A compare's
     // reference is ahead of them (D816).
-    let first = u32::from(texture.compare);
+    let first = u32::from(texture.shape.compare);
     let across = address_element(model, instruction, (addresses, a16), first, lane)?;
     let down = address_element(model, instruction, (addresses, a16), first + 1, lane)?;
     let components = if cube {
@@ -9156,6 +9167,10 @@ fn sample_coordinate<M: Model + ?Sized>(
         cube_direction(model, across, down, face)
             .map(|bits| model.as_float(bits))
             .to_vec()
+    } else if texture.shape.volume && !fetches {
+        // A volume's position, across, down and deep, each as the guest gave it (D823).
+        let deep = address_element(model, instruction, (addresses, a16), 2, lane)?;
+        [across, down, deep].map(|at| model.as_float(at)).to_vec()
     } else if fetches {
         vec![across, down]
     } else {

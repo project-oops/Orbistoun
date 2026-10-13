@@ -4149,6 +4149,7 @@ fn bind_textures(
                     user_data: None,
                     sampler_user_data: None,
                     cube: false,
+                    volume: false,
                     compare: false,
                     saturated: [false; 2],
                 }];
@@ -4290,6 +4291,11 @@ fn table_texture(
 /// module that samples a cube, one image otherwise (D811). Bound the other way, the host's view
 /// would not be the image its module declares.
 fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
+    // A volume binds as nothing yet: a flat image or a cube under a module that samples three
+    // coordinates would not be the image it declares (D823).
+    if source.volume {
+        return false;
+    }
     match bound {
         // A depth target is sampled flat, compared or not (D816, D817).
         RenderCommand::BindDepthTexture { .. } => !source.cube,
@@ -5921,6 +5927,7 @@ mod tests {
                 user_data: None,
                 sampler_user_data: None,
                 cube: false,
+                volume: false,
                 compare: false,
                 saturated: [false; 2],
             }],
@@ -5993,6 +6000,7 @@ mod tests {
                     user_data: Some(9),
                     sampler_user_data: Some(17),
                     cube: false,
+                    volume: false,
                     compare: false,
                     saturated: [false; 2],
                 }],
@@ -6054,6 +6062,7 @@ mod tests {
                 user_data: Some(0),
                 sampler_user_data: Some(8),
                 cube: false,
+                volume: false,
                 compare: false,
                 saturated: [false; 2],
             }],
@@ -6135,6 +6144,7 @@ mod tests {
                     user_data: None,
                     sampler_user_data: None,
                     cube: false,
+                    volume: false,
                     compare: false,
                     saturated,
                 }],
@@ -6217,11 +6227,8 @@ mod tests {
                     table_offset: Some(0),
                     table: TableBase::default(),
                     sampler_offset: Some(0x20),
-                    user_data: None,
-                    sampler_user_data: None,
-                    cube: false,
                     compare,
-                    saturated: [false; 2],
+                    ..TextureSource::default()
                 }],
             )]);
             let mut commands = vec![
@@ -6315,6 +6322,7 @@ mod tests {
             user_data: Some(8),
             sampler_user_data: Some(16),
             cube: false,
+            volume: false,
             compare: true,
             saturated: [false; 2],
         };
@@ -6412,6 +6420,7 @@ mod tests {
                 user_data: Some(8),
                 sampler_user_data: None,
                 cube: false,
+                volume: false,
                 compare: true,
                 saturated: [false; 2],
             }],
@@ -6493,6 +6502,7 @@ mod tests {
             user_data: Some(8),
             sampler_user_data: None,
             cube: false,
+            volume: false,
             compare: true,
             saturated: [false; 2],
         };
@@ -6928,12 +6938,22 @@ mod tests {
             sampler_user_data: None,
             saturated: [false; 2],
             cube,
+            volume: false,
             compare: false,
         };
         assert!(super::shaped_for(command, &source(true)));
         assert!(
             !super::shaped_for(command, &source(false)),
             "not handed to a flat sample"
+        );
+        let volume = super::TextureSource {
+            cube: false,
+            volume: true,
+            ..source(false)
+        };
+        assert!(
+            !super::shaped_for(command, &volume),
+            "nor to a volume, which binds as nothing yet (D823)"
         );
         assert!(
             texture_from_words(words(11), 0, &memory, &mut super::TexelCache::new()).is_none(),
@@ -6980,6 +7000,7 @@ mod tests {
                     user_data,
                     sampler_user_data: user_data.map(|_| 8),
                     cube: false,
+                    volume: false,
                     compare: false,
                     saturated: [true; 2],
                 }],

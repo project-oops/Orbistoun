@@ -1785,7 +1785,7 @@ impl Wavefront<'_> {
     fn new_texture_source(
         &self,
         descriptor: u32,
-        (reaching, (cube, compare)): (Reaching, (bool, bool)),
+        (reaching, shape): (Reaching, model::ImageShape),
     ) -> Result<TextureSource, &'static str> {
         let slot = u32::try_from(self.textures.len()).unwrap_or(u32::MAX);
         if slot as usize >= MAX_TEXTURES {
@@ -1834,8 +1834,9 @@ impl Wavefront<'_> {
             saturated: [false; 2],
             user_data,
             sampler_user_data: None,
-            cube,
-            compare,
+            cube: shape.cube,
+            volume: shape.volume,
+            compare: shape.compare,
         })
     }
 
@@ -3994,7 +3995,8 @@ impl Model for Wavefront<'_> {
         // A compute module's storage image is the guest's, so where its descriptor came from is what
         // binds it; a fragment module's is a harness image.
         if self.stage == Stage::Compute {
-            let mut source = self.new_texture_source(descriptor, (None, (false, false)))?;
+            let mut source =
+                self.new_texture_source(descriptor, (None, model::ImageShape::default()))?;
             source.slot = 0;
             self.images.stored_source = Some(source);
         }
@@ -4058,7 +4060,7 @@ impl Model for Wavefront<'_> {
         &mut self,
         descriptor: u32,
         sampler: Option<u32>,
-        (at, cube, compare): (u32, bool, bool),
+        (at, shape): (u32, model::ImageShape),
     ) -> Result<model::Texture, &'static str> {
         // The fragment stage only: the harness binds its sampled image with fragment stage flags,
         // and the `vec4` type a sample answers with is declared by the colour output, which only a
@@ -4105,7 +4107,7 @@ impl Model for Wavefront<'_> {
                     "only one is bound for them (D690)"
                 ));
             }
-            if (bound.texture.cube, bound.texture.compare) != (cube, compare) {
+            if bound.texture.shape != shape {
                 return Err(CUBE_AND_FLAT);
             }
             // The first instruction to name a sampler records it, which may come after the first to
@@ -4113,7 +4115,7 @@ impl Model for Wavefront<'_> {
             bound.sampler = bound.sampler.or(sampler);
             return Ok(bound.texture);
         }
-        let source = self.new_texture_source(descriptor, (reaching, (cube, compare)))?;
+        let source = self.new_texture_source(descriptor, (reaching, shape))?;
         let binding = orbistoun_spirv::TEXTURE_BINDINGS[source.slot as usize];
 
         let image = self.builder.id();
@@ -4132,10 +4134,10 @@ impl Model for Wavefront<'_> {
         } else {
             (self.f32_type, self.vec4)
         };
-        let (dim, components) = if cube { (DIM_CUBE, 3) } else { (DIM_2D, 2) };
+        let ((dim, components), depth) = (image_dim(shape), u32::from(shape.compare));
         self.builder.declare(
             op::TYPE_IMAGE,
-            &[image.0, element.0, dim, u32::from(compare), 0, 0, 1, 0],
+            &[image.0, element.0, dim, depth, 0, 0, 1, 0],
         );
         self.builder
             .declare(op::TYPE_SAMPLED_IMAGE, &[combined.0, image.0]);
@@ -4166,8 +4168,7 @@ impl Model for Wavefront<'_> {
                 .get(source.slot as usize)
                 .copied()
                 .unwrap_or_default(),
-            cube,
-            compare,
+            shape,
         };
         self.textures.push(BoundTexture {
             texture,
@@ -4585,7 +4586,7 @@ pub type ImageSources = (Vec<TextureSource>, Option<TextureSource>);
 /// the descriptor table the image descriptor was loaded from, and the byte offset in it. `None` when
 /// the module did not load it from a table; a pipeline then reads offset zero of the table at the
 /// stage's first two user-data words.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextureSource {
     /// 0 for the first texture the module samples, 1 for a second, up to
     /// [`orbistoun_spirv::MAX_TEXTURES`].
@@ -4618,6 +4619,10 @@ pub struct TextureSource {
     /// through a cube view (D811).
     #[serde(default)]
     pub cube: bool,
+    /// Whether the module samples this texture as a volume, which the host binds as a
+    /// three-dimensional image of its slices (D823).
+    #[serde(default)]
+    pub volume: bool,
     /// Whether the module samples this texture as depth compared against a reference (D816).
     #[serde(default)]
     pub compare: bool,
@@ -4635,6 +4640,21 @@ const CUBE_AND_FLAT: &str = concat!(
 
 /// SPIR-V's `Dim2D`, the dimensionality a flat texture binding is declared with.
 const DIM_2D: u32 = 1;
+
+/// SPIR-V's `Dim3D`: a volume binding, sampled at three coordinates (D823).
+const DIM_3D: u32 = 2;
+
+/// The SPIR-V dimensionality a sampled binding of `shape` is declared with, and how many float
+/// components its sampling coordinate has.
+const fn image_dim(shape: model::ImageShape) -> (u32, u32) {
+    if shape.cube {
+        (DIM_CUBE, 3)
+    } else if shape.volume {
+        (DIM_3D, 3)
+    } else {
+        (DIM_2D, 2)
+    }
+}
 
 /// SPIR-V's `DimCube`: a cube binding, sampled at a direction of three floats (D811).
 const DIM_CUBE: u32 = 3;
