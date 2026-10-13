@@ -25,9 +25,12 @@ fn callable(address: u64) -> GuestCall {
     unsafe { std::mem::transmute::<*const (), GuestCall>(pointer) }
 }
 
-/// A base far from anything the host is likely to have mapped, and different from the other
-/// integration binary's so fault reports never confuse the two.
-const TABLE_BASE: u64 = 0x0000_5000_0000;
+/// A base in this crate's test range (D324), far from anything the host maps - a 64-bit macOS
+/// process cannot map below 4 GiB at all - and different from the other integration binaries' so
+/// fault reports never confuse them.
+const TABLE_BASE: u64 = orbistoun_mem::test_bases::FIRST_RANGE
+    + orbistoun_mem::test_bases::crates::THUNK * orbistoun_mem::test_bases::RANGE_STRIDE
+    + 0x10_0000_0000;
 
 /// How many imports this run declares.
 const IMPORTS: usize = 8;

@@ -17,8 +17,10 @@ fn callable(address: u64) -> GuestCall {
     unsafe { std::mem::transmute::<*const (), GuestCall>(pointer) }
 }
 
-/// Far from the other integration binaries' tables.
-const TABLE_BASE: u64 = 0x0000_5100_0000;
+/// In this crate's test range (D324), far from the other integration binaries' tables.
+const TABLE_BASE: u64 = orbistoun_mem::test_bases::FIRST_RANGE
+    + orbistoun_mem::test_bases::crates::THUNK * orbistoun_mem::test_bases::RANGE_STRIDE
+    + 0x11_0000_0000;
 
 fn answer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     args[0].wrapping_add(1)
