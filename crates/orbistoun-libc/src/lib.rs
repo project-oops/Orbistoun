@@ -2253,7 +2253,7 @@ fn setlocale(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     use std::sync::OnceLock;
     static C_LOCALE: OnceLock<u64> = OnceLock::new();
     *C_LOCALE.get_or_init(|| {
-        let leaked: &'static mut [u8; 2] = Box::leak(Box::new(*b"C "));
+        let leaked: &'static mut [u8; 2] = Box::leak(Box::new(*b"C\0"));
         std::ptr::from_mut(leaked) as usize as u64
     })
 }
@@ -2279,7 +2279,7 @@ fn localeconv(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     const CHAR_MAX: u8 = 127;
     /// The structure's bytes: ten pointers and fourteen `char`s, padded to a pointer's alignment.
     const LCONV_BYTES: usize = 96;
-    static DECIMAL_POINT: [u8; 2] = *b". ";
+    static DECIMAL_POINT: [u8; 2] = *b".\0";
     static EMPTY: [u8; 1] = [0];
     static LCONV: std::sync::OnceLock<[u8; LCONV_BYTES]> = std::sync::OnceLock::new();
     let lconv = LCONV.get_or_init(|| {

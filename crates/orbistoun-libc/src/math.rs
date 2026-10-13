@@ -717,7 +717,7 @@ mod documented_batch {
     /// `atof` is `strtod` with no end pointer (ISO/IEC 9899 7.22.1.1).
     #[test]
     fn atof_reads_a_number_as_strtod_does() {
-        let text = b"  -12.5e1xyz ";
+        let text = b"  -12.5e1xyz\0";
         let at = text.as_ptr() as u64;
         assert_eq!(f64::from_bits(call("atof", [at, 0], [0; 2])), -125.0);
     }

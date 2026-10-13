@@ -9464,7 +9464,7 @@ mod tests {
     /// each call into it.
     #[test]
     fn a_module_loaded_twice_keeps_its_handle() {
-        let path = b"/app0/Media/Plugins/OnceOnly.prx ";
+        let path = b"/app0/Media/Plugins/OnceOnly.prx\0";
         let mut result = 0_u32;
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
         args[0] = path.as_ptr() as u64;

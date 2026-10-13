@@ -3283,7 +3283,7 @@ mod pointee_tests {
             )
         );
         assert_eq!(
-            printable_text(b"has	tab ......"),
+            printable_text(b"has	tab\0......"),
             None,
             "a control character is not printable, so the run is bytes"
         );

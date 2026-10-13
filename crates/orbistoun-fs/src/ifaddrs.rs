@@ -584,7 +584,7 @@ mod tests {
     /// Zero and `-1` mean different things to a caller.
     #[test]
     fn unparseable_text_is_not_the_same_answer_as_an_unserved_family() {
-        let mut source = b"not an address ".to_vec();
+        let mut source = b"not an address\0".to_vec();
         source.push(0);
         let mut octets = [0_u8; 16];
         assert_eq!(
