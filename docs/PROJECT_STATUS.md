@@ -13,8 +13,10 @@ out of date.
 | obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
 | PPSA28061-app0 | presented | 165 | 20,457,365 | 100% | `ran to the time limit` | `376eae5b08b1225f` new |
-| STKT00001 | presented | 149 | 7,557,561 | 100% | `ran to the time limit` | `e9c3927fc3b26eb7` match |
+| STKT00001 | presented | 150 | 7,911,373 | 100% | `ran to the time limit` | `e9c3927fc3b26eb7` new |
 | CRFT00001 | presented | 106 | 345,461 | 100% | `ran to the time limit` | `5ec4c46ef3083591` match |
+| MCUB00001 | presented | 81 | 166,350 | 100% | `ran to the time limit` | `92bb8ddfebee87c5` new |
+| GCTS00001 | presented | 79 | 1,069,857 | 100% | `the guest called abort` | `87f13d4bc0877671` match |
 | TSHP00001 | presented | 72 | 3,421,974 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` match |
 | SOHK00001 | presented | 72 | 4,303,539 | 100% | `ran to the time limit` | `b1a48bbb026652be` new |
 | OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
@@ -28,14 +30,12 @@ out of date.
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
+| MDEM00001 | flipped | 94 | 236,798 | 100% | `ran to the time limit` | `c9768bbd359ab941` new |
 | GLTC00001 | flipped | 24 | 19,886 | 100% | `ran to the time limit` | `1785f6a8b01771d2` new |
 | PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
-| MDEM00001 | entered | 89 | 74,759 | 100% | `ran to the time limit` | `d74ce91048b89fc9` new |
-| MCUB00001 | entered | 67 | 50,348 | 100% | `ran to the time limit` | `ecc399008f7c33ff` new |
-| GCTS00001 | entered | 65 | 28,019 | 100% | `image+0x1b67c9` | `91f982d1d31cf359` new |
 | DRIP00001 | entered | 62 | 63,336 | 100% | `ran to the time limit` | `5e02052f2e0b06cd` new |
-| MESA00001 | entered | 32 | 353 | 99% | `ran to the time limit` | `a072d7cef4f013a8` new |
+| MESA00001 | entered | 33 | 362 | 100% | `ran to the time limit` | `a072d7cef4f013a8` new |
 | GLTP00001 | entered | 20 | 101,253 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
 | GLPB00001 | entered | 18 | 30,048 | 100% | `ran to the time limit` | `297884c655c12e41` new |
 | dist | entered | 0 | 0 | 100% | `0x1` | - |

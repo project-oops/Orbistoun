@@ -5,7 +5,7 @@ content_version = "01.00"
 master_version = "01.00"
 
 [reproduce]
-module_sha256 = "79b0f7e04babe957c9d4b31275ce7fe5fcb735e452dfb27bb413ead44fc63935"
+module_sha256 = "046ea4cb13a609a7489621c54ee87b3a10896bd9b2d27a601a65534f4bb8341e"
 limit_seconds = 20
 frame_every = 30
 sheet_frames = 10
@@ -16,15 +16,18 @@ frames = "local"
 [settings]
 
 [status]
-reach = "entered"
-outcome = "image+0x1b67c9"
-imports = 65
-calls = 28019
+reach = "presented"
+outcome = "the guest called abort"
+imports = 79
+calls = 1069857
 standing = 100
 default_return = "unimplemented"
-unanswered = 7
+frames = 6
+unanswered = 1
 limit_seconds = 20
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
-link_plan = "91f982d1d31cf359"
-link_plan_stored = "new"
+build = "v0.1.0 - 85cda79"
+measured_on = "2026-10-13"
+link_plan = "87f13d4bc0877671"
+link_plan_stored = "match"
+presented_by = "drawn"
+shown = true
