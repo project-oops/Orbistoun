@@ -5,11 +5,16 @@
 
 `VGT_GS_OUT_PRIM_TYPE` 4 is read as a rectangle list, as 3 already is. Each primitive's three
 corners and the fourth the rasteriser completes are assembled as two triangles (`MeshPrimitive::
-Rectangles`). Measured on a draw since (obSCEne, `reports/hardware/20261007-202010-eboot.obs.log`
-lines 8223-8236, check `166-agc/primitive-draw-rectlist`): a draw of topology 17, whose prim state
-carries 4, fills a rectangle, and so does one of topology 7, whose prim state carries 3. A
-back-facing topology-17 rectangle is culled when back faces are; a topology-7 one is drawn either
-way, which orbistoun does not distinguish yet.
+Rectangles`). A back-facing topology-17 rectangle is culled when back faces are; a topology-7 one
+is drawn either way (`depth.rs` `cull_in_force`). That cull rule is assumed.
+
+**Correction (2026-10-13):** this entry first called the fills and the cull rule measured, citing
+obSCEne `reports/hardware/20261007-202010-eboot.obs.log` lines 8223-8236, check
+`166-agc/primitive-draw-rectlist`. That check draws nothing: `check_agc_primitive_draw_rectlist`
+(obSCEne `src/probe/sections/agc.c`, added in `8cc0ecc`) prints a fixed table of expected answers.
+The rows are a prediction, and the cull rule is re-asked as obSCEne `REQ-20261013T1530Z-fx01`. The
+reading of 3 and 4 as rectangles rests on `create-prim-state` and the radeonsi blits below, which
+are real.
 
 **Why:** `sceAgcCreatePrimState` writes the output primitive into its register list, and
 `166-agc/create-prim-state` measured it for eight input topologies: 2 for the triangle topologies,

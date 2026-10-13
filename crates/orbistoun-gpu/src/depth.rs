@@ -377,9 +377,10 @@ mod bias_tests {
 const RECT_2D: u32 = 3;
 
 /// The cull bits a draw is rasterised under: `PA_SU_SC_MODE_CNTL`'s, except that a draw producing
-/// output primitive 3 culls nothing. Measured (obSCEne `166-agc/primitive-draw-rectlist`, sweep
-/// 20261007-202010): with back faces culled a back-facing topology-17 rectangle (output primitive 4)
-/// is not drawn, and a back-facing topology-7 one (output primitive 3) is.
+/// output primitive 3 culls nothing: with back faces culled a back-facing topology-17 rectangle
+/// (output primitive 4) is not drawn, and a back-facing topology-7 one (output primitive 3) is.
+/// Assumed (D755): the obSCEne rows once cited for it are a fixed table the check prints, not a
+/// draw.
 #[must_use]
 pub const fn cull_in_force(mode_cntl: u32, out_prim: Option<u32>) -> u32 {
     match out_prim {
@@ -757,7 +758,7 @@ mod tests {
     }
 
     /// A draw producing output primitive 3 culls nothing whatever `PA_SU_SC_MODE_CNTL` asks; any
-    /// other keeps the cull bits it asks for (D755, measured).
+    /// other keeps the cull bits it asks for (D755, assumed).
     #[test]
     fn a_rect_2d_draw_culls_nothing() {
         use super::cull_in_force;
