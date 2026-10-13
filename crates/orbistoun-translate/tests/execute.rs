@@ -7367,6 +7367,32 @@ fn pack_round_toward_zero_packs_two_halves_truncated() {
     program.push(s_endpgm());
     let registers = run(&program);
     assert_eq!(vector(&registers, 3), 0x8000_0010, "2^-20 subnormal, -0.0");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 70000.0f32.to_bits()));
+    program.extend(v_mov_literal(2, (-70000.0f32).to_bits()));
+    program.push(v_op2("v_cvt_pkrtz_f16_f32_e32", 3, vgpr_code(1), 2));
+    program.extend(v_mov_literal(4, (-0.0f32).to_bits()));
+    program.extend(v_mov_literal(5, f32::INFINITY.to_bits()));
+    program.push(v_op2("v_cvt_pkrtz_f16_f32_e32", 6, vgpr_code(4), 5));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        0xfbff_7bff,
+        "70000 and -70000 stay finite"
+    );
+    assert_eq!(vector(&registers, 6), 0x7c00_8000, "-0.0 and infinity");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 0x7fc0_0001));
+    program.extend(v_mov_literal(2, 1e-6f32.to_bits()));
+    program.push(v_op2("v_cvt_pkrtz_f16_f32_e32", 3, vgpr_code(1), 2));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 3),
+        0x0010_7e00,
+        "a quiet NaN stays NaN, 1e-6 truncates to the subnormal 16 * 2^-24"
+    );
 }
 
 /// `s_lshr_b64` and `s_lshl_b64`: a 64-bit value shifted by the low six bits of the second source
