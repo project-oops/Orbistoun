@@ -18,17 +18,19 @@ frames = "local"
 [status]
 reach = "presented"
 outcome = "ran to the time limit"
-imports = 157
-calls = 566231
+imports = 165
+calls = 20457365
 standing = 100
 default_return = "unimplemented"
-frames = 313
-unanswered = 7
+frames = 3032
+unanswered = 6
 limit_seconds = 120
-build = "v0.1.0 - 179031e-dirty"
-measured_on = "2026-10-09"
-link_plan = "76feb9bce01fde24"
-link_plan_stored = "match"
+build = "v0.1.0 - 8a47181-dirty"
+measured_on = "2026-10-13"
+link_plan = "376eae5b08b1225f"
+link_plan_stored = "new"
+presented_by = "drawn"
+shown = true
 
 [experiment]
 reach = "entered"

@@ -11,7 +11,7 @@ out of date.
 | PPSA02664-app0 | presented | 399 | 14,884,460 | 100% | `ran to the time limit` | `4065a087cae374b7` new |
 | obscene-probe-prospero-native | presented | 223 | 39,546 | 100% | `ran to the time limit` | `1306f1fcfd52ace9` new |
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
-| PPSA28061-app0 | presented | 157 | 566,231 | 100% | `ran to the time limit` | `76feb9bce01fde24` match |
+| PPSA28061-app0 | presented | 165 | 20,457,365 | 100% | `ran to the time limit` | `376eae5b08b1225f` new |
 | STKT00001 | presented | 149 | 7,557,561 | 100% | `ran to the time limit` | `e9c3927fc3b26eb7` match |
 | CRFT00001 | presented | 106 | 345,461 | 100% | `ran to the time limit` | `5ec4c46ef3083591` match |
 | TSHP00001 | presented | 72 | 3,421,974 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` match |
