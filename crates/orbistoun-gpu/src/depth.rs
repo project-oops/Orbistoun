@@ -48,6 +48,9 @@ const DB_STENCILREFMASK: u32 = 0xA10C;
 const DB_STENCILREFMASK_BF: u32 = 0xA10D;
 /// `PA_SU_SC_MODE_CNTL`, byte `165908` (`0x28814`).
 const PA_SU_SC_MODE_CNTL: u32 = 0xA205;
+/// `PA_SU_POLY_OFFSET_DB_FMT_CNTL`, byte `166776` (`0x28B78`); the clamp and the front and back
+/// scale and offset follow it, one register each, to `0xA2E3`.
+const PA_SU_POLY_OFFSET_DB_FMT_CNTL: u32 = 0xA2DE;
 
 /// A depth surface's element format: `DB_Z_INFO`'s `FORMAT` (bits 0:1), the `ZFormat` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -274,6 +277,101 @@ pub const fn decode_cull(value: u32) -> CullState {
     }
 }
 
+/// One face's polygon offset: `PA_SU_POLY_OFFSET_{FRONT,BACK}_SCALE` and `_OFFSET`, each an `f32`
+/// held as its bits so the state stays hashable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PolygonOffset {
+    /// `_SCALE`: sixteen times the slope factor, as radeonsi (`si_state.c:1018`) and RADV
+    /// (`radv_cmd_buffer.c:4414`) both write it.
+    pub scale: u32,
+    /// `_OFFSET`: the constant term, in the units `DB_FMT_CNTL` declares.
+    pub offset: u32,
+}
+
+/// The polygon offset a draw is rasterized under: `PA_SU_SC_MODE_CNTL`'s
+/// `POLY_OFFSET_FRONT_ENABLE` (bit 11) and `POLY_OFFSET_BACK_ENABLE` (bit 12), and the
+/// `PA_SU_POLY_OFFSET_*` registers (`gfx103.json`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct DepthBias {
+    /// The front faces' offset, when they are offset.
+    pub front: Option<PolygonOffset>,
+    /// The back faces' offset, when they are offset.
+    pub back: Option<PolygonOffset>,
+    /// `PA_SU_POLY_OFFSET_DB_FMT_CNTL`: `POLY_OFFSET_NEG_NUM_DB_BITS` (bits 0:7) and
+    /// `POLY_OFFSET_DB_IS_FLOAT_FMT` (bit 8), the unit the constant term counts in.
+    pub format: u32,
+    /// `PA_SU_POLY_OFFSET_CLAMP`'s `f32` bits: the most the offset moves a depth, zero for no limit.
+    pub clamp: u32,
+}
+
+/// `PA_SU_POLY_OFFSET_DB_FMT_CNTL` for a 32-bit float depth: 23 mantissa bits, float. radeonsi
+/// (`si_state.c:1029-1030`) and RADV (`radv_cmd_buffer.c:4430-4431`) write it for `D32_SFLOAT`,
+/// RADV with the constant factor and slope Vulkan's depth bias gives on that format unchanged.
+pub const FLOAT_DEPTH_OFFSET_FORMAT: u32 = 0xE9 | 1 << 8; // -23 in eight bits, and float
+
+/// The polygon offset in force, from the latest value of each register; a register the stream never
+/// wrote reads zero. [`None`] when the stream never set `PA_SU_SC_MODE_CNTL`.
+#[must_use]
+pub fn depth_bias_from(mut latest: impl FnMut(u32) -> Option<u32>) -> Option<DepthBias> {
+    let mode = latest(PA_SU_SC_MODE_CNTL)?;
+    let mut at = |index| latest(PA_SU_POLY_OFFSET_DB_FMT_CNTL + index).unwrap_or(0);
+    let format = at(0);
+    let clamp = at(1);
+    let front = PolygonOffset {
+        scale: at(2),
+        offset: at(3),
+    };
+    let back = PolygonOffset {
+        scale: at(4),
+        offset: at(5),
+    };
+    Some(DepthBias {
+        front: ((mode >> 11) & 1 != 0).then_some(front),
+        back: ((mode >> 12) & 1 != 0).then_some(back),
+        format,
+        clamp,
+    })
+}
+
+#[cfg(test)]
+mod bias_tests {
+    use super::{DepthBias, FLOAT_DEPTH_OFFSET_FORMAT, PolygonOffset, depth_bias_from};
+
+    /// radeonsi's words for `glPolygonOffset(-8, -1024)` on a float depth with both faces offset
+    /// (`si_state.c:975-976`, `1017-1031`): mode bits 11 and 12, `DB_FMT_CNTL` `0x1E9`, clamp 0,
+    /// scale `-8 * 16`, offset `-1024`.
+    #[test]
+    fn the_polygon_offset_is_read_from_its_six_registers() {
+        let words = [
+            (0xA205, 3 << 11),
+            (0xA2DE, 0x1E9),
+            (0xA2DF, 0),
+            (0xA2E0, (-128.0_f32).to_bits()),
+            (0xA2E1, (-1024.0_f32).to_bits()),
+            (0xA2E2, (-128.0_f32).to_bits()),
+            (0xA2E3, (-1024.0_f32).to_bits()),
+        ];
+        let latest = |register| words.iter().find(|(r, _)| *r == register).map(|(_, v)| *v);
+        let offset = PolygonOffset {
+            scale: (-128.0_f32).to_bits(),
+            offset: (-1024.0_f32).to_bits(),
+        };
+        assert_eq!(FLOAT_DEPTH_OFFSET_FORMAT, 0x1E9);
+        assert_eq!(
+            depth_bias_from(latest),
+            Some(DepthBias {
+                front: Some(offset),
+                back: Some(offset),
+                format: 0x1E9,
+                clamp: 0,
+            })
+        );
+        let off = |register| (register == 0xA205).then_some(0);
+        assert_eq!(depth_bias_from(off), Some(DepthBias::default()));
+        assert_eq!(depth_bias_from(|_| None), None);
+    }
+}
+
 /// `VGT_GS_OUT_PRIM_TYPE.OUTPRIM_TYPE` 3: the rectangle a quad topology draws through the prim
 /// state, which is drawn whichever way it faces (D755).
 const RECT_2D: u32 = 3;
@@ -296,6 +394,8 @@ pub const fn cull_in_force(mode_cntl: u32, out_prim: Option<u32>) -> u32 {
 pub(crate) struct DrawStateSent {
     depth_stencil: Option<DepthStencilState>,
     cull: Option<u32>,
+    /// The polygon offset last sent; `None` is no offset, which a stream starts with.
+    bias: Option<DepthBias>,
 }
 
 impl DrawStateSent {
@@ -324,6 +424,13 @@ impl DrawStateSent {
         {
             commands.push(RenderCommand::SetCull(decode_cull(value)));
             self.cull = Some(value & 0x7);
+        }
+        // A face's offset is sent only once one is on: a stream that never offsets sends nothing.
+        let bias = depth_bias_from(|register| sweep.latest(at, register))
+            .filter(|bias| bias.front.is_some() || bias.back.is_some());
+        if bias != self.bias {
+            commands.push(RenderCommand::SetDepthBias(bias.unwrap_or_default()));
+            self.bias = bias;
         }
         // A clear draw writes the clear value wherever it covers; the backend clears the whole
         // target, which is what a clear draw over the whole target does.

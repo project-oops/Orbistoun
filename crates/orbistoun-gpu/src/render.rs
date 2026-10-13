@@ -26,6 +26,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
+        RenderCommand::SetDepthBias(_) => "SetDepthBias",
         RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
         RenderCommand::BindTexture { .. } => "BindTexture",
         RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",

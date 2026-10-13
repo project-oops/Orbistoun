@@ -296,6 +296,8 @@ pub struct VulkanBackend {
     depth_stencil: Option<orbistoun_gpu::depth::DepthStencilState>,
     /// The cull state for the next draw: the latest `SetCull`; `None` culls nothing.
     cull: Option<orbistoun_gpu::depth::CullState>,
+    /// The polygon offset for the next draw: the latest `SetDepthBias`; `None` offsets nothing.
+    depth_bias: Option<orbistoun_gpu::depth::DepthBias>,
     /// Each depth target's attachment, by the id `SetRenderTargets` names: kept on the device across
     /// submissions and never filled from guest memory ([`depth`]).
     depths: BTreeMap<ResourceId, depth::DepthAttachment>,
@@ -373,6 +375,7 @@ impl VulkanBackend {
             current_depth: None,
             depth_stencil: None,
             cull: None,
+            depth_bias: None,
             depths: BTreeMap::new(),
             depth_clears: BTreeMap::new(),
             depth_reads: BTreeMap::new(),
@@ -697,6 +700,7 @@ impl VulkanBackend {
             // The depth and stencil tests, applied when a depth target is bound.
             RenderCommand::SetDepthStencil(state) => self.depth_stencil = Some(*state),
             RenderCommand::SetCull(cull) => self.cull = Some(*cull),
+            RenderCommand::SetDepthBias(bias) => self.depth_bias = Some(*bias),
             _ => {}
         }
     }
@@ -1008,6 +1012,7 @@ impl VulkanBackend {
         self.blend.hash(&mut hasher);
         self.raster_op.hash(&mut hasher);
         self.line_width.hash(&mut hasher);
+        self.depth_bias.hash(&mut hasher);
         self.write_mask.hash(&mut hasher);
         self.current_depth.is_some().hash(&mut hasher);
         // And the target's encoding: its pass's attachment format.
@@ -1213,6 +1218,17 @@ impl VulkanBackend {
         ))
     }
 
+    /// The next draw's fixed-function state that has no exact Vulkan form, by name - its blend,
+    /// raster operation or polygon offset - or else its polygon offset as Vulkan's depth bias.
+    fn fixed_function(
+        &self,
+        encoding: orbistoun_gpu::TargetEncoding,
+    ) -> Result<Option<[f32; 3]>, &'static str> {
+        framebuffer::blend_attachment(self.blend, self.write_mask).map(drop)?;
+        framebuffer::logic_op(self.raster_op, self.blend, encoding)?;
+        depth::depth_bias(self.depth_bias, self.cull)
+    }
+
     /// A draw that did not join the open batch: its pipeline and bindings worked out in full.
     fn draw_whole(
         &mut self,
@@ -1231,13 +1247,10 @@ impl VulkanBackend {
         let target = self.current_target;
         // A blend state with no exact Vulkan equivalent refuses the draw by name rather than
         // drawing it opaque or approximately.
-        let encoding = self.encoding_of(target);
-        if let Err(what) = framebuffer::blend_attachment(self.blend, self.write_mask)
-            .and(framebuffer::logic_op(self.raster_op, self.blend, encoding))
-        {
-            self.refused += 1;
-            return Err(BackendError::Unsupported { command: what });
-        }
+        let depth_bias = self
+            .fixed_function(self.encoding_of(target))
+            .inspect_err(|_| self.refused += 1)
+            .map_err(|what| BackendError::Unsupported { command: what })?;
         // A draw on a depth target changes what a compare of it reads (D817).
         if let Some(id) = self.current_depth {
             self.depth_reads.remove(&id);
@@ -1272,6 +1285,7 @@ impl VulkanBackend {
             pipeline_key: Some(pipeline_key),
             depth,
             cull: self.cull,
+            depth_bias,
             depth_clear,
             buffers: [&draw_buffers[0], &draw_buffers[1]],
             encoding: self.encoding_of(target),
@@ -1394,6 +1408,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
             | RenderCommand::SetWriteMask(_)
             | RenderCommand::SetDepthStencil(_)
             | RenderCommand::SetCull(_)
+            | RenderCommand::SetDepthBias(_)
     )
 }
 
@@ -1415,6 +1430,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",
+        RenderCommand::SetDepthBias(_) => "SetDepthBias",
         RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
         RenderCommand::ClearColour { .. } => "ClearColour",
         RenderCommand::Draw { .. } => "Draw",

@@ -606,6 +606,14 @@ pub(crate) fn depth_clip_control() -> bool {
     DEPTH_CLIP_CONTROL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the session's device was created with `depth_bias_clamp`.
+static DEPTH_BIAS_CLAMP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a pipeline may clamp its depth bias: the device enabled `depth_bias_clamp`.
+pub(crate) fn depth_bias_clamp() -> bool {
+    DEPTH_BIAS_CLAMP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether the session's device was created with `wide_lines`.
 static WIDE_LINES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -763,7 +771,9 @@ impl Session {
             // `logic_op` serves a guest raster operation other than copy (`CB_COLOR_CONTROL`).
             .logic_op(available.logic_op == vk::TRUE)
             // `wide_lines` serves a guest line wider than one pixel (`PA_SU_LINE_CNTL`).
-            .wide_lines(available.wide_lines == vk::TRUE);
+            .wide_lines(available.wide_lines == vk::TRUE)
+            // `depth_bias_clamp` serves a guest polygon offset with a clamp.
+            .depth_bias_clamp(available.depth_bias_clamp == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
@@ -818,6 +828,10 @@ impl Session {
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
+        DEPTH_BIAS_CLAMP.store(
+            wanted_features.depth_bias_clamp == vk::TRUE,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         WIDE_LINES.store(
             wanted_features.wide_lines == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,

@@ -162,6 +162,58 @@ fn a_depth_test_keeps_the_nearer_triangle_whatever_the_order() {
     assert_eq!(centre(&mut reversed), GREEN_PIXEL);
 }
 
+/// A polygon offset moves a draw's depth before the test: the far red triangle (0.75), offset by
+/// three quarters, lands in front of the near green one (0.25) and covers it. On a float depth an
+/// offset counts units of `2^(e - 23)` for the primitive's largest exponent `e` (here -1), so three
+/// quarters is `-3 * 2^22`. An offset in a 16-bit depth's units has no exact form and is refused.
+#[test]
+fn a_polygon_offset_moves_a_draw_in_front() {
+    use orbistoun_gpu::depth::{DepthBias, FLOAT_DEPTH_OFFSET_FORMAT, PolygonOffset};
+    if !device_or_skip("a_polygon_offset_moves_a_draw_in_front") {
+        return;
+    }
+    let offset = PolygonOffset {
+        scale: 0,
+        offset: (-3.0_f32 * 4_194_304.0).to_bits(),
+    };
+    let bias = DepthBias {
+        front: Some(offset),
+        back: Some(offset),
+        format: FLOAT_DEPTH_OFFSET_FORMAT,
+        clamp: 0,
+    };
+    let mut offset_draw = backend(Some(DEPTH));
+    run(
+        &mut offset_draw,
+        &[clear_to_far(), RenderCommand::SetDepthStencil(less())],
+    );
+    run(&mut offset_draw, &draw(NEAR, GREEN));
+    run(&mut offset_draw, &[RenderCommand::SetDepthBias(bias)]);
+    run(&mut offset_draw, &draw(FAR, RED));
+    assert_eq!(
+        centre(&mut offset_draw),
+        RED_PIXEL,
+        "the offset far draw passed in front of the near one"
+    );
+
+    let sixteen_bit = DepthBias {
+        format: 0xF0,
+        ..bias
+    };
+    let mut refused = backend(Some(DEPTH));
+    run(
+        &mut refused,
+        &[
+            clear_to_far(),
+            RenderCommand::SetDepthStencil(less()),
+            RenderCommand::SetDepthBias(sixteen_bit),
+        ],
+    );
+    let [bind_geometry, bind_colour, draw_far] = draw(FAR, RED);
+    run(&mut refused, &[bind_geometry, bind_colour]);
+    assert!(refused.execute(&draw_far).is_err(), "refused by name");
+}
+
 /// The depth attachment keeps what the draws left until a clear: a far draw after the near one,
 /// in a later submission, fails the test; after a clear to the far plane it passes.
 #[test]

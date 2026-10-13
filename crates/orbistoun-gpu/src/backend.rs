@@ -149,6 +149,10 @@ pub enum RenderCommand {
     /// Which faces the draws that follow discard and which winding is front, as the stream's
     /// `PA_SU_SC_MODE_CNTL` stands at them. Emitted before a draw whenever it changed.
     SetCull(crate::depth::CullState),
+    /// The polygon offset the draws that follow are rasterized under, as the stream's
+    /// `PA_SU_SC_MODE_CNTL` and `PA_SU_POLY_OFFSET_*` stand at them. Emitted before a draw whenever
+    /// it changed, and only once a stream turns an offset on.
+    SetDepthBias(crate::depth::DepthBias),
     /// Set a whole depth target to a value, as the guest cleared it: by a clear draw
     /// (`DB_RENDER_CONTROL`) or by filling its surface.
     ClearDepthStencil {

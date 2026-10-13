@@ -8,7 +8,9 @@
 //! surface back sees what its own memory holds, not the host attachment.
 
 use ash::vk;
-use orbistoun_gpu::depth::{CullState, DepthStencilState, FrontFace, StencilRefMask};
+use orbistoun_gpu::depth::{
+    CullState, DepthBias, DepthStencilState, FLOAT_DEPTH_OFFSET_FORMAT, FrontFace, StencilRefMask,
+};
 use orbistoun_gpu::{CompareFunc, StencilOp};
 
 use crate::compute::DispatchError;
@@ -721,11 +723,97 @@ pub(crate) fn rasterisation(cull: Option<CullState>) -> (vk::CullModeFlags, vk::
     (mode, face)
 }
 
+/// The depth bias a guest's polygon offset asks for, as Vulkan's constant factor, clamp and slope
+/// factor; [`None`] when no face that is drawn is offset.
+///
+/// RADV writes Vulkan's depth bias into these registers on a `D32_SFLOAT` target (the format every
+/// depth target is held in here) as `DB_FMT_CNTL` [`FLOAT_DEPTH_OFFSET_FORMAT`], the constant factor
+/// as the offset, the clamp as the clamp, and sixteen times the slope factor as the scale
+/// (`radv_cmd_buffer.c:4410-4446`); this reads them back the same way. The faces culled are not
+/// drawn, so only the others need agree.
+///
+/// # Errors
+///
+/// An offset counted in other units than a float depth's, one that differs between two faces that
+/// are both drawn, and a clamp on a device without `depthBiasClamp`.
+pub(crate) fn depth_bias(
+    bias: Option<DepthBias>,
+    cull: Option<CullState>,
+) -> Result<Option<[f32; 3]>, &'static str> {
+    let Some(bias) = bias.filter(|b| b.front.is_some() || b.back.is_some()) else {
+        return Ok(None);
+    };
+    let (cull_front, cull_back) = cull.map_or((false, false), |c| (c.cull_front, c.cull_back));
+    let drawn: Vec<_> = [(cull_front, bias.front), (cull_back, bias.back)]
+        .into_iter()
+        .filter(|(culled, _)| !culled)
+        .map(|(_, offset)| offset)
+        .collect();
+    let Some(&offset) = drawn.first() else {
+        return Ok(None);
+    };
+    if drawn.iter().any(|other| *other != offset) {
+        return Err("a polygon offset that differs between the faces drawn");
+    }
+    let Some(offset) = offset else {
+        return Ok(None);
+    };
+    if bias.format != FLOAT_DEPTH_OFFSET_FORMAT {
+        return Err("a polygon offset in other units than a float depth's");
+    }
+    let clamp = f32::from_bits(bias.clamp);
+    if clamp != 0.0 && !crate::compute::depth_bias_clamp() {
+        return Err("a polygon offset clamp on a device without depthBiasClamp");
+    }
+    Ok(Some([
+        f32::from_bits(offset.offset),
+        clamp,
+        f32::from_bits(offset.scale) / 16.0,
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DepthClear, depth_stencil_state, rasterisation, stencil_op};
+    use super::{DepthClear, depth_bias, depth_stencil_state, rasterisation, stencil_op};
     use ash::vk;
     use orbistoun_gpu::StencilOp;
+
+    /// The registers read back as RADV writes them: the offset is the constant factor and the
+    /// scale sixteen times the slope; a face culled need not agree with the one drawn.
+    #[test]
+    fn a_polygon_offset_reads_back_as_radv_writes_it() {
+        use orbistoun_gpu::depth::{
+            CullState, DepthBias, FLOAT_DEPTH_OFFSET_FORMAT, FrontFace, PolygonOffset,
+        };
+        let offset = PolygonOffset {
+            scale: 32.0_f32.to_bits(),
+            offset: (-1024.0_f32).to_bits(),
+        };
+        let bias = DepthBias {
+            front: Some(offset),
+            back: Some(offset),
+            format: FLOAT_DEPTH_OFFSET_FORMAT,
+            clamp: 0,
+        };
+        assert_eq!(depth_bias(Some(bias), None), Ok(Some([-1024.0, 0.0, 2.0])));
+        assert_eq!(depth_bias(None, None), Ok(None));
+        let front_only = DepthBias { back: None, ..bias };
+        assert!(depth_bias(Some(front_only), None).is_err());
+        let back_culled = CullState {
+            cull_front: false,
+            cull_back: true,
+            front_face: FrontFace::CounterClockwise,
+        };
+        assert_eq!(
+            depth_bias(Some(front_only), Some(back_culled)),
+            Ok(Some([-1024.0, 0.0, 2.0]))
+        );
+        let unorm = DepthBias {
+            format: 0xF0,
+            ..bias
+        };
+        assert!(depth_bias(Some(unorm), None).is_err());
+    }
     use orbistoun_gpu::depth::{
         DepthStencilState, decode_cull, decode_stencil_ref_mask, depth_stencil_from,
     };

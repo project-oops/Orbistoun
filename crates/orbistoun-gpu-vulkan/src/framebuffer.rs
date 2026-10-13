@@ -1883,6 +1883,7 @@ pub(crate) fn draw_vertices(
             write_mask: start.write_mask,
             viewport: start.viewport,
             cull: start.cull,
+            depth_bias: start.depth_bias,
             draw_buffers: &DrawBuffersBound {
                 buffers: start.buffers,
                 ..NO_DRAW_BUFFERS
@@ -1929,6 +1930,9 @@ pub(crate) struct Start<'a> {
     pub(crate) depth: Option<crate::depth::DepthDraw>,
     /// The guest's cull state; `None` culls nothing.
     pub(crate) cull: Option<orbistoun_gpu::depth::CullState>,
+    /// The polygon offset as Vulkan's constant factor, clamp and slope factor
+    /// ([`crate::depth::depth_bias`]); `None` offsets nothing.
+    pub(crate) depth_bias: Option<[f32; 3]>,
     /// The clear the depth attachment takes before the draw.
     pub(crate) depth_clear: Option<crate::depth::DepthClear>,
     /// The primitive shader's and the pixel shader's buffers (D733).
@@ -2059,6 +2063,22 @@ fn viewport_within_limits(
         )));
     }
     Ok(())
+}
+
+/// `raster` with the depth bias `bias` - Vulkan's constant factor, clamp and slope factor - on, or
+/// unchanged for none.
+fn biased(
+    raster: vk::PipelineRasterizationStateCreateInfo<'_>,
+    bias: Option<[f32; 3]>,
+) -> vk::PipelineRasterizationStateCreateInfo<'_> {
+    match bias {
+        Some([constant, clamp, slope]) => raster
+            .depth_bias_enable(true)
+            .depth_bias_constant_factor(constant)
+            .depth_bias_clamp(clamp)
+            .depth_bias_slope_factor(slope),
+        None => raster,
+    }
 }
 
 /// The width a pipeline rasterizes lines at: `PA_SU_LINE_CNTL`'s ([`orbistoun_gpu::line_width`]),
@@ -4174,6 +4194,9 @@ fn create_graphics_pipeline(
         .cull_mode(cull_mode)
         .front_face(front_face)
         .line_width(drawn_line_width(bound.line_width));
+    // The guest's polygon offset, resolved before a draw reaches here; only a pass with a depth
+    // attachment has a depth to move.
+    let raster = biased(raster, bound.depth_bias.filter(|_| bound.depth.is_some()));
     // Depth and stencil state only for a pass with a depth attachment; a state that does not map is
     // refused before a draw reaches here.
     let depth_stencil = bound
@@ -4489,6 +4512,7 @@ pub(crate) fn draw_resident(
             pipeline_key: start.pipeline_key,
             depth: start.depth.as_ref(),
             cull: start.cull,
+            depth_bias: start.depth_bias,
             depth_clear: start.depth_clear,
             draw_buffers: &DrawBuffersBound {
                 buffers: start.buffers,
@@ -4611,6 +4635,9 @@ struct Bound<'a> {
     depth: Option<&'a crate::depth::DepthDraw>,
     /// The guest's cull state; `None` culls nothing.
     cull: Option<orbistoun_gpu::depth::CullState>,
+    /// The polygon offset as Vulkan's constant factor, clamp and slope factor; `None` offsets
+    /// nothing.
+    depth_bias: Option<[f32; 3]>,
     /// The clear the depth attachment takes before a resident draw.
     depth_clear: Option<crate::depth::DepthClear>,
     /// The draw's buffers (D733); none by default. By reference, so `Bound` stays cheap to pass by
@@ -4700,6 +4727,7 @@ impl Default for Bound<'_> {
             pipeline_key: None,
             depth: None,
             cull: None,
+            depth_bias: None,
             depth_clear: None,
             draw_buffers: &NO_DRAW_BUFFERS,
             encoding: TargetEncoding::Unorm8,
