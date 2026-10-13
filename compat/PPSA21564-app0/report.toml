@@ -42,3 +42,59 @@ unanswered = 1
 limit_seconds = 20
 build = "v0.1.0 - 97b4e29"
 measured_on = "2026-09-25"
+
+[preview]
+reach = "entered"
+outcome = "ran to the time limit"
+imports = 282
+calls = 217781309
+standing = 100
+default_return = "ok"
+unanswered = 30
+limit_seconds = 120
+build = "v0.1.0 - fe7d5ab"
+measured_on = "2026-10-13"
+link_plan = "3bcd709f97eadd19"
+link_plan_stored = "new"
+
+[preview_dependence]
+depended = []
+unneeded = [
+    "0xe486fe61994e8976",
+    "_ZN3sce4Json5ValueC1Ev",
+    "_ZN3sce4Json5Value3setENS0_9ValueTypeE",
+    "_ZN3sce4Json5Value3setERKNS0_6StringE",
+    "_ZN3sce4Json5Value3setEb",
+    "_ZN3sce4Json6StringD1Ev",
+    "sceNpEntitlementAccessGetAddcontEntitlementInfoList",
+    "sceAcmContextCreate",
+    "0x06487044ab024ad3",
+    "sceNpEntitlementAccessInitialize",
+    "sceNpTrophy2CreateContext",
+    "sceNpTrophy2CreateHandle",
+    "sceNpTrophy2RegisterContext",
+    "sceNpUniversalDataSystemRegisterContext",
+    "sceNpWebApi2PushEventCreateHandle",
+    "scePlayGoClose",
+    "scePlayGoGetToDoList",
+    "scePlayGoOpen",
+    "scePlayGoSetInstallSpeed",
+    "sceRudpEnableInternalIOThread",
+    "sceRudpSetEventHandler",
+]
+unsettled = [
+    "0x0a4e469ba741de7d: of 3 runs, 1 less far, 1 further, 1 the same",
+    "_ZN3sce4Json5Value3setEd: of 3 runs, 0 less far, 2 further, 1 the same",
+    "_ZN3sce4Json5Value3setEl: of 3 runs, 1 less far, 1 further, 1 the same",
+    "_ZN3sce4Json5Value3setEm: of 3 runs, 0 less far, 2 further, 1 the same",
+    "_ZN3sce4Json6StringC1EPKc: of 3 runs, 0 less far, 1 further, 2 the same",
+    "sceNpTrophy2DestroyHandle: of 3 runs, 1 less far, 0 further, 2 the same",
+    "sceNpUniversalDataSystemDestroyHandle: of 3 runs, 0 less far, 2 further, 1 the same",
+    "scePlayGoGetChunkId: of 3 runs, 0 less far, 1 further, 2 the same",
+    "sceRudpInit: of 3 runs, 0 less far, 1 further, 2 the same",
+]
+preview = "entered at 281 imports"
+spread = 1
+calls = 217781309
+build = "v0.1.0 - fe7d5ab"
+measured_on = "2026-10-13"

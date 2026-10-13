@@ -44,3 +44,39 @@ unanswered = 13
 limit_seconds = 20
 build = "v0.1.0 - 5e2c3be"
 measured_on = "2026-09-25"
+
+[preview]
+reach = "presented"
+outcome = "spent its call budget"
+imports = 369
+calls = 10005809
+standing = 100
+default_return = "ok"
+frames = 1532
+unanswered = 9
+limit_seconds = 240
+build = "v0.1.0 - fe7d5ab"
+measured_on = "2026-10-13"
+link_plan = "d3481aff73f97ddc"
+link_plan_stored = "match"
+presented_by = "drawn"
+shown = true
+
+[preview_dependence]
+depended = []
+unneeded = [
+    "0xbc95ee5351ee0e67",
+    "sceNpEntitlementAccessInitialize",
+    "sceNpSessionSignalingInitialize",
+    "sceNpTrophy2RegisterUnlockCallback",
+    "sceSaveDataSetSaveDataMemory2",
+    "sceSaveDataSyncSaveDataMemory",
+    "sceUserServiceGetAccessibilityZoomFollowFocus",
+    "sceVideoOutIsOutputSupported",
+]
+unsettled = ["sceGameUpdateInitialize: of 3 runs, 2 less far, 0 further, 1 the same"]
+preview = "presented at 369 imports"
+spread = 0
+calls = 9900924
+build = "v0.1.0 - fe7d5ab"
+measured_on = "2026-10-13"
