@@ -189,6 +189,25 @@ pub enum RenderCommand {
         /// +x, -x, +y, -y, +z, -z, which the host samples through a cube view (D811).
         faces: u32,
     },
+    /// A three-dimensional texture the draws that follow sample, at a texture slot (D823): `depth`
+    /// slices of `width` x `height` texels, one after another, each the guest's four bytes in memory
+    /// order, which the host samples as a volume.
+    BindVolumeTexture {
+        /// Which of the fragment module's textures this is.
+        slot: u32,
+        /// Texels, row-major, slice after slice, tightly packed.
+        texels: std::sync::Arc<[u32]>,
+        /// [`crate::content_hash`] of the texels, taken once as they were read.
+        hash: u64,
+        /// Width in texels.
+        width: u32,
+        /// Height in texels.
+        height: u32,
+        /// Slices.
+        depth: u32,
+        /// How the draws sample it, from the sampler descriptor the pixel shader names.
+        sampling: crate::registers::TextureSampling,
+    },
     /// A depth target the draws that follow sample, at a texture slot (D817): the attachment the
     /// backend keeps under `target`, as the draws before left it - compared through `sampling`'s
     /// `depth_compare` where `compare` says, its depth read as it is otherwise. Never read from

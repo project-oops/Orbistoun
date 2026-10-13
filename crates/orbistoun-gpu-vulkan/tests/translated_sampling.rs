@@ -11,6 +11,7 @@ use orbistoun_gpu::{BorderColour, MipFilter, TextureFilter, TextureSampling, Tex
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::{
     COARSE_TEXEL, draw_with_cube_texture, draw_with_sampled_texture, draw_with_texture,
+    draw_with_volume_texture,
 };
 use orbistoun_shader::{EncodingTable, OperandTable, decode};
 use orbistoun_spirv::{Lod, interpolated_vertex_module, sampling_fragment_module};
@@ -631,6 +632,63 @@ fn a_volume_sample_translates_to_a_three_dimensional_binding() {
         at += count.max(1);
     }
     assert_eq!(dims, [2], "one Dim3D image");
+}
+
+/// A translated volume sample reads the texel its three coordinates name (D823): across and down
+/// swept over the frame, deep a literal at each slice's middle, and the quadrants that slice's
+/// four texels in order. Every texel of every slice a different colour.
+#[test]
+fn a_translated_volume_sample_reads_the_slice_and_texel_it_names() {
+    if !device_or_skip("a_translated_volume_sample_reads_the_slice_and_texel_it_names") {
+        return;
+    }
+    let texel = |slice: u32, at: u32| [slice * 60 + 20, at * 60 + 20, 255 - slice * 60, 255];
+    let texels: Vec<u32> = (0..3)
+        .flat_map(|slice| (0..4).map(move |at| texel(slice, at)))
+        .map(|[r, g, b, a]| r | g << 8 | b << 16 | a << 24)
+        .collect();
+    // The coordinate sweeps zero to one across the frame.
+    let corners = [
+        [0.0, 0.0, 0.0, 1.0],
+        [2.0, 0.0, 0.0, 1.0],
+        [0.0, 2.0, 0.0, 1.0],
+    ];
+    let vertex = interpolated_vertex_module(corners);
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    for slice in 0..3u32 {
+        #[allow(clippy::cast_precision_loss)]
+        let deep = (slice as f32 + 0.5) / 3.0;
+        // The cube shader's shape with `dim:3D`: its third address register the depth.
+        let mut bytes = cube_sampling_shader(deep);
+        // After two interpolations, the move and its literal.
+        let first = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        bytes[16..20].copy_from_slice(&((first & !(0b111 << 3)) | (2 << 3)).to_le_bytes());
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _) = translate_for(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            Stage::Fragment,
+            Window::default(),
+        )
+        .expect("the volume sample translated");
+        let drawn = draw_with_volume_texture(
+            (&vertex, &module),
+            [1.0, 0.0, 1.0, 1.0],
+            (8, 8),
+            (&texels, 2, 3),
+        )
+        .expect("the volume draw ran");
+        for ((x, y), at) in [((1, 1), 0), ((6, 1), 1), ((1, 6), 2), ((6, 6), 3)] {
+            let want = texel(slice, at).map(|c| u8::try_from(c).expect("a byte"));
+            assert_eq!(
+                drawn.at(x, y),
+                Some(want),
+                "slice {slice}, pixel ({x}, {y}) should be its texel {at}"
+            );
+        }
+    }
 }
 
 /// A guest shader that samples at a level it names, and exports what came back.

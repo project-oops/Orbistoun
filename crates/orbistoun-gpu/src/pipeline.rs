@@ -4004,6 +4004,10 @@ fn overlaps((a, a_bytes): (u64, u64), (b, b_bytes): (u64, u64)) -> bool {
 /// `gl_pack_descriptors` cites it).
 const IMAGE_TYPE_2D: u32 = 9;
 
+/// `SQ_IMG_RSRC_WORD3.TYPE` for a three-dimensional image: 10 (`SQ_RSRC_IMG_3D`), as measured
+/// (`desc-word-3 0xa0000fac`, obSCEne `REQ-20260920T1050Z-5d7c`).
+const IMAGE_TYPE_3D: u32 = 10;
+
 /// `SQ_IMG_RSRC_WORD3.TYPE` for a cube: 11 (`SQ_RSRC_IMG_CUBE`, `gfx6.json:588`).
 const IMAGE_TYPE_CUBE: u32 = 11;
 
@@ -4280,7 +4284,9 @@ fn table_texture(
         if decoded.saturated() != source.saturated {
             return None;
         }
-        if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
+        if let RenderCommand::BindTexture { sampling, .. }
+        | RenderCommand::BindVolumeTexture { sampling, .. } = &mut bound
+        {
             *sampling = decoded;
         }
     }
@@ -4291,17 +4297,14 @@ fn table_texture(
 /// module that samples a cube, one image otherwise (D811). Bound the other way, the host's view
 /// would not be the image its module declares.
 fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
-    // A volume binds as nothing yet: a flat image or a cube under a module that samples three
-    // coordinates would not be the image it declares (D823).
-    if source.volume {
-        return false;
-    }
     match bound {
         // A depth target is sampled flat, compared or not (D816, D817).
-        RenderCommand::BindDepthTexture { .. } => !source.cube,
+        RenderCommand::BindDepthTexture { .. } => !source.cube && !source.volume,
         RenderCommand::BindTexture { faces, .. } => {
-            (*faces == CUBE_FACES) == source.cube && !source.compare
+            (*faces == CUBE_FACES) == source.cube && !source.volume && !source.compare
         }
+        // A volume's slices only under a module that samples three coordinates (D823).
+        RenderCommand::BindVolumeTexture { .. } => source.volume && !source.compare,
         _ => false,
     }
 }
@@ -4378,7 +4381,9 @@ fn user_data_texture(
         if decoded.saturated() != source.saturated {
             return None;
         }
-        if let RenderCommand::BindTexture { sampling, .. } = &mut bound {
+        if let RenderCommand::BindTexture { sampling, .. }
+        | RenderCommand::BindVolumeTexture { sampling, .. } = &mut bound
+        {
             *sampling = decoded;
         }
     }
@@ -4532,14 +4537,17 @@ fn texture_from_words(
         return read_block_texture(&descriptor, &words, block, slot, memory, texels);
     }
     let (format, selects) = sampled_format(&descriptor, words[3])?;
-    let cube = words[3] >> 28 == IMAGE_TYPE_CUBE;
+    let shape = (
+        words[3] >> 28 == IMAGE_TYPE_CUBE,
+        words[3] >> 28 == IMAGE_TYPE_3D,
+    );
     match (descriptor.tiling, format) {
         (SwizzleMode::Linear, TexelFormat::Rgba8 | TexelFormat::Rgba8Srgb) => {}
         // The tiled layouts modelled, each sampled as it is rendered (crate::tiling); a one-byte
         // linear image with no pitch of its own lies as its layout's chain places it. A cube's
-        // faces in them are not modelled.
+        // faces or a volume's slices in them are not modelled.
         (tiling, _)
-            if !cube
+            if shape == (false, false)
                 && SAMPLED_AS_RENDERED.contains(&tiling)
                 && (tiling != SwizzleMode::Linear || words[4].trailing_zeros() >= 14) =>
         {
@@ -4548,7 +4556,7 @@ fn texture_from_words(
         }
         _ => return None,
     }
-    let (base, (width, height), pitch, faces) = linear_texture_surface(&descriptor, words, cube)?;
+    let (base, (width, height), pitch, faces) = linear_texture_surface(&descriptor, words, shape)?;
     let descriptor = ImageDescriptor {
         base,
         width,
@@ -4559,15 +4567,16 @@ fn texture_from_words(
     let row_bytes = pitch as usize * 4;
     let slice_bytes = row_bytes * height;
     let span = slice_bytes * (faces as usize - 1) + row_bytes * (height - 1) + width * 4;
-    // A cube's six faces are another image than the 2D one at the same address.
+    // A cube's six faces, or a volume's slices, are another image than the 2D one at the same
+    // address.
     let key = (
         descriptor.base,
         descriptor.width,
         descriptor.height,
-        pitch | if cube { 1 << 24 } else { 0 },
+        pitch | u32::from(shape.0) << 24 | u32::from(shape.1) << 25,
     );
     if let Some(cached) = kept_texels(texels, key, span as u64) {
-        return Some(swizzled_texture(
+        return linear_bind(
             block_bind(
                 slot,
                 cached.hash,
@@ -4575,9 +4584,9 @@ fn texture_from_words(
                 (descriptor.width, descriptor.height, faces),
                 crate::backend::TextureEncoding::Rgba8,
             ),
-            format,
-            selects,
-        ));
+            shape.1,
+            (format, selects),
+        );
     }
     // Marked before the bytes are hashed, so a write racing the hash is seen next time.
     let since = texture_mark(descriptor.base, span as u64);
@@ -4611,7 +4620,7 @@ fn texture_from_words(
             texels: std::sync::Arc::clone(&shared),
         },
     );
-    Some(swizzled_texture(
+    linear_bind(
         block_bind(
             slot,
             hash ^ u64::from(encoding_tag(texture_encoding(format))),
@@ -4619,9 +4628,48 @@ fn texture_from_words(
             (descriptor.width, descriptor.height, faces),
             texture_encoding(format),
         ),
-        format,
-        selects,
-    ))
+        shape.1,
+        (format, selects),
+    )
+}
+
+/// A linear texture's bind: a flat image's or a cube's as [`swizzled_texture`] leaves it, and a
+/// volume's the same texels - its `faces` its slices - as a [`RenderCommand::BindVolumeTexture`]
+/// (D823), read only as they are: a volume whose selects move a channel, or that is not
+/// `8_8_8_8_UNORM`, is `None`.
+fn linear_bind(
+    bound: RenderCommand,
+    volume: bool,
+    (format, selects): (TexelFormat, [u32; 4]),
+) -> Option<RenderCommand> {
+    if !volume {
+        return Some(swizzled_texture(bound, format, selects));
+    }
+    if format != TexelFormat::Rgba8 || selects != IDENTITY_SELECTS {
+        return None;
+    }
+    let RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling,
+        faces,
+        ..
+    } = bound
+    else {
+        return None;
+    };
+    Some(RenderCommand::BindVolumeTexture {
+        slot,
+        texels,
+        hash,
+        width,
+        height,
+        depth: faces,
+        sampling,
+    })
 }
 
 /// The texels cached under `key` - its first element their address - where nothing was written to
@@ -4655,11 +4703,24 @@ fn face_rows(
 /// 64 cube (obSCEne `REQ-20260920T1050Z-5d7c`, `20260921-final-eboot.obs.log` 16832-16935), and
 /// as oops-sdk's GL lays one out (`gl_tex_cube_upload`). A cube's WORD4 `DEPTH` is its last face,
 /// not a pitch. A cube of more than one level, or an array of cubes, is `None`.
+///
+/// A volume (`shape.1`) lies the same way, its slices for faces, `DEPTH` plus one of them: four
+/// slices of a 64 x 64 volume measured at `f * 0x4000` (the same request, lines 16743-16831)
+/// (D823). One level only.
 fn linear_texture_surface(
     descriptor: &ImageDescriptor,
     words: [u32; 8],
-    cube: bool,
+    (cube, volume): (bool, bool),
 ) -> Option<(u64, (u32, u32), u32, u32)> {
+    if volume {
+        if descriptor.levels > 1 {
+            return None;
+        }
+        let pitch = crate::registers::linear_pitch(0, descriptor.width, 4);
+        let slices = (words[4] & DEPTH_FIELD) + 1;
+        let extent = (descriptor.width, descriptor.height);
+        return Some((descriptor.base, extent, pitch, slices));
+    }
     if !cube {
         let DispatchSurface::Linear {
             base,
@@ -4715,8 +4776,9 @@ fn sampled_format(descriptor: &ImageDescriptor, word3: u32) -> Option<(TexelForm
         _ => return None,
     };
     let selects = destination_selects(word3);
-    (matches!(word3 >> 28, IMAGE_TYPE_2D | IMAGE_TYPE_CUBE) && selects_exactly(format, selects))
-        .then_some((format, selects))
+    (matches!(word3 >> 28, IMAGE_TYPE_2D | IMAGE_TYPE_3D | IMAGE_TYPE_CUBE)
+        && selects_exactly(format, selects))
+    .then_some((format, selects))
 }
 
 /// `SQ_IMG_RSRC_WORD3`'s `DST_SEL_X` .. `DST_SEL_W` (bits 0-2, 3-5, 6-8, 9-11, `gfx10-rsrc.json`):
@@ -6784,6 +6846,70 @@ mod tests {
         );
     }
 
+    /// A linear `8_8_8_8_UNORM` volume binds its slices as one three-dimensional texture, slice
+    /// `s` at `s` slices of the 256-byte pitch in, `DEPTH` plus one of them (D823), and only under
+    /// a module that samples a volume.
+    #[test]
+    fn a_linear_volume_binds_its_slices() {
+        use super::{RenderCommand, TextureSource, shaped_for, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (pitch, side, slices) = (64usize, 2u32, 3u32);
+        let mut bytes = vec![0u8; pitch * 4 * side as usize * slices as usize];
+        for slice in 0..slices {
+            for y in 0..side {
+                for x in 0..side {
+                    let at = ((slice * side + y) as usize * pitch + x as usize) * 4;
+                    bytes[at..at + 4].copy_from_slice(&(slice << 16 | y << 8 | x).to_le_bytes());
+                }
+            }
+        }
+        let words = [
+            0x100,
+            (56 << 20) | (((side - 1) & 3) << 30),
+            ((side - 1) >> 2) | ((side - 1) << 14) | (1 << 31),
+            // 3D, linear, the channels as they are.
+            0xa000_0fac,
+            slices - 1,
+            0x40_0000,
+            0,
+            0,
+        ];
+        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let Some(
+            ref command @ RenderCommand::BindVolumeTexture {
+                ref texels,
+                width: 2,
+                height: 2,
+                depth: 3,
+                ..
+            },
+        ) = bound
+        else {
+            panic!("bound: {bound:?}");
+        };
+        let expected: Vec<u32> = (0..slices)
+            .flat_map(|slice| {
+                (0..side).flat_map(move |y| (0..side).map(move |x| slice << 16 | y << 8 | x))
+            })
+            .collect();
+        assert_eq!(texels.to_vec(), expected);
+        let volume = TextureSource {
+            volume: true,
+            ..TextureSource::default()
+        };
+        assert!(shaped_for(command, &volume));
+        assert!(
+            !shaped_for(command, &TextureSource::default()),
+            "not handed to a flat sample"
+        );
+    }
+
     /// A mipmapped `BC3` texture in `4KB_S` binds the level its view reads first, from where the
     /// chain places it: a 64 x 64 chain of seven levels has level 0 after the tail's block and
     /// level 1 at (8, 0) in that block, eight blocks a side.
@@ -6953,7 +7079,7 @@ mod tests {
         };
         assert!(
             !super::shaped_for(command, &volume),
-            "nor to a volume, which binds as nothing yet (D823)"
+            "nor to a volume, which binds its slices (D823)"
         );
         assert!(
             texture_from_words(words(11), 0, &memory, &mut super::TexelCache::new()).is_none(),

@@ -1313,6 +1313,8 @@ struct Texture {
     levels: u32,
     /// Its layers: one, or a cube's six faces seen through a cube view (D811).
     faces: u32,
+    /// Its depth: one, or a volume's slices (D823).
+    depth: u32,
     /// What its texels are: colour, or a depth sampled through a compare (D817).
     aspect: vk::ImageAspectFlags,
     /// The session's default texture ([`shared_default_texture`]), which every pipeline binds in a
@@ -1372,6 +1374,9 @@ pub(crate) struct TextureWords<'a> {
     pub(crate) encoding: orbistoun_gpu::TextureEncoding,
     /// How many faces the words hold one after another: 1, or a cube's 6 (D811).
     pub(crate) faces: u32,
+    /// A volume's slices, one after another, each `width` x `height`: sampled as one
+    /// three-dimensional image (D823). `None` for a flat image or a cube.
+    pub(crate) slices: Option<u32>,
 }
 
 impl<'a> TextureWords<'a> {
@@ -1386,6 +1391,7 @@ impl<'a> TextureWords<'a> {
             height: None,
             encoding: orbistoun_gpu::TextureEncoding::Rgba8,
             faces: 1,
+            slices: None,
         }
     }
 }
@@ -1505,7 +1511,7 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
     };
     // A cube's faces follow one another, each its full extent: staged as they are, its height
     // the one it was given.
-    let flat = texture.faces <= 1;
+    let flat = texture.faces <= 1 && texture.slices.is_none();
     match texture.encoding {
         orbistoun_gpu::TextureEncoding::Rgba8 if !flat => (FORMAT, as_they_are()),
         orbistoun_gpu::TextureEncoding::Rgba8 => {
@@ -1555,22 +1561,16 @@ fn create_texture(
     } = staged;
     // A cube is six layers of one image, made cube-compatible so a cube view can see them.
     let faces = texture.faces.max(1);
-    let (flags, view_type) = if faces == CUBE_FACES {
-        (
-            vk::ImageCreateFlags::CUBE_COMPATIBLE,
-            vk::ImageViewType::CUBE,
-        )
-    } else {
-        (vk::ImageCreateFlags::empty(), vk::ImageViewType::TYPE_2D)
-    };
+    let depth = texture.slices.unwrap_or(1);
+    let (flags, view_type, image_type) = texture_kind(faces, texture.slices.is_some());
     let info = vk::ImageCreateInfo::default()
         .flags(flags)
-        .image_type(vk::ImageType::TYPE_2D)
+        .image_type(image_type)
         .format(format)
         .extent(vk::Extent3D {
             width,
             height,
-            depth: 1,
+            depth,
         })
         .mip_levels(levels)
         .array_layers(faces)
@@ -1662,9 +1662,38 @@ fn create_texture(
         height,
         levels,
         faces,
+        depth,
         aspect,
         shared: false,
     })
+}
+
+/// How a texture of `faces` layers is made and seen: a cube is six layers of one image made
+/// cube-compatible so a cube view can see them (D811), a volume one three-dimensional image of its
+/// slices (D823), and anything else one flat image.
+fn texture_kind(
+    faces: u32,
+    volume: bool,
+) -> (vk::ImageCreateFlags, vk::ImageViewType, vk::ImageType) {
+    if faces == CUBE_FACES {
+        (
+            vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            vk::ImageViewType::CUBE,
+            vk::ImageType::TYPE_2D,
+        )
+    } else if volume {
+        (
+            vk::ImageCreateFlags::empty(),
+            vk::ImageViewType::TYPE_3D,
+            vk::ImageType::TYPE_3D,
+        )
+    } else {
+        (
+            vk::ImageCreateFlags::empty(),
+            vk::ImageViewType::TYPE_2D,
+            vk::ImageType::TYPE_2D,
+        )
+    }
 }
 
 /// The aspect a texture in `encoding` is read through, and whether it is sampled through a compare
@@ -1733,7 +1762,7 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
             .image_extent(vk::Extent3D {
                 width: texture.width,
                 height: texture.height,
-                depth: 1,
+                depth: texture.depth,
             }),
     ];
     if texture.levels > 1 {
@@ -5094,6 +5123,7 @@ pub fn draw_with_bc3_texture(
                 height: Some(height),
                 encoding: orbistoun_gpu::TextureEncoding::Bc3,
                 faces: 1,
+                slices: None,
             }),
             ..Bound::default()
         },
@@ -5126,6 +5156,40 @@ pub fn draw_with_cube_texture(
                 height: Some(edge),
                 encoding: orbistoun_gpu::TextureEncoding::Rgba8,
                 faces: CUBE_FACES,
+                slices: None,
+            }),
+            ..Bound::default()
+        },
+    )
+}
+
+/// [`draw_with_texture`] with a volume: `texels` `depth` slices of `edge` x `edge`, one after
+/// another, seen through a three-dimensional view and point-sampled (D823).
+///
+/// # Errors
+///
+/// When no device is available, or any Vulkan call fails.
+pub fn draw_with_volume_texture(
+    (vertex_words, fragment_words): (&[u32], &[u32]),
+    clear: [f32; 4],
+    size: (u32, u32),
+    (texels, edge, depth): (&[u32], u32, u32),
+) -> Result<Pixels, DispatchError> {
+    let (frame_width, frame_height) = size;
+    render(
+        clear,
+        frame_width,
+        frame_height,
+        Some((vertex_words, fragment_words)),
+        Geometry::Vertex(VertexDraw::TRIANGLE),
+        Bound {
+            textures: &TexturesBound::first(TextureWords {
+                words: texels,
+                width: edge,
+                height: Some(edge),
+                encoding: orbistoun_gpu::TextureEncoding::Rgba8,
+                faces: 1,
+                slices: Some(depth),
             }),
             ..Bound::default()
         },

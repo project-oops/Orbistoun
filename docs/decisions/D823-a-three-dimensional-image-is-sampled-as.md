@@ -8,12 +8,13 @@ declared `Dim3D`, sampled at its three address elements - across, down and deep 
 gave them, with no conversion. The texture source it reports says `volume`, beside `cube` and
 `compare` (D811, D816), and one image read in two shapes is refused as before.
 
-The binding reads the guest's image as a host three-dimensional image of its slices. Until that
-read exists, a volume source binds nothing: a flat image or a cube under a module that samples
-three coordinates would not be the image the module declares, so the draw is refused at the
-binding rather than at translation. The slices' layout is measured: a linear 3D image's slices lie
-one after another at `pitch * height`, with no padding (obSCEne `REQ-20260920T1050Z-5d7c`,
-`20260921-final-eboot.obs.log` 16743-16831).
+The binding reads the guest's image as a host three-dimensional image of its slices, a command of
+its own (`BindVolumeTexture`) beside the flat image and the cube. A linear `8_8_8_8_UNORM` volume
+of one level is read, its slices `DEPTH` plus one; any other volume binds nothing, and neither does
+a flat image or a cube under a module that samples three coordinates, so such a draw is refused
+rather than sampled from an image it does not declare. The slices' layout is measured: a linear
+3D image's slices lie one after another at `pitch * height`, with no padding (obSCEne
+`REQ-20260920T1050Z-5d7c`, `20260921-final-eboot.obs.log` 16743-16831).
 
 **Why:** gl2-probe's `texture-3d` check (GLTP00001) samples a volume, and its refusal stops the
 command processor, so every check after it reads the clear colour. A volume's coordinates need

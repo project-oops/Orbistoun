@@ -29,6 +29,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetDepthBias(_) => "SetDepthBias",
         RenderCommand::ClearDepthStencil { .. } => "ClearDepthStencil",
         RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::BindVolumeTexture { .. } => "BindVolumeTexture",
         RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::ClearColour { .. } => "ClearColour",
@@ -118,7 +119,10 @@ pub fn drive(
                 inputs.retain(|(s, _)| s != stage);
                 inputs.push((*stage, words[..used].to_vec()));
             }
-            RenderCommand::BindTexture { width, height, .. } => texture = Some((*width, *height)),
+            RenderCommand::BindTexture { width, height, .. }
+            | RenderCommand::BindVolumeTexture { width, height, .. } => {
+                texture = Some((*width, *height));
+            }
             _ => {}
         }
         let span = if matches!(
@@ -150,9 +154,9 @@ pub fn drive(
             }
             Err(BackendError::Device(message)) => {
                 let shown = match command {
-                    RenderCommand::BindTexture { .. } | RenderCommand::BindDrawBuffers { .. } => {
-                        command_name(command).to_owned()
-                    }
+                    RenderCommand::BindTexture { .. }
+                    | RenderCommand::BindVolumeTexture { .. }
+                    | RenderCommand::BindDrawBuffers { .. } => command_name(command).to_owned(),
                     other => format!("{other:?}"),
                 };
                 return Err(BackendError::Device(format!(

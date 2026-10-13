@@ -172,6 +172,8 @@ struct BoundTexture {
     hash: u64,
     sampling: orbistoun_gpu::TextureSampling,
     faces: u32,
+    /// A volume's slices, or `None` for a flat image or a cube (D823).
+    slices: Option<u32>,
 }
 
 impl BoundTexture {
@@ -183,6 +185,7 @@ impl BoundTexture {
             height: Some(self.height),
             encoding: self.encoding,
             faces: self.faces,
+            slices: self.slices,
         }
     }
 }
@@ -531,6 +534,7 @@ impl VulkanBackend {
             hash,
             sampling,
             faces,
+            slices: None,
         });
         let Some(texture) = usize::try_from(slot)
             .ok()
@@ -539,6 +543,51 @@ impl VulkanBackend {
             self.refused += 1;
             return Err(BackendError::Unsupported {
                 command: "BindTexture beyond the last texture slot",
+            });
+        };
+        *texture = bound;
+        Ok(())
+    }
+
+    /// Binds the volume a [`RenderCommand::BindVolumeTexture`] carries at its slot (D823): its
+    /// slices as one three-dimensional image, which the following draws sample at three
+    /// coordinates.
+    fn bind_volume_texture(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        let &RenderCommand::BindVolumeTexture {
+            slot,
+            ref texels,
+            hash,
+            width,
+            height,
+            depth,
+            sampling,
+        } = command
+        else {
+            return Ok(());
+        };
+        if texels.len() != width as usize * height as usize * depth as usize {
+            return Err(BackendError::Device(format!(
+                "BindVolumeTexture carries {} texels for a {width}x{height}x{depth} volume",
+                texels.len()
+            )));
+        }
+        let bound = Some(BoundTexture {
+            texels: std::sync::Arc::clone(texels),
+            width,
+            height,
+            encoding: orbistoun_gpu::TextureEncoding::Rgba8,
+            hash,
+            sampling,
+            faces: 1,
+            slices: Some(depth),
+        });
+        let Some(texture) = usize::try_from(slot)
+            .ok()
+            .and_then(|slot| self.textures.get_mut(slot))
+        else {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "BindVolumeTexture beyond the last texture slot",
             });
         };
         *texture = bound;
@@ -599,6 +648,7 @@ impl VulkanBackend {
             hash,
             sampling,
             faces: 1,
+            slices: None,
         });
         Ok(())
     }
@@ -1422,6 +1472,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetViewportTransform(_) => "SetViewportTransform",
         RenderCommand::SetUserData { .. } => "SetUserData",
         RenderCommand::BindTexture { .. } => "BindTexture",
+        RenderCommand::BindVolumeTexture { .. } => "BindVolumeTexture",
         RenderCommand::BindDepthTexture { .. } => "BindDepthTexture",
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
@@ -1534,6 +1585,7 @@ impl RenderBackend for VulkanBackend {
             }
             // The guest's own texels, sampled by the draws that follow.
             RenderCommand::BindTexture { .. } => self.bind_texture(command),
+            RenderCommand::BindVolumeTexture { .. } => self.bind_volume_texture(command),
             RenderCommand::BindDepthTexture { .. } => self.bind_depth_texture(command),
             RenderCommand::BindDrawBuffers { stage, buffers } => {
                 self.bind_draw_buffers(*stage, buffers)
