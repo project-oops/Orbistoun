@@ -1,0 +1,329 @@
+# PPSA25872 with a controller connected from its first flip, as the console has one: a pad
+# delivered with nothing held sets the record's connected flag (D713). Start and south are
+# pressed and released in turn every forty flips from flip 200, so a press lands on whatever
+# title or menu screen the title waits on. Written by hand, not captured.
+
+[[step]]
+at_flip = 1
+
+[[step]]
+at_flip = 200
+buttons = ["start"]
+
+[[step]]
+at_flip = 203
+
+[[step]]
+at_flip = 240
+buttons = ["south"]
+
+[[step]]
+at_flip = 243
+
+[[step]]
+at_flip = 280
+buttons = ["start"]
+
+[[step]]
+at_flip = 283
+
+[[step]]
+at_flip = 320
+buttons = ["south"]
+
+[[step]]
+at_flip = 323
+
+[[step]]
+at_flip = 360
+buttons = ["start"]
+
+[[step]]
+at_flip = 363
+
+[[step]]
+at_flip = 400
+buttons = ["south"]
+
+[[step]]
+at_flip = 403
+
+[[step]]
+at_flip = 440
+buttons = ["start"]
+
+[[step]]
+at_flip = 443
+
+[[step]]
+at_flip = 480
+buttons = ["south"]
+
+[[step]]
+at_flip = 483
+
+[[step]]
+at_flip = 520
+buttons = ["start"]
+
+[[step]]
+at_flip = 523
+
+[[step]]
+at_flip = 560
+buttons = ["south"]
+
+[[step]]
+at_flip = 563
+
+[[step]]
+at_flip = 600
+buttons = ["start"]
+
+[[step]]
+at_flip = 603
+
+[[step]]
+at_flip = 640
+buttons = ["south"]
+
+[[step]]
+at_flip = 643
+
+[[step]]
+at_flip = 680
+buttons = ["start"]
+
+[[step]]
+at_flip = 683
+
+[[step]]
+at_flip = 720
+buttons = ["south"]
+
+[[step]]
+at_flip = 723
+
+[[step]]
+at_flip = 760
+buttons = ["start"]
+
+[[step]]
+at_flip = 763
+
+[[step]]
+at_flip = 800
+buttons = ["south"]
+
+[[step]]
+at_flip = 803
+
+[[step]]
+at_flip = 840
+buttons = ["start"]
+
+[[step]]
+at_flip = 843
+
+[[step]]
+at_flip = 880
+buttons = ["south"]
+
+[[step]]
+at_flip = 883
+
+[[step]]
+at_flip = 920
+buttons = ["start"]
+
+[[step]]
+at_flip = 923
+
+[[step]]
+at_flip = 960
+buttons = ["south"]
+
+[[step]]
+at_flip = 963
+
+[[step]]
+at_flip = 1000
+buttons = ["start"]
+
+[[step]]
+at_flip = 1003
+
+[[step]]
+at_flip = 1040
+buttons = ["south"]
+
+[[step]]
+at_flip = 1043
+
+[[step]]
+at_flip = 1080
+buttons = ["start"]
+
+[[step]]
+at_flip = 1083
+
+[[step]]
+at_flip = 1120
+buttons = ["south"]
+
+[[step]]
+at_flip = 1123
+
+[[step]]
+at_flip = 1160
+buttons = ["start"]
+
+[[step]]
+at_flip = 1163
+
+[[step]]
+at_flip = 1200
+buttons = ["south"]
+
+[[step]]
+at_flip = 1203
+
+[[step]]
+at_flip = 1240
+buttons = ["start"]
+
+[[step]]
+at_flip = 1243
+
+[[step]]
+at_flip = 1280
+buttons = ["south"]
+
+[[step]]
+at_flip = 1283
+
+[[step]]
+at_flip = 1320
+buttons = ["start"]
+
+[[step]]
+at_flip = 1323
+
+[[step]]
+at_flip = 1360
+buttons = ["south"]
+
+[[step]]
+at_flip = 1363
+
+[[step]]
+at_flip = 1400
+buttons = ["start"]
+
+[[step]]
+at_flip = 1403
+
+[[step]]
+at_flip = 1440
+buttons = ["south"]
+
+[[step]]
+at_flip = 1443
+
+[[step]]
+at_flip = 1480
+buttons = ["start"]
+
+[[step]]
+at_flip = 1483
+
+[[step]]
+at_flip = 1520
+buttons = ["south"]
+
+[[step]]
+at_flip = 1523
+
+[[step]]
+at_flip = 1560
+buttons = ["start"]
+
+[[step]]
+at_flip = 1563
+
+[[step]]
+at_flip = 1600
+buttons = ["south"]
+
+[[step]]
+at_flip = 1603
+
+[[step]]
+at_flip = 1640
+buttons = ["start"]
+
+[[step]]
+at_flip = 1643
+
+[[step]]
+at_flip = 1680
+buttons = ["south"]
+
+[[step]]
+at_flip = 1683
+
+[[step]]
+at_flip = 1720
+buttons = ["start"]
+
+[[step]]
+at_flip = 1723
+
+[[step]]
+at_flip = 1760
+buttons = ["south"]
+
+[[step]]
+at_flip = 1763
+
+[[step]]
+at_flip = 1800
+buttons = ["start"]
+
+[[step]]
+at_flip = 1803
+
+[[step]]
+at_flip = 1840
+buttons = ["south"]
+
+[[step]]
+at_flip = 1843
+
+[[step]]
+at_flip = 1880
+buttons = ["start"]
+
+[[step]]
+at_flip = 1883
+
+[[step]]
+at_flip = 1920
+buttons = ["south"]
+
+[[step]]
+at_flip = 1923
+
+[[step]]
+at_flip = 1960
+buttons = ["start"]
+
+[[step]]
+at_flip = 1963
+
+[[step]]
+at_flip = 2000
+buttons = ["south"]
+
+[[step]]
+at_flip = 2003
