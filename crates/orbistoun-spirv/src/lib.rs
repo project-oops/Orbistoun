@@ -561,7 +561,7 @@ pub mod mode {
     /// The most primitives a mesh shader's workgroup will emit. One literal operand.
     pub const OUTPUT_PRIMITIVES_EXT: u32 = 5270;
     /// A mesh shader's primitives are points. No operand.
-    pub const OUTPUT_POINTS: u32 = 19;
+    pub const OUTPUT_POINTS: u32 = 27;
     /// A mesh shader's primitives are lines. No operand.
     pub const OUTPUT_LINES_EXT: u32 = 5269;
     /// A mesh shader's primitives are triangles. No operand.
@@ -3294,6 +3294,20 @@ mod tests {
         let instruction = words[5];
         assert_eq!(instruction >> 16, 2, "one word of header plus one operand");
         assert_eq!(instruction & 0xFFFF, u32::from(op::CAPABILITY));
+    }
+
+    /// A mesh shader's output shapes are the SPIR-V specification's numbers (section 3.6).
+    #[test]
+    fn mesh_output_modes_are_the_specification_numbers() {
+        // 19 is `InputPoints`, a geometry-shader mode: NVIDIA rasterised a mesh point declared with
+        // it, the AMD driver drew nothing.
+        assert_eq!(super::mode::OUTPUT_POINTS, 27, "OutputPoints");
+        assert_eq!(super::mode::OUTPUT_LINES_EXT, 5269, "OutputLinesEXT");
+        assert_eq!(
+            super::mode::OUTPUT_TRIANGLES_EXT,
+            5298,
+            "OutputTrianglesEXT"
+        );
     }
 
     /// The index of the first instruction with `opcode`, walking the word stream past the
