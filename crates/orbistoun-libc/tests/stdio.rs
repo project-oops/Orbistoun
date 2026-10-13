@@ -549,3 +549,39 @@ fn localeconv_answers_the_c_locale() {
         assert_eq!(value, 127, "char member {index} is CHAR_MAX");
     }
 }
+
+/// A file opened for writing gets what every stream writer writes to it, in order: `fprintf`,
+/// `vfprintf` and `fputs` as well as `fwrite` (ISO/IEC 9899 7.21.6.1, 7.21.6.8, 7.21.7.4). A game
+/// keeps its log and settings this way, through a stream it opened with `"w"`.
+#[test]
+fn a_file_opened_for_writing_gets_what_every_stream_writer_writes() {
+    let dir = std::env::temp_dir().join("orbistoun-libc-stdio-writers");
+    std::fs::create_dir_all(&dir).expect("a temporary directory");
+    let _ = std::fs::remove_file(dir.join("log.txt"));
+    orbistoun_fs::mount::mount("/writerstest", dir.clone());
+    orbistoun_fs::mount::allow_writes("/writerstest");
+
+    let path = Buf::text("/writerstest/log.txt");
+    let mode = Buf::text("w");
+    let stream = call("fopen", &[path.at(), mode.at()]);
+    assert_ne!(stream, 0, "opens for writing");
+
+    let format = Buf::text("%s=%d;");
+    let name = Buf::text("fps");
+    assert_eq!(call("fprintf", &[stream, format.at(), name.at(), 60]), 7);
+    let (_save, _overflow, list) = va_list(&[name.at(), 30]);
+    assert_eq!(
+        call("vfprintf", &[stream, format.at(), list.as_ptr() as u64]),
+        7
+    );
+    let text = Buf::text("put;");
+    assert_ne!(call("fputs", &[text.at(), stream]), EOF);
+    let raw = Buf::text("raw");
+    assert_eq!(call("fwrite", &[raw.at(), 1, 3, stream]), 3);
+    assert_eq!(call("fclose", &[stream]), 0);
+
+    assert_eq!(
+        std::fs::read(dir.join("log.txt")).expect("the file was written"),
+        b"fps=60;fps=30;put;raw"
+    );
+}

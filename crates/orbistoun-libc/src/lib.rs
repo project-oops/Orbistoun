@@ -2428,20 +2428,37 @@ fn _strerror(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// Whether `stream` names something of the guest's own to write to: a file it opened, or a
+/// descriptor it wrapped. Anything else is the standard output or error.
+fn names_a_file(stream: u64) -> bool {
+    orbistoun_fs::open::wrapped_descriptor(stream).is_some()
+        || orbistoun_fs::open::path_of(stream).is_some()
+}
+
+/// Writes `bytes` to the file or descriptor `stream` names, answering how many were taken: a
+/// descriptor's own count, or a file's, which is none for one opened read-only.
+fn write_to_file(stream: u64, bytes: &[u8]) -> usize {
+    match orbistoun_fs::open::wrapped_descriptor(stream) {
+        Some(fd) => orbistoun_fs::descriptor::write(fd, bytes).unwrap_or(0),
+        None => orbistoun_fs::open::write(stream, bytes).unwrap_or(0),
+    }
+}
+
 /// `fprintf(stream, format, ...)` - `printf` with a stream in front.
 ///
-/// A stream that wraps a descriptor is written to that descriptor; anything else goes to the
+/// A stream that names a file or wraps a descriptor is written to it; anything else goes to the
 /// host's error stream, as `printf` does.
 fn fprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     use std::sync::atomic::Ordering::Relaxed;
 
-    // A stream that is a descriptor goes to the descriptor: a server wraps an accepted
-    // connection with `fdopen` and writes its replies with `fprintf`.
-    let Some(fd) = orbistoun_fs::open::wrapped_descriptor(args[0]) else {
+    // A stream that is a file goes to the file: a game keeps its log and settings in streams it
+    // opened with "w", and a server wraps an accepted connection with `fdopen` and writes its
+    // replies with `fprintf`.
+    if !names_a_file(args[0]) {
         let mut shifted = [0_u64; GUEST_ARG_REGISTERS];
         shifted[..GUEST_ARG_REGISTERS - 1].copy_from_slice(&args[1..]);
         return printf(&shifted);
-    };
+    }
 
     let format = args[1];
     FORMAT_CALLS.fetch_add(1, Relaxed);
@@ -2465,7 +2482,7 @@ fn fprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             return 0;
         }
     };
-    orbistoun_fs::descriptor::write(fd, &rendered).map_or(0, |written| written as u64)
+    write_to_file(args[0], &rendered) as u64
 }
 
 /// Renders a guest's format string against a guest's `va_list`.
@@ -2622,16 +2639,16 @@ fn vprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `vfprintf(stream, format, ap)` - [`vprintf`] with a stream in front.
 ///
-/// The stream is honoured as [`fprintf`] honours it: a stream that stands for a descriptor is
-/// written to that descriptor, and anything else goes to the host's error stream.
+/// The stream is honoured as [`fprintf`] honours it: a stream that names a file or a descriptor
+/// is written to it, and anything else goes to the host's error stream.
 ///
 /// Reference: ISO C `vfprintf`; POSIX.1-2008 `vfprintf(3)`.
 fn vfprintf(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if let Some(fd) = orbistoun_fs::open::wrapped_descriptor(args[0]) {
+    if names_a_file(args[0]) {
         let Some(rendered) = render_va(args[1], args[2]) else {
             return 0;
         };
-        return orbistoun_fs::descriptor::write(fd, &rendered).map_or(0, |written| written as u64);
+        return write_to_file(args[0], &rendered) as u64;
     }
     let mut shifted = [0_u64; GUEST_ARG_REGISTERS];
     shifted[..GUEST_ARG_REGISTERS - 1].copy_from_slice(&args[1..]);
@@ -2697,8 +2714,8 @@ fn fputs(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let bytes = unsafe { std::slice::from_raw_parts(ptr(text).cast_const(), len) };
 
     let mut err = std::io::stderr();
-    if let Some(fd) = orbistoun_fs::open::wrapped_descriptor(args[1]) {
-        orbistoun_fs::descriptor::write(fd, bytes).map_or(0, |written| written as u64)
+    if names_a_file(args[1]) {
+        write_to_file(args[1], bytes) as u64
     } else {
         let _ = err.write_all(bytes);
         let _ = err.flush();
