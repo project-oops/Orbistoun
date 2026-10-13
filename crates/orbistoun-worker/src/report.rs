@@ -2444,6 +2444,44 @@ fn called_from(rsp: u64) -> Option<u64> {
     unsafe { orbistoun_mem::guest::read_u64(rsp) }
 }
 
+/// How many bytes a waiting thread's register is shown pointing at.
+const WAIT_BYTES: usize = 32;
+
+/// The loop a thread is waiting in, from its calls in the recorded window, with the callee-saved
+/// registers at the newest of them and what each pointed at (D832).
+fn waiting(
+    own: &[&orbistoun_thunk::RecordedCall],
+    newest: &orbistoun_thunk::RecordedCall,
+) -> Option<orbistoun_report::trace::Wait> {
+    let calls: Vec<(u32, u64)> = own.iter().map(|call| (call.index, call.from)).collect();
+    orbistoun_report::trace::waiting_loop(&calls)?;
+    let registers = orbistoun_report::trace::CALLEE_SAVED
+        .iter()
+        .zip(newest.saved)
+        .map(|(name, value)| orbistoun_report::trace::WaitRegister {
+            name: (*name).to_owned(),
+            value,
+            bytes: pointed_at(value),
+        })
+        .collect();
+    Some(orbistoun_report::trace::Wait {
+        calls: calls.len() as u64,
+        registers,
+    })
+}
+
+/// The first bytes `value` points at, when it points at readable memory.
+#[cfg(windows)]
+fn pointed_at(value: u64) -> Vec<u8> {
+    read_window(value, WAIT_BYTES)
+}
+
+/// Away from Windows nothing here says what is readable, so nothing is read.
+#[cfg(not(windows))]
+fn pointed_at(_value: u64) -> Vec<u8> {
+    Vec::new()
+}
+
 /// Every guest thread, joined against the calls still in the recorded window.
 ///
 /// The thread registry knows names and handles, the ring knows what was called on which host
@@ -2454,10 +2492,11 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
     orbistoun_kernel::thread::all()
         .into_iter()
         .map(|record| {
-            let newest = recorded
+            let own: Vec<&orbistoun_thunk::RecordedCall> = recorded
                 .iter()
                 .filter(|call| record.host != 0 && call.thread == record.host)
-                .max_by_key(|call| call.sequence);
+                .collect();
+            let newest = own.iter().copied().max_by_key(|call| call.sequence);
             orbistoun_report::trace::ThreadNote {
                 handle: record.handle,
                 name: record.name,
@@ -2469,6 +2508,7 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
                     from => format!("{}, called from {from:#x}", labelled(call.index as usize)),
                 }),
                 last_sequence: newest.map(|call| call.sequence),
+                waits: newest.and_then(|call| waiting(&own, call)),
                 inside: inside
                     .iter()
                     .find(|&&(host, ..)| record.host != 0 && host == record.host)

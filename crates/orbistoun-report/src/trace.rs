@@ -210,6 +210,44 @@ impl Quiet {
 /// memory.
 pub const TAIL_CALLS: usize = 48;
 
+/// The fewest recorded calls, all one import from one site, that make a thread a waiting loop.
+pub const WAIT_CALLS: usize = 16;
+
+/// The registers a [`Wait`] reports, in the order the call ring keeps them.
+pub const CALLEE_SAVED: [&str; 6] = ["rbx", "rbp", "r12", "r13", "r14", "r15"];
+
+/// The import and call site a thread's recorded calls, as `(import, site)`, all repeat, when
+/// there are at least [`WAIT_CALLS`] of them: a thread waiting in a loop around one call (D832).
+#[must_use]
+pub fn waiting_loop(calls: &[(u32, u64)]) -> Option<(u32, u64)> {
+    let &first = calls.first()?;
+    (calls.len() >= WAIT_CALLS && calls.iter().all(|&call| call == first)).then_some(first)
+}
+
+/// A thread waiting in a loop around one call: the first step of the wait sub-loop (D832).
+///
+/// The loop's own state lives in the registers a callee preserves, so what they held at the
+/// call, and what each pointed at, is where the word it waits on is found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Wait {
+    /// How many of the thread's recorded calls were this one, from this site.
+    pub calls: u64,
+    /// [`CALLEE_SAVED`]'s registers at the newest of them.
+    pub registers: Vec<WaitRegister>,
+}
+
+/// One callee-saved register at a waiting call.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaitRegister {
+    /// Its name.
+    pub name: String,
+    /// What it held.
+    pub value: u64,
+    /// The first bytes it pointed at, when it pointed at readable memory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bytes: Vec<u8>,
+}
+
 /// One guest thread, as it was when the run ended.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreadNote {
@@ -232,6 +270,9 @@ pub struct ThreadNote {
     /// thread blocked in a call is blocked in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside: Option<String>,
+    /// The loop it is waiting in, when its recorded calls are one call from one site (D832).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waits: Option<Wait>,
 }
 
 /// What the guest's calls looked like against the System V convention.
@@ -1353,6 +1394,25 @@ mod tail_return_tests {
 #[cfg(test)]
 mod tests {
     use super::{CallTrace, CalledImport, Conditions, FaultSite, Verdict, compare};
+
+    /// A thread whose recorded calls are all one import from one site is waiting in a loop
+    /// around it (D832); a second site, a second import or too few calls is not one.
+    #[test]
+    fn one_import_from_one_site_enough_times_is_a_waiting_loop() {
+        let looping = vec![(7, 0x4000_02b5_f0e5); super::WAIT_CALLS];
+        assert_eq!(super::waiting_loop(&looping), Some((7, 0x4000_02b5_f0e5)));
+        assert_eq!(
+            super::waiting_loop(&looping[1..]),
+            None,
+            "too few to call it a loop"
+        );
+        let mut two_sites = looping.clone();
+        two_sites[3].1 = 0x4000_0000_1000;
+        assert_eq!(super::waiting_loop(&two_sites), None, "two call sites");
+        let mut two_imports = looping;
+        two_imports[5].0 = 8;
+        assert_eq!(super::waiting_loop(&two_imports), None, "two imports");
+    }
 
     /// A guest still calling when the clock stopped it is not quiet.
     ///

@@ -37,6 +37,7 @@ pub(crate) fn report_progress(
     print_standing(after);
     print_quiet(after);
     print_threads(after);
+    print_waits(after);
     println!(
         "  fault {}{}",
         progress.fault,
@@ -385,6 +386,37 @@ fn print_threads(trace: &orbistoun_report::trace::CallTrace) {
             format!(", {ended} ended")
         };
         println!("           {name:<30} {count:<16} {tail}{ended}");
+    }
+}
+
+/// Each thread waiting in a loop around one call, with what its callee-saved registers held and
+/// pointed at: where the word it waits on is (D832).
+///
+/// Printed however the run ended, since a thread spinning on a yield keeps a run busy and never
+/// quiet.
+fn print_waits(trace: &orbistoun_report::trace::CallTrace) {
+    for note in &trace.threads {
+        let Some(wait) = &note.waits else {
+            continue;
+        };
+        println!(
+            "  waits    {} loops on {} ({} of its recorded calls)",
+            note.name,
+            note.last_call.as_deref().unwrap_or("?"),
+            wait.calls
+        );
+        for register in &wait.registers {
+            let bytes: Vec<String> = register.bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let pointee = if bytes.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {}", bytes.join(" "))
+            };
+            println!(
+                "           {:<3} = {:#018x}{pointee}",
+                register.name, register.value
+            );
+        }
     }
 }
 

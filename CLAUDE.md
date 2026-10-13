@@ -27,6 +27,10 @@ The loop:
 5. `orbistoun-cli learn` anything the turn established.
 6. `./bin/orbistoun check`.
 
+A thread waiting on one call is resolved to what it waits on by the wait sub-loop, and a policy
+patch that moves a wall without moving any title back is staged by the loop (D832). A diagnosis
+done by hand is not finished until it is a command the next run performs: no scratch scripts.
+
 **`FURTHER`** means the guest executed code it could not reach before. It is the measure of
 progress. [docs/THE_LOOP.md](docs/THE_LOOP.md) describes each step;
 [docs/WORKFLOW.md](docs/WORKFLOW.md) is the command reference.

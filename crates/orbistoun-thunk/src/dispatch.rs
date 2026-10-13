@@ -28,6 +28,12 @@ pub const MAX_RECORDED_CALLS: usize = 8192;
 /// functions it calls agree on how many it spilled.
 pub const SAVED_ARGUMENT_REGISTERS: usize = orbistoun_core::GUEST_ARG_REGISTERS;
 
+/// The registers a System V callee preserves: `rbx`, `rbp` and `r12` to `r15`, in that order.
+///
+/// What the guest held in them at a call is what its own code keeps across the call - a waiting
+/// loop's objects among them - so each recorded call keeps them (D832).
+pub const CALLEE_SAVED_REGISTERS: usize = 6;
+
 /// What `rsp % 16` must be when a callee is entered.
 ///
 /// System V requires `rsp % 16 == 0` immediately before a `call`, and the call pushes an eight-byte
@@ -223,6 +229,10 @@ const _: () = assert!(OPENING_CALLS < MAX_RECORDED_CALLS);
 /// first. The stores are bounded by the ring size; the static cost is the arrays.
 static RING_ARGS: [AtomicU64; MAX_RECORDED_CALLS * SAVED_ARGUMENT_REGISTERS] =
     [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS * SAVED_ARGUMENT_REGISTERS];
+
+/// The guest's callee-saved registers at each recorded call, parallel to [`RING`], six per call.
+static RING_SAVED: [AtomicU64; MAX_RECORDED_CALLS * CALLEE_SAVED_REGISTERS] =
+    [const { AtomicU64::new(0) }; MAX_RECORDED_CALLS * CALLEE_SAVED_REGISTERS];
 
 /// Which host thread made each call, as its own identifier.
 ///
@@ -1245,6 +1255,8 @@ pub struct RecordedCall {
     pub index: u32,
     /// The call's integer arguments, in register order: `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`.
     pub args: [u64; SAVED_ARGUMENT_REGISTERS],
+    /// What the guest held in `rbx`, `rbp` and `r12` to `r15` at the call, in that order.
+    pub saved: [u64; CALLEE_SAVED_REGISTERS],
     /// Which host thread made it, or zero when nothing recorded one. Only compared for equality.
     pub thread: u64,
     /// The guest address this call returns to, one instruction past the call site.
@@ -1328,6 +1340,9 @@ pub fn last_call() -> Option<RecordedCall> {
         args: std::array::from_fn(|r| {
             RING_ARGS[newest * SAVED_ARGUMENT_REGISTERS + r].load(Ordering::Relaxed)
         }),
+        saved: std::array::from_fn(|r| {
+            RING_SAVED[newest * CALLEE_SAVED_REGISTERS + r].load(Ordering::Relaxed)
+        }),
         from: RING_FROM[newest].load(Ordering::Relaxed),
         thread: RING_THREAD[newest].load(Ordering::Relaxed),
         ret: recorded_return(newest),
@@ -1391,6 +1406,9 @@ pub fn recorded_calls() -> Vec<RecordedCall> {
                 args: std::array::from_fn(|r| {
                     RING_ARGS[i * SAVED_ARGUMENT_REGISTERS + r].load(Ordering::Relaxed)
                 }),
+                saved: std::array::from_fn(|r| {
+                    RING_SAVED[i * CALLEE_SAVED_REGISTERS + r].load(Ordering::Relaxed)
+                }),
                 from: RING_FROM[i].load(Ordering::Relaxed),
                 thread: RING_THREAD[i].load(Ordering::Relaxed),
                 ret: recorded_return(i),
@@ -1439,13 +1457,15 @@ pub fn opening_sequence() -> Vec<(u64, u32, u64)> {
 ///
 /// # Safety
 ///
-/// `args` must point to [`SAVED_ARGUMENT_REGISTERS`] readable `u64` values. The trampoline is the
-/// only caller and satisfies this by construction.
+/// `args` must point to [`SAVED_ARGUMENT_REGISTERS`] readable `u64` values, and `saved` to
+/// [`CALLEE_SAVED_REGISTERS`]. The trampoline is the only caller and satisfies this by
+/// construction.
 unsafe extern "sysv64" fn on_guest_call(
     index: u64,
     args: *const u64,
     entry_rsp: u64,
     floats: *mut u64,
+    saved: *const u64,
 ) -> u64 {
     // A backgrounded title parks here: every guest call passes through, and a thread stopped here
     // is in our code holding no guest lock, unlike one frozen at an arbitrary instruction that may
@@ -1469,8 +1489,8 @@ unsafe extern "sysv64" fn on_guest_call(
     // the `SAVED_ARGUMENT_REGISTERS` values the trampoline spilled.
     unsafe { sample_argument_shapes(index, args) };
 
-    // SAFETY: as above; `args` is forwarded unchanged.
-    unsafe { record_call(sequence, index, args, entry_rsp) };
+    // SAFETY: as above; `args` and `saved` are forwarded unchanged.
+    unsafe { record_call(sequence, index, args, saved, entry_rsp) };
 
     // Looked up once, and the dump decided from the result, so implemented calls pay one table
     // lookup.
@@ -1643,9 +1663,16 @@ unsafe fn sample_argument_shapes(index: u64, args: *const u64) {
 ///
 /// # Safety
 ///
-/// As [`on_guest_call`]: `args` points to [`SAVED_ARGUMENT_REGISTERS`] readable `u64` values.
+/// As [`on_guest_call`]: `args` points to [`SAVED_ARGUMENT_REGISTERS`] readable `u64` values, and
+/// `saved` to [`CALLEE_SAVED_REGISTERS`].
 #[inline]
-unsafe fn record_call(sequence: u64, index: u64, args: *const u64, entry_rsp: u64) {
+unsafe fn record_call(
+    sequence: u64,
+    index: u64,
+    args: *const u64,
+    saved: *const u64,
+    entry_rsp: u64,
+) {
     if let Ok(position) = usize::try_from(sequence) {
         // The opening, kept whole and never overwritten (D571).
         if let Some(opening) = RING_OPENING.get(position) {
@@ -1667,6 +1694,15 @@ unsafe fn record_call(sequence: u64, index: u64, args: *const u64, entry_rsp: u6
                 // plain integers with no alignment or validity demand beyond being readable.
                 let value = unsafe { at.read() };
                 RING_ARGS[slot * SAVED_ARGUMENT_REGISTERS + register]
+                    .store(value, Ordering::Relaxed);
+            }
+            for register in 0..CALLEE_SAVED_REGISTERS {
+                // SAFETY: the caller guarantees `CALLEE_SAVED_REGISTERS` readable values, and
+                // `register` is bounded by that count.
+                let at = unsafe { saved.add(register) };
+                // SAFETY: `at` is inside the caller's array, per the block above.
+                let value = unsafe { at.read() };
+                RING_SAVED[slot * CALLEE_SAVED_REGISTERS + register]
                     .store(value, Ordering::Relaxed);
             }
             RING_FROM[slot].store(call_site(entry_rsp), Ordering::Relaxed);
@@ -1806,7 +1842,7 @@ pub fn trampoline_address() -> u64 {
 ///
 /// Spills the argument registers to the stack, presents them as an ordinary call, and passes the
 /// handler's return value back to the guest in `rax`. `sub rsp, 8` corrects the alignment a `call`
-/// left odd; the six pushes move 48 bytes, which preserves it. Naked because a compiler-inserted
+/// left odd; the twelve pushes move 96 bytes, which preserves it. Naked because a compiler-inserted
 /// prologue would clobber the argument registers before they are saved.
 #[unsafe(naked)]
 unsafe extern "sysv64" fn trampoline() {
@@ -1816,6 +1852,15 @@ unsafe extern "sysv64" fn trampoline() {
         // spill without destroying an argument (D159).
         "mov r11, rsp",
         "sub rsp, 8",
+        // The callee-saved registers, which hold what the guest keeps across this call (D832).
+        // Six pushes keep the alignment; the handler preserves them, so they are dropped, not
+        // restored.
+        "push r15",
+        "push r14",
+        "push r13",
+        "push r12",
+        "push rbp",
+        "push rbx",
         "push r9",
         "push r8",
         "push rcx",
@@ -1843,11 +1888,13 @@ unsafe extern "sysv64" fn trampoline() {
         "mov rdx, r11",
         // Fourth: the floating-point array, which the handler also writes its answer into.
         "mov rcx, rsp",
+        // Fifth: the callee-saved registers, above the integer arguments.
+        "lea r8, [rsp + 112]",
         "call {handler}",
         // Whatever the handler left in the first slot becomes `xmm0`. For an integer function that
         // is the value the guest passed in, written straight back, so nothing is disturbed.
         "movsd xmm0, [rsp]",
-        "add rsp, 120",
+        "add rsp, 168",
         "ret",
         handler = sym on_guest_call,
     )

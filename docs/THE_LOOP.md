@@ -29,7 +29,11 @@ flowchart TD
     M --> O["write the trace;<br/>compare it with last time"]
     O --> P["print FURTHER / same / BACK,<br/>then the ranked findings"]
     P --> Q{"orbistoun-turn runs the<br/>mechanical steps, then stops"}
-    Q -- "wall hit<br/>(architectural / spin / regression)" --> X["a person reads the findings<br/>and decides what next"]
+    Q -- "a thread waits<br/>on one call" --> W["the wait sub-loop:<br/>wait, word, writer, cause"]
+    W --> P
+    Q -- "a policy patch moved it<br/>and no title went BACK" --> Z["staged as guest-observed;<br/>its measurement filed"]
+    Z --> B
+    Q -- "wall hit<br/>(architectural / regression)" --> X["a person reads the findings<br/>and decides what next"]
     Q -- "enough is known already" --> R["a person writes the Rust<br/>implementation (known_by: published)"]
     Q -- "not enough is known" --> S["a person writes and runs an<br/>obSCEne probe on real hardware"]
     S --> T["a person reads the transcript<br/>orbistoun-cli probe reports on"]
@@ -41,11 +45,12 @@ flowchart TD
     classDef human fill:#7a2f2f,stroke:#d08a8a,color:#fff
     classDef agent fill:#2f4f7a,stroke:#8aafd0,color:#fff
     class X,R,S,T human
-    class Q,U agent
+    class Q,U,W,Z agent
 ```
 
-Naming, stub-building, execution, tracing, the progress verdict and the mechanical sweeps of
-`orbistoun-turn` run unattended. Deciding what a finding means and writing the implementation
+Naming, stub-building, execution, tracing, the progress verdict, the mechanical sweeps of
+`orbistoun-turn`, resolving a waiting thread to the call it waits on, and staging a policy patch
+that moved a wall run unattended. Deciding what a finding means and writing the implementation
 are a person's job. Nothing in this repository dispatches a hardware probe, drives obSCEne or
 Prosperous, or writes Rust from a measurement: [orbistoun-probe](../crates/orbistoun-probe/README.md)
 only reads a transcript, and [orbistoun-propose](../crates/orbistoun-propose/README.md) has no
@@ -110,12 +115,20 @@ the file is shown absent from the place the run reads: the resolved data directo
     nothing reads. They rank below every wall, since a silent title still runs, and are always
     printed, since nothing else names them.
 17. A person reads the top finding. `orbistoun-turn` has already run the mechanical sweeps
-    against it. If what is left is an unmeasured interface or structure, the next step is a
-    hardware probe question rather than a guess, filed as a census row batched with the other
-    unmeasured facts of its area (see [the capability sub-loop](#the-capability-sub-loop)).
+    against it, and a thread waiting on one call has already been resolved to the call it waits
+    on (see [the wait sub-loop](#the-wait-sub-loop)). If what is left is an unmeasured interface
+    or structure, the next step is a hardware probe question rather than a guess, filed as a
+    census row batched with the other unmeasured facts of its area (see
+    [the capability sub-loop](#the-capability-sub-loop)).
 18. A person writes the implementation - from a published source, or from what an obSCEne
-    probe measured on the hardware - and tags it with its `known_by`.
+    probe measured on the hardware - and tags it with its `known_by`. A policy patch the loop
+    proposed needs no person: one that moves its title and no other title back is staged (see
+    [staging what the loop proves](#staging-what-the-loop-proves)).
 19. Go to step 2. `FURTHER` keeps the change; `same` or `BACK` does not.
+
+A question answered once by hand becomes a command or a report section the next run answers by
+itself. The loop has no scratch scripts: a diagnostic worth running twice is orbistoun's code,
+tested against the wall it first found.
 
 ## Who does what
 
@@ -130,6 +143,8 @@ the file is shown absent from the place the run reads: the resolved data directo
 | 15 - progress verdict | orbistoun | yes |
 | 16 - ranked findings | orbistoun | yes |
 | 17 - mechanical sweeps (`orbistoun-turn`) | orbistoun | yes |
+| 17 - resolve a waiting thread to the call it waits on | orbistoun | yes |
+| 18 - stage a policy patch that moved a wall and no title back | orbistoun | yes |
 | 17 - interpret a finding, design a probe | a person | no |
 | 17 - write and run an obSCEne probe on the hardware | a person, via `pros` | no; `orbistoun-cli probe` reads the transcript afterwards |
 | 18 - write the implementation | a person | no |
@@ -166,12 +181,15 @@ fault at an address the guest computed
 ```
 
 The result is an instruction offset, which is a finding; what should have filled the slot is
-step 18. The variables behind both are in [WORKFLOW.md](WORKFLOW.md#diagnostics).
+step 18. The variables behind both are in [WORKFLOW.md](WORKFLOW.md#diagnostics). A waiting
+thread composes the same two diagnostics another way, in [the wait sub-loop](#the-wait-sub-loop).
 
 ## Step 18: the implementation
 
-Nothing here writes an implementation. Each one carries a decision - what to leave in the
+Nothing here writes Rust. Each implementation carries a decision - what to leave in the
 caller's buffer, whether to trust a number the guest supplied, whether refusing beats guessing.
+A policy entry is different: it is one line of data, and one that earned its place is staged by
+the loop (D832).
 
 A generated implementation is admissible only as a proposal a person reads, gates and merges.
 It arrives as an inert patch in a submission, carries an oracle like every other fact, and is
@@ -238,10 +256,65 @@ Every finding ends in an arrow saying what to do. A finding without one is a def
 | What you see | What it means | What to do |
 |---|---|---|
 | A name at the top of the worklist with an enormous count | A guest spinning on it | Implement it; this is the wall |
+| A yield, sleep or poll at the top, from one call site | A thread waiting for something that never comes | Read its "waits on" finding: the word it reads, who writes it, and the call that was to complete it |
 | `library::0x...` at the top | The same, not yet named | Extend `crates/orbistoun-names/data/vendor.toml`, re-run |
 | A fault instead of a time-out | The guest got somewhere and died | Read the `faulted` block and the calls just before it |
 | Many calls spread thinly | The guest is progressing | Implement the frequent ones and go again |
 | `standing` fell while `calls` rose | A stub started answering wrongly | Check what the new answers unlocked before believing the progress |
+
+## The wait sub-loop
+
+A run whose time goes to one waiting call - a yield, a sleep, a poll, a timed wait retried - is
+not asking that call a question. Its answer is not the wall; something the thread waits for is.
+The wait sub-loop finds it without reading the guest's code (D832, D276):
+
+```mermaid
+flowchart LR
+    A["one call dominates,<br/>from one call site"] --> B["the wait: the thread, the site,<br/>and the objects its callee-saved<br/>registers hold there"]
+    B --> C["the word: snapshot those objects<br/>across iterations; read-watch<br/>the words that never change"]
+    C --> D["the writer: write-watch<br/>the word the loop reads"]
+    D --> E{"written?"}
+    E -- "never" --> F["the cause: the call handed<br/>that object, or a callback in it"]
+    E -- "by a thread that<br/>itself waits" --> B
+    F --> G["a 'waits on' finding,<br/>ranked with the rest"]
+    B --> H{"moves under the<br/>host clock only?"}
+    H -- yes --> I["a clock finding:<br/>the thread's time stands still"]
+```
+
+1. **The wait.** The run names the thread, the call site and the call, and what the thread's
+   callee-saved registers held: the objects the waiting loop reads.
+2. **The word.** Snapshots of those objects at successive iterations name the words that never
+   change; read watchpoints on them name the one the loop reads.
+3. **The writer.** A write watchpoint on that word says whether anything writes it, and which
+   thread. A writer that is itself waiting moves the question to that thread.
+4. **The cause.** The word's object is joined to the run's calls: the import handed it, a callback
+   in it, a pointer into it. An unimplemented, placeholder or refused call ranks first.
+
+A wait that moves under `ORBISTOUN_CLOCK=host` and not under the logical clock is a clock
+finding, whatever it waits on: the thread's logical time does not advance.
+
+## Staging what the loop proves
+
+A policy patch (D296) is data, and one that has earned its place does not wait for a person:
+
+```mermaid
+flowchart LR
+    A["a proposed policy patch"] --> B["trial on its title"]
+    B -- "FURTHER" --> C["run across the corpus"]
+    B -- "same / BACK" --> X["stays a candidate<br/>in learned.toml, unread"]
+    C -- "no title BACK" --> D["staged in the tracked knowledge,<br/>known_by: guest-observed,<br/>with the run as evidence"]
+    C -- "a title BACK" --> X
+    D --> E["census row filed:<br/>the hardware asked the same question"]
+    E --> F{"measured"}
+    F -- agrees --> G["known_by: measured"]
+    F -- contradicts --> H["retired; the measurement<br/>replaces it"]
+```
+
+`FURTHER` on one title is not enough, because a stub answering success moves walls too; the
+corpus run catches a patch that helps one title by breaking another. A staged patch is labelled
+for what it is - the guest accepted it - and its measurement is requested in the same step. A
+patch that writes guest memory still needs a conformance check first (D296). Rust is never
+staged this way.
 
 ## The naming sub-loop
 
@@ -408,8 +481,10 @@ receive these; see [WORKFLOW.md](WORKFLOW.md#recording-what-a-turn-produced).
 - Step 7 compounds: naming is not per-title work, and every learned name is vocabulary for
   every later title.
 - Step 16 removes diagnosis, not fixing: the run states the wall, with evidence, ranked.
-- The loop never keeps unverified code: step 18 is a person's, and a change is kept only when
-  the re-run says `FURTHER`.
+- The loop never keeps unverified code: Rust is a person's, and a change is kept only when
+  the re-run says `FURTHER`. A policy patch is staged only when no title in the corpus went
+  `BACK`, and only as `guest-observed`.
+- Every diagnosis is a command: a question answered once by hand is answered by the next run.
 - Step 18 never invalidates step 3: the plan names thunk indices, not implementations, so a
   turn that adds an implementation reuses the stored plan and pays only for the run.
 - The capability sub-loop makes catching up a ranking problem, not a research problem: the
