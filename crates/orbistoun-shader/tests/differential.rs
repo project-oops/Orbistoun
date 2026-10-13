@@ -150,6 +150,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "copy",
         "radeonsi's compute image copy: sixteen-bit and packed coordinates, a16 d16 images",
     ),
+    (
+        "scalar-compare",
+        "the scalar unsigned orderings, which no compiled fixture produces",
+    ),
 ];
 
 /// Every fixture on disk is read by this suite.

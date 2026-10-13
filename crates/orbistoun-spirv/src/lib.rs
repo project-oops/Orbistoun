@@ -238,6 +238,8 @@ pub mod op {
     pub const SHIFT_LEFT_LOGICAL: u16 = 196;
     /// Unsigned integer less-than.
     pub const ULESS_THAN: u16 = 176;
+    /// Unsigned integer less-than-or-equal.
+    pub const ULESS_THAN_EQUAL: u16 = 178;
     /// Unsigned integer greater-than.
     pub const UGREATER_THAN: u16 = 172;
     /// Unsigned integer greater-than-or-equal.
@@ -2475,6 +2477,13 @@ static SHAPES: &[ShapeEntry] = &[
         RestStride::Every,
     ),
     (op::ULESS_THAN, Some(1), &[0, 2, 3], None, RestStride::Every),
+    (
+        op::ULESS_THAN_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
     (op::SLESS_THAN, Some(1), &[0, 2, 3], None, RestStride::Every),
     (
         op::SGREATER_THAN,

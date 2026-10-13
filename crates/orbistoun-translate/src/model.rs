@@ -126,6 +126,10 @@ pub const SUPPORTED: &[&str] = &[
     "s_cmp_lg_u32",
     "s_cmp_eq_u32",
     "s_cmp_lt_i32",
+    "s_cmp_gt_u32",
+    "s_cmp_ge_u32",
+    "s_cmp_lt_u32",
+    "s_cmp_le_u32",
     "s_cmpk_eq_i32",
     "s_cmpk_lg_i32",
     "s_cselect_b64",
@@ -581,6 +585,10 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_cmp_ge_i32"
             | "s_cmp_lt_i32"
             | "s_cmp_le_i32"
+            | "s_cmp_gt_u32"
+            | "s_cmp_ge_u32"
+            | "s_cmp_lt_u32"
+            | "s_cmp_le_u32"
             | "s_cmpk_eq_i32"
             | "s_cmpk_lg_i32"
             // The arithmetic sets it on signed overflow.
@@ -2379,9 +2387,8 @@ fn scalar_instruction<M: Model + ?Sized>(
         // The scalar compares, which write the condition code the `scc` branches read and have no
         // destination operand.
         "s_cmp_eq_i32" | "s_cmp_lg_i32" | "s_cmp_lg_u32" | "s_cmp_eq_u32" | "s_cmp_gt_i32"
-        | "s_cmp_ge_i32" | "s_cmp_lt_i32" | "s_cmp_le_i32" => {
-            scalar_compare(model, instruction, name)
-        }
+        | "s_cmp_ge_i32" | "s_cmp_lt_i32" | "s_cmp_le_i32" | "s_cmp_gt_u32" | "s_cmp_ge_u32"
+        | "s_cmp_lt_u32" | "s_cmp_le_u32" => scalar_compare(model, instruction, name),
 
         _ => vector_instruction(model, instruction, name),
     }
@@ -4221,7 +4228,8 @@ fn scalar_compare<M: Model + ?Sized>(
     Ok(())
 }
 
-/// The SPIR-V opcode a scalar comparison maps to. Every ordering is signed.
+/// The SPIR-V opcode a scalar comparison maps to: signed for an `_i32` ordering, unsigned for a
+/// `_u32` one.
 fn op_for_scalar_compare(instruction: &Instruction, name: &str) -> Result<u16, TranslateError> {
     match name {
         // Equality does not depend on sign: the unsigned and signed forms agree.
@@ -4232,6 +4240,10 @@ fn op_for_scalar_compare(instruction: &Instruction, name: &str) -> Result<u16, T
         "s_cmp_ge_i32" => Ok(op::SGREATER_THAN_EQUAL),
         "s_cmp_lt_i32" => Ok(op::SLESS_THAN),
         "s_cmp_le_i32" => Ok(op::SLESS_THAN_EQUAL),
+        "s_cmp_gt_u32" => Ok(op::UGREATER_THAN),
+        "s_cmp_ge_u32" => Ok(op::UGREATER_THAN_EQUAL),
+        "s_cmp_lt_u32" => Ok(op::ULESS_THAN),
+        "s_cmp_le_u32" => Ok(op::ULESS_THAN_EQUAL),
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "no translation for this scalar comparison",

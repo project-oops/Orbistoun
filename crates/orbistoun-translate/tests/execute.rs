@@ -2079,6 +2079,37 @@ fn a_scalar_compare_is_signed() {
     );
 }
 
+/// The `_u32` orderings compare unsigned: -1 is the largest value there, so `-1 > 0` holds,
+/// `-1 >= 0` holds, `-1 < 0` and `-1 <= 0` do not - the reverse of the signed answers.
+#[test]
+fn the_unsigned_scalar_compares_are_unsigned() {
+    if !device_or_skip("the_unsigned_scalar_compares_are_unsigned") {
+        return;
+    }
+    // s0 = -1 (inline constant code 193); compared with 0 (code 128). A taken branch skips the
+    // write of 42 into s1.
+    for (name, holds) in [
+        ("s_cmp_gt_u32", true),
+        ("s_cmp_ge_u32", true),
+        ("s_cmp_lt_u32", false),
+        ("s_cmp_le_u32", false),
+    ] {
+        let program = [
+            s_mov_code(0, 193),
+            s_cmp_i32(name, 0, 128),
+            branch("s_cbranch_scc1", 1),
+            s_mov_inline(1, 42),
+            s_endpgm(),
+        ];
+        let (registers, _) = run_memory(Fidelity::Lane, &program);
+        assert_eq!(
+            scalar(&registers, 1),
+            if holds { 0 } else { 42 },
+            "{name} of -1 and 0 should be {holds}"
+        );
+    }
+}
+
 /// A shader using only the condition code keeps the lane model.
 #[test]
 fn the_condition_code_is_not_a_lane_mask() {

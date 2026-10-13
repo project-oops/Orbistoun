@@ -454,6 +454,26 @@ name = "s_cmp_lg_u32"
 
 [[mnemonic]]
 family = "SOPC"
+opcode = 8
+name = "s_cmp_gt_u32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 9
+name = "s_cmp_ge_u32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 10
+name = "s_cmp_lt_u32"
+
+[[mnemonic]]
+family = "SOPC"
+opcode = 11
+name = "s_cmp_le_u32"
+
+[[mnemonic]]
+family = "SOPC"
 opcode = 13
 name = "s_bitcmp1_b32"
 
