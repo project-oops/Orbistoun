@@ -773,6 +773,25 @@ fn draw_chunks(draw: &DrawCall, whole: GeometryInputs, lanes: u32) -> Vec<ChunkP
     chunk_plans(whole, address, lanes)
 }
 
+/// What a draw's shaders are chosen by besides its registers: whether a primitive shader is
+/// prepared per geometry, and the geometry where one is, and whether the pixel stage's words count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrawTerms {
+    per_geometry: bool,
+    with_words: bool,
+    geometry: Option<(u32, u32, u32)>,
+}
+
+/// What a draw's shaders are chosen by in its registers, and what preparing them reads
+/// ([`Pipeline::draw_key`]).
+struct DrawKey {
+    /// The register values the shaders are chosen by, in a fixed order.
+    written: Vec<Option<u32>>,
+    window_space: WindowSpace,
+    vertex_words: [u32; USER_DATA_WORDS],
+    fragment_words: [u32; USER_DATA_WORDS],
+}
+
 /// Each chunk's module beside its plan (D741); empty where the draw is drawn whole.
 fn chunks_of(modules: &[ResourceId], plans: &[ChunkPlan]) -> Vec<Chunk> {
     if modules.len() != plans.len() {
@@ -2194,45 +2213,17 @@ impl Pipeline {
         let mut sweep = crate::registers::RegisterSweep::new(writes);
         let shader_registers: Vec<u32> = self.vocabulary.shader_register_ids().collect();
         // A draw whose shader registers hold the previous draw's values runs the same shaders; a GL
-        // frame rewrites the same addresses before each of many draws.
+        // frame rewrites the same addresses before each of many draws. The registers are read
+        // again only once the sweep reports one of those read for the last key given another
+        // value: nearly every draw of such a frame repeats the last.
         let mut previous_writes: Option<Vec<Option<u32>>> = None;
+        let mut previous_terms: Option<DrawTerms> = None;
         let mut previous_shaders = Vec::new();
         let mut previous_chunks: Vec<ResourceId> = Vec::new();
         let mut sampled_through_samplers = self.samples_through_samplers();
         for draw in draws {
-            let mut written: Vec<Option<u32>> = shader_registers
-                .iter()
-                .map(|&register| sweep.latest(draw.packet_offset, register))
-                .collect();
-            // A primitive shader prepared per geometry runs another module for other geometry, so
-            // the geometry is part of what must repeat.
             let geometry =
                 draw_geometry(draw, |register| sweep.latest(draw.packet_offset, register));
-            if !by_geometry.needs.is_empty()
-                && let Ok(geometry) = geometry
-            {
-                written.extend([
-                    Some(geometry.vertices),
-                    Some(geometry.primitives),
-                    Some(geometry.first_vertex),
-                ]);
-            }
-            // A window-space draw's primitive shader writes its position differently (D731, D780).
-            let window_space = window_space_at(&mut sweep, draw.packet_offset);
-            written.push(Some(window_space as u32));
-            // The vertex stage's user data, which names the buffers whose formats a format load
-            // converts by (D738).
-            let vertex_words = stage_user_data(&mut sweep, draw.packet_offset, 0);
-            if !by_geometry.needs.is_empty() {
-                written.extend(vertex_words.iter().map(|&word| Some(word)));
-            }
-            // The pixel stage's, which name the samplers whose half-border clamps its samples
-            // saturate for (D743).
-            let fragment_words = self.draw_user_data(
-                (&mut sweep, draw.packet_offset),
-                sampled_through_samplers,
-                &mut written,
-            );
             // The widths in force at this draw, which its shaders were compiled for: a submission
             // may change them between draws.
             let widths = crate::registers::wave_widths_from(|register| {
@@ -2244,12 +2235,34 @@ impl Pipeline {
             let plans = geometry
                 .as_ref()
                 .map_or_else(|_| Vec::new(), |&whole| draw_chunks(draw, whole, lanes));
-            if previous_writes.as_ref() == Some(&written) {
+            let per_geometry = !by_geometry.needs.is_empty();
+            let terms = DrawTerms {
+                per_geometry,
+                with_words: sampled_through_samplers,
+                // A primitive shader prepared per geometry runs another module for other geometry,
+                // so the geometry is part of what must repeat.
+                geometry: geometry
+                    .as_ref()
+                    .ok()
+                    .filter(|_| per_geometry)
+                    .map(|g| (g.vertices, g.primitives, g.first_vertex)),
+            };
+            let same_terms = previous_terms == Some(terms);
+            let key = (!same_terms || sweep.noted_changed(draw.packet_offset))
+                .then(|| self.draw_key((&mut sweep, draw.packet_offset), &shader_registers, terms))
+                .filter(|key| !same_terms || previous_writes.as_ref() != Some(&key.written));
+            let Some(DrawKey {
+                written,
+                window_space,
+                vertex_words,
+                fragment_words,
+            }) = key
+            else {
                 per_draw.push(Vec::clone(&previous_shaders));
                 // The same modules; an indexed draw's chunks read its own indices.
                 per_draw_chunks.push(chunks_of(&previous_chunks, &plans));
                 continue;
-            }
+            };
             let mut chunked = Vec::new();
             let mut shaders = Vec::new();
             let latest =
@@ -2288,6 +2301,7 @@ impl Pipeline {
             per_draw.push(shaders.clone());
             per_draw_chunks.push(chunks_of(&chunked, &plans));
             previous_writes = Some(written);
+            previous_terms = Some(terms);
             previous_shaders = shaders;
             previous_chunks = chunked;
         }
@@ -2384,6 +2398,47 @@ impl Pipeline {
         FlatTwins::from_first(&mixed, first)
     }
 
+    /// What the shaders of the draw at `at` are chosen by in its registers - the shader addresses,
+    /// the position space, the vertex stage's words where a primitive shader is prepared per
+    /// geometry, the user-data counts and, where the pixel stage samples through samplers, its
+    /// words - with the space and both stages' words, which preparing them reads. The registers
+    /// read for the key are noted by `sweep`, and only those: the words left out of it are read
+    /// unnoted, so a change to them is not a change of shaders.
+    fn draw_key(
+        &mut self,
+        (sweep, at): (&mut crate::registers::RegisterSweep<'_>, u32),
+        shader_registers: &[u32],
+        terms: DrawTerms,
+    ) -> DrawKey {
+        sweep.record_reads();
+        let mut written: Vec<Option<u32>> = shader_registers
+            .iter()
+            .map(|&register| sweep.latest(at, register))
+            .collect();
+        // A window-space draw's primitive shader writes its position differently (D731, D780).
+        let window_space = window_space_at(sweep, at);
+        written.push(Some(window_space as u32));
+        // The vertex stage's user data, which names the buffers whose formats a format load
+        // converts by (D738).
+        let vertex_words = if terms.per_geometry {
+            let words = stage_user_data(sweep, at, 0);
+            written.extend(words.iter().map(|&word| Some(word)));
+            words
+        } else {
+            sweep.unnoted(|sweep| stage_user_data(sweep, at, 0))
+        };
+        // The pixel stage's, which name the samplers whose half-border clamps its samples
+        // saturate for (D743).
+        let fragment_words = self.draw_user_data((sweep, at), terms.with_words, &mut written);
+        sweep.stop_recording();
+        DrawKey {
+            written,
+            window_space,
+            vertex_words,
+            fragment_words,
+        }
+    }
+
     /// Sets each stage's user-data count and `DX10_CLAMP` to what the registers say at the draw at
     /// `at`, which the draw's modules are translated for and repeat only with, and answers the pixel
     /// stage's words - also part of what must repeat where `with_words` (D743).
@@ -2405,11 +2460,13 @@ impl Pipeline {
             }
             written.extend(self.user_data.iter().map(|layout| Some(layout.count)));
         }
-        let words = stage_user_data(sweep, at, 1);
         if with_words {
+            let words = stage_user_data(sweep, at, 1);
             written.extend(words.iter().map(|&word| Some(word)));
+            words
+        } else {
+            sweep.unnoted(|sweep| stage_user_data(sweep, at, 1))
         }
-        words
     }
 
     /// The key a module prepared for no particular draw is held under in a submission: its stage,

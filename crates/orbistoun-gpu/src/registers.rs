@@ -450,6 +450,55 @@ pub struct RegisterSweep<'a> {
     /// anything past it goes to `beyond`.
     table: SweepTable,
     beyond: BTreeMap<u32, usize>,
+    /// The registers read while [`Self::record_reads`] was noting them.
+    noted: Noted,
+}
+
+/// The registers a sweep's caller read for something it keeps, and whether one has been given
+/// another value since: what lets a draw that repeats the last one's registers be told so without
+/// reading them all again.
+#[derive(Debug, Default)]
+struct Noted {
+    /// Whether reads are being noted now.
+    recording: bool,
+    /// Whether a set of reads was noted and is being watched.
+    keyed: bool,
+    /// Whether a write taken in since gave a noted register another value.
+    changed: bool,
+    /// One bit per register in the table's range; allocated by the first sweep that notes.
+    bits: Vec<u64>,
+    /// The registers set in `bits`, to clear them by.
+    registers: Vec<u32>,
+}
+
+impl Noted {
+    fn holds(&self, register: u32) -> bool {
+        self.bits
+            .get(register as usize / 64)
+            .is_some_and(|word| word & (1 << (register % 64)) != 0)
+    }
+
+    fn note(&mut self, register: u32) {
+        if register as usize >= SWEEP_REGISTERS {
+            // Past the table, where no write is watched: the reads count as changed every time.
+            self.keyed = false;
+            return;
+        }
+        if self.bits.is_empty() {
+            self.bits = vec![0; SWEEP_REGISTERS / 64];
+        }
+        let word = &mut self.bits[register as usize / 64];
+        if *word & (1 << (register % 64)) == 0 {
+            *word |= 1 << (register % 64);
+            self.registers.push(register);
+        }
+    }
+
+    fn forget(&mut self) {
+        for register in self.registers.drain(..) {
+            self.bits[register as usize / 64] = 0;
+        }
+    }
 }
 
 /// Registers the sweep's table covers directly.
@@ -530,7 +579,39 @@ impl<'a> RegisterSweep<'a> {
             reached: NOT_REACHED,
             table: SweepTable::take(),
             beyond: BTreeMap::new(),
+            noted: Noted::default(),
         }
+    }
+
+    /// Starts noting every register read through [`Self::latest`], forgetting those noted before.
+    pub fn record_reads(&mut self) {
+        self.noted.forget();
+        self.noted.recording = true;
+        self.noted.keyed = true;
+        self.noted.changed = false;
+    }
+
+    /// Stops noting reads. From here, a write taken in that gives a noted register another value is
+    /// what [`Self::noted_changed`] reports.
+    pub fn stop_recording(&mut self) {
+        self.noted.recording = false;
+    }
+
+    /// Runs `read` without noting the registers it reads: a read made for something besides what
+    /// the noted reads are kept for.
+    pub fn unnoted<T>(&mut self, read: impl FnOnce(&mut Self) -> T) -> T {
+        let recording = std::mem::replace(&mut self.noted.recording, false);
+        let out = read(self);
+        self.noted.recording = recording;
+        out
+    }
+
+    /// Whether, at the packet at `before`, a register noted by the last [`Self::record_reads`]
+    /// holds another value than it did when it was read. A write of the same value is no change.
+    /// Answers `true` where nothing was noted, or a noted register lies past the table.
+    pub fn noted_changed(&mut self, before: u32) -> bool {
+        self.advance(before);
+        !self.noted.keyed || self.noted.changed
     }
 
     /// The latest write to each of `registers` in force at the packet at `before`, in the order they
@@ -560,6 +641,9 @@ impl<'a> RegisterSweep<'a> {
     /// gathering, sorting and rescanning a list per draw.
     pub fn latest(&mut self, before: u32, register: u32) -> Option<u32> {
         self.advance(before);
+        if self.noted.recording {
+            self.noted.note(register);
+        }
         self.index_of(register)
             .map(|index| self.writes[index].value)
     }
@@ -580,6 +664,8 @@ impl<'a> RegisterSweep<'a> {
             self.next = 0;
             self.table.clear();
             self.beyond.clear();
+            // Walked again from the start, every write is taken in again.
+            self.noted.changed = true;
         }
         self.reached = before;
         while let Some(write) = self.writes.get(self.next) {
@@ -589,6 +675,13 @@ impl<'a> RegisterSweep<'a> {
             // A stream of more writes than a table index holds keeps the rest beside it, as it does
             // registers past the table.
             let index = u32::try_from(self.next).ok().filter(|&i| i != UNWRITTEN);
+            if self.noted.keyed
+                && !self.noted.changed
+                && self.noted.holds(write.register)
+                && self.index_of(write.register).map(|i| self.writes[i].value) != Some(write.value)
+            {
+                self.noted.changed = true;
+            }
             match (self.table.latest.get_mut(write.register as usize), index) {
                 (Some(slot), Some(index)) => {
                     if *slot == UNWRITTEN {
@@ -2929,6 +3022,47 @@ mod tests {
         assert!(in_force_at(&carried, 0));
         assert!(!in_force_at(&later, 0));
     }
+    /// A sweep tells its caller when a register it noted was given another value, and only then: a
+    /// rewrite of the same value, or a write to a register not noted, is no change. A GL frame
+    /// rewrites the same registers before each of thousands of draws, and asking this is what
+    /// spares each draw reading them all again.
+    #[test]
+    fn a_sweep_reports_a_noted_register_given_another_value() {
+        use super::{RegisterSweep, RegisterWrite};
+        let write = |packet_offset, register, value| RegisterWrite {
+            packet_offset,
+            register,
+            value,
+        };
+        let writes = [
+            write(0x10, 0x2C8C, 7),
+            write(0x10, 0x2C8D, 1),
+            // Before the second draw: the noted register rewritten with its own value, and another
+            // register given a new one.
+            write(0x30, 0x2C8C, 7),
+            write(0x30, 0x2C8D, 2),
+            // Before the third: the noted register given another value.
+            write(0x50, 0x2C8C, 8),
+        ];
+        let mut sweep = RegisterSweep::new(&writes);
+        assert!(sweep.noted_changed(0x20), "nothing noted yet");
+        sweep.record_reads();
+        assert_eq!(sweep.latest(0x20, 0x2C8C), Some(7));
+        let unnoted = sweep.unnoted(|sweep| sweep.latest(0x20, 0x2C8D));
+        assert_eq!(unnoted, Some(1), "read while noting, but not noted");
+        sweep.stop_recording();
+        assert!(!sweep.noted_changed(0x20));
+        assert!(
+            !sweep.noted_changed(0x40),
+            "the same value again, and a register not noted"
+        );
+        assert!(sweep.noted_changed(0x60), "the noted register given 8");
+        sweep.record_reads();
+        assert_eq!(sweep.latest(0x60, 0x2C8C), Some(8));
+        sweep.stop_recording();
+        assert!(!sweep.noted_changed(0x60), "noted again at its new value");
+    }
+
     /// A draw's wave widths are the ones in force at it: radeonsi on GFX10 compiles a culling
     /// primitive shader as Wave64 and the rest as Wave32 (`si_state_shaders.cpp`,
     /// `si_determine_wave_size`), and rewrites `VGT_SHADER_STAGES_EN` between such draws in one
