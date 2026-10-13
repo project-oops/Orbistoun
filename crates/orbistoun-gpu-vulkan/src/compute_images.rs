@@ -113,7 +113,17 @@ impl BoundImages {
         ];
         for (image, binding, stored) in wanted {
             let Some(image) = image else { continue };
-            let created = create_image((instance, physical, device), image, stored);
+            let key = SpareKey {
+                device: vk::Handle::as_raw(device.handle()),
+                format: image.format,
+                width: image.width,
+                height: image.height,
+                stored,
+            };
+            let created = match take_spare(device, key, image) {
+                Some(reused) => reused,
+                None => create_image((instance, physical, device), image, stored),
+            };
             match created {
                 Ok((image_handle, memory, view, staging, staging_memory)) => {
                     bound.images.push(Bound {
@@ -136,19 +146,11 @@ impl BoundImages {
             }
         }
         if bound.images.iter().any(|image| !image.stored) {
-            let info = vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::NEAREST)
-                .min_filter(vk::Filter::NEAREST)
-                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-            // SAFETY: the device is live and the create info outlives the call.
-            match unsafe { device.create_sampler(&info, None) } {
+            match kept_sampler(device) {
                 Ok(sampler) => bound.sampler = Some(sampler),
                 Err(e) => {
                     bound.destroy(device);
-                    return Err(DispatchError::Vulkan("create_sampler", e));
+                    return Err(e);
                 }
             }
         }
@@ -328,15 +330,37 @@ impl BoundImages {
         Ok(Some(texels))
     }
 
-    /// Releases everything created.
+    /// Releases everything created, once the dispatch that used it has finished: each image to
+    /// the spares while they hold few enough bytes, else destroyed. The sampler is kept.
     pub(crate) fn destroy(self, device: &ash::Device) {
+        let raw = vk::Handle::as_raw(device.handle());
         for image in self.images {
-            release_image(device, (image.image, image.memory, Some(image.view)));
-            release_buffer(device, image.staging, image.staging_memory);
-        }
-        if let Some(sampler) = self.sampler {
-            // SAFETY: as above.
-            unsafe { device.destroy_sampler(sampler, None) };
+            let key = SpareKey {
+                device: raw,
+                format: image.format,
+                width: image.width,
+                height: image.height,
+                stored: image.stored,
+            };
+            let kept = spare_images().lock().is_ok_and(|mut spares| {
+                let held: u64 = spares.iter().map(|spare| spare.key.bytes()).sum();
+                let room = held + key.bytes() <= SPARE_IMAGE_BYTES_MOST;
+                if room {
+                    spares.push(SpareImage {
+                        key,
+                        image: image.image,
+                        memory: image.memory,
+                        view: image.view,
+                        staging: image.staging,
+                        staging_memory: image.staging_memory,
+                    });
+                }
+                room
+            });
+            if !kept {
+                release_image(device, (image.image, image.memory, Some(image.view)));
+                release_buffer(device, image.staging, image.staging_memory);
+            }
         }
     }
 }
@@ -537,12 +561,7 @@ fn staging_buffer(
     (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
     image: DispatchImage<'_>,
 ) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
-    let (_, size) = image.format.words();
-    let packed: Vec<u8> = image
-        .texels
-        .iter()
-        .flat_map(|word| word.to_le_bytes().into_iter().take(size))
-        .collect();
+    let packed = packed_texels(image);
     let bytes = packed.len() as vk::DeviceSize;
     let info = vk::BufferCreateInfo::default()
         .size(bytes)
@@ -572,17 +591,8 @@ fn staging_buffer(
         }
     };
     // SAFETY: buffer and memory come from this device and the allocation is large enough.
-    let filled = unsafe { device.bind_buffer_memory(buffer, memory, 0) }.and_then(|()| {
-        // SAFETY: the memory is host-visible, holds `bytes`, and is not mapped.
-        let mapped = unsafe { device.map_memory(memory, 0, bytes, vk::MemoryMapFlags::empty()) }?;
-        // SAFETY: the mapping covers `packed.len()` bytes, exclusively ours while mapped.
-        unsafe {
-            std::ptr::copy_nonoverlapping(packed.as_ptr(), mapped.cast::<u8>(), packed.len());
-        }
-        // SAFETY: mapped just above, and the copy into it has finished.
-        unsafe { device.unmap_memory(memory) };
-        Ok(())
-    });
+    let filled = unsafe { device.bind_buffer_memory(buffer, memory, 0) }
+        .and_then(|()| fill_staging(device, memory, &packed));
     match filled {
         Ok(()) => Ok((buffer, memory)),
         Err(e) => {
@@ -590,6 +600,138 @@ fn staging_buffer(
             Err(DispatchError::Vulkan("fill(dispatch image)", e))
         }
     }
+}
+
+/// An image's texels packed as its staging buffer holds them: each texel's own bytes of each word.
+/// Where every byte of a word is the texel's, that is the words as they lie, and nothing is copied.
+fn packed_texels(image: DispatchImage<'_>) -> std::borrow::Cow<'_, [u8]> {
+    let (_, size) = image.format.words();
+    if size == 4 {
+        return std::borrow::Cow::Borrowed(zerocopy::IntoBytes::as_bytes(image.texels));
+    }
+    std::borrow::Cow::Owned(
+        image
+            .texels
+            .iter()
+            .flat_map(|word| word.to_le_bytes().into_iter().take(size))
+            .collect(),
+    )
+}
+
+/// Copies `packed` into a staging buffer's host-visible `memory`, which holds at least that many
+/// bytes and is not mapped.
+fn fill_staging(
+    device: &ash::Device,
+    memory: vk::DeviceMemory,
+    packed: &[u8],
+) -> Result<(), vk::Result> {
+    let bytes = packed.len() as vk::DeviceSize;
+    // SAFETY: the memory is host-visible, holds `bytes`, and is not mapped.
+    let mapped = unsafe { device.map_memory(memory, 0, bytes, vk::MemoryMapFlags::empty()) }?;
+    // SAFETY: the mapping covers `packed.len()` bytes, exclusively ours while mapped.
+    unsafe {
+        std::ptr::copy_nonoverlapping(packed.as_ptr(), mapped.cast::<u8>(), packed.len());
+    }
+    // SAFETY: mapped just above, and the copy into it has finished.
+    unsafe { device.unmap_memory(memory) };
+    Ok(())
+}
+
+/// A dispatch image a finished dispatch released, kept for the next of the same device, format,
+/// extent and use, as a dispatch's buffers are (D805): every reuse uploads the whole image from its
+/// staging buffer, refilled with the new texels, from an undefined layout, so nothing it held is
+/// ever read.
+struct SpareImage {
+    key: SpareKey,
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+    staging: vk::Buffer,
+    staging_memory: vk::DeviceMemory,
+}
+
+/// What a spare image must match to be reused: the device, the format, the extent and whether it
+/// is stored to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpareKey {
+    device: u64,
+    format: DispatchFormat,
+    width: u32,
+    height: u32,
+    stored: bool,
+}
+
+impl SpareKey {
+    /// Bytes it holds, on the device and in its staging buffer together.
+    fn bytes(self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * self.format.bytes() as u64 * 2
+    }
+}
+
+/// The spare images.
+fn spare_images() -> &'static std::sync::Mutex<Vec<SpareImage>> {
+    static SPARES: std::sync::Mutex<Vec<SpareImage>> = std::sync::Mutex::new(Vec::new());
+    &SPARES
+}
+
+/// The most bytes the spare images hold together: a frame's few dispatch images, with room to
+/// spare.
+const SPARE_IMAGE_BYTES_MOST: u64 = 128 << 20;
+
+/// A spare image matching `key`, its staging buffer refilled with `texels`; `None` where none is
+/// kept, or the refill failed (the spare is then released).
+fn take_spare(
+    device: &ash::Device,
+    key: SpareKey,
+    texels: DispatchImage<'_>,
+) -> Option<Result<Created, DispatchError>> {
+    let words = texels.width as usize * texels.height as usize * texels.format.words().0;
+    if texels.texels.len() != words || words == 0 {
+        return None;
+    }
+    let spare = {
+        let mut spares = spare_images().lock().ok()?;
+        let at = spares.iter().position(|spare| spare.key == key)?;
+        spares.swap_remove(at)
+    };
+    if fill_staging(device, spare.staging_memory, &packed_texels(texels)).is_err() {
+        release_image(device, (spare.image, spare.memory, Some(spare.view)));
+        release_buffer(device, spare.staging, spare.staging_memory);
+        return None;
+    }
+    Some(Ok((
+        spare.image,
+        spare.memory,
+        spare.view,
+        spare.staging,
+        spare.staging_memory,
+    )))
+}
+
+/// The sampler every fetched image is bound with, kept per device: its settings never change.
+fn kept_sampler(device: &ash::Device) -> Result<vk::Sampler, DispatchError> {
+    static KEPT: std::sync::Mutex<Option<(u64, vk::Sampler)>> = std::sync::Mutex::new(None);
+    let mut kept = KEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let raw = vk::Handle::as_raw(device.handle());
+    if let Some((on, sampler)) = *kept
+        && on == raw
+    {
+        return Ok(sampler);
+    }
+    let info = vk::SamplerCreateInfo::default()
+        .mag_filter(vk::Filter::NEAREST)
+        .min_filter(vk::Filter::NEAREST)
+        .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+    // SAFETY: the device is live and the create info outlives the call.
+    let sampler = unsafe { device.create_sampler(&info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_sampler", e))?;
+    *kept = Some((raw, sampler));
+    Ok(sampler)
 }
 
 /// Releases an image, its memory and its view, each created on `device` and no longer in use: never
@@ -614,4 +756,76 @@ fn release_buffer(device: &ash::Device, buffer: vk::Buffer, memory: vk::DeviceMe
     unsafe { device.destroy_buffer(buffer, None) };
     // SAFETY: as above, for its memory.
     unsafe { device.free_memory(memory, None) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BoundImages, DispatchFormat, DispatchImage, DispatchImages};
+    use crate::compute::{Availability, Session, probe, session};
+
+    /// An extent no other test uses, so the spares hold none of it before.
+    const WIDTH: u32 = 37;
+    const HEIGHT: u32 = 11;
+
+    /// A dispatch that fetches `texels` as one image of that extent.
+    fn images(texels: &[u32]) -> DispatchImages<'_> {
+        DispatchImages {
+            fetched: Some(DispatchImage {
+                texels,
+                format: DispatchFormat::Rgba8,
+                width: WIDTH,
+                height: HEIGHT,
+            }),
+            stored: None,
+        }
+    }
+
+    /// A finished dispatch's images are kept for the next of the same format, extent and use: the
+    /// second binds the very image the first released, its staging buffer holds its own texels, and
+    /// both fetch through the one kept sampler.
+    #[test]
+    fn a_dispatch_s_images_are_reused_by_the_next() {
+        if let Availability::Unavailable { reason } = probe() {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+        let session = session().expect("a session");
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Session {
+            ref instance,
+            physical,
+            ref device,
+            ..
+        } = *session;
+        let context = (instance, physical, device);
+        let (width, height) = (WIDTH, HEIGHT);
+        let first_texels = vec![1; (width * height) as usize];
+        let first = BoundImages::create(context, &images(&first_texels)).expect("created");
+        let (image, sampler) = (first.images[0].image, first.sampler);
+        first.destroy(device);
+        let second_texels = vec![0x0203_0405; (width * height) as usize];
+        let second = BoundImages::create(context, &images(&second_texels)).expect("created");
+        let reused = (second.images[0].image, second.sampler);
+        let staged = crate::compute::read_back(
+            device,
+            &crate::compute::DispatchBuffer {
+                buffer: second.images[0].staging,
+                memory: second.images[0].staging_memory,
+                size: u64::from(width * height) * 4,
+                words: (width * height) as usize,
+                offset: 0,
+            },
+        );
+        second.destroy(device);
+        assert_eq!(reused, (image, sampler), "the image and sampler kept");
+        assert!(
+            staged
+                .expect("read")
+                .iter()
+                .all(|&texel| texel == 0x0203_0405),
+            "the second's own texels"
+        );
+    }
 }
