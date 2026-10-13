@@ -1192,12 +1192,6 @@ impl GuestWrites {
         }
     }
 
-    /// Room for `runs` more runs of `bytes` bytes in all.
-    fn reserve(&mut self, runs: usize, bytes: usize) {
-        self.runs.reserve(runs);
-        self.bytes.reserve(bytes);
-    }
-
     /// A run of `bytes` at `at`.
     fn push(&mut self, at: u64, bytes: &[u8]) {
         let start = self.bytes.len();
@@ -1281,21 +1275,82 @@ fn buffer_writes(
     after: &[crate::dispatch::BufferAfter],
 ) -> Result<(GuestWrites, Vec<cp::Fill>), String> {
     let mut writes = GuestWrites::default();
-    let fills = buffer_writes_into(&mut writes, ranges, before, after)?;
+    let mut scattered = Vec::new();
+    let fills = buffer_writes_into((&mut writes, &mut scattered), ranges, before, after)?;
+    for buffer in scattered {
+        buffer.push_runs(&mut writes);
+    }
     Ok((writes, fills))
 }
 
+/// The words a dispatch stored to a buffer it did not read (D809), as the device listed them: each
+/// index's word lies at the buffer's address and four bytes an index on, the last cut where the
+/// buffer's range ends. Written back straight from the list rather than as a run each:
+/// PPSA25872's dispatches store some 34 000 scattered words to one buffer, and a run apiece, made
+/// and then copied, cost 0.2 ms of each.
+#[derive(Debug, Clone, Copy)]
+struct Scattered<'a> {
+    address: u64,
+    bytes: u64,
+    indices: &'a [u32],
+    values: &'a [u32],
+}
+
+impl Scattered<'_> {
+    /// Each word's address and the bytes of it the range holds.
+    fn words(&self) -> impl Iterator<Item = (u64, [u8; 4], usize)> + '_ {
+        self.indices
+            .iter()
+            .zip(self.values)
+            .map(|(&index, &value)| {
+                let start = u64::from(index) * 4;
+                let held = usize::try_from(self.bytes.saturating_sub(start).min(4)).unwrap_or(0);
+                (self.address + start, value.to_le_bytes(), held)
+            })
+    }
+
+    /// The first and last byte past what it writes: the list is ascending, so its first and last
+    /// words bound it.
+    fn span(&self) -> Option<(u64, u64)> {
+        let (&first, &last) = (self.indices.first()?, self.indices.last()?);
+        let start = self.address + u64::from(first) * 4;
+        let end = (self.address + u64::from(last) * 4 + 4).min(self.address + self.bytes);
+        (end > start).then_some((start, end))
+    }
+
+    /// Its words as runs of consecutive indices, for a test to compare as the runs were.
+    #[cfg(test)]
+    fn push_runs(&self, writes: &mut GuestWrites) {
+        let mut at = 0;
+        while at < self.indices.len() {
+            let mut count = 1;
+            while self
+                .indices
+                .get(at + count)
+                .is_some_and(|&index| index == self.indices[at + count - 1].wrapping_add(1))
+            {
+                count += 1;
+            }
+            let start = u64::from(self.indices[at]) * 4;
+            let most = usize::try_from(self.bytes.saturating_sub(start)).unwrap_or(0);
+            writes.push_words(self.address + start, &self.values[at..at + count], most);
+            at += count;
+        }
+    }
+}
+
 /// [`buffer_writes`], its writes added to `writes` rather than gathered on their own and copied
-/// over after, and answering its fills.
+/// over after - but for a buffer whose stored words the device listed, which goes to `scattered`
+/// to be written straight from the list - and answering its fills.
 ///
 /// # Errors
 ///
 /// As [`buffer_writes`].
-fn buffer_writes_into(
-    writes: &mut GuestWrites,
+fn buffer_writes_into<'a>(
+    (writes, scattered): (&mut GuestWrites, &mut Vec<Scattered<'a>>),
     ranges: &[(u64, u64)],
     before: &[crate::dispatch::BufferBefore],
-    after: &[crate::dispatch::BufferAfter],
+    after: &'a [crate::dispatch::BufferAfter],
 ) -> Result<Vec<cp::Fill>, String> {
     use crate::dispatch::BufferBefore;
     if after.len() != before.len() {
@@ -1347,18 +1402,22 @@ fn buffer_writes_into(
                 }) {
                     return Err("the device stored past a buffer's end".to_owned());
                 }
-                // At most a run and a word for each listed word.
-                if let Some((indices, _)) = &after.listed {
-                    writes.reserve(indices.len(), indices.len() * 4);
-                }
-                let stored = Box::new(after.stored_words());
                 // Stored whole with one word, it is a fill.
                 let whole = after.stored_whole(size)
                     && after
                         .whole_words()
                         .split_first()
                         .is_some_and(|(&pattern, rest)| rest.iter().all(|&word| word == pattern));
-                (stored, whole)
+                if !whole && let Some((indices, values)) = &after.listed {
+                    scattered.push(Scattered {
+                        address,
+                        bytes,
+                        indices,
+                        values,
+                    });
+                    continue;
+                }
+                (Box::new(after.stored_words()), whole)
             }
         };
         let mut runs = runs.peekable();
@@ -1533,8 +1592,9 @@ impl GuestCp<'_> {
                 );
             }
         }
+        let mut scattered = Vec::new();
         let buffer_fills = buffer_writes_into(
-            &mut writes,
+            (&mut writes, &mut scattered),
             &prepared.buffers,
             &buffers_before,
             &buffers_after,
@@ -1542,7 +1602,7 @@ impl GuestCp<'_> {
         writes.append(&stored_image_writes(&prepared.images, stored)?);
         drop(working_out);
         span(Span::WriteBackGuest, || {
-            self.write_back_dispatch(&writes, &buffer_fills)
+            self.write_back_dispatch(&writes, &scattered, &buffer_fills)
         })?;
         writes.keep();
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
@@ -2328,6 +2388,7 @@ fn write_guest(address: u64, bytes: &[u8]) -> bool {
         return false;
     }
     unprotect_overlapping(address, bytes.len() as u64);
+    orbistoun_mem::watch::release_overlapping(address, bytes.len() as u64);
     // SAFETY: the installed lookup vouched that `[address, address + len)` lies wholly inside one
     // identity-mapped guest mapping whose protection allows writes: `len` writable bytes of this
     // process. A deferred copy's destination and a protected target (D720) have their host
@@ -2823,10 +2884,13 @@ impl GuestCp<'_> {
     /// changed, often thousands close together, so the writability lookup, the deferred copies, the
     /// pending frame and the protected target are each asked once for a stretch of neighbouring
     /// runs rather than once per run. Only the runs' own bytes are written: what lies between them
-    /// may have been written by the guest since it was read.
+    /// may have been written by the guest since it was read. The words of `scattered` buffers follow
+    /// the runs, each buffer asked about once for the span its words cover; a dispatch's buffers are
+    /// written by its lanes in no order the hardware promises, so that order is as good as any.
     fn write_back_dispatch(
         &mut self,
         writes: &GuestWrites,
+        scattered: &[Scattered<'_>],
         fills: &[cp::Fill],
     ) -> Result<(), String> {
         let writable = write_lookup().get();
@@ -2846,7 +2910,28 @@ impl GuestCp<'_> {
                         .all(|(at, bytes)| allowed(at, bytes.len() as u64))
             })
         };
+        // A buffer's span not writable as a whole has each word checked on its own.
+        let scattered_whole: Vec<Option<(u64, u64)>> = scattered
+            .iter()
+            .map(|buffer| {
+                buffer
+                    .span()
+                    .filter(|&(first, end)| allowed(first, end - first))
+            })
+            .collect();
+        let each_word = || {
+            scattered
+                .iter()
+                .zip(&scattered_whole)
+                .all(|(buffer, whole)| {
+                    whole.is_some()
+                        || buffer
+                            .words()
+                            .all(|(at, _, held)| held == 0 || allowed(at, held as u64))
+                })
+        };
         if !each_run()
+            || !each_word()
             || !fills
                 .iter()
                 .all(|fill| allowed(fill.destination, fill.count))
@@ -2858,6 +2943,11 @@ impl GuestCp<'_> {
                 return Err("a write back into guest memory was refused".to_owned());
             }
         }
+        for (buffer, whole) in scattered.iter().zip(scattered_whole) {
+            if !self.write_scattered(buffer, whole) {
+                return Err("a write back into guest memory was refused".to_owned());
+            }
+        }
         for fill in fills {
             let count = usize::try_from(fill.count).map_err(|_| "a fill past this host's reach")?;
             if !cp::CpMemory::fill(self, fill.destination, fill.pattern, count) {
@@ -2865,6 +2955,40 @@ impl GuestCp<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Writes a scattered buffer's words, settling the span they cover once where `whole` - the span,
+    /// writable as a whole - is given; otherwise each word through the checked path.
+    fn write_scattered(&mut self, buffer: &Scattered<'_>, whole: Option<(u64, u64)>) -> bool {
+        let Some((first, end)) = whole else {
+            return buffer
+                .words()
+                .all(|(at, bytes, held)| held == 0 || write_guest(at, &bytes[..held]));
+        };
+        let length = end - first;
+        if !carry_out_overlapping(first, length) || !self.settle_pending(first, length) {
+            return false;
+        }
+        unprotect_overlapping(first, length);
+        orbistoun_mem::watch::release_overlapping(first, length);
+        for (at, bytes, held) in buffer.words() {
+            let Ok(dest) = usize::try_from(at) else {
+                return false;
+            };
+            let dest = std::ptr::with_exposed_provenance_mut::<u8>(dest);
+            if held == 4 {
+                // SAFETY: the installed lookup vouched that `[first, end)`, which holds this word's
+                // four bytes, lies inside identity-mapped guest mappings whose protection allows
+                // writes, and the pages guarded in it were given their protection back above, so
+                // nothing here faults; the store is unaligned-safe.
+                unsafe { std::ptr::write_unaligned(dest.cast::<[u8; 4]>(), bytes) };
+                continue;
+            }
+            // SAFETY: as above, for the `held` bytes of the word the range holds, at most four,
+            // all of them in the source.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest, held) };
+        }
+        true
     }
 
     /// Writes `runs`, which lie within `[first, end)`, settling the stretch once; a stretch not
@@ -2885,6 +3009,8 @@ impl GuestCp<'_> {
                 .all(|(at, bytes)| write_guest(at, bytes));
         }
         unprotect_overlapping(first, length);
+        // A write-watch guard (D824) is released rather than faulted through.
+        orbistoun_mem::watch::release_overlapping(first, length);
         for (at, bytes) in writes.runs_in(runs) {
             let Ok(dest) = usize::try_from(at) else {
                 return false;
@@ -4918,6 +5044,55 @@ mod tests {
             );
             address >= start && address.saturating_add(length) <= start.saturating_add(len)
         });
+    }
+
+    /// A buffer's listed words written straight from the list leave memory as writing them run by
+    /// run does - consecutive and scattered words, the last cut where the range ends - and a buffer
+    /// outside what may be written writes nothing.
+    #[test]
+    fn scattered_words_write_back_as_their_runs_do() {
+        use super::{GuestCp, GuestWrites, MappedRegions, Scattered};
+        let _guard = serial();
+        let span = 0x2000usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0x5au8; span].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        allow_writes_to(base, span as u64);
+        let indices = [0u32, 1, 7, 300, 301, 302, 0x3fe];
+        let values: Vec<u32> = indices.iter().map(|&i| 0x1000_0000 | i).collect();
+        // The range ends two bytes into the last word.
+        let buffer = Scattered {
+            address: base + 0x10,
+            bytes: 0x3fe * 4 + 2,
+            indices: &indices,
+            values: &values,
+        };
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        cp.write_back_dispatch(&GuestWrites::default(), &[buffer], &[])
+            .expect("written");
+        let scattered = memory.to_vec();
+
+        memory.fill(0x5a);
+        let mut runs = GuestWrites::default();
+        buffer.push_runs(&mut runs);
+        assert_eq!(runs.runs.len(), 4, "consecutive words make one run");
+        cp.write_back_dispatch(&runs, &[], &[]).expect("written");
+        assert_eq!(scattered, memory.to_vec());
+        let last = 0x10 + 0x3fe * 4;
+        assert_eq!(&scattered[last..last + 4], &[0xfe, 0x03, 0x5a, 0x5a]);
+
+        memory.fill(0x5a);
+        let outside = Scattered {
+            address: base + span as u64,
+            ..buffer
+        };
+        assert!(
+            cp.write_back_dispatch(&GuestWrites::default(), &[outside], &[])
+                .is_err()
+        );
+        assert!(memory.iter().all(|&byte| byte == 0x5a), "nothing written");
     }
 
     /// The lazy-copy hooks every test here shares (the first install wins): snapshots and
