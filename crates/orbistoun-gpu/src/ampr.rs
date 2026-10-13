@@ -19,6 +19,8 @@ guest_module! {
         // PPSA04263's wrapper calls it.
         "sceAmprAprCommandBufferReadFile" => 6,
         "sceAmprCommandBufferConstructor" => 6,
+        // (obj)
+        "sceAmprCommandBufferGetCurrentOffset" => 1,
         "sceAmprCommandBufferReset" => 6,
         "sceAmprCommandBufferSetBuffer" => 6,
         // (obj, address, value, 0), as PPSA04263's wrapper calls it.
@@ -80,6 +82,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             command_buffer_write_address,
         ),
         ("sceAmprCommandBufferReset", command_buffer_reset),
+        (
+            "sceAmprCommandBufferGetCurrentOffset",
+            command_buffer_get_current_offset,
+        ),
         (
             "sceAmprAprCommandBufferConstructor",
             apr_command_buffer_constructor,
@@ -233,6 +239,16 @@ fn command_buffer_write_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
+/// `sceAmprCommandBufferGetCurrentOffset(obj)`: the bytes the bound buffer's commands take, the
+/// object's +4 - 0 on a freshly bound buffer, 0xc after one write-address of 0x12345678
+/// (REQ-aw03, `000-boot/ampr-command-buffer-queries`). Measured as a 32-bit answer; the high half
+/// of `rax` is answered zero. An object that cannot be read answers 0, which PPSA04263 traps on
+/// rather than reading as a size.
+fn command_buffer_get_current_offset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's own constructed object, at its measured field.
+    unsafe { guest::read_u32(args[0] + USED_AT) }.map_or(0, u64::from)
+}
+
 /// `sceAmprCommandBufferReset(obj)`: answers 0 and, measured after a binding, leaves the object as
 /// it was - the bound buffer and its size kept.
 fn command_buffer_reset(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -311,5 +327,26 @@ mod tests {
         );
         let word = |at: usize| u32::from_le_bytes(object[at..at + 4].try_into().expect("four"));
         assert_eq!((word(4), word(8)), (0x20, 3), "used bytes and commands");
+    }
+
+    /// The current offset is 0 on a freshly bound buffer and 0xc after one write-address of
+    /// 0x12345678, as the console answered (REQ-aw03).
+    #[test]
+    fn the_current_offset_is_the_bytes_the_commands_take() {
+        use orbistoun_core::GUEST_ARG_REGISTERS;
+        let mut buffer = [0xcc_u8; 0x1000];
+        let mut object = [0xa5_u8; 0x40];
+        let obj = object.as_mut_ptr() as u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = obj;
+        assert_eq!(super::command_buffer_constructor(&args), obj);
+        args[..3].copy_from_slice(&[obj, buffer.as_mut_ptr() as u64, 0x1000]);
+        assert_eq!(super::command_buffer_set_buffer(&args), 0);
+        args[1..3].copy_from_slice(&[0, 0]);
+        assert_eq!(super::command_buffer_get_current_offset(&args), 0);
+        let mut slot = [0xcc_u8; 8];
+        args[..4].copy_from_slice(&[obj, slot.as_mut_ptr() as u64, 0x1234_5678, 0]);
+        assert_eq!(super::command_buffer_write_address(&args), 0);
+        assert_eq!(super::command_buffer_get_current_offset(&args), 0xc);
     }
 }

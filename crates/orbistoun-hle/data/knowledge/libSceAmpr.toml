@@ -84,6 +84,21 @@ found_in = ["PPSA28061-app0"]
 found_on = "2026-10-11"
 
 [[function]]
+name = "sceAmprCommandBufferGetCurrentOffset"
+arity = 1
+purpose = "(obj): the bytes the bound buffer's commands take so far, the object's +4."
+returns = "count"
+edge_cases = [
+    "MEASURED (REQ-aw03, link-bound): 0 after construction and a 0x1000-byte SetBuffer, 0xc after one WriteAddress_04_00 of 0x12345678 - the 12 bytes that command appends.",
+    "Read as a 32-bit answer by the probe; orbistoun answers the high half of rax zero. An unreadable object answers 0.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2235Z-aw03, reports/hardware/report-20261013-172400.log lines 3939-3945 (000-boot/ampr-command-buffer-queries)."
+found_in = ["PPSA04263-app0", "PPSA21564-app0", "PPSA28061-app0"]
+found_on = "2026-10-13"
+
+[[function]]
 name = "sceAmprCommandBufferWriteAddress_04_00"
 purpose = "(obj, address, value, flags): appends to the bound buffer a command that writes value to address when the buffer runs."
 returns = "status"
