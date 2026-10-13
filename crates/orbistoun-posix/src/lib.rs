@@ -771,22 +771,89 @@ pub fn implementations() -> Vec<(&'static str, GuestFn)> {
             .map(|(_, function)| *function)
     };
     let _ = FILE_TWINS.set(FILE_CALLS.map(|(_, vendor, _)| found(vendor)));
+    let pthreads: Vec<&(&str, &str)> = DELEGATED
+        .iter()
+        .filter(|(posix, _)| is_pthread(posix))
+        .collect();
+    let twins =
+        PTHREAD_TWINS.get_or_init(|| pthreads.iter().map(|(_, vendor)| found(vendor)).collect());
     DELEGATED
         .iter()
         .filter_map(|(posix, vendor)| {
             // The file calls fail the POSIX way, so they are served by a wrapper that translates
-            // their twin's vendor code; everything else is the twin's own pointer.
+            // their twin's vendor code; so do the pthread calls, with a bare errno.
             let translating = FILE_CALLS
                 .iter()
                 .find(|(name, _, _)| name == posix)
                 .map(|(_, _, wrapper)| *wrapper);
-            match translating {
-                Some(wrapper) => found(vendor).map(|_| (*posix, wrapper)),
-                None => found(vendor).map(|function| (*posix, function)),
+            let pthread = pthreads
+                .iter()
+                .position(|(name, _)| name == posix)
+                .and_then(|index| Some(index).zip(PTHREAD_WRAPPERS.get(index)));
+            match (translating, pthread) {
+                (Some(wrapper), _) => found(vendor).map(|_| (*posix, wrapper)),
+                (None, Some((index, wrapper))) => twins
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .map(|_| (*posix, *wrapper)),
+                (None, None) => found(vendor).map(|function| (*posix, function)),
             }
         })
         .collect()
 }
+
+/// Whether a POSIX name is one of the pthread family, which fails with a bare error number.
+fn is_pthread(posix: &str) -> bool {
+    posix.starts_with("pthread_") || posix.starts_with("posix_pthread_")
+}
+
+/// The vendor twin each pthread name in [`DELEGATED`] calls, in the order they appear there.
+static PTHREAD_TWINS: std::sync::OnceLock<Vec<Option<GuestFn>>> = std::sync::OnceLock::new();
+
+/// Calls pthread twin `I` and reports its failure the POSIX pthread way: the error number itself,
+/// as POSIX.1-2008 specifies for every `pthread_` function, and as a console answered
+/// `posix_pthread_rwlock_trywrlock` on a read-held lock - a bare `0x10` (obSCEne
+/// `019-posixerr/pthread-encoding`, encoding 1, `reports/report-1789484735.txt`). Only a vendor
+/// code, `0x8002_0000 | errno`, is rewritten; any other answer - success, a pointer, or a bare
+/// errno from a POSIX-named twin - passes through.
+fn pthread_call<const I: usize>(args: &[u64; orbistoun_core::GUEST_ARG_REGISTERS]) -> u64 {
+    let twin = PTHREAD_TWINS
+        .get()
+        .and_then(|twins| twins.get(I).copied().flatten());
+    match twin {
+        Some(twin) => bare_errno(twin(args)),
+        // Unreachable, since a wrapper is registered only when its twin was found.
+        None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// A vendor code's error number; anything else unchanged.
+const fn bare_errno(answer: u64) -> u64 {
+    if answer & !0xff == orbistoun_core::VENDOR_ERROR_BASE as u64 {
+        answer & 0xff
+    } else {
+        answer
+    }
+}
+
+/// One wrapper per index, for [`pthread_call`]: a `GuestFn` carries no state, so the index is
+/// the type's. More than [`DELEGATED`] holds, which the test below checks.
+macro_rules! pthread_wrappers {
+    ($($index:literal)*) => {
+        const PTHREAD_WRAPPERS: &[GuestFn] = &[$(pthread_call::<$index>,)*];
+    };
+}
+
+pthread_wrappers!(
+    0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31
+    32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63
+    64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95
+    96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119
+    120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141 142 143
+    144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159 160 161 162 163 164 165 166 167
+    168 169 170 171 172 173 174 175 176 177 178 179 180 181 182 183 184 185 186 187 188 189 190 191
+);
 
 /// The POSIX file calls whose failures are reported the POSIX way: `-1` with `errno` set.
 ///
@@ -839,6 +906,64 @@ mod tests {
     /// Every delegation finds the function it names, asserted exactly, so a renamed vendor
     /// function cannot leave a POSIX name answered by nobody.
     #[test]
+    fn there_is_a_wrapper_for_every_pthread_name() {
+        let pthreads = super::DELEGATED
+            .iter()
+            .filter(|(posix, _)| super::is_pthread(posix))
+            .count();
+        assert!(
+            pthreads <= super::PTHREAD_WRAPPERS.len(),
+            "{pthreads} pthread names and {} wrappers",
+            super::PTHREAD_WRAPPERS.len()
+        );
+    }
+
+    /// A pthread call answers a bare error number where its vendor twin answers the vendor code:
+    /// a trylock of a held mutex is `EBUSY`, 16, and `scePthreadMutexTrylock` `0x80020010`. Only
+    /// the vendor range is rewritten.
+    #[test]
+    fn a_pthread_call_fails_with_a_bare_error_number() {
+        let served = super::implementations();
+        let call = |name: &str, first: u64| {
+            let (_, f) = served
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("{name} is served"));
+            let mut args = [0_u64; orbistoun_core::GUEST_ARG_REGISTERS];
+            args[0] = first;
+            f(&args)
+        };
+        let mut mutex = 0_u64;
+        let at = std::ptr::addr_of_mut!(mutex) as u64;
+        assert_eq!(call("pthread_mutex_init", at), 0);
+        assert_eq!(call("pthread_mutex_lock", at), 0);
+        let held = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    (
+                        call("pthread_mutex_trylock", at),
+                        call("posix_pthread_mutex_trylock", at),
+                    )
+                })
+                .join()
+                .expect("joined")
+        });
+        assert_eq!(held, (16, 16), "EBUSY, bare");
+        assert_eq!(call("pthread_mutex_unlock", at), 0);
+        assert_eq!(super::bare_errno(0x8002_0010), 0x10);
+        assert_eq!(
+            super::bare_errno(0x8041_0123),
+            0x8041_0123,
+            "another facility"
+        );
+        assert_eq!(
+            super::bare_errno(0x5e2d_0000_1000),
+            0x5e2d_0000_1000,
+            "a pointer"
+        );
+    }
+
+    #[test]
     fn every_delegation_resolves_to_a_real_implementation() {
         let served = super::implementations();
         // Names the offenders rather than only counting them.
@@ -889,10 +1014,17 @@ mod tests {
             ("pthread_sigmask", "_sigprocmask"),
             ("pthread_set_name_np", "scePthreadRename"),
         ] {
-            let found = served
+            assert!(served.iter().any(|(name, _)| *name == posix));
+            // A pthread name is served by a wrapper that translates its twin's failures; the twin
+            // is the call it names.
+            let index = super::DELEGATED
                 .iter()
-                .find(|(name, _)| *name == posix)
-                .map(|(_, f)| *f);
+                .filter(|(name, _)| super::is_pthread(name))
+                .position(|(name, _)| *name == posix)
+                .expect("a pthread name");
+            let found = super::PTHREAD_TWINS
+                .get()
+                .and_then(|twins| twins.get(index).copied().flatten());
             let delegate = orbistoun_kernel::implementations()
                 .iter()
                 .find(|(name, _)| *name == vendor)

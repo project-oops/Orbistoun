@@ -1827,18 +1827,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_attr_destroy"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadAttrDestroy`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadAttrDestroy`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadAttrDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -1876,18 +1875,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_attr_getschedparam"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadAttrGetschedparam`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadAttrGetschedparam`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadAttrGetschedparam`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -1929,18 +1927,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_attr_init"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadAttrInit`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadAttrInit`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadAttrInit`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -1986,18 +1983,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_attr_setschedparam"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadAttrSetschedparam`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadAttrSetschedparam`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadAttrSetschedparam`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2027,18 +2023,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_attr_setstacksize"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadAttrSetstacksize`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadAttrSetstacksize`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadAttrSetstacksize`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2120,18 +2115,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_cond_broadcast"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadCondBroadcast`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadCondBroadcast`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadCondBroadcast`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2139,18 +2133,17 @@ found_on = "2026-08-27"
 [[function]]
 name = "pthread_cond_destroy"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadCondDestroy`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadCondDestroy`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadCondDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2163,14 +2156,13 @@ returns = "status"
 edge_cases = [
     "**Two arguments, not the three its vendor twin takes.** `scePthreadCondInit` ends in a name and the POSIX call has no argument for it, so delegating meant reading a register the caller never set - `zftpd` faulted on a stale `rdx` while initialising its client table (D385). It is written under its POSIX name in `orbistoun-kernel`, beside the vendor one it wraps with no name.",
     "Wraps `scePthreadCondInit` with an empty name; every other argument is that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2188,18 +2180,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_cond_signal"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadCondSignal`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadCondSignal`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadCondSignal`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2217,18 +2208,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_cond_wait"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadCondWait`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadCondWait`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadCondWait`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2300,14 +2290,13 @@ returns = "status"
 edge_cases = [
     "**Two arguments, not the three its vendor twin takes.** `scePthreadCreate` ends in a name and the POSIX call has no argument for it, so delegating meant reading a register the caller never set - `zftpd` faulted on a stale `rdx` while initialising its client table (D385). It is written under its POSIX name in `orbistoun-kernel`, beside the vendor one it wraps with no name.",
     "Wraps `scePthreadCreate` with an empty name; every other argument is that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2403,18 +2392,17 @@ found_on = "2026-09-01"
 [[function]]
 name = "pthread_join"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadJoin`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadJoin`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadJoin`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2446,18 +2434,17 @@ found_on = "2026-09-01"
 [[function]]
 name = "pthread_mutex_destroy"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadMutexDestroy`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexDestroy`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2470,14 +2457,13 @@ returns = "status"
 edge_cases = [
     "**Two arguments, not the three its vendor twin takes.** `scePthreadMutexInit` ends in a name and the POSIX call has no argument for it, so delegating meant reading a register the caller never set - `zftpd` faulted on a stale `rdx` while initialising its client table (D385). It is written under its POSIX name in `orbistoun-kernel`, beside the vendor one it wraps with no name.",
     "Wraps `scePthreadMutexInit` with an empty name; every other argument is that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2485,18 +2471,17 @@ found_on = "2026-08-27"
 [[function]]
 name = "pthread_mutex_lock"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadMutexLock`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexLock`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexLock`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2526,18 +2511,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_mutex_unlock"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadMutexUnlock`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexUnlock`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexUnlock`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2545,18 +2529,17 @@ found_on = "2026-08-27"
 [[function]]
 name = "pthread_mutexattr_destroy"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadMutexattrDestroy`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexattrDestroy`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexattrDestroy`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2606,18 +2589,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_mutexattr_init"
 arity = 1
-purpose = "The POSIX spelling of `scePthreadMutexattrInit`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexattrInit`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexattrInit`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2634,18 +2616,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_mutexattr_setprotocol"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadMutexattrSetprotocol`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexattrSetprotocol`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexattrSetprotocol`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2662,18 +2643,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_mutexattr_settype"
 arity = 2
-purpose = "The POSIX spelling of `scePthreadMutexattrSettype`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadMutexattrSettype`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadMutexattrSettype`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2858,18 +2838,17 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_self"
 arity = 0
-purpose = "The POSIX spelling of `scePthreadSelf`, and the same function pointer. Declared 2026-08-27."
+purpose = "The POSIX spelling of `scePthreadSelf`, served by a wrapper that answers its failures as a bare error number. Declared 2026-08-27."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadSelf`; the arguments are that function's, and its knowledge entry is the one that describes them.",
-    "A guest importing both spellings reaches one implementation, so they cannot answer differently.",
+    "It reaches the vendor spelling's implementation and answers what it answers, except that a failure is the bare error number where the vendor spelling answers 0x8002_0000 | errno: POSIX.1-2008 has every pthread function return its error number, and a console answered posix_pthread_rwlock_trywrlock on a read-held lock with a bare 0x10 (obSCEne 019-posixerr/pthread-encoding, reports/report-1789484735.txt).",
     "A failure returns this project's placeholder rather than an errno. It deliberately avoids the high bit, so it can never be mistaken for an established value: a guest testing `!= 0` takes its error path correctly, and one switching on specific values falls to its default branch rather than matching the wrong case.",
 ]
 found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0"]
 found_on = "2026-08-27"
@@ -2904,7 +2883,7 @@ note = "Derived from the implementation's doc comment by `orbistoun-gen knowledg
 [[function]]
 name = "pthread_getschedparam"
 arity = 3
-purpose = "The POSIX spelling of `scePthreadGetschedparam`, and the same function pointer."
+purpose = "The POSIX spelling of `scePthreadGetschedparam`, served by a wrapper that answers its failures as a bare error number."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadGetschedparam`: `(thread, int *policy, struct sched_param *)` in both spellings, and its knowledge entry is the one that describes them.",
@@ -2914,7 +2893,6 @@ found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_on = "2026-09-25"
 note = "Served alongside pthread_setschedparam."
@@ -2922,7 +2900,7 @@ note = "Served alongside pthread_setschedparam."
 [[function]]
 name = "pthread_setschedparam"
 arity = 3
-purpose = "The POSIX spelling of `scePthreadSetschedparam`, and the same function pointer."
+purpose = "The POSIX spelling of `scePthreadSetschedparam`, served by a wrapper that answers its failures as a bare error number."
 returns = "status"
 edge_cases = [
     "Delegates to `scePthreadSetschedparam`: `(thread, policy, const struct sched_param *)` in both spellings, and its knowledge entry is the one that describes them.",
@@ -2932,7 +2910,6 @@ found_by = "published-standard"
 known_by = "assumed"
 assumptions = [
     "That this library's POSIX spelling and the vendor-named function it resolves to are the same behaviour on the target rather than merely similar. Unmeasured - it is inferred from the names and from both being exported by one platform.",
-    "Which convention the platform's POSIX-named exports use on failure: POSIX's own - a returned errno, or -1 with errno set - or the vendor encoding `0x8002_0000 | errno` measured on their vendor-named twins (D398). One provoked failure on hardware settles it for this call, and a second in another family settles whether it is a convention at all.",
 ]
 found_in = ["PPSA02664-app0", "PPSA04263-app0"]
 found_on = "2026-09-03"
