@@ -9,7 +9,7 @@ edge_cases = [
     "Width 0 or 1000001, or attribute 2, answers 0x80690003; a size field of 16 answers 0x80690002.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1818Z-2bfa and REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1818Z-2bfa and REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -20,7 +20,7 @@ edge_cases = [
     "Answers 0 and hands back the memory's base as the handle, having written a 0x18-byte context there: itself at +0, the parameter size 12 at +8, the attribute at +12, the width at +16, and a work size at +20 - 0xd400 for width 64, attribute 0.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 note = "Unmeasured: the work size at any width and attribute but the one point is written as the memory size less 0x90, as there; orbistoun's decoder never reads it back."
 found_on = "2026-10-13"
 
@@ -37,7 +37,7 @@ edge_cases = [
     "A grey or grey-with-alpha image answers the placeholder: no row reports its colour space.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1818Z-2bfa, 000-boot/png-dec-enc, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1818Z-2bfa, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -56,7 +56,7 @@ edge_cases = [
     "A 16-bit image on an attribute-1 decoder, or one wider than the decoder, answers the placeholder: unmeasured.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1818Z-2bfa and REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1818Z-2bfa and REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 note = "Unmeasured: an RGB image's alpha is taken from the parameter's alpha field; no row decoded an image without alpha and dumped it."
 found_on = "2026-10-13"
 
@@ -65,5 +65,5 @@ name = "scePngDecDelete"
 purpose = "Ends a decoder."
 edge_cases = ["A live handle answers 0; deleting it again answers 0x80690004."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"

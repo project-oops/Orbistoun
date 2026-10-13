@@ -1,8 +1,8 @@
 //! `libSceErrorDialog` - the system error dialog.
 //!
 //! The lifecycle is as obSCEne measured it on FW 12.40 (`REQ-20261012T1822Z-bc38`,
-//! `000-boot/system-dialogs`, rows in `reports/hardware/latest_probe_run.log` of 2026-10-13
-//! 15:06 - obSCEne `-3215`): the library initialises once; an open with
+//! `000-boot/system-dialogs`, rows in `reports/hardware/report-20261013-150600.log`): the
+//! library initialises once; an open with
 //! a well-formed parameter is refused `0x80ed0007`; status reads 1, initialised and not running,
 //! before and after; and close and terminate succeed. The refused open was measured in a probe
 //! that had likely not initialised the common dialog (obSCEne's own reading is that a process

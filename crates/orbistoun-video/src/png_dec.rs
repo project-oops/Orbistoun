@@ -1,9 +1,8 @@
 //! `libScePngDec` - decoding a PNG into the guest's own buffer.
 //!
 //! Served as obSCEne measured it on FW 12.40 (`REQ-20261012T1818Z-2bfa`,
-//! `REQ-20261012T1822Z-8912`, `000-boot/png-dec-enc`; the rows are in obSCEne's
-//! `reports/hardware/latest_probe_run.log` of 2026-10-13 15:06, not the `report-1791878041.txt`
-//! the resolutions name, whose rows show the library unresolved - obSCEne `-3215`): the memory a
+//! `REQ-20261012T1822Z-8912`, `000-boot/png-dec-enc`, rows in obSCEne's
+//! `reports/hardware/report-20261013-150600.log`): the memory a
 //! decoder needs, the context `Create` writes into it, which colour space and flags a header
 //! reports, the pixel orders a decode writes, and every error code those rows show. The parameter
 //! blocks' field widths are the OpenOrbis toolchain's (`orbis/_types/png.h`, credited in

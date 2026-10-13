@@ -8,7 +8,7 @@ edge_cases = [
     "After sceErrorDialogTerminate it initialises again (orbistoun's reading of a terminate; the repeat after it is unmeasured).",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
 note = "Handler: crates/orbistoun-systemservice/src/error_dialog.rs."
@@ -24,7 +24,7 @@ edge_cases = [
     "Before Initialize, or with a null parameter, it answers the placeholder: unmeasured.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -35,7 +35,7 @@ edge_cases = [
     "Before Initialize it answers the placeholder: unmeasured.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -43,7 +43,7 @@ name = "sceErrorDialogUpdateStatus"
 purpose = "Advances the dialog and reports its state."
 edge_cases = ["Answers 1 after the refused Open, as GetStatus does."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -51,7 +51,7 @@ name = "sceErrorDialogClose"
 purpose = "Closes the dialog."
 edge_cases = ["Answers 0x0; the status stays 1 afterwards."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -59,5 +59,5 @@ name = "sceErrorDialogTerminate"
 purpose = "Takes the error dialog down for this process."
 edge_cases = ["Answers 0x0 after Close."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1822Z-bc38, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"

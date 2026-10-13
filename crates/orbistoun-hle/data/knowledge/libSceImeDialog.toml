@@ -5,7 +5,7 @@ name = "sceImeDialogGetStatus"
 purpose = "The text-entry dialog's state."
 edge_cases = ["Answers 0 (none) before anything, after the refused Init, and after Abort."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -13,7 +13,7 @@ name = "sceImeDialogGetResult"
 purpose = "What the dialog ended with."
 edge_cases = ["With no dialog open answers 0x80bc0107 (not in use) and leaves the 0x40-byte result block untouched."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -24,7 +24,7 @@ edge_cases = [
     "Once this process has initialised the common dialog it answers the placeholder: the probe had likely not, so a title's own Init - always after sceCommonDialogInitialize - is unmeasured.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -32,7 +32,7 @@ name = "sceImeDialogAbort"
 purpose = "Ends an open dialog."
 edge_cases = ["With no dialog open answers 0x80bc0107."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
 
 [[function]]
@@ -40,5 +40,5 @@ name = "sceImeDialogTerm"
 purpose = "Takes the dialog down."
 edge_cases = ["With no dialog open answers 0x80bc0107, every time."]
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/latest_probe_run.log of 2026-10-13 15:06 (obSCEne -3215; FW 12.40)"
+cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
 found_on = "2026-10-13"
