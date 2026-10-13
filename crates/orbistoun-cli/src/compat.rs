@@ -761,7 +761,7 @@ pub(crate) fn write_title_sheet(
     reproduce: &orbistoun_overrides::Reproduce,
     paths: &orbistoun_paths::Paths,
 ) -> Result<Option<(std::path::PathBuf, usize, usize)>> {
-    let kept = crate::frames::kept(&paths.traces_dir())?;
+    let kept = crate::frames::kept(&crate::frames::kept_dir(&paths.traces_dir()))?;
     if kept.is_empty() {
         return Ok(None);
     }

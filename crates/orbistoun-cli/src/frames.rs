@@ -68,6 +68,22 @@ pub(crate) fn spread(kept: &[Kept], count: usize) -> Vec<Kept> {
         .collect()
 }
 
+/// Where a run of `module` keeps its frames: a directory of its own under `traces`, named as its
+/// trace is. The traces directory is shared by every run on the machine, and a sheet made from
+/// it took in frames another title's run, in another session, kept there at the same time.
+pub(crate) fn run_dir(traces: &std::path::Path, module: &std::path::Path) -> std::path::PathBuf {
+    let trace = orbistoun_report::trace::trace_file_name(&module.to_string_lossy());
+    traces.join("frames").join(trace.trim_end_matches(".json"))
+}
+
+/// The directory a run's frames are read from for its sheet: the one `ORBISTOUN_FRAME_DIR` names,
+/// which [`crate::run`] points at the run's own ([`run_dir`]), or else `traces`.
+pub(crate) fn kept_dir(traces: &std::path::Path) -> std::path::PathBuf {
+    orbistoun_env::FRAME_DIR
+        .get()
+        .map_or_else(|| traces.to_path_buf(), std::path::PathBuf::from)
+}
+
 /// Removes every kept frame from `traces`, so a run's sheet holds that run's frames alone.
 ///
 /// # Errors
@@ -355,6 +371,32 @@ mod tests {
         assert_eq!(picture.get_pixel(0, 0).0, [0, 0, 0]);
         assert_eq!(picture.get_pixel(1, 0).0, [5, 0, 9]);
         assert!(super::difference(3, 1, &kept, &reference).is_none());
+    }
+
+    /// Two titles' runs keep their frames apart: a frame another title's run kept at the same time
+    /// is not among this run's, as PPSA25872's publisher logo was in Neverputt's sheet when both
+    /// kept their frames in the shared traces directory.
+    #[test]
+    fn another_titles_run_keeps_its_frames_apart() {
+        let traces = tempfile::tempdir().expect("a temporary directory");
+        let ours = super::run_dir(
+            traces.path(),
+            std::path::Path::new("homebrew/NVPT00001/eboot.bin"),
+        );
+        let theirs = super::run_dir(
+            traces.path(),
+            std::path::Path::new("titles/PPSA25872-app0/eboot.bin"),
+        );
+        for dir in [&ours, &theirs] {
+            std::fs::create_dir_all(dir).expect("creates");
+        }
+        std::fs::write(theirs.join("flip-000031-2x1.rgba"), [1u8; 8]).expect("writes");
+        super::clear(&ours).expect("clears");
+        assert!(
+            super::kept(&ours).expect("reads").is_empty(),
+            "none of theirs"
+        );
+        assert_eq!(super::kept(&theirs).expect("reads").len(), 1, "theirs kept");
     }
 
     /// References are read from raw kept-frame files and from PNGs, ordered by flip, and a flip

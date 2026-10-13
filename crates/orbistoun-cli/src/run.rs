@@ -23,10 +23,15 @@ fn set_profile_for_run(profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Has the run keep a frame every so many flips, answering how many: what `ORBISTOUN_FRAME_EVERY`
-/// already says, or [`crate::compat::DEFAULT_FRAME_EVERY`]. The previous run's frames are cleared
+/// The frames directory a run in this process last pointed `ORBISTOUN_FRAME_DIR` at, so a later run
+/// here points it at its own rather than taking it for one a caller chose.
+static FRAMES_SET_HERE: std::sync::Mutex<Option<std::ffi::OsString>> = std::sync::Mutex::new(None);
+
+/// Has the run of `module` keep a frame every so many flips, answering how many: what
+/// `ORBISTOUN_FRAME_EVERY` already says, or [`crate::compat::DEFAULT_FRAME_EVERY`]. The frames go
+/// to the run's own directory ([`crate::frames::run_dir`]) unless a caller named one, cleared
 /// first, so the frames the record's sheet is made from are this run's alone (D736).
-fn keep_frames_for_run() -> Result<u64> {
+fn keep_frames_for_run(module: &std::path::Path) -> Result<u64> {
     let asked = orbistoun_env::FRAME_EVERY
         .get()
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -36,7 +41,18 @@ fn keep_frames_for_run() -> Result<u64> {
         // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
         unsafe { std::env::set_var(orbistoun_env::FRAME_EVERY.name, every.to_string()) };
     }
-    crate::frames::clear(&orbistoun_paths::Paths::resolve().traces_dir())?;
+    let mut set_here = FRAMES_SET_HERE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let named = std::env::var_os(orbistoun_env::FRAME_DIR.name);
+    if named.is_none() || named == *set_here {
+        let own = crate::frames::run_dir(&orbistoun_paths::Paths::resolve().traces_dir(), module);
+        std::fs::create_dir_all(&own).with_context(|| format!("creating {}", own.display()))?;
+        crate::frames::clear(&own)?;
+        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+        unsafe { std::env::set_var(orbistoun_env::FRAME_DIR.name, &own) };
+        *set_here = Some(own.into_os_string());
+    }
     Ok(every)
 }
 
@@ -140,7 +156,7 @@ pub(crate) fn cmd_run(
     (staged, relink): (bool, bool),
 ) -> Result<()> {
     set_profile_for_run(profile)?;
-    let frame_every = keep_frames_for_run()?;
+    let frame_every = keep_frames_for_run(path)?;
     let mut worker =
         orbistoun_worker::WorkerHandle::spawn_self().context("spawning a worker process")?;
 
