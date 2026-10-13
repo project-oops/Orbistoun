@@ -263,3 +263,26 @@ the reader locates and relocates the block (D444).
 kernel-memory block sized but empty, so it establishes the block's existence and size but no
 field positions; reading a field from a title's block would derive a layout from material.
 The reader reports where each pointer leads and no further.
+
+## PNG decoder parameter blocks
+
+**Source.** The OpenOrbis toolchain's `orbis/_types/png.h` (credited in
+[ACKNOWLEDGEMENTS.md](../ACKNOWLEDGEMENTS.md)) declares `libScePngDec`'s parameter blocks with
+their field widths and most fields unnamed. obSCEne's `000-boot/png-dec-enc`
+(`REQ-20261012T1818Z-2bfa`, `REQ-20261012T1822Z-8912`, `report-1791878041.txt`, FW 12.40)
+exercised each field on the hardware: a size of 7 refused as a data size, a reserved word
+refused, a short pitch and a short buffer refused, two pixel formats written in two orders.
+
+**Taken.** Field offsets, from the declared widths, and each field's meaning, from the
+measured behaviour that singles it out: the create parameter `{size, attribute, max_width}`;
+the parse parameter `{png, size, reserved}`; the decode parameter `{png, image, png size,
+image size, u16 pixel format, u16 alpha, pitch}`; the image information `{width, height, u16
+colour space, u16 bit depth, u32 flags}`. Declared once in
+`crates/orbistoun-video/src/png_dec.rs`.
+
+**Checked.** The unit tests in `png_dec.rs` reproduce the measured rows: the memory sizes at
+eight points, the context `Create` writes, the packed return, both pixel orders, and each
+refusal.
+
+**Not taken.** The alpha field's effect: no row decoded an image without alpha and dumped it,
+so its use is recorded as unmeasured in the knowledge entry.

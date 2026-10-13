@@ -3487,11 +3487,13 @@ dependencies = [
 name = "orbistoun-video"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "orbistoun-core",
  "orbistoun-env",
  "orbistoun-hle",
  "orbistoun-kernel",
  "orbistoun-mem",
+ "png",
 ]
 
 [[package]]

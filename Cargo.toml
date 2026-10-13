@@ -168,6 +168,12 @@ gilrs = "0.11"
 # it links the system's ALSA library, a build dependency every Unix image would have to carry.
 cpal = "0.16"
 
+# libScePngDec decodes a guest's PNG into its own buffer: the same decoder `image` already brings
+# in, used directly, and the checksum it checks chunks with, for reading a header the way the
+# console refuses one.
+png = "0.18"
+crc32fast = "1.5"
+
 # Decoding title icons. PNG only and no default features: the one job is turning
 # `sce_sys/icon0.png` into pixels, and the rest of the format zoo is weight for
 # nothing.

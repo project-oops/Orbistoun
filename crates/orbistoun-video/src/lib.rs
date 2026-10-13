@@ -8,6 +8,7 @@ use orbistoun_hle::guest_module;
 
 pub mod av_player;
 pub mod font;
+pub mod png_dec;
 pub mod queued;
 pub mod recording;
 
@@ -784,6 +785,11 @@ pub fn install_flip_observer(observer: FlipObserver) {
 /// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("scePngDecQueryMemorySize", png_dec::query_memory_size),
+        ("scePngDecCreate", png_dec::create),
+        ("scePngDecParseHeader", png_dec::parse_header),
+        ("scePngDecDecode", png_dec::decode),
+        ("scePngDecDelete", png_dec::delete),
         ("sceFontMemoryInit", font::font_memory_init),
         ("sceFontMemoryTerm", font::font_memory_term),
         ("sceFontSelectLibraryFt", font::font_select_library_ft),

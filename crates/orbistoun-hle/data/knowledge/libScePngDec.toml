@@ -1,0 +1,69 @@
+library = "libScePngDec"
+
+[[function]]
+name = "scePngDecQueryMemorySize"
+purpose = "The memory a decoder of an attribute and width needs."
+arguments = [{ name = "param", kind = "ptr", note = "{size = 12, attribute, max_width}" }]
+edge_cases = [
+    "Answers ((max_width + 0x47) & ~7) * (8 << attribute) + 0xd090 at every measured point: width 1, 8, 4096 and 1000000, attributes 0 and 1 (0xd2d0, 0xd2d0, 0x15290, 0x7ae490; 0xd510, 0xd510, 0x1d490, 0xf4f890).",
+    "Width 0 or 1000001, or attribute 2, answers 0x80690003; a size field of 16 answers 0x80690002.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1818Z-2bfa and REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngDecCreate"
+purpose = "Makes a decoder in memory the caller supplies."
+edge_cases = [
+    "Memory one byte short of the queried size answers 0x80690002.",
+    "Answers 0 and hands back the memory's base as the handle, having written a 0x18-byte context there: itself at +0, the parameter size 12 at +8, the attribute at +12, the width at +16, and a work size at +20 - 0xd400 for width 64, attribute 0.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, report-1791878041.txt (FW 12.40)"
+note = "Unmeasured: the work size at any width and attribute but the one point is written as the memory size less 0x90, as there; orbistoun's decoder never reads it back."
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngDecParseHeader"
+purpose = "What a PNG's header says, before decoding."
+arguments = [
+    { name = "param", kind = "ptr", note = "{png, size, reserved}" },
+    { name = "info", kind = "ptr", note = "{width, height, u16 colour space, u16 bit depth, u32 flags}" },
+]
+edge_cases = [
+    "A reserved word other than 0 answers 0x80690003; a size of 7 answers 0x80690010; a corrupt IHDR checksum answers 0x80690012.",
+    "Colour space 0x13 for RGBA, 0x3 for RGB, 0x4 for a palette; bit depth 8 or 16; flag 0x1 for an interlaced image and 0x2 for a palette with a transparency chunk.",
+    "A grey or grey-with-alpha image answers the placeholder: no row reports its colour space.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1818Z-2bfa, 000-boot/png-dec-enc, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngDecDecode"
+purpose = "Decodes a PNG into the caller's buffer."
+arguments = [
+    { name = "handle", kind = "u64" },
+    { name = "param", kind = "ptr", note = "{png, image, png size, image size, u16 pixel format, u16 alpha, pitch}" },
+    { name = "info", kind = "ptr" },
+]
+edge_cases = [
+    "Answers (width << 16) | height: 0x20002 for a 2 by 2 image.",
+    "Pixel format 0 writes R, G, B, A; pixel format 1 writes B, G, R, A; 0x84 answers 0x80690003.",
+    "A buffer or pitch too short for the image answers 0x80690003; a 16-bit image on an attribute-0 decoder answers 0x80690005.",
+    "A handle 8 bytes off, or one deleted, answers 0x80690004.",
+    "A 16-bit image on an attribute-1 decoder, or one wider than the decoder, answers the placeholder: unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1818Z-2bfa and REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, report-1791878041.txt (FW 12.40)"
+note = "Unmeasured: an RGB image's alpha is taken from the parameter's alpha field; no row decoded an image without alpha and dumped it."
+found_on = "2026-10-13"
+
+[[function]]
+name = "scePngDecDelete"
+purpose = "Ends a decoder."
+edge_cases = ["A live handle answers 0; deleting it again answers 0x80690004."]
+known_by = "measured"
+cites = "obSCEne REQ-20261012T1822Z-8912, 000-boot/png-dec-enc, report-1791878041.txt (FW 12.40)"
+found_on = "2026-10-13"
