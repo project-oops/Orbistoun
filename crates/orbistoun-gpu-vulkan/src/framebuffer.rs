@@ -1298,6 +1298,7 @@ fn read_storage_image(device: &ash::Device, command: vk::CommandBuffer, storage:
 ///
 /// Created for every pipeline whether or not the fragment module samples: an unused binding costs
 /// one descriptor, while a used binding missing from the layout is an invalid pipeline.
+#[derive(Clone, Copy)]
 struct Texture {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -1314,6 +1315,43 @@ struct Texture {
     faces: u32,
     /// What its texels are: colour, or a depth sampled through a compare (D817).
     aspect: vk::ImageAspectFlags,
+    /// The session's default texture ([`shared_default_texture`]), which every pipeline binds in a
+    /// slot nothing asked for: uploaded once and never released with a pipeline.
+    shared: bool,
+}
+
+/// The default white texel with default sampling, made once for the session and bound in every
+/// slot a draw leaves empty. A pipeline binds all [`MAX_TEXTURES`] slots, and making a texture per
+/// empty slot - an image, a staging buffer and two allocations each - was most of what building a
+/// pipeline cost.
+fn shared_default_texture(devices: Devices<'_>) -> Result<Texture, DispatchError> {
+    static SHARED: std::sync::Mutex<Option<Texture>> = std::sync::Mutex::new(None);
+    let mut shared = SHARED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(texture) = *shared {
+        return Ok(texture);
+    }
+    let texture = Texture {
+        shared: true,
+        ..create_texture(
+            devices,
+            TextureWords::NONE,
+            false,
+            orbistoun_gpu::TextureSampling::default(),
+        )?
+    };
+    *shared = Some(texture);
+    Ok(texture)
+}
+
+/// Whether `texture` still needs its texels copied in: every texture of its own, and the shared
+/// default only the first time a pipeline asks, since copying in again would discard the texels
+/// earlier draws still sample.
+fn needs_upload(texture: &Texture) -> bool {
+    static SHARED_UPLOADED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    !texture.shared || !SHARED_UPLOADED.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The texture bound when a caller does not ask for one: a single opaque white texel, the smallest
@@ -1625,6 +1663,7 @@ fn create_texture(
         levels,
         faces,
         aspect,
+        shared: false,
     })
 }
 
@@ -2501,7 +2540,7 @@ fn release_pipeline(device: &ash::Device, built: &Pipeline) {
             // SAFETY: as above, and the buffer that used it is already destroyed.
             unsafe { device.free_memory(memory, None) };
         }
-        for texture in &built.textures {
+        for texture in built.textures.iter().filter(|texture| !texture.shared) {
             release_texture(device, texture);
         }
         // SAFETY: as above.
@@ -3465,7 +3504,11 @@ fn render_resident_with(
     // this done.
     if !built.textures_uploaded {
         one_shot(session, |device, command| {
-            for texture in &built.textures {
+            for texture in built
+                .textures
+                .iter()
+                .filter(|texture| needs_upload(texture))
+            {
                 upload_texture(device, command, texture);
             }
             open_storage_image(device, command, &built.storage_image);
@@ -3652,7 +3695,11 @@ fn record(
     // the cache already holds its textures.
     if let Some(built) = pipeline {
         if !built.textures_uploaded {
-            for texture in &built.textures {
+            for texture in built
+                .textures
+                .iter()
+                .filter(|texture| needs_upload(texture))
+            {
                 upload_texture(device, command, texture);
             }
         }
@@ -3918,12 +3965,14 @@ fn create_bound_resources(
         .zip(&bound.textures.sampling)
         .enumerate()
     {
-        textures.push(create_texture(
-            devices,
-            words,
-            slot == 0 && bound.coarse_level,
-            sampling,
-        )?);
+        let coarse = slot == 0 && bound.coarse_level;
+        let empty = std::ptr::eq(words.words, TextureWords::NONE.words)
+            && sampling == orbistoun_gpu::TextureSampling::default();
+        textures.push(if empty && !coarse {
+            shared_default_texture(devices)?
+        } else {
+            create_texture(devices, words, coarse, sampling)?
+        });
     }
     let Ok(textures) = <[Texture; MAX_TEXTURES]>::try_from(textures) else {
         unreachable!("one texture is made for each slot");
@@ -5146,6 +5195,42 @@ pub fn draw_with_windows(
 #[cfg(test)]
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
+
+    /// Two pipelines' resources bind one texture in a slot neither draw filled: the session's
+    /// default, not one made per pipeline. A slot a draw filled has its own.
+    #[test]
+    fn an_empty_texture_slot_binds_the_session_s_default() {
+        let Ok(session) = crate::compute::session() else {
+            return;
+        };
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let devices = super::Devices {
+            instance: &session.instance,
+            physical: session.physical,
+            device: &session.device,
+        };
+        let texel = [0xff00_00ff_u32];
+        let mut bound_textures = super::NO_TEXTURES;
+        bound_textures.words[0] = super::TextureWords::rgba8(&texel, 1);
+        let bound = || super::Bound {
+            textures: &bound_textures,
+            ..super::Bound::default()
+        };
+        let first = super::create_bound_resources(devices, bound()).expect("resources");
+        let second = super::create_bound_resources(devices, bound()).expect("resources");
+        assert_eq!(
+            first.textures[5].view, second.textures[5].view,
+            "one default"
+        );
+        assert!(first.textures[5].shared);
+        assert_ne!(
+            first.textures[0].view, second.textures[0].view,
+            "a filled slot is its own"
+        );
+        assert!(!first.textures[0].shared);
+    }
 
     /// A GL guest's transform becomes a flipped Vulkan viewport over the whole target: y starts at
     /// the bottom row with a negative height, so NDC `+y` lands on row 0; a positive y scale gives
