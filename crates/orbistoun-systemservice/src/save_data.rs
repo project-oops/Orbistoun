@@ -40,6 +40,11 @@ const PARAMETER_BYTES: u64 = 64;
 /// Whether a null-parameter initialisation has succeeded.
 static INITIALISED: AtomicBool = AtomicBool::new(false);
 
+/// Held by every test that initialises the library: [`INITIALISED`] is the process's, and tests in
+/// one binary run at once, so a second initialisation answered as a first one would.
+#[cfg(test)]
+static INITIALISING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `sceSaveDataInitialize3(param)`: with a null parameter, initialises the library and answers
 /// `0` - PPSA21564's call; with a zeroed 64-byte block, answers `0x809f0000` and writes nothing,
 /// as measured twice before initialisation and once after termination. A second null call, and
@@ -149,6 +154,10 @@ mod tests {
     /// `0x809f0000` and writes nothing, result pointer or not (obSCEne `-5d20`).
     #[test]
     fn save_data_memory_is_set_up_once_as_measured() {
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::INITIALISED.store(false, std::sync::atomic::Ordering::Release);
         let mut param = [0u8; 64];
         param[4..8].copy_from_slice(&0x1ea2_f4d9_u32.to_le_bytes());
         param[8..16].copy_from_slice(&0x20_0000_u64.to_le_bytes());
@@ -288,6 +297,9 @@ mod mount_tests {
         let _ = std::fs::remove_dir_all(&root);
         orbistoun_fs::mount::mount_data(root.clone());
         orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = super::initialize3(&[0; GUEST_ARG_REGISTERS]);
 
         let name = b"SaveData0\0";
