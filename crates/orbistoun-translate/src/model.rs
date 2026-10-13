@@ -58,6 +58,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample_l",
     "image_sample_lz",
     "image_sample_c_lz",
+    "image_sample_c",
     "image_store",
     "global_load_dword",
     "global_load_dwordx2",
@@ -2656,8 +2657,10 @@ fn memory_instruction<M: Model + ?Sized>(
         }
 
         // A texture sample or fetch; the descriptor rules are D690's.
-        "image_sample_lz" | "image_sample_c_lz" | "image_sample" | "image_sample_l"
-        | "image_load" | "image_load_mip" => image_sample(model, instruction, name),
+        "image_sample_lz" | "image_sample_c_lz" | "image_sample_c" | "image_sample"
+        | "image_sample_l" | "image_load" | "image_load_mip" => {
+            image_sample(model, instruction, name)
+        }
         // A store, the one image instruction that needs its own binding, since nothing writes a
         // sampled image (D692).
         "image_store" => image_store(model, instruction, name),
@@ -8808,7 +8811,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     let shape = ImageShape {
         cube: dimension == IMAGE_DIMENSION_CUBE && is_sample,
         volume: dimension == IMAGE_DIMENSION_3D && is_sample,
-        compare: name == "image_sample_c_lz",
+        compare: matches!(name, "image_sample_c_lz" | "image_sample_c"),
     };
     let (cube, volume, compare) = (shape.cube, shape.volume, shape.compare);
     if dimension != IMAGE_DIMENSION_2D && !cube && !volume {
@@ -9040,7 +9043,7 @@ fn image_sample<M: Model + ?Sized>(
                 model,
                 instruction,
                 (&addresses, a16),
-                (&texture, coordinate),
+                (&texture, coordinate, name == "image_sample_c"),
                 lane,
             )?;
             continue;
@@ -9102,14 +9105,15 @@ fn image_sample<M: Model + ?Sized>(
     Ok(())
 }
 
-/// A depth-compare sample at level zero, for one lane (D816): the reference, the first address
-/// element, compared against the depth texture at the coordinate, its result - the filtered
-/// comparison, one float - written to the one channel the mask names.
+/// A depth-compare sample, for one lane (D816): the reference, the first address element, compared
+/// against the depth texture at the coordinate, its result - the filtered comparison, one float -
+/// written to the one channel the mask names. At level zero for `image_sample_c_lz`, and where
+/// `implicit`, for `image_sample_c`, at the level the pixel's derivatives choose.
 fn compare_sample<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
-    (texture, coordinate): (&Texture, Id),
+    (texture, coordinate, implicit): (&Texture, Id, bool),
     lane: u32,
 ) -> Result<(), TranslateError> {
     let Some(Operand::Vector(destination)) = instruction.operands.first() else {
@@ -9128,18 +9132,25 @@ fn compare_sample<M: Model + ?Sized>(
     let bound = builder.id();
     builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
     let compared = builder.id();
-    builder.function(
-        op::IMAGE_SAMPLE_DREF_EXPLICIT_LOD,
-        &[
-            f32_type.0,
-            compared.0,
-            bound.0,
-            coordinate.0,
-            reference.0,
-            image_operands::LOD,
-            level.0,
-        ],
-    );
+    if implicit {
+        builder.function(
+            op::IMAGE_SAMPLE_DREF_IMPLICIT_LOD,
+            &[f32_type.0, compared.0, bound.0, coordinate.0, reference.0],
+        );
+    } else {
+        builder.function(
+            op::IMAGE_SAMPLE_DREF_EXPLICIT_LOD,
+            &[
+                f32_type.0,
+                compared.0,
+                bound.0,
+                coordinate.0,
+                reference.0,
+                image_operands::LOD,
+                level.0,
+            ],
+        );
+    }
     let bits = builder.id();
     builder.function(op::BITCAST, &[u32_type.0, bits.0, compared.0]);
     model.write_vector_lane(u32::from(*destination), lane, bits);

@@ -446,9 +446,11 @@ fn a_depth_compare_sample_translates_to_a_depth_image_and_its_reference() {
     let (mut dref, mut depth_image) = (false, false);
     while at < module.len() {
         let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
-        // OpTypeImage's fourth operand is Depth; OpImageSampleDrefExplicitLod is 89.
+        // OpTypeImage's fourth operand is Depth; OpImageSampleDrefExplicitLod is 90, and the
+        // implicit-level form 89 must not appear for a sample at level zero.
         depth_image |= opcode == 25 && module.get(at + 4) == Some(&1);
-        dref |= opcode == 89;
+        dref |= opcode == 90;
+        assert_ne!(opcode, 89, "a level-zero compare is the explicit form");
         at += count.max(1);
     }
     assert!(depth_image, "the image is declared depth");

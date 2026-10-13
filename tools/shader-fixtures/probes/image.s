@@ -81,3 +81,15 @@ image_sample_c_lz v240, v[100:102], s[60:67], s[96:99] dmask:0x1 dim:SQ_RSRC_IMG
 // the field from the dimensionality's, which holds the same value.
 image_sample_c_lz v[4:5], v[2:4], s[4:11], s[12:15] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_sample_c_lz v[100:103], v[200:202], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IMG_2D
+
+// ---- image_sample_c ----------------------------------------------------------------
+// A depth-compare sample at the level the derivatives choose: the same address as
+// `image_sample_c_lz`, the reference then the coordinates. A GL `shadow2D` in a pixel shader
+// compiles to it - gl2-probe's shadow-compare check (MIMG opcode 40). Each field high in turn.
+image_sample_c v4, v[2:4], s[4:11], s[12:15] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_c v100, v[200:202], s[80:87], s[92:95] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_c v250, v[10:12], s[40:47], s[60:63] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_c v8, v[253:255], s[12:19], s[20:23] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_c v240, v[100:102], s[60:67], s[96:99] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_c v[4:5], v[2:4], s[4:11], s[12:15] dmask:0x3 dim:SQ_RSRC_IMG_2D
+image_sample_c v[100:103], v[200:202], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IMG_2D

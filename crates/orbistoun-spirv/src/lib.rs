@@ -169,7 +169,12 @@ pub mod op {
     pub const IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88;
     /// Samples a depth texture at a level the instruction names, compared against a reference: the
     /// filtered result of the comparison, one float. A guest's `image_sample_c_lz` (D816).
-    pub const IMAGE_SAMPLE_DREF_EXPLICIT_LOD: u16 = 89;
+    ///
+    /// 90: the Vulkan SDK's `spirv-as` assembles `OpImageSampleDrefExplicitLod` as `0x0008005a`.
+    pub const IMAGE_SAMPLE_DREF_EXPLICIT_LOD: u16 = 90;
+    /// Samples a depth texture at the level its derivatives choose, compared against a reference.
+    /// A guest's `image_sample_c` in a pixel shader. 89, `0x00060059` for the plain form.
+    pub const IMAGE_SAMPLE_DREF_IMPLICIT_LOD: u16 = 89;
     /// Reads one texel by its integer coordinate, with no sampler involved.
     ///
     /// What a guest's `image_load` is. Carries a literal operand mask like the explicit sampling
@@ -2405,6 +2410,15 @@ static SHAPES: &[ShapeEntry] = &[
         Some(1),
         &[0, 2, 3, 4],
         Some(6),
+        RestStride::Every,
+    ),
+    // Result type, result, the sampled image, the coordinate and the reference; no trailing image
+    // operands are emitted for it.
+    (
+        op::IMAGE_SAMPLE_DREF_IMPLICIT_LOD,
+        Some(1),
+        &[0, 2, 3, 4],
+        None,
         RestStride::Every,
     ),
     // The same shape as the explicit sampling form: a literal mask at index four, and the level
