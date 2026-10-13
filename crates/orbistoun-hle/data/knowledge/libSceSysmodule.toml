@@ -9,9 +9,11 @@ edge_cases = [
     "Measured on hardware: obSCEne `060-module/sysmodule-query` reported pass, value 0x805a1000. The check names the condition; see `data/hardware/ps5-imports.txt` in the sibling conformance-probe repository.",
     "Answers loaded for any non-zero module id: nothing here tracks which modules a title actually loaded, so a guest checking for one it never requested is told it is present.",
     "A zero id answers the measured unloaded code rather than reporting a non-module as present.",
+    "Measured on hardware (obSCEne REQ-20261012T1943Z-41aa, 000-boot/sysmodule-isloaded-lifecycle, report-1791836505.txt lines 30-49): id 0xb4 (AppContent) is already loaded in a fresh process - IsLoaded answers 0 before LoadModule, after it, and after UnloadModule, which also answers 0 and leaves it loaded. Ids 0x0e and 0x80 answer 0x805a1000 at every step, LoadModule and UnloadModule included; 0 and 0x7fff answer 0x805a1000 too. The console never answered 0x805a1001.",
+    "So this function's answer of 0 for 0xb4 matches the console. PPSA04263 calls IsLoaded(0xb4) and loads 0xb4 itself only on 0x805a1001 (eboot.bin file offsets 0x4d3fba, 0x1994a55), a branch the console's answer never takes either.",
 ]
 assumptions = [
-    "Which ids a stock system reports loaded, and whether the answer distinguishes anything beyond loaded from the one measured code, is unestablished.",
+    "Which other ids a title's process has loaded at start is unestablished; the console answers 0x805a1000 for 0x0e, 0x80 and 0x7fff where this function answers 0.",
 ]
 known_by = "assumed"
 found_on = "2026-09-01"
