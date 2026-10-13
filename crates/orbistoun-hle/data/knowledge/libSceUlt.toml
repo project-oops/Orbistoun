@@ -253,3 +253,47 @@ known_by = "assumed"
 assumptions = ["The underscore-less export behaves as the underscored one; REQ-cn01 asks."]
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-07"
+
+[[function]]
+name = "sceUltMutexDestroy"
+arity = 1
+purpose = "Destroys a ULT mutex - the export without the leading underscore."
+returns = "status"
+edge_cases = ["Implemented as _sceUltMutexDestroy. PPSA28061 imports this spelling."]
+known_by = "assumed"
+assumptions = ["The underscore-less export behaves as the underscored one."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceUltConditionVariableWait"
+arity = 1
+purpose = "Waits on a ULT condition variable - the export without the leading underscore."
+returns = "status"
+edge_cases = ["Implemented as _sceUltConditionVariableWait. PPSA28061's \"Save Thread\" and \"Rewind\" ulthreads wait for work here; answered by a refusing stub they ran on with no work and faulted."]
+known_by = "assumed"
+assumptions = ["The underscore-less export behaves as the underscored one."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceUltConditionVariableDestroy"
+arity = 1
+purpose = "Destroys a ULT condition variable - the export without the leading underscore."
+returns = "status"
+edge_cases = ["Implemented as _sceUltConditionVariableDestroy. PPSA28061 imports this spelling."]
+known_by = "assumed"
+assumptions = ["The underscore-less export behaves as the underscored one."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-13"
+
+[[function]]
+name = "sceUltFinalize"
+arity = 0
+purpose = "Takes the user-level threading library down."
+returns = "status"
+edge_cases = ["Answers 0; an Ult object's state lives in orbistoun's own tables, which outlive the library, so nothing is released."]
+known_by = "assumed"
+assumptions = ["Finalizing succeeds with objects still live; what the console answers then is unmeasured."]
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-13"
