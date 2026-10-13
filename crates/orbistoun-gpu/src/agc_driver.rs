@@ -1705,7 +1705,38 @@ fn write_back_pending(memory: &mut dyn cp::CpMemory) -> bool {
         forget_written();
         return false;
     };
-    write_target(memory, target, swap, &after)
+    let written = write_target(memory, target, swap, &after);
+    if written {
+        let mut early = written_since_flip()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !early.contains(&target.base) {
+            early.push(target.base);
+        }
+    }
+    written
+}
+
+/// The bases of the targets whose drawn frames were written back since a flip last asked
+/// ([`frame_drawn_into`]). A frame something reads before its flip is written back then (D714) -
+/// oops-gl reads its own target after each frame's draws - and is still the frame that flip shows.
+fn written_since_flip() -> &'static Mutex<Vec<u64>> {
+    static EARLY: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    &EARLY
+}
+
+/// The base of the buffer a frame orbistoun drew went into, asked as the guest flips `address`:
+/// the target whose frame is still waiting to be written back, or else `address` itself when its
+/// frame was already written back because something read it first. The early write-backs are
+/// forgotten, so the next flip asks afresh.
+#[must_use]
+pub fn frame_drawn_into(address: u64) -> Option<u64> {
+    let early = std::mem::take(
+        &mut *written_since_flip()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    pending_frame_base().or_else(|| early.contains(&address).then_some(address))
 }
 
 /// Writes a pending drawn frame back where the guest scans it out, called as the guest flips,
@@ -5726,6 +5757,17 @@ mod tests {
             super::pending_target().is_none(),
             "the frame is no longer pending"
         );
+        // Written back before its flip, it is still the frame the flip of its buffer shows.
+        assert_eq!(
+            super::frame_drawn_into(base + 0x1000),
+            None,
+            "another buffer"
+        );
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+        super::protect_target(target);
+        assert!(super::written_at(base), "written back again");
+        assert_eq!(super::frame_drawn_into(base), Some(base));
+        assert_eq!(super::frame_drawn_into(base), None, "asked once a flip");
         let mut expected = super::words_of(&before);
         crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
             .expect("tiles");

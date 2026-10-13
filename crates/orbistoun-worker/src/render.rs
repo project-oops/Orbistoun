@@ -221,8 +221,9 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
         });
     // The frame drawn since the last flip is written back to guest memory on every flip, shown or
     // not (D714), since the guest's own scanout is what is honoured. A frame due in the window
-    // comes with a device copy of its own.
-    let drawn_into = orbistoun_gpu::agc_driver::pending_frame_base();
+    // comes with a device copy of its own. One the guest read before flipping was written back
+    // then, and is still the frame drawn into this buffer.
+    let drawn_into = orbistoun_gpu::agc_driver::frame_drawn_into(address);
     if drawn_into.is_some() {
         keep_frame_at_this_flip();
     }
