@@ -101,6 +101,17 @@ pub fn sleep_for(how_long: std::time::Duration) {
         std::thread::sleep(coarse);
     }
     while Instant::now() < deadline {
+        wait_a_moment();
+    }
+}
+
+/// One turn of [`sleep_for`]'s final wait. A yield, so other threads run meanwhile - except on
+/// macOS, whose yield lowers the thread's priority and can keep it off the core for far longer than
+/// the microseconds left, so there the wait spins. Either way it lasts at most `SLEEP_OVERSHOOT`.
+fn wait_a_moment() {
+    if cfg!(target_os = "macos") {
+        std::hint::spin_loop();
+    } else {
         std::thread::yield_now();
     }
 }
