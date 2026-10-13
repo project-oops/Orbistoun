@@ -55,7 +55,7 @@ pub(crate) struct DepthDraw {
 }
 
 /// Whether `format` has a stencil aspect.
-fn has_stencil(format: vk::Format) -> bool {
+pub(crate) fn has_stencil(format: vk::Format) -> bool {
     format == vk::Format::D32_SFLOAT_S8_UINT
 }
 

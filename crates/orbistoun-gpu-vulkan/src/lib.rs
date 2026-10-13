@@ -286,6 +286,12 @@ pub struct VulkanBackend {
     /// `SetBlendConstants`; `None` when the stream set none, and a constant-colour factor is then
     /// refused.
     blend_constants: Option<[u32; 4]>,
+    /// The colour targets the latest `SetRenderTargets` selected after the first, in attachment
+    /// order (D825): what a draw writes beside [`Self::current_target`].
+    more_targets: Vec<ResourceId>,
+    /// Their output state for the next draw: the latest `SetMoreColourOutputs`. An attachment it
+    /// does not reach writes every channel, unblended.
+    more_outputs: Vec<orbistoun_gpu::ColourOutput>,
     /// Colour target zero's raster operation for the next draw: the latest `SetRasterOp`; `None`
     /// writes the colour unchanged.
     raster_op: Option<u8>,
@@ -377,6 +383,8 @@ impl VulkanBackend {
             draw_buffers: [Vec::new(), Vec::new()],
             blend: None,
             blend_constants: None,
+            more_targets: Vec::new(),
+            more_outputs: Vec::new(),
             raster_op: None,
             line_width: None,
             write_mask: None,
@@ -455,6 +463,7 @@ impl VulkanBackend {
         }
         // Otherwise its resident attachment goes, and the next draw makes one from the seed.
         if let Some(resident) = self.resident.remove(&Some(target)) {
+            self.detach_more_passes();
             resident.destroy();
         }
         self.contents.insert(Some(target), pixels);
@@ -672,6 +681,7 @@ impl VulkanBackend {
         if self.depths.get(&id).is_some_and(|d| d.extent() != extent) {
             // Framebuffers name the old view, so every pass over it goes first.
             for resident in self.resident.values_mut() {
+                resident.detach_more();
                 resident.detach_depth();
             }
             if let Some(old) = self.depths.remove(&id) {
@@ -748,6 +758,8 @@ impl VulkanBackend {
             RenderCommand::SetBlend(blend) => self.blend = Some(*blend),
             // The blend constants a constant-colour factor reads.
             RenderCommand::SetBlendConstants(bits) => self.blend_constants = Some(*bits),
+            // The colour attachments after the first's blend states and masks.
+            RenderCommand::SetMoreColourOutputs(outputs) => self.more_outputs.clone_from(outputs),
             // The raster operation.
             RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
             // The line width.
@@ -880,9 +892,29 @@ impl VulkanBackend {
     fn retire_resident(&mut self, target: Option<ResourceId>) -> Result<(), DispatchError> {
         self.read_back(target)?;
         if let Some(resident) = self.resident.remove(&target) {
+            self.detach_more_passes();
             resident.destroy();
         }
         Ok(())
+    }
+
+    /// Releases every pass over further colour attachments (D825), before an attachment or depth
+    /// attachment one may name is destroyed.
+    fn detach_more_passes(&mut self) {
+        for resident in self.resident.values_mut() {
+            resident.detach_more();
+        }
+    }
+
+    /// What colour target `target` holds after the draws so far, read back from the device when
+    /// it has draws the host has not seen: how a colour attachment after the first comes back
+    /// (D825). `None` when it holds nothing or could not be read.
+    pub fn target_frame(&mut self, target: ResourceId) -> Option<&framebuffer::Pixels> {
+        if let Err(e) = self.read_back(Some(target)) {
+            tracing::warn!("a colour attachment could not be read back: {e:?}");
+            return None;
+        }
+        self.contents.get(&Some(target))
     }
 
     /// How `target`'s texels hold colour; the interim square's are eight-bit `UNORM`.
@@ -1073,8 +1105,13 @@ impl VulkanBackend {
         self.depth_bias.hash(&mut hasher);
         self.write_mask.hash(&mut hasher);
         self.current_depth.is_some().hash(&mut hasher);
-        // And the target's encoding: its pass's attachment format.
+        // And the target's encoding: its pass's attachment format; and each further attachment's,
+        // with its output state (D825).
         self.encoding_of(self.current_target).hash(&mut hasher);
+        for target in &self.more_targets {
+            self.encoding_of(Some(*target)).hash(&mut hasher);
+        }
+        self.more_outputs_for_draw().hash(&mut hasher);
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
         self.viewport_transform
@@ -1135,10 +1172,28 @@ impl VulkanBackend {
         self.geometry_buffers_rebound = false;
         let target = self.current_target;
         self.unread.insert(target);
+        self.unread
+            .extend(self.more_targets.iter().map(|more| Some(*more)));
         self.last_drawn = Some(DrawnOn(target));
         self.last_window = None;
         self.window_unread = true;
         true
+    }
+
+    /// The output state each colour attachment after the first draws with (D825): the latest
+    /// `SetMoreColourOutputs`'s, or every channel unblended for one it did not reach.
+    fn more_outputs_for_draw(&self) -> Vec<orbistoun_gpu::ColourOutput> {
+        (0..self.more_targets.len())
+            .map(|index| {
+                self.more_outputs
+                    .get(index)
+                    .copied()
+                    .unwrap_or(orbistoun_gpu::ColourOutput {
+                        blend: None,
+                        write_mask: 0xF,
+                    })
+            })
+            .collect()
     }
 
     /// A draw into `target`'s resident attachment, beside the bound depth target's when `start`
@@ -1165,18 +1220,32 @@ impl VulkanBackend {
         let window = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeWindow, || {
             self.ensure_window_buffer()
         })?;
+        // The colour attachments after the first, each resident at the first's extent (D825).
+        let mut more = Vec::with_capacity(self.more_targets.len());
+        for id in self.more_targets.clone() {
+            let attachment = self
+                .resident_for(Some(id), extent)
+                .map_err(|e| device_error("draw (attachment)", e))?;
+            more.push((attachment.view(), attachment.format()));
+        }
         self.resident_for(target, extent)
             .map_err(|e| device_error("draw (resident)", e))?;
         let resident = self
             .resident
             .get_mut(&target)
             .ok_or(BackendError::UnknownResource(ResourceId(0)))?;
+        let depth = self.current_depth.and_then(|id| self.depths.get(&id));
         if start.depth.is_some()
-            && let Some(depth) = self.current_depth.and_then(|id| self.depths.get(&id))
+            && let Some(depth) = depth
         {
             resident
                 .attach_depth(depth)
                 .map_err(|e| device_error("draw (depth)", e))?;
+        }
+        if !more.is_empty() {
+            resident
+                .attach_more(&more, depth.filter(|_| start.depth.is_some()))
+                .map_err(|e| device_error("draw (attachments)", e))?;
         }
         let batched =
             framebuffer::draw_resident(shaders, vertices, start, resident, (&window, scissor))
@@ -1184,6 +1253,8 @@ impl VulkanBackend {
         self.batched = batched.map(|(key, places)| (self.state_generation, key, places));
         self.geometry_buffers_rebound = false;
         self.unread.insert(target);
+        self.unread
+            .extend(self.more_targets.iter().map(|more| Some(*more)));
         self.last_drawn = Some(DrawnOn(target));
         // Read when asked for, not after every draw.
         self.last_window = None;
@@ -1284,6 +1355,14 @@ impl VulkanBackend {
     ) -> Result<Option<[f32; 3]>, &'static str> {
         framebuffer::blend_attachment(self.blend, self.blend_constants, self.write_mask)
             .map(drop)?;
+        for output in self.more_outputs_for_draw() {
+            framebuffer::blend_attachment(
+                output.blend,
+                self.blend_constants,
+                Some(output.write_mask),
+            )
+            .map(drop)?;
+        }
         framebuffer::logic_op(self.raster_op, self.blend, encoding)?;
         depth::depth_bias(self.depth_bias, self.cull)
     }
@@ -1321,7 +1400,7 @@ impl VulkanBackend {
             None => (None, None),
         };
         let block = self.user_data;
-        let blend_constants = self.blend_constants;
+        let more_outputs = self.more_outputs_for_draw();
         let textures = self.textures.clone();
         let draw_buffers = self.draw_buffers.clone();
         let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
@@ -1335,7 +1414,10 @@ impl VulkanBackend {
                 .each_ref()
                 .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
-            blend_constants: blend_constants.as_ref(),
+            colour_extras: framebuffer::ColourExtras {
+                blend_constants: self.blend_constants,
+                more: &more_outputs,
+            },
             raster_op: self.raster_op,
             line_width: self.line_width,
             write_mask: self.write_mask,
@@ -1353,25 +1435,21 @@ impl VulkanBackend {
         };
         let device_error =
             |what: &str, e: DispatchError| BackendError::Device(format!("{what}: {e:?}"));
-        if geometry_is_mesh {
+        if geometry_is_mesh || (!indexed && (start.depth.is_some() || !more_outputs.is_empty())) {
+            // A mesh draw, or a vertex draw with depth or with colour attachments after the first,
+            // draws on the resident attachment, where its depth attachment and its pass over the
+            // others are kept (D825). Only a mesh draw batches.
+            let vertices = (!geometry_is_mesh).then_some(draw);
             self.draw_resident(
-                ((&geometry, &fragment), None),
+                ((&geometry, &fragment), vertices),
                 &start,
                 target,
                 (width, height),
                 scissor,
             )?;
-        } else if !indexed && start.depth.is_some() {
-            // A vertex draw with depth draws on the resident attachment, where its depth
-            // attachment is kept.
-            self.draw_resident(
-                ((&geometry, &fragment), Some(draw)),
-                &start,
-                target,
-                (width, height),
-                scissor,
-            )?;
-            self.batched = None;
+            if vertices.is_some() {
+                self.batched = None;
+            }
         } else if indexed {
             // A vertex pipeline's indexed draw fetches from a host index buffer the executor does
             // not bind. Only a vertex module (a test shader) reaches this, so it is refused rather
@@ -1465,6 +1543,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
             | RenderCommand::SetViewportTransform(_)
             | RenderCommand::SetBlend(_)
             | RenderCommand::SetBlendConstants(_)
+            | RenderCommand::SetMoreColourOutputs(_)
             | RenderCommand::SetRasterOp(_)
             | RenderCommand::SetLineWidth(_)
             | RenderCommand::SetWriteMask(_)
@@ -1489,6 +1568,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::BindDrawBuffers { .. } => "BindDrawBuffers",
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
+        RenderCommand::SetMoreColourOutputs(_) => "SetMoreColourOutputs",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
@@ -1580,6 +1660,15 @@ impl RenderBackend for VulkanBackend {
             // attachment is made at its first draw, sized to the colour target.
             RenderCommand::SetRenderTargets { colour, depth } => {
                 self.current_depth = *depth;
+                // The attachments after the first, each a target made resident like the first.
+                if let Some(unknown) = colour
+                    .iter()
+                    .skip(1)
+                    .find(|id| !self.targets.contains_key(id))
+                {
+                    return Err(BackendError::UnknownResource(*unknown));
+                }
+                self.more_targets = colour.iter().skip(1).copied().collect();
                 self.select_target(colour.first().copied())
             }
             command if is_draw_state(command) => {
@@ -1703,6 +1792,8 @@ impl Drop for VulkanBackend {
     /// Destroys the objects the backend created. Best-effort: if the session cannot be reacquired
     /// the process is tearing down and the driver reclaims them.
     fn drop(&mut self) {
+        // The passes over several attachments first, since they name other attachments' views.
+        self.detach_more_passes();
         for (_, resident) in std::mem::take(&mut self.resident) {
             resident.destroy();
         }
@@ -2895,7 +2986,7 @@ mod tests {
             "half red over green is half of each: {blended:?}"
         );
 
-        // A constant-colour source factor (13), whose constants are not decoded: refused by name.
+        // A constant-colour source factor (13) with no blend constants set: refused by name.
         let constant = decode_blend_control(0xd | (0x5 << 8) | (1 << 30));
         let mut backend = VulkanBackend::new();
         backend

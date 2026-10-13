@@ -44,6 +44,17 @@ pub enum IndexBuffer {
     },
 }
 
+/// A colour attachment's output state past the first one's
+/// ([`RenderCommand::SetMoreColourOutputs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ColourOutput {
+    /// Its blend state, as its `CB_BLENDn_CONTROL` stands; `None` where the stream set none.
+    pub blend: Option<crate::registers::BlendControl>,
+    /// The channels written, red in bit 0 to alpha in bit 3: its four bits of `CB_TARGET_MASK`,
+    /// limited to the channels its format holds.
+    pub write_mask: u8,
+}
+
 /// A rectangle in render-target space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -144,6 +155,10 @@ pub enum RenderCommand {
     /// holds ([`crate::registers::colour_write_mask`]). Emitted before a draw whenever it changed;
     /// without one every channel is written.
     SetWriteMask(u8),
+    /// The output state of each colour attachment after the first, in the order
+    /// [`Self::SetRenderTargets`] lists them from its second: what [`Self::SetBlend`] and
+    /// [`Self::SetWriteMask`] are for the first. Emitted before a draw whenever any changed.
+    SetMoreColourOutputs(Vec<ColourOutput>),
     /// The depth and stencil tests the draws that follow run under, as the stream's
     /// `DB_DEPTH_CONTROL`, `DB_STENCIL_CONTROL` and `DB_STENCILREFMASK` pair stand at them.
     ///

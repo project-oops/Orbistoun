@@ -74,6 +74,40 @@ fn as_buffer_zero(register: u32) -> Option<(u32, u32)> {
         .map(|first| (register - first, first))
 }
 
+/// Colour buffer `buffer`'s register at the place colour buffer zero's `register` has: the same
+/// register again for one that is no one buffer's.
+#[must_use]
+pub const fn of_buffer(register: u32, buffer: u32) -> u32 {
+    if register >= MAIN_BLOCK && register < MAIN_BLOCK + MAIN_BLOCK_STRIDE {
+        return register + MAIN_BLOCK_STRIDE * buffer;
+    }
+    let mut first = 0;
+    while first < PER_BUFFER.len() {
+        if register == PER_BUFFER[first] {
+            return register + buffer;
+        }
+        first += 1;
+    }
+    if register == BLEND_CONTROL {
+        return register + buffer;
+    }
+    register
+}
+
+/// Colour buffer `buffer`'s value of colour buffer zero's `register`, from `latest`, which reads a
+/// register as the stream stands: its own register's, or its four bits of `CB_TARGET_MASK` or
+/// `CB_SHADER_MASK` moved lowest. A register that is no one buffer's reads as it is.
+pub fn read_as_buffer(
+    latest: &mut impl FnMut(u32) -> Option<u32>,
+    register: u32,
+    buffer: u32,
+) -> Option<u32> {
+    if NIBBLE_MASKS.contains(&register) {
+        return latest(register).map(|value| value >> (buffer * 4));
+    }
+    latest(of_buffer(register, buffer))
+}
+
 /// The writes as the decoders written for colour buffer zero read colour buffer `buffer`'s: its
 /// registers moved onto buffer zero's, buffer zero's own dropped, so a register `buffer` never
 /// had written reads as unwritten rather than as buffer zero's, and `CB_TARGET_MASK` and
@@ -104,7 +138,9 @@ pub fn colour_buffer_writes(writes: &[RegisterWrite], buffer: u32) -> Cow<'_, [R
 
 #[cfg(test)]
 mod tests {
-    use super::{buffers_of, colour_buffer_writes, exported_colour_buffers};
+    use super::{
+        buffers_of, colour_buffer_writes, exported_colour_buffers, of_buffer, read_as_buffer,
+    };
     use crate::registers::RegisterWrite;
 
     fn write(register: u32, value: u32) -> RegisterWrite {
@@ -177,5 +213,18 @@ mod tests {
             vec![0xA325, 0xA3B8],
             "buffer seven's DCC_BASE and ATTRIB3"
         );
+    }
+
+    /// Buffer zero's registers name buffer `n`'s by the same strides, and a mask's four bits move.
+    #[test]
+    fn a_register_of_buffer_zero_names_another_buffer_s() {
+        assert_eq!(of_buffer(0xA31C, 1), 0xA32B, "CB_COLOR1_INFO");
+        assert_eq!(of_buffer(0xA318, 7), 0xA381, "CB_COLOR7_BASE");
+        assert_eq!(of_buffer(0xA3B0, 2), 0xA3B2, "CB_COLOR2_ATTRIB2");
+        assert_eq!(of_buffer(0xA1E0, 3), 0xA1E3, "CB_BLEND3_CONTROL");
+        assert_eq!(of_buffer(0xA105, 3), 0xA105, "CB_BLEND_RED is everyone's");
+        let mut latest = |register| (register == 0xA08E).then_some(0x0000_00F3);
+        assert_eq!(read_as_buffer(&mut latest, 0xA08E, 1), Some(0xF));
+        assert_eq!(read_as_buffer(&mut latest, 0xA08E, 0), Some(0xF3));
     }
 }

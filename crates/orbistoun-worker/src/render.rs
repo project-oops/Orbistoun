@@ -521,6 +521,52 @@ fn executed_frame() -> Option<ExecutedFrame> {
     .flatten()
 }
 
+/// Gives each colour attachment after the first what it holds before a submission's draws (D825):
+/// the [`orbistoun_gpu::agc_driver::MoreTargetsSeeder`] the worker installs. On the device thread,
+/// with the run's backend.
+pub fn seed_more_targets(targets: &[(orbistoun_gpu::ResourceId, (u32, u32), &[u32])]) -> bool {
+    on_device(|| {
+        let Availability::Available { .. } = probe() else {
+            return false;
+        };
+        let mut held = live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let backend = held.get_or_insert_with(VulkanBackend::new);
+        for &(target, (width, height), words) in targets {
+            backend.seed_target(
+                target,
+                Pixels {
+                    width,
+                    height,
+                    bytes: zerocopy::IntoBytes::as_bytes(words).to_vec(),
+                },
+            );
+        }
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// What a colour attachment after the first holds after the draws, as linear `Rgba8` words (D825):
+/// the [`orbistoun_gpu::agc_driver::TargetReader`] the worker installs.
+pub fn read_target_frame(target: orbistoun_gpu::ResourceId) -> Option<Vec<u32>> {
+    on_device(move || {
+        let mut held = live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let frame = held.as_mut()?.target_frame(target)?;
+        Some(
+            frame
+                .bytes
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect(),
+        )
+    })
+    .flatten()
+}
+
 /// Carries out a submission's draws at the moment it is submitted: the
 /// [`orbistoun_gpu::agc_driver::DrawExecutor`] the worker installs.
 ///

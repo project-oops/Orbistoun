@@ -461,6 +461,10 @@ pub struct Submission {
     pub stencil_control: Option<StencilControl>,
     /// Colour target zero's blend state (`CB_BLEND0_CONTROL`). `None` when the stream set none.
     pub blend_control: Option<BlendControl>,
+    /// The colour attachments after the first, in the order [`RenderCommand::SetRenderTargets`]
+    /// lists them (D825): each a further colour buffer the pixel shader's exports reach. Empty
+    /// when the draws export to the first alone.
+    pub more_colour_targets: Vec<MoreColourTarget>,
     /// The guest-memory window this submission's shaders read, as words, read at the pipeline's
     /// window (D703). Frame-level, because every module is compiled against one window. Empty when
     /// the window is not mapped.
@@ -512,6 +516,177 @@ fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], d
 
 /// The shaders one draw runs, by stage.
 type DrawShaders = Vec<(ShaderStage, ResourceId)>;
+
+/// A colour attachment after the first, as a submission set it up (D825): what
+/// [`Submission::colour_target`] and its neighbours are for the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoreColourTarget {
+    /// The id [`RenderCommand::SetRenderTargets`] names it by.
+    pub id: ResourceId,
+    /// Which colour buffer it is: `CB_COLORn`'s `n`.
+    pub buffer: u32,
+    /// Its extent.
+    pub extent: ColourTargetExtent,
+    /// Its base and layout, `None` where the stream did not set them.
+    pub target: Option<ColourTarget>,
+    /// Its tiling mode.
+    pub tiling: Option<SwizzleMode>,
+    /// Its element layout.
+    pub format: Option<ColourTargetFormat>,
+    /// Its delta colour compression.
+    pub dcc: Option<crate::registers::ColourTargetDcc>,
+}
+
+/// The colour buffers a submission's attachments are, in attachment order: those
+/// `SPI_SHADER_COL_FORMAT` formats, as the pixel shader's exports are numbered (D825), or colour
+/// buffer zero alone where it formats none or the stream never set it.
+fn attachment_buffers(writes: &[RegisterWrite]) -> Vec<u32> {
+    match crate::colour_slots::exported_colour_buffers(writes) {
+        Some(buffers) if !buffers.is_empty() => buffers,
+        _ => vec![0],
+    }
+}
+
+/// The colour attachments `buffers` are, each read through the decoders colour buffer zero's are,
+/// up to the first the stream gave no extent: attachment `K` is always `mrtK`'s buffer, so an
+/// export to that one or a later one is refused as unbound rather than drawn into the next.
+fn more_colour_targets(writes: &[RegisterWrite], buffers: &[u32]) -> Vec<MoreColourTarget> {
+    buffers
+        .iter()
+        .map_while(|&buffer| {
+            let view = crate::colour_slots::colour_buffer_writes(writes, buffer);
+            let extent = colour_target_extent_at(&view)?;
+            let target = colour_target_at(&view);
+            Some(MoreColourTarget {
+                id: colour_target_id(extent, target.map(|target| target.base)),
+                buffer,
+                extent,
+                target,
+                tiling: colour_swizzle_mode_at(&view),
+                format: colour_target_format_at(&view),
+                dcc: colour_target_dcc_at(&view),
+            })
+        })
+        .collect()
+}
+
+/// A depth target with the id it is bound by and the colour extent it is sized to.
+type SizedDepthTarget = (ResourceId, crate::depth::DepthTarget, ColourTargetExtent);
+
+/// Selects the submission's render targets: the colour attachments its pixel shaders export to
+/// (D825), the first sized and recorded as `targets` keeps it (D702) and the rest as
+/// [`Submission::more_colour_targets`], and a depth target sized to the first. Answers the depth
+/// target and the colour buffers in attachment order.
+fn set_render_targets(
+    submission: &mut Submission,
+    writes: &[RegisterWrite],
+) -> (Option<SizedDepthTarget>, Vec<u32>) {
+    let buffers = attachment_buffers(writes);
+    let first = crate::colour_slots::colour_buffer_writes(writes, buffers[0]);
+    let depth_target = colour_target_extent_at(&first).and_then(|extent| {
+        let target = crate::depth::depth_target_at(writes)?;
+        Some((crate::depth::depth_target_id(&target), target, extent))
+    });
+    if let Some(extent) = colour_target_extent_at(&first) {
+        let base = colour_target_at(&first).map(|target| target.base);
+        let target = colour_target_id(extent, base);
+        submission.targets.insert(target, extent);
+        submission.more_colour_targets = more_colour_targets(writes, &buffers[1..]);
+        let mut colour = vec![target];
+        colour.extend(submission.more_colour_targets.iter().map(|more| more.id));
+        submission.commands.push(RenderCommand::SetRenderTargets {
+            colour,
+            depth: depth_target.map(|(id, _, _)| id),
+        });
+    }
+    (depth_target, buffers)
+}
+
+/// Unbinds the colour attachments after the first that no draw's pixel shader exports to: a
+/// format the guest left set for a buffer its shaders never write binds nothing to draw (D825).
+fn keep_exported_attachments(submission: &mut Submission, exported: usize) {
+    let keep = exported.max(1);
+    submission.more_colour_targets.truncate(keep - 1);
+    if let Some(RenderCommand::SetRenderTargets { colour, .. }) = submission
+        .commands
+        .iter_mut()
+        .find(|command| matches!(command, RenderCommand::SetRenderTargets { .. }))
+    {
+        colour.truncate(keep);
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::{
+        Submission, attachment_buffers, keep_exported_attachments, more_colour_targets,
+        set_render_targets,
+    };
+    use crate::{RegisterWrite, RenderCommand};
+
+    fn write(register: u32, value: u32) -> RegisterWrite {
+        RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        }
+    }
+
+    /// A 64x32 linear `8_8_8_8` surface at `base` for colour buffer `n`: its base, `INFO`,
+    /// `ATTRIB2` and `ATTRIB3`.
+    fn surface(n: u32, base: u32) -> [RegisterWrite; 4] {
+        [
+            write(0xA318 + 15 * n, base),
+            write(0xA31C + 15 * n, 0xA << 2),
+            write(0xA3B0 + n, (63 << 14) | 31),
+            write(0xA3B8 + n, 0),
+        ]
+    }
+
+    /// The attachments are the buffers `SPI_SHADER_COL_FORMAT` formats, in order; buffer zero
+    /// alone where it formats none or was never set.
+    #[test]
+    fn attachments_follow_the_export_formats() {
+        assert_eq!(attachment_buffers(&[]), vec![0]);
+        assert_eq!(attachment_buffers(&[write(0xA1C5, 0)]), vec![0]);
+        assert_eq!(attachment_buffers(&[write(0xA1C5, 0x44)]), vec![0, 1]);
+        assert_eq!(attachment_buffers(&[write(0xA1C5, 0x40)]), vec![1]);
+    }
+
+    /// Attachments stop at the first buffer with no extent, so attachment `K` stays `mrtK`'s.
+    #[test]
+    fn attachments_stop_at_a_buffer_with_no_extent() {
+        let mut writes = surface(1, 0x200).to_vec();
+        writes.extend(surface(3, 0x400));
+        let more = more_colour_targets(&writes, &[1, 2, 3]);
+        assert_eq!(more.iter().map(|m| m.buffer).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(more[0].target.map(|t| t.base), Some(0x200 << 8));
+    }
+
+    /// Two formatted buffers bind two attachments, the first in `targets`; an attachment no
+    /// draw exports to is unbound again.
+    #[test]
+    fn a_second_attachment_is_bound_while_exported() {
+        let mut writes = surface(0, 0x100).to_vec();
+        writes.extend(surface(1, 0x200));
+        writes.push(write(0xA1C5, 0x44));
+        let mut submission = Submission::default();
+        let (_, buffers) = set_render_targets(&mut submission, &writes);
+        assert_eq!(buffers, vec![0, 1]);
+        assert_eq!(submission.targets.len(), 1);
+        assert_eq!(submission.more_colour_targets.len(), 1);
+        let colour = |submission: &Submission| match &submission.commands[..] {
+            [RenderCommand::SetRenderTargets { colour, .. }] => colour.len(),
+            _ => 0,
+        };
+        assert_eq!(colour(&submission), 2);
+        keep_exported_attachments(&mut submission, 2);
+        assert_eq!(colour(&submission), 2);
+        keep_exported_attachments(&mut submission, 1);
+        assert_eq!(colour(&submission), 1);
+        assert!(submission.more_colour_targets.is_empty());
+    }
+}
 
 /// How many colour buffers the commands bind: the latest [`RenderCommand::SetRenderTargets`]'s.
 fn bound_colour_targets(commands: &[RenderCommand]) -> usize {
@@ -1592,22 +1767,11 @@ impl Pipeline {
             ..Submission::default()
         };
 
-        // The colour target first, because a draw reads it. Decoding its size register lets a
-        // backend allocate a real attachment. The `targets` map is keyed by extent (D702); the
-        // decoded base rides on `colour_target` below. A depth target is sized to it.
-        let depth_target = colour_target_extent_at(&writes).and_then(|extent| {
-            let target = crate::depth::depth_target_at(&writes)?;
-            Some((crate::depth::depth_target_id(&target), target, extent))
-        });
-        if let Some(extent) = colour_target_extent_at(&writes) {
-            let base = colour_target_at(&writes).map(|target| target.base);
-            let target = colour_target_id(extent, base);
-            submission.targets.insert(target, extent);
-            submission.commands.push(RenderCommand::SetRenderTargets {
-                colour: vec![target],
-                depth: depth_target.map(|(id, _, _)| id),
-            });
-        }
+        // The colour targets first, because a draw reads them. Decoding their size registers lets
+        // a backend allocate real attachments. The `targets` map is keyed by extent (D702); the
+        // first's decoded base rides on `colour_target` below. A depth target is sized to it.
+        let (depth_target, mut buffers) = set_render_targets(&mut submission, &writes);
+        let first = crate::colour_slots::colour_buffer_writes(&writes, buffers[0]);
 
         // The draws, found once for every pass that walks them.
         // An offset draw's index size is the `VGT_INDEX_TYPE` in force at it, which a stream may
@@ -1621,10 +1785,10 @@ impl Pipeline {
                     .unwrap_or(UNWRITTEN_INDEX_TYPE),
             )
         });
-        record_colour_target(&mut submission, &writes, &draws);
+        record_colour_target(&mut submission, &first, &draws);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
-        submission.blend_control = blend_control_at(&writes);
+        submission.blend_control = blend_control_at(&first);
         // The primitive the draw produces, from `VGT_GS_OUT_PRIM_TYPE`; `prepare` makes it the mesh
         // module's output shape.
         submission.report.primitive_topology = primitive_topology_at(&writes);
@@ -1655,7 +1819,7 @@ impl Pipeline {
         });
         submission.report.unwindowed_draws =
             self.unwindowed_draws(&per_draw, &submission.guest_memory);
-        self.count_export_refusals(&mut submission, &per_draw, (&draws, &writes));
+        self.count_export_refusals(&mut submission, &per_draw, (&draws, &writes, &mut buffers));
         submission.report.unshaded_draws = unshaded_draws(&per_draw, queue, registered);
 
         // A fill of the depth surface before the draws is its clear; the surface is never read.
@@ -1671,7 +1835,7 @@ impl Pipeline {
             push_geometry_commands(
                 &mut submission.commands,
                 (&walked, stream, &draws),
-                &writes,
+                (&writes, &buffers),
                 (&per_draw, &chunks, depth_target.map(|(id, _, _)| id)),
                 (
                     &mut submission.report.unmodelled_viewports,
@@ -2903,7 +3067,7 @@ impl Pipeline {
         &self,
         per_draw: &[DrawShaders],
         draws: &[DrawCall],
-        writes: &[RegisterWrite],
+        (writes, buffers): (&[RegisterWrite], &[u32]),
     ) -> usize {
         let mut sweep = crate::registers::RegisterSweep::new(writes);
         draws
@@ -2918,13 +3082,16 @@ impl Pipeline {
                     return false;
                 };
                 let at = draw.packet_offset;
-                let mask = sweep
-                    .latest(at, crate::registers::CB_TARGET_MASK)
-                    .unwrap_or(0xF);
-                let info = sweep
-                    .latest(at, crate::registers::CB_COLOR0_INFO)
-                    .unwrap_or(0);
-                crate::registers::colour_write_mask(mask, info) & !exported[0] != 0
+                let mut latest = |register| sweep.latest(at, register);
+                // Each attachment's channels against what its target's exports write.
+                buffers.iter().zip(exported).any(|(&buffer, &exported)| {
+                    let mut read = |register| {
+                        crate::colour_slots::read_as_buffer(&mut latest, register, buffer)
+                    };
+                    let mask = read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF);
+                    let info = read(crate::registers::CB_COLOR0_INFO).unwrap_or(0);
+                    crate::registers::colour_write_mask(mask, info) & !exported != 0
+                })
             })
             .count()
     }
@@ -2936,12 +3103,29 @@ impl Pipeline {
         &self,
         submission: &mut Submission,
         per_draw: &[DrawShaders],
-        (draws, writes): (&[DrawCall], &[RegisterWrite]),
+        (draws, writes, buffers): (&[DrawCall], &[RegisterWrite], &mut Vec<u32>),
     ) {
+        keep_exported_attachments(submission, self.exported_attachments(per_draw));
+        // The buffers bound from here on: attachment `K` is the `K`th.
+        let bound = bound_colour_targets(&submission.commands);
+        buffers.truncate(bound.max(1));
         submission.report.unexported_channel_draws =
-            self.unexported_channel_draws(per_draw, draws, writes);
-        submission.report.unbound_export_draws =
-            self.unbound_export_draws(per_draw, bound_colour_targets(&submission.commands));
+            self.unexported_channel_draws(per_draw, draws, (writes, buffers));
+        submission.report.unbound_export_draws = self.unbound_export_draws(per_draw, bound);
+    }
+
+    /// How many colour attachments the draws' pixel shaders export to: one past the highest target
+    /// any writes a channel to.
+    fn exported_attachments(&self, per_draw: &[DrawShaders]) -> usize {
+        per_draw
+            .iter()
+            .flatten()
+            .filter(|(stage, _)| *stage == ShaderStage::Fragment)
+            .filter_map(|(_, resource)| self.colour_channels.get(resource))
+            .filter_map(|channels| channels.iter().rposition(|&c| c != 0))
+            .map(|highest| highest + 1)
+            .max()
+            .unwrap_or(1)
     }
 
     /// How many draws run a pixel shader that writes channels to a colour target past the `bound`
@@ -3705,19 +3889,30 @@ struct ColourOutputSent {
     constants: Option<[u32; 4]>,
     rop: Option<u8>,
     mask: Option<u8>,
+    more: Option<Vec<crate::ColourOutput>>,
 }
 
 /// Colour target zero's output state in force at a draw, as commands where it changed since
 /// `sent`: the blend state, when the stream set one, as `SetBlend`, its raster operation, when the
 /// stream set `CB_COLOR_CONTROL`, as `SetRasterOp`, and the channels the draw
 /// writes, when it set a target mask, as `SetWriteMask`. A one-byte target with no target mask is
-/// counted: a drawer would write every channel of the frame standing in for it.
+/// counted: a drawer would write every channel of the frame standing in for it. The first colour
+/// attachment is `buffers`' first colour buffer; each after it is set by
+/// [`push_more_colour_outputs`].
 fn push_colour_output(
     commands: &mut Vec<RenderCommand>,
     mut latest: impl FnMut(u32) -> Option<u32>,
     sent: &mut ColourOutputSent,
-    unmasked_one_byte_draws: &mut usize,
+    (unmasked_one_byte_draws, buffers): (&mut usize, &[u32]),
 ) {
+    push_more_colour_outputs(
+        commands,
+        &mut latest,
+        sent,
+        buffers.get(1..).unwrap_or_default(),
+    );
+    let first = buffers.first().copied().unwrap_or(0);
+    let mut latest = |register| crate::colour_slots::read_as_buffer(&mut latest, register, first);
     if let Some(value) = latest(crate::registers::CB_BLEND0_CONTROL)
         && sent.blend != Some(value)
     {
@@ -3759,6 +3954,38 @@ fn push_colour_output(
     }
 }
 
+/// The output state of the colour attachments after the first, `buffers` in order, as one
+/// `SetMoreColourOutputs` where it changed since `sent`: each buffer's blend state and the channels
+/// it writes, every one its format holds where the stream set no target mask.
+fn push_more_colour_outputs(
+    commands: &mut Vec<RenderCommand>,
+    latest: &mut impl FnMut(u32) -> Option<u32>,
+    sent: &mut ColourOutputSent,
+    buffers: &[u32],
+) {
+    if buffers.is_empty() {
+        return;
+    }
+    let more: Vec<crate::ColourOutput> = buffers
+        .iter()
+        .map(|&buffer| {
+            let mut read = |register| crate::colour_slots::read_as_buffer(latest, register, buffer);
+            let info = read(crate::registers::CB_COLOR0_INFO).unwrap_or(0);
+            crate::ColourOutput {
+                blend: read(crate::registers::CB_BLEND0_CONTROL).map(decode_blend_control),
+                write_mask: crate::registers::colour_write_mask(
+                    read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF),
+                    info,
+                ),
+            }
+        })
+        .collect();
+    if sent.more.as_ref() != Some(&more) {
+        commands.push(RenderCommand::SetMoreColourOutputs(more.clone()));
+        sent.more = Some(more);
+    }
+}
+
 /// Appends a submission's draws and dispatches to its command list, in the stream's order.
 ///
 /// An auto draw becomes a [`RenderCommand::Draw`] and an indexed one a
@@ -3768,7 +3995,7 @@ fn push_colour_output(
 fn push_geometry_commands(
     commands: &mut Vec<RenderCommand>,
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
-    writes: &[RegisterWrite],
+    (writes, buffers): (&[RegisterWrite], &[u32]),
     (shaders, chunks, depth_target): (&[DrawShaders], &[Vec<Chunk>], Option<ResourceId>),
     (unmodelled_viewports, unmasked_one_byte_draws): (&mut usize, &mut usize),
 ) {
@@ -3804,7 +4031,7 @@ fn push_geometry_commands(
             commands,
             |register| sweep.latest(at, register),
             &mut colour_sent,
-            unmasked_one_byte_draws,
+            (unmasked_one_byte_draws, buffers),
         );
         // The line width in force at this draw, when the stream set one and it changed.
         if let Some(width) = sweep

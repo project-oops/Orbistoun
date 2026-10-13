@@ -366,3 +366,88 @@ fn an_mrt1_export_writes_the_output_at_location_one() {
         [0xF, 0xF, 0, 0, 0, 0, 0, 0]
     );
 }
+
+/// `mrt0` and `mrt1` land in the two colour attachments `SetRenderTargets` lists, in that order
+/// (D825): blue in the first, read as the last frame, and the second export's channels in the
+/// second, read back by its id.
+#[test]
+fn two_exports_draw_two_attachments() {
+    use orbistoun_gpu::{
+        RenderBackend, RenderCommand, Resource, ResourceId, ShaderStage, TargetEncoding,
+    };
+    if !device_or_skip("two_exports_draw_two_attachments") {
+        return;
+    }
+    let (width, height) = (8, 4);
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    // Blue to `mrt0`; then `v3, v2, v1, v0` - red, green, blue, alpha 1, 1, 0, 0 - to `mrt1`.
+    let mut bytes = export_shader([0.0, 0.0, 1.0, 1.0]);
+    bytes.truncate(bytes.len() - 4);
+    bytes.extend((0xF800_001Fu32 | (1 << 11) | (1 << 12)).to_le_bytes());
+    bytes.extend(0x0001_0203u32.to_le_bytes());
+    bytes.extend(0xBF81_0000u32.to_le_bytes());
+    let (module, _) = translate_for(
+        &decode(&bytes, &encodings, &operands),
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        orbistoun_translate::wavefront::Window::default(),
+    )
+    .expect("two exports translate");
+    let vertex = fullscreen_triangle_vertex_module();
+    let mut backend = orbistoun_gpu_vulkan::VulkanBackend::new();
+    backend
+        .ensure_resident(ResourceId(1), Resource::Shader(&vertex))
+        .expect("vertex");
+    backend
+        .ensure_resident(ResourceId(2), Resource::Shader(&module))
+        .expect("fragment");
+    for target in [10, 11] {
+        backend
+            .ensure_resident(
+                ResourceId(target),
+                Resource::RenderTarget {
+                    width,
+                    height,
+                    encoding: TargetEncoding::Unorm8,
+                },
+            )
+            .expect("target");
+    }
+    for command in [
+        RenderCommand::SetRenderTargets {
+            colour: vec![ResourceId(10), ResourceId(11)],
+            depth: None,
+        },
+        RenderCommand::BindShader {
+            stage: ShaderStage::Vertex,
+            shader: ResourceId(1),
+        },
+        RenderCommand::BindShader {
+            stage: ShaderStage::Fragment,
+            shader: ResourceId(2),
+        },
+        RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        },
+    ] {
+        backend.execute(&command).expect("carried out");
+    }
+    for (x, y) in [(0, 0), (7, 3), (4, 2)] {
+        let second = backend.target_frame(ResourceId(11)).expect("the second");
+        assert_eq!(
+            second.at(x, y),
+            Some([255, 255, 0, 0]),
+            "second at ({x}, {y})"
+        );
+        let first = backend.last_frame().expect("the first");
+        assert_eq!(
+            first.at(x, y),
+            Some([0, 0, 255, 255]),
+            "first at ({x}, {y})"
+        );
+    }
+}

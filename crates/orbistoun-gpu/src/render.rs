@@ -22,6 +22,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetUserData { .. } => "SetUserData",
         RenderCommand::SetBlend(_) => "SetBlend",
         RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
+        RenderCommand::SetMoreColourOutputs(_) => "SetMoreColourOutputs",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
@@ -60,6 +61,38 @@ pub struct FrameOutcome {
     pub presented: bool,
 }
 
+/// Makes a submission's colour targets resident, each with its extent and format: the first
+/// colour attachment's in `targets` (D702), each further one's in its own (D825). Answers how many.
+fn make_targets_resident(
+    backend: &mut dyn RenderBackend,
+    submission: &Submission,
+) -> Result<usize, BackendError> {
+    let encoding_of = |format: Option<crate::registers::ColourTargetFormat>| {
+        format.map_or(crate::TargetEncoding::Unorm8, |format| format.encoding())
+    };
+    let first = submission
+        .targets
+        .iter()
+        .map(|(id, extent)| (*id, *extent, encoding_of(submission.colour_target_format)));
+    let more = submission
+        .more_colour_targets
+        .iter()
+        .map(|more| (more.id, more.extent, encoding_of(more.format)));
+    let mut made = 0;
+    for (id, extent, encoding) in first.chain(more) {
+        backend.ensure_resident(
+            id,
+            Resource::RenderTarget {
+                width: extent.width,
+                height: extent.height,
+                encoding,
+            },
+        )?;
+        made += 1;
+    }
+    Ok(made)
+}
+
 /// Drives one submission through a backend: resident, then executed, then presented.
 ///
 /// A refused command is counted, not fatal, so a partial backend reports its gaps and the frame
@@ -77,21 +110,7 @@ pub fn drive(
         outcome.resident += 1;
     }
 
-    // Colour target zero's format is the only one decoded, and is every target's here.
-    let encoding = submission
-        .colour_target_format
-        .map_or(crate::TargetEncoding::Unorm8, |format| format.encoding());
-    for (id, extent) in &submission.targets {
-        backend.ensure_resident(
-            *id,
-            Resource::RenderTarget {
-                width: extent.width,
-                height: extent.height,
-                encoding,
-            },
-        )?;
-        outcome.resident += 1;
-    }
+    outcome.resident += make_targets_resident(backend, submission)?;
 
     // The frame's guest-memory window, set once before the commands: a shader fetches its vertices
     // from it (D703).

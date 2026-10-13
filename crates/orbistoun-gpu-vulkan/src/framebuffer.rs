@@ -263,6 +263,115 @@ fn create_resident_render_pass(
         .map_err(|e| DispatchError::Vulkan("create_render_pass(resident)", e))
 }
 
+/// The render pass a [`ResidentAttachment`] is drawn with beside the colour attachments after it
+/// (D825), `colours` in attachment order with its own first, and a depth attachment after them when
+/// `depth` names one's format: each loaded and stored in its attachment layout, ordered as the
+/// colour-only and depth passes order themselves.
+fn create_attachments_render_pass(
+    device: &ash::Device,
+    colours: &[vk::Format],
+    depth: Option<vk::Format>,
+) -> Result<vk::RenderPass, DispatchError> {
+    let colour = |format: vk::Format| {
+        vk::AttachmentDescription::default()
+            .format(format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+    };
+    let mut attachments: Vec<vk::AttachmentDescription> =
+        colours.iter().copied().map(colour).collect();
+    if let Some(format) = depth {
+        let stencil = if crate::depth::has_stencil(format) {
+            (vk::AttachmentLoadOp::LOAD, vk::AttachmentStoreOp::STORE)
+        } else {
+            (
+                vk::AttachmentLoadOp::DONT_CARE,
+                vk::AttachmentStoreOp::DONT_CARE,
+            )
+        };
+        attachments.push(
+            vk::AttachmentDescription::default()
+                .format(format)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .stencil_load_op(stencil.0)
+                .stencil_store_op(stencil.1)
+                .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+        );
+    }
+    let references: Vec<vk::AttachmentReference> = (0u32..)
+        .take(colours.len())
+        .map(|index| {
+            vk::AttachmentReference::default()
+                .attachment(index)
+                .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        })
+        .collect();
+    let depth_reference = vk::AttachmentReference::default()
+        .attachment(u32::try_from(colours.len()).unwrap_or(u32::MAX))
+        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    let mut subpass = vk::SubpassDescription::default()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&references);
+    if depth.is_some() {
+        subpass = subpass.depth_stencil_attachment(&depth_reference);
+    }
+    let subpasses = [subpass];
+    let tests = if depth.is_some() {
+        vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS
+    } else {
+        vk::PipelineStageFlags::empty()
+    };
+    let depth_access = if depth.is_some() {
+        vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+            | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+    } else {
+        vk::AccessFlags::empty()
+    };
+    let stages =
+        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::TRANSFER | tests;
+    let writes = vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+        | vk::AccessFlags::TRANSFER_WRITE
+        | (depth_access & vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE);
+    let uses = writes
+        | vk::AccessFlags::COLOR_ATTACHMENT_READ
+        | vk::AccessFlags::TRANSFER_READ
+        | depth_access;
+    let dependencies = [
+        vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(stages)
+            .src_access_mask(writes)
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | tests)
+            .dst_access_mask(uses),
+        vk::SubpassDependency::default()
+            .src_subpass(0)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | tests)
+            .src_access_mask(
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | (depth_access & vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE),
+            )
+            .dst_stage_mask(stages)
+            .dst_access_mask(uses),
+    ];
+    let info = vk::RenderPassCreateInfo::default()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&dependencies);
+    // SAFETY: every slice above outlives the call and the device is live.
+    unsafe { device.create_render_pass(&info, None) }
+        .map_err(|e| DispatchError::Vulkan("create_render_pass(attachments)", e))
+}
+
 /// Records one command buffer with `body`, submits it, and waits for the device: for the resident
 /// attachment's seeding and readback, which run outside any draw.
 pub(crate) fn one_shot(
@@ -402,6 +511,21 @@ pub(crate) struct ResidentAttachment {
     encoding: TargetEncoding,
     /// The pass drawing on it with a depth attachment beside it, made for one depth attachment.
     depth_pass: Option<DepthPass>,
+    /// The pass drawing on it with further colour attachments after it (D825), made for one set of
+    /// them and one depth attachment or none.
+    more_pass: Option<MorePass>,
+}
+
+/// A render pass and framebuffer over a colour attachment, the colour attachments after it and a
+/// depth attachment if one is bound (D825).
+#[derive(Debug)]
+struct MorePass {
+    /// The further colour attachments' views the framebuffer holds, in attachment order.
+    views: Vec<vk::ImageView>,
+    /// The depth attachment's view it holds, if any.
+    depth_view: Option<vk::ImageView>,
+    render_pass: vk::RenderPass,
+    framebuffer: vk::Framebuffer,
 }
 
 /// A render pass and framebuffer over a colour attachment and a depth attachment together.
@@ -480,6 +604,108 @@ impl ResidentAttachment {
         unsafe { session.device.destroy_framebuffer(pass.framebuffer, None) };
         // SAFETY: as above.
         unsafe { session.device.destroy_render_pass(pass.render_pass, None) };
+    }
+
+    /// Draws on it from now on may write `more` - further colour attachments, each a view and the
+    /// format it is drawn through, in attachment order - with `depth` beside them when given (D825):
+    /// the pass over them all is made, replacing one made for others.
+    pub(crate) fn attach_more(
+        &mut self,
+        more: &[(vk::ImageView, vk::Format)],
+        depth: Option<&crate::depth::DepthAttachment>,
+    ) -> Result<(), DispatchError> {
+        let views: Vec<vk::ImageView> = more.iter().map(|(view, _)| *view).collect();
+        let depth_view = depth.map(crate::depth::DepthAttachment::view);
+        if self
+            .more_pass
+            .as_ref()
+            .is_some_and(|pass| pass.views == views && pass.depth_view == depth_view)
+        {
+            return Ok(());
+        }
+        self.detach_more();
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let device = &session.device;
+        let formats: Vec<vk::Format> = std::iter::once(drawn_format(self.encoding))
+            .chain(more.iter().map(|(_, format)| *format))
+            .collect();
+        let render_pass = create_attachments_render_pass(
+            device,
+            &formats,
+            depth.map(crate::depth::DepthAttachment::format),
+        )?;
+        let attachments: Vec<vk::ImageView> = std::iter::once(self.view)
+            .chain(views.iter().copied())
+            .chain(depth_view)
+            .collect();
+        let framebuffer_info = vk::FramebufferCreateInfo::default()
+            .render_pass(render_pass)
+            .attachments(&attachments)
+            .width(self.width)
+            .height(self.height)
+            .layers(1);
+        // SAFETY: the render pass and every view are live and the slice outlives the call.
+        let framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None) }
+            .map_err(|e| DispatchError::Vulkan("create_framebuffer(attachments)", e))?;
+        self.more_pass = Some(MorePass {
+            views,
+            depth_view,
+            render_pass,
+            framebuffer,
+        });
+        Ok(())
+    }
+
+    /// Releases the pass over it and further colour attachments, if it has one - before any of
+    /// those attachments, or its depth attachment, is destroyed, since the framebuffer names their
+    /// views.
+    pub(crate) fn detach_more(&mut self) {
+        let Some(pass) = self.more_pass.take() else {
+            return;
+        };
+        let Ok(session) = crate::compute::session() else {
+            return;
+        };
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Every recorded draw through the pass has run once the device settles.
+        let _ = settle(&session);
+        // SAFETY: created on this device, idle after the settle, destroyed exactly once, the
+        // framebuffer before the pass it was made for.
+        unsafe { session.device.destroy_framebuffer(pass.framebuffer, None) };
+        // SAFETY: as above.
+        unsafe { session.device.destroy_render_pass(pass.render_pass, None) };
+    }
+
+    /// Its view, for a pass over it beside another attachment.
+    pub(crate) const fn view(&self) -> vk::ImageView {
+        self.view
+    }
+
+    /// The format it is drawn through.
+    pub(crate) fn format(&self) -> vk::Format {
+        drawn_format(self.encoding)
+    }
+
+    /// The pass a draw records into: [`Self::pass`], or with `more` the one over it and the
+    /// further colour attachments [`Self::attach_more`] attached, with a depth attachment exactly
+    /// when `depth`. `None` when that pass is not attached.
+    pub(crate) fn pass_for(&self, depth: bool, more: bool) -> Option<DrawPass> {
+        if !more {
+            return self.pass(depth);
+        }
+        self.more_pass
+            .as_ref()
+            .filter(|pass| pass.depth_view.is_some() == depth)
+            .map(|pass| DrawPass {
+                render_pass: pass.render_pass,
+                framebuffer: pass.framebuffer,
+                extent: self.extent(),
+            })
     }
 
     /// The pass a draw records into: the one with its depth attachment when `depth`, else colour
@@ -604,6 +830,7 @@ impl ResidentAttachment {
             height,
             encoding,
             depth_pass: None,
+            more_pass: None,
         })
     }
 
@@ -873,6 +1100,7 @@ impl ResidentAttachment {
 
     /// Destroys it. Best-effort, like every release here: with no session the process is ending.
     pub(crate) fn destroy(mut self) {
+        self.detach_more();
         self.detach_depth();
         let Ok(session) = crate::compute::session() else {
             return;
@@ -1946,7 +2174,7 @@ pub(crate) fn draw_vertices(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
-            blend_constants: start.blend_constants,
+            colour_extras: &start.colour_extras,
             raster_op: start.raster_op,
             line_width: start.line_width,
             write_mask: start.write_mask,
@@ -1981,8 +2209,8 @@ pub(crate) struct Start<'a> {
     pub(crate) textures: [Option<TextureWords<'a>>; MAX_TEXTURES],
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
-    /// The blend constants, each an `f32`'s bits; `None` when the stream set none.
-    pub(crate) blend_constants: Option<&'a [u32; 4]>,
+    /// The blend constants, and the colour attachments after the first's output state.
+    pub(crate) colour_extras: ColourExtras<'a>,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     pub(crate) raster_op: Option<u8>,
     /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
@@ -2202,6 +2430,41 @@ pub(crate) fn logic_op(
     Ok(Some(vk::LogicOp::from_raw(i32::from(
         (rop & 0xF).reverse_bits() >> 4,
     ))))
+}
+
+/// What every colour attachment's blending reads beside its own state, and the colour attachments
+/// after the first's own state (D825).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ColourExtras<'a> {
+    /// The blend constants, each an `f32`'s bits; `None` when the stream set none.
+    pub(crate) blend_constants: Option<[u32; 4]>,
+    /// Each colour attachment after the first's blend state and channels written, in attachment
+    /// order; empty when the draw writes one.
+    pub(crate) more: &'a [orbistoun_gpu::ColourOutput],
+}
+
+/// A draw with one colour attachment and no blend constants.
+static NO_COLOUR_EXTRAS: ColourExtras<'static> = ColourExtras {
+    blend_constants: None,
+    more: &[],
+};
+
+/// Every colour attachment's blend state, in attachment order: the first's, then each after it
+/// (D825). A state that does not map is refused before a draw reaches here (`VulkanBackend`).
+fn colour_blend_attachments(
+    bound: &Bound<'_>,
+) -> Result<Vec<vk::PipelineColorBlendAttachmentState>, DispatchError> {
+    let constants = bound.colour_extras.blend_constants;
+    std::iter::once(blend_attachment(bound.blend, constants, bound.write_mask))
+        .chain(
+            bound
+                .colour_extras
+                .more
+                .iter()
+                .map(|output| blend_attachment(output.blend, constants, Some(output.write_mask))),
+        )
+        .collect::<Result<_, _>>()
+        .map_err(|what| DispatchError::Unsupported(what.to_owned()))
 }
 
 /// The blend constants a pipeline is built with: the stream's, each an `f32` from its bits, or zero
@@ -2903,9 +3166,15 @@ fn render_resident(
 ) -> Result<Drawn, DispatchError> {
     let (instance, physical, device) = (&session.instance, session.physical, &session.device);
     orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
-    let pass = resident.pass(bound.depth.is_some()).ok_or_else(|| {
-        DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
-    })?;
+    let more = !bound.colour_extras.more.is_empty();
+    let pass = resident
+        .pass_for(bound.depth.is_some(), more)
+        .ok_or_else(|| {
+            DispatchError::Unsupported(
+                "a draw on an attachment with no pass for its depth or further attachments"
+                    .to_owned(),
+            )
+        })?;
     // A pipeline built for an earlier draw with the same key is reused, because building one per
     // draw dominates a frame. Only with a resident guest-memory buffer, which is re-bound here
     // because the key leaves it out.
@@ -4304,13 +4573,10 @@ fn create_graphics_pipeline(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     // The guest's blend state, or opaque with every channel written when it set none. A state that
     // does not map is refused before a draw reaches here (`VulkanBackend`).
-    let constants = bound.blend_constants.copied();
-    let attachment = blend_attachment(bound.blend, constants, bound.write_mask)
-        .map_err(|what| DispatchError::Unsupported(what.to_owned()))?;
-    let blend_attachments = [attachment];
+    let blend_attachments = colour_blend_attachments(&bound)?;
     let mut blend = vk::PipelineColorBlendStateCreateInfo::default()
         .attachments(&blend_attachments)
-        .blend_constants(blend_constants(constants));
+        .blend_constants(blend_constants(bound.colour_extras.blend_constants));
     if let Some(op) = logic_op(bound.raster_op, bound.blend, bound.encoding)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?
     {
@@ -4541,9 +4807,15 @@ pub(crate) fn draw_resident(
     resident: &ResidentAttachment,
     (guest_buffer, scissor): (&DispatchBuffer, Option<vk::Rect2D>),
 ) -> Result<Option<(BatchKey, crate::draw_buffers::GeometryPlaces)>, DispatchError> {
-    let pass = resident.pass(start.depth.is_some()).ok_or_else(|| {
-        DispatchError::Unsupported("a depth draw on an attachment with no depth pass".to_owned())
-    })?;
+    let more = !start.colour_extras.more.is_empty();
+    let pass = resident
+        .pass_for(start.depth.is_some(), more)
+        .ok_or_else(|| {
+            DispatchError::Unsupported(
+                "a draw on an attachment with no pass for its depth or further attachments"
+                    .to_owned(),
+            )
+        })?;
     // The draw's buffers (D733), in their own set.
     let (buffers_set, places) = {
         let session = crate::compute::session()?;
@@ -4603,7 +4875,7 @@ pub(crate) fn draw_resident(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
-            blend_constants: start.blend_constants,
+            colour_extras: &start.colour_extras,
             raster_op: start.raster_op,
             line_width: start.line_width,
             write_mask: start.write_mask,
@@ -4714,8 +4986,9 @@ struct Bound<'a> {
     user_data: &'a [u32; USER_DATA_BLOCK_WORDS],
     /// Colour target zero's blend state; `None` draws opaque.
     blend: Option<orbistoun_gpu::BlendControl>,
-    /// The blend constants, each an `f32`'s bits; `None` when the stream set none.
-    blend_constants: Option<&'a [u32; 4]>,
+    /// The blend constants, and the colour attachments after the first's output state. By
+    /// reference, so `Bound` stays cheap to pass by value.
+    colour_extras: &'a ColourExtras<'a>,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
     raster_op: Option<u8>,
     /// `PA_SU_LINE_CNTL`'s `WIDTH`; `None` draws lines one pixel wide.
@@ -4820,7 +5093,7 @@ impl Default for Bound<'_> {
             initial: None,
             user_data: &NO_USER_DATA,
             blend: None,
-            blend_constants: None,
+            colour_extras: &NO_COLOUR_EXTRAS,
             raster_op: None,
             line_width: None,
             write_mask: None,

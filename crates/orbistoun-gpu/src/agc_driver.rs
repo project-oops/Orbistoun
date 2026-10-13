@@ -281,6 +281,49 @@ pub fn install_draw_executor(executor: DrawExecutor) {
     let _ = draw_executor().set(executor);
 }
 
+/// Seeds the colour attachments after the first before a submission's draws are carried out
+/// (D825): each by the id `SetRenderTargets` names it by and its extent, with what it holds as
+/// linear `Rgba8` words. `false` when the device could not take them.
+pub type MoreTargetsSeeder = fn(&[(crate::ResourceId, (u32, u32), &[u32])]) -> bool;
+
+/// What a colour attachment after the first holds once the draws ran, as linear `Rgba8` words, by
+/// its id (D825); `None` when it could not be read.
+pub type TargetReader = fn(crate::ResourceId) -> Option<Vec<u32>>;
+
+fn more_targets_io() -> &'static OnceLock<(MoreTargetsSeeder, TargetReader)> {
+    static IO: OnceLock<(MoreTargetsSeeder, TargetReader)> = OnceLock::new();
+    &IO
+}
+
+/// Installs how the colour attachments after the first reach the device and come back (D825).
+/// Without them a submission with more than one is refused. First install wins.
+pub fn install_more_targets(seed: MoreTargetsSeeder, read: TargetReader) {
+    let _ = more_targets_io().set((seed, read));
+}
+
+/// A colour attachment after the first that its draws can be carried out into and written back to
+/// exactly, by the rules [`writable_target`] holds the first to: a modelled layout for its tiling
+/// at its element's size, a format a frame can be written back in, and no compression. It must
+/// also have the first's extent, the one the device's render pass covers, and not be the first.
+fn writable_more_target(
+    more: &crate::pipeline::MoreColourTarget,
+    first: ColourTarget,
+) -> Option<(ColourTarget, ComponentSwap)> {
+    let target = more.target?;
+    let format = more.format?;
+    let bytes_per_texel = format.written_back_bytes()?;
+    (more.dcc.is_none()
+        && (target.width, target.height) == (first.width, first.height)
+        && target.base != first.base
+        && more
+            .tiling
+            .and_then(tiling::SurfaceLayout::of)
+            .and_then(|layout| layout.at_bytes_per_texel(bytes_per_texel))
+            == Some(target.layout)
+        && target.layout.models(target.pipe_bank_xor))
+    .then_some((target, format.swap))
+}
+
 /// The one colour target a submission's draws can be carried out into and written back to exactly:
 /// a single base, a single resident target of the same extent, a modelled layout for its tiling at
 /// its element's size, and either an `8_8_8_8` `UNORM` element in an order `CB_COLOR0_INFO` names
@@ -738,8 +781,9 @@ impl GuestCp<'_> {
         if let Some(dcc) = submission.colour_target_dcc {
             self.expand_dcc(dcc, target.layout)?;
         }
+        let more = self.seed_more_targets(submission, target)?;
         if !write_back_at_flip() {
-            return draw_over(self, target, swap, |before| {
+            draw_over(self, target, swap, |before| {
                 execute(submission, before).then(read).flatten()
             })
             .then_some(())
@@ -748,7 +792,8 @@ impl GuestCp<'_> {
                     "the device did not draw it, or it could not be written back{}",
                     shader_failures(submission)
                 )
-            });
+            })?;
+            return self.write_back_more_targets(&more);
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
         // each of the many submissions a GL frame takes (D714).
@@ -772,6 +817,104 @@ impl GuestCp<'_> {
         // every byte it would: it is superseded, unread (D801).
         if matches!(before, TargetRead::HeldOverDeferred) {
             drop_covered(target.base, target.words() as u64 * 4);
+        }
+        self.write_back_more_targets(&more)
+    }
+
+    /// Hands the device what each colour attachment after the first holds, read from guest memory
+    /// now (D825), and answers each with its id. They are not deferred to the flip as the first
+    /// is: each is read before and written back after every submission that draws into it.
+    fn seed_more_targets(
+        &mut self,
+        submission: &Submission,
+        first: ColourTarget,
+    ) -> Result<Vec<(ColourTarget, ComponentSwap, crate::ResourceId)>, String> {
+        if submission.more_colour_targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some((seed, _)) = more_targets_io().get() else {
+            return Err(
+                "no device is installed to draw more than one colour attachment".to_owned(),
+            );
+        };
+        let mut more = Vec::with_capacity(submission.more_colour_targets.len());
+        let mut before = Vec::with_capacity(more.capacity());
+        for attachment in &submission.more_colour_targets {
+            let (target, swap) = writable_more_target(attachment, first).ok_or_else(|| {
+                format!(
+                    concat!(
+                        "its colour attachment {} (CB_COLOR{}) is not one a frame can be written ",
+                        "back to exactly: {:?}, {:?}, {:?}, {}"
+                    ),
+                    more.len() + 1,
+                    attachment.buffer,
+                    attachment.target,
+                    attachment.tiling,
+                    attachment.format,
+                    if attachment.dcc.is_some() {
+                        "compressed"
+                    } else {
+                        "uncompressed"
+                    }
+                )
+            })?;
+            let length = target.words() * 4;
+            // A frame still pending for its pages is written back first, so this reads it.
+            let bytes = self
+                .settle_pending(target.base, length as u64)
+                .then(|| cp::CpMemory::read(self, target.base, length))
+                .flatten()
+                .filter(|bytes| bytes.len() >= length)
+                .ok_or_else(|| {
+                    format!(
+                        "its colour attachment at {:#x}, {length:#x} bytes, is not readable guest memory",
+                        target.base
+                    )
+                })?;
+            before.push(target.detile_mapped(&words_of(&bytes), |w| loaded(w, target, swap)));
+            more.push((target, swap, attachment.id));
+        }
+        let seeds: Vec<(crate::ResourceId, (u32, u32), &[u32])> = more
+            .iter()
+            .zip(&before)
+            .map(|((target, _, id), words)| (*id, (target.width, target.height), words.as_slice()))
+            .collect();
+        if seed(&seeds) {
+            Ok(more)
+        } else {
+            Err("the device could not take its further colour attachments".to_owned())
+        }
+    }
+
+    /// Writes each colour attachment after the first back where the guest reads it, tiled and in
+    /// its byte order, as the device drew it (D825).
+    fn write_back_more_targets(
+        &mut self,
+        more: &[(ColourTarget, ComponentSwap, crate::ResourceId)],
+    ) -> Result<(), String> {
+        let Some((_, read)) = more_targets_io().get() else {
+            return Ok(());
+        };
+        for &(target, swap, id) in more {
+            let after = read(id).ok_or_else(|| {
+                format!(
+                    "its colour attachment at {:#x} could not be read back",
+                    target.base
+                )
+            })?;
+            let mut tiled_ok = false;
+            let edited =
+                cp::CpMemory::edit_words(self, target.base, target.words(), &mut |tiled| {
+                    tiled_ok = target
+                        .tile_mapped(&after, tiled, |w| stored(w, target, swap))
+                        .is_ok();
+                });
+            if !(edited && tiled_ok) {
+                return Err(format!(
+                    "its colour attachment at {:#x} could not be written back",
+                    target.base
+                ));
+            }
         }
         Ok(())
     }
