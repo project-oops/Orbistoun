@@ -95,19 +95,26 @@ returns = "status"
 edge_cases = [
     "Answers 0, and the entry runs on a runtime worker thread, not the creator's, with its stack inside the caller's context block (a local at 0x9a5054 in a 0x99d080..0x9a5080 block).",
     "The entry had already run when the creator looked straight after create returned.",
+    "The entry receives arg in rdi and zero in rsi, rdx, rcx, r8 and r9 - nothing else, not the ulthread object or the runtime (REQ-20261013T1440Z-5c6c, arg 0 and 0x1111).",
+    "A runtime runs at most its worker count of ulthreads at once: with 3 workers, five ulthreads ran three at a time on three OS threads, and the fourth and fifth started only as the first two ended, on their workers (5c6c).",
+    "A ulthread blocked on an Ult mutex keeps its worker: with one worker, a second ulthread did not run while the first waited (5c6c, b-ran-while-a-blocked 0).",
+    "On a 0x2000-byte context the entry's frame reached 0x70 bytes below the top, and 446 bytes of the context were written (5c6c).",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
+cites = "obSCEne REQ-20261013T0911Z-u1t2 and REQ-20261013T1440Z-5c6c, 000-boot/sce-ult, reports/hardware/report-20261013-172400.log lines 3340-3405, FW 12.40"
 found_on = "2026-09-01"
-note = "Served as a real guest thread on the caller's context block (crates/orbistoun-kernel/src/lib.rs ult_ulthread_create), so it runs alongside the creator; that it has always started before create returns is not promised here."
+note = "Served as a guest thread of its own (crates/orbistoun-kernel/src/lib.rs ult_ulthread_create) on a stack of the default size, not the caller's context block, since orbistoun's own code runs on the guest stack and contexts go down to 8 KiB. Every ulthread starts at once: the worker limit is not modelled. PPSA28061, the one title importing libSceUlt, creates 3 ulthreads on a 3-worker runtime, so the limit does not bind there."
 
 [[function]]
 name = "sceUltUlthreadJoin"
 arity = 2
 purpose = "Waits for a user-level thread to end and writes the value it ended with."
-edge_cases = ["Answers 0 and writes the 32-bit exit value - 0x1234 for an entry ending with it - into exactly four bytes; the bytes around it are untouched."]
+edge_cases = [
+    "Answers 0 and writes the 32-bit exit value - 0x1234 for an entry ending with it - into exactly four bytes; the bytes around it are untouched.",
+    "An entry that returns 0x55 instead of calling sceUltUlthreadExit is joined the same way: rc 0, status 0x55 (REQ-20261013T1440Z-5c6c).",
+]
 known_by = "measured"
-cites = "obSCEne REQ-20261013T0911Z-u1t2, 000-boot/sce-ult, FW 12.40"
+cites = "obSCEne REQ-20261013T0911Z-u1t2 and REQ-20261013T1440Z-5c6c, 000-boot/sce-ult, reports/hardware/report-20261013-172400.log, FW 12.40"
 found_in = ["PPSA28061-app0"]
 found_on = "2026-10-13"
 
