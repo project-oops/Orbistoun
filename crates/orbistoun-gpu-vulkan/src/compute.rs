@@ -212,6 +212,85 @@ pub(crate) fn create_host_buffer(
     Ok((buffer, memory))
 }
 
+/// Whether a host buffer taken for a dispatch must start at zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Zeroed {
+    /// Its words are read back for what the shader wrote.
+    Yes,
+    /// The caller overwrites every word before it is used.
+    No,
+}
+
+/// A host buffer a finished guest dispatch released: the device, its size and words, the buffer
+/// and its memory.
+type SpareHostBuffer = (u64, vk::DeviceSize, usize, vk::Buffer, vk::DeviceMemory);
+
+/// Host buffers finished guest dispatches released, kept for the next of the same size, as a
+/// dispatch's own buffers and images are (D805). Allocating a dispatch's observation and window and
+/// freeing them after took some 0.4 ms of every dispatch, more than the dispatch.
+fn spare_host_buffers() -> &'static std::sync::Mutex<Vec<SpareHostBuffer>> {
+    static SPARES: std::sync::Mutex<Vec<SpareHostBuffer>> = std::sync::Mutex::new(Vec::new());
+    &SPARES
+}
+
+/// The most bytes the spare host buffers hold together.
+const SPARE_HOST_BYTES_MOST: vk::DeviceSize = 64 << 20;
+
+/// A host buffer of `size` bytes holding `words` words for a guest dispatch: a spare of exactly that
+/// where one is kept, zeroed again where `zeroed` asks, else a new one, which starts at zero.
+fn take_host_buffer(
+    (instance, physical, device): (&ash::Instance, vk::PhysicalDevice, &ash::Device),
+    (size, words): (vk::DeviceSize, usize),
+    zeroed: Zeroed,
+) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
+    let raw = vk::Handle::as_raw(device.handle());
+    let spare = spare_host_buffers().lock().ok().and_then(|mut spares| {
+        let at = spares
+            .iter()
+            .position(|&(on, held, count, _, _)| on == raw && held == size && count == words)?;
+        Some(spares.swap_remove(at))
+    });
+    let Some((_, _, _, buffer, memory)) = spare else {
+        return create_host_buffer(instance, physical, device, size, words);
+    };
+    if zeroed == Zeroed::Yes {
+        // SAFETY: the memory is host-visible, holds `size` bytes, and is not mapped: a spare is
+        // given back only after its dispatch finished.
+        let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
+            .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
+        // SAFETY: the mapping covers `size` bytes, which is `words` whole `u32`s, and this process
+        // has exclusive access to it while mapped.
+        unsafe { std::ptr::write_bytes(mapped.cast::<u8>(), 0, words * 4) };
+        // SAFETY: mapped immediately above and not used after unmapping.
+        unsafe { device.unmap_memory(memory) };
+    }
+    Ok((buffer, memory))
+}
+
+/// Keeps a host buffer a finished guest dispatch is done with among the spares, or releases it when
+/// they hold enough already.
+fn give_host_buffer(
+    device: &ash::Device,
+    (size, words): (vk::DeviceSize, usize),
+    (buffer, memory): (vk::Buffer, vk::DeviceMemory),
+) {
+    let raw = vk::Handle::as_raw(device.handle());
+    let kept = spare_host_buffers().lock().is_ok_and(|mut spares| {
+        let held: vk::DeviceSize = spares.iter().map(|spare| spare.1).sum();
+        let room = held + size <= SPARE_HOST_BYTES_MOST;
+        if room {
+            spares.push((raw, size, words, buffer, memory));
+        }
+        room
+    });
+    if !kept {
+        // SAFETY: created on this device, no longer in use, and released exactly once.
+        unsafe { device.destroy_buffer(buffer, None) };
+        // SAFETY: as above, and nothing is bound to the memory now.
+        unsafe { device.free_memory(memory, None) };
+    }
+}
+
 /// A compute pipeline and the layouts it binds through, which outlive one dispatch.
 #[derive(Debug, Clone, Copy)]
 struct KeptPipeline {
@@ -1319,15 +1398,16 @@ pub fn dispatch_guest_with_buffers(
 
     let observation_size = (GUEST_OBSERVATION_WORDS * 4) as vk::DeviceSize;
     let memory_size = (memory.len().max(1) * 4) as vk::DeviceSize;
-    let (observation_buffer, observation_memory) = create_host_buffer(
-        instance,
-        physical,
-        device,
-        observation_size,
-        GUEST_OBSERVATION_WORDS,
+    let context = (instance, physical, device);
+    // The observation is read back for what the shader wrote, so it starts at zero; the window is
+    // overwritten whole just below.
+    let (observation_buffer, observation_memory) = take_host_buffer(
+        context,
+        (observation_size, GUEST_OBSERVATION_WORDS),
+        Zeroed::Yes,
     )?;
     let (memory_buffer, memory_memory) =
-        create_host_buffer(instance, physical, device, memory_size, memory.len())?;
+        take_host_buffer(context, (memory_size, memory.len()), Zeroed::No)?;
     // SAFETY: the memory is host-visible, holds `memory_size` bytes and is not mapped.
     let mapped =
         unsafe { device.map_memory(memory_memory, 0, memory_size, vk::MemoryMapFlags::empty()) }
@@ -1384,17 +1464,19 @@ pub fn dispatch_guest_with_buffers(
     if let Some(traced) = traced {
         traced.destroy(device);
     }
+    // Kept for the next dispatch before an error here can leave them behind; nothing uses them now.
+    give_host_buffer(
+        device,
+        (observation_size, GUEST_OBSERVATION_WORDS),
+        (observation_buffer, observation_memory),
+    );
+    give_host_buffer(
+        device,
+        (memory_size, memory.len()),
+        (memory_buffer, memory_memory),
+    );
     let (observed, after) = dispatched?;
     let stored = stored?.flatten();
-
-    // SAFETY: both buffers were created here, are no longer in use, and are destroyed once.
-    unsafe { device.destroy_buffer(observation_buffer, None) };
-    // SAFETY: as above.
-    unsafe { device.destroy_buffer(memory_buffer, None) };
-    // SAFETY: the memory is unmapped and nothing is bound to it any longer.
-    unsafe { device.free_memory(observation_memory, None) };
-    // SAFETY: as above.
-    unsafe { device.free_memory(memory_memory, None) };
 
     Ok(GuestDispatch {
         memory: after,
