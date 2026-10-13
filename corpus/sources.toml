@@ -567,8 +567,8 @@ licence = "same suite (D043); our own test title, not third-party"
 cite = "https://github.com/project-oops/oops-apps"
 
 [[source.asset]]
-file = "dri-probe-title-prospero.zip"
-sha256 = "aaad33e50e55bad637227e4ac94280239b8e203acce3d898f3d59aaf8a4e1bb0"
+file = "mesa-dri-probe-title-prospero.zip"
+sha256 = "f5d2552e196391e8d89f7ddfbf9507dda859951d1a4ebc0c19f63686d55abb34"
 
 [[source]]
 name = "MESA00001"

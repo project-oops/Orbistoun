@@ -8,6 +8,7 @@ STKT00001              presented  150 imports (149 answered)    7911373 calls  1
 CRFT00001              presented  106 imports (100 answered)     345461 calls  100% standing   ran to the time limit
 MCUB00001              presented   81 imports (80 answered)     166350 calls  100% standing   ran to the time limit
 GCTS00001              presented   79 imports (78 answered)    1069857 calls  100% standing   the guest called abort
+DRIP00001              presented   72 imports (71 answered)      53337 calls  100% standing   ran to the time limit
 TSHP00001              presented   72 imports (68 answered)    3421974 calls  100% standing   ran to the time limit
 SOHK00001              presented   72 imports (67 answered)    4303539 calls  100% standing   ran to the time limit
 OPSY00001              presented   65 imports (57 answered)      23006 calls  100% standing   ran to the time limit
@@ -25,7 +26,6 @@ MDEM00001              flipped     94 imports (93 answered)     236798 calls  10
 GLTC00001              flipped     24 imports (24 answered)      19886 calls  100% standing   ran to the time limit
 PPSA21564-app0         entered    263 imports (243 answered)    1201761 calls  100% standing   ran to the time limit
 PPSA04263-app0         entered    213 imports (204 answered)   20000000 calls  100% standing   spent its call budget
-DRIP00001              entered     62 imports (56 answered)      63336 calls  100% standing   ran to the time limit
 MESA00001              entered     33 imports (32 answered)        362 calls  100% standing   ran to the time limit
 GLTP00001              entered     20 imports (20 answered)     101253 calls  100% standing   ran to the time limit
 GLPB00001              entered     18 imports (18 answered)      30048 calls  100% standing   ran to the time limit

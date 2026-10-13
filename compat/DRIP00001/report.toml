@@ -1,11 +1,11 @@
 [title]
 id = "DRIP00001"
-name = "DRI Probe"
+name = "Mesa DRI Probe"
 content_version = "01.00"
 master_version = "01.00"
 
 [reproduce]
-module_sha256 = "a8f6af7a77203d3c12941dcfaf0836908155a7271d758bc23c675dc2a787d905"
+module_sha256 = "7e36dd757592eafec7af7c1e925665a252a7bc1824ce481547dc3798490e01f9"
 limit_seconds = 20
 frame_every = 30
 sheet_frames = 10
@@ -16,15 +16,18 @@ frames = "local"
 [settings]
 
 [status]
-reach = "entered"
+reach = "presented"
 outcome = "ran to the time limit"
-imports = 62
-calls = 63336
+imports = 72
+calls = 53337
 standing = 100
 default_return = "unimplemented"
-unanswered = 6
+frames = 1
+unanswered = 1
 limit_seconds = 20
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
-link_plan = "5e02052f2e0b06cd"
+build = "v0.1.0 - c073e19"
+measured_on = "2026-10-13"
+link_plan = "d117f754b54f6b72"
 link_plan_stored = "new"
+presented_by = "drawn"
+shown = true

@@ -17,6 +17,7 @@ out of date.
 | CRFT00001 | presented | 106 | 345,461 | 100% | `ran to the time limit` | `5ec4c46ef3083591` match |
 | MCUB00001 | presented | 81 | 166,350 | 100% | `ran to the time limit` | `92bb8ddfebee87c5` new |
 | GCTS00001 | presented | 79 | 1,069,857 | 100% | `the guest called abort` | `87f13d4bc0877671` match |
+| DRIP00001 | presented | 72 | 53,337 | 100% | `ran to the time limit` | `d117f754b54f6b72` new |
 | TSHP00001 | presented | 72 | 3,421,974 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` match |
 | SOHK00001 | presented | 72 | 4,303,539 | 100% | `ran to the time limit` | `b1a48bbb026652be` new |
 | OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
@@ -34,7 +35,6 @@ out of date.
 | GLTC00001 | flipped | 24 | 19,886 | 100% | `ran to the time limit` | `1785f6a8b01771d2` new |
 | PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
-| DRIP00001 | entered | 62 | 63,336 | 100% | `ran to the time limit` | `5e02052f2e0b06cd` new |
 | MESA00001 | entered | 33 | 362 | 100% | `ran to the time limit` | `a072d7cef4f013a8` new |
 | GLTP00001 | entered | 20 | 101,253 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
 | GLPB00001 | entered | 18 | 30,048 | 100% | `ran to the time limit` | `297884c655c12e41` new |
