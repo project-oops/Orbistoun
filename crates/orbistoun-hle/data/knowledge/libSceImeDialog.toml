@@ -3,42 +3,52 @@ library = "libSceImeDialog"
 [[function]]
 name = "sceImeDialogGetStatus"
 purpose = "The text-entry dialog's state."
-edge_cases = ["Answers 0 (none) before anything, after the refused Init, and after Abort."]
-known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
+edge_cases = [
+    "MEASURED (obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, report-20261013-150600.log, FW 12.40): answers 0 (none) before anything, after the refused Init, and after Abort.",
+    "MODELLED (D826): an open dialog answers 1 (running) until the run's input script gives text, then types it into the title's buffer and answers 2 (finished).",
+]
+known_by = "assumed"
+assumptions = ["The codes 1 and 2, as oops-sdk's system/dialog.c reads them on the console (D826)."]
 found_on = "2026-10-13"
 
 [[function]]
 name = "sceImeDialogGetResult"
 purpose = "What the dialog ended with."
-edge_cases = ["With no dialog open answers 0x80bc0107 (not in use) and leaves the 0x40-byte result block untouched."]
-known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
+edge_cases = [
+    "MEASURED (obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, report-20261013-150600.log, FW 12.40): with no dialog open answers 0x80bc0107 (not in use) and leaves the 0x40-byte result block untouched.",
+    "MODELLED (D826): once an open dialog has ended, writes its end status - 0 OK, 2 aborted - to the result's first word and answers 0; before it has ended, the placeholder.",
+]
+known_by = "assumed"
+assumptions = ["The end statuses 0, 1 and 2, as oops-sdk's system/dialog.c reads them on the console (D826)."]
 found_on = "2026-10-13"
 
 [[function]]
 name = "sceImeDialogInit"
 purpose = "Opens the text-entry dialog."
 edge_cases = [
-    "Answers 0x80bc0015 and leaves the status at 0, in the measured process.",
-    "Once this process has initialised the common dialog it answers the placeholder: the probe had likely not, so a title's own Init - always after sceCommonDialogInitialize - is unmeasured.",
+    "MEASURED (obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, report-20261013-150600.log, FW 12.40): answers 0x80bc0015 and leaves the status at 0, in a process that had likely not initialised the common dialog.",
+    "MODELLED (D826): once the common dialog is initialised, opens the dialog over the UTF-16 buffer at param+0x28, taking at most the u32 at param+0x24 characters, and answers 0. A null block, or a dialog already open, answers the placeholder.",
 ]
-known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
+known_by = "assumed"
+assumptions = ["The parameter block's layout, as oops-sdk's system/dialog.c builds it for the console (D826)."]
 found_on = "2026-10-13"
 
 [[function]]
 name = "sceImeDialogAbort"
 purpose = "Ends an open dialog."
-edge_cases = ["With no dialog open answers 0x80bc0107."]
-known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
+edge_cases = [
+    "MEASURED (obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, report-20261013-150600.log, FW 12.40): with no dialog open answers 0x80bc0107.",
+    "MODELLED (D826): an open dialog ends aborted and the call answers 0.",
+]
+known_by = "assumed"
 found_on = "2026-10-13"
 
 [[function]]
 name = "sceImeDialogTerm"
 purpose = "Takes the dialog down."
-edge_cases = ["With no dialog open answers 0x80bc0107, every time."]
-known_by = "measured"
-cites = "obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, rows in reports/hardware/report-20261013-150600.log (FW 12.40)"
+edge_cases = [
+    "MEASURED (obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, report-20261013-150600.log, FW 12.40): with no dialog open answers 0x80bc0107, every time.",
+    "MODELLED (D826): an open dialog closes and the call answers 0.",
+]
+known_by = "assumed"
 found_on = "2026-10-13"

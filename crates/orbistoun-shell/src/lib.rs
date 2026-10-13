@@ -11,6 +11,7 @@
 
 pub mod cross;
 pub mod event;
+pub mod keyboard;
 pub mod profiles;
 pub mod session;
 pub mod settings;
@@ -18,6 +19,7 @@ pub mod startup;
 
 pub use cross::{Cross, Move};
 pub use event::{Delivery, EventQueue, ShellEvent, Withheld};
+pub use keyboard::{Key, Keyboard, Outcome, Press};
 pub use session::{Execution, Focus, Lifecycle, Refused, Request, Taken, Video, WhenBackgrounded};
 pub use settings::{Answer, ButtonAssignment, Parameters, Settings, User};
 pub use startup::{Refusal, Start, View};

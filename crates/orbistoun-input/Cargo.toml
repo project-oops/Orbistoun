@@ -18,6 +18,7 @@ orbistoun-hle = { workspace = true }
 orbistoun-mem = { workspace = true }
 # The signed-in user, the one a keyboard opens for.
 orbistoun-systemservice = { workspace = true }
+orbistoun-shell = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

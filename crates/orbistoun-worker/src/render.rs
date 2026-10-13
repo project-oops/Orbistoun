@@ -107,6 +107,21 @@ pub fn request_launch(title_id: &str) {
     }
 }
 
+/// Streams the system keyboard's view to the front end, which draws it over the title, or `None`
+/// once it has closed (D826). With no front end listening it is only logged.
+pub fn keyboard_changed(view: Option<&orbistoun_shell::keyboard::View>) {
+    if let Some(view) = view {
+        tracing::info!("[keyboard] {:?}", view.text);
+    } else {
+        tracing::info!("[keyboard] closed");
+    }
+    if let Some(sink) = LIVE_EVENTS.get() {
+        sink(&Event::Keyboard {
+            view: view.cloned(),
+        });
+    }
+}
+
 /// The frame regions presented frames rotate through: a front end reads each as its event arrives,
 /// so a few slots are enough, and a long run leaves a few frames on disk rather than one per flip.
 const PRESENT_RING: u64 = 8;

@@ -50,6 +50,8 @@ pub(crate) struct InFlight {
     launches: Receiver<String>,
     /// Where each second of the run went.
     perf: Receiver<orbistoun_proto::PerfReport>,
+    /// The system keyboard as each change left it, `None` once it closed (D826).
+    keyboard: Receiver<Option<orbistoun_shell::keyboard::View>>,
 }
 
 /// Where a run's live events go as they arrive: presented frames, titles the guest asked to start,
@@ -58,6 +60,7 @@ struct Live {
     frames: std::sync::mpsc::Sender<egui::ColorImage>,
     launches: std::sync::mpsc::Sender<String>,
     perf: std::sync::mpsc::Sender<orbistoun_proto::PerfReport>,
+    keyboard: std::sync::mpsc::Sender<Option<orbistoun_shell::keyboard::View>>,
 }
 
 impl InFlight {
@@ -97,6 +100,14 @@ impl InFlight {
     /// The newest time breakdown the worker has streamed since the last call, if any.
     pub(crate) fn latest_perf(&self) -> Option<orbistoun_proto::PerfReport> {
         self.perf.try_iter().last()
+    }
+
+    /// Brings `shown` up to the system keyboard as it now stands: its view, or `None` once it has
+    /// closed (D826). Left as it was when nothing changed.
+    pub(crate) fn update_keyboard(&self, shown: &mut Option<orbistoun_shell::keyboard::View>) {
+        if let Some(latest) = self.keyboard.try_iter().last() {
+            *shown = latest;
+        }
     }
 
     /// The title the guest last asked the system to start, if it asked since the last call.
@@ -201,10 +212,12 @@ pub(crate) fn start(
     let (frame_sender, frames) = channel();
     let (launch_sender, launches) = channel();
     let (perf_sender, perf) = channel();
+    let (keyboard_sender, keyboard) = channel();
     let live = Live {
         frames: frame_sender,
         launches: launch_sender,
         perf: perf_sender,
+        keyboard: keyboard_sender,
     };
     let name = module.to_string_lossy().into_owned();
     let for_thread = module.to_path_buf();
@@ -232,6 +245,7 @@ pub(crate) fn start(
         frames,
         launches,
         perf,
+        keyboard,
     }
 }
 
@@ -286,6 +300,9 @@ fn execute(
             }
             orbistoun_proto::Event::Perf(report) => {
                 let _ = live.perf.send(report.clone());
+            }
+            orbistoun_proto::Event::Keyboard { view } => {
+                let _ = live.keyboard.send(view.clone());
             }
             _ => {}
         },

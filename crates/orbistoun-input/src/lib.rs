@@ -243,11 +243,6 @@ fn pad_get_extended_information(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// remain in the guest's buffer (D713).
 fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (handle, into) = (args[0], args[1]);
-    // A scripted pad is sampled when the guest asks: `script::poll` is a pure function of run
-    // progress, so the run stays repeatable with no feeder thread.
-    if let Some(state) = script::poll() {
-        latest::arrived(&[state]);
-    }
     if ours(handle).is_none() {
         return u64::from(
             GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
@@ -259,13 +254,15 @@ fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         );
     }
     // The pad the window or a script sent, placed where the SDK reads it; the measured
-    // at-rest image when nothing has sent any. Port 0 for every handle, since handles do not record
-    // a port and the window sends one pad.
-    let delivered = latest::delivered(0);
-    // A recording keeps what the guest is handed, not what the window sent.
-    if let Some(state) = &delivered {
-        script::delivered(state);
-    }
+    // at-rest image when nothing has sent any. While the system keyboard has the controller the
+    // title is handed a neutral pad, connected with nothing pressed (D826).
+    let delivered = real_pad().map(|state| {
+        if ime_dialog::has_focus() {
+            PadState::neutral()
+        } else {
+            state
+        }
+    });
     let bytes = delivered.map_or(*pad::AT_REST, |state| pad::record(&state));
     // SAFETY: a guest-supplied destination, written for exactly the extent the hardware was
     // measured writing. The source is a local array of that length; guest memory and this stack
@@ -274,6 +271,23 @@ fn pad_read_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), into as *mut u8, pad::STATE_BYTES);
     }
     OK
+}
+
+/// The controller as it is now: the pad the window or a script sent, port 0 for every reader,
+/// since handles do not record a port and the window sends one pad. `None` when nothing has sent
+/// any. A scripted pad is sampled here, when somebody asks: `script::poll` is a pure function of
+/// run progress, so the run stays repeatable with no feeder thread. A recording keeps every state
+/// read (D721), whether the title or the system keyboard read it (D826), so playing it back
+/// presses what was pressed.
+fn real_pad() -> Option<PadState> {
+    if let Some(state) = script::poll() {
+        latest::arrived(&[state]);
+    }
+    let delivered = latest::delivered(0);
+    if let Some(state) = &delivered {
+        script::delivered(state);
+    }
+    delivered
 }
 
 /// `scePadRead(handle, into, count)` - the same structure, asked for in a batch.

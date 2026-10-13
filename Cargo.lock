@@ -3169,6 +3169,7 @@ dependencies = [
  "orbistoun-hle",
  "orbistoun-mem",
  "orbistoun-nid",
+ "orbistoun-shell",
  "orbistoun-systemservice",
  "serde",
  "toml 0.8.23",

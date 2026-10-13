@@ -198,6 +198,13 @@ pub enum Event {
         /// The title id asked for, as the guest passed it.
         title_id: String,
     },
+    /// The system keyboard a title opened for text, as it now stands, or `None` once it has
+    /// closed (D826). The front end draws it over the title, as the console's system software
+    /// does; streamed as it opens and as each press changes it.
+    Keyboard {
+        /// What to draw.
+        view: Option<orbistoun_shell::keyboard::View>,
+    },
     /// Where the last stretch of a running title's time went, streamed about once a second for a
     /// front end to show over the picture.
     Perf(PerfReport),

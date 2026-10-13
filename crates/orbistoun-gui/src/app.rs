@@ -78,6 +78,8 @@ pub(crate) struct App {
     live_fresh: bool,
     /// Where the running title's last second went, drawn over its picture.
     perf: Option<orbistoun_proto::PerfReport>,
+    /// The system keyboard the running title opened, drawn over its picture (D826).
+    keyboard: Option<orbistoun_shell::keyboard::View>,
     /// Whether that overlay is showing; [`crate::perf_overlay::TOGGLE`] flips it.
     show_perf: bool,
     /// The launcher a running title was started from, returned to when that title's run
@@ -178,6 +180,7 @@ impl App {
             live: None,
             live_fresh: false,
             perf: None,
+            keyboard: None,
             show_perf: true,
             home: None,
             finished: None,
@@ -597,6 +600,7 @@ impl App {
         // may still be submitting a frame that uses it; the next frame overwrites it.
         self.live_fresh = false;
         self.perf = None;
+        self.keyboard = None;
         // A build is played, not measured, so it runs until the title ends.
         let (limit, budget) = if self.aot.is_some() {
             (0, 0)
@@ -776,6 +780,7 @@ impl App {
             if let Some(report) = in_flight.latest_perf() {
                 self.perf = Some(report);
             }
+            in_flight.update_keyboard(&mut self.keyboard);
             if let Some(frame) = in_flight.latest_frame() {
                 self.live_fresh = true;
                 match &mut self.live {
@@ -1602,7 +1607,8 @@ impl eframe::App for App {
             self.show_perf = !self.show_perf;
         }
         let overlay = self.perf.clone().filter(|_| self.show_perf);
-        let overlay = overlay.as_ref();
+        let keyboard = self.keyboard.clone();
+        let overlay = (overlay.as_ref(), keyboard.as_ref());
         match (self.view, playing) {
             (View::Shell, Some(frame)) => {
                 egui::CentralPanel::default()
@@ -1768,7 +1774,10 @@ const DOCS: &[oops_docs::Doc] = &[
 fn live_frame(
     ui: &mut egui::Ui,
     (texture, size): (egui::TextureId, egui::Vec2),
-    overlay: Option<&orbistoun_proto::PerfReport>,
+    (overlay, keyboard): (
+        Option<&orbistoun_proto::PerfReport>,
+        Option<&orbistoun_shell::keyboard::View>,
+    ),
 ) {
     let room = ui.available_size();
     let scale = (room.x / size.x).min(room.y / size.y).max(0.0);
@@ -1778,6 +1787,10 @@ fn live_frame(
     // Where the time goes, over the picture it went into.
     if let Some(report) = overlay {
         crate::perf_overlay::draw(ui, shown.rect, report);
+    }
+    // The system keyboard the title opened, over everything it drew (D826).
+    if let Some(view) = keyboard {
+        crate::keyboard_draw::draw(ui, shown.rect, view);
     }
 }
 

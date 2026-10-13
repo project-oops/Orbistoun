@@ -575,6 +575,8 @@ fn install_presentation() {
     });
     // A launcher's request to start another title, which the front end carries out.
     orbistoun_systemservice::launch::install_launch_observer(render::request_launch);
+    // The system keyboard a title opens, which the front end draws (D826).
+    orbistoun_input::ime_dialog::observe(render::keyboard_changed);
 }
 
 /// Tells the guest-OS layer what this process actually laid out.
