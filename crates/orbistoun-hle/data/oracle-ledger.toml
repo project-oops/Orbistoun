@@ -64,10 +64,3 @@ function = "sce::Json::InitParameter2::InitParameter2()"
 predicted = "zeroes all 0x28 bytes"
 measured = "0x28 bytes, zero but for 2 at +0x18"
 cites = "obSCEne REQ-20261006T2220Z-js02, reports/hardware/20261007-082134-eboot.obs.log lines 4205-4267 (130-layout/json2-init)"
-
-[[refuted]]
-area = "libSceSysmodule"
-function = "sceSysmoduleIsLoaded"
-predicted = "0x805a1001 for a valid module not yet loaded, then 0 once loaded"
-measured = "0x805a1000 for every id not loaded (0x0e, 0x80, 0x7fff, 0), never 0x805a1001; 0xb4 is loaded in a fresh process and answers 0 throughout"
-cites = "obSCEne REQ-20261012T1943Z-41aa, report-1791836505.txt lines 30-49 (000-boot/sysmodule-isloaded-lifecycle)"
