@@ -132,10 +132,10 @@ fn every_test_that_dispatches_skips_without_a_device() {
         })
         .map(|&(name, ..)| name)
         .collect();
+    let guard = "if !device_or_skip(\"<own name>\") { return; }";
     assert!(
         unguarded.is_empty(),
-        "these tests run a shader without `if !device_or_skip(\"<own name>\") {{ return; }}`, \
-         so they fail where no Vulkan driver exists: {unguarded:?}"
+        "these run a shader without `{guard}`, so fail with no Vulkan driver: {unguarded:?}"
     );
 }
 
