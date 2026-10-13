@@ -120,7 +120,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # system tracing and sampling are off: the crash handler would install an exception handler beside
 # the one guest-page guards answer (D717, D720, D824), and sampling walks guest stacks through ETW,
 # which cannot. `ondemand` records only while a viewer is connected; `broadcast` lets one find it.
-tracy-client = { version = "0.19", default-features = false, features = ["enable", "ondemand", "broadcast"] }
+# `manual-lifetime` starts it only where `perf::start_profiler` is called - the worker - rather than
+# in every process, where the launcher would take its port and be the one a capture reaches.
+tracy-client = { version = "0.19", default-features = false, features = ["enable", "ondemand", "broadcast", "manual-lifetime"] }
 
 # Shared with the rest of the collection, rather than a fifth copy here. `oops-build` replaces
 # what `orbistoun-env::build` used to do itself; `oops-log` replaces the subscriber that was

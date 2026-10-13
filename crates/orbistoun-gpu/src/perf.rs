@@ -114,9 +114,10 @@ fn zone(location: &'static tracy_client::SpanLocation) -> Option<tracy_client::S
 }
 
 /// Starts the Tracy client in a `tracy` build (D829): a viewer or `tracy-capture` may then connect,
-/// and zones are recorded while one is. Does nothing in any other build.
+/// and zones are recorded while one is. Only the process that calls this runs one - the worker, not
+/// the launcher that spawned it. Does nothing in any other build.
 pub fn start_profiler() {
-    // The handle is a token: the client runs for the process whether it is kept or not.
+    // The handle is a token: once started, the client runs for the rest of the process.
     #[cfg(feature = "tracy")]
     let _client = tracy_client::Client::start();
 }
