@@ -439,9 +439,14 @@ fn a_refusal_for_no_translation_names_the_instruction() {
             refused += 1;
         }
     }
+    // Once every instruction the table names translates, no refusal is left to name: the check is
+    // then that none of them is missing from SUPPORTED.
     assert!(
-        refused > 0,
-        "some instruction the table names has no translation"
+        refused > 0
+            || known_encodings().iter().all(|(family, opcode, _, _)| {
+                orbistoun_translate::model::supports_named(&table, family, *opcode)
+            }),
+        "an instruction the table names has no translation, and its refusal was not counted"
     );
 }
 
@@ -5623,6 +5628,35 @@ fn the_integer_conversions_round_and_saturate_as_published() {
     assert_eq!(
         [2, 3, 4, 5, 6].map(|n| vector(&registers, n)),
         [0xffff_fffd, 0x7fff_ffff, 0x8000_0000, 0, 2]
+    );
+}
+
+/// `v_cvt_u32_f32` truncates and saturates to unsigned: below zero and a NaN read zero, `2^32` and
+/// above `0xffffffff` (the published instruction set's conversion table).
+#[test]
+fn the_unsigned_conversion_truncates_and_saturates_as_published() {
+    if !device_or_skip("the_unsigned_conversion_truncates_and_saturates_as_published") {
+        return;
+    }
+    let mut program = Vec::new();
+    let inputs = [
+        (-3.7_f32).to_bits(),
+        1.0e10_f32.to_bits(),
+        f32::NAN.to_bits(),
+        2.9_f32.to_bits(),
+        3_000_000_000.0_f32.to_bits(),
+        f32::INFINITY.to_bits(),
+        (-0.5_f32).to_bits(),
+    ];
+    for (i, bits) in (1..).zip(inputs) {
+        program.extend(v_mov_literal(i, bits));
+        program.push(vop1_vv("v_cvt_u32_f32_e32", i, i));
+    }
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        [1, 2, 3, 4, 5, 6, 7].map(|n| vector(&registers, n)),
+        [0, 0xffff_ffff, 0, 2, 3_000_000_000, 0xffff_ffff, 0]
     );
 }
 

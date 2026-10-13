@@ -167,20 +167,24 @@ pub const SUPPORTED: &[&str] = &[
     "v_subrev_nc_u32_e32",
     "v_add_co_ci_u32_e32",
     "v_add_co_ci_u32_e64",
-    "v_cmp_eq_f32_e32",
-    "v_cmp_gt_f32_e32",
     "v_cmp_lt_f32_e32",
+    "v_cmp_eq_f32_e32",
     "v_cmp_le_f32_e32",
+    "v_cmp_gt_f32_e32",
     "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
-    "v_cmp_lt_u32_e32",
-    "v_cmp_ge_u32_e32",
-    "v_cmp_ne_i32_e32",
     "v_cmp_eq_i32_e32",
-    "v_cmp_ne_i32_e64",
+    "v_cmp_ne_i32_e32",
+    "v_cmp_lt_u32_e32",
+    "v_cmp_ne_u32_e32",
+    "v_cmp_ge_u32_e32",
+    "v_cmp_lt_f32_e64",
     "v_cmp_eq_f32_e64",
     "v_cmp_le_f32_e64",
+    "v_cmp_gt_f32_e64",
     "v_cmp_ge_f32_e64",
+    "v_cmp_neq_f32_e64",
+    "v_cmp_ne_i32_e64",
     "v_bfi_b32",
     "v_cmpx_le_i16_e32",
     "v_cmpx_le_i32_e32",
@@ -192,6 +196,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cvt_f32_u32_e32",
     "v_cvt_f32_i32_e32",
     "v_cvt_i32_f32_e32",
+    "v_cvt_u32_f32_e32",
     "v_div_fixup_f32",
     "v_fmac_f32_e32",
     "v_div_scale_f32",
@@ -219,9 +224,6 @@ pub const SUPPORTED: &[&str] = &[
     "v_msad_u8",
     "v_readlane_b32",
     "v_permlane16_b32",
-    "v_cmp_lt_f32_e64",
-    "v_cmp_gt_f32_e64",
-    "v_cmp_neq_f32_e64",
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
     "v_lshrrev_b32_e32",
@@ -2448,13 +2450,12 @@ fn vector_instruction<M: Model + ?Sized>(
     match name {
         // Comparisons, which produce masks: every lane compares, and the answers become one value
         // the shader can and into `exec`.
-        "v_cmp_lt_f32_e32" | "v_cmp_eq_f32_e32" | "v_cmp_gt_f32_e32" | "v_cmp_neq_f32_e32"
-        | "v_cmp_le_f32_e32" | "v_cmp_ge_f32_e32" | "v_cmp_lt_u32_e32" | "v_cmp_ge_u32_e32"
-        | "v_cmp_ne_i32_e32" | "v_cmp_eq_i32_e32" => compare(model, instruction, name),
+        _ if name.ends_with("_e32") && compare_op(name).is_some() => {
+            compare(model, instruction, name)
+        }
 
-        // The long-form integer compare, into a register pair or a named mask.
-        "v_cmp_ne_i32_e64" | "v_cmp_eq_f32_e64" | "v_cmp_le_f32_e64" | "v_cmp_ge_f32_e64"
-        | "v_cmp_lt_f32_e64" | "v_cmp_gt_f32_e64" | "v_cmp_neq_f32_e64" => {
+        // The long-form compare, into a register pair or a named mask.
+        _ if name.ends_with("_e64") && compare_op(name).is_some() => {
             compare_long(model, instruction, name)
         }
         "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_eq_i32_e32"
@@ -2466,7 +2467,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
 
         // Integer conversions.
-        "v_cvt_f32_u32_e32" | "v_cvt_f32_i32_e32" | "v_cvt_i32_f32_e32" => {
+        "v_cvt_f32_u32_e32" | "v_cvt_f32_i32_e32" | "v_cvt_i32_f32_e32" | "v_cvt_u32_f32_e32" => {
             integer_conversion(model, instruction, name)
         }
 
@@ -4377,23 +4378,50 @@ fn compare_into_exec<M: Model + ?Sized>(
 /// The SPIR-V opcode a comparison maps to, and whether its operands are floats; the two travel
 /// together because reading a register as the wrong type is silent.
 fn op_for_compare(instruction: &Instruction, name: &str) -> Result<(u16, bool), TranslateError> {
-    match name {
-        "v_cmp_lt_f32_e32" | "v_cmp_lt_f32_e64" => Ok((op::FORD_LESS_THAN, true)),
-        "v_cmp_eq_f32_e32" | "v_cmp_eq_f32_e64" => Ok((op::FORD_EQUAL, true)),
-        "v_cmp_gt_f32_e32" | "v_cmp_gt_f32_e64" => Ok((op::FORD_GREATER_THAN, true)),
-        // Not equal or unordered: true for a NaN, where `v_cmp_lg_f32` is the ordered form.
-        "v_cmp_neq_f32_e32" | "v_cmp_neq_f32_e64" => Ok((op::FUNORD_NOT_EQUAL, true)),
-        "v_cmp_lt_u32_e32" => Ok((op::ULESS_THAN, false)),
-        "v_cmp_ge_u32_e32" => Ok((op::UGREATER_THAN_EQUAL, false)),
-        "v_cmp_ne_i32_e64" | "v_cmp_ne_i32_e32" => Ok((op::INOT_EQUAL, false)),
-        "v_cmp_eq_i32_e32" => Ok((op::IEQUAL, false)),
-        "v_cmp_le_f32_e32" | "v_cmp_le_f32_e64" => Ok((op::FORD_LESS_THAN_EQUAL, true)),
-        "v_cmp_ge_f32_e32" | "v_cmp_ge_f32_e64" => Ok((op::FORD_GREATER_THAN_EQUAL, true)),
-        _ => Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "no translation for this comparison",
-        }),
-    }
+    compare_op(name).ok_or(TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: "no translation for this comparison",
+    })
+}
+
+/// The SPIR-V comparison a `v_cmp_<condition>_<type>` performs, in either encoding, and whether it
+/// compares floats.
+///
+/// A float condition is ordered - false where either operand is a NaN - and its `n` form is the
+/// negation, so unordered: `nlt` is not-less-than, true for a NaN. `neq` is the unordered
+/// not-equal and `lg` the ordered one. The integer conditions take their signedness from the type.
+/// The always-true, always-false, ordered and unordered tests (`t`, `f`, `o`, `u`) are not here.
+fn compare_op(name: &str) -> Option<(u16, bool)> {
+    let base = name
+        .strip_suffix("_e32")
+        .or_else(|| name.strip_suffix("_e64"))?;
+    let (condition, kind) = base.strip_prefix("v_cmp_")?.rsplit_once('_')?;
+    let opcode = match (kind, condition) {
+        ("f32", "lt") => op::FORD_LESS_THAN,
+        ("f32", "eq") => op::FORD_EQUAL,
+        ("f32", "le") => op::FORD_LESS_THAN_EQUAL,
+        ("f32", "gt") => op::FORD_GREATER_THAN,
+        ("f32", "lg") => op::FORD_NOT_EQUAL,
+        ("f32", "ge") => op::FORD_GREATER_THAN_EQUAL,
+        ("f32", "nge") => op::FUNORD_LESS_THAN,
+        ("f32", "nlg") => op::FUNORD_EQUAL,
+        ("f32", "ngt") => op::FUNORD_LESS_THAN_EQUAL,
+        ("f32", "nle") => op::FUNORD_GREATER_THAN,
+        ("f32", "neq") => op::FUNORD_NOT_EQUAL,
+        ("f32", "nlt") => op::FUNORD_GREATER_THAN_EQUAL,
+        ("i32" | "u32", "eq") => op::IEQUAL,
+        ("i32" | "u32", "ne") => op::INOT_EQUAL,
+        ("i32", "lt") => op::SLESS_THAN,
+        ("i32", "le") => op::SLESS_THAN_EQUAL,
+        ("i32", "gt") => op::SGREATER_THAN,
+        ("i32", "ge") => op::SGREATER_THAN_EQUAL,
+        ("u32", "lt") => op::ULESS_THAN,
+        ("u32", "le") => op::ULESS_THAN_EQUAL,
+        ("u32", "gt") => op::UGREATER_THAN,
+        ("u32", "ge") => op::UGREATER_THAN_EQUAL,
+        _ => return None,
+    };
+    Some((opcode, kind == "f32"))
 }
 
 /// Translates a sixty-four-bit scalar logical operation.
@@ -8371,12 +8399,14 @@ fn ones_between<M: Model + ?Sized>(model: &mut M, offset: Id, width: Id) -> (Id,
     (low, high)
 }
 
-/// `v_cvt_f32_u32`, `v_cvt_f32_i32` and `v_cvt_i32_f32`, per lane.
+/// `v_cvt_f32_u32`, `v_cvt_f32_i32`, `v_cvt_i32_f32` and `v_cvt_u32_f32`, per lane.
 ///
 /// Unsigned or signed to float rounds to nearest, as SPIR-V's conversion does. Float to signed truncates
 /// toward zero and saturates: below `-2^31` (and `-inf`) reads `0x80000000`, `2^31` and above (and
 /// `+inf`) `0x7fffffff`, and a NaN zero - the published instruction set's conversion rules, which
-/// SPIR-V leaves undefined out of range, so the edges are selected rather than converted.
+/// SPIR-V leaves undefined out of range, so the edges are selected rather than converted. Float to
+/// unsigned truncates the same way: below zero (and `-inf`) and a NaN read zero, `2^32` and above
+/// (and `+inf`) `0xffffffff`.
 fn integer_conversion<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -8406,6 +8436,8 @@ fn integer_conversion<M: Model + ?Sized>(
             let out = b.id();
             b.function(op::BITCAST, &[u32_type.0, out.0, float.0]);
             out
+        } else if name == "v_cvt_u32_f32_e32" {
+            float_to_unsigned_saturated(model, bits)
         } else {
             float_to_signed_saturated(model, bits)
         };
@@ -8413,6 +8445,29 @@ fn integer_conversion<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// A float's bits to an unsigned integer, truncated, saturated and NaN to zero.
+fn float_to_unsigned_saturated<M: Model + ?Sized>(model: &mut M, bits: Id) -> Id {
+    let float = model.as_float(bits);
+    // 2^32, exactly representable; zero.
+    let top = model.constant(0x4f80_0000);
+    let top = model.as_float(top);
+    let zero_bits = model.constant(0);
+    let zero = model.as_float(zero_bits);
+    let too_high = model.compare(op::FORD_GREATER_THAN_EQUAL, float, top);
+    // Below zero, or a NaN: neither is ordered at or above zero.
+    let in_range_low = model.compare(op::FORD_GREATER_THAN_EQUAL, float, zero);
+    // Clamped into range so the conversion is always defined.
+    let safe = model.select(in_range_low, float, zero);
+    let safe = model.select(too_high, zero, safe);
+    let u32_type = model.u32_type();
+    let b = model.builder();
+    let converted = b.id();
+    b.function(op::CONVERT_F_TO_U, &[u32_type.0, converted.0, safe.0]);
+    let maximum = model.constant(0xffff_ffff);
+    let converted = model.select(too_high, maximum, converted);
+    model.select(in_range_low, converted, zero_bits)
 }
 
 /// A float's bits to a signed integer, truncated, saturated and NaN to zero.

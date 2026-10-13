@@ -1520,6 +1520,13 @@ operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, impl
 
 [[opcode_operands]]
 family = "VOPC"
+opcode = 197
+mnemonic = "v_cmp_ne_u32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
 opcode = 198
 mnemonic = "v_cmp_ge_u32_e32"
 samples = 5

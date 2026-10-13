@@ -214,6 +214,8 @@ pub mod op {
     pub const FMUL: u16 = 133;
     /// Floating-point division.
     pub const FDIV: u16 = 136;
+    /// Converts a float to an unsigned integer, rounding toward zero; undefined out of range.
+    pub const CONVERT_F_TO_U: u16 = 109;
     /// Converts a float to a signed integer, rounding toward zero; undefined out of range.
     pub const CONVERT_F_TO_S: u16 = 110;
     /// Converts a signed integer to the float of the same value.
@@ -276,8 +278,20 @@ pub mod op {
     /// Ordered means false when either operand is a NaN, as the guest's comparison is. The
     /// unordered forms answer true.
     pub const FORD_EQUAL: u16 = 180;
+    /// Unordered float equality: true when the operands are equal or either is a NaN.
+    pub const FUNORD_EQUAL: u16 = 181;
+    /// Ordered float inequality: false when either operand is a NaN.
+    pub const FORD_NOT_EQUAL: u16 = 182;
     /// Unordered float inequality: true when the operands differ or either is a NaN.
     pub const FUNORD_NOT_EQUAL: u16 = 183;
+    /// Unordered float less-than: true when either operand is a NaN.
+    pub const FUNORD_LESS_THAN: u16 = 185;
+    /// Unordered float greater-than: true when either operand is a NaN.
+    pub const FUNORD_GREATER_THAN: u16 = 187;
+    /// Unordered float less-than-or-equal: true when either operand is a NaN.
+    pub const FUNORD_LESS_THAN_EQUAL: u16 = 189;
+    /// Unordered float greater-than-or-equal: true when either operand is a NaN.
+    pub const FUNORD_GREATER_THAN_EQUAL: u16 = 191;
     /// Ordered float less-than.
     pub const FORD_LESS_THAN: u16 = 184;
     /// Ordered float greater-than.
@@ -2347,6 +2361,13 @@ static SHAPES: &[ShapeEntry] = &[
     (op::LOAD, Some(1), &[0, 2], None, RestStride::Every),
     (op::BITCAST, Some(1), &[0, 2], None, RestStride::Every),
     (
+        op::CONVERT_F_TO_U,
+        Some(1),
+        &[0, 2],
+        None,
+        RestStride::Every,
+    ),
+    (
         op::CONVERT_F_TO_S,
         Some(1),
         &[0, 2],
@@ -2527,6 +2548,48 @@ static SHAPES: &[ShapeEntry] = &[
     (op::BIT_REVERSE, Some(1), &[0, 2], None, RestStride::Every),
     (op::INOT_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
     (op::FORD_EQUAL, Some(1), &[0, 2, 3], None, RestStride::Every),
+    (
+        op::FUNORD_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::FORD_NOT_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::FUNORD_LESS_THAN,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::FUNORD_GREATER_THAN,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::FUNORD_LESS_THAN_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
+    (
+        op::FUNORD_GREATER_THAN_EQUAL,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
     (
         op::FUNORD_NOT_EQUAL,
         Some(1),
