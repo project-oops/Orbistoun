@@ -275,7 +275,7 @@ pub(crate) fn evaluate_computed(
         "a buffer descriptor the program computes from something the host cannot know for the ",
         "draw - a vector result, the execution mask, or an operation not evaluated (D753)"
     );
-    let (encodings, decode) = decode_prefix(&computed.prefix)?;
+    let (encodings, decode) = decoded_prefix(&computed.prefix)?;
     let count = usize::try_from(computed.user_data)
         .unwrap_or(USER_DATA_WORDS)
         .min(USER_DATA_WORDS);
@@ -319,6 +319,43 @@ pub(crate) fn evaluate_computed(
     };
     Ok(Some((words, soffset)))
 }
+
+/// [`decode_prefix`], kept by the prefix's words: a draw resolves its descriptors from the same
+/// prefix every time, and PPSA25872's draws each decoded it again, 0.1 ms of every draw.
+fn decoded_prefix(
+    prefix: &[u32],
+) -> Result<
+    (
+        &'static orbistoun_shader::EncodingTable,
+        std::sync::Arc<orbistoun_shader::Decode>,
+    ),
+    &'static str,
+> {
+    /// Prefixes decoded, by their words.
+    type Prefixes = std::collections::HashMap<Vec<u32>, std::sync::Arc<orbistoun_shader::Decode>>;
+    static PREFIXES: std::sync::OnceLock<std::sync::Mutex<Prefixes>> = std::sync::OnceLock::new();
+    let prefixes = PREFIXES.get_or_init(Default::default);
+    let (encodings, _) = tables()?;
+    if let Some(known) = prefixes
+        .lock()
+        .ok()
+        .and_then(|prefixes| prefixes.get(prefix).cloned())
+    {
+        return Ok((encodings, known));
+    }
+    let (_, decode) = decode_prefix(prefix)?;
+    let decode = std::sync::Arc::new(decode);
+    if let Ok(mut prefixes) = prefixes.lock() {
+        if prefixes.len() >= PREFIXES_KEPT {
+            prefixes.clear();
+        }
+        prefixes.insert(prefix.to_vec(), std::sync::Arc::clone(&decode));
+    }
+    Ok((encodings, decode))
+}
+
+/// The most decoded prefixes [`decoded_prefix`] keeps.
+const PREFIXES_KEPT: usize = 1024;
 
 /// The shader tables, and a prefix of a program decoded with them.
 fn decode_prefix(
