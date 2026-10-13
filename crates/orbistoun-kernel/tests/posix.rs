@@ -957,6 +957,31 @@ fn a_sleep_of_nothing_returns_at_once() {
     );
 }
 
+/// A short sleep lasts about what it asked, as on the console, not the host timer's granularity:
+/// a host timer sleep of ten microseconds takes about half a millisecond, and a driver polling a
+/// fence with ten-microsecond sleeps then waits that long a poll. The median of a run is used, so
+/// one preempted sleep on a busy machine does not decide it.
+#[test]
+fn a_ten_microsecond_sleep_is_not_half_a_millisecond() {
+    let mut taken: Vec<std::time::Duration> = (0..21)
+        .map(|_| {
+            let started = std::time::Instant::now();
+            assert_eq!(call("sceKernelUsleep", &[10]), OK);
+            started.elapsed()
+        })
+        .collect();
+    taken.sort();
+    let median = taken[taken.len() / 2];
+    assert!(
+        median >= std::time::Duration::from_micros(10),
+        "slept less than asked: {median:?}"
+    );
+    assert!(
+        median < std::time::Duration::from_micros(200),
+        "slept {median:?} for ten microseconds"
+    );
+}
+
 /// `sceKernelIsStack` reports the span through its out-parameters and answers zero.
 ///
 /// On the hardware it answers `0` for a local and a static alike and writes the stack bounds

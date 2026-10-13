@@ -751,7 +751,7 @@ fn xtime_get_ticks(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn thrd_sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if let Some(span) = read_xtime(args[0]) {
         let capped = span.min(std::time::Duration::from_secs(1));
-        std::thread::sleep(capped);
+        orbistoun_hle::clocks::sleep_for(capped);
     }
     thrd::SUCCESS
 }
@@ -2914,7 +2914,7 @@ fn getpagesize(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// Returning immediately would make frame pacing and poll-with-sleep loops spin.
 fn usleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let how_long = std::time::Duration::from_micros(args[0]);
-    std::thread::sleep(how_long);
+    orbistoun_hle::clocks::sleep_for(how_long);
     // The clock advances by the slept span too, so a guest polling between sleeps sees time pass
     // the same way on every run (D582).
     orbistoun_hle::clocks::advance(how_long.as_nanos());
@@ -2948,7 +2948,7 @@ fn kernel_nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return invalid;
     }
     let how_long = std::time::Duration::new(seconds, nanos as u32);
-    std::thread::sleep(how_long);
+    orbistoun_hle::clocks::sleep_for(how_long);
     orbistoun_hle::clocks::advance(how_long.as_nanos());
     if remaining != 0 {
         // SAFETY: the guest's remainder `struct timespec`, valid by the call's contract.
@@ -2963,7 +2963,7 @@ fn kernel_nanosleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// `sceKernelSleep(seconds)`: [`usleep`] in whole seconds.
 fn kernel_sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let how_long = std::time::Duration::from_secs(u64::from(args[0] as u32));
-    std::thread::sleep(how_long);
+    orbistoun_hle::clocks::sleep_for(how_long);
     orbistoun_hle::clocks::advance(how_long.as_nanos());
     OK
 }

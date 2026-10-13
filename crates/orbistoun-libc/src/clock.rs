@@ -133,7 +133,7 @@ fn sleep(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// (D275); under the host clock the second call does nothing, because the sleep moved it
 /// (D582).
 fn slept(how_long: std::time::Duration) {
-    std::thread::sleep(how_long);
+    orbistoun_hle::clocks::sleep_for(how_long);
     orbistoun_hle::clocks::advance(how_long.as_nanos());
 }
 

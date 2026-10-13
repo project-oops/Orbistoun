@@ -86,6 +86,25 @@ pub fn since_start_nanos() -> u128 {
     started().elapsed().as_nanos()
 }
 
+/// How much of a host sleep may overshoot what it asked for: a short host timer sleep lasts about
+/// half a millisecond whatever it asks (10 us and 100 us alike, measured on Windows 11), and a
+/// longer one up to a millisecond and a half.
+const SLEEP_OVERSHOOT: std::time::Duration = std::time::Duration::from_millis(2);
+
+/// Waits `how_long` as a guest's sleep does: to the microsecond, not to the host timer's
+/// granularity. A driver polling a fence with ten-microsecond sleeps would otherwise wait half a
+/// millisecond a poll. The host sleeps for all but the span it may overshoot by, and yields the
+/// rest away until the deadline.
+pub fn sleep_for(how_long: std::time::Duration) {
+    let deadline = Instant::now() + how_long;
+    if let Some(coarse) = how_long.checked_sub(SLEEP_OVERSHOOT) {
+        std::thread::sleep(coarse);
+    }
+    while Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+}
+
 /// Moves this thread's logical clock forward by `nanos`, for a guest thread that asked to wait.
 ///
 /// A guest that sleeps ten milliseconds and reads a clock that moved a microsecond concludes the
