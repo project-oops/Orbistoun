@@ -92,6 +92,8 @@ pub fn changes_touching(address: u64, out: &mut [Change]) -> Option<usize> {
 /// committed, the pages do not all share one protection, or the host refuses.
 #[cfg(windows)]
 pub fn guard(base: u64, len: u64) -> Option<u32> {
+    // A write-watch guard's read-only would be taken for the protection to put back (D824).
+    orbistoun_mem::watch::release_overlapping(base, len);
     let to = windows_sys::Win32::System::Memory::PAGE_NOACCESS;
     let had = imp::set_all(base, len, to);
     note(base, len, to, had.is_some());
@@ -102,6 +104,8 @@ pub fn guard(base: u64, len: u64) -> Option<u32> {
 /// (D720): a write to them faults, a read does not. `None`, changing nothing, as [`guard`].
 #[cfg(windows)]
 pub fn protect_writes(base: u64, len: u64) -> Option<u32> {
+    // As in `guard` (D824).
+    orbistoun_mem::watch::release_overlapping(base, len);
     let to = windows_sys::Win32::System::Memory::PAGE_READONLY;
     let had = imp::set_all(base, len, to);
     note(base, len, to, had.is_some());

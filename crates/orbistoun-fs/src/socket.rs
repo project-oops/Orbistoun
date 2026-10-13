@@ -955,6 +955,8 @@ fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     }
     let at = usize::try_from(address).ok()?;
     let len = usize::try_from(length).ok()?;
+    // Written by the host's kernel, which a write-watch guard's fault does not reach (D824).
+    orbistoun_mem::watch::release_overlapping(address, length);
     // SAFETY: as above, and the guest asked for this to be written into.
     Some(unsafe {
         std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(at), len)

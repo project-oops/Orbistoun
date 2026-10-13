@@ -330,6 +330,8 @@ fn guest_bytes_mut<'a>(address: u64, length: u64) -> Option<&'a mut [u8]> {
     }
     let at = usize::try_from(address).ok()?;
     let len = usize::try_from(length).ok()?;
+    // Written by the host's kernel, which a write-watch guard's fault does not reach (D824).
+    orbistoun_mem::watch::release_overlapping(address, length);
     // SAFETY: a guest-supplied buffer under the identity mapping, with the length the guest
     // passed, the same contract the real call has.
     Some(unsafe {

@@ -3566,6 +3566,9 @@ fn fread(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(at) = usize::try_from(dest) else {
         return 0;
     };
+    // The host's read writes it from its kernel, which a write-watch guard's fault does not reach
+    // (D824).
+    orbistoun_mem::watch::release_overlapping(dest, total as u64);
 
     // SAFETY: the guest supplied this destination and declared its size, as the real call's
     // contract states; an unmapped address faults here as it would in the guest, and the fault

@@ -3348,6 +3348,9 @@ fn read_guest_file(guest_path: &str, offset: u64, address: u64, most: u64) -> Op
         orbistoun_fs::open::close(handle);
         return None;
     }
+    // The host's read writes it from its kernel, which a write-watch guard's fault does not reach
+    // (D824).
+    orbistoun_mem::watch::release_overlapping(address, most);
     // SAFETY: the guest supplied this address in a structure it built, and the caller checked it
     // against the length in the same structure. The mapping is identity, and the guest is inside
     // this call, so nothing else is writing the range.

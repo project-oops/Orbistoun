@@ -1739,7 +1739,15 @@ mod imp {
         // execute, never ours), parameter one the address. A write to a protected colour target
         // marks it written: its pages get their protection back and the write runs. Asked first, so
         // a range released and still remembered as resolved below never answers for pages protected
-        // again since.
+        // again since. A write to a range a write-watch mark guards (D824) is asked about before
+        // either: those pages are guarded by nothing else.
+        if code == ACCESS_VIOLATION
+            && count >= 2
+            && parameters[0] == 1
+            && orbistoun_mem::watch::write_faulted(parameters[1] as u64)
+        {
+            return CONTINUE_EXECUTION;
+        }
         if code == ACCESS_VIOLATION
             && count >= 2
             && parameters[0] == 1
@@ -1925,6 +1933,10 @@ mod imp {
         // SAFETY: registering a handler is safe; the function pointer has the signature
         // the platform requires and remains valid for the life of the process.
         let registered = unsafe { AddVectoredExceptionHandler(1, Some(handler)) };
+        // A write-watch guard's first write faults, and only this handler answers it (D824).
+        if !registered.is_null() {
+            orbistoun_mem::watch::guard_marked_ranges();
+        }
         !registered.is_null()
     }
 }

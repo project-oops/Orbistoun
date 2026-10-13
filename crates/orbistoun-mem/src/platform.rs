@@ -280,11 +280,15 @@ pub fn reserve(base: u64, len: u64, protection: Protection) -> Result<Reservatio
 /// Separate from [`reserve`] because an image is written read-write and only then made
 /// executable, so text is never left writable.
 pub fn protect(base: u64, len: u64, protection: Protection) -> Result<(), MemError> {
+    // A write-watch guard on these pages would put its own protection back later (D824).
+    crate::watch::release_overlapping(base, len);
     imp::protect(base, len, protection)
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
+        // A guard on memory going away must not answer for what is mapped there next (D824).
+        crate::watch::release_overlapping(self.base, self.len);
         imp::release(self);
     }
 }

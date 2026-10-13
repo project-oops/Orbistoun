@@ -92,6 +92,9 @@ unsafe fn guest_slice<'a>(address: u64, len: u64) -> Option<&'a mut [u8]> {
     if at == 0 || len == 0 {
         return None;
     }
+    // The host's file read writes it from its kernel, where a write-watch guard's fault reaches
+    // no handler, so the guard goes first (D824).
+    orbistoun_mem::watch::release_overlapping(address, len as u64);
     // SAFETY: the caller's contract, restated: guest-owned memory of the declared length.
     Some(unsafe {
         std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u8>(at), len)
