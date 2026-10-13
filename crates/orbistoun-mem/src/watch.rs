@@ -14,18 +14,67 @@ use std::sync::Mutex;
 /// The host page write-watch reports in.
 const PAGE: u64 = 4096;
 
-/// Each page ever harvested as written, to the epoch it was harvested in; and the current epoch.
+/// The span [`Record::chunks`] keeps one latest epoch for.
+const CHUNK: u64 = 1 << 20;
+
+/// Each page ever harvested as written, to the epoch it was harvested in; each chunk of pages, to
+/// the latest of theirs; and the current epoch.
+///
+/// The chunks keep a question about a large range from reading every page it holds: PPSA25872's
+/// textures span 34 MB, some 8 000 pages of it written once at load, and reading them all at every
+/// binding cost 0.1 ms of each.
 struct Record {
     epoch: u64,
     written: BTreeMap<u64, u64>,
+    chunks: BTreeMap<u64, u64>,
 }
 
 fn record() -> &'static Mutex<Record> {
     static RECORD: Mutex<Record> = Mutex::new(Record {
         epoch: 1,
         written: BTreeMap::new(),
+        chunks: BTreeMap::new(),
     });
     &RECORD
+}
+
+impl Record {
+    /// Records `page` as harvested written at `epoch`.
+    fn note(&mut self, page: u64, epoch: u64) {
+        self.written.insert(page, epoch);
+        let latest = self.chunks.entry(page & !(CHUNK - 1)).or_insert(0);
+        *latest = (*latest).max(epoch);
+    }
+
+    /// Moves every page of `[base, base + len)` the host has seen written since its last harvest
+    /// into the record at the current epoch. Answers whether it found any; `None` when part of the
+    /// range is not watched.
+    fn harvest(&mut self, base: u64, len: u64) -> Option<bool> {
+        let epoch = self.epoch;
+        let mut found = false;
+        imp::harvest(base, len, &mut |page| {
+            self.note(page, epoch);
+            found = true;
+        })?;
+        Some(found)
+    }
+
+    /// Whether any page whose start lies in `[first, end)` was harvested after `since`: a chunk
+    /// wholly inside the range answers from its latest epoch, and only a chunk the range cuts reads
+    /// its pages.
+    fn written_after(&self, (first, end): (u64, u64), since: u64) -> bool {
+        self.chunks
+            .range(first & !(CHUNK - 1)..end)
+            .filter(|&(_, &latest)| latest > since)
+            .any(|(&chunk, _)| {
+                let (from, to) = (chunk.max(first), chunk.saturating_add(CHUNK).min(end));
+                (from == chunk && to == chunk.saturating_add(CHUNK))
+                    || self
+                        .written
+                        .range(from..to)
+                        .any(|(_, &harvested)| harvested > since)
+            })
+    }
 }
 
 /// A point in time for `[base, base + len)`: every write to it before now is behind the answer,
@@ -35,7 +84,7 @@ pub fn mark(base: u64, len: u64) -> Option<u64> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let epoch = record.epoch;
-    imp::harvest(base, len, epoch, &mut record.written)?;
+    record.harvest(base, len)?;
     record.epoch += 1;
     Some(epoch)
 }
@@ -46,21 +95,17 @@ pub fn written_since(base: u64, len: u64, since: u64) -> Option<bool> {
     let mut record = record()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let epoch = record.epoch;
-    imp::harvest(base, len, epoch, &mut record.written)?;
+    // A page found written now was written after any earlier mark: the epoch has moved past
+    // every one handed out.
+    if record.harvest(base, len)? {
+        return Some(true);
+    }
     let first = base & !(PAGE - 1);
-    let end = base.saturating_add(len);
-    Some(
-        record
-            .written
-            .range(first..end)
-            .any(|(_, harvested)| *harvested > since),
-    )
+    Some(record.written_after((first, base.saturating_add(len)), since))
 }
 
 #[cfg(windows)]
 mod imp {
-    use std::collections::BTreeMap;
     use windows_sys::Win32::System::Memory::{
         GetWriteWatch, MEMORY_BASIC_INFORMATION, VirtualQuery,
     };
@@ -72,15 +117,10 @@ mod imp {
     /// Addresses one call hands back at most.
     const BATCH: usize = 512;
 
-    /// Moves every page of `[base, base + len)` the host has seen written since its last harvest
-    /// into `written` at `epoch`, resetting the host's record of them. `None`, having moved what it
-    /// could, when part of the range is not write-watched.
-    pub(super) fn harvest(
-        base: u64,
-        len: u64,
-        epoch: u64,
-        written: &mut BTreeMap<u64, u64>,
-    ) -> Option<()> {
+    /// Hands `found` every page of `[base, base + len)` the host has seen written since its last
+    /// harvest, resetting the host's record of them. `None`, having handed over what it could,
+    /// when part of the range is not write-watched.
+    pub(super) fn harvest(base: u64, len: u64, found: &mut impl FnMut(u64)) -> Option<()> {
         let mut at = usize::try_from(base).ok()?;
         let end = at.checked_add(usize::try_from(len).ok()?)?;
         while at < end {
@@ -130,7 +170,7 @@ mod imp {
                     return None;
                 }
                 for page in &addresses[..count.min(BATCH)] {
-                    written.insert(*page as u64, epoch);
+                    found(*page as u64);
                 }
                 if count < BATCH {
                     break;
@@ -144,16 +184,64 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
+    /// No watch away from Windows yet: every asker compares the bytes.
+    pub(super) fn harvest(_base: u64, _len: u64, _found: &mut impl FnMut(u64)) -> Option<()> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::{CHUNK, PAGE, Record};
     use std::collections::BTreeMap;
 
-    /// No watch away from Windows yet: every asker compares the bytes.
-    pub(super) fn harvest(
-        _base: u64,
-        _len: u64,
-        _epoch: u64,
-        _written: &mut BTreeMap<u64, u64>,
-    ) -> Option<()> {
-        None
+    /// The chunked answer is the page-by-page one: for ranges inside a chunk, across chunk edges,
+    /// covering chunks whole, and before or after every write.
+    #[test]
+    fn written_after_answers_as_reading_every_page() {
+        let mut record = Record {
+            epoch: 1,
+            written: BTreeMap::new(),
+            chunks: BTreeMap::new(),
+        };
+        let pages = [
+            (0, 2),
+            (PAGE, 5),
+            (CHUNK - PAGE, 3),
+            (CHUNK, 7),
+            (3 * CHUNK + 5 * PAGE, 4),
+        ];
+        for (page, epoch) in pages {
+            record.note(page, epoch);
+        }
+        let naive = |(first, end): (u64, u64), since: u64| {
+            pages
+                .iter()
+                .any(|&(page, epoch)| page >= first && page < end && epoch > since)
+        };
+        let edges = [
+            0,
+            PAGE,
+            2 * PAGE,
+            CHUNK - PAGE,
+            CHUNK,
+            CHUNK + PAGE,
+            2 * CHUNK,
+            3 * CHUNK + 5 * PAGE,
+            3 * CHUNK + 6 * PAGE,
+            5 * CHUNK,
+        ];
+        for &first in &edges {
+            for &end in edges.iter().filter(|&&end| end > first) {
+                for since in 0..8 {
+                    assert_eq!(
+                        record.written_after((first, end), since),
+                        naive((first, end), since),
+                        "[{first:#x}, {end:#x}) since {since}"
+                    );
+                }
+            }
+        }
     }
 }
 
