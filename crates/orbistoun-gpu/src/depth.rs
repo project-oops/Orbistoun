@@ -399,6 +399,37 @@ pub(crate) struct DrawStateSent {
     bias: Option<DepthBias>,
     /// Whether draws count their passing samples, as last sent; a stream starts not counting.
     counting: bool,
+    /// The user clip planes last sent; `None` until a stream enables one.
+    clip_planes: Option<[[u32; 4]; 6]>,
+}
+
+/// `PA_CL_CLIP_CNTL` (`gfx103.json`, byte `0x28810`, dword `0xA204`): `UCP_ENA_0` to `_5` in bits
+/// 0-5, `CLIP_DISABLE` in bit 16.
+pub(crate) const PA_CL_CLIP_CNTL: u32 = 0xA204;
+/// `PA_CL_UCP_0_X` (`gfx103.json`, byte `0x285BC`, dword `0xA16F`), the first of six planes' four
+/// floats, consecutive.
+pub(crate) const PA_CL_UCP_0_X: u32 = 0xA16F;
+
+/// The user clip planes `PA_CL_CLIP_CNTL` enables, from `latest`, which reads a register as the
+/// stream stands: each enabled plane's `PA_CL_UCP_*` bits, zero for one disabled or unwritten, and
+/// none at all with clipping disabled. `None` when no plane is enabled (D830).
+pub(crate) fn clip_planes_from(
+    mut latest: impl FnMut(u32) -> Option<u32>,
+) -> Option<[[u32; 4]; 6]> {
+    let control = latest(PA_CL_CLIP_CNTL)?;
+    let enabled = control & 0x3F;
+    if enabled == 0 || control & (1 << 16) != 0 {
+        return None;
+    }
+    let mut planes = [[0_u32; 4]; 6];
+    for (index, plane) in (0u32..).zip(planes.iter_mut()) {
+        if enabled & (1 << index) != 0 {
+            for (axis, value) in (0u32..).zip(plane.iter_mut()) {
+                *value = latest(PA_CL_UCP_0_X + 4 * index + axis).unwrap_or(0);
+            }
+        }
+    }
+    Some(planes)
 }
 
 /// `DB_COUNT_CONTROL` (`gfx103.json`, byte `0x28004`, dword `0xA001`).
@@ -453,6 +484,13 @@ impl DrawStateSent {
         if counting != self.counting {
             commands.push(RenderCommand::SetSampleCounting(counting));
             self.counting = counting;
+        }
+        // The user clip planes, sent once a stream enables one, and zero again when it disables
+        // them all (D830).
+        let planes = clip_planes_from(|register| sweep.latest(at, register));
+        if planes != self.clip_planes && (planes.is_some() || self.clip_planes.is_some()) {
+            commands.push(RenderCommand::SetClipPlanes(planes.unwrap_or_default()));
+            self.clip_planes = planes;
         }
         // A clear draw writes the clear value wherever it covers; the backend clears the whole
         // target, which is what a clear draw over the whole target does.

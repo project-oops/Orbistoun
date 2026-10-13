@@ -294,6 +294,9 @@ pub struct VulkanBackend {
     more_outputs: Vec<orbistoun_gpu::ColourOutput>,
     /// Whether the next draw counts the samples that pass: the latest `SetSampleCounting` (D827).
     sample_counting: bool,
+    /// The user clip planes the next draw is clipped against: the latest `SetClipPlanes`, zero
+    /// before any (D830).
+    clip_planes: framebuffer::ClipPlanes,
     /// Colour target zero's raster operation for the next draw: the latest `SetRasterOp`; `None`
     /// writes the colour unchanged.
     raster_op: Option<u8>,
@@ -388,6 +391,7 @@ impl VulkanBackend {
             more_targets: Vec::new(),
             more_outputs: Vec::new(),
             sample_counting: false,
+            clip_planes: [[0; 4]; 6],
             raster_op: None,
             line_width: None,
             write_mask: None,
@@ -765,6 +769,8 @@ impl VulkanBackend {
             RenderCommand::SetMoreColourOutputs(outputs) => self.more_outputs.clone_from(outputs),
             // Whether draws count their passing samples.
             RenderCommand::SetSampleCounting(on) => self.sample_counting = *on,
+            // The user clip planes.
+            RenderCommand::SetClipPlanes(planes) => self.clip_planes = *planes,
             // The raster operation.
             RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
             // The line width.
@@ -1127,6 +1133,8 @@ impl VulkanBackend {
             self.encoding_of(Some(*target)).hash(&mut hasher);
         }
         self.more_outputs_for_draw().hash(&mut hasher);
+        // The user clip planes a mesh module is specialised with (D830).
+        self.clip_planes.hash(&mut hasher);
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
         self.viewport_transform
@@ -1429,9 +1437,10 @@ impl VulkanBackend {
                 .each_ref()
                 .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
-            colour_extras: framebuffer::ColourExtras {
+            extras: framebuffer::PipelineExtras {
                 blend_constants: self.blend_constants,
                 more: &more_outputs,
+                clip_planes: self.clip_planes,
             },
             counting: self.sample_counting,
             raster_op: self.raster_op,
@@ -1563,6 +1572,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
             | RenderCommand::SetBlendConstants(_)
             | RenderCommand::SetMoreColourOutputs(_)
             | RenderCommand::SetSampleCounting(_)
+            | RenderCommand::SetClipPlanes(_)
             | RenderCommand::SetRasterOp(_)
             | RenderCommand::SetLineWidth(_)
             | RenderCommand::SetWriteMask(_)
@@ -1589,6 +1599,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
         RenderCommand::SetMoreColourOutputs(_) => "SetMoreColourOutputs",
         RenderCommand::SetSampleCounting(_) => "SetSampleCounting",
+        RenderCommand::SetClipPlanes(_) => "SetClipPlanes",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",

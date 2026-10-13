@@ -24,6 +24,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetBlendConstants(_) => "SetBlendConstants",
         RenderCommand::SetMoreColourOutputs(_) => "SetMoreColourOutputs",
         RenderCommand::SetSampleCounting(_) => "SetSampleCounting",
+        RenderCommand::SetClipPlanes(_) => "SetClipPlanes",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",

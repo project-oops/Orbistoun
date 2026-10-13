@@ -127,6 +127,9 @@ pub mod op {
     pub const IEQUAL: u16 = 170;
     /// A constant.
     pub const CONSTANT: u16 = 43;
+    /// A scalar constant a pipeline may replace when it is created, by the `SpecId` it is
+    /// decorated with; the literal is its value otherwise.
+    pub const SPEC_CONSTANT: u16 = 50;
     /// A constant aggregate (a vector, or an array of them) from constant parts.
     pub const CONSTANT_COMPOSITE: u16 = 44;
     /// An aggregate built at run time from values; an export builds its `vec4` colour this way.
@@ -366,6 +369,8 @@ pub mod image_operands {
 
 /// Decorations.
 pub mod decoration {
+    /// The number a pipeline names a specialization constant by when it replaces it.
+    pub const SPEC_ID: u32 = 1;
     /// Marks a structure as a shader interface block.
     pub const BLOCK: u32 = 2;
     /// Bytes between consecutive array elements.
@@ -404,6 +409,9 @@ pub mod decoration {
 pub mod capability {
     /// Shader stages. The baseline for anything graphics or compute.
     pub const SHADER: u32 = 1;
+    /// Writing clip distances. A device without the `shaderClipDistance` feature refuses a module
+    /// declaring this.
+    pub const CLIP_DISTANCE: u32 = 32;
     /// The geometry stage's built-ins, which include a fragment shader reading its `Layer`.
     ///
     /// A device without the `geometryShader` feature refuses a module declaring this.
@@ -482,6 +490,9 @@ pub mod built_in {
     pub const GLOBAL_INVOCATION_ID: u32 = 28;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
+    /// The distances a vertex lies inside each clip plane (a `float` array): the primitive is
+    /// clipped where one is negative.
+    pub const CLIP_DISTANCE: u32 = 3;
     /// The depth a fragment shader writes in place of the rasterised one (a `float`).
     pub const FRAG_DEPTH: u32 = 22;
     /// A mesh shader's point index array: one vertex index per primitive (a `uint`).
@@ -2426,6 +2437,7 @@ static SHAPES: &[ShapeEntry] = &[
     // Typed results: operand zero is the type, operand one the identifier.
     // Operand two of a constant is its literal value.
     (op::CONSTANT, Some(1), &[0], None, RestStride::Every),
+    (op::SPEC_CONSTANT, Some(1), &[0], None, RestStride::Every),
     // Result type, result, then every constituent - each an identifier that must exist.
     (
         op::CONSTANT_COMPOSITE,

@@ -2182,7 +2182,7 @@ pub(crate) fn draw_vertices(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
-            colour_extras: &start.colour_extras,
+            extras: &start.extras,
             raster_op: start.raster_op,
             line_width: start.line_width,
             write_mask: start.write_mask,
@@ -2218,7 +2218,7 @@ pub(crate) struct Start<'a> {
     /// Colour target zero's blend state; `None` draws opaque.
     pub(crate) blend: Option<orbistoun_gpu::BlendControl>,
     /// The blend constants, and the colour attachments after the first's output state.
-    pub(crate) colour_extras: ColourExtras<'a>,
+    pub(crate) extras: PipelineExtras<'a>,
     /// Whether the draw counts the samples that pass, for the guest's z-pass counters (D827).
     pub(crate) counting: bool,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
@@ -2442,21 +2442,46 @@ pub(crate) fn logic_op(
     ))))
 }
 
-/// What every colour attachment's blending reads beside its own state, and the colour attachments
-/// after the first's own state (D825).
+/// The user clip planes (`PA_CL_UCP_0` to `_5`), each four `f32`s' bits (D830).
+pub type ClipPlanes = [[u32; 4]; 6];
+
+/// The specialization a translated mesh module's user clip planes take: constant `4 * plane + axis`
+/// from `planes`' bits, in order (D830). A module that declares none ignores them.
+fn clip_plane_specialization(planes: &ClipPlanes) -> ([vk::SpecializationMapEntry; 24], [u8; 96]) {
+    let entries = std::array::from_fn(|index| {
+        let id = u32::try_from(index).unwrap_or(0);
+        vk::SpecializationMapEntry::default()
+            .constant_id(id)
+            .offset(id * 4)
+            .size(4)
+    });
+    let mut data = [0_u8; 96];
+    for (bytes, bits) in data.chunks_exact_mut(4).zip(planes.iter().flatten()) {
+        bytes.copy_from_slice(&bits.to_le_bytes());
+    }
+    (entries, data)
+}
+
+/// What a pipeline is built with beyond its shaders and its scalar draw state: the blend constants
+/// every colour attachment's blending reads, the colour attachments after the first's own state
+/// (D825), and the user clip planes (D830).
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ColourExtras<'a> {
+pub(crate) struct PipelineExtras<'a> {
     /// The blend constants, each an `f32`'s bits; `None` when the stream set none.
     pub(crate) blend_constants: Option<[u32; 4]>,
     /// Each colour attachment after the first's blend state and channels written, in attachment
     /// order; empty when the draw writes one.
     pub(crate) more: &'a [orbistoun_gpu::ColourOutput],
+    /// The user clip planes a translated mesh module is specialised with, each an `f32`'s bits
+    /// four to a plane; zero clips nothing (D830).
+    pub(crate) clip_planes: ClipPlanes,
 }
 
-/// A draw with one colour attachment and no blend constants.
-static NO_COLOUR_EXTRAS: ColourExtras<'static> = ColourExtras {
+/// A draw with one colour attachment, no blend constants and no user clip planes.
+static NO_EXTRAS: PipelineExtras<'static> = PipelineExtras {
     blend_constants: None,
     more: &[],
+    clip_planes: [[0; 4]; 6],
 };
 
 /// Every colour attachment's blend state, in attachment order: the first's, then each after it
@@ -2464,11 +2489,11 @@ static NO_COLOUR_EXTRAS: ColourExtras<'static> = ColourExtras {
 fn colour_blend_attachments(
     bound: &Bound<'_>,
 ) -> Result<Vec<vk::PipelineColorBlendAttachmentState>, DispatchError> {
-    let constants = bound.colour_extras.blend_constants;
+    let constants = bound.extras.blend_constants;
     std::iter::once(blend_attachment(bound.blend, constants, bound.write_mask))
         .chain(
             bound
-                .colour_extras
+                .extras
                 .more
                 .iter()
                 .map(|output| blend_attachment(output.blend, constants, Some(output.write_mask))),
@@ -3303,7 +3328,7 @@ fn render_resident(
 ) -> Result<Drawn, DispatchError> {
     let (instance, physical, device) = (&session.instance, session.physical, &session.device);
     orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
-    let more = !bound.colour_extras.more.is_empty();
+    let more = !bound.extras.more.is_empty();
     let pass = resident
         .pass_for(bound.depth.is_some(), more)
         .ok_or_else(|| {
@@ -4711,6 +4736,10 @@ fn create_graphics_pipeline(
 ) -> Result<vk::Pipeline, DispatchError> {
     let (vertex, fragment) = modules;
     let (width, height) = size;
+    let (entries, planes) = clip_plane_specialization(&bound.extras.clip_planes);
+    let specialization = vk::SpecializationInfo::default()
+        .map_entries(&entries)
+        .data(&planes);
     let stages = [
         vk::PipelineShaderStageCreateInfo::default()
             .stage(match geometry {
@@ -4718,7 +4747,8 @@ fn create_graphics_pipeline(
                 Geometry::Mesh { .. } => vk::ShaderStageFlags::MESH_EXT,
             })
             .module(vertex)
-            .name(ENTRY),
+            .name(ENTRY)
+            .specialization_info(&specialization),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(fragment)
@@ -4793,7 +4823,7 @@ fn create_graphics_pipeline(
     let blend_attachments = colour_blend_attachments(&bound)?;
     let mut blend = vk::PipelineColorBlendStateCreateInfo::default()
         .attachments(&blend_attachments)
-        .blend_constants(blend_constants(bound.colour_extras.blend_constants));
+        .blend_constants(blend_constants(bound.extras.blend_constants));
     if let Some(op) = logic_op(bound.raster_op, bound.blend, bound.encoding)
         .map_err(|what| DispatchError::Unsupported(what.to_owned()))?
     {
@@ -4969,6 +4999,42 @@ pub fn draw_mesh_of_vertices_over(
     .map(|drawn| (drawn.pixels, drawn.memory))
 }
 
+/// [`draw_mesh_over`] clipped against user clip planes (D830): `planes`, each four `f32`s' bits,
+/// specialise the mesh module, which writes each vertex's distance inside them.
+///
+/// # Errors
+///
+/// When no device is available, when it has no mesh stage, or when any Vulkan call fails.
+pub fn draw_mesh_over_planes(
+    (mesh_words, fragment_words): (&[u32], &[u32]),
+    clear: [f32; 4],
+    (width, height): (u32, u32),
+    memory: &[u32],
+    planes: ClipPlanes,
+) -> Result<Pixels, DispatchError> {
+    let extras = PipelineExtras {
+        clip_planes: planes,
+        ..NO_EXTRAS
+    };
+    render_over(
+        clear,
+        width,
+        height,
+        Some((mesh_words, fragment_words)),
+        Geometry::Mesh {
+            vertices: 0,
+            first: 0,
+        },
+        Bound {
+            windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
+            memory,
+            extras: &extras,
+            ..Bound::default()
+        },
+    )
+    .map(|drawn| drawn.pixels)
+}
+
 /// Draws with a mesh stage over seeded guest memory, restricted to a scissor rectangle.
 ///
 /// The clipped counterpart of [`draw_mesh_over`]: the rectangle restricts rasterisation, so pixels
@@ -5024,7 +5090,7 @@ pub(crate) fn draw_resident(
     resident: &ResidentAttachment,
     (guest_buffer, scissor): (&DispatchBuffer, Option<vk::Rect2D>),
 ) -> Result<Option<(BatchKey, crate::draw_buffers::GeometryPlaces)>, DispatchError> {
-    let more = !start.colour_extras.more.is_empty();
+    let more = !start.extras.more.is_empty();
     let pass = resident
         .pass_for(start.depth.is_some(), more)
         .ok_or_else(|| {
@@ -5093,7 +5159,7 @@ pub(crate) fn draw_resident(
             user_data: start.user_data,
             textures: &TexturesBound::from_start(start),
             blend: start.blend,
-            colour_extras: &start.colour_extras,
+            extras: &start.extras,
             counting: start.counting,
             raster_op: start.raster_op,
             line_width: start.line_width,
@@ -5207,7 +5273,7 @@ struct Bound<'a> {
     blend: Option<orbistoun_gpu::BlendControl>,
     /// The blend constants, and the colour attachments after the first's output state. By
     /// reference, so `Bound` stays cheap to pass by value.
-    colour_extras: &'a ColourExtras<'a>,
+    extras: &'a PipelineExtras<'a>,
     /// Whether the draw counts the samples that pass (D827).
     counting: bool,
     /// Colour target zero's raster operation (`ROP3`); `None` writes the colour unchanged.
@@ -5314,7 +5380,7 @@ impl Default for Bound<'_> {
             initial: None,
             user_data: &NO_USER_DATA,
             blend: None,
-            colour_extras: &NO_COLOUR_EXTRAS,
+            extras: &NO_EXTRAS,
             counting: false,
             raster_op: None,
             line_width: None,

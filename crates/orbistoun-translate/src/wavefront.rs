@@ -277,7 +277,15 @@ struct MeshOutputs {
     index_type: Id,
     /// How many vertex indices one primitive carries: 1, 2 or 3.
     index_width: u32,
+    /// Pointer to one `float` of a vertex's clip distances, member one of its block.
+    float_ptr: Id,
+    /// The user clip planes, four specialization constants each (`SpecId` `4 * plane + axis`),
+    /// which a pipeline sets from `PA_CL_UCP_*`; zero, their default, clips nothing (D830).
+    planes: [[Id; 4]; CLIP_PLANES],
 }
+
+/// The user clip planes a module carries, `PA_CL_UCP_0` to `_5`.
+pub const CLIP_PLANES: usize = 6;
 
 /// Where the guest-memory window sits in the guest's address space.
 ///
@@ -821,6 +829,8 @@ fn emit_header(
     if stage == Stage::Mesh {
         // `MeshShadingEXT` implies `Shader`, and the extension must be declared with it.
         b.header(op::CAPABILITY, &[capability::MESH_SHADING_EXT]);
+        // Every vertex carries its distances inside the user clip planes (D830).
+        b.header(op::CAPABILITY, &[capability::CLIP_DISTANCE]);
         // One invocation per lane builds masks by ballot and reads lanes by shuffle where its
         // subgroup holds the wave (D760).
         if let Some((_, false)) = per_lane {
@@ -1109,6 +1119,30 @@ fn declare_depth_output(b: &mut Builder, f32_type: Id, variable: Id) -> (Id, Id)
     (f32_type, variable)
 }
 
+/// Declares the user clip planes a mesh module is specialised with (D830): six planes of four `float`
+/// specialization constants, `SpecId` `4 * plane + axis`, each zero unless a pipeline sets it, and
+/// the `float[6]` type a vertex's clip distances are. Answers that type and the constants.
+fn declare_clip_planes(
+    b: &mut Builder,
+    f32_type: Id,
+    u32_type: Id,
+) -> (Id, [[Id; 4]; CLIP_PLANES]) {
+    let plane_count = b.id();
+    b.declare(
+        op::CONSTANT,
+        &[u32_type.0, plane_count.0, CLIP_PLANES as u32],
+    );
+    let distances = b.id();
+    b.declare(op::TYPE_ARRAY, &[distances.0, f32_type.0, plane_count.0]);
+    let mut planes = [[Id(0); 4]; CLIP_PLANES];
+    for (index, constant) in (0u32..).zip(planes.iter_mut().flatten()) {
+        *constant = b.id();
+        b.annotate(op::DECORATE, &[constant.0, decoration::SPEC_ID, index]);
+        b.declare(op::SPEC_CONSTANT, &[f32_type.0, constant.0, 0]);
+    }
+    (distances, planes)
+}
+
 /// Declares everything a mesh module writes: the vertices, the indices, and one array per exported
 /// parameter. [`None`] for any other stage.
 ///
@@ -1144,6 +1178,17 @@ fn declare_mesh_outputs(
         op::MEMBER_DECORATE,
         &[per_vertex.0, 0, decoration::BUILT_IN, built_in::POSITION],
     );
+    // Member one, every vertex's distance inside each user clip plane (D830).
+    b.annotate(
+        op::MEMBER_DECORATE,
+        &[
+            per_vertex.0,
+            1,
+            decoration::BUILT_IN,
+            built_in::CLIP_DISTANCE,
+        ],
+    );
+    let (distances, planes) = declare_clip_planes(b, f32_type, u32_type);
     b.annotate(
         op::DECORATE,
         &[
@@ -1156,7 +1201,7 @@ fn declare_mesh_outputs(
         b.annotate(op::DECORATE, &[id.0, decoration::LOCATION, *location]);
     }
 
-    b.declare(op::TYPE_STRUCT, &[per_vertex.0, vec4.0]);
+    b.declare(op::TYPE_STRUCT, &[per_vertex.0, vec4.0, distances.0]);
     let vertex_array = b.id();
     let vertex_array_ptr = b.id();
     b.declare(op::TYPE_ARRAY, &[vertex_array.0, per_vertex.0, slots.0]);
@@ -1199,6 +1244,9 @@ fn declare_mesh_outputs(
     b.declare(op::TYPE_POINTER, &[vec4_ptr.0, OUTPUT, vec4.0]);
     b.declare(op::TYPE_POINTER, &[index_ptr.0, OUTPUT, index_type.0]);
 
+    let float_ptr = b.id();
+    b.declare(op::TYPE_POINTER, &[float_ptr.0, OUTPUT, f32_type.0]);
+
     Some(MeshOutputs {
         vertices: reserved.vertices,
         indices: reserved.indices,
@@ -1207,6 +1255,8 @@ fn declare_mesh_outputs(
         index_ptr,
         index_type,
         index_width,
+        float_ptr,
+        planes,
     })
 }
 
@@ -3190,6 +3240,63 @@ impl<'a> Wavefront<'a> {
         self.builder.function(op::STORE, &[pointer.0, value.0]);
     }
 
+    /// Writes vertex `slot`'s distance inside each user clip plane: `dot(plane, position)` over
+    /// the clip-space position it was given, which the host clips where it is negative, as the
+    /// guest's clipper does against `PA_CL_UCP_*` (D830).
+    fn write_clip_distances(&mut self, mesh: &MeshOutputs, slot: Id, position: [Id; 4]) {
+        let f32_type = self.f32_type;
+        let member = Self::constant(self, 1);
+        for (index, plane) in (0u32..).zip(mesh.planes) {
+            let mut sum: Option<Id> = None;
+            for (component, coefficient) in position.into_iter().zip(plane) {
+                let product = self.builder.id();
+                self.builder.function(
+                    op::FMUL,
+                    &[f32_type.0, product.0, component.0, coefficient.0],
+                );
+                sum = Some(match sum {
+                    None => product,
+                    Some(before) => {
+                        let added = self.builder.id();
+                        self.builder
+                            .function(op::FADD, &[f32_type.0, added.0, before.0, product.0]);
+                        added
+                    }
+                });
+            }
+            let Some(distance) = sum else {
+                continue;
+            };
+            let element = Self::constant(self, index);
+            let pointer = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[
+                    mesh.float_ptr.0,
+                    pointer.0,
+                    mesh.vertices.0,
+                    slot.0,
+                    member.0,
+                    element.0,
+                ],
+            );
+            self.builder.function(op::STORE, &[pointer.0, distance.0]);
+        }
+    }
+
+    /// A `vec4` value's four components.
+    fn extract_vec4(&mut self, value: Id) -> [Id; 4] {
+        let f32_type = self.f32_type;
+        std::array::from_fn(|component| {
+            let id = self.builder.id();
+            self.builder.function(
+                op::COMPOSITE_EXTRACT,
+                &[f32_type.0, id.0, value.0, component as u32],
+            );
+            id
+        })
+    }
+
     /// Four components as one `vec4` value.
     fn composite_vec4(&mut self, components: [Id; 4]) -> Id {
         let vec4 = self.vec4;
@@ -3376,6 +3483,10 @@ impl<'a> Wavefront<'a> {
             );
             for (copy, output) in arrays {
                 let corner = self.fourth_corner(copies.vec4_ptr, copy, masked);
+                if output.is_none() {
+                    let vec4_components = self.extract_vec4(corner);
+                    self.write_clip_distances(&mesh, fourth, vec4_components);
+                }
                 let target = self.builder.id();
                 match output {
                     None => self.builder.function(
@@ -3587,6 +3698,7 @@ impl Model for Wavefront<'_> {
             ],
         );
         self.store_vec4(pointer, components);
+        self.write_clip_distances(&mesh, slot, components);
         if let Some(copies) = self.rectangles.clone() {
             let value = self.composite_vec4(components);
             self.copy_element(copies.positions, copies.vec4_ptr, lane, value);

@@ -470,3 +470,51 @@ fn a_passthrough_primitive_shader_finds_its_primitive_packed() {
     );
     assert_eq!(lane(1)[0], 3 | 4 << 10 | 5 << 20, "primitive thread one");
 }
+
+/// A user clip plane keeps what lies inside it (D830): `(1, 0, 0, 0)` keeps clip-space `x >= 0`,
+/// so a rectangle over the whole viewport covers its right half and leaves its left half clear,
+/// the fourth corner clipped as the three exported ones are. Planes of zeros clip nothing.
+#[test]
+fn a_user_clip_plane_keeps_the_half_inside_it() {
+    if !device_or_skip("a_user_clip_plane_keeps_the_half_inside_it") {
+        return;
+    }
+    let (width, height) = (8u32, 6u32);
+    let fragment = orbistoun_spirv::passthrough_fragment_module();
+    let clear = [0.0, 0.0, 1.0, 1.0];
+    let blue = [0, 0, 255, 255];
+    let module = mesh_module(MeshPrimitive::Rectangles);
+    let mut planes = [[0u32; 4]; 6];
+    planes[2] = [1.0f32.to_bits(), 0, 0, 0];
+    let clipped = orbistoun_gpu_vulkan::framebuffer::draw_mesh_over_planes(
+        (&module, &fragment),
+        clear,
+        (width, height),
+        &memory(),
+        planes,
+    )
+    .expect("the clipped draw ran");
+    for y in 0..height {
+        for x in 0..width {
+            let got = clipped.at(x, y).expect("inside");
+            if x < width / 2 {
+                assert_eq!(got, blue, "({x}, {y}) is outside the plane");
+            } else {
+                assert_ne!(got, blue, "({x}, {y}) is inside the plane");
+            }
+        }
+    }
+    let unclipped = orbistoun_gpu_vulkan::framebuffer::draw_mesh_over_planes(
+        (&module, &fragment),
+        clear,
+        (width, height),
+        &memory(),
+        [[0; 4]; 6],
+    )
+    .expect("the unclipped draw ran");
+    assert_ne!(
+        unclipped.at(0, 0),
+        Some(blue),
+        "planes of zeros clip nothing"
+    );
+}

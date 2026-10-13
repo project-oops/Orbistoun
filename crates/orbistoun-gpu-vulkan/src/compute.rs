@@ -898,7 +898,10 @@ impl Session {
             .depth_bias_clamp(available.depth_bias_clamp == vk::TRUE)
             // `occlusion_query_precise` serves the guest's z-pass counters (`ZPASS_DONE`), which
             // count samples exactly.
-            .occlusion_query_precise(available.occlusion_query_precise == vk::TRUE);
+            .occlusion_query_precise(available.occlusion_query_precise == vk::TRUE)
+            // `shader_clip_distance` serves the guest's user clip planes, which every translated
+            // mesh module writes as clip distances (D830).
+            .shader_clip_distance(available.shader_clip_distance == vk::TRUE);
 
         // Float16 is a Vulkan 1.2 feature and lives in its own structure, chained on.
         let mut offered_float16 = vk::PhysicalDeviceVulkan12Features::default();
