@@ -210,6 +210,14 @@ fn create_render_pass(
         .map_err(|e| DispatchError::Vulkan("create_render_pass", e))
 }
 
+/// The accesses of `uses` a dependency into a pass may name: the attachment ones. Its destination
+/// stages are the pass's own, which perform no transfer, and an access no destination stage
+/// performs is invalid (`VUID-VkSubpassDependency-dstAccessMask-00869`). The pass leaving names
+/// the transfers, since its destination stages include the copy.
+pub(crate) fn within_pass(uses: vk::AccessFlags) -> vk::AccessFlags {
+    uses & !(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE)
+}
+
 /// The render pass a [`ResidentAttachment`] is drawn with: loaded and stored, starting and ending
 /// in `COLOR_ATTACHMENT_OPTIMAL`, so consecutive draws land on each other with no copy between. The
 /// external dependencies order each pass after whatever last wrote the attachment and before the
@@ -245,7 +253,7 @@ fn create_resident_render_pass(
             .src_stage_mask(stages)
             .src_access_mask(writes)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(uses),
+            .dst_access_mask(within_pass(uses)),
         vk::SubpassDependency::default()
             .src_subpass(0)
             .dst_subpass(vk::SUBPASS_EXTERNAL)
@@ -351,7 +359,7 @@ fn create_attachments_render_pass(
             .src_stage_mask(stages)
             .src_access_mask(writes)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | tests)
-            .dst_access_mask(uses),
+            .dst_access_mask(within_pass(uses)),
         vk::SubpassDependency::default()
             .src_subpass(0)
             .dst_subpass(vk::SUBPASS_EXTERNAL)
@@ -5771,6 +5779,26 @@ pub fn draw_with_windows(
 #[cfg(test)]
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
+
+    /// A dependency into a pass names only the attachment accesses its stages perform: the
+    /// readback copy's transfer accesses belong to the dependency out of it.
+    #[test]
+    fn a_dependency_into_a_pass_names_no_transfer_access() {
+        use ash::vk::AccessFlags as A;
+        let uses = A::COLOR_ATTACHMENT_READ
+            | A::COLOR_ATTACHMENT_WRITE
+            | A::DEPTH_STENCIL_ATTACHMENT_WRITE
+            | A::TRANSFER_READ
+            | A::TRANSFER_WRITE;
+        // `AccessFlags` is not `Debug` without ash's `debug` feature, so compared as raw bits.
+        assert_eq!(
+            super::within_pass(uses).as_raw(),
+            (A::COLOR_ATTACHMENT_READ
+                | A::COLOR_ATTACHMENT_WRITE
+                | A::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                .as_raw()
+        );
+    }
 
     /// The four constant-colour factors map to Vulkan's once the stream set blend constants, and
     /// are refused without them; the constants reach the pipeline as the floats their bits are.

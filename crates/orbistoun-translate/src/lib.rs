@@ -1075,6 +1075,47 @@ mod tests {
         assert!(mesh(&[0x7E18_0314, END]).is_ok());
     }
 
+    /// A triangle mesh module reading per-draw user data declares one `uvec3`, shared by its
+    /// indices and its `WorkgroupId` input. Two were invalid SPIR-V that NVIDIA's driver accepted
+    /// and AMD's faulted compiling (a null read inside `amdvlk64.dll` on MDEM00001).
+    #[test]
+    fn a_triangle_mesh_reading_user_data_declares_one_uvec3() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        const END: u32 = 0xBF81_0000;
+        const TYPE_VECTOR: u32 = 23;
+        let (table, operands) = tables();
+        let decoded = decode(&stream(&[END]), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Mesh, MeshPrimitive::Triangles),
+            Window::default(),
+            UserData {
+                count: 4,
+                ..UserData::default()
+            },
+        )
+        .expect("a triangle mesh module with user data translates");
+
+        // Walk the module's instructions after the five-word header, counting three-component
+        // vectors.
+        let words = &translated.module;
+        let mut at = 5;
+        let mut three_wide = 0;
+        while at < words.len() {
+            let (length, opcode) = ((words[at] >> 16) as usize, words[at] & 0xFFFF);
+            if opcode == TYPE_VECTOR && words.get(at + 3) == Some(&3) {
+                three_wide += 1;
+            }
+            at += length.max(1);
+        }
+        assert_eq!(three_wide, 1, "one uvec3, whoever asks for it");
+    }
+
     /// A descriptor loaded through an address the program formed is found where it was formed:
     /// radeonsi's blit pixel shader moves user-data word 3 into `s0` and the constant 4 into `s1`,
     /// then loads its image descriptor from `s[0:1] + 0x400`. A pair holding anything else - here

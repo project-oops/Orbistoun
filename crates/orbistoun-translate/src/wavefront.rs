@@ -1131,12 +1131,11 @@ fn declare_mesh_outputs(
     // line, `uvec3` for a triangle, matching the `PrimitivePointIndices`/`Line`/`Triangle`
     // built-in.
     let index_width = primitive.indices();
+    // The triangle's `uvec3` is the `WorkgroupId` input's type too.
     let index_type = if index_width == 1 {
         u32_type
     } else {
-        let v = b.id();
-        b.declare(op::TYPE_VECTOR, &[v.0, u32_type.0, index_width]);
-        v
+        b.declare_type(op::TYPE_VECTOR, &[u32_type.0, index_width])
     };
 
     let per_vertex = b.id();
@@ -1438,15 +1437,17 @@ impl UserDataSource {
 }
 
 /// Declares the `WorkgroupId` built-in input: the `uvec3` type, and the variable.
+///
+/// The type is the module's one `uvec3`: a triangle mesh module has already declared it for its
+/// indices, and a second declaration is invalid SPIR-V that AMD's driver faulted compiling.
 fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
-    let uvec3 = b.id();
     let pointer = b.id();
     let variable = b.id();
     b.annotate(
         op::DECORATE,
         &[variable.0, decoration::BUILT_IN, built_in::WORKGROUP_ID],
     );
-    b.declare(op::TYPE_VECTOR, &[uvec3.0, u32_type.0, 3]);
+    let uvec3 = b.declare_type(op::TYPE_VECTOR, &[u32_type.0, 3]);
     b.declare(op::TYPE_POINTER, &[pointer.0, INPUT, uvec3.0]);
     b.declare(op::VARIABLE, &[pointer.0, variable.0, INPUT]);
     (uvec3, variable)
@@ -3110,9 +3111,9 @@ impl<'a> Wavefront<'a> {
         if let Some(id) = self.uvec4 {
             return id;
         }
-        let id = self.builder.id();
-        self.builder
-            .declare(op::TYPE_VECTOR, &[id.0, self.u32_type.0, 4]);
+        let id = self
+            .builder
+            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 4]);
         self.uvec4 = Some(id);
         id
     }
@@ -4055,10 +4056,8 @@ impl Model for Wavefront<'_> {
             self.images.stored_source = Some(source);
         }
 
-        let image = self.builder.id();
         let pointer = self.builder.id();
         let variable = self.builder.id();
-        let texel = self.builder.id();
 
         // The capability the format-less declaration needs. A device without the matching feature
         // refuses a module carrying it, so it is declared lazily (D692).
@@ -4090,14 +4089,17 @@ impl Model for Wavefront<'_> {
         } else {
             (self.f32_type, self.vec4)
         };
-        self.builder
-            .declare(op::TYPE_IMAGE, &[image.0, element.0, 1, 0, 0, 0, 2, 0]);
+        let image = self
+            .builder
+            .declare_type(op::TYPE_IMAGE, &[element.0, 1, 0, 0, 0, 2, 0]);
         self.builder
             .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, image.0]);
         self.builder
             .declare(op::VARIABLE, &[pointer.0, variable.0, UNIFORM_CONSTANT]);
-        self.builder
-            .declare(op::TYPE_VECTOR, &[texel.0, self.u32_type.0, 2]);
+        // A sampled texture's fetch declares the same `uvec2`.
+        let texel = self
+            .builder
+            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2]);
 
         let stored = model::Stored {
             variable,
@@ -4172,11 +4174,8 @@ impl Model for Wavefront<'_> {
         let source = self.new_texture_source(descriptor, (reaching, shape))?;
         let binding = orbistoun_spirv::TEXTURE_BINDINGS[source.slot as usize];
 
-        let image = self.builder.id();
-        let combined = self.builder.id();
         let pointer = self.builder.id();
         let variable = self.builder.id();
-        let coordinate = self.builder.id();
         self.decorate_binding(variable, binding);
 
         // Element type, then: two-dimensional, not depth, not arrayed, single-sampled, used with a
@@ -4189,25 +4188,26 @@ impl Model for Wavefront<'_> {
             (self.f32_type, self.vec4)
         };
         let ((dim, components), depth) = (image_dim(shape), u32::from(shape.compare));
-        self.builder.declare(
-            op::TYPE_IMAGE,
-            &[image.0, element.0, dim, depth, 0, 0, 1, 0],
-        );
-        self.builder
-            .declare(op::TYPE_SAMPLED_IMAGE, &[combined.0, image.0]);
+        // A second texture of the same shape shares these types: each is declared once per module,
+        // and only the pointer and variable are the texture's own.
+        let image = self
+            .builder
+            .declare_type(op::TYPE_IMAGE, &[element.0, dim, depth, 0, 0, 1, 0]);
+        let combined = self
+            .builder
+            .declare_type(op::TYPE_SAMPLED_IMAGE, &[image.0]);
         self.builder
             .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, combined.0]);
         self.builder
             .declare(op::VARIABLE, &[pointer.0, variable.0, UNIFORM_CONSTANT]);
-        self.builder.declare(
-            op::TYPE_VECTOR,
-            &[coordinate.0, self.f32_type.0, components],
-        );
+        let coordinate = self
+            .builder
+            .declare_type(op::TYPE_VECTOR, &[self.f32_type.0, components]);
         // The integer coordinate a fetch takes: a texel index rather than a position across the
         // image. Declared alongside the sample's type because the unused one costs one declaration.
-        let texel = self.builder.id();
-        self.builder
-            .declare(op::TYPE_VECTOR, &[texel.0, self.u32_type.0, 2]);
+        let texel = self
+            .builder
+            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2]);
 
         let texture = model::Texture {
             variable,

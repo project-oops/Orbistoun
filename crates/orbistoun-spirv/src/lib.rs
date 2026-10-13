@@ -7,6 +7,7 @@
 //! decided by `spirv-val`, run over emitted modules by `tools/validate-spirv.sh`.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 /// First word of every module.
 pub const MAGIC: u32 = 0x0723_0203;
@@ -623,8 +624,30 @@ pub struct Builder {
     declarations: Vec<u32>,
     /// Function bodies.
     functions: Vec<u32>,
+    /// Every type the format allows once per module, by opcode and operands after the result, so
+    /// [`Self::declare_type`] answers a second request with the first declaration.
+    types: BTreeMap<(u16, Vec<u32>), Id>,
     next_id: u32,
     version: u32,
+}
+
+/// Whether the format allows one declaration of a type per module: every non-aggregate type.
+///
+/// Two `uvec3` declarations are invalid SPIR-V (`spirv-val`: "Duplicate non-aggregate type
+/// declarations are not allowed"). One driver accepts the module and another faults compiling it,
+/// so the builder holds the rule rather than every caller. Structs, arrays and pointers may repeat.
+const fn is_unique_type(opcode: u16) -> bool {
+    matches!(
+        opcode,
+        op::TYPE_VOID
+            | op::TYPE_BOOL
+            | op::TYPE_INT
+            | op::TYPE_FLOAT
+            | op::TYPE_VECTOR
+            | op::TYPE_IMAGE
+            | op::TYPE_SAMPLED_IMAGE
+            | op::TYPE_FUNCTION
+    )
 }
 
 impl Default for Builder {
@@ -642,6 +665,7 @@ impl Builder {
             annotations: Vec::new(),
             declarations: Vec::new(),
             functions: Vec::new(),
+            types: BTreeMap::new(),
             // Identifier zero is reserved by the format, so allocation starts at one.
             next_id: 1,
             version: VERSION_1_0,
@@ -682,7 +706,33 @@ impl Builder {
     ///
     /// Order within this section is preserved, because a type may name one declared before it.
     pub fn declare(&mut self, opcode: u16, operands: &[u32]) {
+        if is_unique_type(opcode)
+            && let Some((&result, rest)) = operands.split_first()
+        {
+            self.types
+                .entry((opcode, rest.to_vec()))
+                .or_insert(Id(result));
+        }
         encode(&mut self.declarations, opcode, operands);
+    }
+
+    /// Declares a type the format allows once per module, or answers the one already declared.
+    ///
+    /// `operands` are the type's words after its result: `[component, count]` for a vector. A type
+    /// declared twice is invalid SPIR-V that [`Self::check`] refuses, so any type more than one
+    /// part of a module may want - a texture's coordinate, the `WorkgroupId` input's `uvec3` - is
+    /// declared through here.
+    pub fn declare_type(&mut self, opcode: u16, operands: &[u32]) -> Id {
+        debug_assert!(is_unique_type(opcode), "opcode {opcode} may repeat");
+        if let Some(&id) = self.types.get(&(opcode, operands.to_vec())) {
+            return id;
+        }
+        let id = self.id();
+        let mut words = Vec::with_capacity(operands.len() + 1);
+        words.push(id.0);
+        words.extend_from_slice(operands);
+        self.declare(opcode, &words);
+        id
     }
 
     /// Appends an instruction to the function section.
@@ -836,6 +886,26 @@ impl Builder {
                     seen[id as usize] = true;
                 }
             }
+        }
+
+        // A non-aggregate type declared twice: valid word by word, refused by the format, and
+        // fatal to a driver that indexes its types by shape.
+        let mut types: BTreeMap<(u16, &[u32]), u32> = BTreeMap::new();
+        for (opcode, operands) in Instructions::new(&self.declarations) {
+            if !is_unique_type(opcode) {
+                continue;
+            }
+            let Some((&second, rest)) = operands.split_first() else {
+                continue;
+            };
+            if let Some(&first) = types.get(&(opcode, rest)) {
+                return Err(ModuleError::DeclaredTwice {
+                    first,
+                    second,
+                    opcode,
+                });
+            }
+            types.insert((opcode, rest), second);
         }
 
         Ok(())
@@ -2093,6 +2163,15 @@ pub enum ModuleError {
         /// The opcode that produced it.
         opcode: u16,
     },
+    /// A type the format allows once per module is declared a second time.
+    DeclaredTwice {
+        /// The first declaration's identifier.
+        first: u32,
+        /// The second's.
+        second: u32,
+        /// The type's opcode.
+        opcode: u16,
+    },
 }
 
 impl fmt::Display for ModuleError {
@@ -2128,6 +2207,18 @@ impl fmt::Display for ModuleError {
             Self::IdAboveBound { id, opcode } => write!(
                 f,
                 "%{id}, from opcode {opcode}, is at or above the declared bound"
+            ),
+            Self::DeclaredTwice {
+                first,
+                second,
+                opcode,
+            } => write!(
+                f,
+                concat!(
+                    "%{} declares the same type as %{} (opcode {}) - invalid SPIR-V, which ",
+                    "one driver accepts and another faults compiling"
+                ),
+                second, first, opcode
             ),
         }
     }
@@ -3459,6 +3550,58 @@ mod tests {
                 opcode: op::TYPE_FLOAT
             })
         );
+    }
+
+    /// Two `uvec3` declarations - a triangle's indices and the `WorkgroupId` input each declaring
+    /// its own - are refused: AMD's driver faulted compiling such a mesh module.
+    #[test]
+    fn a_vector_type_declared_twice_is_refused() {
+        let mut b = Builder::new();
+        let uint = b.id();
+        let (first, second) = (b.id(), b.id());
+        b.declare(op::TYPE_INT, &[uint.0, 32, 0]);
+        b.declare(op::TYPE_VECTOR, &[first.0, uint.0, 3]);
+        b.declare(op::TYPE_VECTOR, &[second.0, uint.0, 3]);
+
+        assert_eq!(
+            b.check(),
+            Err(ModuleError::DeclaredTwice {
+                first: first.0,
+                second: second.0,
+                opcode: op::TYPE_VECTOR
+            })
+        );
+    }
+
+    /// Asking for a type already declared, by either route, answers the declaration made.
+    #[test]
+    fn declare_type_answers_the_type_already_declared() {
+        let mut b = Builder::new();
+        let uint = b.id();
+        let uvec3 = b.id();
+        b.declare(op::TYPE_INT, &[uint.0, 32, 0]);
+        b.declare(op::TYPE_VECTOR, &[uvec3.0, uint.0, 3]);
+
+        assert_eq!(b.declare_type(op::TYPE_VECTOR, &[uint.0, 3]), uvec3);
+        let uvec2 = b.declare_type(op::TYPE_VECTOR, &[uint.0, 2]);
+        assert_ne!(uvec2, uvec3);
+        assert_eq!(b.declare_type(op::TYPE_VECTOR, &[uint.0, 2]), uvec2);
+        assert_eq!(b.check(), Ok(()));
+    }
+
+    /// Structs and pointers may repeat: two identical blocks are two distinct types.
+    #[test]
+    fn an_aggregate_or_pointer_may_be_declared_twice() {
+        let mut b = Builder::new();
+        let uint = b.id();
+        let (one, two, p1, p2) = (b.id(), b.id(), b.id(), b.id());
+        b.declare(op::TYPE_INT, &[uint.0, 32, 0]);
+        b.declare(op::TYPE_STRUCT, &[one.0, uint.0]);
+        b.declare(op::TYPE_STRUCT, &[two.0, uint.0]);
+        b.declare(op::TYPE_POINTER, &[p1.0, 7, uint.0]);
+        b.declare(op::TYPE_POINTER, &[p2.0, 7, uint.0]);
+
+        assert_eq!(b.check(), Ok(()));
     }
 
     /// An access chain's indices count as identifier uses.

@@ -496,7 +496,7 @@ pub(crate) fn create_render_pass(
             .src_stage_mask(stages)
             .src_access_mask(writes)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | tests)
-            .dst_access_mask(uses),
+            .dst_access_mask(crate::framebuffer::within_pass(uses)),
         vk::SubpassDependency::default()
             .src_subpass(0)
             .dst_subpass(vk::SUBPASS_EXTERNAL)
