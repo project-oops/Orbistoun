@@ -87,5 +87,7 @@ unneeded = [
     "sceWebBrowserDialogTerminate",
 ]
 preview = "entered at 263 imports"
-build = "v0.1.0 - 22b92f1-dirty"
+spread = 0
+calls = 1204532
+build = "v0.1.0 - bc4f211-dirty"
 measured_on = "2026-10-12"

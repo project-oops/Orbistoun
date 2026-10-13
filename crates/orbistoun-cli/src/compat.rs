@@ -367,17 +367,18 @@ fn rank_preview(
     };
     // The preview twice more, refusing nothing, under the budget: what it reaches, and how far two
     // runs of it differ with nothing changed - the margin a rerun must clear to count.
-    let mut baselines = Vec::with_capacity(2);
+    // The preview itself counts as a third: it made exactly the budget's calls, whatever ended it.
+    let mut baselines = vec![orbistoun_report::trace::status_of(preview, String::new())];
     for i in 1..=2 {
         println!();
         println!("== baseline {i}/2 {title}, refusing nothing, {budget} calls");
         baselines.push(run(None)?.context("a baseline run left no trace")?);
     }
     baselines.sort_by(orbistoun_overrides::Status::reach_against);
-    let (reference, highest) = (&baselines[0], &baselines[1]);
+    let (reference, highest) = (&baselines[0], &baselines[baselines.len() - 1]);
     anyhow::ensure!(
         reference.reach == highest.reach,
-        "two runs of the preview reached {} and {}: refusals cannot be ranked against that",
+        "runs of the preview reached {} and {}: refusals cannot be ranked against that",
         reach_line(reference),
         reach_line(highest)
     );
@@ -426,10 +427,10 @@ fn reach_line(status: &orbistoun_overrides::Status) -> String {
     format!("{} at {} imports", status.reach.label(), status.imports)
 }
 
-/// Sorts a preview's reruns, each by the function it refused, against the lower of two runs of the
+/// Sorts a preview's reruns, each by the function it refused, against the lowest of the runs of the
 /// preview that refused nothing.
 ///
-/// Imports within `spread` of it - how far those two runs differed - count as the same reach, so a
+/// Imports within `spread` of it - how far those runs differed - count as the same reach, so a
 /// rerun is ranked only by what refusing changed. A rerun that left no trace ended the worker
 /// before it could write one, which is a dependence too, and the furthest set back of all.
 fn rank_reruns(

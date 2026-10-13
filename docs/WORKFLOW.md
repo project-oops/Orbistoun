@@ -173,10 +173,11 @@ orbistoun-cli compat reproduce <title> --preview --rank
 `--rank` then asks the guest which of those answers it needed. The preview is rerun once per
 function it answered without an implementation, with that one function refused again
 (`ORBISTOUN_WITHHOLD=<name>`). Every rerun stops at the preview's own call count, the
-deterministic limit, rather than on the clock. Before them the preview itself runs twice under
-that budget, and how many imports those two runs differ by is the margin a rerun must clear. A
-rerun that got less far than both - a lower rung, or fewer imports - depended on the answer. One
-within the margin did not. One that got further than both had the answer in its way. Only the
+deterministic limit, rather than on the clock. Before them the preview runs twice more under
+that budget, and how many imports the three runs differ by is the margin a rerun must clear - a
+title whose threads interleave differently from run to run still differs by a few. A rerun that
+got less far than all three - a lower rung, or fewer imports - depended on the answer. One within
+the margin did not. One that got further than all three had the answer in its way. Only the
 rung and the imports are compared, since calls and frames move with a run's timing. The result
 goes to the record's `[preview_dependence]` section, with the budget and the margin, the
 furthest set back first: the

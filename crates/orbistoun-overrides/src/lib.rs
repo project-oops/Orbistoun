@@ -1017,10 +1017,10 @@ pub struct OverrideFile {
 ///
 /// Measured by the guest itself, one function at a time: the preview is rerun with that function
 /// refused again, and a rerun that got less far than the preview depended on its answer. Every run
-/// stops at the same call budget, and twice the preview is run refusing nothing, so a difference
-/// within what those two differ by counts for nothing. Those are the
-/// refusals standing between the title and the preview's reach, and the order to implement them
-/// in. A section of its own, with its own build and date, because it describes the preview it was
+/// stops at the same call budget, the preview's own call count, and the preview is run twice more
+/// refusing nothing, so a difference within what those three runs differ by counts for nothing.
+/// The functions depended on are the refusals standing between the title and the preview's reach,
+/// and the order to implement them in. A section of its own, with its own build and date, because it describes the preview it was
 /// taken from rather than any run a slot keeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewDependence {
@@ -1033,10 +1033,10 @@ pub struct PreviewDependence {
     /// in the way.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harmful: Vec<String>,
-    /// What the preview reached, which each rerun was ranked against: the lower of two runs of it
-    /// refusing nothing.
+    /// What the preview reached, which each rerun was ranked against: the lowest of three runs of
+    /// it refusing nothing.
     pub preview: String,
-    /// How many imports those two runs differed by; a rerun within it counts as the same reach.
+    /// How many imports those three runs differed by; a rerun within it counts as the same reach.
     #[serde(default)]
     pub spread: usize,
     /// The call budget every run stopped at, the preview's own call count, so that runs differ
