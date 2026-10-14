@@ -43,3 +43,20 @@ known_by = "measured"
 cites = "obSCEne REQ-20261012T0728Z-pu01, reports/hardware/report-1791801495.txt lines 390-423 (000-boot/pad-ime-uds)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceNpUniversalDataSystemCreateEventPropertyObject"
+arity = 1
+purpose = "(&object): creates an event property object, writing its address to object."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-rf02, link-bound, after sysmodule 0x0105, Initialize, CreateContext and CreateHandle): with each of six arguments a 0x100-byte block of 0xcc, 0x0 and the first block's first eight bytes written with a heap address (0x8803305c0), nothing else changed; every argument zero, 0x80553102; arg0 the context number 0x40060, a SIGSEGV - arg0 is the slot.",
+    "MEASURED (REQ-pd02, REQ-rf01, before Initialize): 0x80553117 for all-zero and all-0xcc arguments, nothing written.",
+    "PPSA02664 and PPSA03416 call it once a frame with six live registers, the third pointing into a property-name block; only the first is an argument.",
+    "orbistoun writes a fresh zeroed 0x100-byte block's address (the size assumed) and does not track initialisation.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1930Z-rf02, reports/hardware/report-20261014-004800.log lines 1666-1684 (000-boot/ux01-calls)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0"]
+found_on = "2026-10-14"

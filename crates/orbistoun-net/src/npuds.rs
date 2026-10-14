@@ -2,8 +2,8 @@
 //!
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
 //! full capture, not a claim about the argument count. `sceNpUniversalDataSystemInitialize` and
-//! `sceNpUniversalDataSystemCreateContext` and `sceNpUniversalDataSystemCreateHandle` are
-//! implemented, as measured.
+//! `sceNpUniversalDataSystemCreateContext`, `sceNpUniversalDataSystemCreateHandle` and
+//! `sceNpUniversalDataSystemCreateEventPropertyObject` are implemented, as measured.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
@@ -16,6 +16,8 @@ guest_module! {
         "sceNpUniversalDataSystemInitialize" => 1,
         // (&handle)
         "sceNpUniversalDataSystemCreateHandle" => 1,
+        // (&object)
+        "sceNpUniversalDataSystemCreateEventPropertyObject" => 1,
     }
 }
 
@@ -26,6 +28,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNpUniversalDataSystemInitialize", initialize),
         ("sceNpUniversalDataSystemCreateContext", create_context),
         ("sceNpUniversalDataSystemCreateHandle", create_handle),
+        (
+            "sceNpUniversalDataSystemCreateEventPropertyObject",
+            create_event_property_object,
+        ),
     ]
 }
 
@@ -85,6 +91,38 @@ fn create_handle(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// The answer for a null object slot (REQ-rf02).
+const INVALID_ARGUMENT: u64 = 0x8055_3102;
+
+/// Bytes behind an event property object. Assumed: the console's object is its own, and nothing a
+/// title was seen to read from it directly; zeroed, as a fresh object holds no properties.
+const EVENT_PROPERTY_OBJECT_BYTES: usize = 0x100;
+
+/// `sceNpUniversalDataSystemCreateEventPropertyObject(&object)`: writes a new object's address,
+/// all eight bytes, and answers 0; a null slot answers `0x80553102` (REQ-20261013T1930Z-rf02,
+/// `000-boot/ux01-calls`, after `Initialize`, `CreateContext` and `CreateHandle`). PPSA02664 and
+/// PPSA03416 call it once a frame; the five registers after the slot are left over from the
+/// caller, not arguments.
+///
+/// Before `Initialize` the console answers `0x80553117` (REQ-pd02); orbistoun does not track
+/// initialisation, and every title seen initialises first.
+fn create_event_property_object(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return INVALID_ARGUMENT;
+    }
+    // Guest code runs in this address space, so a host block is a guest object. Leaked: the
+    // destroy call is not served, and the console's object outlives the call that made it.
+    let object = Box::leak(vec![0_u8; EVENT_PROPERTY_OBJECT_BYTES].into_boxed_slice());
+    let address = object.as_mut_ptr() as u64;
+    // SAFETY: the guest's object slot, by the call's contract; written through the checked
+    // accessor.
+    if unsafe { orbistoun_mem::guest::write_u64(args[0], address) } {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
@@ -100,5 +138,22 @@ mod tests {
         assert_eq!(slot, [0x76, 0x01, 0x02, 0x00, 0xcc, 0xcc, 0xcc, 0xcc]);
         assert_eq!(super::create_handle(&args), 0);
         assert_eq!(slot[..4], [0x77, 0x01, 0x02, 0x00]);
+    }
+
+    /// A new object's address fills all eight bytes of the slot, and a null slot is refused
+    /// (REQ-rf02).
+    #[test]
+    fn event_property_objects_are_written_through_the_slot() {
+        let mut slot = [0xcc_u8; 16];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = slot.as_mut_ptr() as u64;
+        assert_eq!(super::create_event_property_object(&args), 0);
+        let object = u64::from_le_bytes(slot[..8].try_into().unwrap());
+        assert_ne!(object, 0);
+        assert_eq!(slot[8..], [0xcc; 8]);
+        assert_eq!(super::create_event_property_object(&args), 0);
+        assert_ne!(u64::from_le_bytes(slot[..8].try_into().unwrap()), object);
+        args[0] = 0;
+        assert_eq!(super::create_event_property_object(&args), 0x8055_3102);
     }
 }
