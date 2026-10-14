@@ -285,3 +285,41 @@ fn a_submission_carries_its_primitive_topology() {
         "the submission report names the triangle record a triangle strip"
     );
 }
+
+/// A stream that clears state and never writes `VGT_GS_OUT_PRIM_TYPE` draws points: the register
+/// holds its reset value, zero, which radeonsi tracks after a clear and so never writes
+/// (`ac_cmdbuf.c` 968). One that does not clear leaves it unknown.
+#[test]
+fn a_cleared_stream_that_writes_no_primitive_draws_points() {
+    use orbistoun_gpu::PrimitiveTopology;
+    use orbistoun_gpu::packet::build::{command_header, measured};
+    use orbistoun_gpu::pipeline::{GuestMemory, Pipeline, Queue};
+    use orbistoun_translate::{Fidelity, Strategy, Width};
+
+    struct NoMemory;
+    impl GuestMemory for NoMemory {
+        fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+            None
+        }
+    }
+
+    let topology = |clears: bool| {
+        let mut words = Vec::new();
+        if clears {
+            words.extend([command_header(orbistoun_gpu::cp::CLEAR_STATE, 1), 0]);
+        }
+        words.extend([command_header(measured::DRAW_INDEX_AUTO, 2), 1, 2]);
+        let stream: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut pipeline = Pipeline::new(Strategy::Predicated {
+            fidelity: Fidelity::Auto,
+            width: Width::default(),
+        })
+        .expect("pipeline");
+        pipeline
+            .submit(&stream, Queue::Draw, &[], &NoMemory)
+            .report
+            .primitive_topology
+    };
+    assert_eq!(topology(true), Some(PrimitiveTopology::PointList));
+    assert_eq!(topology(false), None);
+}

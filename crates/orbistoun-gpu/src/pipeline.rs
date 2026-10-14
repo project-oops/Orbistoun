@@ -33,9 +33,15 @@ use crate::registers::{
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
+<<<<<<< crates/orbistoun-gpu/src/pipeline.rs
+    colour_target_format_at, decode_image_descriptor, depth_control_at, dispatch_calls,
+    register_writes, register_writes_reading, shader_candidates, stencil_control_at,
+    viewport_transform_from,
+=======
     colour_target_format_at, colour_target_runs, decode_image_descriptor, depth_control_at,
     dispatch_calls, primitive_topology_at, register_writes, register_writes_reading,
     shader_candidates, stencil_control_at, viewport_transform_from,
+>>>>>>> C:\Users\Andrew\AppData\Local\Temp/claude/C--git-OOPS/b2a98b80-a30f-475c-a824-bf51afcdd542/scratchpad/m.new
 };
 
 /// Which queue a command buffer was submitted to.
@@ -867,7 +873,14 @@ enum Unprepared {
 type FormatWords = std::sync::Arc<[orbistoun_translate::draw_buffers::BufferSource]>;
 
 /// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
-type PlainKey = (u32, u64, WindowSpace, u32, (Option<u32>, Option<u32>));
+type PlainKey = (
+    u32,
+    u64,
+    WindowSpace,
+    u32,
+    (Option<u32>, Option<u32>),
+    Option<u32>,
+);
 
 /// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
 /// the reason they gave; what each geometry made; and the refusals already recorded.
@@ -1307,6 +1320,16 @@ pub struct Pipeline {
     /// The wave widths in force at the draw whose shaders are being bound, while one is: a
     /// submission may change them between draws.
     draw_widths: Option<WaveWidths>,
+    /// The `VGT_GS_OUT_PRIM_TYPE` in force at the draw whose shaders are being bound, where the
+    /// stream or the state it carries holds one: a submission may draw points, then triangles.
+    draw_primitive: Option<u32>,
+    /// The `VGT_GS_OUT_PRIM_TYPE` a draw holds where nothing wrote it: its reset value, zero
+    /// (`POINTLIST`), in a submission that clears state (`CLEAR_STATE`); unknown in one that does
+    /// not.
+    unwritten_primitive: Option<u32>,
+    /// The `VGT_GS_OUT_PRIM_TYPE` the submission being prepared leaves in force - its last write, or
+    /// what holds where it writes none - which a module prepared for no particular draw emits.
+    submission_primitive: Option<u32>,
     /// Each stage's user-data layout for the submission being prepared, vertex then fragment.
     user_data: [UserData; 2],
     /// Shader bytes, by content hash, to the resource holding the translation.
@@ -1436,6 +1459,9 @@ impl Pipeline {
             carried: BTreeMap::new(),
             last_read: None,
             draw_widths: None,
+            draw_primitive: None,
+            unwritten_primitive: None,
+            submission_primitive: None,
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
             decoded: DecodedPrograms::default(),
@@ -1967,13 +1993,7 @@ impl Pipeline {
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&first);
-        // The primitive the draw produces, from `VGT_GS_OUT_PRIM_TYPE`; `prepare` makes it the mesh
-        // module's output shape. A stream that clears state and never writes it leaves it at its
-        // reset value, zero - `POINTLIST` - which radeonsi relies on: it tracks the register as
-        // zero after a clear and writes it only when that changes (`ac_cmdbuf.c` 968).
-        submission.report.primitive_topology = primitive_topology_at(&writes).or_else(|| {
-            last_clear(&walked).map(|_| crate::registers::decode_primitive_topology(0))
-        });
+        submission.report.primitive_topology = self.note_primitives(&writes, &walked);
         // Each stage's wave width: the encodings are identical at either width, so the stream's
         // registers are the only source (D145).
         submission.report.wave_widths = crate::registers::wave_widths_at(&writes);
@@ -3091,10 +3111,32 @@ impl Pipeline {
         (per_draw, per_draw_chunks)
     }
 
+    /// The primitive a submission's modules emit, from `VGT_GS_OUT_PRIM_TYPE`, which `prepare`
+    /// makes the mesh module's output shape - each draw's own where it is bound. A stream that
+    /// clears state and never writes it leaves it at its reset value, zero - `POINTLIST` - which
+    /// radeonsi relies on: it tracks the register as zero after a clear and writes it only when that
+    /// changes (`ac_cmdbuf.c` 968).
+    fn note_primitives(
+        &mut self,
+        writes: &[RegisterWrite],
+        walked: &PacketWalk,
+    ) -> Option<PrimitiveTopology> {
+        self.unwritten_primitive = last_clear(walked).map(|_| 0);
+        self.submission_primitive = writes
+            .iter()
+            .rev()
+            .find(|write| write.register == crate::registers::VGT_GS_OUT_PRIM_TYPE)
+            .map(|write| write.value)
+            .or(self.unwritten_primitive);
+        self.submission_primitive
+            .map(crate::registers::decode_primitive_topology)
+    }
+
     /// Forgets what held only while one submission's draws were bound: their wave widths and the
     /// formats kept for their chunks.
     fn end_draws(&mut self) {
         self.draw_widths = None;
+        self.draw_primitive = None;
         self.formats_memo = FormatsMemo::Off;
     }
 
@@ -3202,6 +3244,12 @@ impl Pipeline {
         // A window-space draw's primitive shader writes its position differently (D731, D780).
         let window_space = window_space_at(sweep, at);
         written.push(Some(window_space as u32));
+        // The primitive the draw's modules emit: one submission may draw points and triangles. In a
+        // cleared stream a draw before the register's first write holds its reset value, zero.
+        self.draw_primitive = sweep
+            .latest(at, crate::registers::VGT_GS_OUT_PRIM_TYPE)
+            .or(self.unwritten_primitive);
+        written.push(self.draw_primitive);
         // The vertex stage's user data, which names the buffers whose formats a format load
         // converts by (D738).
         let vertex_words = if terms.per_geometry {
@@ -3259,8 +3307,8 @@ impl Pipeline {
 
     /// The key a module prepared for no particular draw is held under in a submission: its stage,
     /// address and position space, the user-data count it was translated for, since a stream
-    /// can give one program two counts, and its further position exports' routing and default
-    /// point size (D867).
+    /// can give one program two counts, its further position exports' routing and default point
+    /// size (D867), and the primitive its draw emits.
     fn plain_key(&self, stage: ShaderStage, address: u64, window_space: WindowSpace) -> PlainKey {
         let (count, routing) = match stage {
             ShaderStage::Vertex => (
@@ -3273,7 +3321,14 @@ impl Pipeline {
             ShaderStage::Fragment => (self.user_data[1].count, (None, None)),
             ShaderStage::Compute => (0, (None, None)),
         };
-        (stage as u32, address, window_space, count, routing)
+        (
+            stage as u32,
+            address,
+            window_space,
+            count,
+            routing,
+            self.draw_primitive.or(self.submission_primitive),
+        )
     }
 
     /// Whether any module translated so far samples through a sampler it loaded, so a draw's pixel
@@ -3890,7 +3945,11 @@ impl Pipeline {
             candidate.address,
             candidate.stage,
             (
-                submission.report.primitive_topology,
+                // The draw's own primitive where a draw is being bound and the registers hold one,
+                // else the submission's - which is also what a cleared stream leaves unwritten.
+                self.draw_primitive
+                    .or(self.submission_primitive)
+                    .map(crate::registers::decode_primitive_topology),
                 // The draw's own widths where a draw is being bound, else the submission's.
                 self.draw_widths.unwrap_or(submission.report.wave_widths),
                 for_draw,
