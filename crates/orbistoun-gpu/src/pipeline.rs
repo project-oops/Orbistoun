@@ -2526,7 +2526,26 @@ fn dispatch_image_surface(
         })?;
         return Ok((surface, descriptor, format, channel_order(format, words[3])));
     }
-    let surface = surface_layout(&descriptor, format)
+    let surface = tiled_surface(&descriptor, words, format, volume).ok_or_else(|| {
+        format!(
+            "a dispatch image whose layout is not modelled: format {}",
+            describe_dispatch_image(&descriptor, words)
+        )
+    })?;
+    Ok((surface, descriptor, format, channel_order(format, words[3])))
+}
+
+/// Where a tiled image's viewed level lies, as its chain places it in its layout: a 2D level, or
+/// a `volume`'s slices, each such a level of its width and height (D823). `None` where the layout
+/// is not modelled - a volume's slices only where their terms were read: one level of 32-bpp
+/// `64KB_R_X`, no deeper than its slice terms go.
+fn tiled_surface(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    format: TexelFormat,
+    volume: bool,
+) -> Option<DispatchSurface> {
+    let surface = surface_layout(descriptor, format)
         .and_then(|layout| {
             crate::registers::chain_level(
                 (descriptor.base, descriptor.pipe_bank_xor),
@@ -2535,32 +2554,20 @@ fn dispatch_image_surface(
                 layout,
             )
         })
-        .filter(|surface| surface.layout.models(surface.pipe_bank_xor))
-        // A volume's slices are read only where their terms are: one level of 32-bpp `64KB_R_X`,
-        // no deeper than its slice terms go.
-        .filter(|surface| {
-            !volume
-                || (descriptor.tiling == SwizzleMode::Tiled64KbRX
-                    && format.bytes() == 4
-                    && descriptor.levels == 1
-                    && crate::tiling::slice_xor_64kb_rx_bpp4(words[4] & DEPTH_FIELD).is_some()
-                    && surface.pipe_bank_xor == 0)
-        })
-        .ok_or_else(|| {
-            format!(
-                "a dispatch image whose layout is not modelled: format {}",
-                describe_dispatch_image(&descriptor, words)
-            )
-        })?;
-    let surface = if volume {
-        DispatchSurface::Volume {
+        .filter(|surface| surface.layout.models(surface.pipe_bank_xor))?;
+    if !volume {
+        return Some(DispatchSurface::Tiled(surface));
+    }
+    let last_slice = words[4] & DEPTH_FIELD;
+    (descriptor.tiling == SwizzleMode::Tiled64KbRX
+        && format.bytes() == 4
+        && descriptor.levels == 1
+        && crate::tiling::slice_xor_64kb_rx_bpp4(last_slice).is_some()
+        && surface.pipe_bank_xor == 0)
+        .then_some(DispatchSurface::Volume {
             slice: surface,
-            depth: (words[4] & DEPTH_FIELD) + 1,
-        }
-    } else {
-        DispatchSurface::Tiled(surface)
-    };
-    Ok((surface, descriptor, format, channel_order(format, words[3])))
+            depth: last_slice + 1,
+        })
 }
 
 /// Where each channel a dispatch reads or writes lies in an `8_8_8_8_UNORM` texel in memory: byte
@@ -5278,6 +5285,10 @@ fn texel_texture(
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
     let descriptor = *descriptor;
+    // A tiled volume's slices are read as a dispatch reads them (D823).
+    if words[3] >> 28 == IMAGE_TYPE_3D && descriptor.tiling != SwizzleMode::Linear {
+        return tiled_volume_texture(&descriptor, words, slot, memory, texels);
+    }
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     let shape = (
         words[3] >> 28 == IMAGE_TYPE_CUBE,
@@ -5414,6 +5425,66 @@ fn linear_bind(
         height,
         depth: faces,
         sampling,
+        encoding: crate::backend::TextureEncoding::Rgba8,
+    })
+}
+
+/// A tiled volume's bind (D823): its slices read as a dispatch reads them ([`tiled_surface`]),
+/// `8_8_8_8_UNORM` or `2_10_10_10_UNORM` with its selects as they are, and uncompressed. `None` for
+/// any other, which is not sampled exactly. Kept, as a linear texture's texels are, until its bytes
+/// are written.
+fn tiled_volume_texture(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    let format = match descriptor.format {
+        FORMAT_8_8_8_8_UNORM => TexelFormat::Rgba8,
+        FORMAT_2_10_10_10_UNORM => TexelFormat::Rgb10A2,
+        _ => return None,
+    };
+    if destination_selects(words[3]) != IDENTITY_SELECTS || descriptor.compression.is_some() {
+        return None;
+    }
+    let surface = tiled_surface(descriptor, words, format, true)?;
+    let (width, height) = surface.extent();
+    let depth = surface.depth();
+    let encoding = texture_encoding(format);
+    let span = surface.bytes();
+    // A volume is another image than a 2D one at the same address and extent.
+    let key = (surface.base(), width, height, 1 << 26 | depth);
+    let (hash, shared) = if let Some(cached) = kept_texels(texels, key, span as u64) {
+        (cached.hash, cached.texels.clone())
+    } else {
+        // Marked before the bytes are read, so a write racing the read is seen next time.
+        let since = texture_mark(surface.base(), span as u64);
+        let read = surface.detile(memory.read(surface.base(), span)?);
+        let hash = crate::content_hash(&read) ^ u64::from(encoding_tag(encoding));
+        let shared: std::sync::Arc<[u32]> = read.into();
+        if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
+            texels.clear();
+        }
+        texels.insert(
+            key,
+            CachedTexels {
+                since,
+                hash,
+                texels: std::sync::Arc::clone(&shared),
+            },
+        );
+        (hash, shared)
+    };
+    Some(RenderCommand::BindVolumeTexture {
+        slot,
+        texels: shared,
+        hash,
+        width,
+        height,
+        depth,
+        sampling: crate::registers::TextureSampling::default(),
+        encoding,
     })
 }
 
@@ -5521,6 +5592,7 @@ const fn encoding_tag(encoding: crate::backend::TextureEncoding) -> u32 {
     match encoding {
         crate::backend::TextureEncoding::Float11_11_10 => 1 << 22,
         crate::backend::TextureEncoding::Rgba8Srgb => 1 << 17,
+        crate::backend::TextureEncoding::Rgb10A2 => 1 << 21,
         // Block-compressed blocks carry their format's tag in their own cache keys.
         crate::backend::TextureEncoding::Rgba8
         | crate::backend::TextureEncoding::Bc3
@@ -5595,8 +5667,8 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
     match format {
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
-        // A draw's texture is never a ten-bit one: `sampled_format` reads no such format.
-        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint | TexelFormat::Rgb10A2 => {
+        TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
+        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint => {
             crate::backend::TextureEncoding::Rgba8
         }
     }
@@ -8351,6 +8423,66 @@ mod tests {
         let mut tiled = vec![0_u8; volume.bytes()];
         volume.tile(&texels, &mut tiled).expect("tiled back");
         assert!(tiled == spanned, "tiled back to the same bytes");
+    }
+
+    /// A draw samples a tiled ten-bit volume as a dispatch reads it (D823): a `2_10_10_10_UNORM`
+    /// 32 x 32 x 2 volume in 32-bpp `64KB_R_X`, its selects as they are - Grand Theft Auto V's
+    /// `0xa1b00fac` - binds as a volume of its texels in order, slice after slice, sampled as ten-bit
+    /// words.
+    #[test]
+    fn a_tiled_ten_bit_volume_binds_as_a_volume() {
+        use super::{RenderCommand, texture_from_words};
+        use crate::tiling::tiled_byte_offset_64kb_rx_bpp4;
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x10_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (width, height, depth) = (32_u32, 32_u32, 2_u32);
+        let mut bytes = vec![0_u8; 2 * 0x1_0000];
+        for z in 0..depth {
+            let xor = [0, 0x800][z as usize];
+            for y in 0..height {
+                for x in 0..width {
+                    let at = z as usize * 0x1_0000
+                        + (tiled_byte_offset_64kb_rx_bpp4(x, y) as usize ^ xor);
+                    let index = (z * height + y) * width + x;
+                    bytes[at..at + 4].copy_from_slice(&index.to_le_bytes());
+                }
+            }
+        }
+        let words = [
+            0x10_0000 >> 8,
+            (50 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14),
+            0xa1b0_0fac,
+            depth - 1,
+            0,
+            0,
+            0,
+        ];
+        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new())
+            .expect("a volume");
+        let RenderCommand::BindVolumeTexture {
+            texels,
+            width: 32,
+            height: 32,
+            depth: 2,
+            encoding: crate::backend::TextureEncoding::Rgb10A2,
+            ..
+        } = bound
+        else {
+            panic!("{bound:?}");
+        };
+        assert!(
+            texels
+                .iter()
+                .zip(0_u32..)
+                .all(|(&texel, index)| texel == index),
+            "every texel in order"
+        );
     }
 
     /// A dispatch image a refusal quotes is described with its depth and its type, as well as its

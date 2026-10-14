@@ -245,6 +245,8 @@ pub enum RenderCommand {
         depth: u32,
         /// How the draws sample it, from the sampler descriptor the pixel shader names.
         sampling: crate::registers::TextureSampling,
+        /// What a texel is: `Rgba8`, or `Rgb10A2`.
+        encoding: TextureEncoding,
     },
     /// A depth target the draws that follow sample, at a texture slot (D817): the attachment the
     /// backend keeps under `target`, as the draws before left it - compared through `sampling`'s
@@ -484,6 +486,10 @@ pub enum TextureEncoding {
     /// `R8G8B8A8_SRGB`: the colour channels decoded from sRGB to linear as they are read, as the
     /// guest's own sampler decodes them.
     Rgba8Srgb,
+    /// One word a texel, the guest's `2_10_10_10_UNORM` as it holds it - red, green and blue ten bits
+    /// each from the low end, alpha the top two - which the host samples as
+    /// `A2B10G10R10_UNORM_PACK32`. A tiled volume's texels so (D823).
+    Rgb10A2,
     /// One word a texel, a depth as an `f32`'s bits, which the host samples as `D32_SFLOAT`: a depth
     /// target read back from the backend's own attachment, its depth read as it is (D817).
     DepthFloat,
