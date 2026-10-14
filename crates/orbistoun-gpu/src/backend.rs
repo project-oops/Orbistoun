@@ -450,6 +450,9 @@ pub enum TargetEncoding {
     /// `COLOR_2_10_10_10` `UNORM` (D848): red, green and blue in ten bits each from the low end,
     /// alpha in the top two - the bits Vulkan's `A2B10G10R10_UNORM_PACK32` holds.
     Unorm10x3A2,
+    /// `COLOR_32_32` `UINT` (D870): two 32-bit unsigned integers a texel, red then green - the bits
+    /// Vulkan's `R32G32_UINT` holds. Eight bytes a texel.
+    Uint32x2,
     /// `COLOR_8_8` `UNORM` (D869): red and green bytes a texel, which a host carries in each word's
     /// low half and a device draws through Vulkan's `R8G8B8A8_UNORM`, blue zero and alpha one - as
     /// a format without them reads - and written red and green alone.

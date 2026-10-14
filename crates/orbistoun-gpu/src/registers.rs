@@ -2360,19 +2360,23 @@ pub const COLOR_16: u32 = 2;
 /// red in the low bits (`ac_formats.c` 536).
 pub const COLOR_2_10_10_10: u32 = 9;
 /// The bytes one element of the `ColorFormat` `format` takes: one for `COLOR_8`, two for `COLOR_16`
-/// and `COLOR_8_8`, eight for `COLOR_16_16_16_16`, sixteen for `COLOR_32_32_32_32`, and four for
-/// every other - the formats a target is placed by its own size for (D852, D853, D869).
+/// and `COLOR_8_8`, eight for `COLOR_16_16_16_16` and `COLOR_32_32`, sixteen for
+/// `COLOR_32_32_32_32`, and four for every other - the formats a target is placed by its own size
+/// for (D852, D853, D869, D870).
 #[must_use]
 pub const fn element_bytes(format: u32) -> u32 {
     match format {
         COLOR_8 => 1,
         COLOR_16 | COLOR_8_8 => 2,
-        COLOR_16_16_16_16 => 8,
+        COLOR_16_16_16_16 | COLOR_32_32 => 8,
         COLOR_32_32_32_32 => 16,
         _ => 4,
     }
 }
 
+/// `ColorFormat` `COLOR_32_32` (`gfx103.json`): two 32-bit channels, red then green under
+/// `SWAP_STD` (`XY__`).
+pub const COLOR_32_32: u32 = 11;
 /// `ColorFormat` `COLOR_8_8` (`gfx103.json`): two eight-bit channels, red then green under
 /// `SWAP_STD` (`ac_formats.c` `ac_translate_colorswap`, `XY__`).
 pub const COLOR_8_8: u32 = 3;
@@ -2514,6 +2518,16 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is an eight-byte `32_32` `UINT` target holding red then green (`SWAP_STD`,
+    /// `XY__`): two unsigned integers a texel, drawn as they are through an integer attachment
+    /// (D870).
+    #[must_use]
+    pub const fn is_uint_32_32(&self) -> bool {
+        self.format == COLOR_32_32
+            && self.number_type == NUMBER_UINT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a two-byte `8_8` `UNORM` target holding red then green (`SWAP_STD`, `XY__`):
     /// drawn through an `Rgba8` attachment with alpha one and blue zero, as a format without them
     /// reads (D869).
@@ -2590,6 +2604,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Float16
         } else if self.is_unorm_8_8() {
             crate::TargetEncoding::Unorm8x2
+        } else if self.is_uint_32_32() {
+            crate::TargetEncoding::Uint32x2
         } else if self.is_uint_16() {
             crate::TargetEncoding::Uint16
         } else if self.is_float_32_32_32_32() {
@@ -2616,7 +2632,7 @@ impl ColourTargetFormat {
             || self.is_snorm_8_8_8_8()
         {
             Some(4)
-        } else if self.is_float_16_16_16_16() {
+        } else if self.is_float_16_16_16_16() || self.is_uint_32_32() {
             Some(8)
         } else if self.is_uint_16() || self.is_float_16() || self.is_unorm_8_8() {
             Some(2)
@@ -2646,7 +2662,9 @@ pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
             ComponentSwap::Other(3) => 0x8,
             _ => 0xF,
         }
-    } else if (format.format == COLOR_16_16 || format.format == COLOR_8_8)
+    } else if (format.format == COLOR_16_16
+        || format.format == COLOR_8_8
+        || format.format == COLOR_32_32)
         && matches!(format.swap, ComponentSwap::Standard)
     {
         0x3
@@ -3658,6 +3676,46 @@ mod tests {
         assert!(!wave_widths_at(&fixture).primitive_w32);
     }
 
+    /// The two- and eight-byte formats and the signed one Grand Theft Auto V's second submission
+    /// draws into, each read as its own encoding, size and write mask (D866, D868, D869, D870).
+    #[test]
+    fn the_formats_grand_theft_auto_v_draws_into_are_read() {
+        use super::decode_colour_target_format;
+        // `COLOR_32_32` `UINT` (D870): eight bytes a texel, red and green written.
+        let wide_pair = decode_colour_target_format(0x0001_802c | (4 << 8));
+        assert!(wide_pair.is_uint_32_32());
+        assert!(wide_pair.is_integer());
+        assert_eq!(wide_pair.encoding(), crate::TargetEncoding::Uint32x2);
+        assert_eq!(wide_pair.written_back_bytes(), Some(8));
+        assert_eq!(super::colour_write_mask(0xF, 0x0001_802c | (4 << 8)), 0x3);
+        assert_eq!(super::element_bytes(super::COLOR_32_32), 8);
+        assert!(
+            !decode_colour_target_format(0x0001_802c).is_uint_32_32(),
+            "UNORM"
+        );
+        // `COLOR_8_8` `UNORM` (D869), red then green, and only those two written.
+        let pair_of_bytes = decode_colour_target_format(0x0001_800c);
+        assert!(pair_of_bytes.is_unorm_8_8());
+        assert_eq!(pair_of_bytes.encoding(), crate::TargetEncoding::Unorm8x2);
+        assert_eq!(pair_of_bytes.written_back_bytes(), Some(2));
+        assert_eq!(super::colour_write_mask(0xF, 0x0001_800c), 0x3);
+        assert!(!decode_colour_target_format(0x0001_800c | (1 << 11)).is_unorm_8_8());
+        // `COLOR_16` `FLOAT` (D868), as Grand Theft Auto V's second submission draws into next.
+        let half = decode_colour_target_format(0x0001_8008 | (7 << 8));
+        assert!(half.is_float_16());
+        assert!(!half.is_uint_16());
+        assert_eq!(half.encoding(), crate::TargetEncoding::Float16);
+        assert_eq!(half.written_back_bytes(), Some(2));
+        assert!(!decode_colour_target_format(0x0001_8008 | (7 << 8) | (3 << 11)).is_float_16());
+        // `COLOR_8_8_8_8` `SNORM` (D866), as Grand Theft Auto V's second submission draws into.
+        let signed = decode_colour_target_format(0x0001_80a8 | (1 << 8));
+        assert!(signed.is_snorm_8_8_8_8());
+        assert!(!signed.is_rgba8_class());
+        assert_eq!(signed.encoding(), crate::TargetEncoding::Snorm8);
+        assert_eq!(signed.written_back_bytes(), Some(4));
+        assert!(!decode_colour_target_format(0x0001_80a8).is_snorm_8_8_8_8());
+    }
+
     /// `CB_COLOR0_INFO` decodes to the element layout a written-back frame needs: `0x000180a8` is
     /// `8_8_8_8` `UNORM` in standard order, the same value with `COMP_SWAP` = 1 is B, G, R, A, and
     /// a reversed order or another format is not one a frame is written into.
@@ -3733,27 +3791,6 @@ mod tests {
             !decode_colour_target_format(0x0001_8008).is_uint_16(),
             "not UNORM"
         );
-        // `COLOR_8_8` `UNORM` (D869), red then green, and only those two written.
-        let pair_of_bytes = decode_colour_target_format(0x0001_800c);
-        assert!(pair_of_bytes.is_unorm_8_8());
-        assert_eq!(pair_of_bytes.encoding(), crate::TargetEncoding::Unorm8x2);
-        assert_eq!(pair_of_bytes.written_back_bytes(), Some(2));
-        assert_eq!(super::colour_write_mask(0xF, 0x0001_800c), 0x3);
-        assert!(!decode_colour_target_format(0x0001_800c | (1 << 11)).is_unorm_8_8());
-        // `COLOR_16` `FLOAT` (D868), as Grand Theft Auto V's second submission draws into next.
-        let half = decode_colour_target_format(0x0001_8008 | (7 << 8));
-        assert!(half.is_float_16());
-        assert!(!half.is_uint_16());
-        assert_eq!(half.encoding(), crate::TargetEncoding::Float16);
-        assert_eq!(half.written_back_bytes(), Some(2));
-        assert!(!decode_colour_target_format(0x0001_8008 | (7 << 8) | (3 << 11)).is_float_16());
-        // `COLOR_8_8_8_8` `SNORM` (D866), as Grand Theft Auto V's second submission draws into.
-        let signed = decode_colour_target_format(0x0001_80a8 | (1 << 8));
-        assert!(signed.is_snorm_8_8_8_8());
-        assert!(!signed.is_rgba8_class());
-        assert_eq!(signed.encoding(), crate::TargetEncoding::Snorm8);
-        assert_eq!(signed.written_back_bytes(), Some(4));
-        assert!(!decode_colour_target_format(0x0001_80a8).is_snorm_8_8_8_8());
         let ten = decode_colour_target_format(0x0001_8024);
         assert!(ten.is_unorm_2_10_10_10());
         assert_eq!(ten.encoding(), crate::TargetEncoding::Unorm10x3A2);

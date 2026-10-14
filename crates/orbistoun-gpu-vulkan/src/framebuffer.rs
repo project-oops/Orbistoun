@@ -58,6 +58,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
         TargetEncoding::Snorm8 => vk::Format::R8G8B8A8_SNORM,
         TargetEncoding::Uint16 => vk::Format::R32_UINT,
+        TargetEncoding::Uint32x2 => vk::Format::R32G32_UINT,
         TargetEncoding::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
     }
 }
@@ -73,6 +74,7 @@ const fn image_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
         TargetEncoding::Snorm8 => vk::Format::R8G8B8A8_SNORM,
         TargetEncoding::Uint16 => vk::Format::R32_UINT,
+        TargetEncoding::Uint32x2 => vk::Format::R32G32_UINT,
         TargetEncoding::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
         TargetEncoding::Unorm8 | TargetEncoding::Srgb8 | TargetEncoding::Unorm8x2 => FORMAT,
     }
@@ -82,7 +84,7 @@ const fn image_format(encoding: TargetEncoding) -> vk::Format {
 /// seeds or reads it back: eight for a `16_16_16_16` float target (D845), four for every other.
 pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
     match encoding {
-        TargetEncoding::Float16x4 => 8,
+        TargetEncoding::Float16x4 | TargetEncoding::Uint32x2 => 8,
         TargetEncoding::Float32x4 => 16,
         TargetEncoding::Unorm8
         | TargetEncoding::Srgb8
@@ -182,7 +184,8 @@ const fn resample_filter(encoding: TargetEncoding) -> vk::Filter {
         TargetEncoding::Uint16
         | TargetEncoding::Float32
         | TargetEncoding::Float32x4
-        | TargetEncoding::Float16 => vk::Filter::NEAREST,
+        | TargetEncoding::Float16
+        | TargetEncoding::Uint32x2 => vk::Filter::NEAREST,
         TargetEncoding::Unorm8
         | TargetEncoding::Srgb8
         | TargetEncoding::Float11_11_10
@@ -7324,6 +7327,31 @@ mod tests {
             [0x10, 0x20, 0x40, 0x80].repeat((width * height) as usize),
             "every pixel the word, red in the first byte"
         );
+    }
+
+    /// A two-channel `32_32` integer target (D870) hands back the pairs of words it was given, every
+    /// bit of each.
+    #[test]
+    fn a_two_word_integer_target_hands_back_its_words() {
+        if crate::compute::session().is_err() {
+            eprintln!("no Vulkan device: the two-word integer target is not exercised here");
+            return;
+        }
+        let (width, height) = (8_u32, 4_u32);
+        let words: Vec<u32> = (0..width * height * 2)
+            .map(|i| 0x8000_0001_u32.wrapping_mul(i + 1) ^ (i << 13))
+            .collect();
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let resident = super::ResidentAttachment::create(
+            (width, height),
+            Some(&bytes),
+            [0.0; 4],
+            orbistoun_gpu::TargetEncoding::Uint32x2,
+        )
+        .expect("an attachment");
+        let read = resident.read_back().expect("read back");
+        resident.destroy();
+        assert_eq!(read.bytes, bytes, "every word as it was given");
     }
 
     /// A two-channel `8_8` target (D869) hands back the red and green it was given, and a uniform
