@@ -1421,6 +1421,7 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         Some(format) if format.format == COLOR_16_16_16_16 => {
             layout.at_bytes_per_texel(8).unwrap_or(layout)
         }
+        Some(format) if format.format == COLOR_16 => layout.at_bytes_per_texel(2).unwrap_or(layout),
         _ => layout,
     };
     // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
@@ -1957,6 +1958,18 @@ pub struct BlendControl {
     pub disable_rop3: bool,
 }
 
+/// A colour target's blend control: `CB_BLENDn_CONTROL`'s `value` decoded, with blending off for a
+/// target whose `CB_COLORn_INFO` (`info`) holds integers, as radeonsi bypasses it for
+/// `NUMBER_UINT` and `NUMBER_SINT` (`ac_descriptors.c` 1432-1436, D852).
+#[must_use]
+pub fn target_blend_control(value: u32, info: u32) -> BlendControl {
+    let decoded = decode_blend_control(value);
+    BlendControl {
+        enable: decoded.enable && !decode_colour_target_format(info).is_integer(),
+        ..decoded
+    }
+}
+
 /// Decodes `CB_BLEND0_CONTROL` into its colour and alpha blend state.
 #[must_use]
 pub fn decode_blend_control(value: u32) -> BlendControl {
@@ -2288,6 +2301,9 @@ pub const COLOR_10_11_11: u32 = 6;
 /// `ColorFormat` `COLOR_32` (`gfx103.json`): what Mesa targets a one-channel 32-bit format at
 /// (`ac_formats.c` 489).
 pub const COLOR_32: u32 = 4;
+/// `ColorFormat` `COLOR_16` (`gfx103.json`): what Mesa targets a one-channel 16-bit format at
+/// (`ac_formats.c` 486).
+pub const COLOR_16: u32 = 2;
 /// `ColorFormat` `COLOR_2_10_10_10` (`gfx103.json`): what Mesa targets a 10-10-10-2 format at,
 /// red in the low bits (`ac_formats.c` 536).
 pub const COLOR_2_10_10_10: u32 = 9;
@@ -2390,6 +2406,16 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a two-byte `16` `UINT` target holding red, `SWAP_STD` on a one-channel
+    /// format: one 16-bit unsigned integer a texel, drawn through a 32-bit integer attachment and
+    /// written back as it is held (D852).
+    #[must_use]
+    pub const fn is_uint_16(&self) -> bool {
+        self.format == COLOR_16
+            && self.number_type == NUMBER_UINT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a four-byte `2_10_10_10` `UNORM` target in its standard order: red, green
     /// and blue in ten bits each from the low end, alpha in the top two (`ac_formats.c` 612), drawn
     /// and written back as it is held (D848).
@@ -2438,6 +2464,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Float16x2
         } else if self.is_unorm_2_10_10_10() {
             crate::TargetEncoding::Unorm10x3A2
+        } else if self.is_uint_16() {
+            crate::TargetEncoding::Uint16
         } else if self.is_srgb() {
             crate::TargetEncoding::Srgb8
         } else {
@@ -2447,7 +2475,8 @@ impl ColourTargetFormat {
 
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
     /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`], [`Self::is_float_32`],
-    /// [`Self::is_float_16_16`] and [`Self::is_unorm_2_10_10_10`], eight for
+    /// [`Self::is_float_16_16`] and [`Self::is_unorm_2_10_10_10`], two for [`Self::is_uint_16`],
+    /// eight for
     /// [`Self::is_float_16_16_16_16`], one for [`Self::is_r8_class`].
     #[must_use]
     pub const fn written_back_bytes(&self) -> Option<u32> {
@@ -2460,6 +2489,8 @@ impl ColourTargetFormat {
             Some(4)
         } else if self.is_float_16_16_16_16() {
             Some(8)
+        } else if self.is_uint_16() {
+            Some(2)
         } else if self.is_r8_class() {
             Some(1)
         } else {
@@ -2470,14 +2501,15 @@ impl ColourTargetFormat {
 
 /// The channels of colour target zero a draw writes, as a `Rgba8` drawer's red-green-blue-alpha
 /// mask (bit 0 red): `CB_TARGET_MASK`'s `TARGET0_ENABLE`, limited to the channels the target's
-/// format holds. A one-channel target, `8` or `32` (`ac_formats.c` 830), holds red under
+/// format holds. A one-channel target, `8`, `16` or `32` (`ac_formats.c` 830), holds red under
 /// `SWAP_STD` and alpha under `SWAP_ALT_REV` (`ac_translate_colorswap`); a drawer standing in a
 /// four-channel frame for it must leave the others alone. A two-channel `16_16` target holds red
 /// and green under `SWAP_STD` (592). Any other format keeps the mask as it is.
 #[must_use]
 pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
     let format = decode_colour_target_format(info);
-    let held = if format.format == COLOR_8 || format.format == COLOR_32 {
+    let held = if format.format == COLOR_8 || format.format == COLOR_16 || format.format == COLOR_32
+    {
         match format.swap {
             ComponentSwap::Standard => 0x1,
             ComponentSwap::Other(3) => 0x8,
@@ -3541,6 +3573,17 @@ mod tests {
         // PPSA04263's 32 x 32 target: `2_10_10_10`, `NUMBER_UNORM`, `SWAP_STD` - red, green and
         // blue in ten bits each from the low end, alpha in the top two (`ac_formats.c` 536, 612),
         // four bytes (D848).
+        // PPSA04263's 3840 x 2160 target: `16`, `NUMBER_UINT`, `SWAP_STD` - one 16-bit unsigned
+        // integer a texel, red, two bytes (D852).
+        let id = decode_colour_target_format(0x0001_8008 | (4 << 8));
+        assert!(id.is_uint_16());
+        assert_eq!(id.encoding(), crate::TargetEncoding::Uint16);
+        assert_eq!(id.written_back_bytes(), Some(2));
+        assert!(!decode_colour_target_format(0x0001_8008 | (4 << 8) | (3 << 11)).is_uint_16());
+        assert!(
+            !decode_colour_target_format(0x0001_8008).is_uint_16(),
+            "not UNORM"
+        );
         let ten = decode_colour_target_format(0x0001_8024);
         assert!(ten.is_unorm_2_10_10_10());
         assert_eq!(ten.encoding(), crate::TargetEncoding::Unorm10x3A2);
@@ -4552,6 +4595,13 @@ mod tests {
                 },
             })
         );
+        // A two-byte `16` element lies by the 16-bpp layout (D852).
+        let mut two = page.to_vec();
+        two.push(write(0xA31C, 2 << 2 | 4 << 8));
+        assert_eq!(
+            colour_target_at(&two).map(|t| t.layout),
+            Some(crate::tiling::SurfaceLayout::Rx64KbBpp2)
+        );
         let mut rgba = page.to_vec();
         rgba.push(write(0xA31C, 10 << 2));
         assert_eq!(
@@ -4565,6 +4615,17 @@ mod tests {
             colour_target_at(&half).map(|t| t.layout),
             Some(crate::tiling::SurfaceLayout::Rx64KbBpp8)
         );
+    }
+
+    /// A target that holds integers bypasses blending, as radeonsi sets `BLEND_BYPASS` for
+    /// `NUMBER_UINT` and `NUMBER_SINT` (`ac_descriptors.c` 1432-1436): its blend control reads as
+    /// disabled whatever the register enables. Any other keeps the register's (D852).
+    #[test]
+    fn an_integer_target_bypasses_blending() {
+        let enabled = 1 << 30 | 0x0004_0001;
+        assert!(!super::target_blend_control(enabled, 2 << 2 | 4 << 8).enable);
+        assert!(!super::target_blend_control(enabled, 2 << 2 | 5 << 8).enable);
+        assert!(super::target_blend_control(enabled, 10 << 2).enable);
     }
 
     /// A one-byte target's draws write the one channel its format holds - red under `SWAP_STD`,
@@ -4584,6 +4645,8 @@ mod tests {
         assert_eq!(colour_write_mask(0xF, a8), 0x8);
         // A one-channel 32-bit target holds one channel as an 8 does (`ac_formats.c` 830): red
         // under `SWAP_STD`, alpha under `SWAP_ALT_REV` (D844).
+        // A one-channel `16` target holds red under `SWAP_STD`, as an `8` and a `32` do (830).
+        assert_eq!(colour_write_mask(0xF, 2 << 2 | 4 << 8), 0x1);
         // A two-channel `16_16` target holds red and green under `SWAP_STD` (`ac_formats.c` 592).
         assert_eq!(colour_write_mask(0xF, 5 << 2 | 7 << 8), 0x3);
         let r32 = 4 << 2 | 7 << 8;

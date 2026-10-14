@@ -33,9 +33,9 @@ use crate::registers::{
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
-    colour_target_format_at, decode_blend_control, decode_image_descriptor, depth_control_at,
-    dispatch_calls, primitive_topology_at, register_writes, register_writes_reading,
-    shader_candidates, stencil_control_at, viewport_transform_from,
+    colour_target_format_at, decode_image_descriptor, depth_control_at, dispatch_calls,
+    primitive_topology_at, register_writes, register_writes_reading, shader_candidates,
+    stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -4026,7 +4026,9 @@ const CB_BLEND_CONSTANTS: [u32; 4] = [0xA105, 0xA106, 0xA107, 0xA108];
 /// The colour output state last emitted as commands, so a draw emits only what changed.
 #[derive(Default)]
 struct ColourOutputSent {
-    blend: Option<u32>,
+    /// The blend register sent, with its target's `CB_COLORn_INFO`: a target that holds integers
+    /// bypasses blending (D852).
+    blend: Option<(u32, u32)>,
     constants: Option<[u32; 4]>,
     rop: Option<u8>,
     mask: Option<u8>,
@@ -4054,11 +4056,14 @@ fn push_colour_output(
     );
     let first = buffers.first().copied().unwrap_or(0);
     let mut latest = |register| crate::colour_slots::read_as_buffer(&mut latest, register, first);
+    let info = latest(crate::registers::CB_COLOR0_INFO).unwrap_or(0);
     if let Some(value) = latest(crate::registers::CB_BLEND0_CONTROL)
-        && sent.blend != Some(value)
+        && sent.blend != Some((value, info))
     {
-        commands.push(RenderCommand::SetBlend(decode_blend_control(value)));
-        sent.blend = Some(value);
+        commands.push(RenderCommand::SetBlend(
+            crate::registers::target_blend_control(value, info),
+        ));
+        sent.blend = Some((value, info));
     }
     // The blend constants, once the stream has written any of them; one it has not is zero, the
     // register's value after `CLEAR_STATE`.
@@ -4114,7 +4119,8 @@ fn push_more_colour_outputs(
             let mut read = |register| crate::colour_slots::read_as_buffer(latest, register, buffer);
             let info = read(crate::registers::CB_COLOR0_INFO).unwrap_or(0);
             crate::ColourOutput {
-                blend: read(crate::registers::CB_BLEND0_CONTROL).map(decode_blend_control),
+                blend: read(crate::registers::CB_BLEND0_CONTROL)
+                    .map(|value| crate::registers::target_blend_control(value, info)),
                 write_mask: crate::registers::colour_write_mask(
                     read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF)
                         & read(crate::registers::CB_SHADER_MASK).unwrap_or(0xF),

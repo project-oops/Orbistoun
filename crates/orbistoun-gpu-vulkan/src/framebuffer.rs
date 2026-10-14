@@ -56,6 +56,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Float16x2 => vk::Format::R16G16_SFLOAT,
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
+        TargetEncoding::Uint16 => vk::Format::R32_UINT,
     }
 }
 
@@ -68,6 +69,7 @@ const fn image_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Float16x2 => vk::Format::R16G16_SFLOAT,
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
+        TargetEncoding::Uint16 => vk::Format::R32_UINT,
         TargetEncoding::Unorm8 | TargetEncoding::Srgb8 => FORMAT,
     }
 }
@@ -82,7 +84,8 @@ pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
         | TargetEncoding::Float11_11_10
         | TargetEncoding::Float32
         | TargetEncoding::Float16x2
-        | TargetEncoding::Unorm10x3A2 => 4,
+        | TargetEncoding::Unorm10x3A2
+        | TargetEncoding::Uint16 => 4,
     }
 }
 

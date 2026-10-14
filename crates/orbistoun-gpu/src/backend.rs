@@ -443,6 +443,9 @@ pub enum TargetEncoding {
     /// `COLOR_2_10_10_10` `UNORM` (D848): red, green and blue in ten bits each from the low end,
     /// alpha in the top two - the bits Vulkan's `A2B10G10R10_UNORM_PACK32` holds.
     Unorm10x3A2,
+    /// `COLOR_16` `UINT` (D852): one 16-bit unsigned integer a texel, drawn through Vulkan's
+    /// `R32_UINT`, each texel a word holding the integer, which write-back stores as its low half.
+    Uint16,
 }
 
 /// What a bound texture's words are.

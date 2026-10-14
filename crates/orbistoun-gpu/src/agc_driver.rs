@@ -396,19 +396,21 @@ fn one_byte_texels(target: ColourTarget) -> bool {
 /// one: the drawer writes red alone ([`crate::RenderCommand::SetWriteMask`]), so alpha stays one,
 /// which is what blending reads as a one-channel target's destination alpha.
 const fn loaded(texel: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
-    if target.layout.texel_log2() == 0 {
-        0xFF00_0000 | (texel & 0xFF)
-    } else {
-        swapped(texel, swap)
+    match target.layout.texel_log2() {
+        0 => 0xFF00_0000 | (texel & 0xFF),
+        // A two-byte texel is one 16-bit integer, drawn as itself through a 32-bit integer
+        // attachment (D852).
+        1 => texel & 0xFFFF,
+        _ => swapped(texel, swap),
     }
 }
 
 /// [`loaded`]'s inverse: a drawer's linear `Rgba8` word as `target` holds it in memory.
 const fn stored(word: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
-    if target.layout.texel_log2() == 0 {
-        word & 0xFF
-    } else {
-        swapped(word, swap)
+    match target.layout.texel_log2() {
+        0 => word & 0xFF,
+        1 => word & 0xFFFF,
+        _ => swapped(word, swap),
     }
 }
 
@@ -4998,6 +5000,23 @@ mod tests {
         // The second is no longer the last, nor protected: a write lands, and it is read again.
         memory[stride] ^= 0xff;
         assert!(matches!(read(cp, second), Some(TargetRead::Changed(_))));
+    }
+
+    /// A two-byte texel is the low half of its word, loaded as it is and stored as its low half,
+    /// with no byte order: one 16-bit integer, red (D852).
+    #[test]
+    fn a_two_byte_texel_is_its_low_half() {
+        let target = crate::registers::ColourTarget {
+            base: 0,
+            width: 1,
+            height: 1,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64KbBpp2,
+            place: crate::registers::Place::Whole,
+        };
+        let swap = crate::registers::ComponentSwap::Standard;
+        assert_eq!(super::loaded(0xABCD_1234, target, swap), 0x1234);
+        assert_eq!(super::stored(0x0001_5678, target, swap), 0x5678);
     }
 
     /// A submission that stops holds up every later one on the queue: the fence stream submitted
