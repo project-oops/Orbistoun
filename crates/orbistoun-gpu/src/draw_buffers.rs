@@ -282,7 +282,7 @@ pub(crate) fn evaluate_computed(
     let scalars = orbistoun_translate::evaluate::scalar_prefix(
         &decode,
         encodings,
-        computed.at,
+        (computed.at, computed.program_address),
         (computed.first_register, &user_data[..count]),
         system,
         &mut |address| {
@@ -990,6 +990,7 @@ mod tests {
             soffset: 125,
             first_register: 4,
             user_data: 0,
+            program_address: None,
         }));
         let user_data = [0u32; super::USER_DATA_WORDS];
         let memory = At(0, Vec::new());
@@ -1030,6 +1031,7 @@ mod tests {
             soffset: 128 + 16,
             first_register: 4,
             user_data: 2,
+            program_address: None,
         }));
         let mut user_data = [0u32; super::USER_DATA_WORDS];
         user_data[0] = 0x1000;
@@ -1054,6 +1056,7 @@ mod tests {
             soffset: 128 + 16,
             first_register: 4,
             user_data: 2,
+            program_address: None,
         }));
         assert_eq!(
             super::resolve_range(&pointer, (&user_data, 0, &[]), &memory),

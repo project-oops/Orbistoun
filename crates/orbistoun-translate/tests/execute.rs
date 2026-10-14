@@ -2387,6 +2387,49 @@ fn run_with_dx10_clamp(dx10_clamp: bool, words: &[u32]) -> Vec<u32> {
         .observed
 }
 
+/// `s_getpc_b64` reads the address of the instruction after it, from the place the program was
+/// loaded (D842); translated for no place, it is refused.
+#[test]
+fn the_program_counter_is_the_next_instruction_s_address() {
+    use orbistoun_translate::wavefront::{MeshPrimitive, Stage, UserData, Window};
+    if !device_or_skip("the_program_counter_is_the_next_instruction_s_address") {
+        return;
+    }
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    // `s_nop 0`, then `s_getpc_b64 s[2:3]` at byte four.
+    let words = [0xbf80_0000_u32, 0xbe82_1f00, s_endpgm()];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let translate = |program_address| {
+        orbistoun_translate::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                program_address,
+                ..UserData::default()
+            },
+        )
+    };
+    assert!(translate(None).is_err(), "no address to read");
+    let translated = translate(Some(0x0000_7400_1234_5600)).expect("translates");
+    let registers = dispatch(&translated.module, OBSERVED, MEMORY_WORDS, [1, 1, 1])
+        .expect("dispatch")
+        .observed;
+    assert_eq!(
+        scalar(&registers, 2),
+        0x1234_5608,
+        "the instruction after it"
+    );
+    assert_eq!(scalar(&registers, 3), 0x0000_7400);
+}
+
 /// The output clamp holds a float result to `[0, 1]`, with NaN handling set by `DX10_CLAMP`.
 #[test]
 fn the_output_clamp_holds_a_float_result_to_the_unit_range() {

@@ -89,6 +89,9 @@ pub struct Computed {
     pub first_register: u32,
     /// How many user-data words the stage has; the registers past them are unknown at entry.
     pub user_data: u32,
+    /// Where the program was loaded, for an `s_getpc_b64` in the prefix (D842).
+    #[serde(default)]
+    pub program_address: Option<u64>,
 }
 
 /// What a computed access reads through.
@@ -308,6 +311,7 @@ fn slots(
                         soffset,
                         first_register,
                         user_data,
+                        program_address: None,
                     })),
                 )
             }

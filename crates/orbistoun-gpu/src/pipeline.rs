@@ -808,11 +808,13 @@ const DI_PT_RECTLIST: u32 = 17;
 const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
 const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
 /// `GE_INDX_OFFSET` (`gfx103.json`, byte `198952`, uconfig dword `0xC24A`): added to every vertex
-/// index, so the vertex ids of a draw that sets it are not its indices.
+/// index, generated or fetched, as Mesa's r600 driver uses the same register under its older name
+/// `VGT_INDX_OFFSET` (D843).
 const GE_INDX_OFFSET: u32 = 0xC24A;
 
 /// The geometry-engine inputs a draw hands its primitive shader whole (D730), or why it cannot: a
-/// draw of one instance over a list or strip of triangles or lines, with no index offset. One wave may not hold them; [`chunk_plans`] splits those that it does not.
+/// draw of one instance over a list or strip of triangles or lines, and no index offset on an
+/// indexed one. One wave may not hold them; [`chunk_plans`] splits those that it does not.
 fn draw_geometry(
     draw: &DrawCall,
     mut latest: impl FnMut(u32) -> Option<u32>,
@@ -873,13 +875,15 @@ fn draw_geometry(
     };
     let passthrough =
         latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0);
-    if let Some(offset) = latest(GE_INDX_OFFSET).filter(|&value| value != 0) {
+    // The offset is added to every vertex index (D843): a non-indexed draw's ids count up from it.
+    let offset = latest(GE_INDX_OFFSET).unwrap_or(0);
+    if offset != 0 && indices.is_some() {
         return Err(format!(
-            "a draw with an index offset (GE_INDX_OFFSET {offset:#x})'s vertex ids are not seeded"
+            "an indexed draw with an index offset (GE_INDX_OFFSET {offset:#x})'s vertex ids are not seeded"
         ));
     }
     Ok(GeometryInputs {
-        first_vertex: 0,
+        first_vertex: offset,
         vertices,
         primitives,
         assembly,
@@ -1506,6 +1510,7 @@ impl Pipeline {
             flat_twins: None,
             saturated: UNSATURATED,
             local_words: state.local_words,
+            program_address: None,
         };
         let key = content_hash(program)
             // The formats are compiled in, so a dispatch through other formats is another module.
@@ -3053,6 +3058,16 @@ impl Pipeline {
     /// The host subgroup a primitive shader runs one invocation per lane on (D760): wherever the
     /// host recorded one, for any shader but a rectangle list's and one whose lanes exchange in a
     /// way a ballot, shuffle or workgroup memory cannot stand in for. `None` for every other module.
+    /// `address`, for a program that reads its own (`s_getpc_b64`): it is translated for the place
+    /// it was loaded, and is another module at another (D842). `None` for any other program.
+    fn own_address(
+        &self,
+        address: u64,
+        (shader, decoded): (&[u8], Option<&orbistoun_shader::Decode>),
+    ) -> Option<u64> {
+        reads_own_address(shader, decoded, (&self.encodings, &self.operands)).then_some(address)
+    }
+
     fn per_lane_subgroup(
         &mut self,
         (stage, primitive): (Stage, MeshPrimitive),
@@ -3733,14 +3748,12 @@ impl Pipeline {
             },
             ShaderStage::Compute => UserData::default(),
         };
-        // A live draw binds the buffers its stages read through (D733).
-        let user_data = UserData {
-            draw_buffers: self.feeds_user_data && host_stage != Stage::Compute,
-            ..user_data
-        };
         let (strategy, width_salt) = stage_strategy(self.strategy, host_stage, widths);
         let user_data = UserData {
+            // A live draw binds the buffers its stages read through (D733).
+            draw_buffers: self.feeds_user_data && host_stage != Stage::Compute,
             per_invocation: self.per_lane_subgroup((host_stage, primitive), (shader, decoded)),
+            program_address: self.own_address(address, (shader, decoded)),
             ..user_data
         };
         // The user-data layout and the wave width are in the module too.
@@ -5932,6 +5945,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             flat_twins: None,
             saturated: UNSATURATED,
             local_words,
+            program_address: None,
         },
         UserData {
             first_register: 0,
@@ -5950,6 +5964,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             flat_twins: None,
             saturated: UNSATURATED,
             local_words: None,
+            program_address: None,
         },
     ]
 }
@@ -5964,9 +5979,39 @@ fn local_words_salt(words: Option<u32>) -> u64 {
 
 /// What a draw stage's module key takes from its user-data layout: where its words land, how many,
 /// and the local share it declares.
+/// What sets a module translated for its program's address apart (D842): nothing for one translated
+/// for no address.
+fn program_address_salt(address: Option<u64>) -> u64 {
+    address.map_or(0, |at| at.rotate_left(17) ^ 0x6f2c_91d3_57a0_e48b)
+}
+
+/// Whether a program reads its own address (`s_getpc_b64`), and so is a different module at each
+/// place it is loaded (D842). The program is decoded here when the caller has no decode.
+fn reads_own_address(
+    shader: &[u8],
+    decoded: Option<&orbistoun_shader::Decode>,
+    (encodings, operands): (&EncodingTable, &OperandTable),
+) -> bool {
+    let again;
+    let decoded = if let Some(decoded) = decoded {
+        decoded
+    } else {
+        again = decode_program(shader, encodings, operands);
+        &again
+    };
+    decoded.instructions.iter().any(|instruction| {
+        instruction
+            .encoding
+            .and_then(|encoding| encodings.encodings().get(usize::from(encoding)))
+            .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
+            == Some("s_getpc_b64")
+    })
+}
+
 fn layout_salt(user_data: &UserData) -> u64 {
     (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
         ^ local_words_salt(user_data.local_words)
+        ^ program_address_salt(user_data.program_address)
 }
 
 /// `LDS_SIZE` of `SPI_SHADER_PGM_RSRC2_GS`, as `(first bit, bits)`: bits 19-26 (`gfx103.json`).
@@ -9529,12 +9574,14 @@ mod tests {
         }
     }
 
-    /// A draw refused for its index offset says the offset, so a request about it can quote it.
+    /// An index offset is added to every vertex index (D843, from Mesa's r600 `VGT_INDX_OFFSET`):
+    /// a non-indexed draw's ids count up from it. An indexed draw's fetched indices are not offset
+    /// here, so one with an offset is refused, naming it so a request can quote it.
     #[test]
-    fn an_index_offset_refusal_names_the_offset() {
+    fn an_index_offset_is_where_an_auto_draw_s_ids_start() {
         use super::{DI_PT_RECTLIST, GE_INDX_OFFSET, VGT_PRIMITIVE_TYPE, draw_geometry};
         use crate::registers::{DrawCall, DrawKind};
-        let draw = DrawCall {
+        let auto = DrawCall {
             packet_offset: 0,
             instances: 1,
             kind: DrawKind::Auto { vertices: 3 },
@@ -9545,9 +9592,21 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            draw_geometry(&draw, registers),
+            draw_geometry(&auto, registers).map(|g| (g.first_vertex, g.vertices)),
+            Ok((5, 3)),
+            "the ids are 5, 6 and 7"
+        );
+        let indexed = DrawCall {
+            kind: DrawKind::Indexed {
+                indices: 3,
+                address: 0,
+            },
+            ..auto
+        };
+        assert_eq!(
+            draw_geometry(&indexed, registers),
             Err(
-                "a draw with an index offset (GE_INDX_OFFSET 0x5)'s vertex ids are not seeded"
+                "an indexed draw with an index offset (GE_INDX_OFFSET 0x5)'s vertex ids are not seeded"
                     .to_owned()
             )
         );
@@ -9615,7 +9674,6 @@ mod tests {
         for refused in [
             draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0)),
             draw_geometry(&draw(3, 1), registers(5, 0, 0)),
-            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 4)),
         ] {
             assert!(refused.is_err(), "{refused:?}");
         }

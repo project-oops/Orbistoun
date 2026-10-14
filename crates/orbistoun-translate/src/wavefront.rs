@@ -452,6 +452,10 @@ pub struct UserData {
     /// stream declared none, and then the module provides a fixed 1 KiB.
     #[serde(default)]
     pub local_words: Option<u32>,
+    /// The guest address the program was loaded at: what `s_getpc_b64` reads (D842). `None` when
+    /// the module is translated for no particular address, and then that instruction is refused.
+    #[serde(default)]
+    pub program_address: Option<u64>,
 }
 
 /// Each attribute a pixel shader reads both interpolated and flat, with the flat location the draw
@@ -1812,6 +1816,8 @@ pub struct Wavefront<'a> {
     translated: usize,
     /// The stage's `DX10_CLAMP` mode, from its `RSRC1`; `None` when unknown.
     dx10_clamp: Option<bool>,
+    /// Where the program was loaded, for `s_getpc_b64` (D842); `None` when unknown.
+    program_address: Option<u64>,
     /// A guest dispatch's workgroup id and escape flag, or `None` for any other module.
     dispatch: Option<compute_inputs::DispatchState>,
     /// The high thirty-two bits of the window's guest address.
@@ -2522,6 +2528,7 @@ impl<'a> Wavefront<'a> {
             vec4,
             memory_base: window.base,
             dx10_clamp: user_data.dx10_clamp,
+            program_address: user_data.program_address,
             builder: b,
             encodings,
             memory_words: window.words(),
@@ -3847,6 +3854,10 @@ impl Model for Wavefront<'_> {
 
     fn dx10_clamp(&self) -> Option<bool> {
         self.dx10_clamp
+    }
+
+    fn program_address(&self) -> Option<u64> {
+        self.program_address
     }
 
     fn colour_output(&self, target: u32) -> Option<(Id, Id)> {
@@ -5580,6 +5591,13 @@ pub fn draw_buffers_for(
             offset: 0,
             detail: "the shader reads through more buffers than a stage of a draw binds (D733)",
         });
+    }
+    let mut buffers = buffers;
+    // A computed access's prefix may read the program's own address (D842).
+    for source in &mut buffers.sources {
+        if let crate::draw_buffers::BufferSource::Computed(computed) = source {
+            computed.program_address = user_data.program_address;
+        }
     }
     Ok(buffers)
 }

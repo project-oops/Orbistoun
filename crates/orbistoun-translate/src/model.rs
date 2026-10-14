@@ -71,6 +71,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_addk_i32",
     "s_and_b32",
     "s_brev_b32",
+    "s_getpc_b64",
     "s_andn2_b32",
     "s_and_b64",
     "s_lshl_b64",
@@ -688,6 +689,12 @@ pub trait Model {
     /// turns a NaN into zero. `None`, the default, refuses a clamped instruction rather than
     /// choosing.
     fn dx10_clamp(&self) -> Option<bool> {
+        None
+    }
+
+    /// The guest address the program was loaded at, which `s_getpc_b64` reads (D842). `None`, the
+    /// default, refuses that instruction rather than inventing a place.
+    fn program_address(&self) -> Option<u64> {
         None
     }
 
@@ -2392,6 +2399,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // in the source is set, so a derivative across a quad has all four pixels live.
         "s_wqm_b64" => whole_quad_mode(model, instruction),
         "s_brev_b32" => scalar_bit_reverse(model, instruction),
+        "s_getpc_b64" => program_counter(model, instruction),
         // s_wqm_b32: the same for a 32-lane wavefront, whose mask is one register (`s_wqm_b32
         // exec_lo, exec_lo` before a texture sample).
         "s_wqm_b32" => whole_quad_mode_32(model, instruction),
@@ -2918,6 +2926,43 @@ fn bit_reverse<M: Model + ?Sized>(
         b.function(op::BIT_REVERSE, &[u32_type.0, reversed.0, value.0]);
         model.write_vector_lane(register, lane, reversed);
     }
+    model.count();
+    Ok(())
+}
+
+/// `s_getpc_b64`: the address of the instruction after it, into a register pair - the program's own
+/// place, which ACO forms the address of its constant data from (D842).
+fn program_counter<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let Some(Operand::Scalar(register)) = instruction.operands.first() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_getpc_b64 destination is not a scalar register pair",
+        });
+    };
+    let register = u32::from(*register);
+    let Some(base) = model.program_address() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "s_getpc_b64 reads the program's own address, and this translation was not told ",
+                "where the program was loaded (D842)"
+            ),
+        });
+    };
+    if register + 2 > SCALAR_REGISTERS {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_getpc_b64 runs past the end of the register file",
+        });
+    }
+    let next = base + u64::from(instruction.offset) + 4;
+    let low = model.constant(next as u32);
+    let high = model.constant((next >> 32) as u32);
+    model.write_scalar(register, low);
+    model.write_scalar(register + 1, high);
     model.count();
     Ok(())
 }

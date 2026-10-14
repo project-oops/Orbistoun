@@ -65,12 +65,13 @@ pub type Scalars = [Option<u32>; SCALAR_CODES];
 pub fn scalar_prefix(
     decode: &Decode,
     encodings: &EncodingTable,
-    until: u32,
+    (until, program_address): (u32, Option<u64>),
     (first_register, user_data): (u32, &[u32]),
     system: &[(u32, u32)],
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Result<Option<Scalars>, &'static str> {
     let mut model = Concrete::new(encodings, decode.instructions.len());
+    model.program_address = program_address;
     for &(register, word) in system {
         if register < model::SCALAR_REGISTERS {
             model.scalars[register as usize] = Some(word);
@@ -570,6 +571,8 @@ struct Concrete<'a> {
     vertices: u32,
     /// How many lanes, from lane zero, the run models.
     modelled: u32,
+    /// Where the program was loaded, for `s_getpc_b64` (D842).
+    program_address: Option<u64>,
     condition: Option<u32>,
     instructions: usize,
     types: [Id; 6],
@@ -606,6 +609,7 @@ impl<'a> Concrete<'a> {
             width: 64,
             vertices: 0,
             modelled: 64,
+            program_address: None,
             condition: None,
             instructions,
             types,
@@ -1101,6 +1105,10 @@ impl Model for Concrete<'_> {
         self.encodings
     }
 
+    fn program_address(&self) -> Option<u64> {
+        self.program_address
+    }
+
     fn lanes(&self) -> u32 {
         self.width
     }
@@ -1282,7 +1290,7 @@ mod tests {
         user_data: (u32, &[u32]),
         read: &mut dyn FnMut(u64) -> Option<u32>,
     ) -> Result<Scalars, &'static str> {
-        scalar_prefix(decode, encodings, until, user_data, &[], read)
+        scalar_prefix(decode, encodings, (until, None), user_data, &[], read)
             .map(|scalars| scalars.expect("the access is reached"))
     }
 
@@ -1311,14 +1319,29 @@ mod tests {
         let decode = decode_program(&bytes, &encodings, &operands);
         let access = decode.instructions[5].offset;
         let seeds = crate::wavefront::geometry_system_scalars(3, 1);
-        let passed = scalar_prefix(&decode, &encodings, access, (8, &[]), &seeds, &mut |_| None);
+        let passed = scalar_prefix(
+            &decode,
+            &encodings,
+            (access, None),
+            (8, &[]),
+            &seeds,
+            &mut |_| None,
+        );
         assert_eq!(
             passed,
             Ok(None),
             "a wave with lanes branches past the access"
         );
         assert!(
-            scalar_prefix(&decode, &encodings, access, (8, &[]), &[], &mut |_| None).is_err(),
+            scalar_prefix(
+                &decode,
+                &encodings,
+                (access, None),
+                (8, &[]),
+                &[],
+                &mut |_| None
+            )
+            .is_err(),
             "an unseeded mask leaves the branch unknown"
         );
     }
