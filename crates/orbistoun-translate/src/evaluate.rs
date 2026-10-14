@@ -508,6 +508,32 @@ fn crosses_lanes(decode: &Decode, encodings: &EncodingTable, kept: &[bool]) -> b
 }
 
 /// An instruction's family and mnemonic.
+/// The first instruction of `decode` the tables give no name, described for a refusal: its offset,
+/// its encoding family and opcode where the family is known, and its words - what a request for
+/// the opcode quotes. `None` where every instruction is named.
+#[must_use]
+pub fn first_unnamed(decode: &Decode, encodings: &EncodingTable) -> Option<String> {
+    let instruction = decode
+        .instructions
+        .iter()
+        .find(|instruction| named(encodings, instruction).is_none())?;
+    let family = instruction
+        .encoding
+        .and_then(|i| encodings.encodings().get(usize::from(i)))
+        .map_or("no encoding family", |family| family.name.as_str());
+    let words: Vec<String> = instruction
+        .words
+        .iter()
+        .map(|word| format!("{word:#010x}"))
+        .collect();
+    Some(format!(
+        "the instruction at {:#x}, {family} opcode {:#x} ({})",
+        instruction.offset,
+        instruction.opcode,
+        words.join(" ")
+    ))
+}
+
 fn named<'a>(
     encodings: &'a EncodingTable,
     instruction: &Instruction,

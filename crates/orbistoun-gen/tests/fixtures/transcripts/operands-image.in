@@ -102,3 +102,13 @@ image_sample_lz_o v[100:103], v[200:202], s[80:87], s[92:95] dmask:0xf dim:SQ_RS
 image_sample_lz_o v250, v[10:12], s[40:47], s[60:63] dmask:0x1 dim:SQ_RSRC_IMG_2D
 image_sample_lz_o v[8:9], v[253:255], s[12:19], s[20:23] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_sample_lz_o v[240:243], v[100:102], s[60:67], s[96:99] dmask:0xf dim:SQ_RSRC_IMG_2D
+
+// ---- image_get_resinfo -------------------------------------------------------------
+// A level's size, which PPSA21564's compute program at 0x50053c700 asks before it reads
+// (MIMG opcode 14): the data, the one address register holding the level, the resource, and
+// no sampler.
+image_get_resinfo v[4:5], v2, s[16:23] dmask:0x3 dim:SQ_RSRC_IMG_2D
+image_get_resinfo v[100:103], v200, s[80:87] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_get_resinfo v250, v10, s[40:47] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_get_resinfo v[8:9], v254, s[92:99] dmask:0x3 dim:SQ_RSRC_IMG_2D
+image_get_resinfo v[60:62], v31, s[64:71] dmask:0x7 dim:SQ_RSRC_IMG_2D

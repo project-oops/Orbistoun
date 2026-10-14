@@ -107,6 +107,22 @@ const UNSATURATED: [[bool; 2]; MAX_TEXTURES] = [[false; 2]; MAX_TEXTURES];
 
 /// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
 /// position space (D731), in the cache key.
+/// A refusal for an instruction with no name, naming the program at `address` and the instruction,
+/// so a report quotes what the opcode tables lack; any other refusal unchanged.
+fn name_the_unnamed(
+    why: String,
+    (decoded, encodings): (&orbistoun_shader::Decode, &EncodingTable),
+    address: u64,
+) -> String {
+    if !why.contains("has no name") {
+        return why;
+    }
+    match orbistoun_translate::evaluate::first_unnamed(decoded, encodings) {
+        Some(which) => format!("{why}: the program at {address:#x}, {which}"),
+        None => why,
+    }
+}
+
 fn for_draw_salt(for_draw: ForDraw) -> u64 {
     let geometry = for_draw.geometry.map_or(0, |g| {
         0x4745_4f4d_0000_0000
@@ -1381,7 +1397,9 @@ impl Pipeline {
         let program = &window[..decoded.consumed];
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
-        let (served, buffers, formats, unread) = self.dispatch_buffers(state, &decoded, memory)?;
+        let (served, buffers, formats, unread) = self
+            .dispatch_buffers(state, &decoded, memory)
+            .map_err(|why| name_the_unnamed(why, (&decoded, &self.encodings), address))?;
         let placed = crate::dispatch::place_window_except(
             state,
             (&decoded, &self.encodings),

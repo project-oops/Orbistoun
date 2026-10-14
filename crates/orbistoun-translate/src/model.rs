@@ -61,6 +61,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample_c_lz",
     "image_sample_c",
     "image_store",
+    "image_get_resinfo",
     "global_load_dword",
     "global_load_dwordx2",
     "global_load_dwordx3",
@@ -2871,6 +2872,8 @@ fn memory_instruction<M: Model + ?Sized>(
         // A store, the one image instruction that needs its own binding, since nothing writes a
         // sampled image (D692).
         "image_store" => image_store(model, instruction, name),
+        // A level's size, asked of the image a fetch would read.
+        "image_get_resinfo" => image_size(model, instruction, name),
 
         _ => Err(TranslateError::NotTranslated {
             offset: instruction.offset,
@@ -9554,6 +9557,108 @@ fn image_sample<M: Model + ?Sized>(
         )?;
     }
 
+    model.count();
+    Ok(())
+}
+
+/// `image_get_resinfo`: the size of a two-dimensional image's level, the level an integer in the one
+/// address register - its width in the first channel and its height in the second, as ACO reads a
+/// mask of `0x3` (`aco_select_nir.cpp` 334-343). The other two channels have no published meaning
+/// here and are refused. The image is the one a fetch through the same descriptor reads.
+fn image_size<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    let refuse = |detail| TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail,
+    };
+    let (shift, field) = IMAGE_DIMENSION;
+    let dimension = (instruction.word >> shift) & field;
+    if dimension != IMAGE_DIMENSION_2D {
+        return Err(TranslateError::ImageDimension {
+            offset: instruction.offset,
+            mnemonic: name.to_owned(),
+            dimension: IMAGE_DIMENSION_NAMES
+                .get(dimension as usize)
+                .copied()
+                .unwrap_or("unknown"),
+        });
+    }
+    let second = instruction.second_word.unwrap_or(0);
+    if instruction.word & IMAGE_LAYOUT_FIELDS != 0 || second & (IMAGE_A16 | IMAGE_D16) != 0 {
+        return Err(refuse(concat!(
+            "a size query with a four-register descriptor, a status word, or sixteen-bit ",
+            "halves is not translated"
+        )));
+    }
+    let (
+        Some(Operand::Vector(destination)),
+        Some(Operand::Vector(level)),
+        Some(Operand::Scalar(descriptor)),
+        Some(Operand::Immediate(mask)),
+    ) = (
+        instruction.operands.first(),
+        instruction.operands.get(1),
+        instruction.operands.get(2),
+        instruction.operands.get(3),
+    )
+    else {
+        return Err(refuse(
+            "a size query is not a destination, a level, a descriptor and a mask",
+        ));
+    };
+    let mask = u32::try_from(*mask).unwrap_or(0);
+    if mask == 0 || mask & !0b11 != 0 {
+        return Err(refuse(concat!(
+            "a size query's mask selects nothing, or a channel past the width and height, whose ",
+            "meaning is not published"
+        )));
+    }
+    let destination = u32::from(*destination);
+    if destination + mask.count_ones() > VECTOR_REGISTERS {
+        return Err(refuse(
+            "a size query runs past the end of the vector register file",
+        ));
+    }
+    let texture = model
+        .sampled_image(
+            u32::from(*descriptor),
+            None,
+            (instruction.offset, ImageShape::default()),
+        )
+        .map_err(refuse)?;
+    let level_register = Operand::Vector(*level);
+    for lane in running_lanes(model) {
+        let level = model.read_source(instruction, &level_register, lane)?;
+        let u32_type = model.u32_type();
+        let builder = model.builder();
+        builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
+        let bound = builder.id();
+        builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
+        let image = builder.id();
+        builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+        let size = builder.id();
+        builder.function(
+            op::IMAGE_QUERY_SIZE_LOD,
+            &[texture.texel.0, size.0, image.0, level.0],
+        );
+        let mut channels = Vec::new();
+        for component in 0..2 {
+            if mask & (1 << component) != 0 {
+                let extracted = builder.id();
+                builder.function(
+                    op::COMPOSITE_EXTRACT,
+                    &[u32_type.0, extracted.0, size.0, component],
+                );
+                channels.push(extracted);
+            }
+        }
+        for (register, value) in (destination..).zip(channels) {
+            model.write_vector_lane(register, lane, value);
+        }
+    }
     model.count();
     Ok(())
 }

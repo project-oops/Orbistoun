@@ -494,3 +494,60 @@ fn a_sixteen_word_load_names_two_images_of_its_table() {
         assert_eq!(source.table.high, TableWord::UserData(1));
     }
 }
+
+/// Each thread asks the fetched image's level-zero size and stores it with a seven and a nine at
+/// its own place: `v_mov_b32 v4, 0`, `image_get_resinfo v[2:3], v4, s[0:7] dmask:0x3
+/// dim:SQ_RSRC_IMG_2D`, `v_mov_b32 v4, 7`, `v5, 9`, then the store of [`COPY`].
+const SIZE_QUERY: [u32; 10] = [
+    0x7e08_0280,
+    0xf038_0308,
+    0x0000_0204,
+    0x7e08_0287,
+    0x7e0a_0289,
+    0xbf8c_0000,
+    0xf020_1f08,
+    0x0002_0200,
+    0xbf81_0000,
+    0xbf9f_0000,
+];
+
+/// `image_get_resinfo` answers a level's width and height in its first two channels, as ACO reads
+/// a mask of `0x3` (`aco_select_nir.cpp` 334-343): a 6 x 4 image's level zero is 6 and 4 in every
+/// thread. PPSA21564's compute program at `0x50053c700` asks one before it reads.
+#[test]
+fn a_dispatch_asks_an_image_s_size() {
+    if !device_or_skip("image size query") {
+        return;
+    }
+    let source = vec![0_u32; 6 * 4];
+    let destination = vec![0_u32; (SIDE * SIDE * 4) as usize];
+    let done = dispatch_guest(
+        &translated_for(&SIZE_QUERY, [false, true]),
+        &[0],
+        (&[0; 16], [1, 1, 1]),
+        &DispatchImages {
+            fetched: Some(DispatchImage {
+                texels: &source,
+                format: DispatchFormat::Rgba8,
+                width: 6,
+                height: 4,
+                depth: None,
+            }),
+            stored: Some(DispatchImage {
+                texels: &destination,
+                format: DispatchFormat::Rgba32Uint,
+                width: SIDE,
+                height: SIDE,
+                depth: None,
+            }),
+        },
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    let stored = done.stored.expect("stored");
+    assert!(
+        stored.chunks(4).all(|texel| texel == [6, 4, 7, 9]),
+        "{:?}",
+        &stored[..8]
+    );
+}

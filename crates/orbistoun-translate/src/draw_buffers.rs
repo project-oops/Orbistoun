@@ -516,8 +516,12 @@ fn bound_buffer_store(name: &str) -> bool {
 
 /// Whether an instruction reaches an image a dispatch binds whole and writes back exactly, as it
 /// does its buffers (D746): such an access needs no window and keeps no buffer from being traced.
+/// A size query asks the image a load would read, and reads no memory at all.
 pub(crate) fn bound_image_access(name: &str) -> bool {
-    matches!(name, "image_load" | "image_load_mip" | "image_store")
+    matches!(
+        name,
+        "image_load" | "image_load_mip" | "image_store" | "image_get_resinfo"
+    )
 }
 
 /// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
