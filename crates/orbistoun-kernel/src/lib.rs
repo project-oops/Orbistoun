@@ -1739,11 +1739,24 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         let prot = prot_word & 0xff;
         let operation = (prot_word >> 32) as u32;
         if operation != 0 {
-            tracing::warn!(
-                "sceKernelBatchMap entry {index} at {vaddr:#x}+{len:#x}: operation {operation} is not modelled, so it and the entries after it are not carried out"
-            );
-            outcome = u64::from(GuestError::Unimplemented.as_raw());
-            break;
+            // The maps before it are placed first, so the batch's entries apply in order.
+            if let Some(finished) = run.take() {
+                let placed = place(finished, &mut done);
+                if placed != OK {
+                    outcome = placed;
+                    break;
+                }
+            }
+            let applied = batch_operation(operation, vaddr, len, prot);
+            if applied != OK {
+                tracing::warn!(
+                    "sceKernelBatchMap entry {index} at {vaddr:#x}+{len:#x}: operation {operation} was not carried out, nor the entries after it"
+                );
+                outcome = applied;
+                break;
+            }
+            done += 1;
+            continue;
         }
         run = match run {
             Some((v, p, l, pr, n))
@@ -1782,6 +1795,69 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: an address the guest passed for this call, valid by its contract.
     let _ = unsafe { guest::write_u32(completed, done) };
     outcome
+}
+
+/// Carries out one batch-map entry that is not a map, as REQ-bm01 measured each (D838): 1 unmaps the
+/// range as `sceKernelMunmap` does; 2 gives a range already mapped whole the entry's protection; 3
+/// maps zeroed memory at the range with the entry's protection, over what was there. 4 is not
+/// modelled, nor any other, and nor is a protect of a range not mapped whole: each answers the
+/// unimplemented placeholder.
+fn batch_operation(operation: u32, base: u64, len: u64, prot: u64) -> u64 {
+    /// Unmaps the range.
+    const UNMAP: u32 = 1;
+    /// Changes the range's protection.
+    const PROTECT: u32 = 2;
+    /// Maps zeroed memory at the range.
+    const ANONYMOUS: u32 = 3;
+    let unmodelled = u64::from(GuestError::Unimplemented.as_raw());
+    let protection = protection_from_guest(prot);
+    match operation {
+        UNMAP => {
+            forget_mapped(base, len);
+            release_mapping(base, len);
+            OK
+        }
+        PROTECT => {
+            let Ok(mut space) = mappings().lock() else {
+                return unmodelled;
+            };
+            if !space.owns(base, len) || space.protect(base, len, protection).is_err() {
+                return unmodelled;
+            }
+            drop(space);
+            note_requested_protection(base, len, prot);
+            OK
+        }
+        ANONYMOUS => {
+            let Ok(mut space) = mappings().lock() else {
+                return unmodelled;
+            };
+            let writable = protection_from_guest(0x33);
+            let ready = if space.owns(base, len) {
+                space.protect(base, len, writable).is_ok()
+            } else {
+                space.reserve(base, len, writable).is_ok()
+            };
+            drop(space);
+            let Ok(size) = usize::try_from(len) else {
+                return unmodelled;
+            };
+            // SAFETY: the range was just made writable guest memory.
+            if !ready || !unsafe { guest::write_bytes(base, &vec![0; size]) } {
+                return unmodelled;
+            }
+            let protected = mappings()
+                .lock()
+                .is_ok_and(|mut space| space.protect(base, len, protection).is_ok());
+            if !protected {
+                return unmodelled;
+            }
+            mapping_placed(base, len, protection, true);
+            note_requested_protection(base, len, prot);
+            OK
+        }
+        _ => unmodelled,
+    }
 }
 
 /// Maps `len` bytes of physical memory `physical` at the exact guest virtual address `base` with
@@ -8642,7 +8718,8 @@ mod tests {
         args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
         assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
         let va = 0x6e60_0000_0000_u64;
-        // The protection's word carries the operation in its high half: 0 maps, 1 does not.
+        // The protection's word carries the operation in its high half: 0 maps, and 4 is not one
+        // orbistoun models.
         let entries: Vec<u64> = vec![
             va,
             physical,
@@ -8651,7 +8728,7 @@ mod tests {
             va + 2 * PAGE,
             physical + PAGE,
             PAGE,
-            0x33 | (1 << 32),
+            0x33 | (4 << 32),
         ];
         let mut completed = 0_u64;
         let mut args = [0_u64; GUEST_ARG_REGISTERS];
@@ -8668,6 +8745,81 @@ mod tests {
             .lock()
             .is_ok_and(|space| space.region_at(va + 2 * PAGE).is_some());
         assert!(!placed, "nothing is placed for the refused entry");
+    }
+
+    /// Operation 1 unmaps what an earlier entry mapped, so a longer map at the same address then
+    /// places (REQ-bm01: the range unmapped, its neighbours kept, a later map placing again). Grand
+    /// Theft Auto V unmaps a 512 KiB piece and maps 13 MiB at the same address.
+    #[test]
+    fn an_unmap_entry_frees_the_address_for_a_longer_map() {
+        const PAGE: u64 = 0x4000;
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 64 * PAGE;
+        args[1] = 64 * PAGE;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+        let va = 0x6e70_0000_0000_u64;
+        let batch = |entries: &[u64]| {
+            let mut completed = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = entries.as_ptr() as usize as u64;
+            args[1] = (entries.len() / 4) as u64;
+            args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+            (super::batch_map(&args), completed)
+        };
+        assert_eq!(
+            batch(&[va, physical, 8 * PAGE, 0x33]),
+            (0, 1),
+            "the short map"
+        );
+        assert_eq!(
+            batch(&[va, physical, 8 * PAGE, 0x33 | (1 << 32)]),
+            (0, 1),
+            "unmapped"
+        );
+        assert_eq!(
+            batch(&[va, physical, 32 * PAGE, 0x33]),
+            (0, 1),
+            "the longer map at the same address places"
+        );
+    }
+
+    /// Operation 3 leaves the range mapped and zeroed, whatever it held (REQ-bm01: the marker read
+    /// back as zero, the protection 0x33).
+    #[test]
+    fn an_anonymous_entry_maps_zeroes() {
+        const PAGE: u64 = 0x4000;
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 4 * PAGE;
+        args[1] = 4 * PAGE;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+        let va = 0x6e80_0000_0000_u64;
+        let run = |entries: &[u64]| {
+            let mut completed = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = entries.as_ptr() as usize as u64;
+            args[1] = (entries.len() / 4) as u64;
+            args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+            super::batch_map(&args)
+        };
+        assert_eq!(run(&[va, physical, 4 * PAGE, 0x33]), 0, "mapped");
+        // SAFETY: the page just mapped read-write at `va`.
+        unsafe { std::ptr::write_volatile(va as usize as *mut u64, 0x2222_2222) };
+        assert_eq!(run(&[va, 0, 4 * PAGE, 0x33 | (3 << 32)]), 0, "anonymous");
+        // SAFETY: as above; the anonymous entry left it mapped read-write.
+        let seen = unsafe { std::ptr::read_volatile(va as usize as *const u64) };
+        assert_eq!(seen, 0, "zeroed");
     }
 
     /// A buffer batch-mapped in two batches, as oops-mesa's winsys maps a GPU address, is released

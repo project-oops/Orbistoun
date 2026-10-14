@@ -1038,7 +1038,9 @@ pixel (GLCB00001, commit d1502d2).
 """
 returns = "status"
 edge_cases = [
-    "The entry descriptor is 32 bytes: vaddr (8), paddr (8), len (8), prot (1) with three bytes of padding, flags (4). Only the low byte of the prot word is read; the padding and flags are not, because nothing exercised varies on them.",
+    "The entry descriptor is 32 bytes: vaddr (8), paddr (8), len (8), prot (1) with three bytes of padding, and the operation (4).",
+    "MEASURED (REQ-20261014T0230Z-bm01, report-20261014-batch3.log 5971-6030, 64 KiB entries beside watched neighbours): operation 1 unmaps (a query answers 0x8002000d, a read faults, a later map places again); 2 re-protects keeping the contents; 3 maps zeroed memory; 4 keeps the contents at the protection given. Each answered 0 with completed 1.",
+    "orbistoun carries out 0 to 3 in order (D838); 4, any other operation, and a protect of a range not mapped whole are refused by name, the entries before carried out and counted.",
     "`completed` is written whatever the outcome, so a caller can tell a partial map from a total failure. A batch stops at the first entry that cannot be placed and reports how many preceded it.",
     "Each entry is placed at the exact vaddr it names and never relocated, unlike the 'anywhere' named map. Physical memory is not aliased across two simultaneous mappings - the same limit the named map carries.",
 ]
