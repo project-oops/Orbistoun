@@ -2400,11 +2400,11 @@ fn dispatch_image_surface(
         }
     }
     let descriptor = decode_image_descriptor(words);
-    let format = dispatch_format(&descriptor)?;
+    let format = dispatch_format(&descriptor, words)?;
     if words[3] >> 28 != IMAGE_TYPE_2D {
         return Err(format!(
-            "a dispatch image of type {}, not 2D",
-            words[3] >> 28
+            "a dispatch image that is not 2D: format {}",
+            describe_dispatch_image(&descriptor, words)
         ));
     }
     if descriptor.last_level != descriptor.base_level {
@@ -2497,8 +2497,26 @@ pub fn to_memory_channels(texel: u32, order: [u8; 4]) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
-/// The texel format a dispatch image's descriptor names, where it is one bound here.
-fn dispatch_format(descriptor: &ImageDescriptor) -> Result<TexelFormat, String> {
+/// A dispatch image's descriptor as a refusal quotes it: its format, then its layout, extent and
+/// depth, levels and type, so the image a dispatch needs is read rather than guessed - `9
+/// (Tiled64KbRX, 64x64x32, levels 0..=0, type 10)`.
+fn describe_dispatch_image(descriptor: &ImageDescriptor, words: [u32; 8]) -> String {
+    format!(
+        "{} ({:?}, {}x{}x{}, levels {}..={}, type {})",
+        descriptor.format,
+        descriptor.tiling,
+        descriptor.width,
+        descriptor.height,
+        (words[4] & DEPTH_FIELD) + 1,
+        descriptor.base_level,
+        descriptor.last_level,
+        words[3] >> 28
+    )
+}
+
+/// The texel format a dispatch image's descriptor, read from `words`, names, where it is one bound
+/// here.
+fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<TexelFormat, String> {
     match descriptor.format {
         FORMAT_8_8_8_8_UNORM => Ok(TexelFormat::Rgba8),
         FORMAT_8_UNORM => Ok(TexelFormat::R8),
@@ -2512,17 +2530,10 @@ fn dispatch_format(descriptor: &ImageDescriptor) -> Result<TexelFormat, String> 
         {
             Ok(TexelFormat::Rgba32Uint)
         }
-        _ => Err({
-            format!(
-                "a dispatch image of format {} ({:?}, {}x{}, levels {}..={})",
-                descriptor.format,
-                descriptor.tiling,
-                descriptor.width,
-                descriptor.height,
-                descriptor.base_level,
-                descriptor.last_level
-            )
-        }),
+        _ => Err(format!(
+            "a dispatch image of format {}",
+            describe_dispatch_image(descriptor, words)
+        )),
     }
 }
 
@@ -8153,6 +8164,30 @@ mod tests {
         ] {
             assert_eq!(channel_order(format, word3), None, "{word3:#x}");
         }
+    }
+
+    /// A dispatch image a refusal quotes is described with its depth and its type, as well as its
+    /// format, layout, extent and levels: Grand Theft Auto V's first sixteen-wave dispatch stores
+    /// to a volume, which a width and height alone do not say.
+    #[test]
+    fn a_dispatch_image_is_described_with_its_depth_and_type() {
+        let (width, height, depth) = (64u32, 32u32, 16u32);
+        let words = [
+            0x100,
+            (1 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14),
+            10 << 28,
+            depth - 1,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = super::decode_image_descriptor(words);
+        let text = super::describe_dispatch_image(&descriptor, words);
+        assert!(
+            text.contains("64x32x16") && text.ends_with("type 10)"),
+            "{text}"
+        );
     }
 
     /// A pixel shader that samples through a descriptor and sampler still in its user data binds the

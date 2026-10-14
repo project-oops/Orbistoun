@@ -814,6 +814,9 @@ fn dispatch_image(
         },
         width: image.width,
         height: image.height,
+        // A dispatch image read from guest memory is two-dimensional: `dispatch_images` reads no
+        // other.
+        depth: None,
     }
 }
 

@@ -418,12 +418,14 @@ pub struct Stored {
     pub variable: Id,
     /// The image type a load of [`variable`](Self::variable) produces.
     pub image: Id,
-    /// The two-component unsigned vector a texel coordinate is.
+    /// The unsigned vector a texel coordinate is: two components, or three for a volume.
     pub texel: Id,
     /// The four-component vector a texel's value is: float, or unsigned for an integer image.
     pub value: Id,
     /// Whether the image has an unsigned integer format, whose texels are raw words.
     pub integer: bool,
+    /// Whether the image is three-dimensional, addressed by three coordinates.
+    pub volume: bool,
 }
 
 /// How the execution mask's low half arrives from the decoder.
@@ -860,8 +862,9 @@ pub trait Model {
     ///
     /// A different binding from [`sampled_image`](Self::sampled_image)'s: one is read through a
     /// sampler and cannot be written, the other is written and has no sampler. The module declares
-    /// no format, because the guest's format is in a descriptor that is not decoded (D692).
-    fn storage_image(&mut self, _descriptor: u32) -> Result<Stored, &'static str> {
+    /// no format, because the guest's format is in a descriptor that is not decoded (D692). A
+    /// `volume` is three-dimensional.
+    fn storage_image(&mut self, _descriptor: u32, _volume: bool) -> Result<Stored, &'static str> {
         Err(concat!(
             "this model has no storage image to write - one is bound by a graphics pipeline, ",
             "and a compute dispatch has nowhere to put one"
@@ -9192,7 +9195,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     // (`aco_select_nir.cpp`, the MIMG address after any offset and bias).
     let shape = ImageShape {
         cube: dimension == IMAGE_DIMENSION_CUBE && is_sample,
-        volume: dimension == IMAGE_DIMENSION_3D && is_sample,
+        volume: dimension == IMAGE_DIMENSION_3D && (is_sample || name == "image_store"),
         compare: matches!(name, "image_sample_c_lz" | "image_sample_c"),
     };
     let (cube, volume, compare) = (shape.cube, shape.volume, shape.compare);
@@ -9753,6 +9756,7 @@ fn image_store<M: Model + ?Sized>(
         descriptor,
         mask,
         halves,
+        shape,
         ..
     } = image_access(instruction, name)?;
     let Halves {
@@ -9760,7 +9764,9 @@ fn image_store<M: Model + ?Sized>(
         data: d16,
     } = halves;
 
-    let stored = model.storage_image(descriptor).map_err(refuse)?;
+    let stored = model
+        .storage_image(descriptor, shape.volume)
+        .map_err(refuse)?;
     if stored.integer && d16 {
         return Err(refuse(
             "a sixteen-bit store to an integer image is not translated",
@@ -9805,12 +9811,23 @@ fn image_store<M: Model + ?Sized>(
             read += 1;
         }
 
+        // A volume's third coordinate is its slice (D823).
+        let w = if stored.volume {
+            Some(address_element(
+                model,
+                instruction,
+                (&addresses, a16),
+                2,
+                lane,
+            )?)
+        } else {
+            None
+        };
         let builder = model.builder();
         let coordinate = builder.id();
-        builder.function(
-            op::COMPOSITE_CONSTRUCT,
-            &[stored.texel.0, coordinate.0, u.0, v.0],
-        );
+        let mut construct = vec![stored.texel.0, coordinate.0, u.0, v.0];
+        construct.extend(w.map(|w| w.0));
+        builder.function(op::COMPOSITE_CONSTRUCT, &construct);
         let value = builder.id();
         let mut construct = vec![stored.value.0, value.0];
         construct.extend(components.iter().map(|id| id.0));

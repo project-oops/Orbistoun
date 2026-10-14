@@ -4455,7 +4455,11 @@ impl Model for Wavefront<'_> {
         id
     }
 
-    fn storage_image(&mut self, descriptor: u32) -> Result<model::Stored, &'static str> {
+    fn storage_image(
+        &mut self,
+        descriptor: u32,
+        volume: bool,
+    ) -> Result<model::Stored, &'static str> {
         // The fragment stage only: the harness binds its storage image with fragment stage flags,
         // and the `vec4` texel type comes from the colour output, which only a fragment module has.
         if self.stage == Stage::Mesh {
@@ -4464,8 +4468,14 @@ impl Model for Wavefront<'_> {
                 "is bound to a pixel shader or a compute dispatch"
             ));
         }
+        if volume && self.stage != Stage::Compute {
+            return Err(concat!(
+                "a pixel shader stores to a three-dimensional image, and its harness binds a ",
+                "two-dimensional one"
+            ));
+        }
         if let Some((stored, was)) = self.images.stored {
-            if was != descriptor {
+            if was != descriptor || stored.volume != volume {
                 return Err(concat!(
                     "this shader stores to more than one image and a pipeline binds one - ",
                     "resolving which is which needs the descriptors decoded, and writing ",
@@ -4479,8 +4489,11 @@ impl Model for Wavefront<'_> {
         // A compute module's storage image is the guest's, so where its descriptor came from is what
         // binds it; a fragment module's is a harness image.
         if self.stage == Stage::Compute {
-            let mut source =
-                self.new_texture_source(descriptor, (None, model::ImageShape::default()))?;
+            let shape = model::ImageShape {
+                volume,
+                ..model::ImageShape::default()
+            };
+            let mut source = self.new_texture_source(descriptor, (None, shape))?;
             source.slot = 0;
             self.images.stored_source = Some(source);
         }
@@ -4509,26 +4522,28 @@ impl Model for Wavefront<'_> {
         self.builder
             .annotate(op::DECORATE, &[variable.0, decoration::NON_READABLE]);
 
-        // The seven operands a sampled image takes, with `Sampled` at 2 (written through an image
-        // instruction, not read through a sampler) and the format `Unknown`, which the capability
-        // above permits.
+        // The seven operands a sampled image takes: `Dim` 2D, or 3D for a volume (D823), `Sampled`
+        // at 2 (written through an image instruction, not read through a sampler) and the format
+        // `Unknown`, which the capability above permits.
         let integer = self.stage == Stage::Compute && self.integer_images[1];
         let (element, value) = if integer {
             (self.u32_type, self.unsigned_vec4())
         } else {
             (self.f32_type, self.vec4)
         };
-        let image = self
-            .builder
-            .declare_type(op::TYPE_IMAGE, &[element.0, 1, 0, 0, 0, 2, 0]);
+        let image = self.builder.declare_type(
+            op::TYPE_IMAGE,
+            &[element.0, 1 + u32::from(volume), 0, 0, 0, 2, 0],
+        );
         self.builder
             .declare(op::TYPE_POINTER, &[pointer.0, UNIFORM_CONSTANT, image.0]);
         self.builder
             .declare(op::VARIABLE, &[pointer.0, variable.0, UNIFORM_CONSTANT]);
-        // A sampled texture's fetch declares the same `uvec2`.
+        // A sampled texture's fetch declares the same `uvec2`, and the module's one `uvec3` serves a
+        // volume.
         let texel = self
             .builder
-            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2]);
+            .declare_type(op::TYPE_VECTOR, &[self.u32_type.0, 2 + u32::from(volume)]);
 
         let stored = model::Stored {
             variable,
@@ -4536,6 +4551,7 @@ impl Model for Wavefront<'_> {
             texel,
             value,
             integer,
+            volume,
         };
         self.images.stored = Some((stored, descriptor));
         Ok(stored)
@@ -6227,11 +6243,11 @@ mod exact_memory_tests {
         );
     }
 
-    /// An image access of a dimensionality not translated is refused naming it, so the report
-    /// says which image a program needs: Grand Theft Auto V's first sixteen-wave dispatch stores
-    /// through one.
-    #[test]
-    fn an_image_of_another_dimension_is_refused_by_its_name() {
+    /// `image_store v[2:5], v[0:2], s[0:7] dmask:0xf` of the dimensionality whose code is
+    /// `dimension`, translated as a compute dispatch whose user data holds the descriptor.
+    fn store_of_dimension(
+        dimension: u32,
+    ) -> Result<(Vec<u32>, usize, super::ImageSources), crate::TranslateError> {
         use super::{
             ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
         };
@@ -6245,15 +6261,15 @@ mod exact_memory_tests {
             .iter()
             .find(|encoding| encoding.name == family)
             .expect("its family");
-        // image_store v[2:5], v[0:2], s[0:7] dmask:0xf dim:SQ_RSRC_IMG_3D; s_endpgm.
+        // The store; s_endpgm.
         let words = [
-            encoding.value | (opcode << encoding.opcode.shift) | (0xf << 8) | (2 << 3),
+            encoding.value | (opcode << encoding.opcode.shift) | (0xf << 8) | (dimension << 3),
             2 << 8,
             0xbf81_0000,
         ];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let decoded = decode(&bytes, &encodings, &operands);
-        let refused = translate_with_user_data(
+        translate_with_user_data(
             &decoded,
             &encodings,
             Width::Wave64,
@@ -6269,12 +6285,33 @@ mod exact_memory_tests {
                 ..UserData::default()
             },
         )
-        .expect_err("refused")
-        .to_string();
+    }
+
+    /// An image access of a dimensionality not translated is refused naming it, so the report
+    /// says which image a program needs: a store to a 1D array, code 4.
+    #[test]
+    fn an_image_of_another_dimension_is_refused_by_its_name() {
+        let refused = store_of_dimension(4).expect_err("refused").to_string();
         assert!(
-            refused.contains("(image_store) reaches a 3D image"),
+            refused.contains("(image_store) reaches a 1D array image"),
             "{refused}"
         );
+    }
+
+    /// A dispatch's store to a three-dimensional image writes through three coordinates to a
+    /// three-dimensional storage image, whose source says it is a volume so the host binds one:
+    /// Grand Theft Auto V's first sixteen-wave dispatch stores so.
+    #[test]
+    fn a_dispatch_stores_to_a_volume() {
+        let (module, _, (_, stored)) = store_of_dimension(2).expect("a store to a volume");
+        assert!(stored.is_some_and(|source| source.volume), "{stored:?}");
+        // `OpTypeImage` (opcode 0x19, nine words): result, sampled type, then `Dim`, 2 for 3D.
+        let dims: Vec<u32> = module
+            .windows(4)
+            .filter(|w| w[0] == (9 << 16) | 0x19)
+            .map(|w| w[3])
+            .collect();
+        assert_eq!(dims, [2], "one storage image, three-dimensional");
     }
 }
 

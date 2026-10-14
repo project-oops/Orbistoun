@@ -61,6 +61,16 @@ pub struct DispatchImage<'a> {
     pub width: u32,
     /// Height in texels.
     pub height: u32,
+    /// Slices of a three-dimensional image, its texels slice after slice (D823); `None` for a
+    /// two-dimensional one.
+    pub depth: Option<u32>,
+}
+
+impl DispatchImage<'_> {
+    /// Texels it holds: every slice's.
+    fn count(&self) -> usize {
+        self.width as usize * self.height as usize * self.depth.unwrap_or(1) as usize
+    }
 }
 
 /// The images a dispatch binds: the one it fetches from and the one it stores to.
@@ -84,6 +94,7 @@ struct Bound {
     format: DispatchFormat,
     width: u32,
     height: u32,
+    depth: Option<u32>,
 }
 
 /// A dispatch's images on the device, with the sampler the fetched one is bound with.
@@ -118,6 +129,7 @@ impl BoundImages {
                 format: image.format,
                 width: image.width,
                 height: image.height,
+                depth: image.depth,
                 stored,
             };
             let created = match take_spare(device, key, image) {
@@ -137,6 +149,7 @@ impl BoundImages {
                         format: image.format,
                         width: image.width,
                         height: image.height,
+                        depth: image.depth,
                     });
                 }
                 Err(e) => {
@@ -232,7 +245,7 @@ impl BoundImages {
                     vk::PipelineStageFlags::TRANSFER,
                 ),
             );
-            let region = [whole(image.width, image.height)];
+            let region = [whole(image.width, image.height, image.depth)];
             // SAFETY: recording is open; the buffer holds the image's texels and the image is in
             // the transfer-destination layout.
             unsafe {
@@ -281,7 +294,7 @@ impl BoundImages {
                     vk::PipelineStageFlags::TRANSFER,
                 ),
             );
-            let region = [whole(image.width, image.height)];
+            let region = [whole(image.width, image.height, image.depth)];
             // SAFETY: recording is open and the barrier above ordered the shader's stores first.
             unsafe {
                 device.cmd_copy_image_to_buffer(
@@ -303,7 +316,8 @@ impl BoundImages {
         let Some(image) = self.images.iter().find(|image| image.stored) else {
             return Ok(None);
         };
-        let texels = image.width as usize * image.height as usize;
+        let texels =
+            image.width as usize * image.height as usize * image.depth.unwrap_or(1) as usize;
         let size = image.format.bytes();
         let bytes = (texels * size) as vk::DeviceSize;
         // SAFETY: the memory is host-visible and coherent, holds `bytes`, and is not mapped; the
@@ -340,6 +354,7 @@ impl BoundImages {
                 format: image.format,
                 width: image.width,
                 height: image.height,
+                depth: image.depth,
                 stored: image.stored,
             };
             let kept = spare_images().lock().is_ok_and(|mut spares| {
@@ -383,8 +398,8 @@ const fn layout(stored: bool) -> vk::ImageLayout {
     }
 }
 
-/// The whole of a single-level image, tightly packed in its buffer.
-fn whole(width: u32, height: u32) -> vk::BufferImageCopy {
+/// The whole of a single-level image, every slice of a volume, tightly packed in its buffer.
+fn whole(width: u32, height: u32, depth: Option<u32>) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default()
         .image_subresource(
             vk::ImageSubresourceLayers::default()
@@ -394,7 +409,7 @@ fn whole(width: u32, height: u32) -> vk::BufferImageCopy {
         .image_extent(vk::Extent3D {
             width,
             height,
-            depth: 1,
+            depth: depth.unwrap_or(1),
         })
 }
 
@@ -450,7 +465,7 @@ fn create_image(
     texels: DispatchImage<'_>,
     stored: bool,
 ) -> Result<Created, DispatchError> {
-    let words = texels.width as usize * texels.height as usize * texels.format.words().0;
+    let words = texels.count() * texels.format.words().0;
     if texels.texels.len() != words || words == 0 {
         return Err(DispatchError::Unsupported(format!(
             "a dispatch image's texels are not its extent: {} words for {}x{} {:?}",
@@ -467,13 +482,20 @@ fn create_image(
     } else {
         vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
     };
+    // A volume is a three-dimensional image of its slices, seen through a view of the same type,
+    // which is what a module's three-dimensional storage image binds (D823).
+    let (image_type, view_type) = if texels.depth.is_some() {
+        (vk::ImageType::TYPE_3D, vk::ImageViewType::TYPE_3D)
+    } else {
+        (vk::ImageType::TYPE_2D, vk::ImageViewType::TYPE_2D)
+    };
     let info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
+        .image_type(image_type)
         .format(texels.format.vulkan())
         .extent(vk::Extent3D {
             width: texels.width,
             height: texels.height,
-            depth: 1,
+            depth: texels.depth.unwrap_or(1),
         })
         .mip_levels(1)
         .array_layers(1)
@@ -504,7 +526,7 @@ fn create_image(
     let view = bound.and_then(|()| {
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(view_type)
             .format(texels.format.vulkan())
             .subresource_range(
                 vk::ImageSubresourceRange::default()
@@ -658,13 +680,18 @@ struct SpareKey {
     format: DispatchFormat,
     width: u32,
     height: u32,
+    depth: Option<u32>,
     stored: bool,
 }
 
 impl SpareKey {
     /// Bytes it holds, on the device and in its staging buffer together.
     fn bytes(self) -> u64 {
-        u64::from(self.width) * u64::from(self.height) * self.format.bytes() as u64 * 2
+        u64::from(self.width)
+            * u64::from(self.height)
+            * u64::from(self.depth.unwrap_or(1))
+            * self.format.bytes() as u64
+            * 2
     }
 }
 
@@ -685,7 +712,7 @@ fn take_spare(
     key: SpareKey,
     texels: DispatchImage<'_>,
 ) -> Option<Result<Created, DispatchError>> {
-    let words = texels.width as usize * texels.height as usize * texels.format.words().0;
+    let words = texels.count() * texels.format.words().0;
     if texels.texels.len() != words || words == 0 {
         return None;
     }
@@ -775,6 +802,7 @@ mod tests {
                 format: DispatchFormat::Rgba8,
                 width: WIDTH,
                 height: HEIGHT,
+                depth: None,
             }),
             stored: None,
         }

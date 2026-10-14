@@ -128,12 +128,14 @@ fn a_dispatch_copies_one_image_into_another() {
                     format: DispatchFormat::Rgba8,
                     width: SIDE,
                     height: SIDE,
+                    depth: None,
                 }),
                 stored: Some(DispatchImage {
                     texels: &destination,
                     format: DispatchFormat::Rgba8,
                     width: SIDE,
                     height: SIDE,
+                    depth: None,
                 }),
             },
         )
@@ -177,12 +179,14 @@ fn an_inactive_thread_stores_nothing() {
                     format: DispatchFormat::Rgba8,
                     width: SIDE,
                     height: SIDE,
+                    depth: None,
                 }),
                 stored: Some(DispatchImage {
                     texels: &destination,
                     format: DispatchFormat::Rgba8,
                     width: SIDE,
                     height: SIDE,
+                    depth: None,
                 }),
             },
         )
@@ -221,6 +225,7 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
         format: DispatchFormat::Rgba32Uint,
         width: SIDE,
         height: SIDE,
+        depth: None,
     };
     // Both images are declared with the unsigned 32-bit element: `OpTypeImage` (25) whose sampled
     // type is the `OpTypeInt 32 0` (21). A driver may move a float image's bits unchanged too, so
@@ -257,6 +262,75 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
     assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
 }
 
+/// Each thread of a 4 x 4 x 4 group stores its own id and a seven, `[x, y, z, 7]`, at its own
+/// place in a volume: `v_mov_b32 v3, 7`, then `image_store v[0:3], v[0:2], s[0:7] dmask:0xf
+/// dim:SQ_RSRC_IMG_3D unorm`.
+const STORE_IDS_3D: [u32; 5] = [
+    0x7e06_0287,
+    0xf020_1f10,
+    0x0000_0000,
+    0xbf81_0000,
+    0xbf9f_0000,
+];
+
+/// A dispatch stores to a three-dimensional image (D823): every texel of a 4 x 4 x 4 unsigned
+/// volume holds the id of the thread whose coordinate it is, so the slices are bound, written and
+/// read back in order. Grand Theft Auto V's first sixteen-wave dispatch stores to a volume.
+#[test]
+fn a_dispatch_stores_to_a_volume() {
+    const EDGE: u32 = 4;
+    if !device_or_skip("volume store") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = STORE_IDS_3D.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, (_, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 8,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 3,
+                threads: [EDGE, EDGE, EDGE],
+                unwritten_user_data: 0,
+                partial: None,
+                integer_images: [false, true],
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the store translates");
+    assert!(storage.is_some_and(|source| source.volume));
+    let texels = (EDGE * EDGE * EDGE) as usize;
+    let destination = vec![0xdead_beef_u32; texels * 4];
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 8], [1, 1, 1]),
+        &DispatchImages {
+            fetched: None,
+            stored: Some(DispatchImage {
+                texels: &destination,
+                format: DispatchFormat::Rgba32Uint,
+                width: EDGE,
+                height: EDGE,
+                depth: Some(EDGE),
+            }),
+        },
+    )
+    .expect("dispatched");
+    let expected: Vec<u32> = (0..EDGE * EDGE * EDGE)
+        .flat_map(|i| [i % EDGE, (i / EDGE) % EDGE, i / (EDGE * EDGE), 7])
+        .collect();
+    assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+}
+
 /// One component a texel, `dmask:0x1`: `image_load v2, v[0:1], s[0:7]` then the same store.
 const COPY_R8: [u32; 7] = [
     0xf000_1108,
@@ -282,6 +356,7 @@ fn a_dispatch_copies_a_single_channel_image() {
         format: DispatchFormat::R8,
         width: SIDE,
         height: SIDE,
+        depth: None,
     };
     let done = dispatch_guest(
         &translated(&COPY_R8),
