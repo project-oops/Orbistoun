@@ -354,6 +354,31 @@ enum Command {
         #[arg(long)]
         install_tracy: bool,
     },
+    /// Compare a baseline build with this one on one title: each recorded for a few rounds,
+    /// alternately, then each build's frame rate and the zones whose share of the run moved.
+    ///
+    /// The baseline is another orbistoun-cli built with the `tracy` feature - a clean build of the
+    /// commit before a change, say. A single run of each would measure the title's phase against
+    /// the host clock as much as either build.
+    Ab {
+        /// Path to a guest executable.
+        path: std::path::PathBuf,
+        /// The other build to measure against.
+        #[arg(long)]
+        baseline: std::path::PathBuf,
+        /// Seconds of each run to record.
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+        /// How many runs of each build.
+        #[arg(long, default_value_t = 3)]
+        rounds: usize,
+        /// How many zones the comparison lists.
+        #[arg(long, default_value_t = 15)]
+        top: usize,
+        /// Play this pad script on player 1 rather than the compat record's.
+        #[arg(long)]
+        input: Option<std::path::PathBuf>,
+    },
     /// Record every title in the library in turn and rank the costs across them, beside the last
     /// benchmark (D831).
     ///
@@ -1021,6 +1046,14 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             seconds,
             top,
         } => perf::cmd_bench(&titles, seconds, top)?,
+        Command::Ab {
+            path,
+            baseline,
+            seconds,
+            rounds,
+            top,
+            input,
+        } => perf::cmd_ab(&path, &baseline, (seconds, rounds, top), input.as_deref())?,
         Command::Turn { .. }
         | Command::Run { .. }
         | Command::Link { .. }

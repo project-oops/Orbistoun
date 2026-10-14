@@ -62,6 +62,7 @@ fn record(
     path: &Path,
     seconds: u64,
     (input, host_clock): (Option<&Path>, bool),
+    worker: Option<&Path>,
 ) -> Result<Recorded> {
     anyhow::ensure!(
         cfg!(feature = "tracy"),
@@ -89,7 +90,7 @@ fn record(
     // The worker's log and the guest's own output, beside the recording: a title printing every
     // frame would bury the report, and a bench of every title would be unreadable.
     let log = trace.with_extension("log");
-    let ran = run_worker(path, seconds, input, &log);
+    let ran = run_worker(path, seconds, (input, worker), &log);
     println!("  the run's log: {}", log.display());
     if let Err(error) = ran {
         capture.abandon();
@@ -104,10 +105,18 @@ fn record(
     })
 }
 
-/// One run of `path` in a worker, stopped after `seconds`.
-fn run_worker(path: &Path, seconds: u64, input: Option<&Path>, log: &Path) -> Result<()> {
-    let mut worker = orbistoun_worker::WorkerHandle::spawn_self_logging_to(&[], log)
-        .context("spawning a worker process")?;
+/// One run of `path` in a worker - this build's, or the build `exe` - stopped after `seconds`.
+fn run_worker(
+    path: &Path,
+    seconds: u64,
+    (input, exe): (Option<&Path>, Option<&Path>),
+    log: &Path,
+) -> Result<()> {
+    let mut worker = match exe {
+        Some(exe) => orbistoun_worker::WorkerHandle::spawn_other_logging_to(exe, &[], log),
+        None => orbistoun_worker::WorkerHandle::spawn_self_logging_to(&[], log),
+    }
+    .context("spawning a worker process")?;
     let events = worker
         .request(&orbistoun_proto::Request::Run {
             path: path.to_path_buf(),
@@ -153,7 +162,13 @@ pub(crate) fn cmd_perf(
     let title = crate::common::title_id(path).unwrap_or_default();
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
-    let recorded = record(&tools, path, seconds, (input, host_clock || staged(path)))?;
+    let recorded = record(
+        &tools,
+        path,
+        seconds,
+        (input, host_clock || staged(path)),
+        None,
+    )?;
     let text = format!(
         "{}  {} zones, {:.1} s recorded, {:.1} fps by the capture's own count\n\n{}",
         recorded.trace.display(),
@@ -202,6 +217,142 @@ struct BenchEntry {
     /// How long the recording ran, which each zone's self time is a share of.
     #[serde(default)]
     seconds: Option<f64>,
+}
+
+impl BenchEntry {
+    /// `title`'s line from one recorded run of it.
+    fn of(title: String, recorded: Recorded) -> Self {
+        Self {
+            title,
+            fps: recorded.report.frames.fps(),
+            median_ms: recorded.report.frames.percentile(50.0),
+            p99_ms: recorded.report.frames.percentile(99.0),
+            skipped: recorded
+                .report
+                .frames
+                .ms
+                .is_empty()
+                .then(|| "no frames presented".to_owned()),
+            by_self: recorded.report.by_self,
+            seconds: Some(recorded.summary.seconds).filter(|&seconds| seconds > 0.0),
+        }
+    }
+
+    /// Each zone's self time as a share of the run, in percent.
+    fn shares(&self) -> impl Iterator<Item = (&str, f64)> {
+        let zones: u64 = self.by_self.iter().map(|zone| zone.total_ns).sum();
+        let whole = self
+            .seconds
+            .map_or(orbistoun_perf::as_f64(zones), |seconds| seconds * 1e9);
+        self.by_self
+            .iter()
+            .filter(move |_| whole > 0.0)
+            .map(move |zone| {
+                (
+                    zone.name.as_str(),
+                    orbistoun_perf::as_f64(zone.total_ns) * 100.0 / whole,
+                )
+            })
+    }
+}
+
+/// `ab` - run one title under a baseline build and this one, alternately, and say what moved.
+///
+/// One run of each is not a comparison: the same binary's frame rate wanders by half between
+/// runs as the guest's phase against the host clock falls. Alternating, and swapping which goes
+/// first each round, puts both builds through the same drift.
+pub(crate) fn cmd_ab(
+    path: &Path,
+    baseline: &Path,
+    (seconds, rounds, top): (u64, usize, usize),
+    input: Option<&Path>,
+) -> Result<()> {
+    anyhow::ensure!(
+        baseline.is_file(),
+        "no baseline build at {}",
+        baseline.display()
+    );
+    let tools = tools(false)?;
+    let title = crate::common::title_id(path).unwrap_or_default();
+    let recorded_input = pad_script(&title);
+    let input = input.or(recorded_input.as_deref());
+    let host_clock = staged(path);
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    for round in 0..rounds {
+        let order = if round % 2 == 0 {
+            [Some(baseline), None]
+        } else {
+            [None, Some(baseline)]
+        };
+        for exe in order {
+            let which = if exe.is_some() {
+                "baseline"
+            } else {
+                "this build"
+            };
+            println!("round {}/{rounds}: {which}, {seconds} s", round + 1);
+            let recorded = record(&tools, path, seconds, (input, host_clock), exe)?;
+            let entry = BenchEntry::of(which.to_owned(), recorded);
+            if exe.is_some() {
+                before.push(entry);
+            } else {
+                after.push(entry);
+            }
+        }
+    }
+    println!("\n{}", render_ab(&before, &after, top));
+    Ok(())
+}
+
+/// An A/B comparison as text: every run's frame rate for each build, their means, then the zones
+/// whose share of the run moved most between the builds.
+fn render_ab(before: &[BenchEntry], after: &[BenchEntry], top: usize) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let mean = |values: &[f64]| {
+        (!values.is_empty())
+            .then(|| values.iter().sum::<f64>() / orbistoun_perf::as_f64(values.len() as u64))
+    };
+    let shown = |value: Option<f64>| value.map_or_else(|| "-".to_owned(), |v| format!("{v:.1}"));
+    for (name, runs) in [("baseline", before), ("this build", after)] {
+        let rates: Vec<f64> = runs.iter().filter_map(|run| run.fps).collect();
+        let medians: Vec<f64> = runs.iter().filter_map(|run| run.median_ms).collect();
+        let _ = writeln!(
+            out,
+            "{name:<11} fps {:>6}  median ms {:>7}  runs: {}",
+            shown(mean(&rates)),
+            shown(mean(&medians)),
+            rates
+                .iter()
+                .map(|fps| format!("{fps:.1}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    // Each zone's mean share of a run under each build; a zone absent from a run took none of it.
+    let mut shares: std::collections::BTreeMap<&str, [f64; 2]> = std::collections::BTreeMap::new();
+    for (side, runs) in [before, after].into_iter().enumerate() {
+        let count = orbistoun_perf::as_f64(runs.len().max(1) as u64);
+        for run in runs {
+            for (zone, share) in run.shares() {
+                shares.entry(zone).or_default()[side] += share / count;
+            }
+        }
+    }
+    let mut moved: Vec<(&str, [f64; 2])> = shares.into_iter().collect();
+    moved.sort_by(|a, b| (b.1[1] - b.1[0]).abs().total_cmp(&(a.1[1] - a.1[0]).abs()));
+    let _ = writeln!(
+        out,
+        "\nzones that moved, by self time as a share of the run (baseline -> this build)"
+    );
+    for (zone, [was, is]) in moved.into_iter().take(top) {
+        let _ = writeln!(
+            out,
+            "  {zone:<28} {was:>6.1}% -> {is:>6.1}%  ({:+.1})",
+            is - was
+        );
+    }
+    out
 }
 
 /// Every title in the library, by its module: each title directory's `eboot.bin`, and each staged
@@ -299,21 +450,8 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
         }
         let input = pad_script(&title);
         println!("{title}: recording {seconds} s");
-        match record(&tools, &module, seconds, (input.as_deref(), homebrew)) {
-            Ok(recorded) => entries.push(BenchEntry {
-                title: title.clone(),
-                fps: recorded.report.frames.fps(),
-                median_ms: recorded.report.frames.percentile(50.0),
-                p99_ms: recorded.report.frames.percentile(99.0),
-                skipped: recorded
-                    .report
-                    .frames
-                    .ms
-                    .is_empty()
-                    .then(|| "no frames presented".to_owned()),
-                by_self: recorded.report.by_self,
-                seconds: Some(recorded.summary.seconds).filter(|&seconds| seconds > 0.0),
-            }),
+        match record(&tools, &module, seconds, (input.as_deref(), homebrew), None) {
+            Ok(recorded) => entries.push(BenchEntry::of(title.clone(), recorded)),
             Err(error) => entries.push(skipped(format!("{error:#}"))),
         }
     }
@@ -419,7 +557,7 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchEntry, render_bench, staged};
+    use super::{BenchEntry, render_ab, render_bench, staged};
 
     /// A module under the library's `data/homebrew` is staged; a title's own is not.
     #[test]
@@ -480,5 +618,38 @@ mod tests {
         let mut old = entry("OLD", 30.0, &[("draw", 1_000)]);
         old.seconds = None;
         assert!(render_bench(&[old], None, 5).contains("100.0%"));
+    }
+
+    /// An A/B report gives each build's mean rate, and ranks zones by how far their share of the
+    /// run moved, a zone missing from one build counting as none of it.
+    #[test]
+    fn ab_ranks_zones_by_how_far_they_moved() {
+        let before = [
+            entry(
+                "baseline",
+                10.0,
+                &[("build", 400_000_000), ("draw", 100_000_000)],
+            ),
+            entry(
+                "baseline",
+                20.0,
+                &[("build", 200_000_000), ("draw", 100_000_000)],
+            ),
+        ];
+        let after = [entry(
+            "this build",
+            30.0,
+            &[("draw", 120_000_000), ("new", 50_000_000)],
+        )];
+        let text = render_ab(&before, &after, 5);
+        assert!(text.contains("fps   15.0"), "{text}");
+        assert!(text.contains("fps   30.0"), "{text}");
+        assert!(text.contains("runs: 10.0 20.0"), "{text}");
+        let order = |zone: &str| text.find(&format!("  {zone} ")).unwrap_or(usize::MAX);
+        assert!(
+            order("build") < order("new") && order("new") < order("draw"),
+            "{text}"
+        );
+        assert!(text.contains("30.0% ->    0.0%  (-30.0)"), "{text}");
     }
 }

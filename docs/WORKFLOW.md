@@ -121,6 +121,7 @@ orbistoun-cli perf --install-tracy           # fetch the Tracy tools this build'
 orbistoun-cli perf <module> [--seconds N]    # record a run with Tracy; frame times, zones by self and total time
 orbistoun-cli perf <module> --open           # ... and open the recording in the Tracy viewer
 orbistoun-cli bench [title...] [--seconds N] # every title in turn, costs ranked across them, against the last bench
+orbistoun-cli ab <module> --baseline <exe>   # another build and this one, alternately; fps and the zones that moved
 ```
 
 A recording and its report go in the title's `perf` directory, with the run's log and the guest's
@@ -142,9 +143,10 @@ A round of making a title faster goes:
    rather than timing it by hand. A span kept is the next round's answer.
 4. Where the spans run out, `ORBISTOUN_PROFILE=<n>` samples the guest's main thread and the device
    thread, naming host functions; its report is in the run's log.
-5. Change one thing and record again, more than once: a run on the host clock varies by a few
-   frames a second between runs of one build, and other work on the machine moves it more. Judge
-   by the zone you changed as well as by the frame rate.
+5. Change one thing and compare it with `ab` against a `tracy` build of the commit before: a run
+   on the host clock varies by a few frames a second between runs of one build, and other work on
+   the machine moves it more, so `ab` runs the two builds alternately for several rounds. Judge by
+   the zone you changed as well as by the frame rate.
 
 ## Recording what a turn produced
 

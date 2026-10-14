@@ -3357,6 +3357,16 @@ impl WorkerHandle {
         Self::spawn_logging(&exe, env, Stdio::from(std::fs::File::create(log)?))
     }
 
+    /// Spawns another build, `exe`, in worker mode, its stderr to the file `log`: two builds of
+    /// the emulator measured against each other.
+    pub fn spawn_other_logging_to(
+        exe: &Path,
+        env: &[(&str, String)],
+        log: &Path,
+    ) -> io::Result<Self> {
+        Self::spawn_logging(exe, env, Stdio::from(std::fs::File::create(log)?))
+    }
+
     /// Spawns `exe` in worker mode, its stderr to `stderr`.
     fn spawn_logging(exe: &Path, env: &[(&str, String)], stderr: Stdio) -> io::Result<Self> {
         let mut child = Command::new(exe)
