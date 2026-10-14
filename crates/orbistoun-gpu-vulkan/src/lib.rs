@@ -1152,24 +1152,17 @@ impl VulkanBackend {
     /// (which would need a host index buffer), and a draw with either shader unbound are refused by
     /// name. An indexed mesh draw is the mesh draw, because the shader fetches its own indices from
     /// the window.
-    fn pipeline_key(&self, shaders: (u64, u64), extent: (u32, u32)) -> std::num::NonZeroU64 {
+    /// The key a draw's pipeline is kept by, and the key of its shape: the same without its
+    /// textures, which the device's pipeline does not depend on - draws whose textures differ
+    /// share one (D856).
+    fn pipeline_key(
+        &self,
+        shaders: (u64, u64),
+        extent: (u32, u32),
+    ) -> (std::num::NonZeroU64, std::num::NonZeroU64) {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (shaders, extent).hash(&mut hasher);
-        // The samplers too: each is built with its pipeline's descriptor set.
-        // The first two slots as they always were, so their keys do not move; a later slot only
-        // where it is bound, with its slot, so an unbound one adds nothing.
-        for texture in &self.textures[..2] {
-            texture
-                .as_ref()
-                .map(|t| (t.hash, t.sampling, t.encoding))
-                .hash(&mut hasher);
-        }
-        for (slot, t) in self.textures.iter().enumerate().skip(2) {
-            if let Some(t) = t {
-                (slot, t.hash, t.sampling, t.encoding).hash(&mut hasher);
-            }
-        }
         // The scissor too: it is fixed pipeline state. Floats are hashed by their bits. Whether a
         // depth attachment is bound decides the render pass the pipeline is built for.
         self.blend.hash(&mut hasher);
@@ -1186,8 +1179,6 @@ impl VulkanBackend {
             self.encoding_of(Some(*target)).hash(&mut hasher);
         }
         self.more_outputs_for_draw().hash(&mut hasher);
-        // The user clip planes a mesh module is specialised with (D830).
-        self.clip_planes.hash(&mut hasher);
         self.depth_stencil.hash(&mut hasher);
         self.cull.hash(&mut hasher);
         self.viewport_transform
@@ -1209,7 +1200,19 @@ impl VulkanBackend {
         self.current_viewport
             .map(|r| (r.x, r.y, r.width, r.height))
             .hash(&mut hasher);
-        std::num::NonZeroU64::new(hasher.finish()).unwrap_or(std::num::NonZeroU64::MIN)
+        let shape = hasher.finish();
+        // The user clip planes are pushed with the draw (D857), and the textures - their contents,
+        // formats and samplers - are the descriptor set's: a pipeline is kept with both, but the
+        // device pipeline depends on neither. A texture slot only where it is bound, with its slot,
+        // so an unbound one adds nothing.
+        self.clip_planes.hash(&mut hasher);
+        for (slot, t) in self.textures.iter().enumerate() {
+            if let Some(t) = t {
+                (slot, t.hash, t.sampling, t.encoding).hash(&mut hasher);
+            }
+        }
+        let key = |value| std::num::NonZeroU64::new(value).unwrap_or(std::num::NonZeroU64::MIN);
+        (key(hasher.finish()), key(shape))
     }
 
     /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so this
@@ -1443,6 +1446,21 @@ impl VulkanBackend {
         depth::depth_bias(self.depth_bias, self.cull)
     }
 
+    /// The pipeline state a draw's builder takes beside its key: blend constants, the further
+    /// attachments' outputs, clip planes and the shape it shares a device pipeline by (D856).
+    const fn pipeline_extras<'a>(
+        &self,
+        more: &'a [orbistoun_gpu::ColourOutput],
+        shape: std::num::NonZeroU64,
+    ) -> framebuffer::PipelineExtras<'a> {
+        framebuffer::PipelineExtras {
+            blend_constants: self.blend_constants,
+            more,
+            clip_planes: self.clip_planes,
+            shape_key: Some(shape),
+        }
+    }
+
     /// A draw that did not join the open batch: its pipeline and bindings worked out in full.
     fn draw_whole(
         &mut self,
@@ -1479,7 +1497,8 @@ impl VulkanBackend {
         let more_outputs = self.more_outputs_for_draw();
         let textures = self.textures.clone();
         let draw_buffers = self.draw_buffers.clone();
-        let pipeline_key = self.pipeline_key((geometry_hash, fragment_hash), (width, height));
+        let (pipeline_key, shape_key) =
+            self.pipeline_key((geometry_hash, fragment_hash), (width, height));
         let start = framebuffer::Start {
             clear: CLEAR_COLOUR,
             mesh_vertices: draw.vertices,
@@ -1490,11 +1509,7 @@ impl VulkanBackend {
                 .each_ref()
                 .map(|t| t.as_ref().map(BoundTexture::words)),
             blend: self.blend,
-            extras: framebuffer::PipelineExtras {
-                blend_constants: self.blend_constants,
-                more: &more_outputs,
-                clip_planes: self.clip_planes,
-            },
+            extras: self.pipeline_extras(&more_outputs, shape_key),
             counting: self.sample_counting,
             raster_op: self.raster_op,
             line_width: self.line_width,

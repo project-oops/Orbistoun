@@ -281,9 +281,13 @@ struct MeshOutputs {
     index_width: u32,
     /// Pointer to one `float` of a vertex's clip distances, member one of its block.
     float_ptr: Id,
-    /// The user clip planes, four specialization constants each (`SpecId` `4 * plane + axis`),
-    /// which a pipeline sets from `PA_CL_UCP_*`; zero, their default, clips nothing (D830).
+    /// The user clip planes, four `float`s each, loaded at entry from the push-constant block
+    /// [`Self::plane_block`] names (D857): a draw's `PA_CL_UCP_*`, zero clipping nothing.
     planes: [[Id; 4]; CLIP_PLANES],
+    /// The push-constant block the planes are read from, word `4 * plane + axis` from offset zero,
+    /// and the pointer to one of its `float`s - which a mesh module may use, since its user data
+    /// arrives in the draw-data buffer, not the block (D718).
+    plane_block: (Id, Id),
 }
 
 /// The user clip planes a module carries, `PA_CL_UCP_0` to `_5`.
@@ -1251,14 +1255,11 @@ fn declare_depth_output(b: &mut Builder, f32_type: Id, variable: Id) -> (Id, Id)
     (f32_type, variable)
 }
 
-/// Declares the user clip planes a mesh module is specialised with (D830): six planes of four `float`
-/// specialization constants, `SpecId` `4 * plane + axis`, each zero unless a pipeline sets it, and
-/// the `float[6]` type a vertex's clip distances are. Answers that type and the constants.
-fn declare_clip_planes(
-    b: &mut Builder,
-    f32_type: Id,
-    u32_type: Id,
-) -> (Id, [[Id; 4]; CLIP_PLANES]) {
+/// Declares the user clip planes a mesh module reads (D830, D857): the `float[6]` type a vertex's
+/// clip distances are, and the push-constant block of six planes of four `float`s the draw's planes
+/// arrive in, `4 * plane + axis` from offset zero. Answers the type, the block's variable and the
+/// pointer to one of its `float`s; the planes are loaded at entry.
+fn declare_clip_planes(b: &mut Builder, f32_type: Id, u32_type: Id) -> (Id, (Id, Id)) {
     let plane_count = b.id();
     b.declare(
         op::CONSTANT,
@@ -1266,13 +1267,22 @@ fn declare_clip_planes(
     );
     let distances = b.id();
     b.declare(op::TYPE_ARRAY, &[distances.0, f32_type.0, plane_count.0]);
-    let mut planes = [[Id(0); 4]; CLIP_PLANES];
-    for (index, constant) in (0u32..).zip(planes.iter_mut().flatten()) {
-        *constant = b.id();
-        b.annotate(op::DECORATE, &[constant.0, decoration::SPEC_ID, index]);
-        b.declare(op::SPEC_CONSTANT, &[f32_type.0, constant.0, 0]);
-    }
-    (distances, planes)
+    let words = b.id();
+    b.declare(
+        op::CONSTANT,
+        &[u32_type.0, words.0, (CLIP_PLANES * 4) as u32],
+    );
+    let (array, block, block_ptr, element_ptr, variable) = (b.id(), b.id(), b.id(), b.id(), b.id());
+    b.annotate(op::DECORATE, &[array.0, decoration::ARRAY_STRIDE, 4]);
+    b.annotate(op::DECORATE, &[block.0, decoration::BLOCK]);
+    b.annotate(op::MEMBER_DECORATE, &[block.0, 0, decoration::OFFSET, 0]);
+    b.declare(op::TYPE_ARRAY, &[array.0, f32_type.0, words.0]);
+    b.declare(op::TYPE_STRUCT, &[block.0, array.0]);
+    let push = orbistoun_spirv::storage::PUSH_CONSTANT;
+    b.declare(op::TYPE_POINTER, &[block_ptr.0, push, block.0]);
+    b.declare(op::TYPE_POINTER, &[element_ptr.0, push, f32_type.0]);
+    b.declare(op::VARIABLE, &[block_ptr.0, variable.0, push]);
+    (distances, (variable, element_ptr))
 }
 
 /// Declares everything a mesh module writes: the vertices, the indices, and one array per exported
@@ -1320,7 +1330,7 @@ fn declare_mesh_outputs(
             built_in::CLIP_DISTANCE,
         ],
     );
-    let (distances, planes) = declare_clip_planes(b, f32_type, u32_type);
+    let (distances, plane_block) = declare_clip_planes(b, f32_type, u32_type);
     b.annotate(
         op::DECORATE,
         &[
@@ -1388,7 +1398,8 @@ fn declare_mesh_outputs(
         index_type,
         index_width,
         float_ptr,
-        planes,
+        planes: [[Id(0); 4]; CLIP_PLANES],
+        plane_block,
     })
 }
 
@@ -2546,6 +2557,8 @@ impl<'a> Wavefront<'a> {
         interface.extend(mesh_reserved.interface(stage));
         interface.extend(dispatch.map(compute_inputs::DispatchState::interface));
         interface.extend(quad_input.map(|input| input.0));
+        // The block the user clip planes arrive in (D857).
+        interface.extend(mesh.as_ref().map(|mesh| mesh.plane_block.0.0));
         if stage == Stage::Mesh {
             interface.extend(mesh_interface(
                 (&ids, &files),
@@ -2649,6 +2662,13 @@ impl<'a> Wavefront<'a> {
         // into `s[first + i]`, before the first instruction runs.
         if let Some(source) = user_data_source {
             self.load_user_data(source, user_data);
+        }
+        // The draw's user clip planes, from the block a mesh module reads them in (D857).
+        if let Some(block) = self.mesh.as_ref().map(|mesh| mesh.plane_block) {
+            let planes = self.load_clip_planes(block);
+            if let Some(mesh) = self.mesh.as_mut() {
+                mesh.planes = planes;
+            }
         }
         // The system values where the hardware puts them: after the interpolants, in field order.
         system.seed(self);
@@ -3011,6 +3031,25 @@ impl<'a> Wavefront<'a> {
                 self.binary(op::BITWISE_AND, shifted, low)
             }
         }
+    }
+
+    /// The user clip planes, loaded from the push-constant block `(variable, element pointer)`:
+    /// word `4 * plane + axis` (D857).
+    fn load_clip_planes(&mut self, (block, element_ptr): (Id, Id)) -> [[Id; 4]; CLIP_PLANES] {
+        let member = self.constant(0);
+        let mut planes = [[Id(0); 4]; CLIP_PLANES];
+        for (index, value) in (0u32..).zip(planes.iter_mut().flatten()) {
+            let at = self.constant(index);
+            let pointer = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[element_ptr.0, pointer.0, block.0, member.0, at.0],
+            );
+            *value = self.builder.id();
+            self.builder
+                .function(op::LOAD, &[self.f32_type.0, value.0, pointer.0]);
+        }
+        planes
     }
 
     /// Loads each user-data word from `source` into its scalar register, at entry.

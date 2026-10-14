@@ -2560,21 +2560,20 @@ pub(crate) fn logic_op(
 /// The user clip planes (`PA_CL_UCP_0` to `_5`), each four `f32`s' bits (D830).
 pub type ClipPlanes = [[u32; 4]; 6];
 
-/// The specialization a translated mesh module's user clip planes take: constant `4 * plane + axis`
-/// from `planes`' bits, in order (D830). A module that declares none ignores them.
-fn clip_plane_specialization(planes: &ClipPlanes) -> ([vk::SpecializationMapEntry; 24], [u8; 96]) {
-    let entries = std::array::from_fn(|index| {
-        let id = u32::try_from(index).unwrap_or(0);
-        vk::SpecializationMapEntry::default()
-            .constant_id(id)
-            .offset(id * 4)
-            .size(4)
-    });
-    let mut data = [0_u8; 96];
-    for (bytes, bits) in data.chunks_exact_mut(4).zip(planes.iter().flatten()) {
-        bytes.copy_from_slice(&bits.to_le_bytes());
+/// `block` with a mesh pipeline's user clip planes in its first words, `4 * plane + axis`, where
+/// the mesh module reads them (D857): a mesh module's user data arrives in the draw-data buffer,
+/// so the block's geometry half is the planes'. Any other pipeline's block is as it was.
+fn with_clip_planes(
+    mut block: [u32; USER_DATA_BLOCK_WORDS],
+    geometry: Geometry,
+    planes: &ClipPlanes,
+) -> [u32; USER_DATA_BLOCK_WORDS] {
+    if matches!(geometry, Geometry::Mesh { .. }) {
+        for (word, bits) in block.iter_mut().zip(planes.iter().flatten()) {
+            *word = *bits;
+        }
     }
-    (entries, data)
+    block
 }
 
 /// What a pipeline is built with beyond its shaders and its scalar draw state: the blend constants
@@ -2590,6 +2589,9 @@ pub(crate) struct PipelineExtras<'a> {
     /// The user clip planes a translated mesh module is specialised with, each an `f32`'s bits
     /// four to a plane; zero clips nothing (D830).
     pub(crate) clip_planes: ClipPlanes,
+    /// The key of the pipeline's shape - its key without its textures' contents - which builds of
+    /// one shape share a device pipeline by (D856); `None` builds one of its own.
+    pub(crate) shape_key: Option<std::num::NonZeroU64>,
 }
 
 /// A draw with one colour attachment, no blend constants and no user clip planes.
@@ -2597,6 +2599,7 @@ static NO_EXTRAS: PipelineExtras<'static> = PipelineExtras {
     blend_constants: None,
     more: &[],
     clip_planes: [[0; 4]; 6],
+    shape_key: None,
 };
 
 /// Every colour attachment's blend state, in attachment order: the first's, then each after it
@@ -2974,19 +2977,22 @@ fn release(
 /// device, so none is in use.
 fn release_pipeline(device: &ash::Device, built: &Pipeline) {
     {
-        // SAFETY: every handle below was created on this device, is not in use after the queue
-        // wait, and is destroyed exactly once.
-        unsafe { device.destroy_pipeline(built.handle, None) };
-        // SAFETY: as above.
-        unsafe { device.destroy_pipeline_layout(built.layout, None) };
-        // SAFETY: as above.
-        unsafe { device.destroy_shader_module(built.vertex, None) };
-        // SAFETY: as above.
-        unsafe { device.destroy_shader_module(built.fragment, None) };
-        // SAFETY: as above. The pool owns the set, so destroying it frees that too.
+        if !built.shared_shape {
+            // SAFETY: every handle below was created on this device for this pipeline alone, is
+            // not in use after the queue wait, and is destroyed exactly once.
+            unsafe { device.destroy_pipeline(built.handle, None) };
+            // SAFETY: as above.
+            unsafe { device.destroy_pipeline_layout(built.layout, None) };
+            // SAFETY: as above.
+            unsafe { device.destroy_shader_module(built.vertex, None) };
+            // SAFETY: as above.
+            unsafe { device.destroy_shader_module(built.fragment, None) };
+            // SAFETY: as above.
+            unsafe { device.destroy_descriptor_set_layout(built.set_layout, None) };
+        }
+        // SAFETY: created on this device for this pipeline, not in use after the queue wait, and
+        // destroyed exactly once. The pool owns the set, so destroying it frees that too.
         unsafe { device.destroy_descriptor_pool(built.descriptor_pool, None) };
-        // SAFETY: as above.
-        unsafe { device.destroy_descriptor_set_layout(built.set_layout, None) };
         // Binding 0 is always this pipeline's; binding 1 only when it created it. A caller-owned
         // resident window (D703) is bound and read back but never destroyed here.
         let owned: &[(vk::Buffer, vk::DeviceMemory)] = if built.owns_guest_memory {
@@ -3155,7 +3161,7 @@ impl Pipeline {
             layout: self.layout,
             set: self.set,
             geometry: self.geometry,
-            user_data: self.user_data,
+            user_data: with_clip_planes(self.user_data, self.geometry, &self.clip_planes),
             window_offset: self.window_offset,
             buffers: self.draw_buffers,
         }
@@ -4455,6 +4461,11 @@ struct Pipeline {
     fragment: vk::ShaderModule,
     layout: vk::PipelineLayout,
     handle: vk::Pipeline,
+    /// Whether its modules, layouts and device pipeline are a kept [`Shape`]'s, which outlives it
+    /// and which its release leaves alone (D856).
+    shared_shape: bool,
+    /// The user clip planes it draws with, pushed beside its user data (D857).
+    clip_planes: ClipPlanes,
     /// The set layout, pool and set the fragment module's storage buffers are bound through.
     ///
     /// Every translated module declares two storage buffers, the observation window and the
@@ -4529,32 +4540,77 @@ fn build_pipeline(
             "a pipeline built with no draw-buffer set to bind (D733)".to_owned(),
         ));
     };
-    let (vertex, fragment) =
-        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildModules, || {
-            create_shader_modules(device, shaders)
-        })?;
     let resources = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildResources, || {
         create_bound_resources(devices, bound)
     })?;
-    let set_layout = create_set_layout(device)?;
-    let layout = create_pipeline_layout(device, &[set_layout, buffers_layout], geometry)?;
+    let known = bound.extras.shape_key.and_then(|key| {
+        shapes()
+            .lock()
+            .ok()?
+            .get(&key.get())
+            .copied()
+            .filter(|shape| shape.buffers_layout == buffers_layout)
+    });
+    let shape = if let Some(shape) = known {
+        shape
+    } else {
+        let (vertex, fragment) =
+            orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildModules, || {
+                create_shader_modules(device, shaders)
+            })?;
+        let set_layout = create_set_layout(device)?;
+        let layout = create_pipeline_layout(device, &[set_layout, buffers_layout], geometry)?;
+        let handle = create_graphics_pipeline(
+            device,
+            render_pass,
+            (vertex, fragment),
+            layout,
+            size,
+            geometry,
+            bound,
+        )?;
+        let shape = Shape {
+            vertex,
+            fragment,
+            layout,
+            handle,
+            set_layout,
+            buffers_layout,
+            shared: false,
+        };
+        // Kept for the next build of this shape, which then owns none of it: kept shapes live for
+        // the process, so no pipeline releasing them can leave another holding a destroyed one.
+        match bound.extras.shape_key.zip(shapes().lock().ok()) {
+            Some((key, mut kept)) if kept.len() < SHAPES_KEPT => {
+                let shared = Shape {
+                    shared: true,
+                    ..shape
+                };
+                kept.insert(key.get(), shared);
+                shared
+            }
+            _ => shape,
+        }
+    };
+    let Shape {
+        vertex,
+        fragment,
+        layout,
+        handle,
+        set_layout,
+        shared,
+        ..
+    } = shape;
     let (descriptor_pool, set) = allocate_set(device, &[set_layout])?;
     write_descriptor_set(device, set, bound.windows, &resources);
-    let handle = create_graphics_pipeline(
-        device,
-        render_pass,
-        (vertex, fragment),
-        layout,
-        size,
-        geometry,
-        bound,
-    )?;
 
     Ok(Pipeline {
         vertex,
         fragment,
         layout,
         handle,
+        shared_shape: shared,
+        clip_planes: bound.extras.clip_planes,
         set_layout,
         descriptor_pool,
         set,
@@ -4572,6 +4628,33 @@ fn build_pipeline(
         draw_buffers,
     })
 }
+
+/// What a draw's device pipeline is built from and with: its modules, layouts and the pipeline,
+/// which depend on its shaders and fixed state but not on the textures it samples (D856).
+#[derive(Debug, Clone, Copy)]
+struct Shape {
+    vertex: vk::ShaderModule,
+    fragment: vk::ShaderModule,
+    layout: vk::PipelineLayout,
+    handle: vk::Pipeline,
+    set_layout: vk::DescriptorSetLayout,
+    /// The draw-buffer set layout its pipeline layout was made with.
+    buffers_layout: vk::DescriptorSetLayout,
+    /// Whether it is a kept one, which pipelines built of it share.
+    shared: bool,
+}
+
+/// Shapes kept for the process, by [`PipelineExtras::shape_key`]: a title whose textures change every draw
+/// built a whole pipeline each time - Neverball some forty a second of eleven shapes, each a
+/// device pipeline of five milliseconds though the driver's cache held it.
+fn shapes() -> &'static std::sync::Mutex<std::collections::HashMap<u64, Shape>> {
+    static SHAPES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, Shape>>> =
+        std::sync::OnceLock::new();
+    SHAPES.get_or_init(Default::default)
+}
+
+/// How many shapes are kept; past it, a shape is built and released with its pipeline as before.
+const SHAPES_KEPT: usize = 2048;
 
 /// Creates the vertex (or mesh) and fragment shader modules, in that order.
 fn create_shader_modules(
@@ -4844,13 +4927,11 @@ fn write_descriptor_set(
     unsafe { device.update_descriptor_sets(&writes, &[]) };
 }
 
-/// A pipeline's two stages: the geometry stage, vertex or mesh, specialised with the user clip
-/// planes (D830), and the fragment stage.
-fn pipeline_stages<'a>(
+/// A pipeline's two stages: the geometry stage, vertex or mesh, and the fragment stage.
+fn pipeline_stages(
     (vertex, fragment): (vk::ShaderModule, vk::ShaderModule),
     geometry: Geometry,
-    specialization: &'a vk::SpecializationInfo<'a>,
-) -> [vk::PipelineShaderStageCreateInfo<'a>; 2] {
+) -> [vk::PipelineShaderStageCreateInfo<'static>; 2] {
     [
         vk::PipelineShaderStageCreateInfo::default()
             .stage(match geometry {
@@ -4858,8 +4939,7 @@ fn pipeline_stages<'a>(
                 Geometry::Mesh { .. } => vk::ShaderStageFlags::MESH_EXT,
             })
             .module(vertex)
-            .name(ENTRY)
-            .specialization_info(specialization),
+            .name(ENTRY),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(fragment)
@@ -4878,11 +4958,7 @@ fn create_graphics_pipeline(
     bound: Bound<'_>,
 ) -> Result<vk::Pipeline, DispatchError> {
     let (width, height) = size;
-    let (entries, planes) = clip_plane_specialization(&bound.extras.clip_planes);
-    let specialization = vk::SpecializationInfo::default()
-        .map_entries(&entries)
-        .data(&planes);
-    let stages = pipeline_stages(modules, geometry, &specialization);
+    let stages = pipeline_stages(modules, geometry);
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
