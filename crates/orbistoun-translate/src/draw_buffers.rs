@@ -532,7 +532,13 @@ const SOFFSET_NULL: u32 = 125;
 /// bits above the sixteen the operand layout gives. Any other is left untraced.
 fn plain_scalar_offset(instruction: &Instruction) -> bool {
     let second = instruction.second_word.unwrap_or(0);
-    (second >> 25) & 0x7f == SOFFSET_NULL && (second >> 16).trailing_zeros() >= 5
+    (second >> 25) & 0x7f == SOFFSET_NULL && solved_scalar_offset(instruction)
+}
+
+/// Whether a scalar memory access's immediate sets no offset bits above the sixteen the operand
+/// layout gives, whatever offset register it adds.
+fn solved_scalar_offset(instruction: &Instruction) -> bool {
+    (instruction.second_word.unwrap_or(0) >> 16).trailing_zeros() >= 5
 }
 
 /// How many registers a scalar memory access fills, from the width its name states.
@@ -582,15 +588,22 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
                 soffset: u8::try_from((instruction.second_word? >> 25) & 0x7f).ok()?,
             });
         }
-        if !plain_scalar_offset(instruction) {
-            return None;
-        }
-        if name.starts_with("s_buffer_load") {
+        if name.starts_with("s_buffer_load") && solved_scalar_offset(instruction) {
+            // An offset register reaches anywhere within the records, which bound every scalar
+            // buffer load (`descriptor_extent`); an immediate alone, its own words.
+            let scalar_reach = if plain_scalar_offset(instruction) {
+                end
+            } else {
+                u32::MAX
+            };
             let reads = DescriptorReads {
-                scalar_reach: end,
+                scalar_reach,
                 ..DescriptorReads::default()
             };
             return Some(Access::Descriptor(descriptor(held, *base)?, reads));
+        }
+        if !plain_scalar_offset(instruction) {
+            return None;
         }
         return Some(Access::Pointer {
             base: table_base(held, *base)?,
@@ -890,6 +903,20 @@ mod tests {
         };
         assert_eq!(computed.prefix, madmk, "the multiply-add's both dwords");
         assert_eq!(computed.at, 8);
+    }
+
+    /// A scalar buffer load adding an offset register is traced, reaching anywhere within its
+    /// descriptor's records: Grand Theft Auto V's pixel shader reads its constants by
+    /// `s_buffer_load_dwordx4 s[4:7], s[16:19], 0x0` with `vcc_lo` as the offset register, the
+    /// words below as it holds them.
+    #[test]
+    fn a_scalar_load_at_an_offset_register_reaches_its_records() {
+        let traced = traced(&[0xf428_0108, 0xd400_0000, END], 20);
+        let [BufferSource::Descriptor { reads, .. }] = traced.sources.as_slice() else {
+            panic!("one descriptor: {:?}", traced.sources);
+        };
+        assert_eq!(reads.scalar_reach, u32::MAX);
+        assert_eq!(traced.served.get(&0), Some(&0));
     }
 
     /// A dispatch's buffer store is traced like its load (D746): the copy reads one buffer and

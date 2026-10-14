@@ -1079,23 +1079,33 @@ fn a_sixteen_word_scalar_buffer_load_fills_sixteen_registers() {
     );
 }
 
-/// A scalar buffer load adding a scalar offset register is refused by name: the solved layout
-/// has no field for it, so its value would be dropped.
+/// A scalar buffer load adds its offset register - `SOFFSET`, any scalar register or `vcc_lo` - to
+/// its immediate, the sum's low two bits ignored, each word still read within the record count
+/// (AMD's published RDNA instruction set, scalar memory): 4 plus `vcc_lo` 8 reads bytes 12 and 16,
+/// the second past sixteen bytes of records, and 4 plus `s8` 2 reads the word at 4. Grand Theft
+/// Auto V's pixel shader offsets its constants by `vcc_lo` so.
 #[test]
-fn a_scalar_buffer_load_with_an_offset_register_is_refused() {
-    let table = EncodingTable::builtin().expect("encodings");
-    let operands = OperandTable::builtin().expect("operands");
-    let [first, second] = s_buffer_load("s_buffer_load_dwordx4", 4, 0, 0);
-    // SOFFSET s5 rather than null.
-    let program = [first, (second & !(0x7f << 25)) | (5 << 25), s_endpgm()];
-    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let decoded = decode(&bytes, &table, &operands);
-    let error = translate(&decoded, &table, Strategy::default())
-        .expect_err("an offset register must be refused");
-    assert!(
-        error.to_string().contains("offset register"),
-        "the error should name the offset register, got: {error}"
-    );
+fn a_scalar_buffer_load_adds_its_offset_register() {
+    if !device_or_skip("a_scalar_buffer_load_adds_its_offset_register") {
+        return;
+    }
+    let with_offset_register = |[first, second]: [u32; 2], register: u32| {
+        [first, (second & !(0x7f << 25)) | (register << 25)]
+    };
+    let mut program = seeded_buffer([11, 22, 33, 44], 16);
+    program.push(s_mov_inline(106, 8));
+    program.push(s_mov_inline(8, 2));
+    program.extend(with_offset_register(
+        s_buffer_load("s_buffer_load_dwordx2", 0, 4, 4),
+        106,
+    ));
+    program.extend(with_offset_register(
+        s_buffer_load("s_buffer_load_dword", 2, 4, 4),
+        8,
+    ));
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!([0, 1, 2].map(|n| scalar(&registers, n)), [44, 0, 22]);
 }
 
 /// radeonsi's clear primitive shader also picks corners with a signed not-equal compare into

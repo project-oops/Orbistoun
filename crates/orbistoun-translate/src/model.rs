@@ -3511,6 +3511,53 @@ const LONG_FORM: [&str; 19] = [
     "v_cvt_u32_f32_e64",
 ];
 
+/// Where word `word` of a scalar buffer load starts from its buffer's start, and one past it: from
+/// the immediate `bytes` alone, or from `first`, the immediate plus the offset register already
+/// dword-aligned - then with whether the word's end wrapped past the top, which reads nothing.
+fn scalar_word_place<M: Model + ?Sized>(
+    model: &mut M,
+    (bytes, first): (u32, Option<Id>),
+    word: u32,
+) -> (Id, Id, Option<Id>) {
+    let Some(first) = first else {
+        return (
+            model.constant(bytes + word * 4),
+            model.constant(bytes + word * 4 + 4),
+            None,
+        );
+    };
+    let skip = model.constant(word * 4);
+    let at = model.add(first, skip);
+    let four = model.constant(4);
+    let end = model.add(at, four);
+    let wrapped = model.compare(op::ULESS_THAN, end, first);
+    (at, end, Some(wrapped))
+}
+
+/// The value of a scalar memory access's offset register, from its `SOFFSET` field `code`: `None`
+/// for `null`, the register's value for a scalar register or a named one such as `vcc_lo`.
+///
+/// # Errors
+///
+/// A code naming no scalar register.
+fn scalar_offset_register<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    code: u32,
+) -> Result<Option<Id>, TranslateError> {
+    if code == SOFFSET_NULL {
+        return Ok(None);
+    }
+    let register = sdwa_operand_table()
+        .map(|table| table.classify(code, None))
+        .filter(|operand| matches!(operand, Operand::Scalar(_) | Operand::Named(_)))
+        .ok_or(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a scalar memory access's offset field names no scalar register",
+        })?;
+    model.read_source(instruction, &register, 0).map(Some)
+}
+
 /// A float's bits as a normalised 16-bit value in the low half (AMD's published RDNA instruction
 /// set, `V_CVT_PKNORM_U16_F32`/`_I16_F32`; Mesa's `pack_unorm_2x16` and `pack_snorm_2x16`
 /// lowerings): a NaN read as zero, clamped to `[0, 1]` or, `signed`, `[-1, 1]`, scaled by 65535 or
@@ -5798,8 +5845,10 @@ const SOFFSET_NULL: u32 = 125;
 /// (PPSA03416): one word writes the mask's low half, two its whole. One word into a mask's high
 /// half, `vcc_hi` or `exec_hi`, writes that half (PPSA02664).
 ///
-/// Refused by name: an offset register (`SOFFSET` other than `null`), which the solved layout has
-/// no operand for, and offset bits above the sixteen the probes solved.
+/// An offset register (`SOFFSET` other than `null`), which the solved layout has no operand for, is
+/// read from its field and added to the immediate, the sum's low two bits ignored (AMD's published
+/// RDNA instruction set, scalar memory). Refused by name: offset bits above the sixteen the probes
+/// solved, and an offset field naming no scalar register.
 fn scalar_buffer_load<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -5832,12 +5881,7 @@ fn scalar_buffer_load<M: Model + ?Sized>(
         }
     };
     let second = instruction.second_word.unwrap_or(0);
-    if (second >> 25) & 0x7f != SOFFSET_NULL {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: "a scalar buffer load adding an offset register is not modelled",
-        });
-    }
+    let added = scalar_offset_register(model, instruction, (second >> 25) & 0x7f)?;
     if (second >> 16) & 0x1f != 0 {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -5864,14 +5908,25 @@ fn scalar_buffer_load<M: Model + ?Sized>(
     let refused = model.is_not_zero(resource.unsupported);
     let slot = model.draw_buffer_slot(instruction);
     let mut values = Vec::with_capacity(words as usize);
+    // The immediate plus the offset register, dword-aligned; a constant where there is none.
+    let first = added.map(|added| {
+        let immediate = model.constant(bytes);
+        let sum = model.add(immediate, added);
+        let aligned = model.constant(!3);
+        model.binary(op::BITWISE_AND, sum, aligned)
+    });
     for word in 0..words {
-        let at = model.constant(bytes + word * 4);
-        let end = model.constant(bytes + word * 4 + 4);
+        let (at, end, wrapped) = scalar_word_place(model, (bytes, first), word);
         let past = model.compare(op::UGREATER_THAN, end, bytes_in_buffer);
+        let past = match wrapped {
+            Some(wrapped) => model.either(past, wrapped),
+            None => past,
+        };
         let outside = model.either(past, refused);
         // Through a bound draw buffer the word is the offset's, from the buffer's start (D733).
         let loaded = if let Some(slot) = slot {
-            let index = model.constant((bytes + word * 4) / 4);
+            let two = model.constant(2);
+            let index = model.binary(op::SHIFT_RIGHT_LOGICAL, at, two);
             model.read_draw_buffer(slot, index)?
         } else {
             let address = model.add(resource.base, at);
