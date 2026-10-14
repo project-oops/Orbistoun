@@ -2569,6 +2569,16 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a four-byte `16_16` `UNORM` target in its standard order, red then green
+    /// (`XY__`): two normalised 16-bit channels a texel, drawn and written back as it is held
+    /// (D871).
+    #[must_use]
+    pub const fn is_unorm_16_16(&self) -> bool {
+        self.format == COLOR_16_16
+            && self.number_type == NUMBER_UNORM
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is an eight-byte `16_16_16_16` `FLOAT` target in its standard order, red
     /// first: four half floats a texel, drawn and written back as it is held (D845).
     #[must_use]
@@ -2606,6 +2616,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Unorm8x2
         } else if self.is_uint_32_32() {
             crate::TargetEncoding::Uint32x2
+        } else if self.is_unorm_16_16() {
+            crate::TargetEncoding::Unorm16x2
         } else if self.is_uint_16() {
             crate::TargetEncoding::Uint16
         } else if self.is_float_32_32_32_32() {
@@ -2630,6 +2642,7 @@ impl ColourTargetFormat {
             || self.is_float_16_16()
             || self.is_unorm_2_10_10_10()
             || self.is_snorm_8_8_8_8()
+            || self.is_unorm_16_16()
         {
             Some(4)
         } else if self.is_float_16_16_16_16() || self.is_uint_32_32() {
@@ -3681,6 +3694,13 @@ mod tests {
     #[test]
     fn the_formats_grand_theft_auto_v_draws_into_are_read() {
         use super::decode_colour_target_format;
+        // `COLOR_16_16` `UNORM` (D871): four bytes a texel, red and green written.
+        let normal_pair = decode_colour_target_format(0x0001_8014);
+        assert!(normal_pair.is_unorm_16_16());
+        assert!(!normal_pair.is_float_16_16());
+        assert_eq!(normal_pair.encoding(), crate::TargetEncoding::Unorm16x2);
+        assert_eq!(normal_pair.written_back_bytes(), Some(4));
+        assert_eq!(super::colour_write_mask(0xF, 0x0001_8014), 0x3);
         // `COLOR_32_32` `UINT` (D870): eight bytes a texel, red and green written.
         let wide_pair = decode_colour_target_format(0x0001_802c | (4 << 8));
         assert!(wide_pair.is_uint_32_32());

@@ -55,6 +55,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Float32 | TargetEncoding::Float16 => vk::Format::R32_SFLOAT,
         TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Float16x2 => vk::Format::R16G16_SFLOAT,
+        TargetEncoding::Unorm16x2 => vk::Format::R16G16_UNORM,
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
         TargetEncoding::Snorm8 => vk::Format::R8G8B8A8_SNORM,
         TargetEncoding::Uint16 => vk::Format::R32_UINT,
@@ -71,6 +72,7 @@ const fn image_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Float32 | TargetEncoding::Float16 => vk::Format::R32_SFLOAT,
         TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Float16x2 => vk::Format::R16G16_SFLOAT,
+        TargetEncoding::Unorm16x2 => vk::Format::R16G16_UNORM,
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
         TargetEncoding::Snorm8 => vk::Format::R8G8B8A8_SNORM,
         TargetEncoding::Uint16 => vk::Format::R32_UINT,
@@ -95,7 +97,8 @@ pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
         | TargetEncoding::Snorm8
         | TargetEncoding::Uint16
         | TargetEncoding::Float16
-        | TargetEncoding::Unorm8x2 => 4,
+        | TargetEncoding::Unorm8x2
+        | TargetEncoding::Unorm16x2 => 4,
     }
 }
 
@@ -193,7 +196,8 @@ const fn resample_filter(encoding: TargetEncoding) -> vk::Filter {
         | TargetEncoding::Float16x2
         | TargetEncoding::Unorm10x3A2
         | TargetEncoding::Snorm8
-        | TargetEncoding::Unorm8x2 => vk::Filter::LINEAR,
+        | TargetEncoding::Unorm8x2
+        | TargetEncoding::Unorm16x2 => vk::Filter::LINEAR,
     }
 }
 
@@ -7327,6 +7331,31 @@ mod tests {
             [0x10, 0x20, 0x40, 0x80].repeat((width * height) as usize),
             "every pixel the word, red in the first byte"
         );
+    }
+
+    /// A two-channel `16_16` `UNORM` target (D871) hands back the words it was given: two
+    /// normalised 16-bit channels each, moved as they are held.
+    #[test]
+    fn a_sixteen_bit_pair_target_hands_back_its_words() {
+        if crate::compute::session().is_err() {
+            eprintln!("no Vulkan device: the 16-bit pair target is not exercised here");
+            return;
+        }
+        let (width, height) = (8_u32, 4_u32);
+        let words: Vec<u32> = (0..width * height)
+            .map(|i| 0x0001_FFFF_u32.wrapping_mul(i + 3) ^ (i << 9))
+            .collect();
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let resident = super::ResidentAttachment::create(
+            (width, height),
+            Some(&bytes),
+            [0.0; 4],
+            orbistoun_gpu::TargetEncoding::Unorm16x2,
+        )
+        .expect("an attachment");
+        let read = resident.read_back().expect("read back");
+        resident.destroy();
+        assert_eq!(read.bytes, bytes, "every word as it was given");
     }
 
     /// A two-channel `32_32` integer target (D870) hands back the pairs of words it was given, every
