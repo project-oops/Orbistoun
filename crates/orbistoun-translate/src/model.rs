@@ -57,6 +57,7 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample",
     "image_sample_l",
     "image_sample_lz",
+    "image_sample_lz_o",
     "image_sample_c_lz",
     "image_sample_c",
     "image_store",
@@ -2715,8 +2716,8 @@ fn memory_instruction<M: Model + ?Sized>(
         }
 
         // A texture sample or fetch; the descriptor rules are D690's.
-        "image_sample_lz" | "image_sample_c_lz" | "image_sample_c" | "image_sample"
-        | "image_sample_l" | "image_load" | "image_load_mip" => {
+        "image_sample_lz" | "image_sample_lz_o" | "image_sample_c_lz" | "image_sample_c"
+        | "image_sample" | "image_sample_l" | "image_load" | "image_load_mip" => {
             image_sample(model, instruction, name)
         }
         // A store, the one image instruction that needs its own binding, since nothing writes a
@@ -8967,6 +8968,9 @@ struct ImageAccess {
     halves: Halves,
     /// What shape of image it samples.
     shape: ImageShape,
+    /// Whether the first address register holds texel offsets, ahead of the coordinates: the
+    /// `_o` forms.
+    offset: bool,
 }
 
 /// The shape of image an access samples, beyond a flat image's.
@@ -9084,6 +9088,28 @@ fn address_element<M: Model + ?Sized>(
     Ok(model.binary(op::BITWISE_AND, shifted, low))
 }
 
+/// How an access's address is laid out, refusing what is not translated: a sample's position in
+/// sixteen-bit halves, and texel offsets anywhere but a flat, uncompared, full-width sample. Whether
+/// the first address register holds texel offsets, ahead of everything else (ACO's MIMG address
+/// order: offset, bias, compare, coordinates): the `_o` forms.
+fn address_form(
+    name: &str,
+    shape: ImageShape,
+    (a16, fetches): (bool, bool),
+) -> Result<bool, &'static str> {
+    if a16 && !fetches && name != "image_store" {
+        return Err("a sample whose position is sixteen-bit halves, which is not translated");
+    }
+    let offset = name.ends_with("_o");
+    if offset && (shape.cube || shape.volume || shape.compare || a16 || fetches) {
+        return Err(concat!(
+            "a sample with texel offsets of a cube, a volume, a compare or sixteen-bit positions ",
+            "is not translated"
+        ));
+    }
+    Ok(offset)
+}
+
 /// Reads a texture access's operands, refusing anything it cannot use.
 ///
 /// The operand at index three differs: a sample names a sampler there and a fetch its mask. The
@@ -9128,14 +9154,10 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             "registers it uses is not modelled"
         )));
     }
-    if a16 && !fetches && name != "image_store" {
-        return Err(refuse(
-            "a sample whose position is sixteen-bit halves, which is not translated",
-        ));
-    }
     // The level from a register rather than named: the last address element, after the coordinates,
     // as compiled levelled samples place it, and as `image_load_mip` takes its integer level.
     let levelled = matches!(name, "image_sample_l" | "image_load_mip");
+    let offset = address_form(name, shape, (a16, fetches)).map_err(refuse)?;
 
     let (Some(Operand::Vector(destination)), Some(Operand::Vector(address))) =
         (instruction.operands.first(), instruction.operands.get(1))
@@ -9176,7 +9198,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     }
 
     // The address registers and the components coming back both have to fit.
-    let used = address_registers(levelled, a16, shape);
+    let used = address_registers(levelled, a16, shape) + u32::from(offset);
     let addresses = address_list(instruction, u32::from(*address), used).ok_or_else(|| {
         refuse(concat!(
             "an image access whose address registers run past the register file, or whose ",
@@ -9203,6 +9225,7 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
             data: d16,
         },
         shape,
+        offset,
     })
 }
 
@@ -9293,6 +9316,7 @@ fn image_sample<M: Model + ?Sized>(
         levelled,
         halves,
         shape,
+        offset,
     } = image_access(instruction, name)?;
     let (cube, compare, a16) = (shape.cube, shape.compare, halves.address);
 
@@ -9305,10 +9329,12 @@ fn image_sample<M: Model + ?Sized>(
         ));
     }
 
+    // Ahead of the coordinates sit the texel offsets, where the instruction has them.
+    let skip = u32::from(offset);
     // Which sampling instruction this is: `lz` is level zero named, `_l` takes the level from a
     // register, and the plain form lets the implementation choose from derivatives, a different
     // SPIR-V instruction with different operands.
-    let named_level = name.ends_with("_lz") || levelled;
+    let named_level = name.ends_with("_lz") || name.ends_with("_lz_o") || levelled;
 
     let zero = model.constant(0);
     let constant_level = model.as_float(zero);
@@ -9330,7 +9356,7 @@ fn image_sample<M: Model + ?Sized>(
             instruction,
             (&addresses, a16),
             (&texture, fetches, cube),
-            lane,
+            (skip, lane),
         )?;
         if compare {
             compare_sample(
@@ -9348,43 +9374,19 @@ fn image_sample<M: Model + ?Sized>(
         // program on an unchecked aliasing assumption.
         let bound = builder.id();
         builder.function(op::LOAD, &[texture.sampled.0, bound.0, texture.variable.0]);
-        let texel = builder.id();
-        if fetches {
-            // A fetch takes an image, so the bound pair is unwrapped first. Vulkan requires a level
-            // for a non-multisampled image: zero for `image_load`, and the guest's own for
-            // `image_load_mip`, counted from the bound image's first level as the descriptor
-            // counts from its base level.
-            let image = builder.id();
-            builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
-            builder.function(
-                op::IMAGE_FETCH,
-                &[
-                    texture.result.0,
-                    texel.0,
-                    image.0,
-                    coordinate.0,
-                    image_operands::LOD,
-                    level.0,
-                ],
-            );
-        } else if named_level {
-            builder.function(
-                op::IMAGE_SAMPLE_EXPLICIT_LOD,
-                &[
-                    texture.result.0,
-                    texel.0,
-                    bound.0,
-                    coordinate.0,
-                    image_operands::LOD,
-                    level.0,
-                ],
-            );
+        let coordinate = if offset {
+            let offsets = address_element(model, instruction, (&addresses, a16), 0, lane)?;
+            offset_coordinate(model, &texture, bound, (coordinate, offsets))
         } else {
-            builder.function(
-                op::IMAGE_SAMPLE_IMPLICIT_LOD,
-                &[texture.result.0, texel.0, bound.0, coordinate.0],
-            );
-        }
+            coordinate
+        };
+        let texel = sample_or_fetch(
+            model,
+            &texture,
+            (bound, coordinate),
+            (fetches, named_level),
+            level,
+        );
 
         write_components(
             model,
@@ -9460,11 +9462,11 @@ fn sample_coordinate<M: Model + ?Sized>(
     instruction: &Instruction,
     (addresses, a16): (&[u32; MAX_ADDRESS_REGISTERS], bool),
     (texture, fetches, cube): (&Texture, bool, bool),
-    lane: u32,
+    (skip, lane): (u32, u32),
 ) -> Result<Id, TranslateError> {
     // Two dimensions from consecutive elements; the dimensionality field was checked. A compare's
-    // reference is ahead of them (D816).
-    let first = u32::from(texture.shape.compare);
+    // reference is ahead of them (D816), and texel offsets ahead of that (`skip`).
+    let first = skip + u32::from(texture.shape.compare);
     let across = address_element(model, instruction, (addresses, a16), first, lane)?;
     let down = address_element(model, instruction, (addresses, a16), first + 1, lane)?;
     let components = if cube {
@@ -9503,6 +9505,115 @@ fn sample_coordinate<M: Model + ?Sized>(
     operands.extend(components.iter().map(|component| component.0));
     builder.function(op::COMPOSITE_CONSTRUCT, &operands);
     Ok(coordinate)
+}
+
+/// The texel a sample or a fetch answers, from the bound image at `coordinate`: a fetch at an
+/// integer level, a sample at a named level, or one whose level the implementation chooses.
+fn sample_or_fetch<M: Model + ?Sized>(
+    model: &mut M,
+    texture: &Texture,
+    (bound, coordinate): (Id, Id),
+    (fetches, named_level): (bool, bool),
+    level: Id,
+) -> Id {
+    let builder = model.builder();
+    let texel = builder.id();
+    if fetches {
+        // A fetch takes an image, so the bound pair is unwrapped first. Vulkan requires a level
+        // for a non-multisampled image: zero for `image_load`, and the guest's own for
+        // `image_load_mip`, counted from the bound image's first level as the descriptor
+        // counts from its base level.
+        let image = builder.id();
+        builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+        builder.function(
+            op::IMAGE_FETCH,
+            &[
+                texture.result.0,
+                texel.0,
+                image.0,
+                coordinate.0,
+                image_operands::LOD,
+                level.0,
+            ],
+        );
+    } else if named_level {
+        builder.function(
+            op::IMAGE_SAMPLE_EXPLICIT_LOD,
+            &[
+                texture.result.0,
+                texel.0,
+                bound.0,
+                coordinate.0,
+                image_operands::LOD,
+                level.0,
+            ],
+        );
+    } else {
+        builder.function(
+            op::IMAGE_SAMPLE_IMPLICIT_LOD,
+            &[texture.result.0, texel.0, bound.0, coordinate.0],
+        );
+    }
+    texel
+}
+
+/// A flat sample's normalised position moved by the texel offsets an `_o` form carries: the low
+/// six bits across and bits 13:8 down, each signed, in texels of the level sampled - level zero,
+/// the only one an offset form is translated at - so each is divided by that level's size before it
+/// is added. A host sample takes only a constant offset, and the guest's is a register.
+fn offset_coordinate<M: Model + ?Sized>(
+    model: &mut M,
+    texture: &Texture,
+    bound: Id,
+    (coordinate, offsets): (Id, Id),
+) -> Id {
+    let twenty_six = model.constant(26);
+    let eight = model.constant(8);
+    let signed_six = |model: &mut M, value| {
+        let raised = model.binary(op::SHIFT_LEFT_LOGICAL, value, twenty_six);
+        model.binary(op::SHIFT_RIGHT_ARITHMETIC, raised, twenty_six)
+    };
+    let across = signed_six(model, offsets);
+    let shifted = model.binary(op::SHIFT_RIGHT_LOGICAL, offsets, eight);
+    let down = signed_six(model, shifted);
+    let zero = model.constant(0);
+    let f32_type = model.f32_type();
+    let builder = model.builder();
+    builder.header(op::CAPABILITY, &[orbistoun_spirv::capability::IMAGE_QUERY]);
+    let image = builder.id();
+    builder.function(op::IMAGE, &[texture.image.0, image.0, bound.0]);
+    let size = builder.id();
+    builder.function(
+        op::IMAGE_QUERY_SIZE_LOD,
+        &[texture.texel.0, size.0, image.0, zero.0],
+    );
+    let size_f = builder.id();
+    builder.function(
+        op::CONVERT_U_TO_F,
+        &[texture.coordinate.0, size_f.0, size.0],
+    );
+    let mut texels = [Id(0); 2];
+    for (slot, value) in texels.iter_mut().zip([across, down]) {
+        let float = builder.id();
+        builder.function(op::CONVERT_S_TO_F, &[f32_type.0, float.0, value.0]);
+        *slot = float;
+    }
+    let moved = builder.id();
+    builder.function(
+        op::COMPOSITE_CONSTRUCT,
+        &[texture.coordinate.0, moved.0, texels[0].0, texels[1].0],
+    );
+    let fraction = builder.id();
+    builder.function(
+        op::FDIV,
+        &[texture.coordinate.0, fraction.0, moved.0, size_f.0],
+    );
+    let shifted = builder.id();
+    builder.function(
+        op::FADD,
+        &[texture.coordinate.0, shifted.0, coordinate.0, fraction.0],
+    );
+    shifted
 }
 
 /// The direction a cube sample's address names (D811). The hardware takes a face's two coordinates,

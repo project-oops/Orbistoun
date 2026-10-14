@@ -175,6 +175,61 @@ fn the_sampling_instructions_decode_to_what_they_were_written_as() {
     }
 }
 
+/// A level-zero sample with texel offsets reads the texel its offsets move to: the coordinate
+/// interpolated into `v[1:2]`, one texel across in `v0` (`image_sample_lz_o v[4:7], v[0:2], ...`,
+/// MIMG opcode 55, as PPSA21564's pixel shader samples). Moved one texel right, the left quadrants
+/// read the right texels.
+#[test]
+fn a_sample_moved_a_texel_reads_the_texel_it_moves_to() {
+    if !device_or_skip("a_sample_moved_a_texel_reads_the_texel_it_moves_to") {
+        return;
+    }
+    let mut bytes = Vec::new();
+    // v1 <- attr0.x, v2 <- attr0.y; v0 <- 1, one texel across and none down.
+    for (register, channel) in [(1u32, 0u32), (2, 1)] {
+        bytes.extend((0xC800_0000u32 | (register << 18) | (channel << 8)).to_le_bytes());
+    }
+    bytes.extend(0x7E00_0281u32.to_le_bytes());
+    for word in [
+        0xF000_0000 | (55 << 18) | (0xF << 8) | TWO_DIMENSIONAL,
+        mimg_operands(0, 4, IMAGE_DESCRIPTOR, SAMPLER_DESCRIPTOR),
+        0xF800_000F,
+        0x0706_0504,
+        0xBF81_0000,
+    ] {
+        bytes.extend(word.to_le_bytes());
+    }
+    let encodings = EncodingTable::builtin().expect("the shipped encoding table");
+    let operands = OperandTable::builtin().expect("the shipped operand table");
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _) = translate_for(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        Stage::Fragment,
+        Window::default(),
+    )
+    .expect("the moved sample translated");
+    let corners = [
+        [0.0, 0.0, 0.0, 1.0],
+        [2.0, 0.0, 0.0, 1.0],
+        [0.0, 2.0, 0.0, 1.0],
+    ];
+    let vertex = interpolated_vertex_module(corners);
+    let drawn = draw_with_texture(&vertex, &module, [1.0, 0.0, 1.0, 1.0], (8, 8), (&TEXELS, 2))
+        .expect("the draw ran");
+    assert_eq!(
+        drawn.at(1, 1),
+        Some(EXPECTED[1]),
+        "texel 0 moved right is texel 1"
+    );
+    assert_eq!(
+        drawn.at(1, 6),
+        Some(EXPECTED[3]),
+        "texel 2 moved right is texel 3"
+    );
+}
+
 /// A translated texture sample reads the texel its coordinate names.
 ///
 /// The oracle's four-quadrant claim (bound and read, coordinate reaches the sample, rows the right

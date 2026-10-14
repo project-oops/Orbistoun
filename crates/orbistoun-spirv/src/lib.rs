@@ -189,6 +189,8 @@ pub mod op {
     /// A descriptor binds image and sampler together and a fetch takes the image alone, so reading
     /// a texel needs no binding of its own.
     pub const IMAGE: u16 = 100;
+    /// `OpImageQuerySizeLod`: an image's extent at a level, which needs the `ImageQuery` capability.
+    pub const IMAGE_QUERY_SIZE_LOD: u16 = 103;
     /// Writes one texel of a storage image by its integer coordinate.
     ///
     /// What a guest's `image_store` is. It has no result: an image write is an effect.
@@ -436,6 +438,8 @@ pub mod capability {
     /// From `SPV_KHR_float_controls`. Without it a driver may assume no infinity or NaN occurs and
     /// fold them away; the guest's hardware keeps them.
     pub const SIGNED_ZERO_INF_NAN_PRESERVE: u32 = 4466;
+    /// Querying an image's size, for a translated sample whose texel offsets are scaled by it.
+    pub const IMAGE_QUERY: u32 = 50;
     /// Invocations may ask about their subgroup at all.
     pub const GROUP_NON_UNIFORM: u32 = 61;
     /// Invocations may take a ballot across their subgroup.
@@ -2558,6 +2562,14 @@ static SHAPES: &[ShapeEntry] = &[
     ),
     // Result type, result, and the sampled image the image is taken out of.
     (op::IMAGE, Some(1), &[0, 2], None, RestStride::Every),
+    // Result type, result, the image and the level whose size it asks.
+    (
+        op::IMAGE_QUERY_SIZE_LOD,
+        Some(1),
+        &[0, 2, 3],
+        None,
+        RestStride::Every,
+    ),
     // No result: an image write is an effect. The image, coordinate and texel are all identifiers,
     // so the whole instruction is `rest` from zero.
     (op::IMAGE_WRITE, None, &[], Some(0), RestStride::Every),
