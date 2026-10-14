@@ -177,6 +177,24 @@ fn dispatch_refusal(
     )
 }
 
+/// A compute program the translator refused: kept beside the report as a refused shader is, and
+/// the refusal naming the instruction it refused and every opcode the program holds unnamed.
+fn compute_refusal(
+    error: &orbistoun_translate::TranslateError,
+    (decoded, encodings): (&orbistoun_shader::Decode, &EncodingTable),
+    (address, program): (u64, &[u8]),
+) -> String {
+    keep_refused_shader(address, program);
+    let named = refused_instruction(error)
+        .and_then(|offset| instruction_text(decoded, encodings, offset))
+        .map(|text| format!(" ({text})"))
+        .unwrap_or_default();
+    with_unnamed_census(
+        format!("the compute program at {address:#x} could not be translated: {error}{named}"),
+        (decoded, encodings),
+    )
+}
+
 /// `why`, followed by every opcode of the program the tables give no name, where there is one:
 /// what one request to record them lists.
 fn with_unnamed_census(
@@ -240,6 +258,37 @@ mod refusal_tests {
         assert_eq!(
             super::with_unnamed_census("refused".to_owned(), (&decoded, &encodings)),
             "refused"
+        );
+    }
+
+    /// A compute program the translator refuses is named by the instruction it refused, words and
+    /// all, and kept beside the report, as a refused shader is.
+    #[test]
+    fn a_refused_compute_program_names_its_instruction_and_is_kept() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // v_mov_b32 v0, 0; s_endpgm.
+        let words = [0x7e00_0280_u32, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let error = orbistoun_translate::TranslateError::Unsupported {
+            offset: 0,
+            detail: "refused",
+        };
+        let why = super::compute_refusal(&error, (&decoded, &encodings), (0x7400_1230, &bytes));
+        assert!(
+            why.starts_with("the compute program at 0x74001230 could not be translated: "),
+            "{why}"
+        );
+        assert!(
+            why.ends_with("(`v_mov_b32_e32 v0, 0`, word 0x7e000280)"),
+            "{why}"
+        );
+        assert!(
+            super::refused_shader_programs()
+                .iter()
+                .any(|(address, kept)| *address == 0x7400_1230 && *kept == bytes),
+            "the program is kept"
         );
     }
 }
@@ -1895,12 +1944,7 @@ impl Pipeline {
                 placed,
                 user_data,
             )
-            .map_err(|e| {
-                with_unnamed_census(
-                    format!("the compute program at {address:#x} could not be translated: {e}"),
-                    (decoded, &self.encodings),
-                )
-            })?;
+            .map_err(|e| compute_refusal(&e, (decoded, &self.encodings), (address, program)))?;
             let sources = (translated.textures.clone(), translated.storage);
             let hash = crate::content_hash(&translated.module);
             let module = (std::sync::Arc::from(translated.module), hash);
