@@ -209,6 +209,7 @@ pub(crate) fn cmd_run(
                     limit_seconds: limit,
                     input,
                     frame_every,
+                    staged,
                 },
             );
         }

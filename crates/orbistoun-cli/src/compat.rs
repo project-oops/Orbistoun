@@ -201,6 +201,8 @@ pub(crate) struct RunTaken<'a> {
     pub(crate) input: Option<&'a std::path::Path>,
     /// How often it kept a frame.
     pub(crate) frame_every: u64,
+    /// Whether it ran staged (D722).
+    pub(crate) staged: bool,
 }
 
 /// `compat reproduce` - repeat a recorded run and remake its sheet of frames (D736), for one title
@@ -743,7 +745,7 @@ fn run_with_budget(
         calls,
         None,
         (symbols_db, inputs.is_file().then_some(inputs.as_path())),
-        (false, false),
+        (reproduce.staged, false),
     )?;
     Ok((reproduce, module))
 }
@@ -798,8 +800,10 @@ fn note_reproduction(
             frame_every: DEFAULT_FRAME_EVERY,
             sheet_frames: orbistoun_overrides::DEFAULT_SHEET_FRAMES,
             frames: orbistoun_overrides::FramesKept::Local,
+            staged: false,
         });
     reproduce.module_sha256 = Some(module_sha256(&bytes));
+    reproduce.staged = taken.staged;
     reproduce.limit_seconds = taken.limit_seconds;
     reproduce.frame_every = taken.frame_every;
     file.reproduce = Some(reproduce.clone());
@@ -1482,6 +1486,7 @@ mod tests {
             limit_seconds: 45,
             input,
             frame_every: 30,
+            staged: true,
         };
         super::note_reproduction(&dir, "T0001", &module, &taken(Some(&input)), &paths)
             .expect("noted");
@@ -1495,6 +1500,7 @@ mod tests {
         );
         assert_eq!((reproduce.limit_seconds, reproduce.frame_every), (45, 30));
         assert_eq!(reproduce.frames, FramesKept::Local, "local until marked");
+        assert!(reproduce.staged, "a staged run is reproduced staged (D722)");
         let beside = crate::records::title_dir(&dir, "T0001");
         assert!(
             beside.join(INPUTS_FILE).is_file(),

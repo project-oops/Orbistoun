@@ -778,6 +778,9 @@ fn render_reproduce(out: &mut String, row: &Row) {
         .map_or_else(|| "_any - not pinned_".to_owned(), |sha| format!("`{sha}`"));
     let _ = writeln!(out, "| Title build | {build} |");
     let _ = writeln!(out, "| Limit | {} s |", reproduce.limit_seconds);
+    if reproduce.staged {
+        let _ = writeln!(out, "| Staged | yes - its `/app0` is writable (D722) |");
+    }
     let _ = writeln!(
         out,
         "| Frames | one kept every {} flips; {} shown, evenly across the run |",
@@ -890,6 +893,10 @@ pub struct Reproduce {
     /// Whether the sheet is committed beside the record, or kept in the local title library.
     #[serde(default)]
     pub frames: FramesKept,
+    /// Whether the run was made staged, with the title's `/app0` writable (D722): a title that
+    /// writes beside itself, as a port's log does, gets no further from a read-only image.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged: bool,
 }
 
 /// How many frames a sheet shows when its record does not say.
@@ -2457,6 +2464,7 @@ reason = "..."
             frame_every: 30,
             sheet_frames: 10,
             frames,
+            staged: false,
         };
         let row = |screenshot: Option<&str>, frames| Row {
             name: None,
