@@ -803,7 +803,7 @@ enum Unprepared {
 type FormatWords = std::sync::Arc<[orbistoun_translate::draw_buffers::BufferSource]>;
 
 /// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
-type PlainKey = (u32, u64, WindowSpace, u32);
+type PlainKey = (u32, u64, WindowSpace, u32, Option<u32>);
 
 /// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
 /// the reason they gave; what each geometry made; and the refusals already recorded.
@@ -1587,6 +1587,7 @@ impl Pipeline {
             buffer_formats: formats,
             flat_twins: None,
             discard_vertex_exports: state.vertex_streamout,
+            position_vectors: None,
             saturated: UNSATURATED,
             local_words: state.local_words,
             program_address: None,
@@ -3084,8 +3085,10 @@ impl Pipeline {
                 held.count = at_draw.count;
                 held.dx10_clamp = at_draw.dx10_clamp;
                 held.local_words = at_draw.local_words;
+                held.position_vectors = at_draw.position_vectors;
             }
             written.extend(self.user_data.iter().map(|layout| Some(layout.count)));
+            written.push(self.user_data[0].position_vectors);
         }
         if with_words {
             let words = stage_user_data(sweep, at, 1);
@@ -3097,15 +3100,15 @@ impl Pipeline {
     }
 
     /// The key a module prepared for no particular draw is held under in a submission: its stage,
-    /// address and position space, and the user-data count it was translated for, since a stream
-    /// can give one program two counts.
+    /// address and position space, the user-data count it was translated for, since a stream
+    /// can give one program two counts, and its further position exports' routing (D867).
     fn plain_key(&self, stage: ShaderStage, address: u64, window_space: WindowSpace) -> PlainKey {
-        let count = match stage {
-            ShaderStage::Vertex => self.user_data[0].count,
-            ShaderStage::Fragment => self.user_data[1].count,
-            ShaderStage::Compute => 0,
+        let (count, routing) = match stage {
+            ShaderStage::Vertex => (self.user_data[0].count, self.user_data[0].position_vectors),
+            ShaderStage::Fragment => (self.user_data[1].count, None),
+            ShaderStage::Compute => (0, None),
         };
-        (stage as u32, address, window_space, count)
+        (stage as u32, address, window_space, count, routing)
     }
 
     /// Whether any module translated so far samples through a sampler it loaded, so a draw's pixel
@@ -6345,6 +6348,8 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             count: counts[0],
             block_offset: 0,
             dx10_clamp: clamps[0],
+            // What the primitive shader's further position exports are (D867).
+            position_vectors: last(crate::registers::PA_CL_VS_OUT_CNTL),
             pixel_inputs: None,
             input_controls: None,
             compute: None,
@@ -6365,6 +6370,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             count: counts[1],
             block_offset: USER_DATA_STAGE_WORDS,
             dx10_clamp: clamps[1],
+            position_vectors: None,
             // Set by `set_environment` for every backend, with the input controls.
             pixel_inputs: None,
             input_controls: None,
@@ -6451,6 +6457,10 @@ fn layout_salt(user_data: &UserData) -> u64 {
     (u64::from(user_data.count) << 56 | u64::from(user_data.first_register) << 48)
         ^ local_words_salt(user_data.local_words)
         ^ program_address_salt(user_data.program_address)
+        // The further position exports' routing (D867).
+        ^ user_data
+            .position_vectors
+            .map_or(0, |cntl| 0x504f_5356_0000_0000 ^ u64::from(cntl))
 }
 
 /// `LDS_SIZE` of `SPI_SHADER_PGM_RSRC2_GS`, as `(first bit, bits)`: bits 19-26 (`gfx103.json`).

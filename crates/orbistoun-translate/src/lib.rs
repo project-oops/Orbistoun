@@ -817,6 +817,7 @@ mod tests {
                     buffer_formats: None,
                     flat_twins: None,
                     discard_vertex_exports: false,
+                    position_vectors: None,
                     saturated: [[false; 2]; crate::wavefront::MAX_TEXTURES],
                     local_words: None,
                     program_address: None,

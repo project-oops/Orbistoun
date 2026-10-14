@@ -290,6 +290,15 @@ struct MeshOutputs {
     plane_block: (Id, Id),
     /// A layered module's layers (D859): `None` for one that exports none.
     layers: Option<MeshLayers>,
+    /// A module that exports a point size (D867): a workgroup word per vertex slot holding the
+    /// size's bits, one until the vertex exports its own. `None` for one that exports none.
+    point_sizes: Option<Id>,
+    /// A module whose draw clips by exported distances (D867): workgroup words holding each
+    /// vertex's, [`CLIP_DISTANCES`] a vertex slot, zero until it exports them; `None` for one that
+    /// clips only by the user planes.
+    distances: Option<Id>,
+    /// Which exported distances clip, one bit each (`PA_CL_VS_OUT_CNTL.CLIP_DIST_ENA_*`).
+    clip_mask: u8,
 }
 
 /// What a module that exports a layer declares (D859): each primitive's cull flag, and a workgroup
@@ -337,6 +346,16 @@ fn declare_mesh_layers(
         words,
     })
 }
+
+/// The per-vertex block member a module that exports a point size writes it to (D867), after the
+/// position and the clip distances.
+const POINT_SIZE_MEMBER: u32 = 2;
+
+/// The clip and cull distances a vertex can export: four in each of `pos2` and `pos3`'s vectors.
+pub const CLIP_DISTANCES: u32 = 8;
+
+/// The bits of `1.0`, the size a vertex that exports none is drawn at.
+const ONE_BITS: u32 = 0x3f80_0000;
 
 /// The user clip planes a module carries, `PA_CL_UCP_0` to `_5`.
 pub const CLIP_PLANES: usize = 6;
@@ -500,6 +519,13 @@ pub struct UserData {
     /// (`DX_RASTERIZATION_KILL`), which keeps only what it stores to the streamout buffers (D861).
     #[serde(default)]
     pub discard_vertex_exports: bool,
+    /// The draw's `PA_CL_VS_OUT_CNTL`, which says what a primitive shader's `pos1` to `pos3`
+    /// exports are (D867): the misc vector where `VS_OUT_MISC_VEC_ENA` is set, then clip and cull
+    /// distances 0-3 and 4-7 where `VS_OUT_CCDIST0/1_VEC_ENA` are, in that order, and which
+    /// distances clip or cull. `None` where it is not known, which takes `pos1` for the misc
+    /// vector and refuses `pos2` and `pos3`.
+    #[serde(default)]
+    pub position_vectors: Option<u32>,
     /// For each texture slot a pixel shader samples, which coordinates, across then down, it
     /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
     #[serde(default)]
@@ -1325,12 +1351,13 @@ fn declare_depth_output(b: &mut Builder, f32_type: Id, variable: Id) -> (Id, Id)
 /// clip distances are, and the push-constant block of six planes of four `float`s the draw's planes
 /// arrive in, `4 * plane + axis` from offset zero. Answers the type, the block's variable and the
 /// pointer to one of its `float`s; the planes are loaded at entry.
-fn declare_clip_planes(b: &mut Builder, f32_type: Id, u32_type: Id) -> (Id, (Id, Id)) {
+fn declare_clip_planes(
+    b: &mut Builder,
+    (f32_type, u32_type): (Id, Id),
+    length: u32,
+) -> (Id, (Id, Id)) {
     let plane_count = b.id();
-    b.declare(
-        op::CONSTANT,
-        &[u32_type.0, plane_count.0, CLIP_PLANES as u32],
-    );
+    b.declare(op::CONSTANT, &[u32_type.0, plane_count.0, length]);
     let distances = b.id();
     b.declare(op::TYPE_ARRAY, &[distances.0, f32_type.0, plane_count.0]);
     let words = b.id();
@@ -1349,6 +1376,68 @@ fn declare_clip_planes(b: &mut Builder, f32_type: Id, u32_type: Id) -> (Id, (Id,
     b.declare(op::TYPE_POINTER, &[element_ptr.0, push, f32_type.0]);
     b.declare(op::VARIABLE, &[block_ptr.0, variable.0, push]);
     (distances, (variable, element_ptr))
+}
+
+/// Declares `words`, a workgroup array of `count` words.
+fn declare_workgroup_words(b: &mut Builder, u32_type: Id, words: Id, count: u32) {
+    let length = b.id();
+    b.declare(op::CONSTANT, &[u32_type.0, length.0, count]);
+    let (array, array_ptr) = (b.id(), b.id());
+    b.declare(op::TYPE_ARRAY, &[array.0, u32_type.0, length.0]);
+    b.declare(op::TYPE_POINTER, &[array_ptr.0, WORKGROUP, array.0]);
+    b.declare(op::VARIABLE, &[array_ptr.0, words.0, WORKGROUP]);
+}
+
+/// Declares the per-vertex block's type: the position, the clip distances - each user plane's
+/// (D830), and every exported one's where the draw clips by any - and, member two where the module
+/// exports one, the point size (D867), with the workgroup words exported sizes and distances are
+/// kept in until the vertices are written. Answers the user planes' push-constant block.
+fn declare_vertex_block(
+    b: &mut Builder,
+    per_vertex: Id,
+    (f32_type, u32_type, vec4): (Id, Id, Id),
+    reserved: &MeshReserved,
+) -> (Id, Id) {
+    // Member one, every vertex's distance inside each user clip plane (D830).
+    b.annotate(
+        op::MEMBER_DECORATE,
+        &[
+            per_vertex.0,
+            1,
+            decoration::BUILT_IN,
+            built_in::CLIP_DISTANCE,
+        ],
+    );
+    // Every exported distance's place, where the draw clips by any (D867); the user planes' alone
+    // otherwise.
+    let length = if reserved.distances.is_some() {
+        CLIP_DISTANCES
+    } else {
+        CLIP_PLANES as u32
+    };
+    let (distances, plane_block) = declare_clip_planes(b, (f32_type, u32_type), length);
+    if let Some((_, words)) = reserved.distances {
+        declare_workgroup_words(b, u32_type, words, MESH_SLOTS * CLIP_DISTANCES);
+    }
+    if let Some(words) = reserved.point_sizes {
+        b.annotate(
+            op::MEMBER_DECORATE,
+            &[
+                per_vertex.0,
+                POINT_SIZE_MEMBER,
+                decoration::BUILT_IN,
+                built_in::POINT_SIZE,
+            ],
+        );
+        b.declare(
+            op::TYPE_STRUCT,
+            &[per_vertex.0, vec4.0, distances.0, f32_type.0],
+        );
+        declare_workgroup_words(b, u32_type, words, MESH_SLOTS);
+    } else {
+        b.declare(op::TYPE_STRUCT, &[per_vertex.0, vec4.0, distances.0]);
+    }
+    plane_block
 }
 
 /// Declares everything a mesh module writes: the vertices, the indices, and one array per exported
@@ -1386,17 +1475,6 @@ fn declare_mesh_outputs(
         op::MEMBER_DECORATE,
         &[per_vertex.0, 0, decoration::BUILT_IN, built_in::POSITION],
     );
-    // Member one, every vertex's distance inside each user clip plane (D830).
-    b.annotate(
-        op::MEMBER_DECORATE,
-        &[
-            per_vertex.0,
-            1,
-            decoration::BUILT_IN,
-            built_in::CLIP_DISTANCE,
-        ],
-    );
-    let (distances, plane_block) = declare_clip_planes(b, f32_type, u32_type);
     b.annotate(
         op::DECORATE,
         &[
@@ -1409,7 +1487,7 @@ fn declare_mesh_outputs(
         b.annotate(op::DECORATE, &[id.0, decoration::LOCATION, *location]);
     }
 
-    b.declare(op::TYPE_STRUCT, &[per_vertex.0, vec4.0, distances.0]);
+    let plane_block = declare_vertex_block(b, per_vertex, (f32_type, u32_type, vec4), reserved);
     let vertex_array = b.id();
     let vertex_array_ptr = b.id();
     b.declare(op::TYPE_ARRAY, &[vertex_array.0, per_vertex.0, slots.0]);
@@ -1467,6 +1545,9 @@ fn declare_mesh_outputs(
         planes: [[Id(0); 4]; CLIP_PLANES],
         plane_block,
         layers: None,
+        point_sizes: reserved.point_sizes,
+        distances: reserved.distances.map(|(_, words)| words),
+        clip_mask: reserved.distances.map_or(0, |(mask, _)| mask),
     })
 }
 
@@ -1484,12 +1565,24 @@ struct MeshReserved {
     /// For a module that exports a layer (D859): the per-primitive cull flags, and the workgroup
     /// words each vertex's layer is kept in.
     layers: Option<(Id, Id)>,
+    /// For a module that exports a point size (D867): the workgroup words each vertex's size is
+    /// kept in.
+    point_sizes: Option<Id>,
+    /// For a module whose draw clips by exported distances (D867): which, one bit each, and the
+    /// workgroup words each vertex's distances are kept in, [`CLIP_DISTANCES`] a vertex.
+    distances: Option<(u8, Id)>,
 }
 
 impl MeshReserved {
     /// Reserves ids for a mesh module's outputs, or nothing at another stage; `layered` for one
-    /// that exports a layer.
-    fn new(b: &mut Builder, stage: Stage, locations: &[u32], layered: bool) -> Self {
+    /// that exports a layer, `sized` for one that exports a point size, and `clip_mask` the
+    /// exported distances its draw clips by.
+    fn new(
+        b: &mut Builder,
+        stage: Stage,
+        locations: &[u32],
+        ((layered, sized), clip_mask): ((bool, bool), u8),
+    ) -> Self {
         if stage != Stage::Mesh {
             return Self {
                 vertices: Id(0),
@@ -1497,6 +1590,8 @@ impl MeshReserved {
                 parameters: BTreeMap::new(),
                 staged: None,
                 layers: None,
+                point_sizes: None,
+                distances: None,
             };
         }
         Self {
@@ -1508,6 +1603,8 @@ impl MeshReserved {
                 .collect(),
             staged: Some(StagedOutputs::reserve(b, locations)),
             layers: layered.then(|| (b.id(), b.id())),
+            point_sizes: sized.then(|| b.id()),
+            distances: (clip_mask != 0).then(|| (clip_mask, b.id())),
         }
     }
 
@@ -1524,6 +1621,8 @@ impl MeshReserved {
                 .iter()
                 .flat_map(|(cull, words)| [cull.0, words.0]),
         );
+        ids.extend(self.point_sizes.iter().map(|words| words.0));
+        ids.extend(self.distances.iter().map(|(_, words)| words.0));
         ids
     }
 
@@ -1848,6 +1947,8 @@ pub struct Wavefront<'a> {
     flat_twins: Option<FlatTwins>,
     /// Whether position and parameter exports are dropped ([`UserData::discard_vertex_exports`]).
     discard_vertex_exports: bool,
+    /// The draw's position-vector routing ([`UserData::position_vectors`]).
+    position_vectors: Option<u32>,
     /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
     integer_images: [bool; 2],
     /// The coordinates each texture slot's samples saturate (D743).
@@ -2469,7 +2570,7 @@ type StageContext<'b> = (
     Window,
     UserData,
     &'b crate::draw_buffers::DrawBuffers,
-    (bool, bool, u8, bool),
+    (bool, bool, u8, (bool, bool)),
 );
 
 impl Wavefront<'_> {
@@ -2545,7 +2646,7 @@ impl<'a> Wavefront<'a> {
                 Window::default(),
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
-                (false, false, 0, false),
+                (false, false, 0, (false, false)),
             ),
         )
     }
@@ -2583,7 +2684,9 @@ impl<'a> Wavefront<'a> {
         let input_ids =
             reserve_attribute_inputs(&mut b, stage, attributes, user_data.input_controls);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
-        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters, layered);
+        let clip_mask = model::exported_clip_distances(user_data.position_vectors);
+        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters, (layered, clip_mask));
+        let layered = layered.0;
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
         // A guest dispatch's group runs as one invocation per wave (D858).
         let waves = user_data
@@ -2692,6 +2795,7 @@ impl<'a> Wavefront<'a> {
             inputs,
             flat_twins: user_data.flat_twins,
             discard_vertex_exports: user_data.discard_vertex_exports,
+            position_vectors: user_data.position_vectors,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
             saturated: user_data.saturated,
             uvec4: None,
@@ -2800,6 +2904,27 @@ impl<'a> Wavefront<'a> {
                 let slot = self.lane_slot(lane);
                 let pointer = self.workgroup_word(layers.words, slot);
                 self.builder.function(op::STORE, &[pointer.0, zero.0]);
+            }
+        }
+        // A distance a vertex does not export clips nothing (D867).
+        if let Some(words) = self.mesh.as_ref().and_then(|mesh| mesh.distances) {
+            let zero = self.constant(0);
+            for lane in 0..self.modelled.min(MESH_SLOTS) {
+                let slot = self.lane_slot(lane);
+                for index in 0..CLIP_DISTANCES {
+                    let at = self.distance_word(slot, index);
+                    let pointer = self.workgroup_word(words, at);
+                    self.builder.function(op::STORE, &[pointer.0, zero.0]);
+                }
+            }
+        }
+        // A vertex that exports no point size is drawn at one (D867).
+        if let Some(words) = self.mesh.as_ref().and_then(|mesh| mesh.point_sizes) {
+            let one = self.constant(ONE_BITS);
+            for lane in 0..self.modelled.min(MESH_SLOTS) {
+                let slot = self.lane_slot(lane);
+                let pointer = self.workgroup_word(words, slot);
+                self.builder.function(op::STORE, &[pointer.0, one.0]);
             }
         }
     }
@@ -3394,6 +3519,21 @@ impl<'a> Wavefront<'a> {
             .function(op::CONTROL_BARRIER, &[scope.0, scope.0, semantics.0]);
     }
 
+    /// The index of vertex `slot`'s distance `index` among the exported distances' words (D867).
+    fn distance_word(&mut self, slot: Id, index: u32) -> Id {
+        let (stride, offset) = (
+            Self::constant(self, CLIP_DISTANCES),
+            Self::constant(self, index),
+        );
+        let scaled = self.builder.id();
+        self.builder
+            .function(op::IMUL, &[self.u32_type.0, scaled.0, slot.0, stride.0]);
+        let at = self.builder.id();
+        self.builder
+            .function(op::IADD, &[self.u32_type.0, at.0, scaled.0, offset.0]);
+        at
+    }
+
     /// A pointer to word `index` of a workgroup array.
     fn workgroup_word(&mut self, array: Id, index: Id) -> Id {
         let pointer = self.builder.id();
@@ -3609,7 +3749,41 @@ impl<'a> Wavefront<'a> {
     fn write_clip_distances(&mut self, mesh: &MeshOutputs, slot: Id, position: [Id; 4]) {
         let f32_type = self.f32_type;
         let member = Self::constant(self, 1);
+        // A distance the vertex exported, where its draw clips by it, stands in its plane's place
+        // (D867); one past the planes that it does not export clips nothing.
+        if let Some(words) = mesh.distances {
+            for index in 0..CLIP_DISTANCES {
+                let exported = mesh.clip_mask >> index & 1 != 0;
+                if !exported && index < CLIP_PLANES as u32 {
+                    continue;
+                }
+                let at = self.distance_word(slot, index);
+                let pointer = self.workgroup_word(words, at);
+                let (bits, distance) = (self.builder.id(), self.builder.id());
+                self.builder
+                    .function(op::LOAD, &[self.u32_type.0, bits.0, pointer.0]);
+                self.builder
+                    .function(op::BITCAST, &[f32_type.0, distance.0, bits.0]);
+                let element = Self::constant(self, index);
+                let target = self.builder.id();
+                self.builder.function(
+                    op::ACCESS_CHAIN,
+                    &[
+                        mesh.float_ptr.0,
+                        target.0,
+                        mesh.vertices.0,
+                        slot.0,
+                        member.0,
+                        element.0,
+                    ],
+                );
+                self.builder.function(op::STORE, &[target.0, distance.0]);
+            }
+        }
         for (index, plane) in (0u32..).zip(mesh.planes) {
+            if mesh.distances.is_some() && mesh.clip_mask >> index & 1 != 0 {
+                continue;
+            }
             let mut sum: Option<Id> = None;
             for (component, coefficient) in position.into_iter().zip(plane) {
                 let product = self.builder.id();
@@ -3645,6 +3819,30 @@ impl<'a> Wavefront<'a> {
             );
             self.builder.function(op::STORE, &[pointer.0, distance.0]);
         }
+    }
+
+    /// Writes vertex `slot`'s point size, from the word it exported to (D867).
+    fn copy_point_size(&mut self, mesh: &MeshOutputs, words: Id, slot: Id) {
+        let (u32_type, f32_type) = (self.u32_type, self.f32_type);
+        let pointer = self.workgroup_word(words, slot);
+        let (bits, size) = (self.builder.id(), self.builder.id());
+        self.builder
+            .function(op::LOAD, &[u32_type.0, bits.0, pointer.0]);
+        self.builder
+            .function(op::BITCAST, &[f32_type.0, size.0, bits.0]);
+        let member = Self::constant(self, POINT_SIZE_MEMBER);
+        let target = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[
+                mesh.float_ptr.0,
+                target.0,
+                mesh.vertices.0,
+                slot.0,
+                member.0,
+            ],
+        );
+        self.builder.function(op::STORE, &[target.0, size.0]);
     }
 
     /// A `vec4` value's four components.
@@ -3845,6 +4043,9 @@ impl<'a> Wavefront<'a> {
             self.builder.function(op::STORE, &[target.0, position.0]);
             let components = self.extract_vec4(position);
             self.write_clip_distances(&mesh, slot, components);
+            if let Some(words) = mesh.point_sizes {
+                self.copy_point_size(&mesh, words, slot);
+            }
             for (location, copy) in &staged.parameters {
                 let Some(output) = mesh.parameters.get(location).copied() else {
                     continue;
@@ -4257,6 +4458,14 @@ impl Model for Wavefront<'_> {
         Some(())
     }
 
+    fn write_mesh_point_size(&mut self, lane: u32, bits: Id) -> Option<()> {
+        let words = self.mesh.as_ref()?.point_sizes?;
+        let slot = self.lane_slot(lane);
+        let pointer = self.workgroup_word(words, slot);
+        self.builder.function(op::STORE, &[pointer.0, bits.0]);
+        Some(())
+    }
+
     fn write_mesh_layer(&mut self, lane: u32, layer: Id) -> Option<()> {
         let words = self.mesh.as_ref()?.layers?.words;
         let slot = self.lane_slot(lane);
@@ -4491,6 +4700,19 @@ impl Model for Wavefront<'_> {
             Some(invocation) => self.invocation_bit(invocation, (low, high)),
             None => model::constant_lane_test(self, (low, high), lane),
         }
+    }
+
+    fn position_vectors(&self) -> Option<u32> {
+        self.position_vectors
+    }
+
+    fn write_mesh_clip_distance(&mut self, lane: u32, index: u32, bits: Id) -> Option<()> {
+        let words = self.mesh.as_ref()?.distances?;
+        let slot = self.lane_slot(lane);
+        let at = self.distance_word(slot, index);
+        let pointer = self.workgroup_word(words, at);
+        self.builder.function(op::STORE, &[pointer.0, bits.0]);
+        Some(())
     }
 
     fn discards_vertex_exports(&self) -> bool {
@@ -5805,6 +6027,21 @@ pub fn exports_layer(decode: &Decode, encodings: &EncodingTable) -> bool {
     })
 }
 
+/// Whether a primitive shader exports a point size: any `exp pos1` enabling its first channel,
+/// where the misc vector carries it (D867).
+#[must_use]
+pub fn exports_point_size(decode: &Decode, encodings: &EncodingTable) -> bool {
+    decode.instructions.iter().any(|instruction| {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        named == Some("exp")
+            && instruction.operands.first() == Some(&Operand::Immediate(model::EXPORT_MISC))
+            && instruction.word & model::EXPORT_POINT_SIZE_CHANNEL != 0
+    })
+}
+
 /// The local-data-share instructions a primitive shader run one invocation per lane may use (D760):
 /// each followed by a workgroup barrier that keeps the wave's program order, its byte writes and
 /// ors merged by atomics so lanes sharing a word keep each other's bits.
@@ -6131,7 +6368,14 @@ pub fn translate_with_user_data(
                 exports_depth(decode, encodings),
                 reads_quad(decode, encodings),
                 exported_colour_targets(decode, encodings),
-                stage == Stage::Mesh && exports_layer(decode, encodings),
+                (
+                    stage == Stage::Mesh
+                        && model::misc_vector_present(user_data.position_vectors)
+                        && exports_layer(decode, encodings),
+                    stage == Stage::Mesh
+                        && model::point_size_read(user_data.position_vectors)
+                        && exports_point_size(decode, encodings),
+                ),
             ),
         ),
     );

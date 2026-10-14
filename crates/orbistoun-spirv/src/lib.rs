@@ -496,6 +496,8 @@ pub mod built_in {
     pub const GLOBAL_INVOCATION_ID: u32 = 28;
     /// The clip-space position a vertex shader writes.
     pub const POSITION: u32 = 0;
+    /// A point's size in pixels, which a stage before rasterisation writes per vertex.
+    pub const POINT_SIZE: u32 = 1;
     /// The distances a vertex lies inside each clip plane (a `float` array): the primitive is
     /// clipped where one is negative.
     pub const CLIP_DISTANCE: u32 = 3;

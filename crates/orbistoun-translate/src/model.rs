@@ -799,6 +799,23 @@ pub trait Model {
         None
     }
 
+    /// The draw's position-vector routing, `PA_CL_VS_OUT_CNTL` (D867); `None` where it is not known.
+    fn position_vectors(&self) -> Option<u32> {
+        None
+    }
+
+    /// Writes one vertex's exported distance `index`, as the bits of a float, for the lane that is
+    /// that vertex (D867); [`None`] for a module that declares no exported distances.
+    fn write_mesh_clip_distance(&mut self, _lane: u32, _index: u32, _bits: Id) -> Option<()> {
+        None
+    }
+
+    /// Writes one vertex's point size, as the bits of a float, for the lane that is that vertex
+    /// (D867); [`None`] for a module that declares no point sizes.
+    fn write_mesh_point_size(&mut self, _lane: u32, _bits: Id) -> Option<()> {
+        None
+    }
+
     /// Writes one vertex's render-target layer, for the lane that is that vertex (D859); [`None`]
     /// for a module that declares no layers.
     fn write_mesh_layer(&mut self, _lane: u32, _layer: Id) -> Option<()> {
@@ -1945,6 +1962,13 @@ pub(crate) const EXPORT_MISC: i64 = EXPORT_POSITION + 1;
 /// The misc vector's third channel, in an export's `EN` field: the render-target layer in bits
 /// 10:0 and the viewport index in 19:16 on GFX9 and later (`ac_nir_prerast_utils.c` 381-392, D859).
 pub(crate) const EXPORT_LAYER_CHANNEL: u32 = 1 << 2;
+/// The misc vector's first channel, in an export's `EN` field: the point size, a float
+/// (`ac_nir_prerast_utils.c` 355-395, D867).
+pub(crate) const EXPORT_POINT_SIZE_CHANNEL: u32 = 1;
+/// The misc vector's second channel: the vertex's edge flag, which selects the edges a polygon
+/// drawn as lines draws. Every polygon here is filled, where it reaches nothing - as the edge flags
+/// in a primitive export do not ([`mesh_primitive_export`]).
+const EXPORT_EDGE_FLAG_CHANNEL: u32 = 1 << 1;
 /// The layer's bits in the misc vector's third channel.
 const LAYER_BITS: u32 = 0x7FF;
 /// The first parameter target; `param<n>` is this plus n.
@@ -2121,6 +2145,172 @@ fn mesh_layer_export<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `exp pos1`'s first channel: one vertex's point size, a float (D867). It is the size the point is
+/// drawn at where `PA_CL_VS_OUT_CNTL.USE_VTX_POINT_SIZE` has the hardware read it, which radeonsi
+/// sets exactly when the shader writes one.
+fn mesh_point_size_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    source: &Operand,
+) -> Result<(), TranslateError> {
+    if instruction.word & EXPORT_COMPRESSED != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a compressed misc-vector export is not translated",
+        });
+    }
+    for lane in running_lanes(model) {
+        let bits = model.read_source(instruction, source, lane)?;
+        if model.write_mesh_point_size(lane, bits).is_none() {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "a point size export needs the sizes a mesh module declares, and this module ",
+                    "is not one - translate at the mesh stage (D688, D867)"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `PA_CL_VS_OUT_CNTL.VS_OUT_MISC_VEC_ENA`, bit 21 (`gfx103.json`): the misc vector is exported,
+/// first after the position.
+const VS_OUT_MISC_VEC_ENA: u32 = 1 << 21;
+/// `VS_OUT_CCDIST0_VEC_ENA`, bit 22, and `VS_OUT_CCDIST1_VEC_ENA`, bit 23: the vectors of distances
+/// 0-3 and 4-7, after the misc vector.
+const VS_OUT_CCDIST_VEC_ENA: [u32; 2] = [1 << 22, 1 << 23];
+/// `USE_VTX_POINT_SIZE`, bit 16: a point is drawn at the size its vertex exports.
+const USE_VTX_POINT_SIZE: u32 = 1 << 16;
+/// `USE_VTX_VRS_RATE`, bit 28: the shading rate the misc vector's fourth channel carries is read.
+const USE_VTX_VRS_RATE: u32 = 1 << 28;
+/// The misc vector's fourth channel: the shading rate.
+const EXPORT_VRS_RATE_CHANNEL: u32 = 1 << 3;
+/// `CULL_DIST_ENA_0`, bit 8: distance `n` culls where bit `8 + n` is set, as `CLIP_DIST_ENA_n`,
+/// bit `n`, clips.
+const CULL_DIST_SHIFT: u32 = 8;
+
+/// What a further position export is, by the draw's routing (D867).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PositionVector {
+    /// The misc vector: point size, edge flag, layer and viewport index, shading rate.
+    Misc,
+    /// Four clip or cull distances from this index.
+    Distances(u32),
+    /// A vector the draw does not enable.
+    Unread,
+    /// Not known: the draw's routing was not given and this is not `pos1`.
+    Unknown,
+}
+
+/// What `pos(1 + n)` is under `routing`: the enabled vectors in order - the misc vector, then the
+/// two distance vectors (`ac_nir_prerast_utils.c` 355-430, radeonsi `si_state_shaders.cpp`). With
+/// no routing, `pos1` is the misc vector, as D859 took it.
+fn position_vector(routing: Option<u32>, target: i64) -> PositionVector {
+    let Some(cntl) = routing else {
+        return if target == EXPORT_MISC {
+            PositionVector::Misc
+        } else {
+            PositionVector::Unknown
+        };
+    };
+    let mut vectors = Vec::with_capacity(3);
+    if cntl & VS_OUT_MISC_VEC_ENA != 0 {
+        vectors.push(PositionVector::Misc);
+    }
+    for (vector, enable) in (0u32..).zip(VS_OUT_CCDIST_VEC_ENA) {
+        if cntl & enable != 0 {
+            vectors.push(PositionVector::Distances(4 * vector));
+        }
+    }
+    usize::try_from(target - EXPORT_MISC)
+        .ok()
+        .and_then(|at| vectors.get(at).copied())
+        .unwrap_or(PositionVector::Unread)
+}
+
+/// Whether `pos1` can be the misc vector under `routing`: always where it is not known.
+#[must_use]
+pub(crate) fn misc_vector_present(routing: Option<u32>) -> bool {
+    routing.is_none_or(|cntl| cntl & VS_OUT_MISC_VEC_ENA != 0)
+}
+
+/// Whether the draw reads the point size its vertices export: where its routing says so, or is not
+/// known - radeonsi sets `USE_VTX_POINT_SIZE` exactly when the shader writes one.
+#[must_use]
+pub(crate) fn point_size_read(routing: Option<u32>) -> bool {
+    routing.is_none_or(|cntl| cntl & VS_OUT_MISC_VEC_ENA != 0 && cntl & USE_VTX_POINT_SIZE != 0)
+}
+
+/// The exported distances the draw clips by, one bit each: `CLIP_DIST_ENA_n` for a distance whose
+/// vector it enables.
+#[must_use]
+pub(crate) fn exported_clip_distances(routing: Option<u32>) -> u8 {
+    let Some(cntl) = routing else {
+        return 0;
+    };
+    let mut mask = 0u32;
+    for (vector, enable) in (0u32..).zip(VS_OUT_CCDIST_VEC_ENA) {
+        if cntl & enable != 0 {
+            mask |= cntl & 0xF << (4 * vector);
+        }
+    }
+    u8::try_from(mask).unwrap_or(0)
+}
+
+/// `exp pos2`/`pos3` (or `pos1`, where the draw exports no misc vector): four clip or cull
+/// distances from `first` (D867). One the draw clips by is the vertex's clip distance, whether or
+/// not it culls by it too; one it only culls by is refused, not modelled; one it does neither with
+/// reaches nothing.
+fn mesh_distance_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (first, sources): (u32, [&Operand; 4]),
+) -> Result<(), TranslateError> {
+    if instruction.word & EXPORT_COMPRESSED != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a compressed distance export is not translated",
+        });
+    }
+    let cntl = model.position_vectors().unwrap_or(0);
+    let clips = exported_clip_distances(Some(cntl));
+    for (channel, source) in (0u32..).zip(sources) {
+        let index = first + channel;
+        if instruction.word >> channel & 1 == 0 {
+            continue;
+        }
+        let clipped = clips >> index & 1 != 0;
+        // radeonsi culls by every distance it clips by (`si_emit_clip_regs`), which removes nothing
+        // the clipping keeps; a distance that only culls is not modelled.
+        if cntl >> (CULL_DIST_SHIFT + index) & 1 != 0 && !clipped {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "a cull distance that does not also clip (PA_CL_VS_OUT_CNTL.CULL_DIST_ENA_* ",
+                    "without CLIP_DIST_ENA_*) is not translated"
+                ),
+            });
+        }
+        if !clipped {
+            continue;
+        }
+        for lane in running_lanes(model) {
+            let bits = model.read_source(instruction, source, lane)?;
+            if model.write_mesh_clip_distance(lane, index, bits).is_none() {
+                return Err(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: concat!(
+                        "a clip distance export needs the distances a mesh module declares, and ",
+                        "this module is not one - translate at the mesh stage (D688, D867)"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `exp prim`: the triangle's three vertex indices, packed into one register.
 ///
 /// The SDK's vertex program writes `0x20280600` for vertices 0, 1, 2 with edge flags (oracle record
@@ -2202,16 +2392,42 @@ fn discard_inactive<M: Model + ?Sized>(model: &mut M, instruction: &Instruction)
 }
 
 /// The further position exports: `pos1`'s misc vector (point size, edge flag, layer, viewport
-/// index) and the clip and cull distances in `pos2` and `pos3`. Only `pos1`'s layer channel alone
-/// is translated ([`mesh_layer_export`]); the rest is refused by what it is, rather than taken for
+/// index) and the clip and cull distances in `pos2` and `pos3`. `pos1`'s point size
+/// ([`mesh_point_size_export`]), edge flag ([`EXPORT_EDGE_FLAG_CHANNEL`]) and layer
+/// ([`mesh_layer_export`]) are translated; the rest is refused by what it is, rather than taken for
 /// a colour export with nowhere to go.
 fn further_position<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
-    (target, layer): (i64, &Operand),
+    (target, sources): (i64, [&Operand; 4]),
 ) -> Result<(), TranslateError> {
-    if target == EXPORT_MISC && instruction.word & EXPORT_ENABLE_MASK == EXPORT_LAYER_CHANNEL {
-        return mesh_layer_export(model, instruction, layer);
+    let routing = model.position_vectors();
+    let channels = instruction.word & EXPORT_ENABLE_MASK;
+    match position_vector(routing, target) {
+        PositionVector::Misc => {
+            let mut modelled = EXPORT_POINT_SIZE_CHANNEL | EXPORT_EDGE_FLAG_CHANNEL;
+            modelled |= EXPORT_LAYER_CHANNEL;
+            // The shading rate in the fourth channel reaches nothing where the draw does not read
+            // it.
+            if routing.is_some_and(|cntl| cntl & USE_VTX_VRS_RATE == 0) {
+                modelled |= EXPORT_VRS_RATE_CHANNEL;
+            }
+            if channels != 0 && channels & !modelled == 0 {
+                if channels & EXPORT_POINT_SIZE_CHANNEL != 0 && point_size_read(routing) {
+                    mesh_point_size_export(model, instruction, sources[0])?;
+                }
+                if channels & EXPORT_LAYER_CHANNEL != 0 {
+                    mesh_layer_export(model, instruction, sources[2])?;
+                }
+                return Ok(());
+            }
+        }
+        PositionVector::Distances(first) => {
+            return mesh_distance_export(model, instruction, (first, sources));
+        }
+        // A vector the draw does not enable reaches nothing on the hardware.
+        PositionVector::Unread => return Ok(()),
+        PositionVector::Unknown => {}
     }
     Err(TranslateError::Unsupported {
         offset: instruction.offset,
@@ -2265,7 +2481,7 @@ fn export<M: Model + ?Sized>(
         return done;
     }
     if (EXPORT_MISC..=EXPORT_POSITION + 3).contains(target) {
-        return further_position(model, instruction, (*target, c));
+        return further_position(model, instruction, (*target, [a, b, c, d]));
     }
 
     let Some((vec4, colour)) = model.colour_output(0) else {
