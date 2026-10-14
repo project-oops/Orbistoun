@@ -262,7 +262,9 @@ pub fn count(what: Count) {
 fn since_last_flip_ms() -> Option<f64> {
     static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
     let now = std::time::Instant::now();
-    let mut last = LAST.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = last.replace(now)?;
     Some(now.duration_since(previous).as_secs_f64() * 1e3)
 }
