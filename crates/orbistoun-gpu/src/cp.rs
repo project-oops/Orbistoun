@@ -558,6 +558,66 @@ pub fn held_writes(stream: &[u8], from: u32) -> Vec<HeldWrite> {
         .collect()
 }
 
+/// The guest memory the command processor's own packets in `stream` write, as (first byte, bytes):
+/// each `WRITE_DATA` to memory, each `DMA_DATA` fill or copy, and each `RELEASE_MEM` that stores a
+/// value. What carrying the stream out writes besides its draws and dispatches, which a later
+/// submission's preparation reads only once it has been carried out (D876). A walk that lost its
+/// place carries nothing out ([`execute`]), so it writes nothing.
+#[must_use]
+pub fn written_spans(stream: &[u8]) -> Vec<(u64, u64)> {
+    let walked = packet::walk(stream);
+    if !walked.is_trustworthy() {
+        return Vec::new();
+    }
+    walked
+        .packets
+        .iter()
+        .filter_map(|p| {
+            let PacketKind::Command { opcode } = p.kind else {
+                return None;
+            };
+            if !matches!(
+                opcode,
+                WRITE_DATA | measured::DMA_DATA | measured::RELEASE_MEM
+            ) {
+                return None;
+            }
+            let start = p.body_offset() as usize;
+            let body: Vec<u32> = stream
+                .get(start..start + p.body_length() as usize)?
+                .chunks_exact(4)
+                .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                .collect();
+            let span = match (opcode, body.as_slice()) {
+                (WRITE_DATA, [control, low, high, data @ ..])
+                    if WRITE_DATA_DST_SEL_MEMORY.contains(&((control >> 8) & 0xf)) =>
+                {
+                    let words = if control & WRITE_DATA_NO_INCREMENT != 0 {
+                        data.len().min(1)
+                    } else {
+                        data.len()
+                    };
+                    (address(low & !0x3, *high), words as u64 * 4)
+                }
+                (measured::DMA_DATA, _) => {
+                    let dma = decode_dma_data(&body).ok()?;
+                    (dma.destination, dma.count as u64)
+                }
+                (measured::RELEASE_MEM, [_, selectors, low, high, ..]) => {
+                    let bytes = match selectors >> 29 {
+                        DATA_SEL_VALUE_32BIT => 4,
+                        DATA_SEL_VALUE_64BIT | DATA_SEL_TIMESTAMP => 8,
+                        _ => return None,
+                    };
+                    (address(*low, *high), bytes)
+                }
+                _ => return None,
+            };
+            (span.1 > 0).then_some(span)
+        })
+        .collect()
+}
+
 /// The stream's draws split at every packet between two of them that is neither a draw nor
 /// memory-inert (D729): each segment runs from a draw to the last draw before the next such packet.
 fn draw_segments<'a>(stream: &'a [u8], packets: &[packet::Packet]) -> Vec<DrawSegment<'a>> {
@@ -1767,6 +1827,41 @@ mod tests {
         ];
         out.extend_from_slice(data);
         out
+    }
+
+    /// What a stream's own packets write is each `WRITE_DATA` to memory, `DMA_DATA` fill or copy
+    /// and value-storing `RELEASE_MEM`, at its destination for its length (D876); a register
+    /// destination, a prefetch and a discarding release write nothing.
+    #[test]
+    fn a_stream_writes_where_its_packets_land() {
+        let memory_sel = 5 << 8;
+        let mut stream = write_data(memory_sel, 0x2004, &[1, 2, 3]);
+        stream.extend(write_data(
+            memory_sel | super::WRITE_DATA_NO_INCREMENT,
+            0x2100,
+            &[1, 2],
+        ));
+        stream.extend(write_data(0, 0x2200, &[1]));
+        stream.extend(fill(0x3000, 0, 0x40));
+        stream.extend(copy(0x1000, 0x4000, 0x20));
+        let mut prefetch = copy(0x1000, 0x5000, 0x20);
+        prefetch[1] = 0x8000_0000 | (3 << 29) | (super::DST_SEL_NOWHERE << 20);
+        stream.extend(prefetch);
+        stream.extend(release(0x6000, 1, 7));
+        stream.extend(release(0x6100, 2, 7));
+        stream.extend(release(0x6200, 0, 7));
+
+        assert_eq!(
+            super::written_spans(&bytes(&stream)),
+            [
+                (0x2004, 12),
+                (0x2100, 4),
+                (0x3000, 0x40),
+                (0x4000, 0x20),
+                (0x6000, 4),
+                (0x6100, 8)
+            ]
+        );
     }
 
     /// `WRITE_DATA` to memory - through L2, direct, or synchronised across GRBM - writes its data

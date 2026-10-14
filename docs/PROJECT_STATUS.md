@@ -15,8 +15,8 @@ out of date.
 | PPSA28061-app0 | presented | 165 | 20,457,365 | 100% | `ran to the time limit` | `376eae5b08b1225f` new |
 | STKT00001 | presented | 150 | 7,911,373 | 100% | `ran to the time limit` | `e9c3927fc3b26eb7` new |
 | CRFT00001 | presented | 107 | 254,619 | 100% | `ran to the time limit` | `5ec4c46ef3083591` new |
-| GCTS00001 | presented | 87 | 1,608,628 | 100% | `ran to the time limit` | `87f13d4bc0877671` new |
 | MCUB00001 | presented | 81 | 166,350 | 100% | `ran to the time limit` | `92bb8ddfebee87c5` new |
+| GCTS00001 | presented | 79 | 1,069,857 | 100% | `the guest called abort` | `87f13d4bc0877671` match |
 | SOHK00001 | presented | 73 | 1,436,017 | 100% | `ran to the time limit` | `b1a48bbb026652be` match |
 | TSHP00001 | presented | 73 | 635,694 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` new |
 | DRIP00001 | presented | 72 | 53,337 | 100% | `ran to the time limit` | `d117f754b54f6b72` new |

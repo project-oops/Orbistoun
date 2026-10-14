@@ -541,6 +541,12 @@ pub struct Submission {
     /// carrying the submission out writes, which a later submission's preparation reads only once
     /// it has been carried out (D874). Empty when nothing is drawn.
     pub drawn_targets: Vec<ColourTarget>,
+    /// Each compute dispatch's state, in stream order, `None` for one the registers do not give:
+    /// what carrying the submission out writes through them is worked out from these as it is
+    /// queued (D876).
+    pub dispatch_states: Vec<Option<crate::dispatch::DispatchState>>,
+    /// Whether any of its draws streams out (D861), writing buffers through a compute wave.
+    pub streams_out: bool,
     /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`). `None` when the
     /// stream set none: a draw with no depth control has no depth test.
     pub depth_control: Option<DepthControl>,
@@ -627,6 +633,46 @@ fn drawn_targets(
         .collect();
     targets.dedup();
     targets
+}
+
+/// Each dispatch's state from the writes before it, and whether any draw streams out
+/// ([`Submission::dispatch_states`], [`Submission::streams_out`]).
+fn record_compute_work(
+    submission: &mut Submission,
+    writes: &[RegisterWrite],
+    (walked, stream): (&PacketWalk, &[u8]),
+    draws: &[DrawCall],
+) {
+    submission.dispatch_states = walked
+        .packets
+        .iter()
+        .filter(|packet| {
+            packet.kind
+                == (crate::packet::PacketKind::Command {
+                    opcode: crate::packet::build::DISPATCH_DIRECT,
+                })
+        })
+        .map(|packet| {
+            let start = packet.body_offset() as usize;
+            let body = stream.get(start..start + 16)?;
+            let word = |at: usize| {
+                u32::from_le_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]])
+            };
+            crate::dispatch::state_at(
+                writes,
+                packet.offset,
+                [word(0), word(4), word(8)],
+                word(12),
+            )
+            .ok()
+        })
+        .collect();
+    let mut sweep = crate::registers::RegisterSweep::new(writes);
+    submission.streams_out = draws.iter().any(|draw| {
+        sweep
+            .latest(draw.packet_offset, crate::streamout::VGT_STRMOUT_CONFIG)
+            .is_some_and(|config| config & 0xF != 0)
+    });
 }
 
 /// The shaders one draw runs, by stage.
@@ -1579,6 +1625,52 @@ impl Pipeline {
         })
     }
 
+    /// The guest memory a compute dispatch can write, as (first byte, bytes), worked out from its
+    /// bindings without running or translating it (D876): each buffer it binds on its own (D746)
+    /// and the window over its other buffer accesses, every byte of them, read or stored. `None`
+    /// where that does not bound it: a program that does not decode or trace, or one that stores
+    /// other than through a buffer - an image, a global or flat address.
+    #[must_use]
+    pub fn dispatch_write_spans(
+        &self,
+        state: &crate::dispatch::DispatchState,
+        memory: &impl GuestMemory,
+    ) -> Option<Vec<(u64, u64)>> {
+        let window = read_window(memory, guest_address_of(state.program))?;
+        let decoded = decode_program(window, &self.encodings, &self.operands);
+        if !decoded.terminated || !decoded.is_trustworthy() {
+            return None;
+        }
+        let families = self.encodings.encodings();
+        let stores_elsewhere = decoded.instructions.iter().any(|instruction| {
+            instruction
+                .encoding
+                .and_then(|e| families.get(usize::from(e)))
+                .and_then(|family| {
+                    self.encodings
+                        .mnemonic_for(&family.name, instruction.opcode)
+                })
+                .is_some_and(|name| {
+                    (name.contains("store") || name.contains("atomic"))
+                        && !name.starts_with("buffer_")
+                        && !name.starts_with("ds_")
+                })
+        });
+        if stores_elsewhere {
+            return None;
+        }
+        let (served, mut spans, _, _) = self.dispatch_buffers(state, &decoded, memory).ok()?;
+        let placed = crate::dispatch::place_window_except(
+            state,
+            (&decoded, &self.encodings),
+            &served,
+            |at, len| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some()),
+        )
+        .ok()?;
+        spans.extend(placed.map(|window| (window.address(), u64::from(window.words()) * 4)));
+        Some(spans)
+    }
+
     /// The accesses a dispatch's own buffers take, by instruction offset, and the guest range each
     /// binds (D746): traced from the program as a draw's are, stores included, and resolved
     /// against the dispatch's user data. Ranges that overlap are refused. For a program that
@@ -1983,6 +2075,7 @@ impl Pipeline {
             )
         });
         record_colour_target(&mut submission, &first, &draws);
+        record_compute_work(&mut submission, &writes, (&walked, stream), &draws);
         submission.border_table = crate::registers::border_table_at(&writes);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);

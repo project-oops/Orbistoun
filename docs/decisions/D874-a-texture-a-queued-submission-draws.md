@@ -30,6 +30,7 @@ finds the read returning at once with the drawing submission still queued.
 Moving preparation onto the command processor's thread orders every read as well, and was
 measured about 20% slower: it gives up the guest/command-processor overlap.
 
-**Not covered:** memory a queued submission writes other than through a drawn colour target - a
-dispatch's stores, the command processor's own `WRITE_DATA`, `DMA_DATA` and fills - is still read
-by a later submission's preparation as it stood before them.
+Memory a queued submission writes other than through a drawn colour target - a dispatch's stores,
+the command processor's own `WRITE_DATA`, `DMA_DATA` and fills - is waited on the same way (D876),
+which also moves the wait out of the read: a preparation that read a queued write is made again
+once the queue has drained.

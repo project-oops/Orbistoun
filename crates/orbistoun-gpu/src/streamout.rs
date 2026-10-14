@@ -25,7 +25,7 @@ pub const STRMOUT_BUFFER_UPDATE: u8 = 0x34;
 pub const BUFFERS: usize = 4;
 
 /// `VGT_STRMOUT_CONFIG` (`gfx10.json`, context dword `0xA2E5`): `STREAMOUT_n_EN` in bits 0-3.
-const VGT_STRMOUT_CONFIG: u32 = 0xA2E5;
+pub(crate) const VGT_STRMOUT_CONFIG: u32 = 0xA2E5;
 /// `VGT_STRMOUT_BUFFER_CONFIG` (`0xA2E6`): `STREAM_k_BUFFER_EN` in bits `4k..4k+3`.
 const VGT_STRMOUT_BUFFER_CONFIG: u32 = 0xA2E6;
 /// `VGT_STRMOUT_BUFFER_SIZE_0` (`0xA2B4`), in dwords; buffer `n`'s is `4n` further on.
