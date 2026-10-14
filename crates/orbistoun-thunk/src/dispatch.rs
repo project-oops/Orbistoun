@@ -1570,14 +1570,14 @@ static PUBLISHED_FIRST: [AtomicU64; PUBLISHED_THREADS] =
 /// The guest stack pointer at that call, whose top word is where the call returns to.
 static PUBLISHED_RSP: [AtomicU64; PUBLISHED_THREADS] =
     [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
-/// The import each published thread called last, plus one; zero before its first call returns.
-static PUBLISHED_LAST: [AtomicU32; PUBLISHED_THREADS] =
-    [const { AtomicU32::new(0) }; PUBLISHED_THREADS];
-/// Where that call returned to.
-static PUBLISHED_LAST_FROM: [AtomicU64; PUBLISHED_THREADS] =
-    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
-/// What it answered.
-static PUBLISHED_LAST_ANSWER: [AtomicU64; PUBLISHED_THREADS] =
+/// How many of each published thread's calls are kept, newest overwriting oldest.
+pub const RECENT_CALLS: usize = 8;
+/// Each published thread's recent calls: the import plus one (zero for an empty entry), where it
+/// returned to and what it answered, [`RECENT_CALLS`] to a thread.
+static PUBLISHED_RECENT: [[AtomicU64; 3 * RECENT_CALLS]; PUBLISHED_THREADS] =
+    [const { [const { AtomicU64::new(0) }; 3 * RECENT_CALLS] }; PUBLISHED_THREADS];
+/// How many calls each published thread has kept, so the newest entry is known.
+static PUBLISHED_RECENT_COUNT: [AtomicU64; PUBLISHED_THREADS] =
     [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
 /// The next slot a thread claims.
 static PUBLISHED_CLAIMED: AtomicUsize = AtomicUsize::new(0);
@@ -1601,40 +1601,54 @@ fn published_slot() -> usize {
     })
 }
 
-/// Publishes the call this thread made last, where it returned to and what it answered, so a fault
-/// on the thread can name the answer it acted on after the ring has moved on (D832). Three relaxed
-/// stores a call.
+/// Keeps the call this thread just made, where it returned to and what it answered, among its
+/// [`RECENT_CALLS`] most recent, so a fault on the thread can name the answers it acted on after
+/// the run's ring has moved on (D832). Four relaxed stores a call.
 fn publish_last(index: u64, from: u64, answer: u64) {
     let slot = published_slot();
-    if let (Some(last), Some(at), Some(answered)) = (
-        PUBLISHED_LAST.get(slot),
-        PUBLISHED_LAST_FROM.get(slot),
-        PUBLISHED_LAST_ANSWER.get(slot),
-    ) {
-        at.store(from, Ordering::Relaxed);
-        answered.store(answer, Ordering::Relaxed);
-        last.store(
-            u32::try_from(index + 1).unwrap_or(u32::MAX),
-            Ordering::Relaxed,
-        );
-    }
+    let (Some(recent), Some(count)) =
+        (PUBLISHED_RECENT.get(slot), PUBLISHED_RECENT_COUNT.get(slot))
+    else {
+        return;
+    };
+    let at = (count.load(Ordering::Relaxed) as usize % RECENT_CALLS) * 3;
+    recent[at + 1].store(from, Ordering::Relaxed);
+    recent[at + 2].store(answer, Ordering::Relaxed);
+    recent[at].store(index + 1, Ordering::Relaxed);
+    count.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The calls the host thread `host` made most recently, newest first, as `(import, returned to,
+/// answer)`: at most [`RECENT_CALLS`].
+#[must_use]
+pub fn recent_calls_on(host: u64) -> Vec<(u32, u64, u64)> {
+    let claimed = PUBLISHED_CLAIMED
+        .load(Ordering::Relaxed)
+        .min(PUBLISHED_THREADS);
+    let Some(slot) =
+        (0..claimed).find(|&slot| PUBLISHED_HOST[slot].load(Ordering::Relaxed) == host)
+    else {
+        return Vec::new();
+    };
+    let count = PUBLISHED_RECENT_COUNT[slot].load(Ordering::Relaxed) as usize;
+    (1..=count.min(RECENT_CALLS))
+        .filter_map(|back| {
+            let at = ((count - back) % RECENT_CALLS) * 3;
+            let recent = &PUBLISHED_RECENT[slot];
+            let index = recent[at].load(Ordering::Relaxed).checked_sub(1)?;
+            Some((
+                u32::try_from(index).unwrap_or(u32::MAX),
+                recent[at + 1].load(Ordering::Relaxed),
+                recent[at + 2].load(Ordering::Relaxed),
+            ))
+        })
+        .collect()
 }
 
 /// The last call the host thread `host` made, as `(import, returned to, answer)`, if it made one.
 #[must_use]
 pub fn last_call_on(host: u64) -> Option<(u32, u64, u64)> {
-    let claimed = PUBLISHED_CLAIMED
-        .load(Ordering::Relaxed)
-        .min(PUBLISHED_THREADS);
-    let slot = (0..claimed).find(|&slot| PUBLISHED_HOST[slot].load(Ordering::Relaxed) == host)?;
-    let index = PUBLISHED_LAST[slot]
-        .load(Ordering::Relaxed)
-        .checked_sub(1)?;
-    Some((
-        index,
-        PUBLISHED_LAST_FROM[slot].load(Ordering::Relaxed),
-        PUBLISHED_LAST_ANSWER[slot].load(Ordering::Relaxed),
-    ))
+    recent_calls_on(host).first().copied()
 }
 
 /// Publishes what this thread is inside, the call's first argument and the guest stack pointer at
@@ -1961,6 +1975,22 @@ mod tests {
 
     /// A thread's last call is published with where it came from and what it answered, however
     /// long ago the ring overwrote it, so a fault on a thread can name the answer it acted on (D832).
+    #[test]
+    fn a_threads_recent_calls_are_kept_newest_first() {
+        let recent = std::thread::spawn(|| {
+            for i in 0..10_u64 {
+                super::publish_last(i, 0x4000_0000_0000 + i, i * 2);
+            }
+            super::recent_calls_on(super::host_thread())
+        })
+        .join()
+        .expect("the thread ran");
+        assert_eq!(recent.len(), super::RECENT_CALLS, "the ring's worth");
+        assert_eq!(recent[0], (9, 0x4000_0000_0009, 18), "newest first");
+        assert_eq!(recent[super::RECENT_CALLS - 1], (2, 0x4000_0000_0002, 4));
+    }
+
+    /// The last call alone, as a fault names it first.
     #[test]
     fn a_threads_last_call_is_published_with_its_answer() {
         let (host, last) = std::thread::spawn(|| {

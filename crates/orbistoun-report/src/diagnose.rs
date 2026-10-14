@@ -830,17 +830,23 @@ fn preceding(trace: &CallTrace) -> Vec<String> {
         .collect()
 }
 
-/// The faulting thread's own last call, when the recorded window holds none of its calls: the
-/// answer it acted on, however long before the fault it came (D832).
-fn last_call_here(trace: &CallTrace) -> Option<String> {
-    let faulted_on = trace.fault.as_ref().and_then(|f| f.host_thread)?;
+/// The faulting thread's own recent calls, newest first, when the recorded window holds none of its
+/// calls: the answers it acted on, however long before the fault they came (D832).
+fn last_call_here(trace: &CallTrace) -> Vec<String> {
+    let Some(fault) = trace.fault.as_ref() else {
+        return Vec::new();
+    };
+    let Some(faulted_on) = fault.host_thread else {
+        return Vec::new();
+    };
     if trace.tail.iter().any(|c| c.thread == faulted_on) {
-        return None;
+        return Vec::new();
     }
-    let line = trace.fault.as_ref()?.last_call_here.as_ref()?;
-    Some(format!(
-        "{PRECEDED_BY}{line}  [this thread, before the recorded window]"
-    ))
+    fault
+        .recent_here
+        .iter()
+        .map(|line| format!("{PRECEDED_BY}{line}  [this thread, before the recorded window]"))
+        .collect()
 }
 
 /// A placeholder code being used by the guest as a pointer.
@@ -2003,7 +2009,7 @@ mod tests {
             instruction: Vec::new(),
             thread: None,
             host_thread: None,
-            last_call_here: None,
+            recent_here: Vec::new(),
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: code,
@@ -2228,7 +2234,7 @@ mod tests {
             instruction: Vec::new(),
             thread: None,
             host_thread: None,
-            last_call_here: None,
+            recent_here: Vec::new(),
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: placeholder_code(),
@@ -2259,7 +2265,7 @@ mod tests {
                 instruction,
                 thread: None,
                 host_thread: None,
-                last_call_here: None,
+                recent_here: Vec::new(),
                 pointees: Vec::new(),
                 kind: "read of".to_owned(),
                 address: u64::MAX, // the general-protection read a trap raises
@@ -2342,9 +2348,7 @@ mod tests {
             instruction: vec![0xcd, 0x41],
             thread: Some(1),
             host_thread: Some(5),
-            last_call_here: Some(
-                "libSceVoice::sceVoiceInit() -> 0xf7ff0004 from 0x4000".to_owned(),
-            ),
+            recent_here: vec!["libSceVoice::sceVoiceInit() -> 0xf7ff0004 from 0x4000".to_owned()],
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: u64::MAX,
@@ -2384,7 +2388,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x40, 0x38], // mov rax, [rax+0x38]
             thread: Some(1),
             host_thread: Some(0),
-            last_call_here: None,
+            recent_here: Vec::new(),
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0x38,
@@ -2425,7 +2429,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x00],
             thread: Some(1),
             host_thread: Some(0),
-            last_call_here: None,
+            recent_here: Vec::new(),
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0x38,
@@ -2463,7 +2467,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x00], // an ordinary read, not a trap
             thread: Some(1),
             host_thread: Some(0),
-            last_call_here: None,
+            recent_here: Vec::new(),
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0xa8,
@@ -2510,7 +2514,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x00],
             thread: Some(1),
             host_thread: Some(0),
-            last_call_here: None,
+            recent_here: Vec::new(),
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0xa8,

@@ -1327,14 +1327,15 @@ fn persist_fault_trace(
             // The same identifier the recorded calls carry, so the tail can be filtered to this
             // thread (D621).
             host_thread: Some(orbistoun_thunk::current_thread()),
-            last_call_here: orbistoun_thunk::last_call_on(orbistoun_thunk::current_thread()).map(
-                |(index, from, answer)| {
+            recent_here: orbistoun_thunk::recent_calls_on(orbistoun_thunk::current_thread())
+                .into_iter()
+                .map(|(index, from, answer)| {
                     format!(
                         "{}() -> {answer:#x} from {from:#x}",
                         labelled(index as usize)
                     )
-                },
-            ),
+                })
+                .collect(),
             registers: Some(registers),
             pointees: describe_pointees(&registers),
             frames: walk_frames(registers.rbp),
