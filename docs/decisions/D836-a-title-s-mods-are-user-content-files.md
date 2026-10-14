@@ -13,8 +13,13 @@ writable layer (D722), so a guest's write is copied up into its overlay and neve
 the library. The `mods` directory, like the rest of what orbistoun keeps beside a title, is hidden
 from the guest (D756).
 
-A mod may also patch the title's code and data; that half is decided with its format, below the
-files.
+A mod's `patches.toml` replaces bytes in the title's executable once it is linked and before its
+segments take their protection: each patch an offset from the executable's base, the bytes it
+expects there and as many bytes it writes. A mod's patches apply all or none - one outside the
+executable's segments, finding other bytes than it expects (a mod made for another build), or
+naming another of the title's modules leaves every one of that mod's patches unwritten, and the
+log says which and what it found. Only the executable is patched; the title's other modules are
+linked and protected inside the link (D724), and patching them is a further step.
 
 **Why:** a player changing a title - a fan translation, replaced textures, a fix the publisher never
 shipped - wants the title's own files left alone and the change undone by turning it off, and the

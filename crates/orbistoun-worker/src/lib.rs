@@ -899,7 +899,7 @@ fn place_and_relocate<W: Write>(
     if let Ok(exports) = service.export_addresses(bytes, image.base()) {
         orbistoun_kernel::note_guest_exports(service.nid_suffix(), &exports);
     }
-    let protection = match service.protect_image(&mut image) {
+    let protection = match patched_and_protected(service, &mut image, path) {
         Ok(p) => p,
         Err(e) => {
             return halt(
@@ -947,6 +947,75 @@ fn place_and_relocate<W: Write>(
         module,
         service.entry_settings(),
     )
+}
+
+/// The linked executable with the user's mods' patches written into it while it is still writable
+/// (D836), then protected as its segments ask.
+fn patched_and_protected(
+    service: &Service,
+    image: &mut Image,
+    module: &Path,
+) -> Result<orbistoun_loader::protect::ProtectionTally, orbistoun_service::ServiceError> {
+    apply_mod_patches(module, image);
+    service.protect_image(image)
+}
+
+/// Writes each applying mod's patches into the linked executable at `image` (D836): a mod's patches
+/// all, or - where one lies outside the executable, finds other bytes than it expects, or names
+/// another of the title's modules - none of them, with the reason logged.
+fn apply_mod_patches(module: &Path, image: &Image) {
+    let paths = orbistoun_paths::Paths::resolve();
+    let title = orbistoun_service::linkplan::title_of(module);
+    let executable = module
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let segments: Vec<(u64, u64)> = image
+        .segments()
+        .iter()
+        .map(|segment| (segment.address, segment.memsz()))
+        .collect();
+    let read = |at: u64, length: usize| {
+        let mut bytes = vec![0u8; length];
+        // SAFETY: a read of guest memory through the checked accessor, which refuses an address
+        // nothing maps.
+        unsafe { orbistoun_mem::guest::read_into(at, &mut bytes) }.then_some(bytes)
+    };
+    for applying in orbistoun_overrides::mods::found(&paths.title_mods_dir(&title))
+        .iter()
+        .filter(|m| m.applies())
+    {
+        let planned = applying.patches().and_then(|patches| {
+            if let Some(other) = patches.iter().find_map(|p| {
+                p.module
+                    .as_ref()
+                    .filter(|m| Some(*m) != executable.as_ref())
+            }) {
+                return Err(format!(
+                    "it patches {other}, and only the title's executable is patched"
+                ));
+            }
+            orbistoun_overrides::mods::plan_patches(&patches, (image.base(), &segments), read)
+        });
+        match planned {
+            Ok(writes) if writes.is_empty() => {}
+            Ok(writes) => {
+                for (at, bytes) in &writes {
+                    // SAFETY: inside one of the executable's segments, which are writable until
+                    // the image is protected, through the checked accessor.
+                    unsafe { orbistoun_mem::guest::write_bytes(*at, bytes) };
+                }
+                tracing::info!(
+                    "the mod {} patched the executable in {} place(s)",
+                    applying.name,
+                    writes.len()
+                );
+            }
+            Err(why) => tracing::warn!(
+                "the mod {}'s patches were not applied: {why}",
+                applying.name
+            ),
+        }
+    }
 }
 
 /// Relocates the executable, refusing the imports this run was asked to leave unnamed.

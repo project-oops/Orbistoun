@@ -180,7 +180,22 @@ A title's mods sit beside it, in its directory's `mods`, one directory each (D83
 <title directory>/mods/<name>/
     mod.toml   optional - enabled = false turns it off; description says what it is
     app0/      files laid over the title's own, as its /app0 sees them
+    patches.toml  bytes replaced in the title's executable once it is linked
 ```
+
+A patch names its place by its offset from the executable's base, as a disassembler shows it, the
+bytes that must be there and the bytes written instead, as many:
+
+```toml
+[[patch]]
+offset = 0x1a2b3c
+original = "74 0e"
+bytes = "eb 0e"
+description = "skip the intro"
+```
+
+A mod's patches apply all or none: one finding other bytes than it expects - a mod made for another
+build of the title - leaves every patch of that mod unwritten, and the log says what it found.
 
 Every mod not turned off applies, in the order of the directories' names, so where two replace the
 same file the later name's wins. A mod's files are never written: a staged title's writes land in its

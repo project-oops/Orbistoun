@@ -6,6 +6,18 @@
 //! <title directory>/mods/<name>/
 //!     mod.toml      optional: `enabled = false` turns it off, `description` says what it is
 //!     app0/         optional: files laid over the title's own, as its /app0 sees them
+//!     patches.toml  optional: bytes replaced in the title's executable once it is linked
+//! ```
+//!
+//! A patch names where it applies by its offset from the module's base, the bytes it expects
+//! there and the bytes it writes, of the same length:
+//!
+//! ```toml
+//! [[patch]]
+//! offset = 0x1a2b3c          # from the executable's base, as a disassembler shows it
+//! original = "74 0e"         # what must be there: a build the patch was not made for refuses
+//! bytes = "eb 0e"            # what is written
+//! description = "skip the intro"
 //! ```
 //!
 //! Every mod not turned off applies, in the order of the directories' names, so where two replace
@@ -62,6 +74,169 @@ impl Mod {
     }
 }
 
+/// One patch from a mod's `patches.toml`, as written there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct PatchEntry {
+    /// The module it patches, by file name; the title's executable when left out.
+    #[serde(default)]
+    module: Option<String>,
+    /// Where, from the module's base.
+    offset: u64,
+    /// The bytes that must be there, as hexadecimal pairs.
+    original: String,
+    /// The bytes written in their place, as many.
+    bytes: String,
+    /// What it does.
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// A `patches.toml`: its patches, in order.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+struct PatchFile {
+    #[serde(default, rename = "patch")]
+    patches: Vec<PatchEntry>,
+}
+
+/// One patch, read: where, what must be there and what is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Patch {
+    /// The module it patches, by file name; `None` for the title's executable.
+    pub module: Option<String>,
+    /// Where, from the module's base.
+    pub offset: u64,
+    /// The bytes that must be there.
+    pub original: Vec<u8>,
+    /// The bytes written in their place.
+    pub bytes: Vec<u8>,
+    /// What it does.
+    pub description: Option<String>,
+}
+
+/// The file a mod's patches are in.
+pub const PATCH_FILE: &str = "patches.toml";
+
+/// Bytes written as hexadecimal pairs, spaced or not: `"74 0e"`, `"740e"`.
+///
+/// # Errors
+///
+/// An odd number of digits, or anything that is not one.
+pub fn hex_bytes(text: &str) -> Result<Vec<u8>, String> {
+    let digits: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if digits.len() % 2 != 0 {
+        return Err(format!("\"{text}\" is not whole bytes"));
+    }
+    digits
+        .chunks(2)
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                .ok_or_else(|| format!("\"{text}\" is not hexadecimal bytes"))
+        })
+        .collect()
+}
+
+impl Mod {
+    /// Its patches, from its `patches.toml`; none where it has none.
+    ///
+    /// # Errors
+    ///
+    /// A `patches.toml` that does not parse, or a patch whose bytes are not hexadecimal or are not
+    /// as many as it expects to find.
+    pub fn patches(&self) -> Result<Vec<Patch>, String> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join(PATCH_FILE)) else {
+            return Ok(Vec::new());
+        };
+        let file: PatchFile = toml::from_str(&text).map_err(|e| e.to_string())?;
+        file.patches
+            .into_iter()
+            .enumerate()
+            .map(|(at, entry)| {
+                let original = hex_bytes(&entry.original)?;
+                let bytes = hex_bytes(&entry.bytes)?;
+                if original.len() != bytes.len() || bytes.is_empty() {
+                    return Err(format!(
+                        "patch {} at {:#x} writes {} byte(s) over {}: a patch replaces bytes in place",
+                        at + 1,
+                        entry.offset,
+                        bytes.len(),
+                        original.len()
+                    ));
+                }
+                Ok(Patch {
+                    module: entry.module,
+                    offset: entry.offset,
+                    original,
+                    bytes,
+                    description: entry.description,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Where each of a mod's patches writes in a module placed at `base` whose segments span
+/// `segments` (each its first address and length), checked against what is there now: every
+/// patch inside one segment and finding its original bytes, or none written. `read` answers the
+/// bytes at an address. All or nothing, so a mod made for another build of the title changes none
+/// of it.
+///
+/// # Errors
+///
+/// The first patch that lies outside every segment, cannot be read, or finds other bytes than it
+/// expects - with what it found.
+pub fn plan_patches(
+    patches: &[Patch],
+    (base, segments): (u64, &[(u64, u64)]),
+    read: impl Fn(u64, usize) -> Option<Vec<u8>>,
+) -> Result<Vec<(u64, Vec<u8>)>, String> {
+    patches
+        .iter()
+        .enumerate()
+        .map(|(at, patch)| {
+            let start = base
+                .checked_add(patch.offset)
+                .ok_or("an offset past the address space")?;
+            let end = start
+                .checked_add(patch.bytes.len() as u64)
+                .ok_or("an offset past the address space")?;
+            let inside = segments
+                .iter()
+                .any(|&(first, length)| first <= start && end <= first.saturating_add(length));
+            if !inside {
+                return Err(format!(
+                    "patch {} at {:#x} lies outside the module's segments",
+                    at + 1,
+                    patch.offset
+                ));
+            }
+            let found = read(start, patch.original.len())
+                .ok_or_else(|| format!("patch {} at {:#x} cannot be read", at + 1, patch.offset))?;
+            if found != patch.original {
+                return Err(format!(
+                    "patch {} at {:#x} expects {} and finds {}: made for another build",
+                    at + 1,
+                    patch.offset,
+                    hex(&patch.original),
+                    hex(&found)
+                ));
+            }
+            Ok((start, patch.bytes.clone()))
+        })
+        .collect()
+}
+
+/// Bytes as spaced hexadecimal pairs.
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The directory in a mod that is laid over the title's `/app0`.
 pub const APP0_DIR: &str = "app0";
 
@@ -101,7 +276,79 @@ pub fn found(mods_dir: &Path) -> Vec<Mod> {
 
 #[cfg(test)]
 mod tests {
-    use super::found;
+    use super::{Patch, found, hex_bytes, plan_patches};
+
+    fn patch(offset: u64, original: &[u8], bytes: &[u8]) -> Patch {
+        Patch {
+            module: None,
+            offset,
+            original: original.to_vec(),
+            bytes: bytes.to_vec(),
+            description: None,
+        }
+    }
+
+    /// Hexadecimal pairs read spaced or not; odd digits and non-digits are refused.
+    #[test]
+    fn hex_bytes_read_spaced_or_not() {
+        assert_eq!(hex_bytes("74 0e").unwrap(), [0x74, 0x0e]);
+        assert_eq!(hex_bytes("740E").unwrap(), [0x74, 0x0e]);
+        assert!(hex_bytes("740").is_err());
+        assert!(hex_bytes("zz").is_err());
+    }
+
+    /// Every patch inside a segment and finding its original is planned; one that is not stops all.
+    #[test]
+    fn patches_apply_all_or_none() {
+        let memory = |at: u64, len: usize| -> Option<Vec<u8>> {
+            Some(
+                (0..len)
+                    .map(|i| u8::try_from((at as usize + i) & 0xff).unwrap())
+                    .collect(),
+            )
+        };
+        let segments = [(0x1000, 0x100)];
+        let ok = [
+            patch(0x10, &[0x10, 0x11], &[0x90, 0x90]),
+            patch(0x20, &[0x20], &[0xeb]),
+        ];
+        assert_eq!(
+            plan_patches(&ok, (0x1000, &segments), memory).unwrap(),
+            [(0x1010, vec![0x90, 0x90]), (0x1020, vec![0xeb])]
+        );
+        let wrong = [ok[0].clone(), patch(0x20, &[0x99], &[0xeb])];
+        let why = plan_patches(&wrong, (0x1000, &segments), memory).unwrap_err();
+        assert!(why.contains("expects 99 and finds 20"), "{why}");
+        let outside = [patch(0xff, &[0xff, 0x00], &[0, 0])];
+        assert!(
+            plan_patches(&outside, (0x1000, &segments), memory)
+                .unwrap_err()
+                .contains("outside")
+        );
+    }
+
+    /// A mod's `patches.toml` reads into patches, and one replacing a different length is refused.
+    #[test]
+    fn a_patch_file_reads_and_refuses_a_length_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let write = |text: &str| std::fs::write(dir.path().join(super::PATCH_FILE), text).unwrap();
+        let module = super::Mod {
+            name: "m".to_owned(),
+            dir: dir.path().to_path_buf(),
+            file: super::ModFile::default(),
+            unreadable: None,
+        };
+        assert!(module.patches().unwrap().is_empty(), "none without a file");
+        write("[[patch]]\noffset = 0x10\noriginal = \"74 0e\"\nbytes = \"eb 0e\"\n");
+        let patches = module.patches().unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            (patches[0].offset, patches[0].bytes.clone()),
+            (0x10, vec![0xeb, 0x0e])
+        );
+        write("[[patch]]\noffset = 0x10\noriginal = \"74\"\nbytes = \"eb 0e\"\n");
+        assert!(module.patches().unwrap_err().contains("in place"));
+    }
 
     /// Mods are found in name order, a `mod.toml` can turn one off, and one whose file does not
     /// parse is left off with the reason.
