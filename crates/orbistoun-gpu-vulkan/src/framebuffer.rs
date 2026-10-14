@@ -52,6 +52,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Unorm8 => FORMAT,
         TargetEncoding::Srgb8 => vk::Format::R8G8B8A8_SRGB,
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
+        TargetEncoding::Float32 => vk::Format::R32_SFLOAT,
     }
 }
 
@@ -60,6 +61,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
 const fn image_format(encoding: TargetEncoding) -> vk::Format {
     match encoding {
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
+        TargetEncoding::Float32 => vk::Format::R32_SFLOAT,
         TargetEncoding::Unorm8 | TargetEncoding::Srgb8 => FORMAT,
     }
 }

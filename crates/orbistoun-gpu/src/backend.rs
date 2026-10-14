@@ -431,6 +431,9 @@ pub enum TargetEncoding {
     /// `COLOR_10_11_11` `FLOAT` (D773): red and green as eleven-bit and blue as ten-bit unsigned
     /// floats, red in the low bits - the packing Vulkan's `B10G11R11_UFLOAT_PACK32` holds.
     Float11_11_10,
+    /// `COLOR_32` `FLOAT` (D844): one 32-bit float a texel, red - the bits Vulkan's `R32_SFLOAT`
+    /// holds.
+    Float32,
 }
 
 /// What a bound texture's words are.

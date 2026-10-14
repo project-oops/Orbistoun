@@ -2274,6 +2274,9 @@ pub const NUMBER_UNORM: u32 = 0;
 pub const NUMBER_SRGB: u32 = 6;
 /// `ColorFormat` `COLOR_10_11_11` (`gfx103.json`): what Mesa targets `R11G11B10_FLOAT` at.
 pub const COLOR_10_11_11: u32 = 6;
+/// `ColorFormat` `COLOR_32` (`gfx103.json`): what Mesa targets a one-channel 32-bit format at
+/// (`ac_formats.c` 489).
+pub const COLOR_32: u32 = 4;
 /// `SurfaceNumber` `NUMBER_FLOAT` (`gfx103.json`).
 pub const NUMBER_FLOAT: u32 = 7;
 
@@ -2352,11 +2355,22 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a four-byte `32` `FLOAT` target holding red, `SWAP_STD` on a one-channel
+    /// format (`ac_formats.c` 892): one float a texel, drawn and written back as it is held (D844).
+    #[must_use]
+    pub const fn is_float_32(&self) -> bool {
+        self.format == COLOR_32
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// How its texels hold colour, for the attachment a draw writes through.
     #[must_use]
     pub const fn encoding(&self) -> crate::TargetEncoding {
         if self.is_float_11_11_10() {
             crate::TargetEncoding::Float11_11_10
+        } else if self.is_float_32() {
+            crate::TargetEncoding::Float32
         } else if self.is_srgb() {
             crate::TargetEncoding::Srgb8
         } else {
@@ -2365,10 +2379,11 @@ impl ColourTargetFormat {
     }
 
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
-    /// [`Self::is_rgba8_class`] and [`Self::is_float_11_11_10`], one for [`Self::is_r8_class`].
+    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`] and [`Self::is_float_32`], one for
+    /// [`Self::is_r8_class`].
     #[must_use]
     pub const fn written_back_bytes(&self) -> Option<u32> {
-        if self.is_rgba8_class() || self.is_float_11_11_10() {
+        if self.is_rgba8_class() || self.is_float_11_11_10() || self.is_float_32() {
             Some(4)
         } else if self.is_r8_class() {
             Some(1)
@@ -3428,6 +3443,18 @@ mod tests {
         assert_eq!(float.written_back_bytes(), Some(4));
         assert!(
             !decode_colour_target_format(0x0001_8018 | (7 << 8) | (1 << 11)).is_float_11_11_10()
+        );
+        // PPSA04263's 5x5 reduction target: `32`, `NUMBER_FLOAT`, `SWAP_STD` - one red float a
+        // texel (`ac_formats.c` 489, 892), written back four bytes a texel (D844); with any other
+        // swap it is not.
+        let red = decode_colour_target_format(0x0001_8010 | (7 << 8));
+        assert!(red.is_float_32());
+        assert_eq!(red.encoding(), crate::TargetEncoding::Float32);
+        assert_eq!(red.written_back_bytes(), Some(4));
+        assert!(!decode_colour_target_format(0x0001_8010 | (7 << 8) | (3 << 11)).is_float_32());
+        assert!(
+            !decode_colour_target_format(0x0001_8010).is_float_32(),
+            "not UNORM"
         );
         assert_eq!(srgb.encoding(), crate::TargetEncoding::Srgb8);
         assert_eq!(measured.encoding(), crate::TargetEncoding::Unorm8);
