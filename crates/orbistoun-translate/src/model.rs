@@ -2722,6 +2722,9 @@ pub fn instruction<M: Model + ?Sized>(
         if SDWA_COMPARE.contains(&name) {
             return sdwa_compare(model, instruction, name, word);
         }
+        if SDWA_CARRY.contains(&name) {
+            return sdwa_carry(model, instruction, name, word);
+        }
         return sdwa_integer(model, instruction, name, word);
     }
 
@@ -7152,6 +7155,10 @@ pub const SDWA_FLOAT_UNARY: &[&str] = &[
     "v_rndne_f32_e32",
 ];
 
+/// The short-form carry arithmetic translated in its SDWA form over whole registers: there the
+/// instruction is its short form on the sources the word names.
+pub const SDWA_CARRY: &[&str] = &["v_add_co_ci_u32_e32"];
+
 /// The short-form compares translated in their SDWA form over whole registers.
 pub const SDWA_COMPARE: &[&str] = &[
     // Integer compares, which take no negate or absolute value.
@@ -7274,6 +7281,44 @@ fn sdwa_compare<M: Model + ?Sized>(
     Ok(())
 }
 
+/// An `SDWA_CARRY` instruction in its SDWA form: over whole registers, with none of the word's
+/// float modifiers, it is its short form reading the first source the word names, and the second
+/// as a scalar register where bit 31 says (RDNA ISA, SDWA). A select of part of a register, a sign
+/// extension, a destination part, or a float modifier is refused.
+fn sdwa_carry<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+    word: u32,
+) -> Result<(), TranslateError> {
+    // Clamp 13, omod 15:14, and each source's negate and absolute (20, 21, 28, 29).
+    const FLOAT_MODIFIERS: u32 = (1 << 13) | (0x3 << 14) | (0x3 << 20) | (0x3 << 28);
+    let fields = SdwaFields::read(word);
+    let whole = fields
+        .select
+        .iter()
+        .all(|&select| select == (SDWA_DWORD, false))
+        && fields.dst_sel == SDWA_DWORD;
+    if !whole || word & FLOAT_MODIFIERS != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "SDWA carry arithmetic over part of a register or with a float modifier",
+        });
+    }
+    // The short form's sources follow its two destinations: the marker, then the register field.
+    let Some(Operand::Vector(vsrc1)) = instruction.operands.get(3) else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "an SDWA carry instruction's second source is not its register field",
+        });
+    };
+    let mut plain = instruction.clone();
+    plain.operands[2] = sdwa_operand(instruction, fields.src0, fields.src0_scalar)?;
+    plain.operands[3] = sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?;
+    plain.second_word = None;
+    carry_arithmetic(model, &plain, name)
+}
+
 /// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
 fn sdwa_float_long_form(name: &str) -> Option<&'static str> {
     SDWA_FLOAT
@@ -7295,6 +7340,7 @@ pub fn sdwa_translated(marker: u32, instruction: &Instruction, encodings: &Encod
                 SDWA_INTEGER.contains(&name)
                     || SDWA_FLOAT_UNARY.contains(&name)
                     || SDWA_COMPARE.contains(&name)
+                    || SDWA_CARRY.contains(&name)
                     || sdwa_float_long_form(name).is_some()
             })
 }

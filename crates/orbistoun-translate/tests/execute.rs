@@ -1810,6 +1810,33 @@ fn an_sdwa_integer_compare_writes_the_pair_its_word_names() {
     assert!(refused.to_string().contains("integer"), "{refused}");
 }
 
+/// The carry-in add in its SDWA form over whole registers is the add itself on the sources its
+/// word names: Grand Theft Auto V's compute program does `v_add_co_ci_u32_sdwa v2, vcc, 0, s13,
+/// vcc` (words 0x50041af9 0x86860680). With `s13` 7 and a carry in for lanes 0 to 3, those lanes
+/// hold 8 and the rest 7.
+#[test]
+fn an_sdwa_carry_add_adds_the_sources_its_word_names() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_carry_add_adds_the_sources_its_word_names") {
+        return;
+    }
+    let add = head("v_add_co_ci_u32_e32") | 2 << 17 | 13 << 9 | SDWA_MARKER;
+    assert_eq!(add, 0x5004_1af9, "Grand Theft Auto V's first word");
+    let mut program = lane_index_into(0).to_vec();
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.push(v_mov_inline(3, 4));
+    program.push(v_cmp_f32("v_cmp_lt_u32_e32", vgpr_code(0), 3));
+    program.push(sop1("s_mov_b32", 13, 128 + 7));
+    program.extend([add, 0x8686_0680]);
+    program.extend(global_store(1, 2));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane < 4 { 8 } else { 7 };
+        assert_eq!(*stored, expected, "lane {lane}");
+    }
+}
+
 /// A `cmpx` in its SDWA form narrows the execution mask by its answer, its word's absolute value on
 /// the second source: PPSA21564's pixel shader does `v_cmpx_lt_f32_sdwa v1, |v0|` (words
 /// 0x7c2200f9 0x26060001). 0.5 < |-1.0| keeps every lane writing; 2.0 < |-1.0| stops them all.
