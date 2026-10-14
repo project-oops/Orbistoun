@@ -142,6 +142,42 @@ pub fn tiled_byte_offset_64kb_rx_bpp8_surface(x: u32, y: u32, width: u32) -> usi
     block * BLOCK_BYTES + offset
 }
 
+/// A 16-bpp `64KB_R_X` block's extent in texels: 64 KiB of two-byte texels, 256 across and 128
+/// down.
+const RX_BPP2_BLOCK_WIDTH: u32 = 256;
+const RX_BPP2_BLOCK_HEIGHT: u32 = 128;
+
+/// Where each of the low eight bits of `x`, then seven of `y`, lands in a 16-bpp `64KB_R_X` block's
+/// byte offset: the offset is the XOR of the entries whose coordinate bit is set.
+///
+/// Printed by `tools/addrlib/equation 64KB_R_X 2 32` for this console's configuration, which finds
+/// no term above the block and checks row-major blocks under these terms against addrlib for every
+/// texel of a 32 x 32-block surface and a 5 x 3-block one.
+const RX_BPP2_X_BITS: [usize; 8] = [0x2, 0x4, 0x8, 0x180, 0x200, 0x800, 0x2400, 0x8000];
+/// The same for `y`.
+const RX_BPP2_Y_BITS: [usize; 7] = [0x10, 0x20, 0x40, 0x100, 0x1200, 0x400, 0x4800];
+
+/// Byte offset of texel `(x, y)` in a 16-bpp `64KB_R_X` surface `width` texels wide: its block,
+/// row-major, then its place in the block, before any pipe-bank XOR.
+#[must_use]
+pub fn tiled_byte_offset_64kb_rx_bpp2_surface(x: u32, y: u32, width: u32) -> usize {
+    let blocks_per_row = width.div_ceil(RX_BPP2_BLOCK_WIDTH) as usize;
+    let block =
+        (y / RX_BPP2_BLOCK_HEIGHT) as usize * blocks_per_row + (x / RX_BPP2_BLOCK_WIDTH) as usize;
+    let mut offset = 0;
+    for (bit, place) in RX_BPP2_X_BITS.iter().enumerate() {
+        if x >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    for (bit, place) in RX_BPP2_Y_BITS.iter().enumerate() {
+        if y >> bit & 1 == 1 {
+            offset ^= place;
+        }
+    }
+    block * BLOCK_BYTES + offset
+}
+
 /// Texels per side of a 128-bpp `64KB_D_X` block: 64 KiB of sixteen-byte texels, 64 x 64.
 const DX_BPP16_BLOCK_EXTENT: u32 = 64;
 
@@ -291,6 +327,32 @@ fn tile_4kb_s_bpp1(
         let shift = (at % 4) * 8;
         let word = &mut tiled[at / 4];
         *word = (*word & !(0xFF << shift)) | ((map(texel) & 0xFF) << shift);
+    }
+    Ok(())
+}
+
+/// Tiles a 16-bpp `64KB_R_X` surface's linear texels, the low half of a word each, into their
+/// halves of `tiled`'s little-endian words, each through `map`, leaving the other halves alone:
+/// [`SurfaceLayout::tile_mapped`] for [`SurfaceLayout::Rx64KbBpp2`].
+fn tile_64kb_rx_bpp2(
+    (linear, tiled): (&[u32], &mut [u32]),
+    (width, height): (u32, u32),
+    map: impl Fn(u32) -> u32,
+) -> Result<(), DetileError> {
+    let needed_words = SurfaceLayout::Rx64KbBpp2.words(width, height);
+    let texels = width as usize * height as usize;
+    if tiled.len() < needed_words || linear.len() != texels {
+        return Err(DetileError::TiledDataTooShort {
+            needed_words: needed_words.max(texels),
+            got_words: tiled.len().min(linear.len()),
+        });
+    }
+    for (index, &texel) in linear.iter().enumerate() {
+        let (x, y) = (index as u32 % width, index as u32 / width);
+        let at = tiled_byte_offset_64kb_rx_bpp2_surface(x, y, width);
+        let shift = (at % 4) * 8;
+        let word = &mut tiled[at / 4];
+        *word = (*word & !(0xFFFF << shift)) | ((map(texel) & 0xFFFF) << shift);
     }
     Ok(())
 }
@@ -874,6 +936,9 @@ pub enum SurfaceLayout {
     /// `64KB_R_X` at eight bytes a texel: 128 x 64-texel blocks, row-major, each by addrlib's
     /// 64-bpp equation ([`tiled_byte_offset_64kb_rx_bpp8_surface`]). A texel is two words.
     Rx64KbBpp8,
+    /// `64KB_R_X` at two bytes a texel: 256 x 128-texel blocks, row-major, each by addrlib's
+    /// 16-bpp equation ([`tiled_byte_offset_64kb_rx_bpp2_surface`]). A texel is half a word.
+    Rx64KbBpp2,
 }
 
 /// A linear surface's row pitch in texels: its width rounded up to 64, 256 bytes.
@@ -905,7 +970,9 @@ impl SurfaceLayout {
             (Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16, 16) => {
                 Some(self)
             }
-            (Self::S4KbBpp8 | Self::Rx64KbBpp8, 8) | (Self::S4KbBpp1, 1) => Some(self),
+            (Self::S4KbBpp8 | Self::Rx64KbBpp8, 8)
+            | (Self::S4KbBpp1, 1)
+            | (Self::Rx64KbBpp2, 2) => Some(self),
             (
                 Self::Dx64KbBpp16
                 | Self::Dx4KbBpp16
@@ -913,6 +980,7 @@ impl SurfaceLayout {
                 | Self::S4KbBpp16
                 | Self::S4KbBpp8
                 | Self::Rx64KbBpp8
+                | Self::Rx64KbBpp2
                 | Self::S4KbBpp1,
                 _,
             ) => None,
@@ -923,6 +991,7 @@ impl SurfaceLayout {
             (Self::S4Kb, 1) => Some(Self::S4KbBpp1),
             (Self::Rx64Kb, 1) => Some(Self::Rx64KbBpp1),
             (Self::Rx64Kb, 8) => Some(Self::Rx64KbBpp8),
+            (Self::Rx64Kb, 2) => Some(Self::Rx64KbBpp2),
             (Self::Linear, 1) => Some(Self::LinearBpp1),
             (_, 4) => Some(self),
             _ => None,
@@ -934,6 +1003,7 @@ impl SurfaceLayout {
     pub const fn texel_log2(self) -> u32 {
         match self {
             Self::Rx64KbBpp1 | Self::LinearBpp1 | Self::S4KbBpp1 => 0,
+            Self::Rx64KbBpp2 => 1,
             Self::Rx64Kb | Self::Dx4Kb | Self::Linear | Self::S4Kb | Self::S64Kb => 2,
             Self::S4KbBpp8 | Self::Rx64KbBpp8 => 3,
             Self::Dx64KbBpp16 | Self::Dx4KbBpp16 | Self::S64KbBpp16 | Self::S4KbBpp16 => 4,
@@ -1020,6 +1090,12 @@ impl SurfaceLayout {
                     * S4_BLOCK_BYTES
                     / 4
             }
+            Self::Rx64KbBpp2 => {
+                width.div_ceil(RX_BPP2_BLOCK_WIDTH) as usize
+                    * height.div_ceil(RX_BPP2_BLOCK_HEIGHT) as usize
+                    * BLOCK_BYTES
+                    / 4
+            }
             Self::Rx64KbBpp8 => {
                 width.div_ceil(RX_BPP8_BLOCK_WIDTH) as usize
                     * height.div_ceil(RX_BPP8_BLOCK_HEIGHT) as usize
@@ -1052,6 +1128,7 @@ impl SurfaceLayout {
             Self::Rx64Kb
             | Self::Rx64KbBpp1
             | Self::Rx64KbBpp8
+            | Self::Rx64KbBpp2
             | Self::Dx64KbBpp16
             | Self::S64Kb
             | Self::S64KbBpp16 => 16,
@@ -1235,6 +1312,7 @@ impl SurfaceLayout {
             | Self::S4KbBpp16
             | Self::S4KbBpp8
             | Self::Rx64KbBpp8
+            | Self::Rx64KbBpp2
             | Self::S4KbBpp1 => pipe_bank_xor == 0,
         }
     }
@@ -1281,6 +1359,14 @@ impl SurfaceLayout {
                     .map(|at| map(tiled[at / 4] >> ((at % 4) * 8) & 0xFF))
                     .collect()
             }
+            // Each texel is one half of the little-endian words.
+            Self::Rx64KbBpp2 => (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let at = tiled_byte_offset_64kb_rx_bpp2_surface(x, y, width);
+                    map(tiled[at / 4] >> ((at % 4) * 8) & 0xFFFF)
+                })
+                .collect(),
             // Each texel is one byte of the little-endian words.
             Self::Rx64KbBpp1 => (0..height)
                 .flat_map(|y| (0..width).map(move |x| (x, y)))
@@ -1392,6 +1478,7 @@ impl SurfaceLayout {
                 }
                 Ok(())
             }
+            Self::Rx64KbBpp2 => tile_64kb_rx_bpp2((linear, tiled), (width, height), map),
             // Each texel's low byte, into its byte of the little-endian words.
             Self::Rx64KbBpp1 => {
                 let needed_words = self.words(width, height);
@@ -1838,6 +1925,52 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 128 * 128);
+    }
+
+    /// `64KB_R_X` at two bytes a texel is row-major 256 x 128-texel blocks, each by addrlib's
+    /// equation, with no term above the block (`tools/addrlib/equation 64KB_R_X 2 32`, checked
+    /// against addrlib for 34 million texels). Each texel is the low half of its linear word, and
+    /// tiling one leaves the other half of its tiled word alone.
+    #[test]
+    fn two_byte_64kb_r_x_is_addrlib_s_equation() {
+        use super::{SurfaceLayout, tiled_byte_offset_64kb_rx_bpp2_surface};
+        assert_eq!(
+            SurfaceLayout::Rx64Kb.at_bytes_per_texel(2),
+            Some(SurfaceLayout::Rx64KbBpp2)
+        );
+        let layout = SurfaceLayout::Rx64KbBpp2;
+        assert_eq!(layout.texel_log2(), 1);
+        for ((x, y), offset) in [
+            ((1, 0), 0x2),
+            ((8, 0), 0x180),
+            ((0, 1), 0x10),
+            ((0, 16), 0x1200),
+            ((256, 0), 0x1_0000),
+            ((0, 128), 0x2_0000),
+        ] {
+            assert_eq!(
+                tiled_byte_offset_64kb_rx_bpp2_surface(x, y, 512),
+                offset,
+                "({x}, {y})"
+            );
+        }
+        let (width, height) = (300, 150);
+        let linear: Vec<u32> = (0..width * height).map(|i| i & 0xFFFF).collect();
+        let mut tiled = vec![0xAAAA_AAAA_u32; layout.words(width, height)];
+        layout
+            .tile_mapped(&linear, width, height, 0, &mut tiled, |w| w)
+            .expect("tiled");
+        assert_eq!(
+            layout.detile_mapped(&tiled, width, height, 0, |w| w),
+            linear
+        );
+        let mut one = vec![0xAAAA_AAAA_u32; layout.words(width, height)];
+        let mut single = vec![0_u32; (width * height) as usize];
+        single[1] = 0x1234;
+        layout
+            .tile_mapped(&single, width, height, 0, &mut one, |w| w)
+            .expect("tiled");
+        assert_eq!(one[0], 0x1234_0000, "texel 1 is the high half of word 0");
     }
 
     /// `64KB_R_X` at eight bytes a texel is row-major 128 x 64-texel blocks, each by addrlib's
