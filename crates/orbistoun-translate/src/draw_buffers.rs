@@ -593,19 +593,22 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
                 scalar_reach: end,
                 ..DescriptorReads::default()
             };
-            // An offset register's value is the draw's, found per draw with the descriptor through
-            // the program before the access (D753); the binding reaches the immediate's words past
-            // it.
-            if !plain_scalar_offset(instruction) {
-                return Some(Access::Computed {
+            // A descriptor from the user data, read at its immediate alone, is the draw's as it
+            // stands; an offset register's value, or a descriptor the program computes or loads, is
+            // found per draw through the program before the access (D753), the binding reaching the
+            // immediate's words past the offset.
+            return match descriptor(held, *base) {
+                Some(words) if plain_scalar_offset(instruction) => {
+                    Some(Access::Descriptor(words, reads))
+                }
+                _ => Some(Access::Computed {
                     through: ComputedAccess::Descriptor {
                         first: *base,
                         reads,
                     },
                     soffset: u8::try_from((instruction.second_word? >> 25) & 0x7f).ok()?,
-                });
-            }
-            return Some(Access::Descriptor(descriptor(held, *base)?, reads));
+                }),
+            };
         }
         if !plain_scalar_offset(instruction) {
             return None;
@@ -929,6 +932,27 @@ mod tests {
         assert_eq!(traced.served.get(&0), Some(&0));
     }
 
+    /// A scalar buffer load through a descriptor the program loaded itself is found per draw (D753),
+    /// as a vector access through one is: Grand Theft Auto V's pixel shader loads `s[4:7]` from its
+    /// constants at `vcc_lo`, then reads `s_buffer_load_dwordx4 s[0:3], s[4:7], 0xb0` through it.
+    #[test]
+    fn a_scalar_load_through_a_loaded_descriptor_is_found_per_draw() {
+        let traced = traced(
+            &[0xf428_0108, 0xd400_0000, 0xf428_0002, 0xfa00_00b0, END],
+            20,
+        );
+        let through: Vec<_> = traced
+            .sources
+            .iter()
+            .map(|source| match source {
+                BufferSource::Computed(computed) => Some((computed.at, computed.soffset)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(through, [Some((0, 106)), Some((8, 125))]);
+        assert_eq!(traced.served.get(&8), Some(&1));
+    }
+
     /// A dispatch's buffer store is traced like its load (D746): the copy reads one buffer and
     /// writes another, each through its own slot. A draw's, a snapshot, traces nothing, as does a
     /// dispatch that writes any other way.
@@ -1179,10 +1203,11 @@ mod tests {
         assert_eq!(buffers.served.get(&0x10), Some(&1), "{:?}", buffers.served);
     }
 
-    /// A register written with something else on one path to the load leaves it untraced: the
-    /// value at the load is not one thing.
+    /// A register written with something else on one path to the load is not the user data's: the
+    /// value at the load is not one thing, so the load is found per draw (D753), its program
+    /// followed where the draw's condition is known.
     #[test]
-    fn a_register_written_on_one_path_is_not_traced() {
+    fn a_register_written_on_one_path_is_found_per_draw() {
         let program = [
             0xbe80_0302, // s_mov_b32 s0, s2
             0xbe81_0384, // s_mov_b32 s1, 4
@@ -1196,8 +1221,11 @@ mod tests {
             END,
         ];
         let buffers = traced(&program, 4);
-        assert!(buffers.sources.is_empty(), "{:?}", buffers.sources);
-        assert!(buffers.served.is_empty());
+        assert!(
+            matches!(buffers.sources.as_slice(), [BufferSource::Computed(_)]),
+            "{:?}",
+            buffers.sources
+        );
     }
 
     /// Paths that agree on a register keep it traced: a branch around an unrelated write joins with
@@ -1219,9 +1247,10 @@ mod tests {
         assert_eq!(traced(&program, 4).sources.len(), 1);
     }
 
-    /// A user-data register an arithmetic instruction overwrote is not the draw's word any more.
+    /// A user-data register an arithmetic instruction overwrote is not the draw's word any more:
+    /// the load is found per draw (D753), the arithmetic evaluated.
     #[test]
-    fn an_overwritten_user_data_register_is_not_traced() {
+    fn an_overwritten_user_data_register_is_found_per_draw() {
         let program = [
             0x8102_ff02, // s_add_i32 s2, s2, 0x40
             0x0000_0040,
@@ -1234,12 +1263,16 @@ mod tests {
             0xfa00_0000,
             END,
         ];
-        assert!(traced(&program, 4).sources.is_empty());
+        assert!(matches!(
+            traced(&program, 4).sources.as_slice(),
+            [BufferSource::Computed(_)]
+        ));
     }
 
     /// A 32-bit scalar write forgets its own register and not the next: `s_add_i32 s3, s3, s3`
     /// leaves the descriptor in `s[4:7]` the user data's, as PPSA02664's vertex shader writes `s7`
-    /// by `s_bfe_u32` below a descriptor in `s[8:11]`. A 64-bit one forgets the pair.
+    /// by `s_bfe_u32` below a descriptor in `s[8:11]`. A 64-bit one forgets the pair, and the load
+    /// is found per draw (D753).
     #[test]
     fn a_scalar_write_forgets_only_its_width() {
         let load = [0xf420_0002, 0xfa00_0000]; // s_buffer_load_dword s0, s[4:7], 0x0
@@ -1255,7 +1288,10 @@ mod tests {
         );
         // s_lshl_b64 s[3:4], s[3:4], 1 writes s4 too.
         let program = [0x8f83_8103, load[0], load[1], END];
-        assert!(traced(&program, 8).sources.is_empty());
+        assert!(matches!(
+            traced(&program, 8).sources.as_slice(),
+            [BufferSource::Computed(_)]
+        ));
     }
 
     /// A program that writes memory is traced not at all: a buffer bound for the draw is its
