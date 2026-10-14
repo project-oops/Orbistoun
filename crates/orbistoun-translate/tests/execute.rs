@@ -1210,6 +1210,28 @@ fn a_sixty_four_bit_move_extends_a_constant_rather_than_repeating_it() {
     );
 }
 
+/// A 64-bit move of a 32-bit literal with its top bit clear sets the low half to it and the high
+/// half to zero - sign and zero extension agree there (ACO keeps a 64-bit literal as its low 32 bits
+/// and an extension flag, `aco_ir.h` 589-595). Grand Theft Auto V's fragment shader moves
+/// 0x6500000 so.
+#[test]
+fn a_sixty_four_bit_move_of_a_literal_with_its_top_bit_clear_zero_extends_it() {
+    if !device_or_skip("a_sixty_four_bit_move_of_a_literal_with_its_top_bit_clear_zero_extends_it")
+    {
+        return;
+    }
+
+    // Code 255 is "a literal follows".
+    let registers = run(&[s_mov_b64(0, 255), 0x0650_0000, s_endpgm()]);
+
+    assert_eq!(
+        scalar(&registers, 0),
+        0x0650_0000,
+        "registers were {registers:?}"
+    );
+    assert_eq!(scalar(&registers, 1), 0, "registers were {registers:?}");
+}
+
 /// A 64-bit move copies both halves of a register pair.
 #[test]
 fn a_sixty_four_bit_move_copies_both_halves_of_a_register_pair() {

@@ -542,11 +542,18 @@ fn sixty_four_bit_source<M: Model + ?Sized>(
             let name = lane_mask_name(name).unwrap_or(EXEC_LOW_HALF);
             model.read_lane_mask(name)
         }
+        // A 32-bit literal with its top bit clear: sign and zero extension agree, so the high half
+        // is zero whichever the hardware applies. ACO keeps a 64-bit literal as its low 32 bits and
+        // an extension flag (`aco_ir.h` 589-595); with the top bit set the two readings differ, and
+        // which one a 64-bit operand takes is not established here, so that stays refused.
+        Operand::Literal(value) if value & 0x8000_0000 == 0 => {
+            Ok((model.constant(*value), model.constant(0)))
+        }
         _ => Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: concat!(
-                "a 64-bit source is neither a register pair, an inline constant, ",
-                "nor the execution mask"
+                "a 64-bit source is neither a register pair, an inline constant, a literal with ",
+                "its top bit clear, nor the execution mask"
             ),
         }),
     }
