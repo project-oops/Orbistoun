@@ -42,6 +42,8 @@ macro_rules! span_labels {
             Span::ExecuteOnDevice => $as!("execute on device"),
             Span::Copy => $as!("dma copy"),
             Span::KeepSnapshot => $as!("keep snapshot"),
+            Span::ReadBand => $as!("read band"),
+            Span::FoldBand => $as!("fold band"),
             Span::DiscardSnapshot => $as!("discard snapshot"),
             Span::OtherMemory => $as!("other memory work"),
             Span::FlipWriteBack => $as!("flip write-back"),
@@ -407,6 +409,10 @@ pub enum Span {
     TextureLevels,
     /// A block-compressed texture's blocks, read.
     TextureBlocks,
+    /// Reading a band of a pending frame's rows off the device for a guest's write (D864).
+    ReadBand,
+    /// Patching a band the guest wrote back onto the device (D864).
+    FoldBand,
     /// The host asked whether a kept texture's pages were written since it was kept.
     TextureWatch,
     /// A texture read whose memory the host does not write-watch, so the next binding reads it
@@ -456,7 +462,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 67] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::CommandProcessor,
@@ -502,6 +508,8 @@ impl Span {
         Self::TextureBase,
         Self::TextureLevels,
         Self::TextureBlocks,
+        Self::ReadBand,
+        Self::FoldBand,
         Self::TextureWatch,
         Self::TextureUnwatched,
         Self::TextureSwizzle,

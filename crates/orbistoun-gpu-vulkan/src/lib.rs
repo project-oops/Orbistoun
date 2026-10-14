@@ -970,6 +970,62 @@ impl VulkanBackend {
         self.contents.get(&target)
     }
 
+    /// Rows `first` to `first + count` of the frame the most recent `Draw` rendered, at the guest's
+    /// extent (D864): read off its resident attachment alone, or from the host's copy when that is
+    /// current. `None` when there is no such frame or the rows are past it.
+    pub fn last_frame_rows(&mut self, (first, count): (u32, u32)) -> Option<framebuffer::Pixels> {
+        let target = self.last_drawn?.0;
+        if !self.unread.contains(&target) {
+            let held = self.contents.get(&target)?;
+            let row = held.bytes.len() / held.height.max(1) as usize;
+            let rows = held
+                .bytes
+                .get(first as usize * row..(first as usize + count as usize) * row)?;
+            return Some(framebuffer::Pixels {
+                width: held.width,
+                height: count,
+                bytes: rows.to_vec(),
+            });
+        }
+        match self.resident.get(&target)?.read_rows((first, count)) {
+            Ok(pixels) => Some(pixels),
+            Err(e) => {
+                tracing::warn!("rows of a resident frame could not be read back: {e:?}");
+                None
+            }
+        }
+    }
+
+    /// Gives rows `first` to `first + count` of the frame the most recent `Draw` rendered new
+    /// pixels (tightly packed, the guest's width), on its resident attachment and in the host's copy
+    /// (D864). `false` when there is no such frame or they could not be given.
+    pub fn patch_last_frame_rows(&mut self, (first, count): (u32, u32), pixels: &[u8]) -> bool {
+        let Some(target) = self.last_drawn.map(|drawn| drawn.0) else {
+            return false;
+        };
+        if let Some(resident) = self.resident.get(&target)
+            && let Err(e) = resident.reload_rows((first, count), pixels)
+        {
+            tracing::warn!("rows of a resident frame could not be given: {e:?}");
+            return false;
+        }
+        // The host's copy, where it is current, stays so.
+        if !self.unread.contains(&target)
+            && let Some(held) = self.contents.get_mut(&target)
+        {
+            let row = held.bytes.len() / held.height.max(1) as usize;
+            let Some(rows) = held
+                .bytes
+                .get_mut(first as usize * row..(first as usize + count as usize) * row)
+                .filter(|rows| rows.len() == pixels.len())
+            else {
+                return false;
+            };
+            rows.copy_from_slice(pixels);
+        }
+        true
+    }
+
     /// Brings [`Self::contents`] up to date with `target`'s resident attachment, if it has draws the
     /// host has not seen.
     fn read_back(&mut self, target: Option<ResourceId>) -> Result<(), DispatchError> {

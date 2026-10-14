@@ -1124,12 +1124,12 @@ impl SurfaceLayout {
     }
 
     /// Whether this is a linear layout, whose levels each have rows of their own.
-    const fn is_linear(self) -> bool {
+    pub(crate) const fn is_linear(self) -> bool {
         matches!(self, Self::Linear | Self::LinearBpp1)
     }
 
     /// A linear layout's row pitch in texels: 256 bytes' worth, as [`linear_level_of`] aligns it.
-    const fn linear_pitch(self, width: u32) -> u32 {
+    pub(crate) const fn linear_pitch(self, width: u32) -> u32 {
         width.next_multiple_of(256 >> self.texel_log2())
     }
 

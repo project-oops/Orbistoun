@@ -841,6 +841,21 @@ impl GuestCp<'_> {
             self.expand_dcc(dcc, target.layout)?;
         }
         let more = self.seed_more_targets(submission, target)?;
+        // What the guest wrote into the pending frame's rows reaches the device before more is
+        // drawn over it (D864); where it cannot, the frame goes back whole and is read afresh.
+        let banded_here = open_band()
+            .lock()
+            .is_ok_and(|open| open.is_some_and(|band| band.target == target))
+            && pending_target().is_some_and(|(pending, _)| pending == target);
+        let folded_here = if fold_band() {
+            banded_here
+        } else {
+            let _ = write_back_pending(&mut GuestCp {
+                memory: MappedRegions::current(),
+                submission: None,
+            });
+            false
+        };
         if !write_back_at_flip() {
             draw_over(self, target, swap, |before| {
                 execute(submission, before).then(read).flatten()
@@ -855,8 +870,15 @@ impl GuestCp<'_> {
             return self.write_back_more_targets(&more);
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
-        // each of the many submissions a GL frame takes (D714).
-        let before = read_target(self, target, swap).ok_or_else(|| {
+        // each of the many submissions a GL frame takes (D714). A frame still pending with its band
+        // folded in is the drawer's own as it stands: any other write to the target would have
+        // taken it back whole, so memory has nothing for it (D864).
+        let before = if folded_here {
+            Some(TargetRead::Unchanged)
+        } else {
+            read_target(self, target, swap)
+        }
+        .ok_or_else(|| {
             format!(
                 "its colour target at {:#x}, {:#x} bytes, is not readable guest memory",
                 target.base,
@@ -1831,6 +1853,304 @@ pub fn install_frame_reader(reader: FrameReader) {
     let _ = frame_reader().set(reader);
 }
 
+/// Reads rows `first` to `first + count` of the pending frame off the device, as linear `Rgba8`
+/// words (D864).
+pub type RowsReader = fn(u32, u32) -> Option<Vec<u32>>;
+
+/// Gives rows `first` to `first + count` of the pending frame on the device new texels, as linear
+/// `Rgba8` words (D864). `false` when it could not.
+pub type RowsPatcher = fn(u32, u32, &[u32]) -> bool;
+
+fn frame_rows() -> &'static OnceLock<(RowsReader, RowsPatcher)> {
+    static ROWS: OnceLock<(RowsReader, RowsPatcher)> = OnceLock::new();
+    &ROWS
+}
+
+/// Installs what a band of a pending frame's rows is read and patched with (D864). Without it a
+/// guest's write into a pending frame writes the whole frame back first. First install wins.
+pub fn install_frame_rows(read: RowsReader, patch: RowsPatcher) {
+    let _ = frame_rows().set((read, patch));
+}
+
+/// Rows of the pending frame the guest may write in memory (D864): read off the device into memory
+/// and made writable, and folded back onto the device before anything takes the frame from it.
+#[derive(Debug, Clone, Copy)]
+struct Band {
+    target: ColourTarget,
+    swap: ComponentSwap,
+    /// The first row and how many.
+    rows: (u32, u32),
+    /// The whole host pages they lie in.
+    pages: (u64, u64),
+}
+
+fn open_band() -> &'static Mutex<Option<Band>> {
+    static BAND: Mutex<Option<Band>> = Mutex::new(None);
+    &BAND
+}
+
+/// The fewest rows a band holds: a software pointer's height and then some, so one fault answers
+/// every write it makes.
+const BAND_ROWS: u32 = 32;
+
+/// The most bytes a band may span: a layout whose rows meet a page, or end a block row, only every
+/// many rows would read back most of the frame anyway.
+const BAND_BYTES_MOST: u64 = 2 << 20;
+
+/// The band of `target`'s rows a write at `address` falls in: its first row and count, and where
+/// its words lie - a surface of their own, `count` rows of the target's width laid out as the
+/// target is, starting on a page. A linear target's band is whole rows starting where a row and a
+/// page meet; a `64KB_R_X` one's is a row of blocks, 128 rows, which its layout tiles alone (no
+/// per-block rotation, one pipe-bank XOR for the surface). `None` for any other target, one not laid
+/// out by itself at a page, or one whose band would span more than [`BAND_BYTES_MOST`].
+fn band_at(target: ColourTarget, address: u64) -> Option<((u32, u32), (u64, u64))> {
+    use crate::tiling::SurfaceLayout;
+    if target.layout.texel_log2() != 2
+        || target.place != crate::registers::Place::Whole
+        || target.base % HOST_PAGE != 0
+        || address < target.base
+    {
+        return None;
+    }
+    // Rows that start where a band may, every so many, and the bytes between them.
+    let (group, group_bytes) = match target.layout {
+        SurfaceLayout::Linear => {
+            let row_bytes = target_row_bytes(target);
+            let (mut a, mut b) = (row_bytes, HOST_PAGE);
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            let group = HOST_PAGE / a;
+            (group, group * row_bytes)
+        }
+        SurfaceLayout::Rx64Kb => (
+            BLOCK_ROWS,
+            u64::from(target.width.div_ceil(BLOCK_ROWS as u32)) * 64 * 1024,
+        ),
+        _ => return None,
+    };
+    let index = (address - target.base) / group_bytes;
+    let first = index * group;
+    let height = u64::from(target.height);
+    if first >= height {
+        return None;
+    }
+    let groups = u64::from(BAND_ROWS).div_ceil(group).max(1);
+    if groups * group_bytes > BAND_BYTES_MOST {
+        return None;
+    }
+    let count = (groups * group).min(height - first);
+    let (first, count) = (u32::try_from(first).ok()?, u32::try_from(count).ok()?);
+    let start = target.base + index * group_bytes;
+    let bytes = target.layout.words(target.width, count) as u64 * 4;
+    Some(((first, count), (start, bytes)))
+}
+
+/// The rows a `64KB_R_X` block holds at four bytes a texel.
+const BLOCK_ROWS: u64 = 128;
+
+/// Lets the guest write the band of the pending frame's rows its write at `address` falls in
+/// (D864): those rows are read off the device into memory, and their pages - only theirs - made
+/// writable, so the write lands on the frame as it would on hardware without the whole frame being
+/// written back. `false` when it cannot, and the frame is then written back whole.
+fn open_band_at(
+    (target, swap): (ColourTarget, ComponentSwap),
+    address: u64,
+    (protection, under): (u32, Option<u32>),
+    hooks: &LazyCopies,
+) -> bool {
+    let Some(&(read, _)) = frame_rows().get() else {
+        return false;
+    };
+    let Ok(mut open) = open_band().lock() else {
+        return false;
+    };
+    if open.is_some() {
+        return false;
+    }
+    let Some(((first, count), pages)) = band_at(target, address) else {
+        return false;
+    };
+    let whole = page_span(pages.0, pages.1);
+    let width = target.width as usize;
+    let Some(texels) = crate::perf::span(crate::perf::Span::ReadBand, || read(first, count))
+        .filter(|texels| texels.len() == width * count as usize)
+    else {
+        return false;
+    };
+    if !(hooks.release)(whole.0, whole.1, protection) {
+        return false;
+    }
+    // Laid out over what memory holds there, which keeps the words the rows do not cover - or over
+    // the word a deferred fill would have left there.
+    let memory = MappedRegions::current();
+    let Some(mut words) = usize::try_from(pages.1)
+        .ok()
+        .and_then(|length| match under {
+            Some(word) => Some(vec![word; length / 4]),
+            None => memory.read(pages.0, length).map(words_of),
+        })
+    else {
+        return false;
+    };
+    if target
+        .layout
+        .tile_mapped(
+            &texels,
+            target.width,
+            count,
+            target.pipe_bank_xor,
+            &mut words,
+            |w| stored(w, target, swap),
+        )
+        .is_err()
+        || !copy_into_guest(pages.0, zerocopy::IntoBytes::as_bytes(words.as_slice()))
+    {
+        return false;
+    }
+    if let Ok(mut resolved) = resolved().lock() {
+        if resolved.len() >= RESOLVED_KEPT {
+            resolved.remove(0);
+        }
+        resolved.push(whole);
+    }
+    *open = Some(Band {
+        target,
+        swap,
+        rows: (first, count),
+        pages: whole,
+    });
+    true
+}
+
+/// The pending frame's band of rows a touch at `address` falls in, handed over while the deferred
+/// fills `touched` over it stay deferred around the band (D864): each is cut into the pieces before
+/// and after the band's pages, still guarded, and the band starts from the fill's word, which is
+/// what memory would hold under the frame. The pieces, or `None` - with nothing changed - when the
+/// touch is not on a pending frame's band, `touched` is not all fills of one word, or the band
+/// cannot be opened.
+fn band_under_fills(
+    touched: &[Deferred],
+    address: u64,
+    hooks: &LazyCopies,
+) -> Option<Vec<Deferred>> {
+    let pending = pending_target().filter(|(target, _)| overlaps_target(*target, address, 1))?;
+    let (_, rows) = band_at(pending.0, address)?;
+    let band = page_span(rows.0, rows.1);
+    let mut word = None;
+    for copy in touched {
+        let Held::Fill(pattern) = copy.held else {
+            return None;
+        };
+        if word.is_some_and(|word| word != pattern) || copy.destination % 4 != 0 {
+            return None;
+        }
+        word = Some(pattern);
+    }
+    let word = word?;
+    let protection = touched.first()?.pages.2;
+    if !open_band_at(pending, address, (protection, Some(word)), hooks) {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    for copy in touched {
+        let end = copy.destination + copy.length;
+        let before = (
+            copy.destination,
+            band.0.min(end).saturating_sub(copy.destination),
+        );
+        let after_start = (band.0 + band.1).max(copy.destination);
+        let after = (after_start, end.saturating_sub(after_start));
+        for (destination, length) in [before, after] {
+            if length == 0 {
+                continue;
+            }
+            let span = page_span(destination, length);
+            pieces.push(Deferred {
+                destination,
+                length,
+                pages: (span.0, span.1, copy.pages.2),
+                held: Held::Fill(word),
+            });
+        }
+    }
+    Some(pieces)
+}
+
+/// [`open_band_at`] for a pending frame whose target was guarded under a deferred fill just carried
+/// out (D719): the target's pages are made read-only, as a written target's are (D720), and the band
+/// of rows the touch at `address` falls in is handed over. `false`, with nothing left read-only,
+/// when it cannot be.
+fn band_after_carrying_out(
+    (target, swap): (ColourTarget, ComponentSwap),
+    address: u64,
+    hooks: &LazyCopies,
+) -> bool {
+    protect_target(target);
+    let protection = write_protected().lock().ok().and_then(|protected| {
+        protected
+            .filter(|p| p.target_base == target.base)
+            .map(|p| p.protection)
+    });
+    if let Some(protection) = protection
+        && open_band_at((target, swap), address, (protection, None), hooks)
+    {
+        return true;
+    }
+    unprotect_overlapping(target.base, target.words() as u64 * 4);
+    false
+}
+
+/// Folds the open band back onto the device (D864): its rows as memory holds them now become the
+/// pending frame's there, and their pages read-only again where the target is still protected.
+/// Before anything takes the pending frame from the device. A band whose frame is no longer pending
+/// is forgotten: that frame is gone, and memory holds what the guest wrote. `false` when the rows
+/// could not be patched; the caller then writes the frame back as the device holds it.
+fn fold_band() -> bool {
+    let Some(band) = open_band().lock().ok().and_then(|mut open| open.take()) else {
+        return true;
+    };
+    if pending_target().map(|(target, _)| target) != Some(band.target) {
+        return true;
+    }
+    let Some(&(_, patch)) = frame_rows().get() else {
+        return false;
+    };
+    let (first, count) = band.rows;
+    let Some(((_, _), (start, bytes))) =
+        band_at(band.target, band.pages.0).filter(|(rows, _)| *rows == band.rows)
+    else {
+        return false;
+    };
+    let memory = MappedRegions::current();
+    let Some(words) = usize::try_from(bytes)
+        .ok()
+        .and_then(|length| memory.read(start, length))
+        .map(words_of)
+    else {
+        return false;
+    };
+    let texels = band.target.layout.detile_mapped(
+        &words,
+        band.target.width,
+        count,
+        band.target.pipe_bank_xor,
+        |w| loaded(w, band.target, band.swap),
+    );
+    let patched = crate::perf::span(crate::perf::Span::FoldBand, || patch(first, count, &texels));
+    if let (Some(hooks), Ok(protected)) = (lazy_copies().get(), write_protected().lock())
+        && protected.is_some_and(|p| p.target_base == band.target.base)
+    {
+        let _ = (hooks.protect_writes)(band.pages.0, band.pages.1);
+    }
+    patched
+}
+
+/// A linear target's row pitch in bytes.
+fn target_row_bytes(target: ColourTarget) -> u64 {
+    u64::from(target.layout.linear_pitch(target.width)) * 4
+}
+
 /// Whether a drawn target is written back at the flip (the default) or after every submission
 /// (D714).
 static WRITE_BACK_AT_FLIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -1877,6 +2197,8 @@ fn set_pending(target: Option<(ColourTarget, ComponentSwap)>) {
 /// or it was written; `false` when it could not be, which drops it rather than leaving it pending
 /// forever.
 fn write_back_pending(memory: &mut dyn cp::CpMemory) -> bool {
+    // What the guest wrote into the frame's rows reaches the device first (D864).
+    let _ = fold_band();
     let Some((target, swap)) = pending_target() else {
         return true;
     };
@@ -1978,6 +2300,10 @@ pub const fn memory_order(word: u32, swap: ComponentSwap) -> u32 {
 /// anything that touched the target since would have written the frame back. `false` when it
 /// cannot wait; the caller then writes it back now.
 fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
+    // What the guest wrote into the frame's rows reaches the device before it is kept (D864).
+    if !fold_band() {
+        return Err(CannotWait);
+    }
     let hooks = lazy_copies().get().ok_or(CannotWait)?;
     let (target, swap) = pending_target().ok_or(CannotWait)?;
     let span = target.words() as u64 * 4;
@@ -2014,6 +2340,17 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
         .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), pages));
     *list = kept;
     let carried = !touched.is_empty();
+    // A fill left around a band (D864) lies inside the target, and the frame's write-back writes
+    // every byte of it over the fill's own word, which `memory_then` holds: it is dropped unwritten.
+    let (dropped, touched): (Vec<Deferred>, Vec<Deferred>) = touched.into_iter().partition(|copy| {
+        matches!((&copy.held, &memory_then), (Held::Fill(word), Contents::Uniform { word: then, .. })
+            if word == then)
+            && copy.destination >= target.base
+            && copy.destination + copy.length <= target.base + span
+    });
+    for copy in &dropped {
+        (hooks.release)(copy.pages.0, copy.pages.1, copy.pages.2);
+    }
     carry_out_all(&touched, hooks);
     if carried && guard.is_some() && (hooks.guard)(pages.0, pages.1).is_none() {
         return Err(CannotWait);
@@ -2542,9 +2879,13 @@ fn protect_target(target: ColourTarget) {
 
 /// Whether `target` has been read-only, unwritten, since it was last written or read (D720).
 fn protected_unwritten(target: ColourTarget) -> bool {
-    write_protected()
+    let banded = open_band()
         .lock()
-        .is_ok_and(|protected| protected.is_some_and(|p| p.target_base == target.base))
+        .is_ok_and(|open| open.is_some_and(|band| band.target.base == target.base));
+    !banded
+        && write_protected()
+            .lock()
+            .is_ok_and(|protected| protected.is_some_and(|p| p.target_base == target.base))
 }
 
 /// Gives a protected target's pages back their protection when `[address, address + length)`
@@ -2594,6 +2935,15 @@ pub fn written_at(address: u64) -> bool {
         };
         match *protected {
             Some(p) if ranges_overlap(p.pages, (address, 1)) => {
+                // A write into the pending frame's rows: only their band is handed over (D864),
+                // the rest kept read-only and on the device.
+                if let Some(pending) = pending_target()
+                    .filter(|(target, _)| target.base == p.target_base)
+                    .filter(|(target, _)| overlaps_target(*target, address, 1))
+                    && open_band_at(pending, address, (p.protection, None), hooks)
+                {
+                    return true;
+                }
                 release_protection(p, hooks);
                 *protected = None;
             }
@@ -2615,6 +2965,18 @@ pub fn written_at(address: u64) -> bool {
 /// Writes `bytes` into guest memory at `address` - `false`, writing nothing, when the range is not
 /// writable guest memory.
 fn write_guest(address: u64, bytes: &[u8]) -> bool {
+    if !write_lookup()
+        .get()
+        .is_some_and(|allows| allows(address, bytes.len() as u64))
+    {
+        return false;
+    }
+    unprotect_overlapping(address, bytes.len() as u64);
+    copy_into_guest(address, bytes)
+}
+
+/// [`write_guest`] into pages the caller has made writable already: no protection is released.
+fn copy_into_guest(address: u64, bytes: &[u8]) -> bool {
     let writable = write_lookup()
         .get()
         .is_some_and(|allows| allows(address, bytes.len() as u64));
@@ -2624,12 +2986,12 @@ fn write_guest(address: u64, bytes: &[u8]) -> bool {
     if !writable {
         return false;
     }
-    unprotect_overlapping(address, bytes.len() as u64);
     orbistoun_mem::watch::release_overlapping(address, bytes.len() as u64);
     // SAFETY: the installed lookup vouched that `[address, address + len)` lies wholly inside one
     // identity-mapped guest mapping whose protection allows writes: `len` writable bytes of this
     // process. A deferred copy's destination and a protected target (D720) have their host
-    // protection restored above, so nothing here faults.
+    // protection restored by the caller - [`write_guest`], or a band's opener (D864) - so nothing
+    // here faults.
     unsafe {
         std::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -2990,13 +3352,24 @@ pub fn carry_out_at(address: u64) -> bool {
             .into_iter()
             .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), (address, 1)));
         *list = kept;
+        // A touch of a pending frame under a deferred fill takes a band of its rows, the fill kept
+        // deferred around them (D864).
+        if let Some(pieces) = band_under_fills(&touched, address, hooks) {
+            list.extend(pieces);
+            return true;
+        }
         (!touched.is_empty()).then(|| carry_out_all(&touched, hooks))
     };
     if let Some(carried) = carried {
         // A target under a deferred fill is guarded rather than protected, so a touch of it arrives
         // here and not at `written_at`. Its frame on the device goes into memory first all the
         // same: on hardware the draws are there by the time the guest looks.
-        if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, 1)) {
+        // A write lands on a band of the frame's rows, the rest kept on the device and read-only
+        // (D864).
+        if let Some(pending) =
+            pending_target().filter(|(target, _)| overlaps_target(*target, address, 1))
+            && !band_after_carrying_out(pending, address, hooks)
+        {
             let mut memory = GuestCp {
                 memory: MappedRegions::current(),
                 submission: None,
@@ -3018,6 +3391,10 @@ impl GuestCp<'_> {
     /// [`carry_out`] produces the bytes on first touch. `false` when this copy cannot wait; the
     /// caller then carries it out now.
     fn defer_copy(source: u64, destination: u64, count: usize) -> bool {
+        // What the guest wrote into the frame's rows reaches the device before it is kept (D864).
+        if !fold_band() {
+            return false;
+        }
         let Some(hooks) = lazy_copies().get() else {
             return false;
         };
@@ -4432,6 +4809,66 @@ mod tests {
             super::changed_runs(&before, &[9, 1, 9, 9, 4, 5, 9]),
             vec![(0, 1), (2, 2), (6, 1)]
         );
+    }
+
+    /// A write into a linear 1920x1080 frame is handed a band of whole rows that starts and ends on
+    /// a page: 7680-byte rows meet a 4 KiB page every 8 rows, so a write in row 0 or row 5 gets rows
+    /// 0 to 31, fifteen pages to the 8 rows, and the last band stops at the frame's foot (D864). A
+    /// tiled frame, or one whose rows are not each a run of memory, gets none.
+    #[test]
+    fn a_write_into_a_linear_frame_is_handed_a_band_of_whole_rows() {
+        use super::{ColourTarget, band_at};
+        let target = ColourTarget {
+            base: 0x40_0000,
+            width: 1920,
+            height: 1080,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Linear,
+            place: crate::registers::Place::Whole,
+        };
+        let row = 1920 * 4;
+        let top = Some(((0, 32), (0x40_0000, 32 * row)));
+        assert_eq!(band_at(target, 0x40_0000), top);
+        assert_eq!(band_at(target, 0x40_0000 + 5 * row + 100), top);
+        assert_eq!(
+            band_at(target, 0x40_0000 + 40 * row),
+            Some(((40, 32), (0x40_0000 + 40 * row, 32 * row)))
+        );
+        // The foot: row 1079's group starts at 1072, and the frame ends 8 rows on.
+        assert_eq!(
+            band_at(target, 0x40_0000 + 1079 * row),
+            Some(((1072, 8), (0x40_0000 + 1072 * row, 8 * row)))
+        );
+        assert_eq!(
+            band_at(target, 0x40_0000 + 1080 * row),
+            None,
+            "past the frame"
+        );
+        assert_eq!(band_at(target, 0x3f_ffff), None, "before it");
+        // A 64KB_R_X frame's band is a row of fifteen blocks, 128 rows; the last is 56.
+        let tiled = ColourTarget {
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            ..target
+        };
+        let block_row = 15 * 64 * 1024;
+        assert_eq!(
+            band_at(tiled, 0x40_0000),
+            Some(((0, 128), (0x40_0000, block_row)))
+        );
+        assert_eq!(
+            band_at(tiled, 0x40_0000 + 8 * block_row + 5),
+            Some(((1024, 56), (0x40_0000 + 8 * block_row, block_row)))
+        );
+        let other = ColourTarget {
+            layout: crate::tiling::SurfaceLayout::Dx4Kb,
+            ..target
+        };
+        assert_eq!(band_at(other, 0x40_0000), None);
+        let unaligned = ColourTarget {
+            base: 0x40_0100,
+            ..target
+        };
+        assert_eq!(band_at(unaligned, 0x40_0100), None);
     }
 
     /// A range touches a target exactly when it shares a byte with its tiled surface: a 16x8 target

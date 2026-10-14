@@ -589,6 +589,11 @@ fn install_presentation() {
     // Read back when the drawn frame is written into guest memory: at the flip by default, or after
     // every submission under `ORBISTOUN_TARGET_WRITEBACK=submit` (D714).
     orbistoun_gpu::agc_driver::install_frame_reader(render::read_frame);
+    // A band of its rows, for a guest's write into a frame still on the device (D864).
+    orbistoun_gpu::agc_driver::install_frame_rows(
+        render::read_frame_rows,
+        render::patch_frame_rows,
+    );
     // The colour attachments after the first, seeded before and read back after each submission
     // that draws into them (D825).
     orbistoun_gpu::agc_driver::install_more_targets(

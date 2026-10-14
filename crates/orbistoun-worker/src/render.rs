@@ -957,6 +957,39 @@ fn read_frame_here() -> Option<Vec<u32>> {
     )
 }
 
+/// Rows `first` to `first + count` of the frame the last submissions drew, read off the device as
+/// linear `Rgba8` words: the [`orbistoun_gpu::agc_driver::RowsReader`] the worker installs, for a
+/// guest's write into a frame still on the device (D864).
+pub fn read_frame_rows(first: u32, count: u32) -> Option<Vec<u32>> {
+    on_device(move || {
+        let mut held = live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rows = held.as_mut()?.last_frame_rows((first, count))?;
+        Some(
+            rows.bytes
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect(),
+        )
+    })
+    .flatten()
+}
+
+/// Gives rows `first` to `first + count` of the frame the last submissions drew new texels, linear
+/// `Rgba8` words: the [`orbistoun_gpu::agc_driver::RowsPatcher`] the worker installs (D864).
+pub fn patch_frame_rows(first: u32, count: u32, texels: &[u32]) -> bool {
+    let bytes = zerocopy::IntoBytes::as_bytes(texels).to_vec();
+    on_device(move || {
+        live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .is_some_and(|backend| backend.patch_last_frame_rows((first, count), &bytes))
+    })
+    .unwrap_or(false)
+}
+
 /// Keeps the frame the executor last drew as it stands now, on the device: the snapshot a
 /// deferred copy of the colour target reads later.
 pub fn keep_frame_on_device() -> Option<u64> {

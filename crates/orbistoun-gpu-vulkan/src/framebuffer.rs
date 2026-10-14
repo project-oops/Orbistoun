@@ -1189,6 +1189,123 @@ impl ResidentAttachment {
         }
     }
 
+    /// Rows `first` to `first + count` of its pixels at the guest's extent, as [`Self::read_back`]
+    /// reads them all: what the guest's memory holds there once the frame is written back (D864).
+    pub(crate) fn read_rows(&self, (first, count): (u32, u32)) -> Result<Pixels, DispatchError> {
+        let (width, height) = self.extent();
+        if count == 0 || first.saturating_add(count) > height {
+            return Err(DispatchError::Unsupported(
+                "rows past the attachment cannot be read".to_owned(),
+            ));
+        }
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (image, loads, buffer) = (self.image, self.loads(), self.buffer);
+        one_shot(&session, |device, command| {
+            let attachment = (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            );
+            let transfer_read = (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_READ,
+            );
+            transition(
+                device,
+                command,
+                image,
+                (
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                ),
+                attachment,
+                transfer_read,
+            );
+            loads.copy_rows_out(device, command, buffer, (first, count));
+            transition(
+                device,
+                command,
+                image,
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ),
+                transfer_read,
+                attachment,
+            );
+        })?;
+        let size = attachment_bytes((width, count), self.encoding);
+        let bytes = read_host_memory(&session.device, self.buffer_memory, size)?;
+        Ok(Pixels {
+            width,
+            height: count,
+            bytes,
+        })
+    }
+
+    /// Gives rows `first` to `first + count` new pixels in place (tightly packed, the guest's width),
+    /// keeping the rest: what the guest wrote into a frame still on the device (D864). After
+    /// everything already recorded on the queue; the device is settled first, so nothing still
+    /// reads the buffer when it is written.
+    pub(crate) fn reload_rows(
+        &self,
+        (first, count): (u32, u32),
+        pixels: &[u8],
+    ) -> Result<(), DispatchError> {
+        let (width, height) = self.extent();
+        if count == 0
+            || first.saturating_add(count) > height
+            || pixels.len() as u64 != attachment_bytes((width, count), self.encoding)
+        {
+            return Err(DispatchError::Unsupported(
+                "rows of another extent cannot fill this attachment".to_owned(),
+            ));
+        }
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        settle(&session)?;
+        fill_host_memory(&session.device, self.buffer_memory, pixels)?;
+        let (image, loads) = (self.image, self.loads());
+        one_shot_unwaited(&session, |device, command| {
+            let attachment = (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            );
+            let transfer_write = (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::TRANSFER_WRITE,
+            );
+            // Kept across the transition: only the rows are replaced.
+            transition(
+                device,
+                command,
+                image,
+                (
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                ),
+                attachment,
+                transfer_write,
+            );
+            loads.copy_rows_in(device, command, (first, count));
+            transition(
+                device,
+                command,
+                image,
+                (
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ),
+                transfer_write,
+                attachment,
+            );
+        })
+    }
+
     /// Destroys it. Best-effort, like every release here: with no session the process is ending.
     pub(crate) fn destroy(mut self) {
         self.detach_more();
@@ -1441,6 +1558,211 @@ impl Loads {
             );
         }
     }
+}
+
+impl Loads {
+    /// Records rows `first` to `first + count` of the image, which is in `TRANSFER_SRC_OPTIMAL`,
+    /// into the start of `buffer` at the guest's extent: copied, or resampled through the guest
+    /// image when drawn larger.
+    fn copy_rows_out(
+        self,
+        device: &ash::Device,
+        command: vk::CommandBuffer,
+        buffer: vk::Buffer,
+        rows: (u32, u32),
+    ) {
+        let width = self.extent.0;
+        let regions = [rows_image(width, rows)];
+        let Some(guest) = self.guest_image else {
+            // SAFETY: recording is open, the image is in the transfer-source layout and the
+            // buffer holds the image's size, more than the rows.
+            unsafe {
+                device.cmd_copy_image_to_buffer(
+                    command,
+                    self.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    buffer,
+                    &regions,
+                );
+            }
+            return;
+        };
+        let transfer_write = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        let transfer_read = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            transfer_read,
+            transfer_write,
+        );
+        let blits = [rows_blit(width, rows, self.scale, true)];
+        // SAFETY: recording is open, the image is a transfer source and the guest image a transfer
+        // destination, both of one format; the filter is one the format allows.
+        unsafe {
+            device.cmd_blit_image(
+                command,
+                self.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                guest,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &blits,
+                self.filter,
+            );
+        }
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            transfer_write,
+            transfer_read,
+        );
+        // SAFETY: recording is open, the guest image is in the transfer-source layout and the
+        // buffer holds its size, more than the rows.
+        unsafe {
+            device.cmd_copy_image_to_buffer(
+                command,
+                guest,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &regions,
+            );
+        }
+    }
+
+    /// Records the start of the buffer, rows `first` to `first + count` at the guest's extent, into
+    /// those rows of the image, which is in `TRANSFER_DST_OPTIMAL`; a scaled one takes each guest
+    /// pixel over its square.
+    fn copy_rows_in(self, device: &ash::Device, command: vk::CommandBuffer, rows: (u32, u32)) {
+        let width = self.extent.0;
+        let regions = [rows_image(width, rows)];
+        let Some(guest) = self.guest_image else {
+            // SAFETY: recording is open; the buffer holds the rows and the image is in the
+            // transfer-destination layout.
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    command,
+                    self.buffer,
+                    self.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            }
+            return;
+        };
+        let transfer_write = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        let transfer_read = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            transfer_read,
+            transfer_write,
+        );
+        // SAFETY: recording is open; the buffer holds the rows and the guest image is in the
+        // transfer-destination layout.
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command,
+                self.buffer,
+                guest,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+            );
+        }
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            transfer_write,
+            transfer_read,
+        );
+        let blits = [rows_blit(width, rows, self.scale, false)];
+        // SAFETY: recording is open, the guest image is a transfer source and the image a transfer
+        // destination, both of one format; a scaled-up blit takes the nearest texel.
+        unsafe {
+            device.cmd_blit_image(
+                command,
+                guest,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &blits,
+                vk::Filter::NEAREST,
+            );
+        }
+    }
+}
+
+/// A copy of rows `first` to `first + count` of a `width`-wide image, from or to the start of a
+/// buffer.
+fn rows_image(width: u32, (first, count): (u32, u32)) -> vk::BufferImageCopy {
+    whole_image(width, count).image_offset(vk::Offset3D {
+        x: 0,
+        y: i32::try_from(first).unwrap_or(i32::MAX),
+        z: 0,
+    })
+}
+
+/// A blit between rows `first` to `first + count` of a guest-extent image `width` wide and the
+/// same rows of one drawn at `scale`: from the drawn one when `down`, onto it otherwise.
+fn rows_blit(width: u32, (first, count): (u32, u32), scale: u32, down: bool) -> vk::ImageBlit {
+    let layer = vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .layer_count(1);
+    let at = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+    let span = |by: u32| {
+        [
+            vk::Offset3D {
+                x: 0,
+                y: at(first.saturating_mul(by)),
+                z: 0,
+            },
+            vk::Offset3D {
+                x: at(width.saturating_mul(by)),
+                y: at(first.saturating_add(count).saturating_mul(by)),
+                z: 1,
+            },
+        ]
+    };
+    let (from, to) = if down {
+        (span(scale), span(1))
+    } else {
+        (span(1), span(scale))
+    };
+    vk::ImageBlit::default()
+        .src_subresource(layer)
+        .src_offsets(from)
+        .dst_subresource(layer)
+        .dst_offsets(to)
 }
 
 /// Reads `size` bytes of a frame out of host-visible, coherent `memory` that a waited-on copy
