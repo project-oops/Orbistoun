@@ -112,7 +112,8 @@ fn refused_program() -> &'static std::sync::Mutex<Option<(u64, Vec<u8>)>> {
     &PROGRAM
 }
 
-/// The program [`refused_program`] keeps, and where it lies.
+/// The program of the most recent dispatch refused while its buffers were traced, and where it
+/// lies.
 #[must_use]
 pub fn last_refused_program() -> Option<(u64, Vec<u8>)> {
     refused_program()
