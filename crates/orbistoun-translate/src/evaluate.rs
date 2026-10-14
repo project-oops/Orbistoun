@@ -851,9 +851,7 @@ impl LaneProgram {
     pub fn new(decode: Decode, encodings: &EncodingTable, loads: &[u32]) -> Self {
         let kept = address_slice(&decode, encodings, loads);
         let crosses = crosses_lanes(&decode, encodings, &kept);
-        let quick = (!crosses)
-            .then(|| crate::quick_lanes::compile(&decode, encodings, loads, &kept))
-            .flatten();
+        let quick = crate::quick_lanes::compile(&decode, encodings, loads, (&kept, crosses));
         Self {
             until: run_end(&decode, encodings, loads),
             loads: loads.to_vec(),
@@ -2579,6 +2577,90 @@ mod tests {
             Ok(vec![(load, vec![0]), (load, vec![4]), (load, vec![8])]),
             "every pass"
         );
+    }
+
+    /// The native run carries out what the model does, step for step, over every operation an
+    /// integer division and a copy loop take: a shift-add, the float reciprocal and its conversions,
+    /// a lane read, the scalar products and difference, the high product, compares into `vcc` and,
+    /// in their SDWA form, into a pair, both selects, the mask logic, the SDWA carry-in add and a
+    /// branch on the execution mask (D850).
+    #[test]
+    fn the_native_run_carries_out_what_the_model_does() {
+        use super::{WaveEntry, quick_wave_lane_addresses, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let family = |name: &str| {
+            let (family, opcode) = encodings.find_by_name(name).expect(name);
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|encoding| encoding.name == family)
+                .expect("its family");
+            encoding.value | (opcode << encoding.opcode.shift)
+        };
+        let vop3 =
+            |name: &str, dst: u32, [a, b, c]: [u32; 3]| [family(name) | dst, a | b << 9 | c << 18];
+        let sop2 = |name: &str, dst: u32, a: u32, b: u32| family(name) | dst << 16 | b << 8 | a;
+        let short = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+            short_form(&encodings, name, dst, src0, vsrc1)
+        };
+        let v = |register: u32| 256 + register;
+        let mut words = Vec::new();
+        words.extend(vop3("v_lshl_add_u32", 1, [v(0), 128 + 2, 0]));
+        words.push(short("v_cvt_f32_u32_e32", 2, 1, 0));
+        words.push(short("v_rcp_iflag_f32_e32", 2, v(2), 0));
+        words.extend([short("v_mul_f32_e32", 2, 255, 2), 0x4f7f_fffe]);
+        words.push(short("v_cvt_u32_f32_e32", 2, v(2), 0));
+        words.push(short("v_readfirstlane_b32", 2, v(2), 0));
+        words.push(sop2("s_mul_hi_u32", 3, 2, 1));
+        words.push(sop2("s_mul_i32", 4, 2, 1));
+        words.push(sop2("s_sub_i32", 5, 0, 1));
+        words.extend(vop3("v_mul_hi_u32", 3, [v(1), 2, 0]));
+        words.push(short("v_sub_nc_u32_e32", 4, v(1), 3));
+        words.push(short("v_subrev_nc_u32_e32", 5, 1, 4));
+        words.push(short("v_cmp_le_u32_e32", 0, 1, 5));
+        words.push(short("v_cndmask_b32_e32", 6, v(4), 5));
+        // v_cmp_le_u32_sdwa s[8:9], s1, v6.
+        words.extend([
+            short("v_cmp_le_u32_e32", 0, 0xf9, 6),
+            1 | 8 << 8 | 1 << 15 | 6 << 16 | 1 << 23 | 6 << 24,
+        ]);
+        words.extend(vop3("v_cndmask_b32_e64", 7, [v(6), v(1), 8]));
+        words.push(sop2("s_and_b64", 10, 8, 126));
+        words.push(sop2("s_andn2_b64", 12, 126, 8));
+        words.push(short("v_add_nc_u32_e32", 1, 5, 7));
+        // v_add_co_ci_u32_sdwa v2, vcc, 0, s4, vcc.
+        words.extend([short("v_add_co_ci_u32_e32", 2, 0xf9, 4), 0x8686_0680]);
+        // s_cbranch_execz to the next instruction.
+        words.push(0xbf88_0000);
+        // global_load_dword v9, v[1:2], off; s_endpgm.
+        words.extend([0xdc30_8000, 0x097d_0001, 0xbf81_0000]);
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the fixture decodes cleanly");
+        assert!(
+            decode
+                .instructions
+                .iter()
+                .all(|instruction| super::named(&encodings, instruction).is_some()),
+            "every instruction is named"
+        );
+        let load = decode.instructions[decode.instructions.len() - 2].offset;
+        let program = super::LaneProgram::new(decode, &encodings, &[load]);
+        assert!(
+            program.runs_quickly(),
+            "every step is one the native run carries out"
+        );
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: (0..4).map(|thread| Some([thread, 0, 0])).collect(),
+            components: 1,
+        };
+        let model =
+            wave_lane_addresses(&program, &encodings, &[100, 7], (64, &wave), &mut |_| None);
+        let native = quick_wave_lane_addresses(&program, &[100, 7], (64, &wave), &mut |_| None);
+        assert!(model.is_ok(), "{model:?}");
+        assert_eq!(native, model.ok());
     }
 
     /// A lane read is run where its lane is known: `v_readfirstlane_b32 s4, v0` takes the first

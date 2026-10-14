@@ -69,6 +69,53 @@ enum Step {
     Branch { target: usize, on: Option<bool> },
     /// `v_mov_b32`.
     Move { destination: u32, source: Source },
+    /// A scalar operation of two words into a scalar register.
+    Scalar {
+        op: ScalarOp,
+        destination: usize,
+        a: Source,
+        b: Source,
+    },
+    /// `s_and_b64` (`not` false) or `s_andn2_b64`: two register pairs into a pair, and whether the
+    /// answer is not zero into the condition.
+    Mask {
+        not: bool,
+        destination: usize,
+        a: usize,
+        b: usize,
+    },
+    /// `s_cbranch_execz`/`execnz`/`vccz`/`vccnz`: to `target` where the mask at `mask` is zero
+    /// (`zero`) or not.
+    MaskBranch {
+        target: usize,
+        mask: usize,
+        zero: bool,
+    },
+    /// A vector operation of up to three sources into a vector register.
+    Vector {
+        op: VectorOp,
+        destination: u32,
+        sources: [Source; 3],
+    },
+    /// `v_readfirstlane_b32`: the source at the lowest running lane, lane 0 where none runs.
+    FirstLane { destination: usize, source: Source },
+    /// An unsigned compare into a lane mask, every modelled lane's bit.
+    Compare32 {
+        op: CompareOp,
+        mask: usize,
+        a: Source,
+        b: Source,
+    },
+    /// `v_cndmask_b32`: `b` where the lane's bit of `mask` is set, `a` where it is not.
+    Select {
+        destination: u32,
+        a: Source,
+        b: Source,
+        mask: usize,
+    },
+    /// An access other than a global load: what it leaves in its first vector operand, `count`
+    /// registers from it, is memory's, unknown here - as the model leaves it.
+    Forget { first: u32 },
     /// `v_lshlrev_b32`: `value` shifted left by `amount`'s low five bits.
     ShiftLeft {
         destination: u32,
@@ -118,6 +165,132 @@ enum Step {
     },
 }
 
+/// The scalar operations a run carries out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScalarOp {
+    /// `s_sub_i32`, its signed overflow into the condition.
+    Subtract,
+    /// `s_mul_i32`.
+    MultiplyLow,
+    /// `s_mul_hi_u32`.
+    MultiplyHigh,
+}
+
+/// The vector operations a run carries out, on words or on floats held as their bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VectorOp {
+    /// `v_lshl_add_u32 d, a, b, c`: `(a << b[4:0]) + c`.
+    ShiftAdd,
+    /// `v_sub_nc_u32`: `a - b`.
+    Subtract,
+    /// `v_subrev_nc_u32`: `b - a`.
+    SubtractReversed,
+    /// `v_mul_hi_u32`: the unsigned product's high word.
+    MultiplyHigh,
+    /// `v_cvt_f32_u32`.
+    UnsignedToFloat,
+    /// `v_cvt_u32_f32`: truncated, saturated, NaN to zero.
+    FloatToUnsigned,
+    /// `v_rcp_f32`, `v_rcp_iflag_f32`: the exact reciprocal, as the model computes it.
+    Reciprocal,
+    /// `v_mul_f32`.
+    FloatMultiply,
+}
+
+/// The unsigned compares a run carries out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompareOp {
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+    Equal,
+    NotEqual,
+}
+
+impl CompareOp {
+    fn of(name: &str) -> Option<Self> {
+        let kind = name.strip_prefix("v_cmp_")?.split('_').next()?;
+        if !name.contains("_u32") {
+            return None;
+        }
+        Some(match kind {
+            "lt" => Self::Less,
+            "le" => Self::LessOrEqual,
+            "gt" => Self::Greater,
+            "ge" => Self::GreaterOrEqual,
+            "eq" => Self::Equal,
+            "ne" => Self::NotEqual,
+            _ => return None,
+        })
+    }
+
+    const fn holds(self, a: u32, b: u32) -> bool {
+        match self {
+            Self::Less => a < b,
+            Self::LessOrEqual => a <= b,
+            Self::Greater => a > b,
+            Self::GreaterOrEqual => a >= b,
+            Self::Equal => a == b,
+            Self::NotEqual => a != b,
+        }
+    }
+}
+
+/// The SDWA marker a short vector instruction's first source reads.
+const SDWA_MARKER: u32 = 249;
+
+/// The real sources of a whole-register SDWA form with no modifier, and the scalar pair its word
+/// names as a compare's destination where bit 15 is set: the first from the word's 7:0, scalar
+/// where bit 23 says; the second the register field `vsrc1`, scalar where bit 31 says. `None` for a
+/// part-register select, a sign extension or a modifier, which a run does not carry out.
+fn sdwa_sources(word: u32, vsrc1: u32, compare: bool) -> Option<(Source, Source, Option<usize>)> {
+    const WHOLE: u32 = 6;
+    let selects = [(word >> 16) & 7, (word >> 24) & 7];
+    let extends = word >> 19 & 1 != 0 || word >> 27 & 1 != 0;
+    let modifiers = word & (0b11 << 20 | 0b11 << 28) != 0;
+    let destination = if compare {
+        if word >> 15 & 1 == 0 && word >> 13 & 1 != 0 {
+            return None;
+        }
+        (word >> 15 & 1 != 0).then_some(((word >> 8) & 0x7f) as usize)
+    } else {
+        if (word >> 8) & 7 != WHOLE || word >> 13 & 0b111 != 0 {
+            return None;
+        }
+        None
+    };
+    if selects != [WHOLE, WHOLE] || extends || modifiers {
+        return None;
+    }
+    let code = |code: u32, scalar: bool| {
+        if scalar {
+            source(&code_operand(code)?)
+        } else {
+            Some(Source::Vector(code & 0xff))
+        }
+    };
+    Some((
+        code(word & 0xff, word >> 23 & 1 != 0)?,
+        code(vsrc1, word >> 31 != 0)?,
+        destination,
+    ))
+}
+
+/// The operand a scalar source code names: a register, a mask's half, or an inline integer.
+fn code_operand(code: u32) -> Option<Operand> {
+    Some(match code {
+        0..=105 => Operand::Scalar(u16::try_from(code).ok()?),
+        106 => Operand::Named("vcc_lo".to_owned()),
+        107 => Operand::Named("vcc_hi".to_owned()),
+        126 => Operand::Named("exec_lo".to_owned()),
+        127 => Operand::Named("exec_hi".to_owned()),
+        128..=192 => Operand::Integer(i64::from(code) - 128),
+        193..=208 => Operand::Integer(192 - i64::from(code)),
+        _ => return None,
+    })
+}
+
 /// A program compiled for runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -126,6 +299,9 @@ pub struct Program {
     offsets: Vec<u32>,
     /// The last load: a run ends past it.
     until: u32,
+    /// Whether a step reads one lane's value from another: a run then models every lane of the
+    /// wave, as the model does.
+    crosses: bool,
 }
 
 /// The scalar code a named register stands for, as a source or destination.
@@ -191,7 +367,7 @@ pub fn compile(
     decode: &Decode,
     encodings: &EncodingTable,
     loads: &[u32],
-    kept: &[bool],
+    (kept, crosses): (&[bool], bool),
 ) -> Option<Program> {
     loads.iter().copied().max()?;
     let until = crate::evaluate::run_end(decode, encodings, loads);
@@ -224,6 +400,7 @@ pub fn compile(
         steps,
         offsets,
         until,
+        crosses,
     })
 }
 
@@ -282,6 +459,38 @@ fn scalar_step(
         ("SOPP", "s_inst_prefetch" | "s_nop" | "s_sendmsg" | "s_waitcnt") | ("EXP", _) => {
             Step::Nothing
         }
+        ("SOPP", "s_cbranch_execz" | "s_cbranch_execnz" | "s_cbranch_vccz" | "s_cbranch_vccnz") => {
+            let Some(Operand::Immediate(jump)) = operands.first() else {
+                return None;
+            };
+            let to = i64::from(instruction.offset) + 4 + 4 * crate::evaluate::simm16(*jump);
+            let target = decode
+                .instructions
+                .iter()
+                .position(|i| i64::from(i.offset) == to)
+                .unwrap_or(OUTSIDE);
+            Step::MaskBranch {
+                target,
+                mask: if name.contains("exec") { EXEC } else { VCC },
+                zero: name.ends_with('z') && !name.ends_with("nz"),
+            }
+        }
+        ("SOP2", "s_sub_i32" | "s_mul_i32" | "s_mul_hi_u32") => Step::Scalar {
+            op: match name {
+                "s_sub_i32" => ScalarOp::Subtract,
+                "s_mul_i32" => ScalarOp::MultiplyLow,
+                _ => ScalarOp::MultiplyHigh,
+            },
+            destination: scalar_destination(operands.first()?)?,
+            a: source(operands.get(1)?)?,
+            b: source(operands.get(2)?)?,
+        },
+        ("SOP2", "s_and_b64" | "s_andn2_b64") => Step::Mask {
+            not: name == "s_andn2_b64",
+            destination: scalar_destination(operands.first()?)?,
+            a: scalar_destination(operands.get(1)?)?,
+            b: scalar_destination(operands.get(2)?)?,
+        },
         ("SOP1", "s_mov_b32") => Step::ScalarMove {
             destination: scalar_destination(operands.first()?)?,
             source: source(operands.get(1)?)?,
@@ -316,16 +525,133 @@ fn scalar_step(
                 words,
             }
         }
+        // Any other memory access: what it leaves in its first vector operand is memory's.
+        ("MIMG" | "MUBUF" | "MTBUF" | "FLAT" | "DS", _) => match operands.first() {
+            Some(Operand::Vector(first)) => Step::Forget {
+                first: u32::from(*first),
+            },
+            _ => Step::Nothing,
+        },
         _ => return None,
     })
+}
+
+/// The vector forms a compute wave's programs take beside a draw's: compares into a mask, in their
+/// SDWA form too, a lane read, the SDWA carry-in add, integer and float arithmetic and selects.
+/// `None` for any other, which [`vector_step`] then reads.
+fn wave_vector_step(family: &str, name: &str, instruction: &Instruction) -> Option<Step> {
+    let operands = instruction.operands.as_slice();
+    // A whole-register SDWA form is its short form on the sources its word names.
+    let sdwa = (instruction.word & 0x1ff == SDWA_MARKER)
+        .then_some(instruction.second_word)
+        .flatten();
+    if let Some(compare) = CompareOp::of(name) {
+        let (mask, a, b) = match (family, sdwa) {
+            ("VOPC", Some(word)) => {
+                let Some(Operand::Vector(vsrc1)) = operands.get(2) else {
+                    return None;
+                };
+                let (a, b, destination) = sdwa_sources(word, u32::from(*vsrc1), true)?;
+                (destination.unwrap_or(VCC), a, b)
+            }
+            _ => (
+                scalar_destination(operands.first()?)?,
+                source(operands.get(1)?)?,
+                source(operands.get(2)?)?,
+            ),
+        };
+        return Some(Step::Compare32 {
+            op: compare,
+            mask,
+            a,
+            b,
+        });
+    }
+    if name == "v_readfirstlane_b32" {
+        return Some(Step::FirstLane {
+            destination: scalar_destination(operands.first()?)?,
+            source: source(operands.get(1)?)?,
+        });
+    }
+    let destination = vector_destination(operands.first())?;
+    let at = |index: usize| operands.get(index).and_then(source);
+    if let Some(word) = sdwa {
+        // Only the carry-in add, as the model translates it (`SDWA_CARRY`).
+        if name != "v_add_co_ci_u32_e32" {
+            return None;
+        }
+        let Some(Operand::Vector(vsrc1)) = operands.get(3) else {
+            return None;
+        };
+        let (a, b, _) = sdwa_sources(word, u32::from(*vsrc1), false)?;
+        return Some(Step::AddWithCarry {
+            destination,
+            carry: scalar_destination(operands.get(1)?)?,
+            a,
+            b,
+            carry_in: scalar_destination(operands.get(4)?)?,
+        });
+    }
+    let unary = |op| {
+        Some(Step::Vector {
+            op,
+            destination,
+            sources: [at(1)?, Source::Constant(0), Source::Constant(0)],
+        })
+    };
+    let binary = |op| {
+        Some(Step::Vector {
+            op,
+            destination,
+            sources: [at(1)?, at(2)?, Source::Constant(0)],
+        })
+    };
+    match (family, name) {
+        ("VOP3", "v_lshl_add_u32") => {
+            return Some(Step::Vector {
+                op: VectorOp::ShiftAdd,
+                destination,
+                sources: [at(1)?, at(2)?, at(3)?],
+            });
+        }
+        ("VOP2", "v_sub_nc_u32_e32") | ("VOP3", "v_sub_nc_u32") => {
+            return binary(VectorOp::Subtract);
+        }
+        ("VOP2", "v_subrev_nc_u32_e32") | ("VOP3", "v_subrev_nc_u32") => {
+            return binary(VectorOp::SubtractReversed);
+        }
+        ("VOP3", "v_mul_hi_u32") => return binary(VectorOp::MultiplyHigh),
+        ("VOP2", "v_mul_f32_e32") => return binary(VectorOp::FloatMultiply),
+        ("VOP1", "v_cvt_f32_u32_e32") => return unary(VectorOp::UnsignedToFloat),
+        ("VOP1", "v_cvt_u32_f32_e32") => return unary(VectorOp::FloatToUnsigned),
+        ("VOP1", "v_rcp_f32_e32" | "v_rcp_iflag_f32_e32") => return unary(VectorOp::Reciprocal),
+        ("VOP2", "v_cndmask_b32_e32") | ("VOP3", "v_cndmask_b32_e64") => {
+            return Some(Step::Select {
+                destination,
+                a: at(1)?,
+                b: at(2)?,
+                mask: scalar_destination(operands.get(3)?)?,
+            });
+        }
+        _ => {}
+    }
+    None
 }
 
 /// A vector instruction as a step; `None` for one a run does not carry out exactly, a long form
 /// carrying a modifier among them.
 fn vector_step(family: &str, name: &str, instruction: &Instruction) -> Option<Step> {
     let operands = instruction.operands.as_slice();
-    if family == "VOP3" && modified(instruction, name.contains("_co_")) {
+    if family == "VOP3"
+        && modified(
+            instruction,
+            name.contains("_co_") || name.starts_with("v_cmp"),
+        )
+    {
         return None;
+    }
+    if let Some(step) = wave_vector_step(family, name, instruction) {
+        return Some(step);
     }
     let destination = vector_destination(operands.first())?;
     let at = |index: usize| operands.get(index).and_then(source);
@@ -385,9 +711,17 @@ impl Lanes {
     /// A run's registers at entry: user data from `first_register`, every lane of a wave `width`
     /// wide running, every vector register zero but the seeded ids in the draw's `lanes` vertex
     /// lanes, which are unknown.
-    fn start((first_register, user_data): (u32, &[u32]), (width, lanes): (u32, u32)) -> Self {
+    fn start(
+        (first_register, user_data): (u32, &[u32]),
+        (width, lanes): (u32, u32),
+        crosses: bool,
+    ) -> Self {
         let width = width.clamp(1, 64);
-        let modelled = lanes.clamp(1, width);
+        let modelled = if crosses {
+            width
+        } else {
+            lanes.clamp(1, width)
+        };
         let mut state = Self {
             scalars: [None; SCALAR_CODES],
             vectors: vec![Some(0); VECTOR_REGISTERS * modelled as usize],
@@ -489,7 +823,7 @@ pub fn run(
     (width, lanes): (u32, u32),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Option<crate::evaluate::LaneAddresses> {
-    let state = Lanes::start((first_register, user_data), (width, lanes));
+    let state = Lanes::start((first_register, user_data), (width, lanes), program.crosses);
     run_from(state, program, lanes, read)
 }
 
@@ -504,7 +838,11 @@ pub fn run_wave(
 ) -> Option<crate::evaluate::LaneAddresses> {
     let width = width.clamp(1, 64);
     let lanes = u32::try_from(wave.threads.len()).ok()?.min(width);
-    let modelled = lanes.clamp(1, width);
+    let modelled = if program.crosses {
+        width
+    } else {
+        lanes.clamp(1, width)
+    };
     let mut state = Lanes {
         scalars: [None; SCALAR_CODES],
         vectors: vec![Some(0); VECTOR_REGISTERS * modelled as usize],
@@ -582,6 +920,12 @@ fn run_from(
                     *state.scalars.get_mut(destination + step)? = value;
                 }
             }
+            step @ (Step::Scalar { .. }
+            | Step::Mask { .. }
+            | Step::MaskBranch { .. }
+            | Step::FirstLane { .. }
+            | Step::Compare32 { .. }
+            | Step::Forget { .. }) => run_wave_step(&mut state, step, &mut at)?,
             Step::Branch { target, on } => {
                 let taken = match on {
                     None => true,
@@ -614,6 +958,79 @@ fn run_from(
     Some(found)
 }
 
+/// One of the steps a compute wave's programs take beside a draw's: scalar arithmetic, mask logic
+/// and branches on a mask, a lane read, a compare into a mask, an access left unknown. `None` where
+/// a value it needs is unknown, or a branch leaves the words kept.
+fn run_wave_step(state: &mut Lanes, step: Step, at: &mut usize) -> Option<()> {
+    match step {
+        Step::Scalar {
+            op,
+            destination,
+            a,
+            b,
+        } => {
+            let (a, b) = (state.read(a, 0)?, state.read(b, 0)?);
+            let value = match op {
+                ScalarOp::Subtract => {
+                    let signed = |word: u32| i32::from_ne_bytes(word.to_ne_bytes());
+                    let (signed_a, signed_b) = (signed(a), signed(b));
+                    state.condition = Some(signed_a.checked_sub(signed_b).is_none());
+                    a.wrapping_sub(b)
+                }
+                ScalarOp::MultiplyLow => a.wrapping_mul(b),
+                ScalarOp::MultiplyHigh => ((u64::from(a) * u64::from(b)) >> 32) as u32,
+            };
+            *state.scalars.get_mut(destination)? = Some(value);
+        }
+        Step::Mask {
+            not,
+            destination,
+            a,
+            b,
+        } => {
+            let pair = |state: &Lanes, code: usize| {
+                Some(u64::from(state.scalar(code)?) | u64::from(state.scalar(code + 1)?) << 32)
+            };
+            let (a, b) = (pair(state, a)?, pair(state, b)?);
+            let value = if not { a & !b } else { a & b };
+            *state.scalars.get_mut(destination)? = Some(value as u32);
+            *state.scalars.get_mut(destination + 1)? = Some((value >> 32) as u32);
+            state.condition = Some(value != 0);
+        }
+        Step::MaskBranch { target, mask, zero } => {
+            let value = u64::from(state.scalar(mask)?) | u64::from(state.scalar(mask + 1)?) << 32;
+            if (value == 0) == zero {
+                if target == OUTSIDE {
+                    return None;
+                }
+                *at = target;
+            }
+        }
+        Step::FirstLane {
+            destination,
+            source,
+        } => {
+            let running =
+                (0..state.modelled).find(|&lane| state.mask_bit(EXEC, lane) == Some(true));
+            let value = state.read(source, running.unwrap_or(0))?;
+            *state.scalars.get_mut(destination)? = Some(value);
+        }
+        Step::Compare32 { op, mask, a, b } => {
+            let mut value = 0u64;
+            for lane in 0..state.modelled {
+                if op.holds(state.read(a, lane)?, state.read(b, lane)?) {
+                    value |= 1 << lane;
+                }
+            }
+            *state.scalars.get_mut(mask)? = Some(value as u32);
+            *state.scalars.get_mut(mask + 1)? = Some((value >> 32) as u32);
+        }
+        Step::Forget { first } => state.forget(first, 4),
+        _ => return None,
+    }
+    Some(())
+}
+
 /// One vector step in every active modelled lane; `None` where a value it needs is unknown.
 fn run_vector(state: &mut Lanes, step: Step) -> Option<()> {
     for lane in 0..state.modelled {
@@ -638,6 +1055,34 @@ fn run_vector(state: &mut Lanes, step: Step) -> Option<()> {
                 value,
             } => {
                 let value = state.read(value, lane)? << (state.read(amount, lane)? & 31);
+                state.set_vector(destination, lane, Some(value));
+            }
+            Step::Vector {
+                op,
+                destination,
+                sources: [a, b, c],
+            } => {
+                let value = vector_op(
+                    op,
+                    (
+                        state.read(a, lane)?,
+                        state.read(b, lane)?,
+                        state.read(c, lane)?,
+                    ),
+                );
+                state.set_vector(destination, lane, Some(value));
+            }
+            Step::Select {
+                destination,
+                a,
+                b,
+                mask,
+            } => {
+                let value = if state.mask_bit(mask, lane)? {
+                    state.read(b, lane)?
+                } else {
+                    state.read(a, lane)?
+                };
                 state.set_vector(destination, lane, Some(value));
             }
             Step::MultiplyLow { destination, a, b } => {
@@ -687,6 +1132,22 @@ fn run_vector(state: &mut Lanes, step: Step) -> Option<()> {
         }
     }
     Some(())
+}
+
+/// A vector operation on one lane's words, floats held as their bits, as the model computes it.
+fn vector_op(op: VectorOp, (a, b, c): (u32, u32, u32)) -> u32 {
+    let float = f32::from_bits;
+    match op {
+        VectorOp::ShiftAdd => (a << (b & 31)).wrapping_add(c),
+        VectorOp::Subtract => a.wrapping_sub(b),
+        VectorOp::SubtractReversed => b.wrapping_sub(a),
+        VectorOp::MultiplyHigh => ((u64::from(a) * u64::from(b)) >> 32) as u32,
+        VectorOp::UnsignedToFloat => (f64::from(a) as f32).to_bits(),
+        // Truncated, saturated at both ends, NaN to zero: Rust's conversion is that.
+        VectorOp::FloatToUnsigned => float(a) as u32,
+        VectorOp::Reciprocal => (1.0 / float(a)).to_bits(),
+        VectorOp::FloatMultiply => (float(a) * float(b)).to_bits(),
+    }
 }
 
 /// Writes a lane's carry into the mask at `carry`, starting it from zero if it was unknown: a
