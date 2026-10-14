@@ -1196,14 +1196,15 @@ fn write_failed_submission(submission: &Submission) {
 
 /// What a bound texture holds, at a glance: its first texel and how many distinct texels it has, a
 /// texture of one value - nothing written to it - reading as `1 distinct`. Counted over at most
-/// the first 4096 texels, so a large texture costs no more to list than a small one.
+/// 4096 texels spread evenly over the whole texture, so a large texture costs no more to list than
+/// a small one and a picture below its first rows still counts.
 fn texel_summary(texels: &[u32]) -> String {
     const COUNTED: usize = 4096;
-    let counted = &texels[..texels.len().min(COUNTED)];
-    let distinct: std::collections::BTreeSet<u32> = counted.iter().copied().collect();
+    let step = texels.len().div_ceil(COUNTED).max(1);
+    let distinct: std::collections::BTreeSet<u32> = texels.iter().step_by(step).copied().collect();
     let first = texels.first().copied().unwrap_or(0);
-    let bound = if texels.len() > COUNTED {
-        " in the first 4096"
+    let bound = if step > 1 {
+        " among 4096 spread over it"
     } else {
         ""
     };
@@ -1686,6 +1687,20 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// A large texture's summary samples all of it, not its first row: one black above and grey
+    /// below counts two values, where the first 4096 texels alone said one.
+    #[test]
+    fn a_textures_summary_samples_all_of_it() {
+        let mut texels = vec![0xff00_0000_u32; 8192 * 4];
+        texels[16384..].fill(0xff40_4040);
+        let said = super::texel_summary(&texels);
+        assert!(said.starts_with("first 0xff000000, 2 distinct"), "{said}");
+        assert_eq!(
+            super::texel_summary(&[7, 7, 9]),
+            "first 0x00000007, 2 distinct"
+        );
+    }
 
     /// Two runs dumping a submission under the same name keep their own: each run's dumps go to
     /// its own directory, since every session's runs share the traces directory (D865).
