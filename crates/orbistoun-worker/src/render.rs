@@ -305,7 +305,11 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     };
     perf::measure(perf::Phase::Present, || match shown {
         Some(shown) if shows_directly(address, shape, shown) => {
-            present_later(shown, sink, dir);
+            present_later(PresentJob {
+                frame: Presented::Shown(shown),
+                sink,
+                dir,
+            });
         }
         other => {
             if let Some(shown) = other {
@@ -351,21 +355,35 @@ fn shows_directly(
         && (shape.width, shape.height) == (shown.target.width, shown.target.height)
 }
 
-/// A frame the window will show, handed to the thread that shows it.
+/// A frame the window will show, handed to the thread that shows it: its device copy, or a copy
+/// of the flipped buffer's tiled words with how its pixels decode.
+enum Presented {
+    /// The device copy of the frame drawn into the flipped buffer (D719).
+    Shown(orbistoun_gpu::agc_driver::ShownFrame),
+    /// The flipped buffer's words as the flip left them, still tiled.
+    Memory {
+        tiled: Vec<u32>,
+        shape: orbistoun_video::BufferShape,
+        decode: fn(u32) -> u32,
+    },
+}
+
+/// A frame to show, and where it goes.
 struct PresentJob {
-    shown: orbistoun_gpu::agc_driver::ShownFrame,
+    frame: Presented,
     sink: fn(&Event),
     dir: &'static Path,
 }
 
-/// Shows a flipped frame from its device copy on a thread of its own, so the guest does not wait
-/// for the window. A frame arriving while another is being shown is dropped, as a slow display
-/// misses frames.
-fn present_later(
-    shown: orbistoun_gpu::agc_driver::ShownFrame,
-    sink: fn(&Event),
-    dir: &'static Path,
-) {
+/// Whether the presenting thread is busy with a frame, so a flip can drop the next without
+/// copying it first.
+static PRESENTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Shows a flipped frame on a thread of its own, so the guest does not wait for the window: it
+/// waited 6 to 8 ms a frame for a buffer detiled from memory and written out, up to twenty times
+/// a second. A frame arriving while another is being shown is dropped, as a slow display misses
+/// frames; answers whether it was taken.
+fn present_later(job: PresentJob) -> bool {
     static PRESENTER: OnceLock<Option<std::sync::mpsc::SyncSender<PresentJob>>> = OnceLock::new();
     let presenter = PRESENTER.get_or_init(|| {
         let (send, receive) = std::sync::mpsc::sync_channel::<PresentJob>(1);
@@ -373,36 +391,48 @@ fn present_later(
             .name("orbistoun-present".to_owned())
             .spawn(move || {
                 for job in receive {
-                    present_shown(&job);
+                    PRESENTING.store(true, Ordering::Release);
+                    match job.frame {
+                        Presented::Shown(shown) => present_shown(shown, job.sink, job.dir),
+                        Presented::Memory {
+                            tiled,
+                            shape,
+                            decode,
+                        } => present_tiled(&tiled, shape, decode, (job.sink, job.dir)),
+                    }
+                    PRESENTING.store(false, Ordering::Release);
                 }
             })
             .ok()
             .map(|_| send)
     });
-    let sent = presenter
-        .as_ref()
-        .is_some_and(|send| send.try_send(PresentJob { shown, sink, dir }).is_ok());
-    if !sent {
-        discard_snapshot(shown.snapshot);
+    let Some(send) = presenter.as_ref() else {
+        return false;
+    };
+    match send.try_send(job) {
+        Ok(()) => true,
+        Err(
+            std::sync::mpsc::TrySendError::Full(job)
+            | std::sync::mpsc::TrySendError::Disconnected(job),
+        ) => {
+            if let Presented::Shown(shown) = job.frame {
+                discard_snapshot(shown.snapshot);
+            }
+            false
+        }
     }
 }
 
 /// Reads a shown frame's device copy and streams it, converting each pixel from its memory order
-/// to `Rgba8` as [`present_now`] does from memory (D719).
-fn present_shown(job: &PresentJob) {
-    let shown = job.shown;
+/// to `Rgba8` as [`present_tiled`] does from memory (D719).
+fn present_shown(shown: orbistoun_gpu::agc_driver::ShownFrame, sink: fn(&Event), dir: &Path) {
     let Some(frame) = take_snapshot(shown.snapshot) else {
         return;
     };
     // The device copy is linear `Rgba8`, the colours the title drew: shown as-is (D784), which for
     // the SDK's alternate-order targets is exactly what their B, G, R, A scanout shows.
     let bytes = zerocopy::IntoBytes::as_bytes(frame.as_slice());
-    emit_presented(
-        (shown.target.width, shown.target.height),
-        bytes,
-        job.sink,
-        job.dir,
-    );
+    emit_presented((shown.target.width, shown.target.height), bytes, sink, dir);
 }
 
 /// A scanout pixel, B, G, R, A in memory, as `Rgba8`: red and blue trade places.
@@ -522,9 +552,19 @@ fn scanout_decoder(format: u64) -> Option<fn(u32) -> u32> {
     }
 }
 
-/// Detiles a flipped buffer and streams it as a frame.
-fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Event), dir: &Path) {
+/// Copies a flipped buffer as the flip left it, for the presenting thread to detile and stream -
+/// the guest goes on once its words are copied. Nothing is copied while a frame is still being
+/// shown, since that frame would be dropped.
+fn present_now(
+    address: u64,
+    shape: orbistoun_video::BufferShape,
+    sink: fn(&Event),
+    dir: &'static Path,
+) {
     static REFUSED: std::sync::Once = std::sync::Once::new();
+    if PRESENTING.load(Ordering::Acquire) {
+        return;
+    }
     let (width, height) = (shape.width, shape.height);
     let decode = scanout_decoder(shape.format);
     let Some((tiled, decode)) = decode
@@ -539,12 +579,31 @@ fn present_now(address: u64, shape: orbistoun_video::BufferShape, sink: fn(&Even
         });
         return;
     };
+    present_later(PresentJob {
+        frame: Presented::Memory {
+            tiled,
+            shape,
+            decode,
+        },
+        sink,
+        dir,
+    });
+}
+
+/// Detiles a flipped buffer's copied words and streams them as a frame, on the presenting thread.
+fn present_tiled(
+    tiled: &[u32],
+    shape: orbistoun_video::BufferShape,
+    decode: fn(u32) -> u32,
+    (sink, dir): (fn(&Event), &Path),
+) {
+    let (width, height) = (shape.width, shape.height);
     if tiled.len() < orbistoun_gpu::tiling::surface_words_64kb_rx_bpp4(width, height) {
         return;
     }
     // The format's byte order to R, G, B, A, as each texel is detiled.
     let linear =
-        orbistoun_gpu::tiling::detile_surface_64kb_rx_bpp4_mapped(&tiled, width, height, 0, decode);
+        orbistoun_gpu::tiling::detile_surface_64kb_rx_bpp4_mapped(tiled, width, height, 0, decode);
     let bytes = zerocopy::IntoBytes::as_bytes(linear.as_slice());
     emit_presented((width, height), bytes, sink, dir);
 }
@@ -567,12 +626,10 @@ fn read_scanout(address: u64, width: u32, height: u32) -> Option<Vec<u32>> {
     let bytes = unsafe {
         std::slice::from_raw_parts(std::ptr::with_exposed_provenance::<u8>(at), words * 4)
     };
-    Some(
-        bytes
-            .chunks_exact(4)
-            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
-            .collect(),
-    )
+    // One copy of the bytes as they lie, little-endian words on this host: the flip waits for it.
+    let mut copied = vec![0u32; words];
+    zerocopy::IntoBytes::as_mut_bytes(copied.as_mut_slice()).copy_from_slice(bytes);
+    Some(copied)
 }
 
 /// How many drawn submissions a run dumps, in order.
