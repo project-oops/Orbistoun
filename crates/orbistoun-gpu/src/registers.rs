@@ -1413,20 +1413,13 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         None if levels == 1 => crate::tiling::SurfaceLayout::default(),
         None => return None,
     };
-    // A one-byte `COLOR_8` element and an eight-byte `16_16_16_16` one lie by their own layouts,
-    // where one is modelled; any other format keeps the 32-bpp one, and is written back only if it
-    // is a four-byte one.
-    let layout = match last(CB_COLOR0_INFO).map(decode_colour_target_format) {
-        Some(format) if format.format == COLOR_8 => layout.at_bytes_per_texel(1).unwrap_or(layout),
-        Some(format) if format.format == COLOR_16_16_16_16 => {
-            layout.at_bytes_per_texel(8).unwrap_or(layout)
-        }
-        Some(format) if format.format == COLOR_16 => layout.at_bytes_per_texel(2).unwrap_or(layout),
-        Some(format) if format.format == COLOR_32_32_32_32 => {
-            layout.at_bytes_per_texel(16).unwrap_or(layout)
-        }
-        _ => layout,
-    };
+    // An element of another size than four bytes lies by its own size's layout, where one is
+    // modelled; a four-byte one, or an unwritten format, keeps the 32-bpp one.
+    let layout = last(CB_COLOR0_INFO)
+        .map(|info| element_bytes(decode_colour_target_format(info).format))
+        .filter(|&bytes| bytes != 4)
+        .and_then(|bytes| layout.at_bytes_per_texel(bytes))
+        .unwrap_or(layout);
     // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
     // unwritten extension reads as its reset value, zero.
     let high = u64::from(last(CB_COLOR0_BASE_EXT).unwrap_or(0) & 0xFF) << 32;
@@ -2366,6 +2359,20 @@ pub const COLOR_16: u32 = 2;
 /// `ColorFormat` `COLOR_2_10_10_10` (`gfx103.json`): what Mesa targets a 10-10-10-2 format at,
 /// red in the low bits (`ac_formats.c` 536).
 pub const COLOR_2_10_10_10: u32 = 9;
+/// The bytes one element of the `ColorFormat` `format` takes: one for `COLOR_8`, two for `COLOR_16`
+/// and `COLOR_8_8`, eight for `COLOR_16_16_16_16`, sixteen for `COLOR_32_32_32_32`, and four for
+/// every other - the formats a target is placed by its own size for (D852, D853, D869).
+#[must_use]
+pub const fn element_bytes(format: u32) -> u32 {
+    match format {
+        COLOR_8 => 1,
+        COLOR_16 | COLOR_8_8 => 2,
+        COLOR_16_16_16_16 => 8,
+        COLOR_32_32_32_32 => 16,
+        _ => 4,
+    }
+}
+
 /// `ColorFormat` `COLOR_8_8` (`gfx103.json`): two eight-bit channels, red then green under
 /// `SWAP_STD` (`ac_formats.c` `ac_translate_colorswap`, `XY__`).
 pub const COLOR_8_8: u32 = 3;
@@ -4809,13 +4816,17 @@ mod tests {
             colour_target_at(&wide).map(|t| t.layout),
             Some(crate::tiling::SurfaceLayout::Rx64KbBpp16)
         );
-        // A two-byte `16` element lies by the 16-bpp layout (D852).
-        let mut two = page.to_vec();
-        two.push(write(0xA31C, 2 << 2 | 4 << 8));
-        assert_eq!(
-            colour_target_at(&two).map(|t| t.layout),
-            Some(crate::tiling::SurfaceLayout::Rx64KbBpp2)
-        );
+        // A two-byte `16` element lies by the 16-bpp layout (D852), as a two-byte `8_8` one does
+        // (D869).
+        for info in [2 << 2 | 4 << 8, 3 << 2] {
+            let mut two = page.to_vec();
+            two.push(write(0xA31C, info));
+            assert_eq!(
+                colour_target_at(&two).map(|t| t.layout),
+                Some(crate::tiling::SurfaceLayout::Rx64KbBpp2),
+                "{info:#x}"
+            );
+        }
         let mut rgba = page.to_vec();
         rgba.push(write(0xA31C, 10 << 2));
         assert_eq!(
