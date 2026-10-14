@@ -9092,8 +9092,7 @@ fn read_first_lane<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
 ) -> Result<(), TranslateError> {
-    let [Operand::Scalar(destination), Operand::Vector(source)] = instruction.operands.as_slice()
-    else {
+    let [destination, Operand::Vector(source)] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
             detail: "v_readfirstlane_b32 does not name a scalar and a vector register",
@@ -9128,8 +9127,33 @@ fn read_first_lane<M: Model + ?Sized>(
                 offset: instruction.offset,
                 detail: "a lane read at a lane known only when the program runs needs every lane",
             })?;
-    model.write_scalar(u32::from(*destination), value);
+    write_scalar_operand(model, instruction, destination, value)?;
     model.count();
+    Ok(())
+}
+
+/// Writes a scalar result where `destination` names: a scalar register, a lane mask's low or high
+/// half used as a scalar (`vcc_lo`, `vcc_hi`, `exec_lo`, `exec_hi`), or `m0`.
+fn write_scalar_operand<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    destination: &Operand,
+    value: Id,
+) -> Result<(), TranslateError> {
+    if let Some(mask) = mask_destination(destination) {
+        return write_mask_low(model, mask, value);
+    }
+    if let Operand::Named(named) = destination {
+        if let Some(mask) = lane_mask_high_name(named) {
+            return write_mask_high(model, mask, value);
+        }
+        if named == M0 {
+            model.write_m0(value);
+            return Ok(());
+        }
+    }
+    let register = scalar_destination(instruction, destination)?;
+    model.write_scalar(register, value);
     Ok(())
 }
 

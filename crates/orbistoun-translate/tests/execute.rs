@@ -910,7 +910,8 @@ fn the_scalar_high_product_is_the_upper_word() {
 /// `v_cmp_le_u32` sets `vcc` for the lanes whose first source is at most the second, unsigned, and
 /// `v_readfirstlane_b32` reads the lowest lane still running (AMD's published RDNA instruction
 /// set): with `5 <= lane` narrowing the mask, lane 5's index; with every lane running, lane 0's.
-/// Grand Theft Auto V's compute program divides integers through both.
+/// Its destination may be a lane mask's half used as a scalar: Grand Theft Auto V's compute
+/// program, which divides integers through both, does `v_readfirstlane_b32 vcc_hi, v0`.
 #[test]
 fn the_first_running_lane_is_read_after_an_unsigned_comparison() {
     if !device_or_skip("the_first_running_lane_is_read_after_an_unsigned_comparison") {
@@ -921,10 +922,14 @@ fn the_first_running_lane_is_read_after_an_unsigned_comparison() {
     program.push(v_cmp_f32("v_cmp_le_u32_e32", 128 + 5, 0));
     program.push(s_logic_b64("s_and_b64", 126, 126, 106));
     program.push(vop1_vv("v_readfirstlane_b32", 2, 0));
+    // vcc_hi is scalar code 107; read back through s4.
+    program.push(vop1_vv("v_readfirstlane_b32", 107, 0));
+    program.push(sop1("s_mov_b32", 4, 107));
     program.push(s_endpgm());
     let registers = run_at(Fidelity::Wavefront, &program);
     assert_eq!(scalar(&registers, 3), 0, "every lane running");
     assert_eq!(scalar(&registers, 2), 5, "lanes 0 to 4 fail 5 <= lane");
+    assert_eq!(scalar(&registers, 4), 5, "through vcc_hi");
 }
 
 /// The sub-word loads read the byte or half at their address and widen it - zero-extended
