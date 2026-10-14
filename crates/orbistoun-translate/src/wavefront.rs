@@ -730,6 +730,29 @@ pub struct GeometryInputs {
     /// in place of the first two indices sixteen bits each.
     #[serde(default)]
     pub passthrough: bool,
+    /// A legacy vertex shader's draw (D881): no primitive shader runs (`VGT_SHADER_STAGES_EN` sets no
+    /// `PRIMGEN_EN`), so the program neither declares its counts nor exports its primitives. The
+    /// module does both from the draw's own, a lane a vertex, and seeds the vertex shader's inputs:
+    /// the vertex id in `v0` and the instance id in `v3` (radeonsi `declare_vs_input_vgprs`, GFX10).
+    #[serde(default)]
+    pub legacy: bool,
+    /// A legacy vertex shader that takes streamout words (`SPI_SHADER_PGM_RSRC2_VS.SO_EN`): its
+    /// buffer stores are its streamout, which the streamout pass carries out exactly (D861) and the
+    /// draw drops (D881) - with streamout off the hardware hands it no vertices to store.
+    #[serde(default)]
+    pub streamout: bool,
+}
+
+/// What a module does of a legacy vertex shader's streamout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamoutRole {
+    /// Nothing: no streamout, or a program that is no legacy vertex shader.
+    None,
+    /// The streamout pass (D861): the stores are carried out and the position and parameter
+    /// exports dropped, the rasterizer being killed.
+    Pass,
+    /// The draw (D881): the exports drawn and the stores dropped, the streamout pass's to make.
+    Draw,
 }
 
 /// How wide an indexed draw's indices are: `VGT_INDEX_TYPE`'s `VGT_INDEX_16` and `VGT_INDEX_32`
@@ -762,6 +785,13 @@ const INSTANCE_ID_REGISTER: u32 = 8;
 /// The input register a primitive shader's vertex thread finds its vertex id in: `v5`, after the
 /// vertex indices, primitive id and invocation id (GFX10's non-passthrough primitive shader).
 const VERTEX_ID_REGISTER: u32 = 5;
+
+/// Where a legacy vertex shader's vertex id arrives on GFX10: `v0` (radeonsi
+/// `declare_vs_input_vgprs`), D881.
+const LEGACY_VERTEX_ID_REGISTER: u32 = 0;
+
+/// Where its instance id arrives: `v3`, after a user VGPR and the primitive id.
+const LEGACY_INSTANCE_ID_REGISTER: u32 = 3;
 
 /// How a draw's primitives take their three vertices each.
 #[derive(
@@ -1957,8 +1987,8 @@ pub struct Wavefront<'a> {
     /// Each attribute's second, flat location (D742): where a pixel shader's flat reads of an
     /// attribute it also interpolates go, and where a primitive shader exports the parameter again.
     flat_twins: Option<FlatTwins>,
-    /// Whether position and parameter exports are dropped ([`UserData::discard_vertex_exports`]).
-    discard_vertex_exports: bool,
+    /// What the module does of a legacy vertex shader's streamout (D861, D881).
+    streamout: StreamoutRole,
     /// The draw's position-vector routing ([`UserData::position_vectors`]).
     position_vectors: Option<u32>,
     /// The draw's point size register ([`UserData::point_size`]).
@@ -2808,7 +2838,16 @@ impl<'a> Wavefront<'a> {
             output,
             inputs,
             flat_twins: user_data.flat_twins,
-            discard_vertex_exports: user_data.discard_vertex_exports,
+            streamout: if user_data.discard_vertex_exports {
+                StreamoutRole::Pass
+            } else if user_data
+                .geometry
+                .is_some_and(|geometry| geometry.legacy && geometry.streamout)
+            {
+                StreamoutRole::Draw
+            } else {
+                StreamoutRole::None
+            },
             position_vectors: user_data.position_vectors,
             point_size: user_data.point_size,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
@@ -2954,6 +2993,10 @@ impl<'a> Wavefront<'a> {
     /// draw's, read from its words at run time (D745): its vertex count, and the primitive count
     /// the assembly makes of it.
     fn seed_geometry(&mut self, geometry: GeometryInputs) {
+        if geometry.legacy {
+            self.seed_legacy_vertices(geometry);
+            return;
+        }
         let GeometryInputs {
             first_vertex,
             vertices: whole,
@@ -3050,6 +3093,60 @@ impl<'a> Wavefront<'a> {
                 let id = self.select(is_vertex, id, zero);
                 self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
             }
+        }
+    }
+
+    /// A legacy vertex shader's draw (D881): the counts declared from the draw - its vertices, and
+    /// the primitives its assembly makes of them - each primitive's vertices written as an
+    /// `exp prim` would, and each vertex lane's id in `v0` (its index, for an indexed draw) and
+    /// instance in `v3`. Lanes past the draw's vertices read zero.
+    fn seed_legacy_vertices(&mut self, geometry: GeometryInputs) {
+        let GeometryInputs {
+            first_vertex,
+            vertices: whole,
+            assembly,
+            indices,
+            ..
+        } = geometry;
+        let index_slot = self.draw_buffers.as_ref().map_or(0, |(_, served)| {
+            served.values().max().map_or(0, |&slot| slot + 1)
+        });
+        let vertices = self
+            .draw_word(orbistoun_spirv::DRAW_DATA_VERTICES_WORD)
+            .unwrap_or_else(|| self.constant(whole));
+        let primitives = self.primitives_of(assembly, vertices);
+        let _ = self.set_mesh_outputs(vertices, primitives);
+        let first = self.constant(first_vertex);
+        let base = match self.draw_word(orbistoun_spirv::DRAW_DATA_FIRST_VERTEX_WORD) {
+            Some(word) => self.binary(op::IADD, word, first),
+            None => first,
+        };
+        let zero = self.constant(0);
+        let width = self.primitive.indices() as usize;
+        let lanes: Vec<(u32, Id)> = match self.invocation {
+            // One invocation per lane (D760): this invocation's own lane, in its slot zero.
+            Some(at) => vec![(0, at)],
+            None => (0..self.lanes)
+                .map(|lane| (lane, self.constant(lane)))
+                .collect(),
+        };
+        for (lane, at) in lanes {
+            let corners = self.vertices_of_lane(assembly, at);
+            let _ = self.write_mesh_indices(lane, &corners[..width]);
+            let is_vertex = self.compare(op::ULESS_THAN, at, vertices);
+            let id = match indices {
+                Some(width) => {
+                    let position = self.select(is_vertex, at, zero);
+                    let id = self.index_at(index_slot, width, position);
+                    self.offset_index(id, first_vertex)
+                }
+                None => self.binary(op::IADD, base, at),
+            };
+            let id = self.select(is_vertex, id, zero);
+            self.store_lane_masked(LEGACY_VERTEX_ID_REGISTER, lane, id);
+            let instance = self.instance_id.unwrap_or(zero);
+            let instance = self.select(is_vertex, instance, zero);
+            self.store_lane_masked(LEGACY_INSTANCE_ID_REGISTER, lane, instance);
         }
     }
 
@@ -4735,8 +4832,12 @@ impl Model for Wavefront<'_> {
         Some(())
     }
 
+    fn drops_streamout_stores(&self) -> bool {
+        self.streamout == StreamoutRole::Draw
+    }
+
     fn discards_vertex_exports(&self) -> bool {
-        self.discard_vertex_exports
+        self.streamout == StreamoutRole::Pass
     }
 
     fn lane_may_run(&self, lane: u32) -> bool {
@@ -6932,6 +7033,8 @@ mod wave32_mask_tests {
                 assembly: Assembly::List,
                 indices: None,
                 passthrough: false,
+                legacy: false,
+                streamout: false,
             }),
             ..UserData::default()
         };

@@ -322,6 +322,8 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
             ^ (u64::from(g.vertices) << 32)
             ^ (u64::from(g.primitives) << 16)
             ^ u64::from(g.first_vertex)
+            ^ u64::from(g.legacy) << 63
+            ^ u64::from(g.streamout) << 62
             ^ match g.indices {
                 None => 0,
                 Some(width) => 0x4944_5800_0000_0000 ^ u64::from(width.bytes()),
@@ -1118,6 +1120,50 @@ const DI_PT_QUADLIST: u32 = 19;
 const PA_SU_SC_MODE_CNTL: u32 = 0xA205;
 /// See [`PA_SU_SC_MODE_CNTL`].
 const PROVOKING_VTX_LAST: u32 = 1 << 19;
+/// The shaders a draw runs, from the candidates its registers name: those its queue permits and
+/// no registration already gave, the vertex program the primitive shader's or - where `legacy` -
+/// the legacy vertex shader's (D881).
+fn draw_candidates(
+    inferred: Vec<crate::registers::ShaderCandidate>,
+    legacy: bool,
+    (queue, registered_stages): (Queue, &[ShaderStage]),
+) -> Vec<Candidate> {
+    inferred
+        .into_iter()
+        .filter(|inferred| runs_vertex_candidate(&inferred.stage, legacy))
+        .filter_map(|inferred| {
+            let stage = stage_of(&inferred.stage)?;
+            (queue.permits(stage) && !registered_stages.contains(&stage)).then_some(Candidate {
+                address: inferred.address,
+                stage,
+            })
+        })
+        .collect()
+}
+
+/// Whether a candidate named `name` is the vertex program a draw runs: the primitive shader's, or -
+/// where `legacy`, a draw with none - the legacy vertex shader's (D881). Every other stage is.
+fn runs_vertex_candidate(name: &str, legacy: bool) -> bool {
+    match name {
+        "vertex" => !legacy,
+        "legacy-vertex" => legacy,
+        _ => true,
+    }
+}
+
+/// The output primitive a legacy vertex shader's draw assembles (D881), as `VGT_GS_OUT_PRIM_TYPE`
+/// codes, from its input topology: radeonsi writes that register only for a primitive or geometry
+/// shader (`si_state_draw.cpp` 1083), so a legacy draw's is its input's.
+fn legacy_output_primitive(primitive_type: Option<u32>) -> Option<u32> {
+    match primitive_type? & 0x3F {
+        DI_PT_POINTLIST => Some(0),
+        DI_PT_LINELIST | DI_PT_LINESTRIP => Some(1),
+        DI_PT_TRILIST | DI_PT_TRISTRIP | DI_PT_QUADLIST | DI_PT_QUADSTRIP => Some(2),
+        DI_PT_RECTLIST | DI_PT_2D_RECTANGLE => Some(3),
+        _ => None,
+    }
+}
+
 /// `DI_PT_TRILIST` and `DI_PT_RECTLIST` (`gfx103.json:691`, `:704`, enum `VGT_DI_PRIM_TYPE`): the
 /// input primitives of three vertices each, the second radeonsi's blits.
 const DI_PT_TRILIST: u32 = 4;
@@ -1191,8 +1237,11 @@ fn draw_geometry(
             ));
         }
     };
-    let passthrough =
-        latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0);
+    let stages = latest(VGT_SHADER_STAGES_EN);
+    let passthrough = stages.is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0);
+    let legacy = crate::registers::legacy_vertex(stages);
+    // `SPI_SHADER_PGM_RSRC2_VS.SO_EN`, bit 12: its stores are its streamout (D881).
+    let streamout = legacy && latest(0x2C4B).is_some_and(|value| value & 1 << 12 != 0);
     // The offset is added to each index an indexed draw fetches; an auto draw's ids count up from
     // zero whatever it holds (D843, obSCEne ix01).
     let offset = latest(GE_INDX_OFFSET).unwrap_or(0);
@@ -1203,6 +1252,8 @@ fn draw_geometry(
         assembly,
         indices,
         passthrough,
+        legacy,
+        streamout,
     })
 }
 
@@ -1276,6 +1327,8 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
                     // which its draw's words carry, so every chunk runs one module (D761).
                     indices: whole.indices.map(|_| width),
                     passthrough: whole.passthrough,
+                    legacy: whole.legacy,
+                    streamout: whole.streamout,
                 },
                 index_buffer,
             }
@@ -1502,6 +1555,12 @@ pub struct Pipeline {
     /// (`POINTLIST`), in a submission that clears state (`CLEAR_STATE`); unknown in one that does
     /// not.
     unwritten_primitive: Option<u32>,
+    /// The `VGT_SHADER_STAGES_EN` in force at the draw whose shaders are being bound, which says
+    /// whether it runs a legacy vertex shader (D881).
+    draw_stages: Option<u32>,
+    /// The one the submission being prepared leaves in force, for a module prepared for no
+    /// particular draw.
+    submission_stages: Option<u32>,
     /// The `VGT_GS_OUT_PRIM_TYPE` the submission being prepared leaves in force - its last write, or
     /// what holds where it writes none - which a module prepared for no particular draw emits.
     submission_primitive: Option<u32>,
@@ -1636,6 +1695,8 @@ impl Pipeline {
             draw_widths: None,
             draw_primitive: None,
             unwritten_primitive: None,
+            draw_stages: None,
+            submission_stages: None,
             submission_primitive: None,
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
@@ -2220,6 +2281,13 @@ impl Pipeline {
 
         // The guest-memory window this frame's shaders read, read once because every module shares
         // it (D703). The default window at address zero is unmapped and reads empty.
+        // The vertex program a draw runs: the primitive shader's, or a legacy vertex shader's
+        // (D881).
+        let legacy = crate::registers::legacy_vertex(self.submission_stages);
+        let inferred: Vec<_> = inferred
+            .into_iter()
+            .filter(|candidate| runs_vertex_candidate(&candidate.stage, legacy))
+            .collect();
         let candidates = Self::reconcile(queue, registered, &inferred, &mut submission.report);
         span(Span::PrepareEnvironment, || {
             self.set_environment(&candidates, &writes, memory);
@@ -3289,18 +3357,11 @@ impl Pipeline {
             let mut shaders = Vec::new();
             let latest =
                 sweep.before_among(draw.packet_offset, self.vocabulary.shader_register_ids());
-            let draw_candidates: Vec<Candidate> = shader_candidates(&latest, &self.vocabulary)
-                .into_iter()
-                .filter_map(|inferred| {
-                    let stage = stage_of(&inferred.stage)?;
-                    (queue.permits(stage) && !registered_stages.contains(&stage)).then_some(
-                        Candidate {
-                            address: inferred.address,
-                            stage,
-                        },
-                    )
-                })
-                .collect();
+            let draw_candidates = draw_candidates(
+                shader_candidates(&latest, &self.vocabulary),
+                crate::registers::legacy_vertex(self.draw_stages),
+                (queue, &registered_stages),
+            );
             // A pixel shader first prepared here may be the first to sample through a sampler.
             sampled_through_samplers |= self.inputs_for_draw(
                 &draw_candidates,
@@ -3342,12 +3403,19 @@ impl Pipeline {
         walked: &PacketWalk,
     ) -> Option<PrimitiveTopology> {
         self.unwritten_primitive = last_clear(walked).map(|_| 0);
-        self.submission_primitive = writes
-            .iter()
-            .rev()
-            .find(|write| write.register == crate::registers::VGT_GS_OUT_PRIM_TYPE)
-            .map(|write| write.value)
-            .or(self.unwritten_primitive);
+        let last = |register: u32| {
+            writes
+                .iter()
+                .rev()
+                .find(|write| write.register == register)
+                .map(|write| write.value)
+        };
+        self.submission_stages = last(VGT_SHADER_STAGES_EN);
+        self.submission_primitive = if crate::registers::legacy_vertex(self.submission_stages) {
+            legacy_output_primitive(last(VGT_PRIMITIVE_TYPE))
+        } else {
+            last(crate::registers::VGT_GS_OUT_PRIM_TYPE).or(self.unwritten_primitive)
+        };
         self.submission_primitive
             .map(crate::registers::decode_primitive_topology)
     }
@@ -3357,6 +3425,7 @@ impl Pipeline {
     fn end_draws(&mut self) {
         self.draw_widths = None;
         self.draw_primitive = None;
+        self.draw_stages = None;
         self.formats_memo = FormatsMemo::Off;
     }
 
@@ -3469,6 +3538,13 @@ impl Pipeline {
         self.draw_primitive = sweep
             .latest(at, crate::registers::VGT_GS_OUT_PRIM_TYPE)
             .or(self.unwritten_primitive);
+        // Whether the draw runs a legacy vertex shader, whose output is its input topology's
+        // (D881).
+        self.draw_stages = sweep.latest(at, VGT_SHADER_STAGES_EN);
+        written.push(self.draw_stages);
+        if crate::registers::legacy_vertex(self.draw_stages) {
+            self.draw_primitive = legacy_output_primitive(sweep.latest(at, VGT_PRIMITIVE_TYPE));
+        }
         written.push(self.draw_primitive);
         // The vertex stage's user data, which names the buffers whose formats a format load
         // converts by (D738).
@@ -3781,7 +3857,13 @@ impl Pipeline {
                 }
             }
         }
-        if let Some(access) = reaches_guest_memory(decoded, &self.encodings, &buffers.served) {
+        // A legacy vertex shader's draw drops its streamout stores (D881).
+        let drops_stores = user_data
+            .geometry
+            .is_some_and(|geometry| geometry.legacy && geometry.streamout);
+        if let Some(access) =
+            reaches_guest_memory(decoded, &self.encodings, (&buffers.served, drops_stores))
+        {
             self.memory_readers.insert(resource, access);
         }
         if stage == Stage::Fragment {
@@ -4646,7 +4728,8 @@ fn stage_user_data(
     stage: usize,
 ) -> [u32; USER_DATA_WORDS] {
     let mut words = [0u32; USER_DATA_WORDS];
-    let (_, first) = USER_DATA_REGISTERS[stage];
+    let (named, first) = USER_DATA_REGISTERS[stage];
+    let first = vertex_user_data_base(named, first, sweep.latest(at, VGT_SHADER_STAGES_EN));
     for (register, word) in (first..).zip(words.iter_mut()) {
         *word = sweep.latest(at, register).unwrap_or(0);
     }
@@ -4876,11 +4959,8 @@ fn push_geometry_commands(
         }
         // Each stage's user data as it stands at this draw, emitted when it changed. A word the
         // stream never wrote reads zero.
-        for (slot, (stage, first)) in USER_DATA_REGISTERS.into_iter().enumerate() {
-            let mut words = [0u32; USER_DATA_WORDS];
-            for (register, word) in (first..).zip(words.iter_mut()) {
-                *word = sweep.latest(at, register).unwrap_or(0);
-            }
+        for (slot, (stage, _)) in USER_DATA_REGISTERS.into_iter().enumerate() {
+            let words = stage_user_data(&mut sweep, at, slot);
             if sent[slot] != Some(words) {
                 commands.push(RenderCommand::SetUserData { stage, words });
                 sent[slot] = Some(words);
@@ -5036,6 +5116,20 @@ fn push_chunks(
 /// `gfx103.json` maps it at byte `45616` (`0xB230`), and the open-toolchain GL context writes its
 /// per-draw vertex offset there (oops-sdk `gl_draw.c`). The vertex stage reads the `GS` set because
 /// the vertex program runs as the primitive-shader geometry stage (D688).
+/// `SPI_SHADER_USER_DATA_VS_0` (`gfx103.json`, `0x2C4C`): where a legacy vertex shader's user data
+/// lies (D881), from `s0`.
+const USER_DATA_VS_0: u32 = 0x2C4C;
+
+/// Where `stage`'s user data lies: `first`, or for the vertex stage of a legacy vertex draw - by
+/// its `VGT_SHADER_STAGES_EN`, `stages` - [`USER_DATA_VS_0`] (D881).
+fn vertex_user_data_base(stage: ShaderStage, first: u32, stages: Option<u32>) -> u32 {
+    if stage == ShaderStage::Vertex && crate::registers::legacy_vertex(stages) {
+        USER_DATA_VS_0
+    } else {
+        first
+    }
+}
+
 const USER_DATA_REGISTERS: [(ShaderStage, u32); 2] = [
     (ShaderStage::Vertex, 0x2C8C),
     (ShaderStage::Fragment, 0x2C0C),
@@ -6863,6 +6957,11 @@ const RSRC2_REGISTERS: [u32; 2] = [0x2C8B, 0x2C0B];
 /// `45608` (`0x2C8A`) and `RSRC1_PS` at `45096` (`0x2C0A`), with `DX10_CLAMP` in bit 21.
 const RSRC1_REGISTERS: [u32; 2] = [0x2C8A, 0x2C0A];
 
+/// `SPI_SHADER_PGM_RSRC1_VS` and `_RSRC2_VS` (`gfx103.json`, `0x2C4A`, `0x2C4B`): a legacy vertex
+/// shader's (D881).
+const RSRC1_VS: u32 = 0x2C4A;
+const RSRC2_VS: u32 = 0x2C4B;
+
 /// `SPI_SHADER_PGM_RSRC1.DX10_CLAMP`, bit 21 (`gfx103.json`).
 const DX10_CLAMP_BIT: u32 = 1 << 21;
 
@@ -6888,25 +6987,34 @@ fn user_data_layouts_at(sweep: &mut crate::registers::RegisterSweep<'_>, at: u32
 
 /// The two stages' layouts from `last`, which answers a register's value where it is read.
 fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 2] {
+    // A legacy vertex shader's resource words are the VS pair, and its user data starts at `s0`
+    // (D881).
+    let legacy = crate::registers::legacy_vertex(last(VGT_SHADER_STAGES_EN));
+    let (rsrc1_vertex, rsrc2_vertex) = if legacy {
+        (RSRC1_VS, RSRC2_VS)
+    } else {
+        (RSRC1_REGISTERS[0], RSRC2_REGISTERS[0])
+    };
     // `USER_SGPR`, bits 5:1, and its sixth bit `USER_SGPR_MSB`, bit 27 of both stages' `RSRC2`
     // (`gfx103.json`): thirty-two registers set the MSB and leave the low five zero.
     let mut count = |register: u32| {
         last(register).map_or(0, |value| (value >> 1) & 0x1f | (value >> 27 & 1) << 5)
     };
-    let counts = [count(RSRC2_REGISTERS[0]), count(RSRC2_REGISTERS[1])];
+    let counts = [count(rsrc2_vertex), count(RSRC2_REGISTERS[1])];
     // The geometry program's local data share, from its `RSRC2`'s `LDS_SIZE`. The pixel stage's
     // `RSRC2` holds `EXTRA_LDS_SIZE` there instead, which no translated pixel shader reads.
-    let local_words = local_words_of(last(RSRC2_REGISTERS[0]), GS_LDS_SIZE);
+    let local_words = if legacy {
+        None
+    } else {
+        local_words_of(last(RSRC2_REGISTERS[0]), GS_LDS_SIZE)
+    };
     // `DX10_CLAMP`, bit 21 of the stage's `RSRC1` (Mesa `S_00B848_DX10_CLAMP`): what an output
     // clamp does with a NaN. `None` when the stream set no `RSRC1`.
     let mut dx10_clamp = |register: u32| last(register).map(|value| value & DX10_CLAMP_BIT != 0);
-    let clamps = [
-        dx10_clamp(RSRC1_REGISTERS[0]),
-        dx10_clamp(RSRC1_REGISTERS[1]),
-    ];
+    let clamps = [dx10_clamp(rsrc1_vertex), dx10_clamp(RSRC1_REGISTERS[1])];
     [
         UserData {
-            first_register: 8,
+            first_register: if legacy { 0 } else { 8 },
             count: counts[0],
             block_offset: 0,
             dx10_clamp: clamps[0],
@@ -7131,6 +7239,33 @@ impl Pipeline {
     }
 }
 
+/// A program's instructions with their names, less a legacy vertex shader's streamout stores where
+/// the module drops them (`drops_stores`, D881): those neither reach memory nor read what a load
+/// gave them.
+fn named_instructions<'a>(
+    decoded: &'a orbistoun_shader::Decode,
+    encodings: &'a EncodingTable,
+    drops_stores: bool,
+) -> Vec<(&'a orbistoun_shader::Instruction, &'a str)> {
+    decoded
+        .instructions
+        .iter()
+        .filter_map(|instruction| {
+            let family = encodings
+                .encodings()
+                .get(usize::from(instruction.encoding?))?;
+            Some((
+                instruction,
+                encodings.mnemonic_for(&family.name, instruction.opcode)?,
+            ))
+        })
+        .filter(|&(_, name)| {
+            !(drops_stores
+                && (name.starts_with("buffer_store") || name.starts_with("tbuffer_store")))
+        })
+        .collect()
+}
+
 /// Whether a shader's results depend on guest memory it reaches through the window: any flat,
 /// global, scratch, buffer or scalar buffer access, and any scalar load whose registers something
 /// other than an image instruction reads.
@@ -7146,7 +7281,7 @@ impl Pipeline {
 fn reaches_guest_memory(
     decoded: &orbistoun_shader::Decode,
     encodings: &EncodingTable,
-    served: &BTreeMap<u32, u32>,
+    (served, drops_stores): (&BTreeMap<u32, u32>, bool),
 ) -> Option<String> {
     const ACCESSES: [&str; 6] = [
         "s_buffer_load",
@@ -7156,19 +7291,7 @@ fn reaches_guest_memory(
         "buffer_",
         "tbuffer_",
     ];
-    let named: Vec<(&orbistoun_shader::Instruction, &str)> = decoded
-        .instructions
-        .iter()
-        .filter_map(|instruction| {
-            let family = encodings
-                .encodings()
-                .get(usize::from(instruction.encoding?))?;
-            Some((
-                instruction,
-                encodings.mnemonic_for(&family.name, instruction.opcode)?,
-            ))
-        })
-        .collect();
+    let named = named_instructions(decoded, encodings, drops_stores);
     // Every scalar register something other than an image instruction reads: its sources, and the
     // first operand of a compare, which writes nothing.
     let reads = |instruction: &orbistoun_shader::Instruction, name: &str| {
@@ -7548,7 +7671,7 @@ pub enum PipelineError {
 /// Unknown names produce `None` rather than a guess.
 fn stage_of(name: &str) -> Option<ShaderStage> {
     match name {
-        "vertex" => Some(ShaderStage::Vertex),
+        "vertex" | "legacy-vertex" => Some(ShaderStage::Vertex),
         "fragment" | "pixel" => Some(ShaderStage::Fragment),
         "compute" => Some(ShaderStage::Compute),
         _ => None,
@@ -10579,7 +10702,7 @@ mod tests {
             super::reaches_guest_memory(
                 &decode_program(bytes, &encodings, &operands),
                 &encodings,
-                &std::collections::BTreeMap::new(),
+                (&std::collections::BTreeMap::new(), false),
             )
         };
         assert_eq!(reaches(&only_image), None);
@@ -10864,6 +10987,36 @@ mod tests {
 
     /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list or strip
     /// of triangles, without passthrough or an index offset (D730); anything else says why not.
+    /// A draw with no primitive shader runs a legacy vertex shader (D881): its geometry says so,
+    /// and that its stores are streamout where its `RSRC2_VS` sets `SO_EN`. A primitive shader's
+    /// draw is neither; nor is one whose stream never wrote the stage register.
+    #[test]
+    fn a_draw_with_no_primitive_shader_is_a_legacy_vertex_draw() {
+        use super::{DI_PT_TRILIST, VGT_PRIMITIVE_TYPE, VGT_SHADER_STAGES_EN, draw_geometry};
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = DrawCall {
+            packet_offset: 0,
+            instances: 1,
+            kind: DrawKind::Auto { vertices: 3 },
+        };
+        let geometry = |stages: Option<u32>, rsrc2: Option<u32>| {
+            let found = draw_geometry(&draw, |register| match register {
+                VGT_PRIMITIVE_TYPE => Some(DI_PT_TRILIST),
+                VGT_SHADER_STAGES_EN => stages,
+                0x2C4B => rsrc2,
+                _ => None,
+            })
+            .expect("a triangle list is seeded");
+            (found.legacy, found.streamout)
+        };
+        // GCTS00001's streamout pass: VS_W32_EN and MAX_PRIMGRP_IN_WAVE, no PRIMGEN_EN.
+        assert_eq!(geometry(Some(0x0081_0000), Some(0x1112)), (true, true));
+        assert_eq!(geometry(Some(0x0081_0000), Some(0x0012)), (true, false));
+        // A primitive shader (PRIMGEN_EN), and a stream that never wrote the register.
+        assert_eq!(geometry(Some(0x0041_2010), Some(0x1112)), (false, false));
+        assert_eq!(geometry(None, Some(0x1112)), (false, false));
+    }
+
     #[test]
     fn a_draw_s_geometry_is_seeded_only_for_one_instance_of_triangles() {
         use super::{
@@ -10893,6 +11046,8 @@ mod tests {
                 assembly: super::Assembly::List,
                 indices: None,
                 passthrough: false,
+                legacy: false,
+                streamout: false,
             })
         );
         // A strip of six vertices is four triangles, its provoking convention from
@@ -10906,15 +11061,8 @@ mod tests {
         };
         for (mode, provoking_last) in [(super::PROVOKING_VTX_LAST, true), (0, false)] {
             assert_eq!(
-                draw_geometry(&draw(6, 1), strip(mode)),
-                Ok(GeometryInputs {
-                    first_vertex: 0,
-                    vertices: 6,
-                    primitives: 4,
-                    assembly: super::Assembly::Strip { provoking_last },
-                    indices: None,
-                    passthrough: false,
-                })
+                draw_geometry(&draw(6, 1), strip(mode)).map(|g| (g.primitives, g.assembly)),
+                Ok((4, super::Assembly::Strip { provoking_last }))
             );
         }
         assert_eq!(
@@ -11014,6 +11162,8 @@ mod tests {
             assembly,
             indices,
             passthrough: false,
+            legacy: false,
+            streamout: false,
         };
         assert!(chunk_plans(whole(63, 21, Assembly::List, None), None, 64).is_empty());
         // 96 vertices of a list at 64 lanes: 21 triangles, then 11.

@@ -757,6 +757,12 @@ pub trait Model {
         true
     }
 
+    /// Whether buffer stores are dropped: a legacy vertex shader's draw, whose stores are its
+    /// streamout, carried out by the streamout pass (D861, D881). The default stores.
+    fn drops_streamout_stores(&self) -> bool {
+        false
+    }
+
     /// Whether position and parameter exports are dropped rather than written: a legacy vertex
     /// shader's streamout pass, whose rasterizer is killed (D861). The default writes them.
     fn discards_vertex_exports(&self) -> bool {
@@ -2997,8 +3003,24 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_fract_f32_e32" | "v_trunc_f32_e32" => float_unary(model, instruction, name),
         "v_bfrev_b32_e32" => bit_reverse(model, instruction),
 
-        _ => memory_instruction(model, instruction, name),
+        _ => memory_or_dropped_store(model, instruction, name),
     }
+}
+
+/// [`memory_instruction`], except a legacy vertex shader's draw, which leaves its streamout stores
+/// to the streamout pass (D861, D881).
+fn memory_or_dropped_store<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    name: &str,
+) -> Result<(), TranslateError> {
+    if model.drops_streamout_stores()
+        && (name.starts_with("buffer_store") || name.starts_with("tbuffer_store"))
+    {
+        model.count();
+        return Ok(());
+    }
+    memory_instruction(model, instruction, name)
 }
 
 /// Translates the memory and image instructions, refusing any other.

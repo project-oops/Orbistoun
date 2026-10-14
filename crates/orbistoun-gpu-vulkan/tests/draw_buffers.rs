@@ -611,6 +611,8 @@ fn vertex_id_primitive_shader_with(
                 assembly: Assembly::List,
                 indices,
                 passthrough: false,
+                legacy: false,
+                streamout: false,
             }),
             ..UserData::default()
         },

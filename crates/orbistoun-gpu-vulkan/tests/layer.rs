@@ -187,6 +187,8 @@ fn each_instance_finds_its_instance_in_v8() {
                 assembly: Assembly::List,
                 indices: None,
                 passthrough: false,
+                legacy: false,
+                streamout: false,
             }),
             ..UserData::default()
         },

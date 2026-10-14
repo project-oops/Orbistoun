@@ -194,6 +194,8 @@ fn a_primitive_shader_given_a_draw_s_geometry_finds_its_inputs() {
         assembly: orbistoun_translate::wavefront::Assembly::List,
         indices: None,
         passthrough: false,
+        legacy: false,
+        streamout: false,
     }))
     .expect("translates with its geometry")
     .module;
@@ -453,6 +455,8 @@ fn a_passthrough_primitive_shader_finds_its_primitive_packed() {
                 assembly: orbistoun_translate::wavefront::Assembly::List,
                 indices: None,
                 passthrough: true,
+                legacy: false,
+                streamout: false,
             }),
             ..UserData::default()
         },

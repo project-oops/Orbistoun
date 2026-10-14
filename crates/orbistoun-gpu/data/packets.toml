@@ -466,6 +466,19 @@ register = 0x2CC9
 stage = "vertex"
 half = "high"
 
+# SPI_SHADER_PGM_LO_VS / HI_VS: the legacy vertex stage's program, which a draw with no primitive
+# shader runs - radeonsi binds one on GFX10 for a program with transform-feedback outputs (D881).
+# Chosen over the pair above only for such a draw.
+[[shader_address]]
+register = 0x2C48
+stage = "legacy-vertex"
+half = "low"
+
+[[shader_address]]
+register = 0x2C49
+stage = "legacy-vertex"
+half = "high"
+
 [[shader_address]]
 register = 0x2E0C
 stage = "compute"

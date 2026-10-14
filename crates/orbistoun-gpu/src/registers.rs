@@ -2889,6 +2889,21 @@ pub fn primitive_topology_at(writes: &[RegisterWrite]) -> Option<PrimitiveTopolo
 /// host's mesh stage - is thirty-two lanes wide.
 const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
 const GS_W32_EN: u32 = 1 << 22;
+/// Its `VS_W32_EN`, bit 23: a legacy vertex shader is thirty-two lanes wide.
+const VS_W32_EN: u32 = 1 << 23;
+/// Its `PRIMGEN_EN`, bit 13: the vertex program runs as a primitive shader (NGG).
+const PRIMGEN_EN: u32 = 1 << 13;
+/// Its `LS_EN`, `HS_EN`, `ES_EN` and `GS_EN` (bits 5:0): a stage before the vertex shader's output.
+const EARLIER_STAGES: u32 = 0x3F;
+
+/// Whether `VGT_SHADER_STAGES_EN`, as the stream wrote it, runs a legacy vertex shader (D881): no
+/// primitive shader and no stage besides the vertex and pixel ones - what radeonsi binds on GFX10
+/// for a program with transform-feedback outputs (NGG is off for streamout). A stream that never
+/// wrote it is not taken for one.
+#[must_use]
+pub fn legacy_vertex(stages: Option<u32>) -> bool {
+    stages.is_some_and(|value| value & PRIMGEN_EN == 0 && value & EARLIER_STAGES == 0)
+}
 
 /// The absolute dword index of `SPI_PS_IN_CONTROL`.
 ///
@@ -2931,8 +2946,15 @@ pub fn wave_widths_at(writes: &[RegisterWrite]) -> WaveWidths {
 /// and the others as Wave32 (`si_state_shaders.cpp`, `si_determine_wave_size`), and rewrites
 /// `VGT_SHADER_STAGES_EN` between such draws within one submission.
 pub fn wave_widths_from(mut last: impl FnMut(u32) -> Option<u32>) -> WaveWidths {
+    let stages = last(VGT_SHADER_STAGES_EN);
+    // A legacy vertex shader's width is the vertex stage's (D881).
+    let width_bit = if legacy_vertex(stages) {
+        VS_W32_EN
+    } else {
+        GS_W32_EN
+    };
     WaveWidths {
-        primitive_w32: last(VGT_SHADER_STAGES_EN).unwrap_or(0) & GS_W32_EN != 0,
+        primitive_w32: stages.unwrap_or(0) & width_bit != 0,
         pixel_w32: last(SPI_PS_IN_CONTROL).unwrap_or(0) & PS_W32_EN != 0,
     }
 }
@@ -3464,7 +3486,7 @@ mod tests {
     #[test]
     fn a_draws_wave_widths_are_the_ones_in_force_at_it() {
         use super::{
-            GS_W32_EN, PS_W32_EN, RegisterSweep, RegisterWrite, SPI_PS_IN_CONTROL,
+            GS_W32_EN, PRIMGEN_EN, PS_W32_EN, RegisterSweep, RegisterWrite, SPI_PS_IN_CONTROL,
             VGT_SHADER_STAGES_EN, wave_widths_from,
         };
         let write = |packet_offset, register, value| RegisterWrite {
@@ -3473,9 +3495,10 @@ mod tests {
             value,
         };
         let writes = [
-            write(0x10, VGT_SHADER_STAGES_EN, GS_W32_EN),
+            // Primitive shaders both (PRIMGEN_EN), as radeonsi's NGG draws are.
+            write(0x10, VGT_SHADER_STAGES_EN, PRIMGEN_EN | GS_W32_EN),
             write(0x10, SPI_PS_IN_CONTROL, PS_W32_EN),
-            write(0x40, VGT_SHADER_STAGES_EN, 0),
+            write(0x40, VGT_SHADER_STAGES_EN, PRIMGEN_EN),
         ];
         let mut sweep = RegisterSweep::new(&writes);
         let at_first = wave_widths_from(|register| sweep.latest(0x20, register));
@@ -3709,9 +3732,12 @@ mod tests {
                 pixel_w32: true
             }
         );
-        // VS_W32_EN (bit 23) alone is not the primitive shader's width.
+        // VS_W32_EN (bit 23) is the width of a legacy vertex shader, which a stream with no
+        // primitive shader runs (D881); with one, only GS_W32_EN is.
         let vs_only = [write(0xA2D5, 1 << 23), write(0xA1B6, 0x0000_0002)];
-        assert_eq!(wave_widths_at(&vs_only), WaveWidths::default());
+        assert!(wave_widths_at(&vs_only).primitive_w32);
+        let ngg_vs_bit = [write(0xA2D5, 1 << 23 | 1 << 13), write(0xA1B6, 0x0000_0002)];
+        assert_eq!(wave_widths_at(&ngg_vs_bit), WaveWidths::default());
         let fixture = [write(0xA2D5, 0x00c1_2010), write(0xA2D5, 0x0200_2000)];
         assert!(!wave_widths_at(&fixture).primitive_w32);
     }
