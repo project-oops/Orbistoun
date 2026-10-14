@@ -589,17 +589,22 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
             });
         }
         if name.starts_with("s_buffer_load") && solved_scalar_offset(instruction) {
-            // An offset register reaches anywhere within the records, which bound every scalar
-            // buffer load (`descriptor_extent`); an immediate alone, its own words.
-            let scalar_reach = if plain_scalar_offset(instruction) {
-                end
-            } else {
-                u32::MAX
-            };
             let reads = DescriptorReads {
-                scalar_reach,
+                scalar_reach: end,
                 ..DescriptorReads::default()
             };
+            // An offset register's value is the draw's, found per draw with the descriptor through
+            // the program before the access (D753); the binding reaches the immediate's words past
+            // it.
+            if !plain_scalar_offset(instruction) {
+                return Some(Access::Computed {
+                    through: ComputedAccess::Descriptor {
+                        first: *base,
+                        reads,
+                    },
+                    soffset: u8::try_from((instruction.second_word? >> 25) & 0x7f).ok()?,
+                });
+            }
             return Some(Access::Descriptor(descriptor(held, *base)?, reads));
         }
         if !plain_scalar_offset(instruction) {
@@ -905,17 +910,22 @@ mod tests {
         assert_eq!(computed.at, 8);
     }
 
-    /// A scalar buffer load adding an offset register is traced, reaching anywhere within its
-    /// descriptor's records: Grand Theft Auto V's pixel shader reads its constants by
+    /// A scalar buffer load adding an offset register is found per draw (D753): the descriptor and
+    /// the register's value through the program before it, the binding reaching the immediate's
+    /// words past the offset. Grand Theft Auto V's pixel shader reads its constants by
     /// `s_buffer_load_dwordx4 s[4:7], s[16:19], 0x0` with `vcc_lo` as the offset register, the
     /// words below as it holds them.
     #[test]
-    fn a_scalar_load_at_an_offset_register_reaches_its_records() {
+    fn a_scalar_load_at_an_offset_register_is_found_per_draw() {
         let traced = traced(&[0xf428_0108, 0xd400_0000, END], 20);
-        let [BufferSource::Descriptor { reads, .. }] = traced.sources.as_slice() else {
-            panic!("one descriptor: {:?}", traced.sources);
+        let [BufferSource::Computed(computed)] = traced.sources.as_slice() else {
+            panic!("one computed access: {:?}", traced.sources);
         };
-        assert_eq!(reads.scalar_reach, u32::MAX);
+        assert_eq!(computed.soffset, 106, "vcc_lo");
+        let super::ComputedAccess::Descriptor { first, reads } = computed.through else {
+            panic!("through a descriptor: {:?}", computed.through);
+        };
+        assert_eq!((first, reads.scalar_reach), (16, 16));
         assert_eq!(traced.served.get(&0), Some(&0));
     }
 
