@@ -24,7 +24,7 @@ use crate::{TranslateError, Width};
 mod compute_inputs;
 mod input_controls;
 mod pixel_inputs;
-pub use compute_inputs::{ComputeInputs, PARTIAL_PUSH_WORD, PartialGroups};
+pub use compute_inputs::{ComputeInputs, GLOBAL_BASE_PUSH_WORD, PARTIAL_PUSH_WORD, PartialGroups};
 pub use input_controls::{INPUT_CONTROLS, InputControls};
 pub use orbistoun_spirv::MAX_TEXTURES;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
@@ -5391,11 +5391,13 @@ impl Model for Wavefront<'_> {
     }
 
     fn draw_buffer_base(&mut self, slot: u32) -> Option<Id> {
-        // A primitive shader's draw data carries each slot's base beside its place (D758).
-        if self.stage != Stage::Mesh {
-            return None;
+        // A primitive shader's draw data carries each slot's base beside its place (D758); a
+        // dispatch's push block carries its global loads' buffer's, the one such slot (D883).
+        match self.stage {
+            Stage::Mesh => self.draw_word(orbistoun_spirv::DRAW_DATA_BASES_WORD + slot),
+            Stage::Compute => self.push_word(GLOBAL_BASE_PUSH_WORD),
+            Stage::Fragment => None,
         }
-        self.draw_word(orbistoun_spirv::DRAW_DATA_BASES_WORD + slot)
     }
 
     fn buffer_descriptor_format(&self, slot: u32) -> Option<u32> {
@@ -6857,6 +6859,42 @@ mod exact_memory_tests {
             refused.contains("(global_load_dword)") && refused.contains("checked against"),
             "{refused}"
         );
+    }
+
+    /// A dispatch's global load with no scalar base reads the buffer its lanes' addresses span
+    /// (D883), so it is placed exactly and translates: Grand Theft Auto V's compute program's
+    /// `global_load_ubyte v0, v[1:2], off` (0xdc200000 0x007d0001).
+    #[test]
+    fn a_traced_global_load_in_a_dispatch_translates() {
+        use super::{
+            ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [0xdc20_0000_u32, 0x007d_0001, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let translated = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::spanning_address(0x4_0000_0000, 1024).expect("a window"),
+            UserData {
+                compute: Some(ComputeInputs {
+                    threads: [64, 1, 1],
+                    thread_id_components: 1,
+                    ..ComputeInputs::default()
+                }),
+                // Two words of user data, which a dispatch's push block carries.
+                count: 2,
+                draw_buffers: true,
+                ..UserData::default()
+            },
+        );
+        assert!(translated.is_ok(), "{:?}", translated.err());
     }
 
     /// A scalar buffer load that reads through no traced buffer, because the program also stores

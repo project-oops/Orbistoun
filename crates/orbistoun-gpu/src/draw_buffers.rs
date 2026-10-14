@@ -646,8 +646,100 @@ fn span_of(
             }));
         }
     }
-    // Whole words, from the word the lowest address is in, as the module reads them.
-    span.map_or((0, 0), |(low, high)| (low & !3, high - (low & !3)))
+    // Whole words, from the word the lowest address is in to the end of the word the last byte is
+    // in, as the module reads them: a sub-word load's last byte can sit mid-word (D883).
+    span.map_or((0, 0), |(low, high)| {
+        let first = low & !3;
+        (first, (high.saturating_add(3) & !3) - first)
+    })
+}
+
+/// The most waves a dispatch's global loads are run through on the host in one preparation (D883):
+/// a bound on the work a dispatch can ask of the host, refused by name beyond it.
+const MOST_DISPATCH_WAVES: u64 = 4096;
+
+/// The range a dispatch's global loads read (D883): the program run on the host over every wave of
+/// every group the dispatch runs, each from its entry state - the user data, the group's enabled id
+/// components, and each lane's thread id, x fastest, where the lane has a thread - and the span of
+/// every address an active lane forms. A partial dispatch's last group runs only its threads (D855).
+///
+/// # Errors
+///
+/// A dispatch of more waves than [`MOST_DISPATCH_WAVES`], or a load whose lanes' addresses or mask
+/// the host cannot know.
+pub(crate) fn dispatch_global_range(
+    global: &GlobalLoads,
+    (user_data, inputs, groups, width): (
+        &[u32],
+        orbistoun_translate::wavefront::ComputeInputs,
+        [u32; 3],
+        u32,
+    ),
+    memory: &impl GuestMemory,
+) -> Result<(u64, u64), &'static str> {
+    use orbistoun_translate::evaluate::{WaveEntry, wave_lane_addresses};
+    let waves = inputs.waves(width);
+    let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(waves);
+    if runs > MOST_DISPATCH_WAVES {
+        return Err(concat!(
+            "a dispatch of more waves than one preparation runs on the host to find where its ",
+            "global loads read (D883)"
+        ));
+    }
+    let (encodings, _) = tables()?;
+    let prepared = prepared_program(global, crate::content_hash(&global.prefix))?;
+    let mut word = |address: u64| {
+        let bytes = memory.read(address, 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let [x_threads, y_threads, z_threads] = inputs.threads.map(|n| n.max(1));
+    let mut found = orbistoun_translate::evaluate::LaneAddresses::new();
+    for z in 0..groups[2] {
+        for y in 0..groups[1] {
+            for x in 0..groups[0] {
+                let group = [x, y, z];
+                let group_ids: Vec<u32> = (0..3)
+                    .filter(|&component| inputs.workgroup_ids[component])
+                    .map(|component| group[component])
+                    .collect();
+                for wave in 0..waves {
+                    let threads = (0..width)
+                        .map(|lane| {
+                            let thread = wave * width + lane;
+                            if thread >= x_threads * y_threads * z_threads {
+                                return None;
+                            }
+                            let id = [
+                                thread % x_threads,
+                                thread / x_threads % y_threads,
+                                thread / (x_threads * y_threads),
+                            ];
+                            // The last group of a partial dispatch runs only the threads it has.
+                            let runs = inputs.partial.is_none_or(|partial| {
+                                (0..3).all(|c| {
+                                    group[c] != partial.last[c] || id[c] < partial.threads[c]
+                                })
+                            });
+                            runs.then_some(id)
+                        })
+                        .collect();
+                    let entry = WaveEntry {
+                        group_ids: group_ids.clone(),
+                        threads,
+                        components: inputs.thread_id_components,
+                    };
+                    found.extend(wave_lane_addresses(
+                        &prepared.program,
+                        encodings,
+                        user_data,
+                        (width, &entry),
+                        &mut word,
+                    )?);
+                }
+            }
+        }
+    }
+    Ok(span_of(global, found))
 }
 
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and
@@ -1270,6 +1362,62 @@ mod tests {
     #[test]
     fn swizzled_addressing_is_refused() {
         assert!(descriptor_extent([0, 4 | 1 << 31, 16, RAW], scalar(16)).is_err());
+    }
+
+    /// A dispatch's global loads bind the span every wave of every group forms (D883): each lane's
+    /// address is `s[0:1]` plus four times its thread id plus its group's id (`s2`), and the byte
+    /// loads' span ends at the word their last byte is in. A dispatch of more waves than one
+    /// preparation runs is refused by name.
+    #[test]
+    fn a_dispatchs_global_loads_bind_what_every_wave_reads() {
+        use orbistoun_shader::EncodingTable;
+        use orbistoun_translate::draw_buffers::GlobalLoads;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let short_form = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+            let (family, opcode) = encodings.find_by_name(name).expect(name);
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|encoding| encoding.name == family)
+                .expect("its family");
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+        };
+        let global = GlobalLoads {
+            prefix: vec![
+                short_form("v_lshlrev_b32_e32", 1, 130, 0),
+                short_form("v_add_nc_u32_e32", 1, 0, 1),
+                short_form("v_add_nc_u32_e32", 1, 2, 1),
+                short_form("v_mov_b32_e32", 2, 1, 0),
+                // global_load_ubyte v3, v[1:2], off.
+                0xdc20_0000,
+                0x037d_0001,
+            ],
+            loads: vec![(16, 1)],
+            first_register: 0,
+            user_data: 2,
+            width: 64,
+        };
+        // Groups of 104 threads, two waves each, the group's x id after two user-data words.
+        let inputs = ComputeInputs {
+            workgroup_ids: [true, false, false],
+            thread_id_components: 1,
+            threads: [104, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let memory = At(0, Vec::new());
+        let range =
+            super::dispatch_global_range(&global, (&[0x1000, 7], inputs, [2, 1, 1], 64), &memory);
+        // Group 1's thread 103 reads the last byte, 0x19d past the base.
+        assert_eq!(range, Ok((0x7_0000_1000, 0x1a0)));
+        assert!(
+            super::dispatch_global_range(
+                &global,
+                (&[0x1000, 7], inputs, [5000, 1, 1], 64),
+                &memory
+            )
+            .is_err()
+        );
     }
 
     /// Guest memory at one address.

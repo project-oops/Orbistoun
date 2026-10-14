@@ -49,6 +49,10 @@ pub struct ComputeInputs {
 /// stage's user data may take.
 pub const PARTIAL_PUSH_WORD: u32 = super::USER_DATA_STAGE_WORDS;
 
+/// Where a dispatch's global loads' buffer's guest base sits in the push-constant block (D883): the
+/// low half of the address the buffer starts at, after the partial-group shape.
+pub const GLOBAL_BASE_PUSH_WORD: u32 = PARTIAL_PUSH_WORD + 6;
+
 impl PartialGroups {
     /// The six words a module reads at [`PARTIAL_PUSH_WORD`].
     #[must_use]

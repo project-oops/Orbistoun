@@ -204,7 +204,8 @@ pub struct DrawBuffers {
 /// a buffer store through a descriptor, which is traced like a load, or a store to an image the
 /// dispatch binds whole and writes back the same way. With `globals` (a primitive
 /// shader, D758), its global loads with no scalar base share one buffer after the others, and an
-/// indexed access by its vertex or instance id says so (D879).
+/// indexed access by its vertex or instance id says so (D879). A dispatch's global loads share one
+/// buffer the same way (D883).
 #[must_use]
 pub fn trace(
     decode: &Decode,
@@ -260,6 +261,8 @@ pub fn trace(
     // Every access, with the state it reads, in program order: the bases' reach is known only once
     // every load through them has been seen.
     let mut accesses: Vec<(u32, Access)> = Vec::new();
+    // A dispatch's global loads are traced as a primitive shader's are (D883).
+    let dispatch = stores;
     let mut stores: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for ((block, state), lanes) in blocks.iter().zip(reached).zip(indices) {
         let Some(mut held) = state else {
@@ -279,7 +282,7 @@ pub fn trace(
                 let access = indexed_by(access, instruction, &lanes);
                 accesses.push((instruction.offset, access));
             } else if let Some(&(_, name)) = named.as_ref()
-                && globals
+                && (globals || dispatch)
                 && let Some(bytes) = global_load(instruction, name)
             {
                 accesses.push((instruction.offset, Access::Global { bytes }));
@@ -457,14 +460,19 @@ enum Access {
 }
 
 /// How many bytes a global load with no scalar base reads from its address, its immediate offset
-/// counted in the address; [`None`] for any other instruction.
+/// counted in the address - a byte or a half for the sub-word loads (D878); [`None`] for any other
+/// instruction.
 fn global_load(instruction: &Instruction, name: &str) -> Option<u32> {
-    let words = match name.strip_prefix("global_load_dword")? {
-        "" => 1,
-        count => count.strip_prefix('x')?.parse().ok()?,
+    let bytes = match name {
+        "global_load_ubyte" | "global_load_sbyte" => 1,
+        "global_load_ushort" | "global_load_sshort" => 2,
+        _ => match name.strip_prefix("global_load_dword")? {
+            "" => 4,
+            count => 4 * count.strip_prefix('x')?.parse::<u32>().ok()?,
+        },
     };
     match instruction.operands.get(2)? {
-        Operand::Named(base) if base == crate::model::FLAT_NO_BASE => Some(words * 4),
+        Operand::Named(base) if base == crate::model::FLAT_NO_BASE => Some(bytes),
         _ => None,
     }
 }
@@ -1321,6 +1329,26 @@ mod tests {
                 .iter()
                 .any(|source| matches!(source, BufferSource::Global(_)))
         );
+    }
+
+    /// A dispatch's global loads with no scalar base are traced as one buffer, as a primitive
+    /// shader's are (D883), the sub-word loads among them reading as many bytes as they load: Grand
+    /// Theft Auto V's compute program does `global_load_ubyte v0, v[1:2], off`.
+    #[test]
+    fn a_dispatchs_global_loads_share_one_buffer() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = [0xdc20_0000_u32, 0x007d_0001, END]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let traced = trace(&decoded, &encodings, (0, 2), (true, false));
+        let [BufferSource::Global(global)] = traced.sources.as_slice() else {
+            panic!("the global load: {:?}", traced.sources);
+        };
+        assert_eq!(global.loads, vec![(0, 1)]);
+        assert_eq!(traced.served.get(&0), Some(&0));
     }
 
     const END: u32 = 0xbf81_0000;

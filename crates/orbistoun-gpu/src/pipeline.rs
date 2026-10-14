@@ -1748,7 +1748,7 @@ impl Pipeline {
         let program = &window[..decoded.consumed];
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
-        let (served, buffers, formats, unread) = self
+        let (served, buffers, formats, unread, global_base) = self
             .dispatch_buffers(state, &decoded, memory)
             .map_err(|why| {
                 dispatch_refusal(why, (&decoded, &self.encodings), (address, program))
@@ -1813,6 +1813,12 @@ impl Pipeline {
                     let at = orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize;
                     block[at..at + 6].copy_from_slice(&partial.push_words());
                 }
+                // The global loads' buffer's guest base, its low half, as the module reads it
+                // (D883).
+                if let Some(base) = global_base {
+                    block[orbistoun_translate::wavefront::GLOBAL_BASE_PUSH_WORD as usize] =
+                        base as u32;
+                }
                 block
             },
             groups: state.groups,
@@ -1855,7 +1861,7 @@ impl Pipeline {
         if stores_elsewhere {
             return None;
         }
-        let (served, mut spans, _, _) = self.dispatch_buffers(state, &decoded, memory).ok()?;
+        let (served, mut spans, _, _, _) = self.dispatch_buffers(state, &decoded, memory).ok()?;
         let placed = crate::dispatch::place_window_except(
             state,
             (&decoded, &self.encodings),
@@ -1896,8 +1902,27 @@ impl Pipeline {
             *word = value.unwrap_or(0);
         }
         let mut ranges = Vec::with_capacity(traced.sources.len());
+        let mut global_base = None;
         for source in &traced.sources {
-            let range = crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)?;
+            // The global loads' buffer is what every wave of the dispatch reads (D883).
+            let range =
+                if let orbistoun_translate::draw_buffers::BufferSource::Global(global) = source {
+                    let count = state.user_data.len().min(USER_DATA_WORDS);
+                    let range = crate::draw_buffers::dispatch_global_range(
+                        global,
+                        (
+                            &words[..count],
+                            state.inputs,
+                            state.groups,
+                            state.width.lanes(),
+                        ),
+                        memory,
+                    )?;
+                    global_base = Some(range.0);
+                    range
+                } else {
+                    crate::draw_buffers::resolve_range(source, (&words, 0, &[]), memory)?
+                };
             if ranges.iter().any(|&held| overlaps(held, range)) {
                 return Err(concat!(
                     "two buffers the dispatch binds overlap, and two copies of one byte would ",
@@ -1924,7 +1949,7 @@ impl Pipeline {
         let unread = (0..ranges.len())
             .map(|slot| u32::try_from(slot).is_ok_and(|slot| traced.stored_only.contains(&slot)))
             .collect();
-        Ok((traced.served, ranges, formats, unread))
+        Ok((traced.served, ranges, formats, unread, global_base))
     }
 
     /// A dispatch's program translated for its entry state, its window, its buffers' formats and its
@@ -5198,6 +5223,8 @@ type DispatchBuffers = (
     Vec<(u64, u64)>,
     Option<orbistoun_translate::wavefront::BufferFormats>,
     Vec<bool>,
+    // Where the global loads' buffer starts, where the program has global loads (D883).
+    Option<u64>,
 );
 
 /// Whether two `(address, bytes)` ranges share a byte.

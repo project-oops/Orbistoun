@@ -3045,12 +3045,11 @@ fn memory_instruction<M: Model + ?Sized>(
     // its accesses need no window; the local data share is not guest memory; and a scalar load
     // the buffer tracer gave a slot - through a descriptor, or from a traced base such as a
     // streamout pass's internal table (D861) - reads the buffer bound there (D746), not the window.
-    let scalar_load = name.starts_with("s_buffer_load_dword") || name.starts_with("s_load_dword");
     if model.exact_memory()
         && !name.starts_with("buffer_")
         && !name.starts_with("ds_")
         && !crate::draw_buffers::bound_image_access(name)
-        && (!scalar_load || model.draw_buffer_slot(instruction).is_none())
+        && (!traced_load(name) || model.draw_buffer_slot(instruction).is_none())
     {
         if let Some((at, store)) = model.untraced_by() {
             return Err(TranslateError::Untraced {
@@ -10665,6 +10664,50 @@ fn close_if_active<M: Model + ?Sized>(model: &mut M, merge: Option<Id>) {
     }
 }
 
+/// Whether an access reads a buffer the tracer can give a slot: a scalar load, or a global load,
+/// which reads the buffer its lanes' addresses span (D883).
+fn traced_load(name: &str) -> bool {
+    name.starts_with("s_buffer_load_dword")
+        || name.starts_with("s_load_dword")
+        || name.starts_with("global_load_")
+}
+
+/// A traced global load's draw buffer and its guest base: the buffer its lanes' addresses span
+/// (D758, D883); `None` for a load read through the window.
+fn traced_global_load<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<Option<(u32, Id)>, TranslateError> {
+    let Some(slot) = model.draw_buffer_slot(instruction) else {
+        return Ok(None);
+    };
+    let base = model
+        .draw_buffer_base(slot)
+        .ok_or(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a global load's draw buffer in a module whose draw data carries no base (D758)",
+        })?;
+    Ok(Some((slot, base)))
+}
+
+/// The word at `address` a global load reads: from its traced draw buffer, relative to the
+/// buffer's guest base, or through the window.
+fn global_word<M: Model + ?Sized>(
+    model: &mut M,
+    bound: Option<(u32, Id)>,
+    address: Id,
+) -> Result<Id, TranslateError> {
+    Ok(match bound {
+        Some((slot, base)) => {
+            let offset = model.binary(op::ISUB, address, base);
+            let two = model.constant(2);
+            let index = model.binary(op::SHIFT_RIGHT_LOGICAL, offset, two);
+            model.read_draw_buffer(slot, index)?
+        }
+        None => read_guarded(model, address),
+    })
+}
+
 /// The width in bits and signedness of a sub-word load: a byte or a half, zero- or sign-extended.
 fn sub_word(name: &str) -> Option<(u32, bool)> {
     match name {
@@ -10692,13 +10735,14 @@ fn sub_word_load<M: Model + ?Sized>(
         });
     };
     let register = u32::from(*register);
+    let bound = traced_global_load(model, instruction)?;
     for lane in running_lanes(model) {
         let address = model.flat_address(instruction, vaddr, base, lane)?;
         let aligned = model.constant(!3);
         let word_address = model.binary(op::BITWISE_AND, address, aligned);
-        let low = read_guarded(model, word_address);
+        let low = global_word(model, bound, word_address)?;
         let next = step_address(model, word_address, 1);
-        let high = read_guarded(model, next);
+        let high = global_word(model, bound, next)?;
         // The bytes from the address on: the low word shifted down, the next word's above it.
         let three = model.constant(3);
         let place = model.binary(op::BITWISE_AND, address, three);
@@ -10775,35 +10819,14 @@ fn flat_memory<M: Model + ?Sized>(
                     detail: "a flat load runs past the end of the vector register file",
                 });
             }
-            // A traced load reads the draw buffer its lanes' addresses span, from its guest base
-            // (D758).
-            let bound = match model.draw_buffer_slot(instruction) {
-                Some(slot) => Some((
-                    slot,
-                    model
-                        .draw_buffer_base(slot)
-                        .ok_or(TranslateError::Unsupported {
-                            offset: instruction.offset,
-                            detail: "a global load's draw buffer in a module whose draw data carries no base (D758)",
-                        })?,
-                )),
-                None => None,
-            };
+            let bound = traced_global_load(model, instruction)?;
             for lane in running_lanes(model) {
                 let address = model.flat_address(instruction, vaddr, base, lane)?;
                 for word in 0..words {
                     // Consecutive words, stepped by address so each word is bounds-checked: a
                     // multi-word access can start inside the window and end outside it.
                     let stepped = step_address(model, address, word);
-                    let value = match bound {
-                        Some((slot, base)) => {
-                            let offset = model.binary(op::ISUB, stepped, base);
-                            let two = model.constant(2);
-                            let index = model.binary(op::SHIFT_RIGHT_LOGICAL, offset, two);
-                            model.read_draw_buffer(slot, index)?
-                        }
-                        None => read_guarded(model, stepped),
-                    };
+                    let value = global_word(model, bound, stepped)?;
                     model.write_vector_lane(register + word, lane, value);
                 }
             }

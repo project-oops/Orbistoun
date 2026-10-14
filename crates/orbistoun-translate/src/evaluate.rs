@@ -379,20 +379,7 @@ pub fn lane_addresses(
     (width, lanes): (u32, u32),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Result<LaneAddresses, &'static str> {
-    const UNKNOWN: &str = concat!(
-        "a global load whose lanes' addresses, or whose execution mask, the host cannot know for ",
-        "the draw (D758)"
-    );
-    let LaneProgram {
-        decode,
-        loads,
-        until,
-        kept: needed,
-        crosses,
-        ..
-    } = program;
-    let (loads, until) = (loads.as_slice(), *until);
-    let mut model = Concrete::new(encodings, decode.instructions.len());
+    let mut model = Concrete::new(encodings, program.decode.instructions.len());
     for (register, word) in (first_register as usize..).zip(user_data) {
         if register < model::SCALAR_REGISTERS as usize {
             model.scalars[register] = Some(*word);
@@ -407,11 +394,97 @@ pub fn lane_addresses(
     model.vertices = lanes;
     model.lanes = true;
     // Only the draw's vertex lanes, where nothing the run does reads one lane from another.
-    model.modelled = if *crosses {
+    model.modelled = if program.crosses {
         width
     } else {
         lanes.clamp(1, width)
     };
+    run_lanes(&mut model, program, encodings, lanes, read)
+}
+
+/// A compute wave's registers at entry beyond its user data, for a lane run (D883): what the
+/// hardware loads for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaveEntry {
+    /// The workgroup id components enabled, in the scalar registers after the user data.
+    pub group_ids: Vec<u32>,
+    /// Each lane's thread id components, lane zero up; `None` for a lane with no thread, which does
+    /// not run - past a group's last thread, or outside a partial group (D855).
+    pub threads: Vec<Option<[u32; 3]>>,
+    /// How many thread id components land in `v0` upward.
+    pub components: u32,
+}
+
+/// Runs `program` over one compute wave (D883), as [`lane_addresses`] runs a draw's: the user data
+/// from `s0`, then `wave`'s group ids; in each lane with a thread its id components from `v0`, and
+/// that lane's execution-mask bit; every other vector register zero. The wave is `width` lanes.
+/// Each load's addresses are the running lanes', in lane order.
+///
+/// # Errors
+///
+/// As [`lane_addresses`].
+pub fn wave_lane_addresses(
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    user_data: &[u32],
+    (width, wave): (u32, &WaveEntry),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<LaneAddresses, &'static str> {
+    let mut model = Concrete::new(encodings, program.decode.instructions.len());
+    for (register, word) in user_data.iter().chain(&wave.group_ids).enumerate() {
+        if register < model::SCALAR_REGISTERS as usize {
+            model.scalars[register] = Some(*word);
+        }
+    }
+    let width = width.clamp(1, 64);
+    let lanes = u32::try_from(wave.threads.len())
+        .unwrap_or(u32::MAX)
+        .min(width);
+    let mask = (0..lanes)
+        .zip(&wave.threads)
+        .filter(|(_, thread)| thread.is_some())
+        .fold(0u64, |mask, (lane, _)| mask | 1 << lane);
+    model.scalars[EXEC] = Some(mask as u32);
+    model.scalars[EXEC + 1] = Some((mask >> 32) as u32);
+    model.width = width;
+    model.lanes = true;
+    model.modelled = if program.crosses {
+        width
+    } else {
+        lanes.clamp(1, width)
+    };
+    for (lane, ids) in (0..lanes).zip(&wave.threads) {
+        let Some(ids) = ids else {
+            continue;
+        };
+        for (register, id) in (0..wave.components.min(3)).zip(ids) {
+            model.vectors.insert((register, lane), Some(*id));
+        }
+    }
+    run_lanes(&mut model, program, encodings, lanes, read)
+}
+
+/// The run [`lane_addresses`] and [`wave_lane_addresses`] share, from a model at the wave's entry:
+/// each load's addresses in the active lanes below `lanes`.
+fn run_lanes(
+    model: &mut Concrete<'_>,
+    program: &LaneProgram,
+    encodings: &EncodingTable,
+    lanes: u32,
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<LaneAddresses, &'static str> {
+    const UNKNOWN: &str = concat!(
+        "a global load whose lanes' addresses, or whose execution mask, the host cannot know for ",
+        "the draw or dispatch (D758, D883)"
+    );
+    let LaneProgram {
+        decode,
+        loads,
+        until,
+        kept: needed,
+        ..
+    } = program;
+    let (loads, until) = (loads.as_slice(), *until);
     let mut found = LaneAddresses::new();
     let mut at = 0usize;
     // A bound on the steps, since a known branch can go backwards.
@@ -461,7 +534,7 @@ pub fn lane_addresses(
                 if name.starts_with("s_setpc") || name.starts_with("s_swappc") {
                     return Err("the program jumps to a computed address (D758)");
                 }
-                if model::instruction(&mut model, instruction).is_err() {
+                if model::instruction(model, instruction).is_err() {
                     model.forget_written(instruction, name);
                 }
                 model.catch_up();
@@ -470,7 +543,7 @@ pub fn lane_addresses(
             // stays as it was, which no address depends on.
             "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" if !needed[at - 1] => {}
             "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC" => {
-                if model::instruction(&mut model, instruction).is_err() {
+                if model::instruction(model, instruction).is_err() {
                     model.forget_vector(instruction.operands.first(), 4);
                     model.forget_vector_writes(instruction, name);
                 }
@@ -1957,6 +2030,63 @@ mod tests {
         0xbf8c_3f70, // s_waitcnt vmcnt(0)
         0xbf81_0000, // s_endpgm
     ];
+
+    /// A short-form vector instruction by name: `name vD, src0, vS` (VOP2), or `name vD, src0`
+    /// (VOP1) with `vsrc1` none.
+    fn short_form(encodings: &EncodingTable, name: &str, dst: u32, src0: u32, vsrc1: u32) -> u32 {
+        let (family, opcode) = encodings.find_by_name(name).expect(name);
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+    }
+
+    /// A compute wave's lanes form their addresses from their thread ids and their group's id, which
+    /// the run seeds as the hardware loads them (D883): `v0` the thread id, `s2` the group id after
+    /// two words of user data. Lanes past the wave's threads form none.
+    #[test]
+    fn a_compute_waves_lanes_form_addresses_from_their_ids() {
+        use super::{WaveEntry, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            // v_lshlrev_b32 v1, 2, v0; v_add_nc_u32 v1, s0, v1; v_add_nc_u32 v1, s2, v1.
+            short_form(&encodings, "v_lshlrev_b32_e32", 1, 130, 0),
+            short_form(&encodings, "v_add_nc_u32_e32", 1, 0, 1),
+            short_form(&encodings, "v_add_nc_u32_e32", 1, 2, 1),
+            // v_mov_b32 v2, s1.
+            short_form(&encodings, "v_mov_b32_e32", 2, 1, 0),
+            // global_load_dword v3, v[1:2], off.
+            0xdc30_8000,
+            0x037d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        assert!(decode.is_trustworthy(), "the program decodes cleanly");
+        let load = decode.instructions[4].offset;
+        let program = super::LaneProgram::new(decode, &encodings, &[load]);
+        // The second wave of a group of 104 threads: threads 64 to 103, in lanes 0 to 39; lane 2
+        // has no thread, as a partial group leaves one.
+        let wave = WaveEntry {
+            group_ids: vec![5],
+            threads: (64..104)
+                .map(|thread| (thread != 66).then_some([thread, 0, 0]))
+                .collect(),
+            components: 1,
+        };
+        let found =
+            wave_lane_addresses(&program, &encodings, &[0x1000, 7], (64, &wave), &mut |_| {
+                None
+            });
+        let expected: Vec<u64> = (64..104)
+            .filter(|&thread| thread != 66)
+            .map(|thread| 0x7_0000_1000 + 5 + 4 * thread)
+            .collect();
+        assert_eq!(found, Ok(vec![(load, expected)]));
+    }
 
     /// Each lane of a GL attribute fetch forms its vertex's address from the draw's table and base
     /// vertex, through the branch the table's component count takes; the lanes the program's mask
