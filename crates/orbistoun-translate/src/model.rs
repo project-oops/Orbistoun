@@ -70,6 +70,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_add_i32",
     "s_addk_i32",
     "s_and_b32",
+    "s_brev_b32",
     "s_andn2_b32",
     "s_and_b64",
     "s_lshl_b64",
@@ -98,6 +99,8 @@ pub const SUPPORTED: &[&str] = &[
     "v_trunc_f32_e32",
     "v_bfrev_b32_e32",
     "v_cmpx_gt_f32_e32",
+    "v_cmpx_lt_f32_e32",
+    "v_cmpx_nlt_f32_e32",
     "v_cmpx_eq_i32_e32",
     "v_cmpx_gt_i32_e32",
     "v_cmpx_gt_u32_e32",
@@ -213,6 +216,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_mad_u32_u16",
     "v_mad_i32_i24",
     "v_mul_lo_u32",
+    "v_mul_hi_u32",
     "v_and_or_b32",
     "v_max3_f32",
     "v_min3_f32",
@@ -2383,6 +2387,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // s_wqm_b64: whole quad mode. Sets each group of four bits of the result if any of the four
         // in the source is set, so a derivative across a quad has all four pixels live.
         "s_wqm_b64" => whole_quad_mode(model, instruction),
+        "s_brev_b32" => scalar_bit_reverse(model, instruction),
         // s_wqm_b32: the same for a 32-lane wavefront, whose mask is one register (`s_wqm_b32
         // exec_lo, exec_lo` before a texture sample).
         "s_wqm_b32" => whole_quad_mode_32(model, instruction),
@@ -2466,10 +2471,9 @@ fn vector_instruction<M: Model + ?Sized>(
         _ if name.ends_with("_e64") && compare_op(name).is_some() => {
             compare_long(model, instruction, name)
         }
-        "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_eq_i32_e32"
-        | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" => {
-            compare_into_exec(model, instruction, name)
-        }
+        "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_lt_f32_e32"
+        | "v_cmpx_nlt_f32_e32" | "v_cmpx_eq_i32_e32" | "v_cmpx_gt_i32_e32"
+        | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" => compare_into_exec(model, instruction, name),
 
         // The short-form select, whose mask is always the condition mask.
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
@@ -2483,9 +2487,8 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_lshl_or_b32" => shift_or(model, instruction),
         _ if MULTIPLY_ADDS.contains(&name) => multiply_add_family(model, instruction, name),
         "v_bfi_b32" => bitfield_insert(model, instruction),
-        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_msad_u8" => {
-            integer_long_form(model, instruction, name)
-        }
+        "v_mad_u32_u16" | "v_mad_i32_i24" | "v_and_or_b32" | "v_mul_lo_u32" | "v_mul_hi_u32"
+        | "v_msad_u8" => integer_long_form(model, instruction, name),
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
@@ -2908,6 +2911,58 @@ fn bit_reverse<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// `s_brev_b32`: a scalar register's bits in reverse order. The condition code is untouched.
+fn scalar_bit_reverse<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let (destination, source) = two_operands(instruction)?;
+    let Operand::Scalar(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "s_brev_b32 destination is not a scalar register",
+        });
+    };
+    let register = u32::from(*register);
+    let value = model.read_source(instruction, source, 0)?;
+    let u32_type = model.u32_type();
+    let b = model.builder();
+    let reversed = b.id();
+    b.function(op::BIT_REVERSE, &[u32_type.0, reversed.0, value.0]);
+    model.write_scalar(register, reversed);
+    model.count();
+    Ok(())
+}
+
+/// The high thirty-two bits of the unsigned product of `a` and `b`, from four sixteen-bit partial
+/// products, each of which, and every sum of them taken here, fits thirty-two bits.
+fn multiply_high<M: Model + ?Sized>(model: &mut M, a: Id, b: Id) -> Id {
+    let sixteen = model.constant(16);
+    let low_mask = model.constant(0xffff);
+    let split = |model: &mut M, value| {
+        (
+            model.binary(op::BITWISE_AND, value, low_mask),
+            model.binary(op::SHIFT_RIGHT_LOGICAL, value, sixteen),
+        )
+    };
+    let (a_low, a_high) = split(model, a);
+    let (b_low, b_high) = split(model, b);
+    let low_low = model.binary(op::IMUL, a_low, b_low);
+    let low_high = model.binary(op::IMUL, a_low, b_high);
+    let high_low = model.binary(op::IMUL, a_high, b_low);
+    let high_high = model.binary(op::IMUL, a_high, b_high);
+    // The carry into bit 32: the middle column's sum above its sixteen bits.
+    let carried = model.binary(op::SHIFT_RIGHT_LOGICAL, low_low, sixteen);
+    let (low_high_low, low_high_high) = split(model, low_high);
+    let (high_low_low, high_low_high) = split(model, high_low);
+    let middle = model.add(carried, low_high_low);
+    let middle = model.add(middle, high_low_low);
+    let middle_carry = model.binary(op::SHIFT_RIGHT_LOGICAL, middle, sixteen);
+    let high = model.add(high_high, low_high_high);
+    let high = model.add(high, high_low_high);
+    model.add(high, middle_carry)
 }
 
 /// GLSL.std.450 instruction number for `FMin` - the smaller of two floats.
@@ -4360,6 +4415,9 @@ fn compare_into_exec<M: Model + ?Sized>(
         // Not equal or unordered: true for a NaN, as `v_cmp_neq_f32` is.
         "v_cmpx_neq_f32_e32" => (op::FUNORD_NOT_EQUAL, 0),
         "v_cmpx_gt_f32_e32" => (op::FORD_GREATER_THAN, 0),
+        "v_cmpx_lt_f32_e32" => (op::FORD_LESS_THAN, 0),
+        // Not less than: true for a NaN, as `v_cmp_nlt_f32` is.
+        "v_cmpx_nlt_f32_e32" => (op::FUNORD_GREATER_THAN_EQUAL, 0),
         "v_cmpx_le_i16_e32" => (op::SLESS_THAN_EQUAL, 1),
         "v_cmpx_eq_i32_e32" => (op::IEQUAL, 2),
         "v_cmpx_le_i32_e32" => (op::SLESS_THAN_EQUAL, 2),
@@ -7981,7 +8039,11 @@ fn integer_long_form<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    let sources = if name == "v_mul_lo_u32" { 2 } else { 3 };
+    let sources = if matches!(name, "v_mul_lo_u32" | "v_mul_hi_u32") {
+        2
+    } else {
+        3
+    };
     no_integer_modifiers(instruction, sources)?;
     let op_sel = (instruction.word >> 11) & 0xf;
     if name == "v_mad_u32_u16" && op_sel & 0b1100 != 0 {
@@ -8039,6 +8101,7 @@ fn integer_long_form<M: Model + ?Sized>(
                 model.add(product, c)
             }
             "v_mul_lo_u32" => model.binary(op::IMUL, a, b),
+            "v_mul_hi_u32" => multiply_high(model, a, b),
             "v_and_or_b32" => {
                 let both = model.binary(op::BITWISE_AND, a, b);
                 model.binary(op::BITWISE_OR, both, c)
@@ -8085,13 +8148,34 @@ fn masked_sum_of_differences<M: Model + ?Sized>(
 
 /// `v_max3_f32` and `v_min3_f32`: the larger or smaller of three floats, each source with its
 /// absolute and negate flags, as two of `v_max_f32`'s or `v_min_f32`'s steps. `v_med3_f32`: the
-/// median, `max(min(a, b), min(max(a, b), c))` in the same steps (D785).
+/// median, `max(min(a, b), min(max(a, b), c))` in the same steps (D785). The output clamp to
+/// `[0, 1]` applies as the long form's does, under the stage's NaN rule.
 fn float_min_max_of_three<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
-    let modifiers = Modifiers::read(instruction, false)?;
+    let modifiers = Modifiers::read_allowing_clamp(instruction, false)?;
+    if output_scale(modifiers.output_multiplier).is_some() {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a three-way min/max scales its result by an output multiplier, which is not translated",
+        });
+    }
+    let clamp = if modifiers.clamp {
+        let Some(nan_to_zero) = model.dx10_clamp() else {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: concat!(
+                    "this instruction clamps its result to [0, 1], and what that does to a NaN ",
+                    "is the stage's DX10_CLAMP mode, which this translation was not given"
+                ),
+            });
+        };
+        Some(nan_to_zero)
+    } else {
+        None
+    };
     let [Operand::Vector(register), first, second, third] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
@@ -8118,6 +8202,10 @@ fn float_min_max_of_three<M: Model + ?Sized>(
         } else {
             let pair = model.f32_ext_binary(extended, values[0], values[1]);
             model.f32_ext_binary(extended, pair, values[2])
+        };
+        let value = match clamp {
+            Some(nan_to_zero) => clamp_unit(model, value, nan_to_zero),
+            None => value,
         };
         model.write_vector_lane(register, lane, value);
     }

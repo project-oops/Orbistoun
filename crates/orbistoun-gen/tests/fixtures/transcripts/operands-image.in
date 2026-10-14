@@ -93,3 +93,12 @@ image_sample_c v8, v[253:255], s[12:19], s[20:23] dmask:0x1 dim:SQ_RSRC_IMG_2D
 image_sample_c v240, v[100:102], s[60:67], s[96:99] dmask:0x1 dim:SQ_RSRC_IMG_2D
 image_sample_c v[4:5], v[2:4], s[4:11], s[12:15] dmask:0x3 dim:SQ_RSRC_IMG_2D
 image_sample_c v[100:103], v[200:202], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IMG_2D
+
+// ---- image_sample_lz_o -------------------------------------------------------------
+// The level-zero sample with texel offsets, which PPSA21564's fragment shader runs (MIMG opcode
+// 55): the packed offsets ride in the first address register, before the coordinates.
+image_sample_lz_o v[4:7], v[2:4], s[4:11], s[12:15] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample_lz_o v[100:103], v[200:202], s[80:87], s[92:95] dmask:0xf dim:SQ_RSRC_IMG_2D
+image_sample_lz_o v250, v[10:12], s[40:47], s[60:63] dmask:0x1 dim:SQ_RSRC_IMG_2D
+image_sample_lz_o v[8:9], v[253:255], s[12:19], s[20:23] dmask:0x3 dim:SQ_RSRC_IMG_2D
+image_sample_lz_o v[240:243], v[100:102], s[60:67], s[96:99] dmask:0xf dim:SQ_RSRC_IMG_2D

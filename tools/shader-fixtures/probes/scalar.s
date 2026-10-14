@@ -206,3 +206,11 @@ s_endpgm
 s_waitcnt lgkmcnt(0)
 s_waitcnt vmcnt(0)
 s_waitcnt expcnt(0)
+// A scalar bit reversal, which PPSA21564's fragment shader runs (SOP1 opcode 11). Varied
+// destinations and sources: registers and inline integers.
+s_brev_b32 s16, 1
+s_brev_b32 s101, s0
+s_brev_b32 s0, s101
+s_brev_b32 s60, s13
+s_brev_b32 s7, 64
+s_brev_b32 s9, vcc_lo

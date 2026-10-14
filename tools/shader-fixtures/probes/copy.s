@@ -528,3 +528,23 @@ v_ashrrev_i32_e32 v255, s101, v200
 v_ashrrev_i32_e32 v7, -1, v130
 v_ashrrev_i32_e32 v100, v3, v254
 v_ashrrev_i32_e32 v1, 31, v77
+// The two other exec-writing float compares PPSA21564's fragment shader runs (VOPC opcodes 17
+// and 30): less than, and not less than, which is true for an unordered pair. Varied vector,
+// scalar and inline first sources, and registers spread across the file.
+v_cmpx_lt_f32_e32 v4, v5
+v_cmpx_lt_f32_e32 s5, v190
+v_cmpx_lt_f32_e32 -1, v255
+v_cmpx_lt_f32_e32 4, v77
+v_cmpx_lt_f32_e32 v130, v12
+v_cmpx_nlt_f32_e32 v4, v5
+v_cmpx_nlt_f32_e32 s5, v190
+v_cmpx_nlt_f32_e32 -1, v255
+v_cmpx_nlt_f32_e32 4, v77
+v_cmpx_nlt_f32_e32 v130, v12
+// The high half of an unsigned 32-bit product, which PPSA21564's vertex shaders run (VOP3 opcode
+// 362), beside v_mul_lo_u32's low half. Varied vector, scalar and inline sources.
+v_mul_hi_u32 v3, v4, v5
+v_mul_hi_u32 v200, s5, v9
+v_mul_hi_u32 v255, v12, s30
+v_mul_hi_u32 v9, -1, v77
+v_mul_hi_u32 v130, v88, 4

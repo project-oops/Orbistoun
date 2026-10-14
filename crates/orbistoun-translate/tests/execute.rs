@@ -2429,6 +2429,38 @@ fn the_output_clamp_holds_a_float_result_to_the_unit_range() {
     );
 }
 
+/// A three-way median clamps its result to `[0, 1]` as the long form does: PPSA21564's pixel
+/// shader runs `v_med3_f32 v8, 1.0, v8, 0 clamp` (`d5578008 020210f2`).
+#[test]
+fn a_clamped_median_of_three_holds_to_the_unit_range() {
+    const CLAMP: u32 = 1 << 15;
+    if !device_or_skip("a_clamped_median_of_three_holds_to_the_unit_range") {
+        return;
+    }
+    let clamped_median = |dst: u32, sources: [u32; 3]| {
+        let mut encoded = vop3("v_med3_f32", dst, sources, 0, 0);
+        encoded[0] |= CLAMP;
+        encoded
+    };
+    let mut program = vec![v_mov_code(0, F_2), v_mov_code(1, F_MINUS_2)];
+    program.extend(v_mov_literal(2, 0x3F00_0000)); // 0.5
+    // The median of (2, 4, 3) is 3, clamped to one; of (-2, -2, 1) -2, clamped to zero; of
+    // (0.5, 0, 1) 0.5, untouched.
+    program.extend(v_mov_literal(3, 0x4080_0000)); // 4
+    program.extend(v_mov_literal(4, 0x4040_0000)); // 3
+    program.extend(clamped_median(
+        5,
+        [vgpr_code(0), vgpr_code(3), vgpr_code(4)],
+    ));
+    program.extend(clamped_median(6, [vgpr_code(1), vgpr_code(1), F_1]));
+    program.extend(clamped_median(7, [vgpr_code(2), 0x80, F_1]));
+    program.push(s_endpgm());
+    let registers = run_with_dx10_clamp(true, &program);
+    assert_eq!(vector(&registers, 5), BITS_1);
+    assert_eq!(vector(&registers, 6), 0);
+    assert_eq!(vector(&registers, 7), 0x3F00_0000);
+}
+
 /// The output multiplier scales a float result by two, four or a half, before the clamp: the RDNA
 /// ISA's `OMOD`, second word bits 28:27. STKT00001's vertex shader at `0x403802000` carries
 /// `v_mul_f32_e64 v6, v6, v10 mul:2` (`d5080006 0a021506`).
@@ -6989,6 +7021,25 @@ fn a_masked_sum_with_a_zero_first_source_sums_the_second() {
     program.extend(vop3("v_msad_u8", 2, [128, VGPR_0 + 1, 128], 0, 0));
     program.push(s_endpgm());
     assert_eq!(vector(&run(&program), 2), 1 + 2 + 3);
+}
+
+/// `v_mul_hi_u32` is the high half of the unsigned product, the middle column's carry included.
+#[test]
+fn the_high_half_of_an_unsigned_product_is_exact() {
+    if !device_or_skip("the_high_half_of_an_unsigned_product_is_exact") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(0, 0xffff_fffb));
+    program.extend(v_mov_literal(1, 0xfedc_ba98));
+    program.extend(v_mov_literal(2, 0x0001_ffff));
+    program.extend(vop3("v_mul_hi_u32", 3, [VGPR_0, VGPR_0 + 1, 0], 0, 0));
+    program.extend(vop3("v_mul_hi_u32", 4, [VGPR_0 + 2, VGPR_0 + 2, 0], 0, 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    let high = |a: u64, b: u64| ((a * b) >> 32) as u32;
+    assert_eq!(vector(&registers, 3), high(0xffff_fffb, 0xfedc_ba98));
+    assert_eq!(vector(&registers, 4), high(0x0001_ffff, 0x0001_ffff));
 }
 
 /// The culling shader's integer and float arithmetic: a sixteen-bit multiply-add of the low halves,
