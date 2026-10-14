@@ -1982,6 +1982,9 @@ pub enum TexelFormat {
     Float11_11_10,
     /// Four eight-bit channels, the colour ones sRGB-encoded, a texel a word.
     Rgba8Srgb,
+    /// Red, green and blue in ten normalised bits each from the low end, alpha in the top two, a
+    /// texel a word: the guest's `2_10_10_10_UNORM`.
+    Rgb10A2,
 }
 
 impl TexelFormat {
@@ -1989,7 +1992,7 @@ impl TexelFormat {
     #[must_use]
     pub const fn bytes(self) -> u32 {
         match self {
-            Self::Rgba8 | Self::Float11_11_10 | Self::Rgba8Srgb => 4,
+            Self::Rgba8 | Self::Float11_11_10 | Self::Rgba8Srgb | Self::Rgb10A2 => 4,
             Self::R8 => 1,
             Self::Rgba32Uint => 16,
         }
@@ -2009,11 +2012,21 @@ impl TexelFormat {
 }
 
 /// Where a dispatch image lies in guest memory: a tiled level, placed as a colour target of that
-/// shape would be, or a linear image's rows at their pitch.
+/// shape would be, a tiled volume's slices, or a linear image's rows at their pitch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchSurface {
     /// A tiled level, at four bytes a texel or - in the one-byte layout - one.
     Tiled(ColourTarget),
+    /// A tiled volume (D823): `depth` slices, each laid out as `slice` is and a slice's surface
+    /// after the one before, with the slice's XOR on its in-block offsets
+    /// ([`crate::tiling::slice_xor_64kb_rx_bpp4`]). Only a 32-bpp `64KB_R_X` volume's slice terms
+    /// are read.
+    Volume {
+        /// The first slice, placed as a 2D level of the volume's width and height.
+        slice: ColourTarget,
+        /// Slices.
+        depth: u32,
+    },
     /// A linear image's level.
     Linear {
         /// Its first byte.
@@ -2034,7 +2047,7 @@ impl DispatchSurface {
     #[must_use]
     pub const fn base(&self) -> u64 {
         match self {
-            Self::Tiled(target) => target.base,
+            Self::Tiled(target) | Self::Volume { slice: target, .. } => target.base,
             Self::Linear { base, .. } => *base,
         }
     }
@@ -2043,9 +2056,27 @@ impl DispatchSurface {
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {
         match self {
-            Self::Tiled(target) => (target.width, target.height),
+            Self::Tiled(target) | Self::Volume { slice: target, .. } => {
+                (target.width, target.height)
+            }
             Self::Linear { width, height, .. } => (*width, *height),
         }
+    }
+
+    /// Its slices: a volume's, and one for a level.
+    #[must_use]
+    pub const fn depth(&self) -> u32 {
+        match self {
+            Self::Volume { depth, .. } => *depth,
+            Self::Tiled(_) | Self::Linear { .. } => 1,
+        }
+    }
+
+    /// Texels it holds, every slice's.
+    #[must_use]
+    pub const fn texels(&self) -> usize {
+        let (width, height) = self.extent();
+        width as usize * height as usize * self.depth() as usize
     }
 
     /// Bytes it spans from [`Self::base`]: a tiled level's whole surface; a linear one's rows at
@@ -2054,6 +2085,7 @@ impl DispatchSurface {
     pub fn bytes(&self) -> usize {
         match self {
             Self::Tiled(target) => target.words() * 4,
+            Self::Volume { slice, depth } => slice.words() * 4 * *depth as usize,
             Self::Linear {
                 width,
                 height,
@@ -2072,6 +2104,14 @@ impl DispatchSurface {
     pub fn detile(&self, spanned: &[u8]) -> Vec<u32> {
         match self {
             Self::Tiled(target) => target.detile_mapped(&words_of_bytes(spanned), |w| w),
+            Self::Volume { slice, .. } => spanned
+                .chunks_exact(slice.words() * 4)
+                .zip(0_u32..)
+                .flat_map(|(bytes, z)| {
+                    let words = slice_words(&words_of_bytes(bytes), z);
+                    slice.detile_mapped(&words, |w| w)
+                })
+                .collect(),
             Self::Linear {
                 width,
                 height,
@@ -2111,13 +2151,32 @@ impl DispatchSurface {
                 bytes_per_texel, ..
             } => bytes_per_texel.div_ceil(4) as usize,
             // A sixteen-byte tiled texel is four words, as a linear one is.
-            Self::Tiled(target) => (1_usize << target.layout.texel_log2()).div_ceil(4),
+            Self::Tiled(target) | Self::Volume { slice: target, .. } => {
+                (1_usize << target.layout.texel_log2()).div_ceil(4)
+            }
         };
-        if texels.len() != width as usize * height as usize * words || spanned.len() < self.bytes()
-        {
+        if texels.len() != self.texels() * words || spanned.len() < self.bytes() {
             return Err("a dispatch image's texels do not match its extent".to_owned());
         }
         match self {
+            Self::Volume { slice, .. } => {
+                let per_slice = width as usize * height as usize * words;
+                for ((bytes, texels), z) in spanned[..self.bytes()]
+                    .chunks_exact_mut(slice.words() * 4)
+                    .zip(texels.chunks(per_slice))
+                    .zip(0_u32..)
+                {
+                    let mut words = slice_words(&words_of_bytes(bytes), z);
+                    slice
+                        .tile_mapped(texels, &mut words, |w| w)
+                        .map_err(|e| format!("{e:?}"))?;
+                    // The slice's XOR undoes itself.
+                    for (bytes, word) in bytes.chunks_exact_mut(4).zip(slice_words(&words, z)) {
+                        bytes.copy_from_slice(&word.to_le_bytes());
+                    }
+                }
+                Ok(())
+            }
             Self::Tiled(target) => {
                 let mut words = words_of_bytes(spanned);
                 target
@@ -2155,7 +2214,9 @@ impl DispatchSurface {
         use std::sync::{Arc, Mutex, PoisonError};
         static KEPT: Mutex<Vec<(DispatchSurface, Arc<[u32]>)>> = Mutex::new(Vec::new());
         let four_bytes = match self {
-            Self::Tiled(target) => target.layout.texel_log2() == 2,
+            Self::Tiled(target) | Self::Volume { slice: target, .. } => {
+                target.layout.texel_log2() == 2
+            }
             Self::Linear {
                 bytes_per_texel, ..
             } => *bytes_per_texel == 4,
@@ -2167,8 +2228,7 @@ impl DispatchSurface {
         if let Some((_, slots)) = kept.iter().find(|(surface, _)| surface == self) {
             return Some(Arc::clone(slots));
         }
-        let (width, height) = self.extent();
-        let texels = u32::try_from(width as usize * height as usize).ok()?;
+        let texels = u32::try_from(self.texels()).ok()?;
         // No texel's index is all ones, so a word left so holds none.
         let indices: Vec<u32> = (0..texels).collect();
         let mut spanned = vec![0xFF; self.bytes()];
@@ -2203,6 +2263,13 @@ fn words_of_bytes(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// Slice `z` of a 32-bpp `64KB_R_X` volume with its slice XOR undone, or put back: word `i` of the
+/// one is word `i ^ (xor / 4)` of the other. The XOR is under a block, so no word leaves its block.
+fn slice_words(words: &[u32], z: u32) -> Vec<u32> {
+    let xor = crate::tiling::slice_xor_64kb_rx_bpp4(z).unwrap_or(0) / 4;
+    (0..words.len()).map(|i| words[i ^ xor]).collect()
+}
+
 /// One image a dispatch binds, as linear texels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchTexels {
@@ -2214,6 +2281,16 @@ pub struct DispatchTexels {
     pub width: u32,
     /// Height in texels.
     pub height: u32,
+    /// A volume's slices, its texels slice after slice (D823); `None` for a 2D image.
+    pub depth: Option<u32>,
+}
+
+/// A volume's slices, for its texels; `None` for a 2D surface.
+const fn volume_depth(surface: &DispatchSurface) -> Option<u32> {
+    match surface {
+        DispatchSurface::Volume { depth, .. } => Some(*depth),
+        DispatchSurface::Tiled(_) | DispatchSurface::Linear { .. } => None,
+    }
 }
 
 /// Reads a dispatch's images from guest memory, by where its module said each descriptor came
@@ -2248,9 +2325,7 @@ fn dispatch_images(
                     None => texels,
                 }
             }
-            crate::dcc::Keys::Clear0000 => {
-                vec![0; width as usize * height as usize * format.words() as usize]
-            }
+            crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize],
             crate::dcc::Keys::Other => {
                 return Err(concat!(
                     "the fetched image's compression keys need per-block addressing, which is ",
@@ -2264,6 +2339,7 @@ fn dispatch_images(
             format,
             width,
             height,
+            depth: volume_depth(&surface),
         });
         images.fetched_span = Some((surface.base(), surface.bytes() as u64));
     }
@@ -2300,7 +2376,7 @@ fn dispatch_images(
                         keys: (crate::dcc::meta_start(dcc), bytes),
                         surface: (descriptor.base, chain),
                     });
-                vec![0; width as usize * height as usize * format.words() as usize]
+                vec![0; surface.texels() * format.words() as usize]
             }
             crate::dcc::Keys::Other => {
                 return Err(concat!(
@@ -2315,6 +2391,7 @@ fn dispatch_images(
             format,
             width,
             height,
+            depth: volume_depth(&surface),
         });
         // Under cleared keys the level's bytes are the zeros they mean, whatever memory holds.
         let spanned = if images.stored_keys_to_expand.is_some() {
@@ -2406,9 +2483,21 @@ fn dispatch_image_surface(
     }
     let descriptor = decode_image_descriptor(words);
     let format = dispatch_format(&descriptor, words)?;
-    if words[3] >> 28 != IMAGE_TYPE_2D {
+    // A volume where the program addresses one, three coordinates to its texel (D823); a 2D image
+    // otherwise.
+    let volume = words[3] >> 28 == IMAGE_TYPE_3D;
+    if (words[3] >> 28 != IMAGE_TYPE_2D && !volume) || volume != source.volume {
         return Err(format!(
-            "a dispatch image that is not 2D: format {}",
+            "a dispatch image that is not the shape its program addresses ({}): format {}",
+            if source.volume { "3D" } else { "2D" },
+            describe_dispatch_image(&descriptor, words)
+        ));
+    }
+    // A ten-bit texel's channels are read in their own order: selects that move them are refused
+    // rather than read as they are.
+    if format == TexelFormat::Rgb10A2 && destination_selects(words[3]) != IDENTITY_SELECTS {
+        return Err(format!(
+            "a dispatch image whose selects reorder its ten-bit channels: format {}",
             describe_dispatch_image(&descriptor, words)
         ));
     }
@@ -2444,23 +2533,31 @@ fn dispatch_image_surface(
             )
         })
         .filter(|surface| surface.layout.models(surface.pipe_bank_xor))
+        // A volume's slices are read only where their terms are: one level of 32-bpp `64KB_R_X`,
+        // no deeper than its slice terms go.
+        .filter(|surface| {
+            !volume
+                || (descriptor.tiling == SwizzleMode::Tiled64KbRX
+                    && format.bytes() == 4
+                    && descriptor.levels == 1
+                    && crate::tiling::slice_xor_64kb_rx_bpp4(words[4] & DEPTH_FIELD).is_some()
+                    && surface.pipe_bank_xor == 0)
+        })
         .ok_or_else(|| {
             format!(
-                "a {:?} dispatch image of {}-byte texels, {}x{}, {} level(s) viewed from {}, whose layout is not modelled",
-                descriptor.tiling,
-                format.bytes(),
-                descriptor.width,
-                descriptor.height,
-                descriptor.levels,
-                descriptor.base_level,
+                "a dispatch image whose layout is not modelled: format {}",
+                describe_dispatch_image(&descriptor, words)
             )
         })?;
-    Ok((
-        DispatchSurface::Tiled(surface),
-        descriptor,
-        format,
-        channel_order(format, words[3]),
-    ))
+    let surface = if volume {
+        DispatchSurface::Volume {
+            slice: surface,
+            depth: (words[4] & DEPTH_FIELD) + 1,
+        }
+    } else {
+        DispatchSurface::Tiled(surface)
+    };
+    Ok((surface, descriptor, format, channel_order(format, words[3])))
 }
 
 /// Where each channel a dispatch reads or writes lies in an `8_8_8_8_UNORM` texel in memory: byte
@@ -2525,6 +2622,7 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
     match descriptor.format {
         FORMAT_8_8_8_8_UNORM => Ok(TexelFormat::Rgba8),
         FORMAT_8_UNORM => Ok(TexelFormat::R8),
+        FORMAT_2_10_10_10_UNORM => Ok(TexelFormat::Rgb10A2),
         // A sixteen-byte texel is placed linearly, or in `64KB_D_X`; its other layouts are not
         // modelled.
         FORMAT_32_32_32_32_UINT
@@ -4591,6 +4689,9 @@ const FORMAT_10_11_11_FLOAT: u32 = 36;
 const FORMAT_8_8_8_8_SRGB: u32 = 130;
 /// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
 const FORMAT_32_32_32_32_UINT: u32 = 75;
+/// `GFX10_FORMAT_2_10_10_10_UNORM` (`gfx10-rsrc.json`): red, green and blue ten bits each from the
+/// low end, alpha two.
+const FORMAT_2_10_10_10_UNORM: u32 = 50;
 
 /// What each texture a submission binds became, by its descriptor's address, slot, sampler address
 /// and the coordinates the module saturates: read once per submission.
@@ -5491,7 +5592,8 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
     match format {
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
-        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint => {
+        // A draw's texture is never a ten-bit one: `sampled_format` reads no such format.
+        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint | TexelFormat::Rgb10A2 => {
             crate::backend::TextureEncoding::Rgba8
         }
     }
@@ -5596,7 +5698,8 @@ fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std
                 TexelFormat::Rgba8
                 | TexelFormat::Rgba32Uint
                 | TexelFormat::Float11_11_10
-                | TexelFormat::Rgba8Srgb => texel.to_le_bytes(),
+                | TexelFormat::Rgba8Srgb
+                | TexelFormat::Rgb10A2 => texel.to_le_bytes(),
                 TexelFormat::R8 => [texel.to_le_bytes()[0], 0, 0, 0xFF],
             };
             u32::from_le_bytes(selects.map(|select| pick(channels, select)))
@@ -8201,6 +8304,48 @@ mod tests {
         ] {
             assert_eq!(channel_order(format, word3), None, "{word3:#x}");
         }
+    }
+
+    /// A 32-bpp `64KB_R_X` volume's texel `(x, y, z)` lies a slice of blocks per slice in, at its
+    /// 2D place in the block XORed with the slice's terms (`tools/addrlib/equation 64KB_R_X 4 32
+    /// 3d`): a 32 x 32 x 3 volume is three 64 KiB blocks, slice 1's texels moved by `0x800` and
+    /// slice 2's by `0x400`. Its texels detile in order and tile back to the same bytes. Grand Theft
+    /// Auto V's first sixteen-wave dispatch stores to a 32 x 32 x 32 volume so.
+    #[test]
+    fn a_volume_lies_slice_after_slice_with_each_slice_s_xor() {
+        use super::{DispatchSurface, SwizzleMode};
+        use crate::tiling::{SurfaceLayout, tiled_byte_offset_64kb_rx_bpp4};
+        let layout = SurfaceLayout::of(SwizzleMode::Tiled64KbRX)
+            .and_then(|layout| layout.at_bytes_per_texel(4))
+            .expect("a 32-bpp 64KB_R_X layout");
+        let slice = crate::registers::chain_level((0x10_0000, 0), (32, 32), (1, 0), layout)
+            .expect("one level");
+        let volume = DispatchSurface::Volume { slice, depth: 3 };
+        assert_eq!(volume.bytes(), 3 * 0x1_0000, "a block a slice");
+        assert_eq!(volume.texels(), 32 * 32 * 3);
+        let mut spanned = vec![0_u8; volume.bytes()];
+        for z in 0..3_u32 {
+            let xor = [0, 0x800, 0x400][z as usize];
+            for y in 0..32_u32 {
+                for x in 0..32_u32 {
+                    let at = z as usize * 0x1_0000
+                        + (tiled_byte_offset_64kb_rx_bpp4(x, y) as usize ^ xor);
+                    let index = (z * 32 + y) * 32 + x;
+                    spanned[at..at + 4].copy_from_slice(&index.to_le_bytes());
+                }
+            }
+        }
+        let texels = volume.detile(&spanned);
+        assert!(
+            texels
+                .iter()
+                .zip(0_u32..)
+                .all(|(&texel, index)| texel == index),
+            "every texel in order"
+        );
+        let mut tiled = vec![0_u8; volume.bytes()];
+        volume.tile(&texels, &mut tiled).expect("tiled back");
+        assert!(tiled == spanned, "tiled back to the same bytes");
     }
 
     /// A dispatch image a refusal quotes is described with its depth and its type, as well as its

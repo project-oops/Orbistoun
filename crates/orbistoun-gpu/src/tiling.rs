@@ -542,6 +542,30 @@ pub fn surface_words_64kb_rx_bpp4(width: u32, height: u32) -> usize {
         * (BLOCK_BYTES / 4)
 }
 
+/// What each bit of a slice index adds to a 32-bpp `64KB_R_X` volume's offset inside its block: the
+/// offset is the XOR of the entries whose bit is set. Such a volume's blocks are thin, 128 x 128 x
+/// 1, its in-block terms for `x` and `y` a 2D surface's, and its slices follow one another a whole
+/// slice of blocks apart (D823). Read off addrlib for this console's configuration by
+/// `tools/addrlib/equation 64KB_R_X 4 32 3d`, which checks every texel of three volumes - one of
+/// them a quarter of a block across - against that rule.
+const RX_BPP4_SLICE_BITS: [usize; 5] = [0x800, 0x400, 0x200, 0x100, 0x0];
+
+/// The XOR slice `z` of a 32-bpp `64KB_R_X` volume puts on its in-block byte offsets; `None` past
+/// the slices whose terms were read.
+#[must_use]
+pub fn slice_xor_64kb_rx_bpp4(z: u32) -> Option<usize> {
+    if z >> RX_BPP4_SLICE_BITS.len() != 0 {
+        return None;
+    }
+    Some(
+        RX_BPP4_SLICE_BITS
+            .iter()
+            .enumerate()
+            .filter(|&(bit, _)| (z >> bit) & 1 == 1)
+            .fold(0, |offset, (_, term)| offset ^ term),
+    )
+}
+
 /// Detiles a whole 32-bpp `64KB_R_X` surface of any size into a linear, row-major image, through
 /// [`tiled_byte_offset_64kb_rx_bpp4_surface`].
 ///
@@ -1615,6 +1639,20 @@ impl SurfaceLayout {
 
 #[cfg(test)]
 mod tests {
+    /// A 32-bpp `64KB_R_X` volume's slice XOR is the XOR of the terms addrlib gives for each bit
+    /// of the slice index (`tools/addrlib/equation 64KB_R_X 4 32 3d`): slice 0 none, 1 `0x800`, 3
+    /// `0xc00`, 31 `0xf00`; past slice 31 nothing was read.
+    #[test]
+    fn a_volume_slice_xors_its_index_into_the_block() {
+        use super::slice_xor_64kb_rx_bpp4;
+        assert_eq!(slice_xor_64kb_rx_bpp4(0), Some(0));
+        assert_eq!(slice_xor_64kb_rx_bpp4(1), Some(0x800));
+        assert_eq!(slice_xor_64kb_rx_bpp4(3), Some(0xc00));
+        assert_eq!(slice_xor_64kb_rx_bpp4(16), Some(0));
+        assert_eq!(slice_xor_64kb_rx_bpp4(31), Some(0xf00));
+        assert_eq!(slice_xor_64kb_rx_bpp4(32), None);
+    }
+
     /// `4KB_S` at one byte a texel places each texel by addrlib's pattern for this mode and size
     /// (`GFX10_SW_4K_S_PATINFO` at 1 bpe: nibbles 01 row 0 and 2 row 1): X0-X3, Y0-Y4, X4, Y5, X5
     /// from byte bit 0, a 64 x 64-texel block.

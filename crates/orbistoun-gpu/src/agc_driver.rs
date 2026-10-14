@@ -4623,6 +4623,7 @@ mod tests {
             format: TexelFormat::Rgba8,
             width,
             height,
+            depth: None,
         };
         let known = DispatchImages {
             stored: Some(stored),
@@ -4667,6 +4668,7 @@ mod tests {
                 format: TexelFormat::Rgba8,
                 width,
                 height,
+                depth: None,
             }),
             stored_order: Some(order),
             ..known.clone()

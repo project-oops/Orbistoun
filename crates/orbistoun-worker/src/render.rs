@@ -811,12 +811,13 @@ fn dispatch_image(
             orbistoun_gpu::pipeline::TexelFormat::R8 => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::R8
             }
+            orbistoun_gpu::pipeline::TexelFormat::Rgb10A2 => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgb10A2
+            }
         },
         width: image.width,
         height: image.height,
-        // A dispatch image read from guest memory is two-dimensional: `dispatch_images` reads no
-        // other.
-        depth: None,
+        depth: image.depth,
     }
 }
 

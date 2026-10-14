@@ -331,6 +331,73 @@ fn a_dispatch_stores_to_a_volume() {
     assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
 }
 
+/// Each thread stores opaque red at its own place: `v_mov_b32 v4, 1.0`, `v5, 0`, `v6, 0`, `v7,
+/// 1.0`, then `image_store v[4:7], v[0:2], s[0:7] dmask:0xf dim:SQ_RSRC_IMG_3D unorm`.
+const STORE_RED_3D: [u32; 8] = [
+    0x7e08_02f2,
+    0x7e0a_0280,
+    0x7e0c_0280,
+    0x7e0e_02f2,
+    0xf020_1f10,
+    0x0000_0400,
+    0xbf81_0000,
+    0xbf9f_0000,
+];
+
+/// A ten-bit volume, the guest's `2_10_10_10_UNORM` as Grand Theft Auto V's first sixteen-wave
+/// dispatch stores to it, takes a normalised store as the guest packs it: opaque red is ten bits
+/// of red at the low end and two of alpha at the top, `0xc00003ff`, in every texel.
+#[test]
+fn a_dispatch_stores_to_a_ten_bit_volume() {
+    const EDGE: u32 = 4;
+    if !device_or_skip("ten-bit volume store") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = STORE_RED_3D.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, _) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 8,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 3,
+                threads: [EDGE, EDGE, EDGE],
+                unwritten_user_data: 0,
+                partial: None,
+                integer_images: [false, false],
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the store translates");
+    let destination = vec![0_u32; (EDGE * EDGE * EDGE) as usize];
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 8], [1, 1, 1]),
+        &DispatchImages {
+            fetched: None,
+            stored: Some(DispatchImage {
+                texels: &destination,
+                format: DispatchFormat::Rgb10A2,
+                width: EDGE,
+                height: EDGE,
+                depth: Some(EDGE),
+            }),
+        },
+    )
+    .expect("dispatched");
+    let expected = vec![0xc000_03ff_u32; destination.len()];
+    assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+}
+
 /// One component a texel, `dmask:0x1`: `image_load v2, v[0:1], s[0:7]` then the same store.
 const COPY_R8: [u32; 7] = [
     0xf000_1108,
