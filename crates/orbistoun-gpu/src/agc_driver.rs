@@ -3103,6 +3103,34 @@ fn copy_into_guest(address: u64, bytes: &[u8]) -> bool {
     true
 }
 
+/// Runs `edit` over `words` words of guest memory at `address`, in place, and answers what it
+/// does - `false`, editing nothing, when the range is not writable guest memory or not word-aligned.
+fn edit_guest_words(address: u64, words: usize, edit: impl FnOnce(&mut [u32]) -> bool) -> bool {
+    let length = words as u64 * 4;
+    if address % 4 != 0
+        || !write_lookup()
+            .get()
+            .is_some_and(|allows| allows(address, length))
+    {
+        return false;
+    }
+    let Ok(at) = usize::try_from(address) else {
+        return false;
+    };
+    unprotect_overlapping(address, length);
+    orbistoun_mem::watch::release_overlapping(address, length);
+    // SAFETY: the installed lookup vouched that `[address, address + length)` lies wholly inside
+    // one identity-mapped guest mapping whose protection allows writes, and `address` is
+    // word-aligned, so it is `words` writable, aligned words of this process. Its pages' protection
+    // is restored above or by the caller, and nothing else in this process holds a reference into
+    // them meanwhile: a guest thread touching a deferred copy's pages waits on the list its caller
+    // holds.
+    let slice = unsafe {
+        std::slice::from_raw_parts_mut(std::ptr::with_exposed_provenance_mut::<u32>(at), words)
+    };
+    edit(slice)
+}
+
 /// Fills `[address, address + length)` of guest memory with `pattern`, starting at `address` -
 /// `false`, writing nothing, when the range is not writable guest memory.
 fn fill_guest(address: u64, length: u64, pattern: u32) -> bool {
@@ -3370,6 +3398,33 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         return false;
     };
     let (width, height) = (target.width, target.height);
+    let Ok(length) = usize::try_from(copy.length) else {
+        return false;
+    };
+    // Laid out in place: memory as the copy saw it goes down first, then the frame is tiled over it
+    // in the destination itself - rather than into a copy of memory that is then written.
+    if copy.destination % 4 == 0 && length % 4 == 0 && length / 4 >= target.words() {
+        // A clear's word filled as words, not spelt out byte by byte first.
+        let laid = crate::perf::span(crate::perf::Span::CarryOutWrite, || match memory_then {
+            Contents::Uniform { word, .. } => fill_guest(copy.destination, copy.length, *word),
+            Contents::Bytes(then) => then
+                .get(..length)
+                .is_some_and(|then| write_guest(copy.destination, then)),
+        });
+        if !laid {
+            return false;
+        }
+        return crate::perf::span(crate::perf::Span::CarryOutTile, || {
+            edit_guest_words(copy.destination, length / 4, |words| {
+                target
+                    .layout
+                    .tile_mapped(&frame, width, height, target.pipe_bank_xor, words, |w| {
+                        stored(w, target, swap)
+                    })
+                    .is_ok()
+            })
+        });
+    }
     let tiled = crate::perf::span(crate::perf::Span::CarryOutTile, || {
         let mut tiled = memory_then.words();
         target
