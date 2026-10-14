@@ -41,23 +41,20 @@ fn main() -> eframe::Result<()> {
     }
 
     // A played window reads the host clock unless chosen otherwise (D723): the logical clock
-    // advances per reading, so a guest spinning on its counter races ahead of the player.
-    // Set before any worker exists, because each worker inherits it.
-    if std::env::var_os(orbistoun_env::CLOCK.name).is_none() {
-        // SAFETY: no worker or guest thread exists yet, and nothing started so far reads the
-        // environment concurrently; the spawned workers inherit it at their start.
-        unsafe { std::env::set_var(orbistoun_env::CLOCK.name, "host") };
+    // advances per reading, so a guest spinning on its counter races ahead of the player. And its
+    // GPU work runs alongside it, as on hardware (D821); `ORBISTOUN_SUBMIT=sync` keeps the command
+    // line's order. Set before any worker exists, because each worker inherits them.
+    for (var, value) in orbistoun_env::AS_PLAYED {
+        if std::env::var_os(var.name).is_none() {
+            // SAFETY: no worker or guest thread exists yet, and nothing started so far reads the
+            // environment concurrently; the spawned workers inherit it at their start.
+            unsafe { std::env::set_var(var.name, value) };
+        }
     }
     // And is heard: its audio output plays on the host's device unless chosen otherwise.
     if std::env::var_os(orbistoun_env::AUDIO.name).is_none() {
         // SAFETY: as above - still no worker or guest thread.
         unsafe { std::env::set_var(orbistoun_env::AUDIO.name, orbistoun_env::AUDIO_HOST) };
-    }
-    // And its GPU work runs alongside it, as on hardware (D821); `ORBISTOUN_SUBMIT=sync` keeps the
-    // command line's order.
-    if std::env::var_os(orbistoun_env::SUBMIT.name).is_none() {
-        // SAFETY: as above - still no worker or guest thread.
-        unsafe { std::env::set_var(orbistoun_env::SUBMIT.name, orbistoun_env::SUBMIT_ASYNC) };
     }
 
     // Beside an orbistoun-aot manifest this program is that build's launcher, and plays only its

@@ -344,9 +344,6 @@ enum Command {
         /// Play this pad script on player 1, as `run --input` does.
         #[arg(long)]
         input: Option<std::path::PathBuf>,
-        /// Run on the host clock, as a staged homebrew build is played.
-        #[arg(long)]
-        host_clock: bool,
         /// Open the recording in the Tracy viewer afterwards.
         #[arg(long)]
         open: bool,
@@ -382,8 +379,8 @@ enum Command {
     /// Record every title in the library in turn and rank the costs across them, beside the last
     /// benchmark (D831).
     ///
-    /// Each title replays its compat record's pad script when it has one; staged homebrew runs on
-    /// the host clock. A title is skipped while something else keeps the GPU busy.
+    /// Each title replays its compat record's pad script when it has one, and runs as the window
+    /// plays it (`AS_PLAYED`). A title is skipped while something else keeps the GPU busy.
     Bench {
         /// Only these titles, by their directory names.
         titles: Vec<String>,
@@ -1032,13 +1029,12 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             seconds,
             top,
             input,
-            host_clock,
             open,
             install_tracy,
         } => perf::cmd_perf(
             path.as_deref(),
             (seconds, top),
-            (input.as_deref(), host_clock),
+            input.as_deref(),
             (open, install_tracy),
         )?,
         Command::Bench {

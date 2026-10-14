@@ -61,7 +61,7 @@ fn record(
     tools: &orbistoun_perf::Tools,
     path: &Path,
     seconds: u64,
-    (input, host_clock): (Option<&Path>, bool),
+    input: Option<&Path>,
     worker: Option<&Path>,
 ) -> Result<Recorded> {
     anyhow::ensure!(
@@ -80,9 +80,13 @@ fn record(
     unsafe { std::env::set_var(orbistoun_env::TRACY.name, "1") };
     // SAFETY: as above.
     unsafe { std::env::set_var("TRACY_PORT", port.to_string()) };
-    if host_clock {
-        // SAFETY: as above.
-        unsafe { std::env::set_var(orbistoun_env::CLOCK.name, "host") };
+    // As the window plays it, unless the environment says otherwise: what is measured is what a
+    // player gets.
+    for (var, value) in orbistoun_env::AS_PLAYED {
+        if std::env::var_os(var.name).is_none() {
+            // SAFETY: as above.
+            unsafe { std::env::set_var(var.name, value) };
+        }
     }
     // Longer than the run, so the capture ends when the worker's client goes, with all of it.
     let capture = orbistoun_perf::Capture::start(tools, &trace, port, seconds + 120)
@@ -152,7 +156,7 @@ fn run_worker(
 pub(crate) fn cmd_perf(
     path: Option<&Path>,
     (seconds, top): (u64, usize),
-    (input, host_clock): (Option<&Path>, bool),
+    input: Option<&Path>,
     (open, install): (bool, bool),
 ) -> Result<()> {
     let tools = tools(install)?;
@@ -160,18 +164,11 @@ pub(crate) fn cmd_perf(
         println!("Tracy tools ready in {}", tools.dir().display());
         return Ok(());
     };
-    // As a benchmark runs the title: its compat record's pad script unless one is named, and the
-    // host clock for a staged homebrew build.
+    // As a benchmark runs the title: its compat record's pad script unless one is named.
     let title = crate::common::title_id(path).unwrap_or_default();
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
-    let recorded = record(
-        &tools,
-        path,
-        seconds,
-        (input, host_clock || staged(path)),
-        None,
-    )?;
+    let recorded = record(&tools, path, seconds, input, None)?;
     let text = format!(
         "{}  {} zones, {:.1} s recorded, {:.1} fps by the capture's own count\n\n{}",
         recorded.trace.display(),
@@ -196,14 +193,6 @@ fn pad_script(title: &str) -> Option<PathBuf> {
     let inputs = crate::records::title_dir(Path::new("compat"), title)
         .join(orbistoun_overrides::INPUTS_FILE);
     inputs.is_file().then_some(inputs)
-}
-
-/// Whether `module` is a staged homebrew build, under the library's `data/homebrew`, which plays on
-/// the host clock.
-fn staged(module: &Path) -> bool {
-    let mut above = module.ancestors().skip(2).map(Path::file_name);
-    above.next() == Some(Some(std::ffi::OsStr::new("homebrew")))
-        && above.next() == Some(Some(std::ffi::OsStr::new("data")))
 }
 
 /// One title's line in a benchmark.
@@ -279,7 +268,6 @@ pub(crate) fn cmd_ab(
     let title = crate::common::title_id(path).unwrap_or_default();
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
-    let host_clock = staged(path);
     let (mut before, mut after) = (Vec::new(), Vec::new());
     for round in 0..rounds {
         let order = if round % 2 == 0 {
@@ -294,7 +282,7 @@ pub(crate) fn cmd_ab(
                 "this build"
             };
             println!("round {}/{rounds}: {which}, {seconds} s", round + 1);
-            let recorded = record(&tools, path, seconds, (input, host_clock), exe)?;
+            let recorded = record(&tools, path, seconds, input, exe)?;
             let entry = BenchEntry::of(which.to_owned(), recorded);
             if exe.is_some() {
                 before.push(entry);
@@ -375,8 +363,8 @@ fn render_ab(before: &[BenchEntry], after: &[BenchEntry], top: usize) -> String 
 }
 
 /// Every title in the library, by its module: each title directory's `eboot.bin`, and each staged
-/// build's under `data/homebrew`, which run on the host clock.
-fn library() -> Vec<(PathBuf, bool)> {
+/// build's under `data/homebrew`.
+fn library() -> Vec<PathBuf> {
     let titles = orbistoun_paths::Paths::resolve().titles_dir();
     let modules = |dir: &Path| -> Vec<PathBuf> {
         let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -393,12 +381,7 @@ fn library() -> Vec<(PathBuf, bool)> {
     };
     modules(&titles)
         .into_iter()
-        .map(|module| (module, false))
-        .chain(
-            modules(&titles.join("data").join("homebrew"))
-                .into_iter()
-                .map(|module| (module, true)),
-        )
+        .chain(modules(&titles.join("data").join("homebrew")))
         .collect()
 }
 
@@ -434,7 +417,7 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
         .filter(|name| {
             !library
                 .iter()
-                .any(|(module, _)| crate::common::title_id(module).as_ref() == Some(*name))
+                .any(|module| crate::common::title_id(module).as_ref() == Some(*name))
         })
         .collect();
     if !unknown.is_empty() {
@@ -448,7 +431,7 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
         );
     }
     let mut entries = Vec::new();
-    for (module, homebrew) in library {
+    for module in library {
         let title = crate::common::title_id(&module).unwrap_or_default();
         if !only.is_empty() && !only.contains(&title) {
             continue;
@@ -469,7 +452,7 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
         }
         let input = pad_script(&title);
         println!("{title}: recording {seconds} s");
-        match record(&tools, &module, seconds, (input.as_deref(), homebrew), None) {
+        match record(&tools, &module, seconds, input.as_deref(), None) {
             Ok(recorded) => entries.push(BenchEntry::of(title.clone(), recorded)),
             Err(error) => entries.push(skipped(format!("{error:#}"))),
         }
@@ -576,16 +559,8 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchEntry, render_ab, render_bench, staged};
+    use super::{BenchEntry, render_ab, render_bench};
 
-    /// A module under the library's `data/homebrew` is staged; a title's own is not.
-    #[test]
-    fn staged_homebrew_is_told_by_where_it_lies() {
-        let library = std::path::Path::new("titles");
-        assert!(staged(&library.join("data/homebrew/STKT00001/eboot.bin")));
-        assert!(!staged(&library.join("MDEM00001/eboot.bin")));
-        assert!(!staged(&library.join("homebrew/STKT00001/eboot.bin")));
-    }
     use orbistoun_perf::ZoneStat;
 
     fn entry(title: &str, fps: f64, zones: &[(&str, u64)]) -> BenchEntry {

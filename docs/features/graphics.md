@@ -81,9 +81,12 @@ ORBISTOUN_TRACY=1 orbistoun-cli run <title>   # just start the client, for a vie
 `perf` keeps the recording and its report in the title's `perf` directory and reports frame times
 (median, p95, p99, worst) and the zones by self time - what to make faster - and by total time -
 where the time sits. A zone that hands work to another thread and waits for it, such as `execute
-hand-off`, counts the wait as its own time, because the work's zone is on the other thread.
-`bench` replays each title's pad script, runs homebrew on the host clock, skips a title while
-something else keeps the GPU busy, and compares against the last benchmark.
+hand-off`, keeps only the hand-off as its own time: the report takes out the time of the zone it
+waits on, which the profiler counts on the other thread too (`WAITS_ON`).
+`perf`, `bench` and `ab` run a title as the window plays it - on the host clock, its submissions
+carried out alongside it (`AS_PLAYED`) - unless the environment sets either. `bench` replays each
+title's pad script, skips a title while something else keeps the GPU busy, and compares against
+the last benchmark.
 
 | Variable | Does |
 |---|---|

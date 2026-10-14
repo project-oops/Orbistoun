@@ -490,6 +490,11 @@ pub const SUBMIT: Var = Var {
 /// The value of [`SUBMIT`] that carries submissions out asynchronously.
 pub const SUBMIT_ASYNC: &str = "async";
 
+/// How the window plays a title, each variable unless it is already set: on the host clock (D723),
+/// with its GPU work alongside it (D821). A run measured for its speed - `perf`, `bench`, `ab` -
+/// runs so too, so what it measures is what a player gets.
+pub const AS_PLAYED: [(&Var, &str); 2] = [(&CLOCK, "host"), (&SUBMIT, SUBMIT_ASYNC)];
+
 /// The value of [`AUDIO`] that plays output on the host's device.
 pub const AUDIO_HOST: &str = "host";
 
