@@ -2445,6 +2445,7 @@ fn called_from(rsp: u64) -> Option<u64> {
 }
 
 /// How many bytes a waiting thread's register is shown pointing at.
+#[cfg(windows)]
 const WAIT_BYTES: usize = 32;
 
 /// The loop a thread is waiting in, with the callee-saved registers at its newest call, what each
