@@ -34,17 +34,30 @@ found_on = "2026-09-28"
 
 [[function]]
 name = "sceSaveDataGetSaveDataMemory2"
-purpose = "Reads the title's save-data memory: (get)."
+purpose = "Reads the title's save-data memory: (get), get holding the user at +0x00 and a data block's address at +0x08; the data block holds the buffer, its length and the offset into the memory."
 returns = "status"
 edge_cases = [
-    "MEASURED (200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2) on a console with no save-data memory set up: 0x809f0001 with every argument a buffer and with every argument zero, writing none of them.",
-    "MEASURED after Initialize3(NULL) and a successful SetupSaveDataMemory2 (REQ-20261009T1930Z-sd01, reports/hardware/20261009-215800-eboot.log lines 6102-6107): for the signed-in user 0x809f0000 with the buffer and data block untouched, before and after a SetSaveDataMemory2 (which itself answered 0x809f0000); for user 1, 0x809f0011.",
-    "orbistoun answers 0x809f0001 before set-up and, after it, 0x809f0000 for the signed-in user and 0x809f0011 for any other, writing nothing. PPSA25872's Unity runtime reads its PlayerPrefs through it six times at start-up.",
+    "MEASURED (200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2, 20261009-151440-eboot.obs.log 13554-13564) on a console with no save-data memory set up: 0x809f0001 with every argument a buffer and with every argument zero, writing none of them.",
+    "MEASURED in a probe whose set-up's own save mount had failed (REQ-sd01, 20261009-215800-eboot.log 6094-6107: the system log's ExecResult 0x809f8022 for api_id 1, under the homebrew title id PPSA90000): 0x809f0000 for the signed-in user before and after a set, 0x809f0011 for user 1. Those answers describe memory with no backing save, not a title's.",
+    "orbistoun answers 0x809f0001 before set-up and 0x809f0011 for another user; for the signed-in user it copies the requested span of save-data memory - zero until written - into the buffer and answers 0 (D839). PPSA21564 asserts (SaveMemory.cpp:118) on 0x809f0000; PPSA25872's Unity runtime reads its PlayerPrefs through it at start-up.",
 ]
-known_by = "measured"
-cites = "obSCEne reports/hardware/20261009-151440-eboot.obs.log lines 13554-13564, 200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2."
-found_in = ["PPSA25872-app0"]
+known_by = "assumed"
+assumptions = ["That a read after a set-up whose mount succeeded answers 0 and copies out what was written, zero where nothing was: the only post-set-up measurement had a failed mount, and a homebrew probe cannot set up a working one (REQ-rf03: Initialize3 is unusable there). Grounded in the call's purpose and in PPSA21564 asserting on any other answer on hardware where it runs (D708, D839)."]
+found_in = ["PPSA25872-app0", "PPSA21564-app0"]
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceSaveDataSetSaveDataMemory2"
+purpose = "Writes the title's save-data memory: (set), laid out as the read's request, with a count of data blocks at +0x20."
+returns = "status"
+edge_cases = [
+    "MEASURED only in the probe whose mount had failed (REQ-sd01): 0x809f0000.",
+    "orbistoun copies the buffer into save-data memory at the offset and answers 0 for the signed-in user after set-up; before set-up and for another user it answers as the read does, and a span outside the memory is refused by name (D839). Nothing persists the memory past the run.",
+]
+known_by = "assumed"
+assumptions = ["As for sceSaveDataGetSaveDataMemory2: a write after a working set-up answers 0 and is read back (D839)."]
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
 
 [[function]]
 name = "sceSaveDataMount3"

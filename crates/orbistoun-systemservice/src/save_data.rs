@@ -96,7 +96,65 @@ pub(crate) fn setup_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
     if MEMORY_SET_UP.swap(true, Ordering::AcqRel) {
         MEMORY_ALREADY_SET_UP
     } else {
+        // SAFETY: the guest's parameter block; the size is its u64 at +8.
+        let size = unsafe { guest::read_u64(param + 8) }
+            .unwrap_or(0)
+            .min(STORE_MOST);
+        if let Ok(mut store) = STORE.lock() {
+            *store = vec![0; usize::try_from(size).unwrap_or(0)];
+        }
         0
+    }
+}
+
+/// The span a request block names, as `(buffer, length, offset into the memory)`: the block holds
+/// the user at +0 and the data block's address at +8; the data block the buffer, its length and the
+/// offset, as obSCEne's `130-layout/savedata-memory-5d20` built them.
+fn requested_span(request: u64) -> Option<(u64, usize, usize)> {
+    // SAFETY: the guest's request block, by the call's contract.
+    let data = unsafe { guest::read_u64(request + 8) }.filter(|&d| d != 0)?;
+    // SAFETY: the data block the request names.
+    let buffer = unsafe { guest::read_u64(data) }?;
+    // SAFETY: as above.
+    let length = unsafe { guest::read_u64(data + 8) }?;
+    // SAFETY: as above.
+    let offset = unsafe { guest::read_u64(data + 16) }?;
+    Some((
+        buffer,
+        usize::try_from(length).ok()?,
+        usize::try_from(offset).ok()?,
+    ))
+}
+
+/// `sceSaveDataSetSaveDataMemory2(set)`: copies the request's buffer into save-data memory at its
+/// offset and answers `0` for the signed-in user after set-up (D839, assumed); before set-up, for
+/// another user, or for a span the memory does not hold, it answers as a read would or refuses by
+/// name.
+pub(crate) fn set_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's request block, its first word the user by the call's contract.
+    let user = unsafe { guest::read_u32(args[0]) }.unwrap_or(u32::MAX);
+    let answer = get_answer(MEMORY_SET_UP.load(Ordering::Acquire), user);
+    if answer != 0 {
+        return answer;
+    }
+    let unserved = u64::from(GuestError::Unimplemented.as_raw());
+    let Some((buffer, length, offset)) = requested_span(args[0]) else {
+        return unserved;
+    };
+    let Ok(mut store) = STORE.lock() else {
+        return unserved;
+    };
+    let Some(span) = offset
+        .checked_add(length)
+        .and_then(|end| store.get_mut(offset..end))
+    else {
+        return unserved;
+    };
+    // SAFETY: the guest's buffer, `length` bytes by the request's contract.
+    if unsafe { guest::read_into(buffer, span) } {
+        0
+    } else {
+        unserved
     }
 }
 
@@ -105,31 +163,59 @@ pub(crate) fn setup_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
 /// `200-census/libSceSaveData_native/sceSaveDataGetSaveDataMemory2`, `20261009-151440-eboot.obs.log`).
 const READ_BEFORE_SET_UP: u64 = 0x809f_0001;
 
-/// What a read after set-up answered for the signed-in user, with nothing saved: `0x809f0000`
-/// (REQ-20261009T1930Z-sd01, `20261009-215800-eboot.log` 6102 and 6107, before and after a set).
-const NOTHING_SAVED: u64 = 0x809f_0000;
+/// Save-data memory: as many bytes as set-up asked for, zero until written. Reads copy out of it and
+/// writes into it (D839, assumed); nothing persists it past the run.
+static STORE: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// The most save-data memory a set-up is given, so a size read from a guest block cannot ask the
+/// host for an unbounded allocation. PPSA21564 asks for 0x200000.
+const STORE_MOST: u64 = 0x1000_0000;
 
 /// What a read after set-up answered for user 1, which is no user (line 6105).
 const NOT_A_USER: u64 = 0x809f_0011;
 
-/// What `sceSaveDataGetSaveDataMemory2` answers for `user`: before set-up `0x809f0001`; after it,
-/// `0x809f0000` for the signed-in user, nothing having been saved, and `0x809f0011` for any other.
+/// What a save-data memory request answers for `user`: before set-up `0x809f0001` (measured);
+/// after it `0` for the signed-in user, whose memory the request reads or writes (D839, assumed),
+/// and `0x809f0011` for any other.
 fn get_answer(set_up: bool, user: u32) -> u64 {
     if !set_up {
         READ_BEFORE_SET_UP
     } else if user == crate::signed_in_user() {
-        NOTHING_SAVED
+        0
     } else {
         NOT_A_USER
     }
 }
 
-/// `sceSaveDataGetSaveDataMemory2(get)`: answers as [`get_answer`] decides for the user at `get`'s
-/// first word, writing nothing - the measured read left its buffer and data block as they were.
+/// `sceSaveDataGetSaveDataMemory2(get)`: copies save-data memory at the request's offset into its
+/// buffer and answers `0` for the signed-in user after set-up (D839, assumed); otherwise as
+/// [`get_answer`] decides, writing nothing, and a span the memory does not hold is refused by name.
 pub(crate) fn get_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's request block, its first word the user by the call's contract.
     let user = unsafe { guest::read_u32(args[0]) }.unwrap_or(u32::MAX);
-    get_answer(MEMORY_SET_UP.load(Ordering::Acquire), user)
+    let answer = get_answer(MEMORY_SET_UP.load(Ordering::Acquire), user);
+    if answer != 0 {
+        return answer;
+    }
+    let unserved = u64::from(GuestError::Unimplemented.as_raw());
+    let Some((buffer, length, offset)) = requested_span(args[0]) else {
+        return unserved;
+    };
+    let Ok(store) = STORE.lock() else {
+        return unserved;
+    };
+    let Some(span) = offset
+        .checked_add(length)
+        .and_then(|end| store.get(offset..end))
+    else {
+        return unserved;
+    };
+    // SAFETY: the guest's buffer, `length` bytes by the request's contract.
+    if unsafe { guest::write_bytes(buffer, span) } {
+        0
+    } else {
+        unserved
+    }
 }
 
 #[cfg(test)]
@@ -145,13 +231,63 @@ mod tests {
         let me = crate::signed_in_user();
         let someone_else = me.wrapping_add(1);
         assert_eq!(super::get_answer(false, me), 0x809f_0001);
-        assert_eq!(super::get_answer(true, me), 0x809f_0000);
+        assert_eq!(
+            super::get_answer(true, me),
+            0,
+            "a read from the store (D839)"
+        );
         assert_eq!(super::get_answer(true, someone_else), 0x809f_0011);
     }
     use orbistoun_core::GUEST_ARG_REGISTERS;
 
     /// The first set-up after initialisation answers `0` and writes nothing; every later one answers
     /// `0x809f0000` and writes nothing, result pointer or not (obSCEne `-5d20`).
+    /// What is written to save-data memory is read back, and what was never written reads as
+    /// zero: the memory is a store reads and writes copy through (D839).
+    #[test]
+    fn save_data_memory_reads_back_what_was_written() {
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let at = |bytes: &mut [u8]| bytes.as_mut_ptr().expose_provenance() as u64;
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        let _ = initialize3(&args);
+        let mut param = [0u8; 64];
+        param[8..16].copy_from_slice(&0x20_0000_u64.to_le_bytes());
+        args[0] = at(&mut param);
+        let _ = setup_save_data_memory2(&args);
+        let me = crate::signed_in_user();
+        // A request block: the user, then the data block's address; a data block: the buffer, its
+        // size and the offset into the memory.
+        let request = |data: &mut [u64; 4]| {
+            let mut block = [0u8; 64];
+            block[0..4].copy_from_slice(&me.to_le_bytes());
+            block[8..16].copy_from_slice(&at(bytemuck_words(data)).to_le_bytes());
+            block
+        };
+        let mut written = [0u8; 16];
+        for (i, b) in written.iter_mut().enumerate() {
+            *b = i as u8 + 1;
+        }
+        let mut data = [at(&mut written), 16, 0x30, 0];
+        let mut block = request(&mut data);
+        args[0] = at(&mut block);
+        assert_eq!(super::set_save_data_memory2(&args), 0, "written");
+        let mut read = [0xa5u8; 32];
+        let mut data = [at(&mut read), 32, 0x28, 0];
+        let mut block = request(&mut data);
+        args[0] = at(&mut block);
+        assert_eq!(super::get_save_data_memory2(&args), 0, "read");
+        assert_eq!(&read[..8], &[0; 8], "never written reads as zero");
+        assert_eq!(&read[8..24], &written, "and what was written reads back");
+    }
+
+    /// A data block's words as bytes, so the request can hold its address.
+    fn bytemuck_words(words: &mut [u64; 4]) -> &mut [u8] {
+        // SAFETY: four u64s are 32 initialised bytes, with no padding and any bit pattern valid.
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), 32) }
+    }
+
     #[test]
     fn save_data_memory_is_set_up_once_as_measured() {
         let _alone = super::INITIALISING
