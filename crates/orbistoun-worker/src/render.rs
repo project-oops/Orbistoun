@@ -1609,6 +1609,20 @@ fn refusal_lines(refusals: &[(&'static str, usize)]) -> String {
 const SUMMARY_LINES: usize = 12;
 
 /// Says what the command processor carried out at submit: how many submissions ran to
+/// Writes each program the dispatches ran, listed, beside the report: what a dispatch did is read
+/// against its code.
+fn write_dispatch_listings() {
+    let Some(dir) = frames_dir() else {
+        return;
+    };
+    for (address, listing) in orbistoun_gpu::pipeline::dispatch_program_listings() {
+        let path = dir.join(format!("dispatch-program-{address:x}.txt"));
+        if let Err(e) = std::fs::write(&path, listing) {
+            tracing::warn!("a dispatch program's listing could not be written: {e}");
+        }
+    }
+}
+
 /// completion, and where the last one stopped when it did not (D705).
 fn log_execution() {
     let record = orbistoun_gpu::agc_driver::execution();
@@ -1686,6 +1700,7 @@ fn log_execution() {
             Err(e) => tracing::warn!("the refused dispatch's program could not be written: {e}"),
         }
     }
+    write_dispatch_listings();
     // Each shader that could not be translated, likewise.
     let refused = orbistoun_gpu::pipeline::refused_shader_programs();
     if let (false, Some(dir)) = (refused.is_empty(), frames_dir()) {

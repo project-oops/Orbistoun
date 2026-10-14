@@ -137,6 +137,52 @@ pub fn refused_shader_programs() -> Vec<(u64, Vec<u8>)> {
         .collect()
 }
 
+/// The programs the run's dispatches ran, by address, at most [`REFUSED_SHADERS_KEPT`]: what it
+/// lists beside its report, so what a dispatch did can be read against its code.
+fn dispatch_programs() -> &'static std::sync::Mutex<BTreeMap<u64, Vec<u8>>> {
+    static PROGRAMS: std::sync::Mutex<BTreeMap<u64, Vec<u8>>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    &PROGRAMS
+}
+
+/// Keeps a dispatch's program the first time it runs, while there is room.
+fn keep_dispatch_program(address: u64, program: &[u8]) {
+    let mut kept = dispatch_programs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !kept.contains_key(&address) && kept.len() < REFUSED_SHADERS_KEPT {
+        kept.insert(address, program.to_vec());
+    }
+}
+
+/// Each program the run's dispatches ran, listed one instruction a line, with its address.
+#[must_use]
+pub fn dispatch_program_listings() -> Vec<(u64, String)> {
+    let (Ok(encodings), Ok(operands)) = (EncodingTable::builtin(), OperandTable::builtin()) else {
+        return Vec::new();
+    };
+    dispatch_programs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|(address, bytes)| (*address, program_listing(bytes, (&encodings, &operands))))
+        .collect()
+}
+
+/// A program listed one instruction a line: its byte, then its name, operands and words as a
+/// refusal quotes them ([`instruction_text`]).
+fn program_listing(bytes: &[u8], (encodings, operands): (&EncodingTable, &OperandTable)) -> String {
+    use std::fmt::Write as _;
+    let decoded = decode_program(bytes, encodings, operands);
+    let mut listing = String::new();
+    for instruction in &decoded.instructions {
+        let text = instruction_text(&decoded, encodings, instruction.offset)
+            .unwrap_or_else(|| format!("no encoding family, word {:#010x}", instruction.word));
+        let _ = writeln!(listing, "{:#06x}  {text}", instruction.offset);
+    }
+    listing
+}
+
 /// The program of the most recent dispatch refused while its buffers were traced, and where it
 /// lies: what a run writes beside its report, so the refusal can be read against the code.
 fn refused_program() -> &'static std::sync::Mutex<Option<(u64, Vec<u8>)>> {
@@ -279,6 +325,27 @@ mod refusal_tests {
         assert!(
             why.ends_with("(`v_mov_b32_e32 v0, 0`, word 0x7e000280)"),
             "{why}"
+        );
+    }
+
+    /// A dispatch program is listed one instruction a line: its byte, its name and operands, and its
+    /// words - what a dispatch is read against, with no disassembler.
+    #[test]
+    fn a_program_is_listed_an_instruction_a_line() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // v_mov_b32 v0, 0; s_endpgm.
+        let bytes: Vec<u8> = [0x7e00_0280_u32, 0xbf81_0000]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let listing = super::program_listing(&bytes, (&encodings, &operands));
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            [
+                "0x0000  `v_mov_b32_e32 v0, 0`, word 0x7e000280",
+                "0x0004  `s_endpgm `, word 0xbf810000",
+            ]
         );
     }
 
@@ -1755,6 +1822,7 @@ impl Pipeline {
             ));
         }
         let program = &window[..decoded.consumed];
+        keep_dispatch_program(address, program);
         // Each buffer a load or store reaches through a traced descriptor is bound on its own
         // (D746); the window covers the rest.
         let (served, buffers, formats, unread, global_base) = self
