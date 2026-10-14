@@ -1653,6 +1653,27 @@ fn an_sdwa_compare_writes_the_pair_its_word_names() {
     }
 }
 
+/// A `cmpx` in its SDWA form narrows the execution mask by its answer, its word's absolute value on
+/// the second source: PPSA21564's pixel shader does `v_cmpx_lt_f32_sdwa v1, |v0|` (words
+/// 0x7c2200f9 0x26060001). 0.5 < |-1.0| keeps every lane writing; 2.0 < |-1.0| stops them all.
+#[test]
+fn an_sdwa_compare_into_exec_narrows_the_lanes() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_compare_into_exec_narrows_the_lanes") {
+        return;
+    }
+    let compare = head("v_cmpx_lt_f32_e32") | SDWA_MARKER;
+    assert_eq!(compare, 0x7c22_00f9, "PPSA21564's first word");
+    for (first, expected) in [(0.5f32, 63), (2.0, 0)] {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, (-1.0f32).to_bits()));
+        program.extend(v_mov_literal(1, first.to_bits()));
+        program.extend([compare, 0x2606_0001, v_mov_inline(2, 63), s_endpgm()]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        assert_eq!(vector(&registers, 2), expected, "{first} < |-1.0|");
+    }
+}
+
 /// A float comparison compares floats, not their bits.
 #[test]
 fn a_comparison_compares_floats_not_the_bits() {

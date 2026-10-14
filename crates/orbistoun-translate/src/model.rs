@@ -6566,6 +6566,12 @@ pub const SDWA_COMPARE: &[&str] = &[
     "v_cmp_gt_f32_e32",
     "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
+    // The forms whose answer narrows the execution mask.
+    "v_cmpx_lt_f32_e32",
+    "v_cmpx_eq_f32_e32",
+    "v_cmpx_gt_f32_e32",
+    "v_cmpx_neq_f32_e32",
+    "v_cmpx_nlt_f32_e32",
 ];
 
 /// A compare in its SDWA form, as ACO encodes one (`aco_assembler.cpp`, its SDWA emission): the
@@ -6595,8 +6601,19 @@ fn sdwa_compare<M: Model + ?Sized>(
             "an SDWA compare selects part of a register or clamps, which is not translated",
         ));
     }
-    let (opcode, floats) = op_for_compare(instruction, name)?;
-    let Some(Operand::Vector(vsrc1)) = instruction.operands.get(2) else {
+    // A `cmpx` is its compare whose answer narrows the execution mask, which names no other
+    // destination.
+    let into_exec = name.strip_prefix("v_cmpx_");
+    if into_exec.is_some() && word >> 15 & 1 != 0 {
+        return Err(refuse(
+            "an SDWA compare into the execution mask names a destination of its own",
+        ));
+    }
+    let compare = into_exec.map(|rest| format!("v_cmp_{rest}"));
+    let (opcode, floats) = op_for_compare(instruction, compare.as_deref().unwrap_or(name))?;
+    // A compare's operands begin with the `vcc` it writes; a `cmpx` writes none of its own.
+    let second = if into_exec.is_some() { 1 } else { 2 };
+    let Some(Operand::Vector(vsrc1)) = instruction.operands.get(second) else {
         return Err(refuse(
             "an SDWA compare's second source is not its register field",
         ));
@@ -6636,6 +6653,11 @@ fn sdwa_compare<M: Model + ?Sized>(
         if words == 2 {
             model.write_scalar(register + 1, halves.1);
         }
+    } else if into_exec.is_some() {
+        let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+        let low = model.binary(op::BITWISE_AND, halves.0, running_low);
+        let high = model.binary(op::BITWISE_AND, halves.1, running_high);
+        model.write_lane_mask(EXEC_LOW_HALF, low, high)?;
     } else {
         model.write_lane_mask(VCC_LOW_HALF, halves.0, halves.1)?;
     }
