@@ -4864,9 +4864,10 @@ mod tests {
     }
 
     /// Only a target a frame can be written into exactly qualifies: single-base, single-target,
-    /// `64KB_R_X`, `8_8_8_8` `UNORM`; a second base, linear tiling, a signed-normalised format or
-    /// no format each refuses, saying which: Grand Theft Auto V's second submission draws into an
-    /// `8_8_8_8` `SNORM` target, and the refusal named every field but the one that refused.
+    /// `64KB_R_X`, `8_8_8_8` `UNORM`; a second base, linear tiling, a scaled format or no format
+    /// each refuses, saying which: Grand Theft Auto V's second submission drew into an `8_8_8_8`
+    /// `SNORM` target before one was written back (D866), and the refusal named every field but
+    /// the one that refused.
     #[test]
     fn a_writable_target_needs_one_tiled_rgba8_surface() {
         use super::writable_target;
@@ -4910,10 +4911,10 @@ mod tests {
         assert!(
             refused(|s| {
                 s.colour_target_format = Some(decode_colour_target_format(
-                    0x0001_80a8 | (1 << 11) | (1 << 8),
+                    0x0001_80a8 | (1 << 11) | (2 << 8),
                 ));
             })
-            .contains("COLOR code 10 with number type 1")
+            .contains("COLOR code 10 with number type 2")
         );
     }
 

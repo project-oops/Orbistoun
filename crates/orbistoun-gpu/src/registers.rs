@@ -2346,6 +2346,9 @@ pub const COLOR_8_8_8_8: u32 = 10;
 pub const COLOR_8: u32 = 1;
 /// `SurfaceNumber` `NUMBER_UNORM` (`gfx103.json`, enum `SurfaceNumber`).
 pub const NUMBER_UNORM: u32 = 0;
+/// `SurfaceNumber` `NUMBER_SNORM` (`gfx103.json`, enum `SurfaceNumber`): channels hold signed
+/// normalised values, -1 to 1.
+pub const NUMBER_SNORM: u32 = 1;
 /// `SurfaceNumber` `NUMBER_SRGB` (`gfx103.json`, enum `SurfaceNumber`): the bytes hold sRGB-encoded
 /// colour, which the colour block decodes to linear before blending and encodes again on write.
 pub const NUMBER_SRGB: u32 = 6;
@@ -2501,6 +2504,19 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a four-byte `8_8_8_8` `SNORM` target in an order [`Self::swap`] names, as
+    /// [`Self::is_rgba8_class`] takes them: drawn through a signed-normalised attachment, its bytes
+    /// moved as they are held (D866).
+    #[must_use]
+    pub const fn is_snorm_8_8_8_8(&self) -> bool {
+        self.format == COLOR_8_8_8_8
+            && self.number_type == NUMBER_SNORM
+            && matches!(
+                self.swap,
+                ComponentSwap::Standard | ComponentSwap::Alternate
+            )
+    }
+
     /// Whether this is a four-byte `16_16` `FLOAT` target in its standard order, red then green
     /// (`ac_formats.c` 592): two half floats a texel, drawn and written back as it is held (D847).
     #[must_use]
@@ -2539,6 +2555,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Float16x2
         } else if self.is_unorm_2_10_10_10() {
             crate::TargetEncoding::Unorm10x3A2
+        } else if self.is_snorm_8_8_8_8() {
+            crate::TargetEncoding::Snorm8
         } else if self.is_uint_16() {
             crate::TargetEncoding::Uint16
         } else if self.is_float_32_32_32_32() {
@@ -2562,6 +2580,7 @@ impl ColourTargetFormat {
             || self.is_float_32()
             || self.is_float_16_16()
             || self.is_unorm_2_10_10_10()
+            || self.is_snorm_8_8_8_8()
         {
             Some(4)
         } else if self.is_float_16_16_16_16() {
@@ -3679,6 +3698,13 @@ mod tests {
             !decode_colour_target_format(0x0001_8008).is_uint_16(),
             "not UNORM"
         );
+        // `COLOR_8_8_8_8` `SNORM` (D866), as Grand Theft Auto V's second submission draws into.
+        let signed = decode_colour_target_format(0x0001_80a8 | (1 << 8));
+        assert!(signed.is_snorm_8_8_8_8());
+        assert!(!signed.is_rgba8_class());
+        assert_eq!(signed.encoding(), crate::TargetEncoding::Snorm8);
+        assert_eq!(signed.written_back_bytes(), Some(4));
+        assert!(!decode_colour_target_format(0x0001_80a8).is_snorm_8_8_8_8());
         let ten = decode_colour_target_format(0x0001_8024);
         assert!(ten.is_unorm_2_10_10_10());
         assert_eq!(ten.encoding(), crate::TargetEncoding::Unorm10x3A2);
