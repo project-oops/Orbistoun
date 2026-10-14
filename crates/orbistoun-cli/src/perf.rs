@@ -300,7 +300,23 @@ pub(crate) fn cmd_ab(
             }
         }
     }
-    println!("\n{}", render_ab(&before, &after, top));
+    let text = format!(
+        "{} against {}\n\n{}",
+        path.display(),
+        baseline.display(),
+        render_ab(&before, &after, top)
+    );
+    println!("\n{text}");
+    // Kept beside the recordings, as a perf report is: a comparison of an hour's runs is worth more
+    // than a terminal's scrollback.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let file = orbistoun_paths::Paths::resolve()
+        .title_perf_dir(&title)
+        .join(format!("ab-{stamp}.txt"));
+    std::fs::write(&file, &text).with_context(|| format!("writing {}", file.display()))?;
+    println!("kept as {}", file.display());
     Ok(())
 }
 
