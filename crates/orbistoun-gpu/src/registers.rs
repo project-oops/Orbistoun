@@ -2380,6 +2380,16 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a one-byte `8` `UNORM` target holding alpha - `SWAP_ALT_REV` on a
+    /// one-channel format, `___X` (`ac_formats.c` 586): drawn in the frame's alpha and written back
+    /// one byte a texel (D854).
+    #[must_use]
+    pub const fn is_a8_class(&self) -> bool {
+        self.format == COLOR_8
+            && self.number_type == NUMBER_UNORM
+            && matches!(self.swap, ComponentSwap::Other(3))
+    }
+
     /// Whether no colour buffer is bound (`COLOR_INVALID`): the colour block writes nothing, so a
     /// draw through it writes only depth and stencil (D779).
     #[must_use]
@@ -2510,7 +2520,7 @@ impl ColourTargetFormat {
             Some(2)
         } else if self.is_float_32_32_32_32() {
             Some(16)
-        } else if self.is_r8_class() {
+        } else if self.is_r8_class() || self.is_a8_class() {
             Some(1)
         } else {
             None
@@ -3596,6 +3606,13 @@ mod tests {
         // integer a texel, red, two bytes (D852).
         // PPSA04263's 1 x 1 target: `32_32_32_32`, `NUMBER_FLOAT`, `SWAP_STD` - four floats a
         // texel, red first (`ac_formats.c` 529, 612), sixteen bytes (D853).
+        // PPSA04263's 1920 x 1080 target: `8`, `NUMBER_UNORM`, `SWAP_ALT_REV` - one byte a texel
+        // holding alpha, `___X` (`ac_formats.c` 586), written back one byte a texel (D854).
+        let alpha = decode_colour_target_format(0x0001_8004 | (3 << 11));
+        assert!(alpha.is_a8_class());
+        assert!(!alpha.is_r8_class());
+        assert_eq!(alpha.written_back_bytes(), Some(1));
+        assert!(!decode_colour_target_format(0x0001_8004 | (1 << 11)).is_a8_class());
         let wide = decode_colour_target_format(0x0001_8038 | (7 << 8));
         assert!(wide.is_float_32_32_32_32());
         assert_eq!(wide.encoding(), crate::TargetEncoding::Float32x4);

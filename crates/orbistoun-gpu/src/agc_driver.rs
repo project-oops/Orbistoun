@@ -385,18 +385,14 @@ fn writable_target(submission: &Submission) -> Option<(ColourTarget, ComponentSw
     .then_some((target, format.swap))
 }
 
-/// Whether `target` holds one byte a texel - an `8` `UNORM` target holding red, the only one-byte
-/// class [`writable_target`] accepts.
-fn one_byte_texels(target: ColourTarget) -> bool {
-    target.layout.texel_log2() == 0
-}
-
 /// A texel as `target` holds it in memory - a word in its byte order, or a byte - as the linear
 /// `Rgba8` word a drawer works in. A one-byte texel is red, with green and blue zero and alpha
 /// one: the drawer writes red alone ([`crate::RenderCommand::SetWriteMask`]), so alpha stays one,
 /// which is what blending reads as a one-channel target's destination alpha.
 const fn loaded(texel: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
     match target.layout.texel_log2() {
+        // An alpha target's byte is the frame's alpha, the colour channels zero (D854).
+        0 if matches!(swap, ComponentSwap::Other(3)) => (texel & 0xFF) << 24,
         0 => 0xFF00_0000 | (texel & 0xFF),
         // A two-byte texel is one 16-bit integer, drawn as itself through a 32-bit integer
         // attachment (D852).
@@ -408,6 +404,7 @@ const fn loaded(texel: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
 /// [`loaded`]'s inverse: a drawer's linear `Rgba8` word as `target` holds it in memory.
 const fn stored(word: u32, target: ColourTarget, swap: ComponentSwap) -> u32 {
     match target.layout.texel_log2() {
+        0 if matches!(swap, ComponentSwap::Other(3)) => word >> 24,
         0 => word & 0xFF,
         1 => word & 0xFFFF,
         _ => swapped(word, swap),
@@ -2138,11 +2135,19 @@ enum TargetRead {
 }
 
 impl TargetRead {
-    /// A target whose memory is `word` throughout: every texel that word, or - one byte a texel,
-    /// the word's bytes not all alike - the texels its bytes make where the layout puts them.
+    /// A target whose memory is `word` throughout: every texel that word, or - one or two bytes a
+    /// texel, the word's texels not all alike - the texels it makes where the layout puts them.
     fn of_pattern(word: u32, target: ColourTarget, swap: ComponentSwap) -> Self {
-        let bytes = word.to_le_bytes();
-        if !one_byte_texels(target) || bytes.iter().all(|&b| b == bytes[0]) {
+        // The word's texels: four bytes, two halves, or the word itself.
+        let alike = match target.layout.texel_log2() {
+            0 => word
+                .to_le_bytes()
+                .iter()
+                .all(|&b| b == word.to_le_bytes()[0]),
+            1 => word >> 16 == word & 0xFFFF,
+            _ => true,
+        };
+        if alike {
             Self::Uniform(loaded(word, target, swap))
         } else {
             Self::Changed(
@@ -5000,6 +5005,50 @@ mod tests {
         // The second is no longer the last, nor protected: a write lands, and it is read again.
         memory[stride] ^= 0xff;
         assert!(matches!(read(cp, second), Some(TargetRead::Changed(_))));
+    }
+
+    /// A one-byte texel of an alpha target (`SWAP_ALT_REV`) is the frame's alpha, the other
+    /// channels zero, and is stored back from it; a red one's is the frame's red (D854).
+    #[test]
+    fn a_one_byte_alpha_texel_is_the_frame_s_alpha() {
+        let target = crate::registers::ColourTarget {
+            base: 0,
+            width: 1,
+            height: 1,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64KbBpp1,
+            place: crate::registers::Place::Whole,
+        };
+        let alpha = crate::registers::ComponentSwap::Other(3);
+        assert_eq!(super::loaded(0x0000_00AB, target, alpha), 0xAB00_0000);
+        assert_eq!(super::stored(0xCD12_3456, target, alpha), 0xCD);
+        let red = crate::registers::ComponentSwap::Standard;
+        assert_eq!(super::loaded(0x0000_00AB, target, red), 0xFF00_00AB);
+        assert_eq!(super::stored(0xCD12_3456, target, red), 0x56);
+    }
+
+    /// A fill whose word repeats one texel is uniform; one whose texels differ within the word is
+    /// not, at two bytes a texel as at one (D852).
+    #[test]
+    fn a_fill_is_uniform_only_when_its_texels_are_alike() {
+        let target = |layout| crate::registers::ColourTarget {
+            base: 0,
+            width: 4,
+            height: 4,
+            pipe_bank_xor: 0,
+            layout,
+            place: crate::registers::Place::Whole,
+        };
+        let swap = crate::registers::ComponentSwap::Standard;
+        let two = target(crate::tiling::SurfaceLayout::Rx64KbBpp2);
+        assert!(matches!(
+            super::TargetRead::of_pattern(0x0007_0007, two, swap),
+            super::TargetRead::Uniform(7)
+        ));
+        assert!(matches!(
+            super::TargetRead::of_pattern(0x0001_0002, two, swap),
+            super::TargetRead::Changed(_)
+        ));
     }
 
     /// A two-byte texel is the low half of its word, loaded as it is and stored as its low half,
