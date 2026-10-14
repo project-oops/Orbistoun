@@ -1775,6 +1775,41 @@ fn an_sdwa_compare_writes_the_pair_its_word_names() {
     }
 }
 
+/// An integer compare in its SDWA form compares the integers its word names, into the pair it
+/// names: Grand Theft Auto V's compute program does `v_cmp_le_u32_sdwa s[14:15], s10, v0` (words
+/// 0x7d8600f9 0x06868e0a). With `s10` 5 and `v0` each lane's index, the pair anded into `exec`
+/// leaves lanes 5 on writing. The word's negate or absolute value, float modifiers, is refused.
+#[test]
+fn an_sdwa_integer_compare_writes_the_pair_its_word_names() {
+    const SDWA_MARKER: u32 = 0xf9;
+    if !device_or_skip("an_sdwa_integer_compare_writes_the_pair_its_word_names") {
+        return;
+    }
+    let compare = head("v_cmp_le_u32_e32") | SDWA_MARKER;
+    assert_eq!(compare, 0x7d86_00f9, "Grand Theft Auto V's first word");
+    let mut program = lane_index_into(0).to_vec();
+    program.push(v_int_op("v_lshlrev_b32_e32", 1, 128 + 2, 0));
+    program.push(sop1("s_mov_b32", 10, 128 + 5));
+    program.extend([compare, 0x0686_8e0a]);
+    program.push(s_logic_b64("s_and_b64", 126, 126, 14));
+    program.extend(global_store(1, 0));
+    program.push(s_endpgm());
+    let (_, memory) = run_memory(Fidelity::Wavefront, &program);
+    for (lane, stored) in memory.iter().take(64).enumerate() {
+        let expected = if lane >= 5 { lane as u32 } else { 0 };
+        assert_eq!(*stored, expected, "lane {lane}");
+    }
+
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    // The same, the first source negated (bit 20).
+    let negated = [compare, 0x0686_8e0a | 1 << 20, s_endpgm()];
+    let bytes: Vec<u8> = negated.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let refused = translate(&decoded, &table, Strategy::default()).expect_err("refused");
+    assert!(refused.to_string().contains("integer"), "{refused}");
+}
+
 /// A `cmpx` in its SDWA form narrows the execution mask by its answer, its word's absolute value on
 /// the second source: PPSA21564's pixel shader does `v_cmpx_lt_f32_sdwa v1, |v0|` (words
 /// 0x7c2200f9 0x26060001). 0.5 < |-1.0| keeps every lane writing; 2.0 < |-1.0| stops them all.

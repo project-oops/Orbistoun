@@ -7152,8 +7152,16 @@ pub const SDWA_FLOAT_UNARY: &[&str] = &[
     "v_rndne_f32_e32",
 ];
 
-/// The short-form float compares translated in their SDWA form over whole registers.
+/// The short-form compares translated in their SDWA form over whole registers.
 pub const SDWA_COMPARE: &[&str] = &[
+    // Integer compares, which take no negate or absolute value.
+    "v_cmp_eq_i32_e32",
+    "v_cmp_ne_i32_e32",
+    "v_cmp_lt_u32_e32",
+    "v_cmp_le_u32_e32",
+    "v_cmp_eq_u32_e32",
+    "v_cmp_ne_u32_e32",
+    "v_cmp_ge_u32_e32",
     "v_cmp_lt_f32_e32",
     "v_cmp_eq_f32_e32",
     "v_cmp_le_f32_e32",
@@ -7206,6 +7214,12 @@ fn sdwa_compare<M: Model + ?Sized>(
     }
     let compare = into_exec.map(|rest| format!("v_cmp_{rest}"));
     let (opcode, floats) = op_for_compare(instruction, compare.as_deref().unwrap_or(name))?;
+    // Negate and absolute value are float modifiers; on an integer compare they are refused.
+    if !floats && word & (0b11 << 20 | 0b11 << 28) != 0 {
+        return Err(refuse(
+            "an SDWA integer compare negates or takes the absolute value of a source",
+        ));
+    }
     // A compare's operands begin with the `vcc` it writes; a `cmpx` writes none of its own.
     let second = if into_exec.is_some() { 1 } else { 2 };
     let Some(Operand::Vector(vsrc1)) = instruction.operands.get(second) else {
