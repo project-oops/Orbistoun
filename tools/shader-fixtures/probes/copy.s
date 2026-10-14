@@ -261,6 +261,12 @@ v_cmp_ngt_f32_e32 vcc, s5, v190
 v_cmp_ngt_f32_e32 vcc, -1, v255
 v_cmp_ngt_f32_e32 vcc, 4, v77
 v_cmp_ngt_f32_e32 vcc, v130, v12
+// Unsigned equality, which PPSA21564's pixel shader at 0x500540000 tests a masked word with.
+v_cmp_eq_u32_e32 vcc, v4, v5
+v_cmp_eq_u32_e32 vcc, s5, v190
+v_cmp_eq_u32_e32 vcc, -1, v255
+v_cmp_eq_u32_e32 vcc, 4, v77
+v_cmp_eq_u32_e32 vcc, v130, v12
 
 // ---- s_cmp_lg_u32: SOPC; v_cmpx_neq_f32_e32: VOPC into exec ------------------------------
 s_cmp_lg_u32 s2, 0

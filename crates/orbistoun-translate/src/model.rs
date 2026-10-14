@@ -192,6 +192,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_lt_u32_e32",
+    "v_cmp_eq_u32_e32",
     "v_cmp_ne_u32_e32",
     "v_cmp_ge_u32_e32",
     "v_cmp_lt_f32_e64",

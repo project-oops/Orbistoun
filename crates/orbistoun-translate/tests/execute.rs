@@ -6750,6 +6750,36 @@ fn not_greater_than_is_true_for_a_nan() {
     assert_eq!(lanes_written(BITS_QUIET_NAN, one), 63, "NaN is unordered");
 }
 
+/// `v_cmp_eq_u32` compares the words whole: equal ones, the top bit set included, and nothing
+/// else. PPSA21564's pixel shader at `0x500540000` tests a masked word with it.
+#[test]
+fn unsigned_equality_compares_whole_words() {
+    if !device_or_skip("unsigned_equality_compares_whole_words") {
+        return;
+    }
+    let lanes_written = |left: u32, right: u32| -> u32 {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, left));
+        program.extend(v_mov_literal(1, right));
+        program.extend([
+            v_cmp_f32("v_cmp_eq_u32_e32", vgpr_code(0), 1),
+            s_logic_b64("s_and_b64", 126, 126, 106),
+            v_mov_inline(2, 63),
+            s_endpgm(),
+        ]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    assert_eq!(lanes_written(5, 5), 63, "5 == 5");
+    assert_eq!(lanes_written(5, 6), 0, "5 != 6");
+    assert_eq!(lanes_written(u32::MAX, u32::MAX), 63, "the top bit set");
+    assert_eq!(
+        lanes_written(u32::MAX, 0x7fff_ffff),
+        0,
+        "only the top bit differs"
+    );
+}
+
 /// The long-form float compares take each source's absolute and negate flags: `|-2| == 2`,
 /// `-2 <= 2`, `-(-2) >= 2`, and `-2 >= 2` is false. In a thirty-two-lane wave the mask is one
 /// register, and the next is left as it was.

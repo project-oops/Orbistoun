@@ -1641,6 +1641,21 @@ fn log_execution() {
             Err(e) => tracing::warn!("the refused dispatch's program could not be written: {e}"),
         }
     }
+    // Each shader that could not be translated, likewise.
+    let refused = orbistoun_gpu::pipeline::refused_shader_programs();
+    if let (false, Some(dir)) = (refused.is_empty(), frames_dir()) {
+        let written = refused.iter().try_for_each(|(address, program)| {
+            std::fs::write(dir.join(format!("refused-shader-{address:x}.bin")), program)
+        });
+        match written {
+            Ok(()) => tracing::info!(
+                "{} shader(s) that could not be translated are refused-shader-<address>.bin in {}",
+                refused.len(),
+                dir.display()
+            ),
+            Err(e) => tracing::warn!("the refused shaders could not be written: {e}"),
+        }
+    }
     if let Some(why) = orbistoun_gpu::agc_driver::last_draw_refusal() {
         tracing::info!("a draw segment was not carried out - {why}");
     }

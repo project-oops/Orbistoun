@@ -105,6 +105,38 @@ struct ForDraw {
 /// No texture slot's coordinates saturated.
 const UNSATURATED: [[bool; 2]; MAX_TEXTURES] = [[false; 2]; MAX_TEXTURES];
 
+/// The shaders a run could not translate, by address: what it writes beside its report, so each
+/// refusal can be read against the code. At most [`REFUSED_SHADERS_KEPT`].
+fn refused_shaders() -> &'static std::sync::Mutex<BTreeMap<u64, Vec<u8>>> {
+    static SHADERS: std::sync::Mutex<BTreeMap<u64, Vec<u8>>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    &SHADERS
+}
+
+/// How many refused shaders a run keeps.
+const REFUSED_SHADERS_KEPT: usize = 16;
+
+/// Keeps a shader that could not be translated, while there is room.
+fn keep_refused_shader(address: u64, shader: &[u8]) {
+    let mut kept = refused_shaders()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if kept.len() < REFUSED_SHADERS_KEPT || kept.contains_key(&address) {
+        kept.insert(address, shader.to_vec());
+    }
+}
+
+/// The shaders a run could not translate, each with its address.
+#[must_use]
+pub fn refused_shader_programs() -> Vec<(u64, Vec<u8>)> {
+    refused_shaders()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|(address, bytes)| (*address, bytes.clone()))
+        .collect()
+}
+
 /// The program of the most recent dispatch refused while its buffers were traced, and where it
 /// lies: what a run writes beside its report, so the refusal can be read against the code.
 fn refused_program() -> &'static std::sync::Mutex<Option<(u64, Vec<u8>)>> {
@@ -4196,12 +4228,16 @@ impl Pipeline {
                 .map(|text| format!(" ({text})"))
                 .unwrap_or_default();
             let reason = format!("the shader at {address:#x} could not be translated: {e}{named}");
-            if matches!(
+            let retried = matches!(
                 e,
                 orbistoun_translate::TranslateError::ReadsGeometryInputs
                     | orbistoun_translate::TranslateError::NeedsBufferFormats
                     | orbistoun_translate::TranslateError::NeedsFlatTwins
-            ) {
+            );
+            if !retried {
+                keep_refused_shader(address, shader);
+            }
+            if retried {
                 PrepareFailure::NeedsGeometry(reason)
             } else {
                 PrepareFailure::Resolved(reason)
