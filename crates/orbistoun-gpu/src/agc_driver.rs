@@ -3642,12 +3642,19 @@ fn undelivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::Res
 /// Reads one submit descriptor, walks the command buffer it names, and keeps the submission - the
 /// body both submit entry points share.
 fn submit_described(descriptor: u64) -> u64 {
-    crate::perf::span(crate::perf::Span::SubmitCall, || {
-        crate::perf::measure(crate::perf::Phase::Submit, || {
-            submit_described_timed(descriptor)
+    // On a title's own stack the walk and the translator's frames may not fit (D841).
+    orbistoun_kernel::thread::with_room(SUBMIT_STACK_ROOM, || {
+        crate::perf::span(crate::perf::Span::SubmitCall, || {
+            crate::perf::measure(crate::perf::Phase::Submit, || {
+                submit_described_timed(descriptor)
+            })
         })
     })
 }
+
+/// The stack a submission's preparation is given (D841): it decodes and translates shaders and
+/// walks the command buffer, and PPSA21564's render thread, on a stack of its own, overflowed in it.
+const SUBMIT_STACK_ROOM: u64 = 4 * 1024 * 1024;
 
 /// What a submission left in the registers is what the next one starts from (D737), its indirect
 /// loads read from the tables as it was submitted with them.

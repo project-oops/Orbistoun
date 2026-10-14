@@ -970,6 +970,57 @@ pub fn this_stack() -> Option<(u64, u64)> {
     MY_STACK.with(std::cell::Cell::get)
 }
 
+/// The stack a host thread lent to a handler gets: far more than any handler's frames.
+const LENT_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+/// Runs `work` - a handler's own body - where it has `room` bytes of stack: inline when this
+/// thread's guest stack has that much left below the current frame, and otherwise on a host thread
+/// with a stack of its own while this one waits (D841).
+///
+/// A handler runs on the stack of the guest thread that called it. A stack the title supplied
+/// (`scePthreadAttrSetstack`) is sized for the console's libraries, and a handler that translates or
+/// walks a command buffer needs more than that leaves. The lent thread starts at this thread's
+/// logical time, and this thread's clock moves up to where the work left it (D735), so the guest
+/// sees one thread's time either way. A host that refuses the thread gets the work inline.
+pub fn with_room<R: Send>(room: u64, work: impl FnOnce() -> R + Send) -> R {
+    let marker = 0_u8;
+    let here = std::ptr::addr_of!(marker) as u64;
+    let enough = this_stack().is_none_or(|(low, _)| here.saturating_sub(low) >= room);
+    if enough {
+        return work();
+    }
+    let born = orbistoun_hle::clocks::thread_time();
+    // Held here, so a thread the host refuses leaves the work behind to run inline.
+    let held = Mutex::new(Some(work));
+    let take = || {
+        held.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    };
+    let lent = std::thread::scope(|scope| {
+        let spawned = std::thread::Builder::new()
+            .name("handler:room".to_owned())
+            .stack_size(LENT_STACK_BYTES)
+            .spawn_scoped(scope, || {
+                orbistoun_hle::clocks::begin_thread_at(born);
+                take().map(|work| (work(), orbistoun_hle::clocks::thread_time()))
+            });
+        spawned.ok().map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
+    });
+    if let Some(Some((result, after))) = lent {
+        orbistoun_hle::clocks::advance_to(after);
+        return result;
+    }
+    match take() {
+        Some(work) => work(),
+        None => unreachable!("the work either ran on the lent thread or is still held"),
+    }
+}
+
 /// Where guest thread stacks are reserved.
 ///
 /// Stacks are spaced by more than the largest stack, so a guard page always has unmapped space
@@ -995,6 +1046,38 @@ fn next_stack_index() -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A handler with room on its stack runs inline; one on a stack with too little left runs on a
+    /// lent host thread, and the thread's logical clock carries over it (D841).
+    #[test]
+    fn a_handler_without_room_runs_on_a_lent_stack() {
+        // On a fresh host thread, so the stack it pretends to have is no other test's.
+        std::thread::spawn(|| {
+            let here = std::thread::current().id();
+            assert_eq!(
+                super::with_room(1 << 20, || std::thread::current().id()),
+                here
+            );
+
+            let marker = 0_u8;
+            let at = std::ptr::addr_of!(marker) as u64;
+            // A guest stack ending a few kilobytes below this frame.
+            super::note_this_stack(at - 4096, 8192);
+            orbistoun_hle::clocks::begin_thread_at(5_000);
+            let (ran_on, saw) = super::with_room(1 << 20, || {
+                (
+                    std::thread::current().id(),
+                    orbistoun_hle::clocks::thread_time(),
+                )
+            });
+            assert_ne!(ran_on, here, "too little room, so another thread");
+            assert_eq!(saw, 5_000, "it starts at this thread's time");
+            assert!(orbistoun_hle::clocks::thread_time() >= 5_000);
+            assert_eq!(super::with_room(1024, || std::thread::current().id()), here);
+        })
+        .join()
+        .expect("the test thread");
+    }
 
     /// A raise on a thread running guest code is accepted and waits for it, taken exactly once
     /// when the thread next sleeps where it is consulted, and leaves nothing behind (D813). The
