@@ -2059,6 +2059,8 @@ pub enum TexelFormat {
     Rgba32Uint,
     /// One thirty-two-bit unsigned channel, a texel a word: the guest's `32_UINT`.
     R32Uint,
+    /// One thirty-two-bit float channel, a texel a word: the guest's `32_FLOAT`.
+    R32Float,
     /// Three packed unsigned floats, eleven, eleven and ten bits, a texel a word (D774).
     Float11_11_10,
     /// Four eight-bit channels, the colour ones sRGB-encoded, a texel a word.
@@ -2073,9 +2075,12 @@ impl TexelFormat {
     #[must_use]
     pub const fn bytes(self) -> u32 {
         match self {
-            Self::Rgba8 | Self::Float11_11_10 | Self::Rgba8Srgb | Self::Rgb10A2 | Self::R32Uint => {
-                4
-            }
+            Self::Rgba8
+            | Self::Float11_11_10
+            | Self::Rgba8Srgb
+            | Self::Rgb10A2
+            | Self::R32Uint
+            | Self::R32Float => 4,
             Self::R8 => 1,
             Self::Rgba32Uint => 16,
         }
@@ -2774,6 +2779,7 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         // One channel, read with the constants a one-channel image answers for the others - which
         // the host's one-channel view answers too - or written, where the selects say nothing.
         FORMAT_32_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Uint),
+        FORMAT_32_FLOAT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Float),
         _ => Err(format!(
             "a dispatch image of format {}",
             describe_dispatch_image(descriptor, words)
@@ -5803,9 +5809,11 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
-        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint | TexelFormat::R32Uint => {
-            crate::backend::TextureEncoding::Rgba8
-        }
+        TexelFormat::Rgba8
+        | TexelFormat::R8
+        | TexelFormat::Rgba32Uint
+        | TexelFormat::R32Uint
+        | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
     }
 }
 
@@ -5908,6 +5916,7 @@ fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std
                 TexelFormat::Rgba8
                 | TexelFormat::Rgba32Uint
                 | TexelFormat::R32Uint
+                | TexelFormat::R32Float
                 | TexelFormat::Float11_11_10
                 | TexelFormat::Rgba8Srgb
                 | TexelFormat::Rgb10A2 => texel.to_le_bytes(),
