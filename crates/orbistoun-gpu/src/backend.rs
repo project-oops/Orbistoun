@@ -446,6 +446,9 @@ pub enum TargetEncoding {
     /// `COLOR_16` `UINT` (D852): one 16-bit unsigned integer a texel, drawn through Vulkan's
     /// `R32_UINT`, each texel a word holding the integer, which write-back stores as its low half.
     Uint16,
+    /// `COLOR_32_32_32_32` `FLOAT` (D853): four 32-bit floats a texel, red first - the bits
+    /// Vulkan's `R32G32B32A32_SFLOAT` holds. Sixteen bytes a texel.
+    Float32x4,
 }
 
 /// What a bound texture's words are.

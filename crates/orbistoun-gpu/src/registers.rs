@@ -1422,6 +1422,9 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
             layout.at_bytes_per_texel(8).unwrap_or(layout)
         }
         Some(format) if format.format == COLOR_16 => layout.at_bytes_per_texel(2).unwrap_or(layout),
+        Some(format) if format.format == COLOR_32_32_32_32 => {
+            layout.at_bytes_per_texel(16).unwrap_or(layout)
+        }
         _ => layout,
     };
     // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
@@ -2301,6 +2304,9 @@ pub const COLOR_10_11_11: u32 = 6;
 /// `ColorFormat` `COLOR_32` (`gfx103.json`): what Mesa targets a one-channel 32-bit format at
 /// (`ac_formats.c` 489).
 pub const COLOR_32: u32 = 4;
+/// `ColorFormat` `COLOR_32_32_32_32` (`gfx103.json`): what Mesa targets a four-channel 32-bit
+/// format at (`ac_formats.c` 529).
+pub const COLOR_32_32_32_32: u32 = 14;
 /// `ColorFormat` `COLOR_16` (`gfx103.json`): what Mesa targets a one-channel 16-bit format at
 /// (`ac_formats.c` 486).
 pub const COLOR_16: u32 = 2;
@@ -2416,6 +2422,15 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a sixteen-byte `32_32_32_32` `FLOAT` target in its standard order, red first
+    /// (`ac_formats.c` 612): four floats a texel, drawn and written back as it is held (D853).
+    #[must_use]
+    pub const fn is_float_32_32_32_32(&self) -> bool {
+        self.format == COLOR_32_32_32_32
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a four-byte `2_10_10_10` `UNORM` target in its standard order: red, green
     /// and blue in ten bits each from the low end, alpha in the top two (`ac_formats.c` 612), drawn
     /// and written back as it is held (D848).
@@ -2466,6 +2481,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Unorm10x3A2
         } else if self.is_uint_16() {
             crate::TargetEncoding::Uint16
+        } else if self.is_float_32_32_32_32() {
+            crate::TargetEncoding::Float32x4
         } else if self.is_srgb() {
             crate::TargetEncoding::Srgb8
         } else {
@@ -2491,6 +2508,8 @@ impl ColourTargetFormat {
             Some(8)
         } else if self.is_uint_16() {
             Some(2)
+        } else if self.is_float_32_32_32_32() {
+            Some(16)
         } else if self.is_r8_class() {
             Some(1)
         } else {
@@ -3575,6 +3594,15 @@ mod tests {
         // four bytes (D848).
         // PPSA04263's 3840 x 2160 target: `16`, `NUMBER_UINT`, `SWAP_STD` - one 16-bit unsigned
         // integer a texel, red, two bytes (D852).
+        // PPSA04263's 1 x 1 target: `32_32_32_32`, `NUMBER_FLOAT`, `SWAP_STD` - four floats a
+        // texel, red first (`ac_formats.c` 529, 612), sixteen bytes (D853).
+        let wide = decode_colour_target_format(0x0001_8038 | (7 << 8));
+        assert!(wide.is_float_32_32_32_32());
+        assert_eq!(wide.encoding(), crate::TargetEncoding::Float32x4);
+        assert_eq!(wide.written_back_bytes(), Some(16));
+        assert!(
+            !decode_colour_target_format(0x0001_8038 | (7 << 8) | (1 << 11)).is_float_32_32_32_32()
+        );
         let id = decode_colour_target_format(0x0001_8008 | (4 << 8));
         assert!(id.is_uint_16());
         assert_eq!(id.encoding(), crate::TargetEncoding::Uint16);
@@ -4594,6 +4622,13 @@ mod tests {
                     origin: (16, 32),
                 },
             })
+        );
+        // A sixteen-byte `32_32_32_32` element lies by the 128-bpp layout (D853).
+        let mut wide = page.to_vec();
+        wide.push(write(0xA31C, 14 << 2 | 7 << 8));
+        assert_eq!(
+            colour_target_at(&wide).map(|t| t.layout),
+            Some(crate::tiling::SurfaceLayout::Rx64KbBpp16)
         );
         // A two-byte `16` element lies by the 16-bpp layout (D852).
         let mut two = page.to_vec();
