@@ -1236,6 +1236,10 @@ pub struct Pipeline {
     carries_state: bool,
     /// That state: the last value each register was written, by the submissions carried so far.
     carried: BTreeMap<u32, u32>,
+    /// The stream the last preparation read - by where it lies and its length - with its own
+    /// register writes and its last `CLEAR_STATE`: what [`Self::carry`] of that same stream takes
+    /// rather than walking and reading it again. Taken once.
+    last_read: Option<LastRead>,
     /// The wave widths in force at the draw whose shaders are being bound, while one is: a
     /// submission may change them between draws.
     draw_widths: Option<WaveWidths>,
@@ -1366,6 +1370,7 @@ impl Pipeline {
             feeds_user_data: false,
             carries_state: false,
             carried: BTreeMap::new(),
+            last_read: None,
             draw_widths: None,
             user_data: [UserData::default(); 2],
             cache: BTreeMap::new(),
@@ -1754,9 +1759,20 @@ impl Pipeline {
         if !self.carries_state {
             return;
         }
-        let walked = walk(stream);
-        let writes = register_writes_reading(&walked, stream, &self.vocabulary, tables);
-        let cleared = last_clear(&walked);
+        // The writes the preparation of this very stream read, under the same tables, when it was
+        // the last one prepared; otherwise read again.
+        let (writes, cleared) = match self.last_read.take() {
+            Some(read) if read.stream == (stream.as_ptr() as usize, stream.len()) => {
+                (read.writes, read.cleared)
+            }
+            _ => {
+                let walked = walk(stream);
+                (
+                    register_writes_reading(&walked, stream, &self.vocabulary, tables),
+                    last_clear(&walked),
+                )
+            }
+        };
         if cleared.is_some() {
             self.carried.clear();
         }
@@ -1843,6 +1859,13 @@ impl Pipeline {
         let (writes, own_writes) = span(Span::PrepareRegisters, || {
             self.writes_over(&carried_in, &walked, stream, Some(&tables.over(memory)))
         });
+        if self.carries_state {
+            self.last_read = Some(LastRead {
+                stream: (stream.as_ptr() as usize, stream.len()),
+                writes: writes[writes.len() - own_writes..].to_vec(),
+                cleared: last_clear(&walked),
+            });
+        }
         let inferred = shader_candidates(&writes, &self.vocabulary);
 
         let mut submission = Submission {
@@ -1948,6 +1971,15 @@ impl Pipeline {
 
         submission
     }
+}
+
+/// A preparation's own reading of its stream, kept for [`Pipeline::carry`] of the same stream.
+#[derive(Debug, Clone)]
+struct LastRead {
+    /// Where the stream lay and how long it was: the same slice, handed on from the submit.
+    stream: (usize, usize),
+    writes: Vec<RegisterWrite>,
+    cleared: Option<u32>,
 }
 
 /// The offset of a stream's last `CLEAR_STATE`, which resets register state to its defaults, or
