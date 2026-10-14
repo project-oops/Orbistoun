@@ -858,10 +858,61 @@ fn global_store(vaddr: u32, vdata: u32) -> [u32; 2] {
 
 /// `global_load_dword vDst, vAddr, off`.
 fn global_load(vdst: u32, vaddr: u32) -> [u32; 2] {
-    [
-        head("global_load_dword"),
-        vaddr | (FLAT_NO_BASE_CODE << 16) | (vdst << 24),
-    ]
+    global_load_named("global_load_dword", vdst, vaddr)
+}
+
+/// A flat load `name vDst, vAddr, off`, its segment bits those of a flat access.
+fn global_load_named(name: &str, vdst: u32, vaddr: u32) -> [u32; 2] {
+    [head(name), vaddr | (FLAT_NO_BASE_CODE << 16) | (vdst << 24)]
+}
+
+/// The sub-word loads read the byte or half at their address and widen it - zero-extended
+/// unsigned, sign-extended signed (AMD's published RDNA instruction set): from a word holding
+/// `0x80ff7f81` at 16, the bytes at 16, 17 and 19 and the half at 18. Grand Theft Auto V's compute
+/// program reads a byte through a flat address so (D878).
+#[test]
+fn the_sub_word_loads_read_and_widen_their_byte_or_half() {
+    if !device_or_skip("the_sub_word_loads_read_and_widen_their_byte_or_half") {
+        return;
+    }
+    let mut program = vec![
+        v_mov_inline(8, 16),
+        v_mov_inline(9, 17),
+        v_mov_inline(10, 18),
+    ];
+    program.push(v_mov_inline(11, 19));
+    program.extend(v_mov_literal(1, 0x80ff_7f81));
+    program.extend(global_store(8, 1));
+    for (name, vdst, vaddr) in [
+        ("global_load_ubyte", 2, 8),
+        ("global_load_ubyte", 3, 9),
+        ("global_load_sbyte", 4, 11),
+        ("global_load_ushort", 5, 10),
+        ("global_load_sshort", 6, 10),
+        ("global_load_sbyte", 7, 8),
+    ] {
+        program.extend(global_load_named(name, vdst, vaddr));
+    }
+    program.push(s_endpgm());
+    let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+    assert_eq!(
+        [2, 3, 4, 5, 6, 7].map(|n| vector(&registers, n)),
+        [0x81, 0x7f, 0xffff_ff80, 0x80ff, 0xffff_80ff, 0xffff_ff81]
+    );
+}
+
+/// A scratch-segment access - segment bits 15:14 one - is refused by name rather than read as a
+/// global one: its address is per-lane private memory, not guest memory (D878).
+#[test]
+fn a_scratch_access_is_refused() {
+    let table = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let [first, second] = global_load(2, 8);
+    let program = [first | (1 << 14), second, s_endpgm()];
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &table, &operands);
+    let error = translate(&decoded, &table, Strategy::default()).expect_err("refused");
+    assert!(error.to_string().contains("scratch"), "{error}");
 }
 
 /// `s_load_dwordxN sDst, s[base:base+1], offset`, from the solved layout.

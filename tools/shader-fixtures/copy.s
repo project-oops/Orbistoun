@@ -75,6 +75,11 @@ v_cvt_pkrtz_f16_f32_e64 v18, v1, v2
 // Grand Theft Auto V's pixel shader packs two floats as unsigned-normalised halves for a `16_16`
 // `UNORM` target; its siblings pack signed-normalised halves and 16-bit integers.
 v_cvt_pknorm_u16_f32 v18, v1, v2
+// Grand Theft Auto V's compute program reads a byte through a flat address; the sub-word loads.
+global_load_ubyte v18, v1, s[2:3]
+global_load_sbyte v18, v1, s[2:3]
+global_load_ushort v18, v1, s[2:3]
+global_load_sshort v18, v1, s[2:3]
 v_cvt_pknorm_i16_f32 v18, v1, v2
 v_cvt_pk_u16_u32 v18, v1, v2
 v_cvt_pk_i16_i32 v18, v1, v2

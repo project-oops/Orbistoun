@@ -67,6 +67,26 @@ global_load_dword v255, v130, s[40:41]
 global_load_dword v44, v255, s[16:17]
 global_load_dword v128, v77, s[24:25]
 
+// The sub-word loads, a byte or a half zero- or sign-extended into one register (ACO
+// `aco_opcodes.py` 1985-1988). Grand Theft Auto V's compute program reads a byte so. Scalar bases
+// and addresses spread across the register file, as above.
+global_load_ubyte v11, v22, s[8:9]
+global_load_ubyte v190, v7, s[30:31]
+global_load_ubyte v255, v130, s[40:41]
+global_load_ubyte v44, v255, s[16:17] offset:6
+global_load_sbyte v11, v22, s[8:9]
+global_load_sbyte v190, v7, s[30:31]
+global_load_sbyte v255, v130, s[40:41]
+global_load_sbyte v44, v255, s[16:17] offset:6
+global_load_ushort v11, v22, s[8:9]
+global_load_ushort v190, v7, s[30:31]
+global_load_ushort v255, v130, s[40:41]
+global_load_ushort v44, v255, s[16:17] offset:6
+global_load_sshort v11, v22, s[8:9]
+global_load_sshort v190, v7, s[30:31]
+global_load_sshort v255, v130, s[40:41]
+global_load_sshort v44, v255, s[16:17] offset:6
+
 // **With offsets, which nothing here had.** A flat access carries a byte offset beside its
 // address, and every probe above leaves it at zero - where the reference prints nothing, so the
 // solver had no evidence the field exists and correctly declined to invent one. The translation

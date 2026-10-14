@@ -62,6 +62,10 @@ pub const SUPPORTED: &[&str] = &[
     "image_sample_c",
     "image_store",
     "image_get_resinfo",
+    "global_load_ubyte",
+    "global_load_sbyte",
+    "global_load_ushort",
+    "global_load_sshort",
     "global_load_dword",
     "global_load_dwordx2",
     "global_load_dwordx3",
@@ -3047,6 +3051,10 @@ fn memory_instruction<M: Model + ?Sized>(
         | "global_load_dwordx2"
         | "global_load_dwordx3"
         | "global_load_dwordx4"
+        | "global_load_ubyte"
+        | "global_load_sbyte"
+        | "global_load_ushort"
+        | "global_load_sshort"
         | "global_store_dword"
         | "global_store_dwordx2"
         | "global_store_dwordx4" => memory(model, instruction, name),
@@ -10493,6 +10501,67 @@ fn close_if_active<M: Model + ?Sized>(model: &mut M, merge: Option<Id>) {
     }
 }
 
+/// The width in bits and signedness of a sub-word load: a byte or a half, zero- or sign-extended.
+fn sub_word(name: &str) -> Option<(u32, bool)> {
+    match name {
+        "global_load_ubyte" => Some((8, false)),
+        "global_load_sbyte" => Some((8, true)),
+        "global_load_ushort" => Some((16, false)),
+        "global_load_sshort" => Some((16, true)),
+        _ => None,
+    }
+}
+
+/// A byte or half load: the word holding its address read, and the bytes at its place in it
+/// widened into the destination - zero-extended, or `signed` sign-extended (AMD's published RDNA
+/// instruction set). A half at a word's last byte takes its high byte from the next word.
+fn sub_word_load<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (width, signed): (u32, bool),
+) -> Result<(), TranslateError> {
+    let (destination, vaddr, base) = first_three_operands(instruction)?;
+    let Operand::Vector(register) = destination else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a flat load destination is not a vector register",
+        });
+    };
+    let register = u32::from(*register);
+    for lane in running_lanes(model) {
+        let address = model.flat_address(instruction, vaddr, base, lane)?;
+        let aligned = model.constant(!3);
+        let word_address = model.binary(op::BITWISE_AND, address, aligned);
+        let low = read_guarded(model, word_address);
+        let next = step_address(model, word_address, 1);
+        let high = read_guarded(model, next);
+        // The bytes from the address on: the low word shifted down, the next word's above it.
+        let three = model.constant(3);
+        let place = model.binary(op::BITWISE_AND, address, three);
+        let eight = model.constant(8);
+        let shift = model.binary(op::IMUL, place, eight);
+        let down = model.binary(op::SHIFT_RIGHT_LOGICAL, low, shift);
+        // `high << (32 - shift)`, as two shifts so a shift of zero moves it out entirely.
+        let one = model.constant(1);
+        let doubled = model.binary(op::SHIFT_LEFT_LOGICAL, high, one);
+        let thirty_one = model.constant(31);
+        let rest = model.binary(op::ISUB, thirty_one, shift);
+        let up = model.binary(op::SHIFT_LEFT_LOGICAL, doubled, rest);
+        let bytes = model.binary(op::BITWISE_OR, down, up);
+        let unused = model.constant(32 - width);
+        let top = model.binary(op::SHIFT_LEFT_LOGICAL, bytes, unused);
+        let widen = if signed {
+            op::SHIFT_RIGHT_ARITHMETIC
+        } else {
+            op::SHIFT_RIGHT_LOGICAL
+        };
+        let value = model.binary(widen, top, unused);
+        model.write_vector_lane(register, lane, value);
+    }
+    model.count();
+    Ok(())
+}
+
 /// One vector register number as the decoder spells it.
 ///
 /// Saturating, and unreachable either way: the caller has checked the pair fits the register file.
@@ -10509,6 +10578,17 @@ fn flat_memory<M: Model + ?Sized>(
     instruction: &Instruction,
     name: &str,
 ) -> Result<(), TranslateError> {
+    // The segment, bits 15:14 of the first word: flat (0) and global (2) both reach global memory
+    // here (D878); scratch (1) is a lane's private memory, which no window holds.
+    if (instruction.word >> 14) & 3 == 1 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a scratch-segment access reaches a lane's private memory, which is not modelled (D878)",
+        });
+    }
+    if let Some((width, signed)) = sub_word(name) {
+        return sub_word_load(model, instruction, (width, signed));
+    }
     match name {
         // The flat loads, which differ only in how many consecutive registers they fill; each
         // layout is probed rather than assumed shared.
@@ -10904,6 +10984,10 @@ fn memory<M: Model + ?Sized>(
         | "global_load_dwordx2"
         | "global_load_dwordx3"
         | "global_load_dwordx4"
+        | "global_load_ubyte"
+        | "global_load_sbyte"
+        | "global_load_ushort"
+        | "global_load_sshort"
         | "global_store_dword"
         | "global_store_dwordx2"
         | "global_store_dwordx4" => flat_memory(model, instruction, name),
