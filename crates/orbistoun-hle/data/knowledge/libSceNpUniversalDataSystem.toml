@@ -60,3 +60,34 @@ known_by = "measured"
 cites = "obSCEne REQ-20261013T1930Z-rf02, reports/hardware/report-20261014-004800.log lines 1666-1684 (000-boot/ux01-calls)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-14"
+
+[[function]]
+name = "sceNpUniversalDataSystemCreateEvent"
+arity = 4
+purpose = "(name, prop, &event, 0): creates an event named name, with an optional property object, writing its address to event."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261014T0430Z-ue01, after sysmodule 0x0105, Initialize, CreateContext, CreateHandle and CreateEventPropertyObject): CreateEvent(\"activityTerminate\", prop, event, 0) with event a 0x20-byte block of 0xcc answered 0x0 and wrote a heap address to its first eight bytes, the other 0x18 untouched; prop null answered 0x0; event null answered 0x80553102; a second call in the same process answered 0x0 with another address.",
+    "PPSA02664 calls it once a frame, name \"activityTerminate\".",
+    "orbistoun writes a fresh zeroed 0x100-byte block's address (the size assumed).",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261014T0430Z-ue01, reports/hardware/report-20261014-batch4.log lines 2855-2863 (000-boot/uds-create-event)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceNpUniversalDataSystemRegisterContext"
+arity = 3
+purpose = "(ctx, handle, 0): registers a context with a handle."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261014T0430Z-ue01, with the context and handle the same process had just made): 0x80553104, and 0x80553104 again on a second call.",
+    "Every commercial title in the corpus calls it.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261014T0430Z-ue01, reports/hardware/report-20261014-batch4.log lines 2851-2852 (000-boot/uds-create-event)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA28061-app0"]
+found_on = "2026-10-14"

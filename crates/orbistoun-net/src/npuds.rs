@@ -3,7 +3,8 @@
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
 //! full capture, not a claim about the argument count. `sceNpUniversalDataSystemInitialize` and
 //! `sceNpUniversalDataSystemCreateContext`, `sceNpUniversalDataSystemCreateHandle` and
-//! `sceNpUniversalDataSystemCreateEventPropertyObject` are implemented, as measured.
+//! `sceNpUniversalDataSystemCreateEventPropertyObject`, `sceNpUniversalDataSystemCreateEvent` and
+//! `sceNpUniversalDataSystemRegisterContext` are implemented, as measured.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
@@ -18,6 +19,10 @@ guest_module! {
         "sceNpUniversalDataSystemCreateHandle" => 1,
         // (&object)
         "sceNpUniversalDataSystemCreateEventPropertyObject" => 1,
+        // (name, prop, &event, 0)
+        "sceNpUniversalDataSystemCreateEvent" => 4,
+        // (ctx, handle, 0)
+        "sceNpUniversalDataSystemRegisterContext" => 3,
     }
 }
 
@@ -32,6 +37,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
             "sceNpUniversalDataSystemCreateEventPropertyObject",
             create_event_property_object,
         ),
+        ("sceNpUniversalDataSystemCreateEvent", create_event),
+        ("sceNpUniversalDataSystemRegisterContext", register_context),
     ]
 }
 
@@ -94,9 +101,29 @@ fn create_handle(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// The answer for a null object slot (REQ-rf02).
 const INVALID_ARGUMENT: u64 = 0x8055_3102;
 
-/// Bytes behind an event property object. Assumed: the console's object is its own, and nothing a
-/// title was seen to read from it directly; zeroed, as a fresh object holds no properties.
-const EVENT_PROPERTY_OBJECT_BYTES: usize = 0x100;
+/// Bytes behind an event property object or an event. Assumed: the console's object is its own,
+/// and nothing a title was seen to read from either directly; zeroed, as a fresh object holds
+/// nothing.
+const OBJECT_BYTES: usize = 0x100;
+
+/// Writes a fresh object's address, all eight bytes, through `slot`, and answers 0, or
+/// [`INVALID_ARGUMENT`] for a null slot: what both the property object and the event calls do.
+fn new_object(slot: u64) -> u64 {
+    if slot == 0 {
+        return INVALID_ARGUMENT;
+    }
+    // Guest code runs in this address space, so a host block is a guest object. Leaked: the
+    // destroy calls are not served, and the console's object outlives the call that made it.
+    let object = Box::leak(vec![0_u8; OBJECT_BYTES].into_boxed_slice());
+    let address = object.as_mut_ptr() as u64;
+    // SAFETY: the guest's object slot, by the call's contract; written through the checked
+    // accessor.
+    if unsafe { orbistoun_mem::guest::write_u64(slot, address) } {
+        0
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
 
 /// `sceNpUniversalDataSystemCreateEventPropertyObject(&object)`: writes a new object's address,
 /// all eight bytes, and answers 0; a null slot answers `0x80553102` (REQ-20261013T1930Z-rf02,
@@ -107,20 +134,27 @@ const EVENT_PROPERTY_OBJECT_BYTES: usize = 0x100;
 /// Before `Initialize` the console answers `0x80553117` (REQ-pd02); orbistoun does not track
 /// initialisation, and every title seen initialises first.
 fn create_event_property_object(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    if args[0] == 0 {
-        return INVALID_ARGUMENT;
-    }
-    // Guest code runs in this address space, so a host block is a guest object. Leaked: the
-    // destroy call is not served, and the console's object outlives the call that made it.
-    let object = Box::leak(vec![0_u8; EVENT_PROPERTY_OBJECT_BYTES].into_boxed_slice());
-    let address = object.as_mut_ptr() as u64;
-    // SAFETY: the guest's object slot, by the call's contract; written through the checked
-    // accessor.
-    if unsafe { orbistoun_mem::guest::write_u64(args[0], address) } {
-        0
-    } else {
-        u64::from(GuestError::Unimplemented.as_raw())
-    }
+    new_object(args[0])
+}
+
+/// `sceNpUniversalDataSystemCreateEvent(name, prop, &event, 0)`: writes a new event's address to
+/// the first eight bytes of `event`, leaving the rest of the block as it was, and answers 0, with a
+/// property object or a null one; a null `event` answers `0x80553102`. A second call gives another
+/// event (REQ-20261014T0430Z-ue01, `000-boot/uds-create-event`, `report-20261014-batch4.log`
+/// 2855-2863). PPSA02664 calls it once a frame.
+fn create_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    new_object(args[2])
+}
+
+/// What `sceNpUniversalDataSystemRegisterContext` answered for a context and handle just made,
+/// both times it was called (REQ-ue01, `000-boot/uds-create-event` 2851-2852).
+const REGISTER_CONTEXT_ANSWER: u64 = 0x8055_3104;
+
+/// `sceNpUniversalDataSystemRegisterContext(ctx, handle, 0)`: answers `0x80553104`, as the console
+/// did for the context and handle it had just made, a second time too. Every commercial title in
+/// the corpus calls it.
+const fn register_context(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    REGISTER_CONTEXT_ANSWER
 }
 
 #[cfg(test)]
@@ -155,5 +189,45 @@ mod tests {
         assert_ne!(u64::from_le_bytes(slot[..8].try_into().unwrap()), object);
         args[0] = 0;
         assert_eq!(super::create_event_property_object(&args), 0x8055_3102);
+    }
+
+    /// `CreateEvent(name, prop, &event, 0)` writes a new event's address to the first eight bytes
+    /// of `event`, with or without a property object, and refuses a null slot (REQ-ue01). A repeat
+    /// gives another event.
+    #[test]
+    fn events_are_written_through_the_third_argument() {
+        let mut event = [0xcc_u8; 0x20];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = c"activityTerminate".as_ptr() as u64;
+        args[1] = 0x1000;
+        args[2] = event.as_mut_ptr() as u64;
+        assert_eq!(super::create_event(&args), 0);
+        let first = u64::from_le_bytes(event[..8].try_into().unwrap());
+        assert_ne!(first, 0);
+        assert_eq!(
+            event[8..],
+            [0xcc; 0x18],
+            "the rest of the block is untouched"
+        );
+        args[1] = 0;
+        assert_eq!(
+            super::create_event(&args),
+            0,
+            "a null property object is accepted"
+        );
+        assert_ne!(u64::from_le_bytes(event[..8].try_into().unwrap()), first);
+        args[2] = 0;
+        assert_eq!(super::create_event(&args), 0x8055_3102);
+    }
+
+    /// `RegisterContext(ctx, handle, 0)` answers `0x80553104` on the console, a second time too
+    /// (REQ-ue01).
+    #[test]
+    fn registering_a_context_answers_as_measured() {
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 0x4_007b;
+        args[1] = 0x2_0098;
+        assert_eq!(super::register_context(&args), 0x8055_3104);
+        assert_eq!(super::register_context(&args), 0x8055_3104);
     }
 }
