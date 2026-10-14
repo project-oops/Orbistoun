@@ -37,6 +37,7 @@ impl core::fmt::Display for PlacementError {
 }
 
 /// The lowest `cores` set bits of `allowed`: the first that many cores a process may use.
+#[cfg(any(windows, target_os = "linux", test))]
 fn first_cores(allowed: u64, cores: u32) -> u64 {
     let mut taken = 0u64;
     let mut left = cores;
