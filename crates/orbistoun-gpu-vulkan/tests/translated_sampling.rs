@@ -1428,6 +1428,7 @@ fn a_half_border_clamp_holds_a_coordinate_past_the_edge_at_half_the_border() {
         border: BorderColour::TransparentBlack,
         anisotropy: 1,
         depth_compare: 0,
+        ..TextureSampling::default()
     };
     let white = [u32::MAX; 4];
     let drawn = draw_with_sampled_texture(

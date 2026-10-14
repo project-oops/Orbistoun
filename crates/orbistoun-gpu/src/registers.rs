@@ -2770,7 +2770,18 @@ pub struct TextureSampling {
     /// `DEPTH_COMPARE_FUNC` (bits 14:12, `gfx10-rsrc.json`), `SQ_TEX_DEPTH_COMPARE` 0-7, never to
     /// always, in `VkCompareOp`'s order (`radv_tex_compare`). Read only by a compare (D817).
     pub depth_compare: u8,
+    /// The least level of detail a sample takes, relative to the view's base level:
+    /// `SQ_IMG_SAMP_WORD1.MIN_LOD` (bits 11:0), unsigned 4.8 fixed point as radv writes it.
+    pub min_lod: u16,
+    /// The most, `SQ_IMG_SAMP_WORD1.MAX_LOD` (bits 23:12), the same encoding.
+    pub max_lod: u16,
+    /// What is added to every computed level of detail, `SQ_IMG_SAMP_WORD2.LOD_BIAS` (bits 13:0),
+    /// signed 5.8 fixed point, sign-extended.
+    pub lod_bias: i16,
 }
+
+/// Level 15 in the sampler's 4.8 fixed point: the most `MAX_LOD` can say, and so no clamp.
+pub const LOD_UNCLAMPED: u16 = 15 << 8;
 
 impl TextureSampling {
     /// Point sampling clamped to the edge: what a texture no sampler names is read with, such as
@@ -2783,6 +2794,9 @@ impl TextureSampling {
         border: BorderColour::TransparentBlack,
         anisotropy: 1,
         depth_compare: 0,
+        min_lod: 0,
+        max_lod: LOD_UNCLAMPED,
+        lod_bias: 0,
     };
 
     /// Which coordinates, across then down, the shader saturates before sampling: those a
@@ -2803,7 +2817,7 @@ impl Default for TextureSampling {
 /// Decodes a sampler descriptor's four words into how it samples, or names the field it cannot
 /// honour exactly: a border clamp, a mirror-once mode, a half-border clamp whose border colour is
 /// the table's, or a reserved value. Only the wrap across and down, the three filters, the
-/// anisotropy ratio and the built-in border colour are read; a 2D texture has no third coordinate.
+/// anisotropy ratio, the level-of-detail clamp and bias and the built-in border colour are read; a 2D texture has no third coordinate.
 /// An anisotropic filter is its point or bilinear base at `1 << MAX_ANISO_RATIO` (D775).
 pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
     let wrap = |value: u32| match value {
@@ -2862,6 +2876,10 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         border,
         anisotropy,
         depth_compare: ((words[0] >> 12) & 0x7) as u8,
+        min_lod: (words[1] & 0xfff) as u16,
+        max_lod: ((words[1] >> 12) & 0xfff) as u16,
+        // Fourteen bits, sign-extended from bit 13.
+        lod_bias: i16::from_ne_bytes((((words[2] & 0x3fff) << 2) as u16).to_ne_bytes()) >> 2,
     })
 }
 
@@ -3242,6 +3260,19 @@ mod tests {
             Ok((TextureFilter::Nearest, 2))
         );
         assert_eq!(repeat_linear.anisotropy, 1, "no anisotropy asked for");
+        // The level-of-detail clamp and bias, in radv's fixed point: PPSA02664's sampler clamps
+        // to 0..15.996 (`0x00ff_f000`) unbiased; a bias of -2.5 is `0x3d80` in s5.8.
+        assert_eq!(
+            (aniso.min_lod, aniso.max_lod, aniso.lod_bias),
+            (0, 0xfff, 0)
+        );
+        let biased = decode_sampler_descriptor([0, 0x0030_0100, 0x3d80, 0]).expect("decodes");
+        assert_eq!(
+            (biased.min_lod, biased.max_lod, biased.lod_bias),
+            (0x100, 0x300, -0x280)
+        );
+        let up = decode_sampler_descriptor([0, 0, 0x0200, 0]).expect("decodes");
+        assert_eq!(up.lod_bias, 0x200, "a bias of +2");
     }
 
     /// The sweep answers what the whole stream would, forwards, backwards and past the table.

@@ -1686,6 +1686,11 @@ fn staged(texels: &[u32], row: u32, coarse_level: bool) -> Staged {
     }
 }
 
+/// The most level-of-detail bias a sampler is made with: Vulkan guarantees at least 2 for
+/// `maxSamplerLodBias`, and every desktop device reports 15 or more; the descriptor's s5.8 field
+/// reaches 32.
+const MAX_LOD_BIAS: f32 = 15.0;
+
 /// The sampler for a texture of `levels` mip levels, sampled as its sampler descriptor asks; the
 /// default - point sampling clamped to the edge - for a texture no sampler names, so a test that
 /// names a texel gets exactly that texel. A depth texture (`compare`) is sampled through a compare
@@ -1731,6 +1736,11 @@ fn sampler_info(
         orbistoun_gpu::MipFilter::Nearest => (vk::SamplerMipmapMode::NEAREST, f32_from(levels - 1)),
         orbistoun_gpu::MipFilter::Linear => (vk::SamplerMipmapMode::LINEAR, f32_from(levels - 1)),
     };
+    // The descriptor's clamp and bias, in levels from the view's base as the hardware counts them
+    // from `BASE_LEVEL`; a minimum above the maximum is the maximum, which Vulkan requires.
+    let max_lod = max_lod.min(f32::from(sampling.max_lod) / 256.0);
+    let min_lod = (f32::from(sampling.min_lod) / 256.0).min(max_lod);
+    let lod_bias = (f32::from(sampling.lod_bias) / 256.0).clamp(-MAX_LOD_BIAS, MAX_LOD_BIAS);
     vk::SamplerCreateInfo::default()
         .mag_filter(filter(sampling.magnify))
         .min_filter(filter(sampling.minify))
@@ -1739,7 +1749,9 @@ fn sampler_info(
         .address_mode_v(address(sampling.wrap[1]))
         .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
         .border_color(border)
+        .min_lod(min_lod)
         .max_lod(max_lod)
+        .mip_lod_bias(lod_bias)
         // At the ratio radv would have encoded this descriptor from (D775).
         .anisotropy_enable(sampling.anisotropy > 1 && crate::compute::sampler_anisotropy())
         .max_anisotropy(f32::from(sampling.anisotropy))
