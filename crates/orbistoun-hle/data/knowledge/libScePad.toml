@@ -362,6 +362,36 @@ found_in = ["PPSA04263-app0"]
 found_on = "2026-10-13"
 
 [[function]]
+name = "scePadSetTiltCorrectionState"
+arity = 2
+purpose = "(handle, enable): turns the motion sensor's tilt correction on or off."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pt01, link-bound, on a handle from scePadOpen for the initial user): 0x0 with 1 and with 0; 0x80920003 for handle 0x7fffffff.",
+    "orbistoun answers so and discards the setting. PPSA21564 asserts on any other answer (PsPadPpr.cpp line 108).",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T2030Z-pt01, reports/hardware/report-20261014-004800.log lines 1659-1661 (000-boot/ux01-calls)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "scePadGetTriggerEffectState"
+arity = 2
+purpose = "(handle, state): the adaptive triggers' current effect state."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-pt01, link-bound, on an open handle): 0x0, writing eight zero bytes and nothing past them into a 0x40-byte block of 0xcc; 0x80920001 for a null state; 0x80920003 for handle 0x7fffffff.",
+    "A never-issued handle with a null state is unmeasured; the handle is checked first.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T2030Z-pt01, reports/hardware/report-20261014-004800.log lines 1662-1665 (000-boot/ux01-calls)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
+
+[[function]]
 name = "scePadResetOrientation"
 arity = 1
 purpose = "(handle): resets the motion sensor's reference orientation."

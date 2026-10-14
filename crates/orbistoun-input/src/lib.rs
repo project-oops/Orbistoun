@@ -44,6 +44,9 @@ guest_module! {
         // (handle) and (handle, param)
         "scePadResetLightBar" => 1,
         "scePadSetTriggerEffect" => 2,
+        // (handle, enable) and (handle, state)
+        "scePadSetTiltCorrectionState" => 2,
+        "scePadGetTriggerEffectState" => 2,
         // (handle, info) and (handle)
         "scePadGetControllerInformation" => 2,
         // (handle, info)
@@ -180,6 +183,38 @@ fn pad_set_trigger_effect(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return PAD_INVALID_ARGUMENT;
     }
     OK
+}
+
+/// `scePadSetTiltCorrectionState(handle, enable)`: 0 for an open handle with either value,
+/// `0x80920003` for one never issued (REQ-pt01). The setting is discarded: no motion sensor is
+/// modelled.
+fn pad_set_tilt_correction_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    pad_discard(args)
+}
+
+/// The bytes `scePadGetTriggerEffectState` writes on an open pad: eight zeros, nothing past them
+/// (REQ-pt01, a 0x40-byte block of `0xcc` came back zero in its first eight).
+const TRIGGER_EFFECT_STATE_BYTES: usize = 8;
+
+/// `scePadGetTriggerEffectState(handle, state)`: for an open handle 0, with eight zero bytes
+/// written - no trigger effect running; `0x80920001` for a null `state`, `0x80920003` for a handle
+/// never issued (REQ-pt01). A never-issued handle with a null `state` is unmeasured; the handle is
+/// checked first, as for `scePadSetTriggerEffect`.
+fn pad_get_trigger_effect_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if ours(args[0]).is_none() {
+        return u64::from(
+            GuestError::vendor_in(PAD_ERROR_BASE, orbistoun_core::errno::NO_SUCH).as_raw(),
+        );
+    }
+    if args[1] == 0 {
+        return PAD_INVALID_ARGUMENT;
+    }
+    // SAFETY: the state block the guest passed, at least the eight bytes the console writes.
+    if unsafe { orbistoun_mem::guest::write_bytes(args[1], &[0; TRIGGER_EFFECT_STATE_BYTES]) } {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
 }
 
 /// The 28 bytes `scePadGetControllerInformation` wrote for the console's open pad (REQ-pu01,
@@ -342,6 +377,11 @@ const OWN: &[(&str, GuestFn)] = &[
     // (REQ-pd02), which is what the discard answers.
     ("scePadResetLightBar", pad_discard),
     ("scePadSetTriggerEffect", pad_set_trigger_effect),
+    (
+        "scePadSetTiltCorrectionState",
+        pad_set_tilt_correction_state,
+    ),
+    ("scePadGetTriggerEffectState", pad_get_trigger_effect_state),
     // `scePadResetOrientation(handle)`: 0 for an open handle, `0x80920003` for one never issued
     // (REQ-pu01), which is what the discard answers.
     ("scePadResetOrientation", pad_discard),
@@ -534,6 +574,26 @@ mod tests {
         assert_eq!(call("scePadSetTriggerEffect", handle, 0), 0x8092_0001);
         assert_eq!(
             call("scePadSetTriggerEffect", 0x7fff_ffff, block),
+            0x8092_0003
+        );
+        // REQ-pt01.
+        assert_eq!(call("scePadSetTiltCorrectionState", handle, 1), 0);
+        assert_eq!(call("scePadSetTiltCorrectionState", handle, 0), 0);
+        assert_eq!(
+            call("scePadSetTiltCorrectionState", 0x7fff_ffff, 1),
+            0x8092_0003
+        );
+        let mut state = [0xcc_u8; 0x40];
+        let at = state.as_mut_ptr() as u64;
+        assert_eq!(call("scePadGetTriggerEffectState", handle, at), 0);
+        assert_eq!(state[..8], [0; 8]);
+        assert!(
+            state[8..].iter().all(|&b| b == 0xcc),
+            "nothing past eight bytes"
+        );
+        assert_eq!(call("scePadGetTriggerEffectState", handle, 0), 0x8092_0001);
+        assert_eq!(
+            call("scePadGetTriggerEffectState", 0x7fff_ffff, at),
             0x8092_0003
         );
     }
