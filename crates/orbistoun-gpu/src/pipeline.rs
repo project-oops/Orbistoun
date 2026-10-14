@@ -844,8 +844,8 @@ const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
 const GE_INDX_OFFSET: u32 = 0xC24A;
 
 /// The geometry-engine inputs a draw hands its primitive shader whole (D730), or why it cannot: a
-/// draw of one instance over a list or strip of triangles or lines, and no index offset on an
-/// indexed one. One wave may not hold them; [`chunk_plans`] splits those that it does not.
+/// draw over a list or strip of triangles or lines, each of its instances a workgroup that finds
+/// its instance in `v8` (D863). One wave may not hold them; [`chunk_plans`] splits those that it does not.
 fn draw_geometry(
     draw: &DrawCall,
     mut latest: impl FnMut(u32) -> Option<u32>,
@@ -865,11 +865,6 @@ fn draw_geometry(
             (indices, Some(width))
         }
     };
-    if draw.instances != 1 {
-        return Err(
-            "a draw of more than one instance's geometry-engine inputs are not seeded".to_owned(),
-        );
-    }
     let topology = latest(VGT_PRIMITIVE_TYPE).map(|value| value & 0x3F);
     let (assembly, primitives) = match topology {
         Some(DI_PT_TRILIST | DI_PT_RECTLIST | DI_PT_2D_RECTANGLE) => (Assembly::List, vertices / 3),
@@ -10094,12 +10089,13 @@ mod tests {
             draw_geometry(&draw(30, 1), registers(DI_PT_TRILIST, 0, 0)).map(|g| g.primitives),
             Ok(10)
         );
-        for refused in [
+        // Instances are each a workgroup of their own (D863), seeded alike.
+        assert_eq!(
             draw_geometry(&draw(3, 2), registers(DI_PT_RECTLIST, 0, 0)),
-            draw_geometry(&draw(3, 1), registers(5, 0, 0)),
-        ] {
-            assert!(refused.is_err(), "{refused:?}");
-        }
+            draw_geometry(&draw(3, 1), registers(DI_PT_RECTLIST, 0, 0))
+        );
+        let fan = draw_geometry(&draw(3, 1), registers(5, 0, 0));
+        assert!(fan.is_err(), "{fan:?}");
         // Larger than a wave is not refused: it is drawn in chunks (D741).
         assert!(draw_geometry(&draw(96, 1), registers(DI_PT_TRILIST, 0, 0)).is_ok());
         // An indexed draw takes its index size from `VGT_INDEX_TYPE` (D740): sixteen and

@@ -8,8 +8,12 @@ use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::draw_mesh_in_layer;
 use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
 use orbistoun_spirv::DRAW_LAYER_UNUSED;
-use orbistoun_translate::wavefront::{MeshPrimitive, Stage, Window};
-use orbistoun_translate::{Fidelity, Strategy, Width, translate_windowed_primitive};
+use orbistoun_translate::wavefront::{
+    Assembly, GeometryInputs, MeshPrimitive, Stage, UserData, Window,
+};
+use orbistoun_translate::{
+    Fidelity, Strategy, Width, translate_windowed_primitive, translate_with_user_data,
+};
 
 fn device_or_skip(what: &str) -> bool {
     match probe() {
@@ -33,6 +37,11 @@ fn device_or_skip(what: &str) -> bool {
 /// vertex's layer - `exp pos1 off, off, v20, off`, the form PPSA21564's full-screen pass takes
 /// (`0xf80000d4`, its third source the layer) - and the positions again as parameter zero.
 fn layered_shader(layer: u32) -> Vec<u8> {
+    layered_shader_from(layer, 20)
+}
+
+/// [`layered_shader`] exporting register `v{source}` as the layer, after setting `v20` to `layer`.
+fn layered_shader_from(layer: u32, source: u32) -> Vec<u8> {
     let words = [
         // m0 = three vertices, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
         0xbefc_03ff,
@@ -60,7 +69,7 @@ fn layered_shader(layer: u32) -> Vec<u8> {
         0x7e28_02ff,
         layer,
         0xf800_00d4,
-        0x0014_0000,
+        source << 16,
         // exp param0 v2..v5, which the passthrough fragment module reads, then s_endpgm
         0xf800_020f,
         0x0504_0302,
@@ -121,7 +130,7 @@ fn a_primitive_is_drawn_only_in_the_pass_of_its_layer() {
             clear,
             (width, height),
             &memory(),
-            pass,
+            (0, pass, 1),
         )
         .expect("the draw ran");
         let drawn: Vec<bool> = (0..height)
@@ -147,4 +156,59 @@ fn a_primitive_is_drawn_only_in_the_pass_of_its_layer() {
         covered(2 | 1 << 16, 2),
         "the viewport index is not the layer"
     );
+}
+
+/// An instanced draw runs a workgroup per instance, each finding its instance in `v8` (D863): a
+/// shader exporting `v8` as its layer draws instance `k`'s triangle in the pass of layer `k`, the
+/// way PPSA21564's full-screen pass fills one slice an instance. A draw of one instance has only
+/// instance zero.
+#[test]
+fn each_instance_finds_its_instance_in_v8() {
+    if !device_or_skip("each_instance_finds_its_instance_in_v8") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let decoded = decode_program(&layered_shader_from(0, 8), &encodings, &operands);
+    let module = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Strategy::Predicated {
+            fidelity: Fidelity::Auto,
+            width: Width::default(),
+        },
+        (Stage::Mesh, MeshPrimitive::Triangles),
+        Window::default(),
+        UserData {
+            geometry: Some(GeometryInputs {
+                first_vertex: 0,
+                vertices: 0,
+                primitives: 0,
+                assembly: Assembly::List,
+                indices: None,
+                passthrough: false,
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the instanced primitive shader translates")
+    .module;
+    let fragment = orbistoun_spirv::passthrough_fragment_module();
+    let clear = [0.0, 0.0, 1.0, 1.0];
+    let covered = |instances: u32, pass: u32| {
+        let pixels = draw_mesh_in_layer(
+            (&module, &fragment),
+            clear,
+            (8, 6),
+            &memory(),
+            (3, pass, instances),
+        )
+        .expect("the draw ran");
+        pixels.at(4, 3).expect("inside") != [0, 0, 255, 255]
+    };
+    assert!(covered(3, 0), "instance 0 draws in layer 0");
+    assert!(covered(3, 2), "instance 2 draws in layer 2");
+    assert!(!covered(3, 3), "no instance 3 among three");
+    assert!(!covered(1, 2), "one instance has no instance 2");
+    assert!(covered(1, 0), "one instance is instance 0");
 }

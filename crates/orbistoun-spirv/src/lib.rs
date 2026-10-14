@@ -1959,6 +1959,10 @@ pub const DRAW_DATA_LAYER_WORD: u32 = 34;
 /// [`DRAW_DATA_LAYER_WORD`]'s value for a draw that keeps every primitive whatever its layer.
 pub const DRAW_LAYER_UNUSED: u32 = u32::MAX;
 
+/// Where in a draw's stride its instance count is (D863): the draw runs a workgroup per instance,
+/// the instance its `WorkgroupId.y`, and only draws of one count share a dispatch.
+pub const DRAW_DATA_INSTANCES_WORD: u32 = 35;
+
 /// Where in a draw's stride its geometry buffers' places begin (D747): for each slot, three words -
 /// the arena at the geometry binding it is a range of, its first word there, and how many words it
 /// holds.

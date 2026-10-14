@@ -668,8 +668,8 @@ pub enum WindowSpace {
 /// primitive threads at bits 0 and 8 and the one wave of the group counted at bit 28
 /// (`:36`, `:99`, `:127`, `:418`); `v0` the first two vertex indices, sixteen bits each, and `v1`
 /// the third (`ac_nir_lower_ngg.c:130-131`); `v2` the primitive id; and `v5` the vertex id
-/// (`si_shader_args.c:95`). The invocation id, the fifth vertex register, the user VGPRs and the
-/// instance id read zero: one invocation, no adjacency, one instance.
+/// (`si_shader_args.c:95`), and `v8` the instance, the workgroup's `y` (D863). The invocation id,
+/// the fifth vertex register and the user VGPRs read zero: one invocation, no adjacency.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -719,6 +719,10 @@ impl IndexWidth {
         }
     }
 }
+
+/// The input register a primitive shader's vertex thread finds its instance id in: `v8`, after the
+/// vertex id and the two user VGPRs (`si_shader_args.c:363-371`, D863).
+const INSTANCE_ID_REGISTER: u32 = 8;
 
 /// The input register a primitive shader's vertex thread finds its vertex id in: `v5`, after the
 /// vertex indices, primitive id and invocation id (GFX10's non-passthrough primitive shader).
@@ -1943,6 +1947,8 @@ pub struct Wavefront<'a> {
     written: (u128, [u64; 4]),
     /// Whether a mesh module read a geometry-engine input it was not given.
     reads_geometry_input: bool,
+    /// A mesh module's instance: its workgroup's `y`, a workgroup per instance (D863).
+    instance_id: Option<Id>,
     /// A mesh module's draw-data buffer and the first word of this workgroup's stride in it (D718),
     /// where its draw's vertex count is read from (D745).
     draw_data: Option<(buffer::StorageBuffer, Id)>,
@@ -2722,6 +2728,7 @@ impl<'a> Wavefront<'a> {
             reads_unwritten: false,
             written: (0, [0; 4]),
             reads_geometry_input: false,
+            instance_id: None,
             draw_data: None,
             push_block: None,
             draw_buffers,
@@ -2871,6 +2878,10 @@ impl<'a> Wavefront<'a> {
                 let id = self.select(is_vertex, id, zero);
                 self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
             }
+            if let Some(instance) = self.instance_id {
+                let id = self.select(is_vertex, instance, zero);
+                self.store_lane_masked(INSTANCE_ID_REGISTER, lane, id);
+            }
             if let Some(width) = indices {
                 // A lane past the draw's vertices reads the first index and keeps zero.
                 let position = self.select(is_vertex, at, zero);
@@ -2931,6 +2942,11 @@ impl<'a> Wavefront<'a> {
                 None => zero,
             };
             self.store_lane_masked(register, 0, value);
+        }
+        // The instance, a workgroup per instance (D863).
+        if let Some(instance) = self.instance_id {
+            let id = self.select(is_vertex, instance, zero);
+            self.store_lane_masked(INSTANCE_ID_REGISTER, 0, id);
         }
         if let Some(width) = indices {
             let position = self.select(is_vertex, at, zero);
@@ -3187,6 +3203,11 @@ impl<'a> Wavefront<'a> {
                 self.builder
                     .function(op::IMUL, &[u32_type.0, first.0, x.0, stride.0]);
                 self.draw_data = Some((buffer, first));
+                // A workgroup per instance (D863): its `y` is the instance.
+                let y = self.builder.id();
+                self.builder
+                    .function(op::COMPOSITE_EXTRACT, &[u32_type.0, y.0, id.0, 1]);
+                self.instance_id = Some(y);
                 (buffer, Some(first))
             }
         };

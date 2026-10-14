@@ -2755,8 +2755,13 @@ pub(crate) fn draw_vertices(
 impl Start<'_> {
     /// A mesh draw's vertex count (D745), first vertex (D761) and layer (D859), as its words carry
     /// them.
-    pub(crate) const fn mesh_words(&self) -> (u32, u32, u32) {
-        (self.mesh_vertices, self.mesh_first_vertex, self.mesh_layer)
+    pub(crate) const fn mesh_words(&self) -> (u32, u32, u32, u32) {
+        (
+            self.mesh_vertices,
+            self.mesh_first_vertex,
+            self.mesh_layer,
+            self.mesh_instances,
+        )
     }
 
     /// The mesh draw [`Self::mesh_words`] describe.
@@ -2765,6 +2770,7 @@ impl Start<'_> {
             vertices: self.mesh_vertices,
             first: self.mesh_first_vertex,
             layer: self.mesh_layer,
+            instances: self.mesh_instances,
         }
     }
 }
@@ -2781,6 +2787,8 @@ pub(crate) struct Start<'a> {
     pub(crate) mesh_first_vertex: u32,
     /// The layer a mesh draw renders, which its words carry (D859).
     pub(crate) mesh_layer: u32,
+    /// A mesh draw's instances, a workgroup each, which its words carry (D863).
+    pub(crate) mesh_instances: u32,
     /// The attachment's starting pixels.
     pub(crate) initial: Option<&'a [u8]>,
     /// The user-data block.
@@ -3720,6 +3728,15 @@ struct MeshBatch {
     query: Option<u32>,
 }
 
+impl MeshBatch {
+    /// Whether `draw` can join: it has the instances the batch's draws have, since one dispatch
+    /// runs every draw that many times (D863).
+    fn takes(&self, draw: &DrawWords) -> bool {
+        let at = orbistoun_spirv::DRAW_DATA_INSTANCES_WORD as usize;
+        self.draws.first().is_none_or(|first| first[at] == draw[at])
+    }
+}
+
 /// What must be the same for a draw to join a batch: the pipeline (which carries its shaders,
 /// textures, blend, viewport and scissor), the attachment, the window slot and buffer, the draw's
 /// buffers, and the fragment stage's user data - everything but the geometry stage's words.
@@ -3747,7 +3764,10 @@ impl BatchKey {
 /// lies (D747) after them.
 pub(crate) fn split_user_data(
     block: &[u32; USER_DATA_BLOCK_WORDS],
-    ((vertices, first, layer), places): ((u32, u32, u32), &crate::draw_buffers::GeometryPlaces),
+    ((vertices, first, layer, instances), places): (
+        (u32, u32, u32, u32),
+        &crate::draw_buffers::GeometryPlaces,
+    ),
 ) -> (DrawWords, DrawWords) {
     let mut geometry = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
     let mut fragment = [0u32; DRAW_DATA_STRIDE_WORDS as usize];
@@ -3757,6 +3777,7 @@ pub(crate) fn split_user_data(
     geometry[DRAW_DATA_VERTICES_WORD as usize] = vertices;
     geometry[DRAW_DATA_FIRST_VERTEX_WORD as usize] = first;
     geometry[orbistoun_spirv::DRAW_DATA_LAYER_WORD as usize] = layer;
+    geometry[orbistoun_spirv::DRAW_DATA_INSTANCES_WORD as usize] = instances;
     let (first, bases) = (
         DRAW_DATA_BUFFERS_WORD as usize,
         DRAW_DATA_BASES_WORD as usize,
@@ -4456,6 +4477,7 @@ fn batch_draw(
     if let Some(batch) = open.batch.as_mut()
         && batch.key == *key
         && batch.draws.len() < DRAW_DATA_MOST_DRAWS as usize
+        && batch.takes(draw)
     {
         batch.draws.push(*draw);
         return Ok(());
@@ -4501,6 +4523,7 @@ pub(crate) fn join_open_batch(key: &BatchKey, draw: &DrawWords) -> bool {
     };
     if open.framebuffer != key.framebuffer
         || batch.key != *key
+        || !batch.takes(draw)
         || batch.draws.len() >= DRAW_DATA_MOST_DRAWS as usize
         || !draw_data_room(batch.draws.len() + 1)
     {
@@ -4781,14 +4804,15 @@ fn issue_draw(
         // many workgroups, each reading its own draw's words (D718); a lower workgroup's primitives
         // reach the rasteriser first (Vulkan's mesh shader primitive ordering), so a batch blends
         // as its draws would one by one.
-        Geometry::Mesh { .. } => {
+        Geometry::Mesh { instances, .. } => {
             // The extension's entry points, looked up once for the process's one device.
             static MESH: std::sync::OnceLock<ash::ext::mesh_shader::Device> =
                 std::sync::OnceLock::new();
             let mesh = MESH.get_or_init(|| ash::ext::mesh_shader::Device::new(instance, device));
             // SAFETY: a mesh pipeline is bound inside an open render pass, and one exists only
             // where the device was created with the extension this loader dispatches through.
-            unsafe { mesh.cmd_draw_mesh_tasks(command, draws, 1, 1) };
+            // A workgroup per instance, along y (D863).
+            unsafe { mesh.cmd_draw_mesh_tasks(command, draws, instances.max(1), 1) };
         }
     }
 }
@@ -5729,9 +5753,10 @@ pub fn draw_mesh_of_vertices_over(
     .map(|drawn| (drawn.pixels, drawn.memory))
 }
 
-/// [`draw_mesh_over`] as one pass of a layered draw (D859): its words carry `layer`, the layer the
-/// pass renders, whose primitives alone a module that exports layers keeps;
-/// [`orbistoun_spirv::DRAW_LAYER_UNUSED`] keeps every one.
+/// [`draw_mesh_over`] as one pass of a layered draw (D859): its words carry `vertices`, `layer` -
+/// the layer the pass renders, whose primitives alone a module that exports layers keeps;
+/// [`orbistoun_spirv::DRAW_LAYER_UNUSED`] keeps every one - and `instances`, a workgroup each
+/// (D863).
 ///
 /// # Errors
 ///
@@ -5741,7 +5766,7 @@ pub fn draw_mesh_in_layer(
     clear: [f32; 4],
     (width, height): (u32, u32),
     memory: &[u32],
-    layer: u32,
+    (vertices, layer, instances): (u32, u32, u32),
 ) -> Result<Pixels, DispatchError> {
     render_over(
         clear,
@@ -5749,9 +5774,10 @@ pub fn draw_mesh_in_layer(
         height,
         Some((mesh_words, fragment_words)),
         Geometry::Mesh {
-            vertices: 0,
+            vertices,
             first: 0,
             layer,
+            instances,
         },
         Bound {
             windows: [DEFAULT_WINDOWS[0], memory.len().max(1)],
@@ -6194,25 +6220,28 @@ enum Geometry {
     Vertex(VertexDraw),
     /// A mesh shader, one workgroup, which supplies its own; `vertices` is the guest draw's vertex
     /// count, which a primitive shader seeded with its geometry reads (D745), and `first` the
-    /// vertex its ids count up from (D761), and `layer` the layer it renders (D859).
+    /// vertex its ids count up from (D761), `layer` the layer it renders (D859), and `instances`
+    /// its instances, a workgroup each (D863).
     Mesh {
         vertices: u32,
         first: u32,
         layer: u32,
+        instances: u32,
     },
 }
 
 impl Geometry {
     /// The vertex count (D745), first vertex (D761) and layer (D859) a mesh draw's words carry;
     /// zero for a vertex draw, whose words are not a mesh module's.
-    fn mesh_vertices(self) -> (u32, u32, u32) {
+    fn mesh_vertices(self) -> (u32, u32, u32, u32) {
         match self {
             Self::Mesh {
                 vertices,
                 first,
                 layer,
-            } => (vertices, first, layer),
-            Self::Vertex(_) => (0, 0, 0),
+                instances,
+            } => (vertices, first, layer, instances),
+            Self::Vertex(_) => (0, 0, 0, 0),
         }
     }
 
@@ -6222,6 +6251,7 @@ impl Geometry {
             vertices,
             first: 0,
             layer: orbistoun_spirv::DRAW_LAYER_UNUSED,
+            instances: 1,
         }
     }
 }
