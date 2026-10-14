@@ -537,7 +537,9 @@ mod tests {
             reason = "a fixed address, named as the constants it stands for are"
         )]
         let WATCH_BASE = crate::unique_test_base();
-        let len = 0x10000;
+        // Below the guarded size: another test turns guarding on for the process, and a guarded
+        // range's write faults into a handler only a worker installs.
+        let len = super::GUARDED_FROM / 2;
         let _held = reserve(WATCH_BASE, len, Protection::READ_WRITE).expect("reserve");
         let bytes = std::ptr::with_exposed_provenance_mut::<u8>(WATCH_BASE as usize);
         // SAFETY: the reservation above is `len` read-write bytes at this address, held for the
