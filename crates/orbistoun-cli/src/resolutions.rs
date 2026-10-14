@@ -35,32 +35,47 @@ pub(crate) fn cmd_resolutions(
                 Err(_) => problems.push(format!("{log} cannot be read")),
             }
         }
+        let mut notes: Vec<String> = Vec::new();
         if !rows.is_empty() {
             let claims = unbacked(&resolution.outcome, &rows);
-            let named = |never: bool| {
+            let of = |kind: fn(&Unbacked) -> Option<&str>| {
                 claims
                     .iter()
-                    .filter_map(|c| match c {
-                        Unbacked::Absent(claim) if !never => Some(claim.as_str()),
-                        Unbacked::NeverBound(claim) if never => Some(claim.as_str()),
-                        _ => None,
-                    })
+                    .filter_map(kind)
                     .collect::<Vec<_>>()
                     .join(", ")
             };
-            let (absent, never) = (named(false), named(true));
+            let absent = of(|c| match c {
+                Unbacked::Absent(claim) => Some(claim),
+                _ => None,
+            });
+            let never = of(|c| match c {
+                Unbacked::NeverBound(claim) => Some(claim),
+                _ => None,
+            });
+            let unnamed = of(|c| match c {
+                Unbacked::Unnamed(claim) => Some(claim),
+                _ => None,
+            });
             if !absent.is_empty() {
                 problems.push(format!("no row holds {absent}"));
             }
             if !never.is_empty() {
                 problems.push(format!("never bound {never}"));
             }
+            if !unnamed.is_empty() {
+                notes.push(format!(
+                    "no row names {unnamed} (rows may use a key of their own)"
+                ));
+            }
         }
         if !problems.is_empty() {
             refile += 1;
+        }
+        if !problems.is_empty() || !notes.is_empty() {
             println!("{}", resolution.id);
-            for problem in problems {
-                println!("  {problem}");
+            for line in problems.iter().chain(&notes) {
+                println!("  {line}");
             }
         }
     }

@@ -3,36 +3,37 @@
 
 use orbistoun_probe::resolution::{Unbacked, resolutions, unbacked};
 
-const WORKLOG: &str = "\
-# Worklog
+const WORKLOG: &str = concat!(
+    "# Worklog\n",
+    "\n",
+    "### REQ-20261012T1822Z-b1ca - libSceNpEntitlementAccess: Initialize\n",
+    "- **status:** RESOLVED (obSCEne 2026-10-14)\n",
+    "- **resolved:** 2026-10-14 on live PS5 (report `reports/hardware/report-batch.log ",
+    "(SHA-256 `1dd1`)`)\n",
+    "- **from:** Orbistoun (oracle-diff, 2026-10-12)\n",
+    "- **to:** Obscene\n",
+    "- **wants:** `sceNpEntitlementAccessInitialize(param)`; the oracle says 0x80553804.\n",
+    "- **outcome:** delivered\n",
+    "  - `sceNpGetState` returns rc `0x0`.\n",
+    "  - `sceNpEntitlementAccessInitialize` returns `0x80550001` offline.\n",
+    "  - `sceSaveDataInitialize3` refuses with `0x809f0001`.\n",
+    "\n",
+    "### REQ-20261013T0100Z-zz01 - an open one\n",
+    "- **status:** OPEN\n",
+    "- **from:** Orbistoun\n",
+    "\n",
+    "### REQ-20261013T0200Z-zz02 - one from another project\n",
+    "- **status:** RESOLVED\n",
+    "- **from:** OopsMesa\n",
+    "- **outcome:** done, `0x80550001`\n",
+);
 
-### REQ-20261012T1822Z-b1ca - libSceNpEntitlementAccess: Initialize
-- **status:** RESOLVED (obSCEne 2026-10-14)
-- **resolved:** 2026-10-14 on live PS5 (report `reports/hardware/report-batch.log (SHA-256 `1dd1`)`)
-- **from:** Orbistoun (oracle-diff, 2026-10-12)
-- **to:** Obscene
-- **wants:** `sceNpEntitlementAccessInitialize(param)`; the oracle says 0x80553804.
-- **outcome:** delivered
-  - `sceNpGetState` returns rc `0x0`.
-  - `sceNpEntitlementAccessInitialize` returns `0x80550001` offline.
-  - `sceSaveDataInitialize3` refuses with `0x809f0001`.
-
-### REQ-20261013T0100Z-zz01 - an open one
-- **status:** OPEN
-- **from:** Orbistoun
-
-### REQ-20261013T0200Z-zz02 - one from another project
-- **status:** RESOLVED
-- **from:** OopsMesa
-- **outcome:** done, `0x80550001`
-";
-
-const LOG: &str = "\
-<118>[SceShellCore] FMEM sceNpGetState is mentioned outside a row
-OBS|measure|000-boot/np|sceNpEntitlementAccessInitialize|bound|0x0|bool
-OBS|measure|000-boot/np|sceNpEntitlementAccessInitialize|status|0x0|not-possible
-OBS|measure|000-boot/sd|sceSaveDataInitialize3|rc|0x809f0001|code
-";
+const LOG: &str = concat!(
+    "<118>[SceShellCore] FMEM sceNpGetState is mentioned outside a row\n",
+    "OBS|measure|000-boot/np|sceNpEntitlementAccessInitialize|bound|0x0|bool\n",
+    "OBS|measure|000-boot/np|sceNpEntitlementAccessInitialize|status|0x0|not-possible\n",
+    "OBS|measure|000-boot/sd|sceSaveDataInitialize3|rc|0x809f0001|code\n",
+);
 
 #[test]
 fn only_resolved_requests_from_the_asker_are_read() {
@@ -59,11 +60,19 @@ fn a_claim_no_row_holds_is_unbacked() {
     assert_eq!(
         claims,
         [
-            Unbacked::Absent("sceNpGetState".into()),
+            Unbacked::Unnamed("sceNpGetState".into()),
             Unbacked::NeverBound("sceNpEntitlementAccessInitialize".into()),
             Unbacked::Absent("0x80550001".into()),
         ]
     );
+}
+
+#[test]
+fn a_function_no_row_names_is_not_decisive_alone() {
+    let found = resolutions(WORKLOG, "Orbistoun");
+    let claims = unbacked(&found[0].outcome, LOG);
+    let decisive: Vec<bool> = claims.iter().map(Unbacked::is_decisive).collect();
+    assert_eq!(decisive, [false, true, true]);
 }
 
 #[test]

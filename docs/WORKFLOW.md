@@ -299,9 +299,9 @@ orbistoun-cli resolutions <worklog> --reports <obSCEne repository> --since REQ-2
 ```
 
 `resolutions` checks what came back: every resolved request orbistoun filed, its outcome's
-status codes and functions looked for among the `OBS|` rows of the logs it cites. A claim no row
+status codes and functions looked for among the `OBS|` rows of the logs it cites. A code no row
 holds, or a function whose rows say it never bound, is printed, and that request is filed again
-rather than ingested (D840).
+rather than ingested. A function no row names is a note: the rows may be keyed otherwise (D840).
 
 `census --imports` lists every import of every module a title in the library runs - its
 executable and the modules it ships - whose knowledge entry is missing or not

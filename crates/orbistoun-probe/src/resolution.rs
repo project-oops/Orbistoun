@@ -19,10 +19,22 @@ pub struct Resolution {
 /// A claim of an outcome that no row backs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unbacked {
-    /// No `OBS|` row holds it.
+    /// A status code no `OBS|` row holds.
     Absent(String),
-    /// Its only rows say it never bound.
+    /// A function whose only rows say it never bound.
     NeverBound(String),
+    /// A function no row names. Weaker than the other two: a probe may label a call's rows by a
+    /// short key of its own (`ime-dialog|abort-rc`) rather than by the function.
+    Unnamed(String),
+}
+
+impl Unbacked {
+    /// Whether the claim alone shows the resolution is not a measurement: a code with no row, or
+    /// a function that never bound.
+    #[must_use]
+    pub fn is_decisive(&self) -> bool {
+        !matches!(self, Self::Unnamed(_))
+    }
 }
 
 /// Where a bus entry's fields begin.
@@ -149,7 +161,7 @@ pub fn unbacked(outcome: &str, log: &str) -> Vec<Unbacked> {
             }
             let naming: Vec<&Vec<&str>> = rows.iter().filter(|row| row.contains(&claim)).collect();
             if naming.is_empty() {
-                Some(Unbacked::Absent(claim.to_owned()))
+                Some(Unbacked::Unnamed(claim.to_owned()))
             } else if naming.iter().all(|row| never_bound(row, claim)) {
                 Some(Unbacked::NeverBound(claim.to_owned()))
             } else {
