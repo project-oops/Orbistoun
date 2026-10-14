@@ -500,12 +500,50 @@ fn gpu_still_busy() -> Option<f64> {
 /// when it does not, the line the run's report carries, since the run measures that too. Another
 /// session's run on the same device once made one in three runs of a title 2.7 times slower, its
 /// device time per dispatch 23 ms rather than 10 (PPSA28061).
+///
+/// A busy CPU is not waited for - a virtual machine or a build beside the run may last all day - but
+/// said the same way: a title bound by its guest thread loses a quarter of its frame rate beside
+/// ten busy cores (NVRB00001, 9.9 -> 7.4 fps, the same build).
 fn before_measuring() -> Option<String> {
-    let busy = gpu_still_busy()?;
-    let line = format!("measured beside something else using {busy:.0}% of the GPU");
+    let mut beside = Vec::new();
+    if let Some(busy) = gpu_still_busy() {
+        beside.push(format!("{busy:.0}% of the GPU"));
+    }
+    if let Some(busy) = cpu_busy() {
+        beside.push(format!("{busy:.0}% of the CPU"));
+    }
+    if beside.is_empty() {
+        return None;
+    }
+    let line = format!(
+        "measured beside something else using {}",
+        beside.join(" and ")
+    );
     println!("  {line}");
     Some(line)
 }
+
+/// How busy something else keeps the host's cores, over two seconds, when it is more than
+/// [`CPU_BUSY_MOST`]; asked before a run starts, so none of it is the run's.
+fn cpu_busy() -> Option<f64> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "((Get-Counter '\\Processor(_Total)\\% Processor Time' -SampleInterval 1 -MaxSamples 2 -ErrorAction SilentlyContinue).CounterSamples | Measure-Object CookedValue -Average).Average",
+        ])
+        .output()
+        .ok()?;
+    let busy: f64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    (busy > CPU_BUSY_MOST).then_some(busy)
+}
+
+/// The most of the host's cores something else may be using before a run says so: an idle desktop
+/// keeps them 2 to 5% busy.
+const CPU_BUSY_MOST: f64 = 10.0;
 
 /// The most of the GPU something else may be using for a benchmark to measure. An idle desktop
 /// at 4K and 120 Hz keeps the 3D engines 12 to 19% busy; a game beside it, 88%.
@@ -562,6 +600,9 @@ pub(crate) fn cmd_bench(
             println!("{title}: skipped - something else is using {busy:.0}% of the GPU");
             entries.push(skipped(format!("the GPU was {busy:.0}% busy")));
             continue;
+        }
+        if let Some(busy) = cpu_busy() {
+            println!("  measured beside something else using {busy:.0}% of the CPU");
         }
         let input = pad_script(&id);
         let seconds = run_seconds(&id, every);

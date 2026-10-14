@@ -163,6 +163,10 @@ A round of making a title faster goes:
 `perf`, `ab` and `bench` wait up to a minute before each measured run for anything else using the
 GPU - another session's run on the same device slows the title's device time, not its host time,
 and reads as a slower build. A run that could not wait it out says so at the top of its report.
+A busy CPU is not waited for, since a virtual machine beside the run may last all day, but a run
+beside one says so the same way: a title bound by its guest thread loses a quarter of its frame
+rate beside ten busy cores, so compare its frame rate only with a run made beside the same load -
+`ab`, which alternates the builds, does.
 Change the build in a `git archive` export rather than the shared working tree: another session's
 uncommitted edits there go into whatever is built from it.
 
