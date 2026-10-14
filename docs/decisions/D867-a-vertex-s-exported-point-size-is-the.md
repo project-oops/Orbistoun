@@ -26,6 +26,11 @@ took it, and `pos2` and `pos3` are refused.
 | Z | layer | Handled as D859. |
 | W | shading rate | Dropped where `USE_VTX_VRS_RATE` is clear, refused where it is set. |
 
+**A point that exports no size** is drawn at the draw's `PA_SU_POINT_SIZE`: its height in eighths
+of a pixel, as radeonsi writes it (`si_state.c` 945: `size * 8` in both the height and the width).
+Where that is not known, the point is drawn at one. Every module that emits points therefore writes
+`PointSize`, since a mesh stage's point has no size of its own.
+
 **Distances.** A distance whose `CLIP_DIST_ENA_n` is set is written to the vertex's `ClipDistance`
 in its index's place. It stands in for the user plane's computed distance there (D830), and the
 array grows to eight. radeonsi also sets `CULL_DIST_ENA_n` for every distance it clips by

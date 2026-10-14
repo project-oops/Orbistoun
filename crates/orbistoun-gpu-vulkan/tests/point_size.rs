@@ -7,8 +7,10 @@
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::framebuffer::draw_mesh_over;
 use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
-use orbistoun_translate::wavefront::{MeshPrimitive, Stage, Window};
-use orbistoun_translate::{Fidelity, Strategy, Width, translate_windowed_primitive};
+use orbistoun_translate::wavefront::{MeshPrimitive, Stage, UserData, Window};
+use orbistoun_translate::{
+    Fidelity, Strategy, Width, translate_windowed_primitive, translate_with_user_data,
+};
 
 fn device_or_skip(what: &str) -> bool {
     match probe() {
@@ -32,7 +34,12 @@ fn device_or_skip(what: &str) -> bool {
 /// `exp pos1 v20, off, off, off`, the form GCTS00001's clip-distance shaders take
 /// (`0xf80000d1`) - and the position again as parameter zero.
 fn sized_point(size: f32) -> Vec<u8> {
-    let words = [
+    point_shader(Some(size))
+}
+
+/// [`sized_point`], exporting `size` where given and no point size where not.
+fn point_shader(size: Option<f32>) -> Vec<u8> {
+    let mut words = vec![
         // m0 = one vertex, one primitive; s_sendmsg sendmsg(MSG_GS_ALLOC_REQ)
         0xbefc_03ff,
         0x0000_1001,
@@ -54,16 +61,13 @@ fn sized_point(size: f32) -> Vec<u8> {
         // exp pos0 v2..v5
         0xf800_08cf,
         0x0504_0302,
-        // v20 = size; exp pos1 v20, off, off, off
-        0x7e28_02ff,
-        size.to_bits(),
-        0xf800_00d1,
-        20,
-        // exp param0 v2..v5, which the passthrough fragment module reads, then s_endpgm
-        0xf800_020f,
-        0x0504_0302,
-        0xbf81_0000,
     ];
+    if let Some(size) = size {
+        // v20 = size; exp pos1 v20, off, off, off
+        words.extend([0x7e28_02ff, size.to_bits(), 0xf800_00d1, 20]);
+    }
+    // exp param0 v2..v5, which the passthrough fragment module reads, then s_endpgm
+    words.extend([0xf800_020f, 0x0504_0302, 0xbf81_0000]);
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
@@ -88,6 +92,11 @@ fn module(size: f32) -> Vec<u32> {
 
 /// How many pixels a point at the centre of a 16x16 target covers when its vertex exports `size`.
 fn covered(size: f32) -> usize {
+    pixels_of(&module(size))
+}
+
+/// How many pixels the point `module` draws at the centre of a 16x16 target covers.
+fn pixels_of(module: &[u32]) -> usize {
     let mut memory = vec![0u32; 64];
     for (component, value) in [0.0f32, 0.0, 0.0, 1.0].into_iter().enumerate() {
         memory[component] = value.to_bits();
@@ -95,7 +104,7 @@ fn covered(size: f32) -> usize {
     let fragment = orbistoun_spirv::passthrough_fragment_module();
     let clear = [0.0, 0.0, 1.0, 1.0];
     let (pixels, _) =
-        draw_mesh_over(&module(size), &fragment, clear, 16, 16, &memory).expect("the draw ran");
+        draw_mesh_over(module, &fragment, clear, 16, 16, &memory).expect("the draw ran");
     (0..16u32)
         .flat_map(|y| (0..16u32).map(move |x| (x, y)))
         .filter(|&(x, y)| pixels.at(x, y).expect("inside") != [0, 0, 255, 255])
@@ -110,4 +119,37 @@ fn a_point_is_drawn_at_the_size_its_vertex_exports() {
     }
     assert_eq!(covered(1.0), 1, "a point of size one is one pixel");
     assert_eq!(covered(4.0), 16, "a point of size four is four by four");
+}
+
+/// A point whose vertex exports no size is drawn at the draw's `PA_SU_POINT_SIZE`, its height in
+/// eighths of a pixel as radeonsi writes it - and at one where the register is not known.
+#[test]
+fn a_point_that_exports_no_size_is_drawn_at_the_draws() {
+    if !device_or_skip("a_point_that_exports_no_size_is_drawn_at_the_draws") {
+        return;
+    }
+    let unsized_module = |register: Option<u32>| {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let decoded = decode_program(&point_shader(None), &encodings, &operands);
+        translate_with_user_data(
+            &decoded,
+            &encodings,
+            Strategy::Predicated {
+                fidelity: Fidelity::Auto,
+                width: Width::default(),
+            },
+            (Stage::Mesh, MeshPrimitive::Points),
+            Window::default(),
+            UserData {
+                point_size: register,
+                ..UserData::default()
+            },
+        )
+        .expect("the unsized point shader translates")
+        .module
+    };
+    // Four pixels: thirty-two eighths, in both the height and the width.
+    assert_eq!(pixels_of(&unsized_module(Some(32 | 32 << 16))), 16);
+    assert_eq!(pixels_of(&unsized_module(None)), 1);
 }

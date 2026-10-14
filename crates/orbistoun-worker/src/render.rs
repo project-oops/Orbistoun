@@ -1320,6 +1320,12 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
             submission.colour_target_bases,
         )
     );
+    // The primitive the mesh modules were made to emit: a draw of another shape draws nothing.
+    let _ = writeln!(
+        text,
+        "primitive topology {:?}",
+        submission.report.primitive_topology
+    );
     let listing = dir.join(format!("{name}-submission.txt"));
     let window: Vec<u8> = submission
         .guest_memory

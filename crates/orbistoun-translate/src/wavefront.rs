@@ -526,6 +526,10 @@ pub struct UserData {
     /// vector and refuses `pos2` and `pos3`.
     #[serde(default)]
     pub position_vectors: Option<u32>,
+    /// The draw's `PA_SU_POINT_SIZE`: the size, in eighths of a pixel, a point is drawn at whose
+    /// vertex exports none (D867). `None` where it is not known, which draws such a point at one.
+    #[serde(default)]
+    pub point_size: Option<u32>,
     /// For each texture slot a pixel shader samples, which coordinates, across then down, it
     /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
     #[serde(default)]
@@ -1949,6 +1953,8 @@ pub struct Wavefront<'a> {
     discard_vertex_exports: bool,
     /// The draw's position-vector routing ([`UserData::position_vectors`]).
     position_vectors: Option<u32>,
+    /// The draw's point size register ([`UserData::point_size`]).
+    point_size: Option<u32>,
     /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
     integer_images: [bool; 2],
     /// The coordinates each texture slot's samples saturate (D743).
@@ -2796,6 +2802,7 @@ impl<'a> Wavefront<'a> {
             flat_twins: user_data.flat_twins,
             discard_vertex_exports: user_data.discard_vertex_exports,
             position_vectors: user_data.position_vectors,
+            point_size: user_data.point_size,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
             saturated: user_data.saturated,
             uvec4: None,
@@ -2918,9 +2925,14 @@ impl<'a> Wavefront<'a> {
                 }
             }
         }
-        // A vertex that exports no point size is drawn at one (D867).
+        // A vertex that exports no point size is drawn at the draw's, `PA_SU_POINT_SIZE`'s height
+        // in eighths of a pixel as radeonsi writes it (`si_state.c` 945), or at one (D867).
         if let Some(words) = self.mesh.as_ref().and_then(|mesh| mesh.point_sizes) {
-            let one = self.constant(ONE_BITS);
+            let bits = self.point_size.map_or(ONE_BITS, |register| {
+                let height = u16::try_from(register & 0xFFFF).unwrap_or(0);
+                (f32::from(height) / 8.0).to_bits()
+            });
+            let one = self.constant(bits);
             for lane in 0..self.modelled.min(MESH_SLOTS) {
                 let slot = self.lane_slot(lane);
                 let pointer = self.workgroup_word(words, slot);
@@ -6372,9 +6384,11 @@ pub fn translate_with_user_data(
                     stage == Stage::Mesh
                         && model::misc_vector_present(user_data.position_vectors)
                         && exports_layer(decode, encodings),
+                    // Every point has a size, its vertex's or the draw's (D867).
                     stage == Stage::Mesh
-                        && model::point_size_read(user_data.position_vectors)
-                        && exports_point_size(decode, encodings),
+                        && (primitive == MeshPrimitive::Points
+                            || model::point_size_read(user_data.position_vectors)
+                                && exports_point_size(decode, encodings)),
                 ),
             ),
         ),

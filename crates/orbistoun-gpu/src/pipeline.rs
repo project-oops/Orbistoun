@@ -836,7 +836,7 @@ enum Unprepared {
 type FormatWords = std::sync::Arc<[orbistoun_translate::draw_buffers::BufferSource]>;
 
 /// Where a module prepared for no particular draw is held: [`Pipeline::plain_key`].
-type PlainKey = (u32, u64, WindowSpace, u32, Option<u32>);
+type PlainKey = (u32, u64, WindowSpace, u32, (Option<u32>, Option<u32>));
 
 /// A submission's primitive shaders prepared per draw geometry (D730): the ones that need it, with
 /// the reason they gave; what each geometry made; and the refusals already recorded.
@@ -1623,6 +1623,7 @@ impl Pipeline {
             flat_twins: None,
             discard_vertex_exports: state.vertex_streamout,
             position_vectors: None,
+            point_size: None,
             saturated: UNSATURATED,
             local_words: state.local_words,
             program_address: None,
@@ -1936,8 +1937,12 @@ impl Pipeline {
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&first);
         // The primitive the draw produces, from `VGT_GS_OUT_PRIM_TYPE`; `prepare` makes it the mesh
-        // module's output shape.
-        submission.report.primitive_topology = primitive_topology_at(&writes);
+        // module's output shape. A stream that clears state and never writes it leaves it at its
+        // reset value, zero - `POINTLIST` - which radeonsi relies on: it tracks the register as
+        // zero after a clear and writes it only when that changes (`ac_cmdbuf.c` 968).
+        submission.report.primitive_topology = primitive_topology_at(&writes).or_else(|| {
+            last_clear(&walked).map(|_| crate::registers::decode_primitive_topology(0))
+        });
         // Each stage's wave width: the encodings are identical at either width, so the stream's
         // registers are the only source (D145).
         submission.report.wave_widths = crate::registers::wave_widths_at(&writes);
@@ -3206,9 +3211,11 @@ impl Pipeline {
                 held.dx10_clamp = at_draw.dx10_clamp;
                 held.local_words = at_draw.local_words;
                 held.position_vectors = at_draw.position_vectors;
+                held.point_size = at_draw.point_size;
             }
             written.extend(self.user_data.iter().map(|layout| Some(layout.count)));
             written.push(self.user_data[0].position_vectors);
+            written.push(self.user_data[0].point_size);
         }
         if with_words {
             let words = stage_user_data(sweep, at, 1);
@@ -3221,12 +3228,19 @@ impl Pipeline {
 
     /// The key a module prepared for no particular draw is held under in a submission: its stage,
     /// address and position space, the user-data count it was translated for, since a stream
-    /// can give one program two counts, and its further position exports' routing (D867).
+    /// can give one program two counts, and its further position exports' routing and default
+    /// point size (D867).
     fn plain_key(&self, stage: ShaderStage, address: u64, window_space: WindowSpace) -> PlainKey {
         let (count, routing) = match stage {
-            ShaderStage::Vertex => (self.user_data[0].count, self.user_data[0].position_vectors),
-            ShaderStage::Fragment => (self.user_data[1].count, None),
-            ShaderStage::Compute => (0, None),
+            ShaderStage::Vertex => (
+                self.user_data[0].count,
+                (
+                    self.user_data[0].position_vectors,
+                    self.user_data[0].point_size,
+                ),
+            ),
+            ShaderStage::Fragment => (self.user_data[1].count, (None, None)),
+            ShaderStage::Compute => (0, (None, None)),
         };
         (stage as u32, address, window_space, count, routing)
     }
@@ -6586,6 +6600,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             dx10_clamp: clamps[0],
             // What the primitive shader's further position exports are (D867).
             position_vectors: last(crate::registers::PA_CL_VS_OUT_CNTL),
+            point_size: last(PA_SU_POINT_SIZE),
             pixel_inputs: None,
             input_controls: None,
             compute: None,
@@ -6607,6 +6622,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             block_offset: USER_DATA_STAGE_WORDS,
             dx10_clamp: clamps[1],
             position_vectors: None,
+            point_size: None,
             // Set by `set_environment` for every backend, with the input controls.
             pixel_inputs: None,
             input_controls: None,
@@ -6697,7 +6713,15 @@ fn layout_salt(user_data: &UserData) -> u64 {
         ^ user_data
             .position_vectors
             .map_or(0, |cntl| 0x504f_5356_0000_0000 ^ u64::from(cntl))
+        // The size a point that exports none is drawn at (D867).
+        ^ user_data
+            .point_size
+            .map_or(0, |size| 0x5053_5a00_0000_0000 ^ u64::from(size).rotate_left(24))
 }
+
+/// `PA_SU_POINT_SIZE` (`gfx103.json`, byte `0x28A00`, dword `0xA280`): a point's height and width
+/// in eighths of a pixel, where its vertex exports no size (D867).
+const PA_SU_POINT_SIZE: u32 = 0xA280;
 
 /// `LDS_SIZE` of `SPI_SHADER_PGM_RSRC2_GS`, as `(first bit, bits)`: bits 19-26 (`gfx103.json`).
 const GS_LDS_SIZE: (u32, u32) = (19, 8);
