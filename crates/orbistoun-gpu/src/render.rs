@@ -161,12 +161,10 @@ pub fn drive(
         // A split draw is carried out as the chunks it names (D787), each the draw it stands for
         // and counted as one.
         let result = match command {
-            RenderCommand::DrawChunks { chunks, .. } => command
-                .chunk_draws()
-                .try_for_each(|draw| {
-                    crate::perf::span(crate::perf::Span::DrawCommand, || backend.execute(&draw))
-                })
-                .map(|()| usize::try_from(*chunks).unwrap_or(usize::MAX)),
+            RenderCommand::DrawChunks { chunks, .. } => {
+                crate::perf::span(span, || backend.execute_chunks(command))
+                    .map(|()| usize::try_from(*chunks).unwrap_or(usize::MAX))
+            }
             _ => crate::perf::span(span, || backend.execute(command)).map(|()| 1),
         };
         match result {

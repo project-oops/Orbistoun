@@ -4224,12 +4224,47 @@ struct MeshBatch {
 }
 
 impl MeshBatch {
+    /// A batch of `draw` alone, its list in the storage the last batch let go of: a full batch's
+    /// list is near a mebibyte, which the allocator returns to the system when it is freed, and a
+    /// title drawing tens of thousands of draws a frame spent a quarter of its time faulting a new
+    /// one in for each batch (CRFT00001, 45 us per join).
+    fn of(key: &BatchKey, state: &BindState, draw: &DrawWords, query: Option<u32>) -> Self {
+        let mut draws = spare_draws()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_default();
+        draws.push(*draw);
+        Self {
+            key: *key,
+            state: *state,
+            draws,
+            query,
+        }
+    }
+
     /// Whether `draw` can join: it has the instances the batch's draws have, since one dispatch
     /// runs every draw that many times (D863).
     fn takes(&self, draw: &DrawWords) -> bool {
         let at = orbistoun_spirv::DRAW_DATA_INSTANCES_WORD as usize;
         self.draws.first().is_none_or(|first| first[at] == draw[at])
     }
+}
+
+impl Drop for MeshBatch {
+    fn drop(&mut self) {
+        let mut draws = std::mem::take(&mut self.draws);
+        draws.clear();
+        *spare_draws()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(draws);
+    }
+}
+
+/// The storage of the last batch's list of draws, kept for the next ([`MeshBatch::of`]).
+fn spare_draws() -> &'static std::sync::Mutex<Option<Vec<DrawWords>>> {
+    static SPARE: std::sync::Mutex<Option<Vec<DrawWords>>> = std::sync::Mutex::new(None);
+    &SPARE
 }
 
 /// What must be the same for a draw to join a batch: the pipeline (which carries its shaders,
@@ -4282,6 +4317,15 @@ pub(crate) fn split_user_data(
         geometry[bases + slot] = base;
     }
     (geometry, fragment)
+}
+
+/// `geometry`, a draw's geometry words from [`split_user_data`], with `draw`'s counts in place of
+/// its own.
+pub(crate) fn with_counts(mut geometry: DrawWords, draw: &VertexDraw) -> DrawWords {
+    geometry[DRAW_DATA_VERTICES_WORD as usize] = draw.vertices;
+    geometry[DRAW_DATA_FIRST_VERTEX_WORD as usize] = draw.first_vertex;
+    geometry[orbistoun_spirv::DRAW_DATA_INSTANCES_WORD as usize] = draw.instances;
+    geometry
 }
 
 /// Records a batch into `command`: its draw data written, then one dispatch of a workgroup per draw.
@@ -4994,40 +5038,40 @@ fn batch_draw(
     } else {
         None
     };
-    open.batch = Some(MeshBatch {
-        key: *key,
-        state: *state,
-        draws: vec![*draw],
-        query,
-    });
+    open.batch = Some(MeshBatch::of(key, state, draw, query));
     Ok(())
 }
 
-/// Adds a draw to the open batch without touching the pipeline or the session, when the pass is on
-/// `key`'s attachment and the batch is `key`'s and has room (D718). `false` otherwise, and the draw
-/// takes the whole path.
-pub(crate) fn join_open_batch(key: &BatchKey, draw: &DrawWords) -> bool {
+/// Adds draws to the open batch without touching the pipeline or the session, when the pass is on
+/// `key`'s attachment and the batch is `key`'s and has room (D718): as many of `draws`, from the
+/// first, as it takes. The rest take the whole path.
+pub(crate) fn join_open_batch(key: &BatchKey, draws: &[DrawWords]) -> usize {
     let mut open = open_pass()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(open) = open.as_mut() else {
-        return false;
+        return 0;
     };
     let Some(batch) = open.batch.as_mut() else {
-        return false;
+        return 0;
     };
-    if open.framebuffer != key.framebuffer
-        || batch.key != *key
-        || !batch.takes(draw)
-        || batch.draws.len() >= DRAW_DATA_MOST_DRAWS as usize
-        || !draw_data_room(batch.draws.len() + 1)
-    {
-        return false;
+    if open.framebuffer != key.framebuffer || batch.key != *key {
+        return 0;
     }
-    batch.draws.push(*draw);
+    let room = (DRAW_DATA_MOST_DRAWS as usize)
+        .saturating_sub(batch.draws.len())
+        .min(draw_data_room_for(batch.draws.len()));
+    let joined = draws
+        .iter()
+        .take(room)
+        .take_while(|draw| batch.takes(draw))
+        .count();
+    batch.draws.extend_from_slice(&draws[..joined]);
     // A draw carried out is a draw, whether it took the whole path or joined a batch.
-    orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
-    true
+    for _ in 0..joined {
+        orbistoun_gpu::perf::count(orbistoun_gpu::perf::Count::Draws);
+    }
+    joined
 }
 
 /// Runs every resident draw recorded or submitted so far, waits for them, and frees their command
@@ -6407,7 +6451,7 @@ pub(crate) fn draw_resident(
         });
     if let Some(key) = key.filter(|_| start.depth_clear.is_none()) {
         let (words, _) = split_user_data(start.user_data, (start.mesh_words(), &places));
-        if join_open_batch(&key, &words) {
+        if join_open_batch(&key, &[words]) == 1 {
             return Ok(Some((key, places)));
         }
     }
@@ -6849,15 +6893,23 @@ fn ensure_draw_data(devices: Devices<'_>) -> Result<vk::Buffer, DispatchError> {
 
 /// Whether `draws` more draws fit before the buffer must be taken back.
 fn draw_data_room(draws: usize) -> bool {
+    draw_data_room_for(0) >= draws
+}
+
+/// How many more draws a batch of `batched` draws has room for in the draw-data buffer: every one
+/// while the buffer is not yet made.
+fn draw_data_room_for(batched: usize) -> usize {
+    let stride = u64::from(DRAW_DATA_STRIDE_WORDS) * 4;
     draw_data()
         .lock()
         .ok()
         .and_then(|data| {
             let data = data.as_ref()?;
             let start = data.cursor.next_multiple_of(DRAW_DATA_ALIGN);
-            Some(start + draws as u64 * u64::from(DRAW_DATA_STRIDE_WORDS) * 4 <= DRAW_DATA_BYTES)
+            let fit = DRAW_DATA_BYTES.saturating_sub(start) / stride;
+            usize::try_from(fit).ok()
         })
-        .unwrap_or(true)
+        .map_or(usize::MAX, |fit| fit.saturating_sub(batched))
 }
 
 /// Writes a batch's draws into the buffer and answers the offset its dispatch binds; `None` when
@@ -7135,6 +7187,26 @@ pub fn draw_with_windows(
 #[cfg(test)]
 mod tests {
     use super::{COARSE_TEXEL, guest_viewport, staged};
+
+    /// A joined chunk's words, the first chunk's with its own counts, are the words its own draw
+    /// would have.
+    #[test]
+    fn a_chunk_s_words_are_its_own_draw_s() {
+        let block: [u32; orbistoun_gpu::USER_DATA_BLOCK_WORDS] =
+            std::array::from_fn(|i| u32::try_from(i).unwrap_or(0) * 7 + 1);
+        let places: crate::draw_buffers::GeometryPlaces = std::array::from_fn(|slot| {
+            let slot = u32::try_from(slot).unwrap_or(0);
+            [slot, slot + 10, slot + 20, slot + 30]
+        });
+        let (template, _) = super::split_user_data(&block, ((64, 0, 3, 2), &places));
+        let chunk = super::VertexDraw {
+            vertices: 40,
+            instances: 2,
+            first_vertex: 640,
+        };
+        let (own, _) = super::split_user_data(&block, ((40, 640, 3, 2), &places));
+        assert_eq!(super::with_counts(template, &chunk), own);
+    }
 
     /// A dependency into a pass names only the attachment accesses its stages perform: the
     /// readback copy's transfer accesses belong to the dependency out of it.

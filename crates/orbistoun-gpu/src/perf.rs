@@ -61,6 +61,7 @@ macro_rules! span_labels {
             Span::DrawCommand => $as!("draw command"),
             Span::StateCommand => $as!("state command"),
             Span::DrawJoined => $as!("draw joined"),
+            Span::JoinedBuffers => $as!("joined: buffers"),
             Span::DrawWhole => $as!("draw whole"),
             Span::WholeWindow => $as!("whole: window"),
             Span::WholePipeline => $as!("whole: pipeline"),
@@ -377,6 +378,8 @@ pub enum Span {
     StateCommand,
     /// A draw that joined the open batch without being worked out again (D718).
     DrawJoined,
+    /// Working out whether a joining draw's re-bound buffers leave the batch's set unchanged.
+    JoinedBuffers,
     /// A draw that could not join the open batch, and took the whole path.
     DrawWhole,
     /// A whole-path draw's guest-memory window, uploaded when it changed.
@@ -485,7 +488,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 74] = [
+    pub const ALL: [Self; 75] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -511,6 +514,7 @@ impl Span {
         Self::DrawCommand,
         Self::StateCommand,
         Self::DrawJoined,
+        Self::JoinedBuffers,
         Self::DrawWhole,
         Self::WholeWindow,
         Self::WholePipeline,

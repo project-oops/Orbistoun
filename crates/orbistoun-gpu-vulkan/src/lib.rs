@@ -1320,40 +1320,62 @@ impl VulkanBackend {
         (key(hasher.finish()), key(shape))
     }
 
-    /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so this
-    /// draw joins the batch if it is still open; `false` when it cannot.
-    fn join_unchanged_batch(&mut self, (vertices, first, instances): (u32, u32, u32)) -> bool {
+    /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so these
+    /// draws join the batch if it is still open: as many of them, from the first, as it takes.
+    fn join_unchanged_batch(&mut self, draws: &[framebuffer::VertexDraw]) -> usize {
         let Some((generation, key, places)) = self.batched else {
-            return false;
+            return 0;
         };
         if generation != self.state_generation {
-            return false;
+            return 0;
         }
         // The geometry buffers bound since are placed in the arenas and named in the draw's
         // words (D747); the draw still joins when that leaves the set the batch binds unchanged.
         let places = if self.geometry_buffers_rebound {
-            let Ok(session) = compute::session() else {
-                return false;
+            let unchanged =
+                orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::JoinedBuffers, || {
+                    let session = compute::session().ok()?;
+                    let session = session
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match draw_buffers::descriptor_set(
+                        &session,
+                        [&self.draw_buffers[0], &self.draw_buffers[1]],
+                    ) {
+                        Ok((set, places)) if set == key.buffers() => Some(places),
+                        _ => None,
+                    }
+                });
+            let Some(places) = unchanged else {
+                return 0;
             };
-            let session = session
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match draw_buffers::descriptor_set(
-                &session,
-                [&self.draw_buffers[0], &self.draw_buffers[1]],
-            ) {
-                Ok((set, places)) if set == key.buffers() => places,
-                _ => return false,
-            }
+            places
         } else {
             places
         };
-        let (words, _) = framebuffer::split_user_data(
+        let Some(first) = draws.first() else {
+            return 0;
+        };
+        // The draws differ in their counts alone, so their words are the first's with those set.
+        let (template, _) = framebuffer::split_user_data(
             &self.user_data,
-            ((vertices, first, self.layer_word(), instances), &places),
+            (
+                (
+                    first.vertices,
+                    first.first_vertex,
+                    self.layer_word(),
+                    first.instances,
+                ),
+                &places,
+            ),
         );
-        if !framebuffer::join_open_batch(&key, &words) {
-            return false;
+        let words: Vec<framebuffer::DrawWords> = draws
+            .iter()
+            .map(|draw| framebuffer::with_counts(template, draw))
+            .collect();
+        let joined = framebuffer::join_open_batch(&key, &words);
+        if joined == 0 {
+            return 0;
         }
         self.batched = Some((generation, key, places));
         self.geometry_buffers_rebound = false;
@@ -1364,7 +1386,7 @@ impl VulkanBackend {
         self.last_drawn = Some(DrawnOn(target));
         self.last_window = None;
         self.window_unread = true;
-        true
+        joined
     }
 
     /// The output state each colour attachment after the first draws with (D825): the latest
@@ -1480,13 +1502,51 @@ impl VulkanBackend {
         indexed: bool,
     ) -> Result<(), BackendError> {
         if orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawJoined, || {
-            self.join_unchanged_batch((draw.vertices, draw.first_vertex, draw.instances))
-        }) {
+            self.join_unchanged_batch(&[draw])
+        }) == 1
+        {
             return Ok(());
         }
         orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawWhole, || {
             self.draw_whole(draw, indexed)
         })
+    }
+
+    /// A split draw's chunks (D787): as many as join the open batch at once, then the next by the
+    /// whole path, which opens a batch the rest join. Chunk by chunk, a title drawing its world in
+    /// wave-sized chunks spent most of its draw time joining them one at a time (CRFT00001,
+    /// 650 000 chunks a second).
+    fn draw_chunks(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        let draws: Vec<framebuffer::VertexDraw> = command
+            .chunk_draws()
+            .filter_map(|draw| match draw {
+                RenderCommand::Draw {
+                    vertices,
+                    instances,
+                    first_vertex,
+                } => Some(framebuffer::VertexDraw {
+                    vertices,
+                    instances,
+                    first_vertex,
+                }),
+                _ => None,
+            })
+            .collect();
+        let mut rest = draws.as_slice();
+        while let Some((&first, more)) = rest.split_first() {
+            let joined = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawJoined, || {
+                self.join_unchanged_batch(rest)
+            });
+            if joined > 0 {
+                rest = &rest[joined..];
+                continue;
+            }
+            orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DrawWhole, || {
+                self.draw_whole(first, false)
+            })?;
+            rest = more;
+        }
+        Ok(())
     }
 
     /// Binds a stage's buffers for the draws that follow, in a set of their own at the next draw
@@ -1980,6 +2040,10 @@ impl RenderBackend for VulkanBackend {
                 })
             }
         }
+    }
+
+    fn execute_chunks(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        self.draw_chunks(command)
     }
 
     fn present(&mut self) -> Result<(), BackendError> {

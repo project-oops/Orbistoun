@@ -542,6 +542,15 @@ pub trait RenderBackend: fmt::Debug + Send {
     /// reports a gap rather than silently doing nothing (D010).
     fn execute(&mut self, command: &RenderCommand) -> Result<(), BackendError>;
 
+    /// Carry out a [`RenderCommand::DrawChunks`]'s draws (D787), each as
+    /// [`RenderCommand::chunk_draws`] gives it. A backend that can take a run of them at once
+    /// overrides this: a split draw may be thousands of chunks.
+    fn execute_chunks(&mut self, command: &RenderCommand) -> Result<(), BackendError> {
+        command
+            .chunk_draws()
+            .try_for_each(|draw| self.execute(&draw))
+    }
+
     /// Present whatever has been drawn.
     fn present(&mut self) -> Result<(), BackendError>;
 
