@@ -397,6 +397,10 @@ enum Command {
         /// How many zones the ranking across titles lists.
         #[arg(long, default_value_t = 20)]
         top: usize,
+        /// Benchmark this revision - `HEAD`, a commit, a tag - built with Tracy from a clean export,
+        /// rather than this build, which carries whatever else the working tree holds.
+        #[arg(long)]
+        at: Option<String>,
     },
     /// Answer the conformance probe's command protocol, so one driver can drive either.
     ///
@@ -1048,7 +1052,8 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             titles,
             seconds,
             top,
-        } => perf::cmd_bench(&titles, seconds, top)?,
+            at,
+        } => perf::cmd_bench(&titles, (seconds, top), at.as_deref())?,
         Command::Ab {
             path,
             baseline,

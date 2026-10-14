@@ -263,14 +263,7 @@ pub(crate) fn cmd_ab(
     let baseline = match (baseline, against) {
         (Some(baseline), _) => baseline,
         (None, Some(revision)) => {
-            let dir = orbistoun_paths::Paths::resolve().data_root().join("ab");
-            println!("building {revision} into {}", dir.display());
-            built = orbistoun_perf::baseline::build_at(
-                &std::env::current_dir().context("finding the repository")?,
-                revision,
-                &dir,
-            )
-            .map_err(anyhow::Error::msg)?;
+            built = build_revision(revision)?;
             built.as_path()
         }
         (None, None) => anyhow::bail!("name a baseline build or a revision to build one from"),
@@ -339,6 +332,19 @@ pub(crate) fn cmd_ab(
     std::fs::write(&file, &text).with_context(|| format!("writing {}", file.display()))?;
     println!("kept as {}", file.display());
     Ok(())
+}
+
+/// The command line built with Tracy from `revision` of the repository the working directory lies
+/// in, into the data root's `ab` directory, or as built there before.
+fn build_revision(revision: &str) -> Result<PathBuf> {
+    let dir = orbistoun_paths::Paths::resolve().data_root().join("ab");
+    println!("building {revision} into {}", dir.display());
+    orbistoun_perf::baseline::build_at(
+        &std::env::current_dir().context("finding the repository")?,
+        revision,
+        &dir,
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 /// The longest a warm-up run of [`cmd_ab`] lasts: long enough to pass a title's start, where most
@@ -444,13 +450,39 @@ fn others_on_the_gpu() -> Option<f64> {
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
+/// How long a benchmark waits for something else to stop using the GPU before it skips a title,
+/// and how often it asks meanwhile: another run beside it often ends within a minute.
+const GPU_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+const GPU_ASKED_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How busy something else keeps the GPU, when it still keeps it busier than a benchmark can
+/// measure beside after [`GPU_WAIT`]; `None` once it is free enough.
+fn gpu_still_busy() -> Option<f64> {
+    let started = std::time::Instant::now();
+    loop {
+        let busy = others_on_the_gpu().filter(|&busy| busy > GPU_BUSY_MOST)?;
+        if started.elapsed() >= GPU_WAIT {
+            return Some(busy);
+        }
+        println!("  something else is using {busy:.0}% of the GPU; waiting");
+        std::thread::sleep(GPU_ASKED_EVERY);
+    }
+}
+
 /// The most of the GPU something else may be using for a benchmark to measure. An idle desktop
 /// at 4K and 120 Hz keeps the 3D engines 12 to 19% busy; a game beside it, 88%.
 const GPU_BUSY_MOST: f64 = 35.0;
 
 /// `bench` - record every title in turn and rank the costs across them, against the last benchmark.
-pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()> {
+pub(crate) fn cmd_bench(
+    only: &[String],
+    (seconds, top): (u64, usize),
+    at: Option<&str>,
+) -> Result<()> {
     let tools = tools(false)?;
+    // A revision's own build, so a benchmark measures a commit rather than whatever else the
+    // working tree holds.
+    let worker = at.map(build_revision).transpose()?;
     let library = library();
     // A name matching no title would bench nothing and say nothing: an option after `--` is read
     // as a title's name.
@@ -488,14 +520,20 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
             skipped: Some(why),
             seconds: None,
         };
-        if let Some(busy) = others_on_the_gpu().filter(|&busy| busy > GPU_BUSY_MOST) {
+        if let Some(busy) = gpu_still_busy() {
             println!("{title}: skipped - something else is using {busy:.0}% of the GPU");
             entries.push(skipped(format!("the GPU was {busy:.0}% busy")));
             continue;
         }
         let input = pad_script(&id);
         println!("{title}: recording {seconds} s");
-        match record(&tools, &module, seconds, input.as_deref(), None) {
+        match record(
+            &tools,
+            &module,
+            seconds,
+            input.as_deref(),
+            worker.as_deref(),
+        ) {
             Ok(recorded) => entries.push(BenchEntry::of(title.clone(), recorded)),
             Err(error) => entries.push(skipped(format!("{error:#}"))),
         }
