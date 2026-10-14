@@ -67,6 +67,10 @@ macro_rules! span_labels {
             Span::TextureCensus => $as!("textures: census"),
             Span::TextureBind => $as!("textures: bind"),
             Span::BufferBind => $as!("textures: buffers"),
+            Span::BuildModules => $as!("build: modules"),
+            Span::BuildResources => $as!("build: resources"),
+            Span::BuildPipeline => $as!("build: pipeline"),
+            Span::KeepPipelineCache => $as!("build: keep cache"),
             Span::BufferResolve => $as!("buffers: resolve"),
             Span::BufferWatch => $as!("buffers: watch"),
             Span::BufferCompare => $as!("buffers: compare"),
@@ -375,6 +379,14 @@ pub enum Span {
     TextureBind,
     /// Within [`Self::PrepareTextures`]: the buffers each draw reads, read and bound.
     BufferBind,
+    /// Within a draw's pipeline build: its shader modules made.
+    BuildModules,
+    /// Within a draw's pipeline build: its textures, storage image and buffers made.
+    BuildResources,
+    /// Within a draw's pipeline build: the device's pipeline made.
+    BuildPipeline,
+    /// The driver's pipeline cache written to disk, where it grew (D744).
+    KeepPipelineCache,
     /// Within [`Self::BufferBind`]: a draw buffer's range resolved from its descriptor.
     BufferResolve,
     /// Within [`Self::BufferBind`]: the host asked whether a kept large range was written.
@@ -432,7 +444,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 61] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::CommandProcessor,
@@ -466,6 +478,10 @@ impl Span {
         Self::TextureCensus,
         Self::TextureBind,
         Self::BufferBind,
+        Self::BuildModules,
+        Self::BuildResources,
+        Self::BuildPipeline,
+        Self::KeepPipelineCache,
         Self::BufferResolve,
         Self::BufferWatch,
         Self::BufferCompare,

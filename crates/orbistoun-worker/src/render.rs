@@ -1283,6 +1283,8 @@ pub fn render_and_log_last_submission() -> Option<Event> {
             "submissions were still queued when the run ended; the report leaves them out"
         );
     }
+    // The pipelines the run's last seconds compiled, kept for the next run (D744).
+    on_device(orbistoun_gpu_vulkan::pipeline_cache::flush);
     log_execution();
     let submission = orbistoun_gpu::agc_driver::take_last_submission()?;
     write_submission(&submission, "last");

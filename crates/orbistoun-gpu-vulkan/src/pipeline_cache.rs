@@ -2,8 +2,8 @@
 //!
 //! A translated module is megabytes of SPIR-V, and the driver takes seconds to compile one. The
 //! modules are the same from one run to the next (D113), so what the driver made of them is kept
-//! too: one pipeline cache, loaded when the device opens and written back after each pipeline it
-//! had to compile.
+//! too: one pipeline cache, loaded when the device opens and written back as it grows - at most
+//! every [`KEEP_EVERY`], and once more when the run ends ([`flush`]).
 
 use ash::vk;
 use std::path::PathBuf;
@@ -18,7 +18,15 @@ static KEPT: OnceLock<Mutex<Kept>> = OnceLock::new();
 struct Kept {
     cache: vk::PipelineCache,
     written: usize,
+    /// When it was last written, so a run compiling a pipeline a draw does not write the whole
+    /// cache after each.
+    at: Option<std::time::Instant>,
 }
+
+/// The least time between two writes of the cache while a run goes on. Neverball compiled a
+/// pipeline every few draws, and writing its cache after each - fifteen milliseconds a time - was a
+/// tenth of its run.
+const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Keeps compiled pipelines at `path`; the first place named is the one used. A device already
 /// open has its cache opened now: the worker names the place once it knows the title, and by then
@@ -79,6 +87,7 @@ pub(crate) fn open(instance: &ash::Instance, physical: vk::PhysicalDevice, devic
     let _ = KEPT.set(Mutex::new(Kept {
         cache,
         written: cache_size(device, cache).unwrap_or(0),
+        at: None,
     }));
 }
 
@@ -113,23 +122,45 @@ pub(crate) fn cache() -> vk::PipelineCache {
 /// of megabytes, and copying it out after every pipeline built - most of them found in it - cost
 /// more than building them (6 ms a draw, STKT00001 generating mipmaps).
 pub(crate) fn keep(device: &ash::Device) {
+    write_back(device, false);
+}
+
+/// Writes the cache back now where it grew since it was last written, however recently that was:
+/// at the end of a run, so the pipelines its last seconds compiled are kept too.
+pub fn flush() {
+    if let Some(session) = crate::compute::opened_session() {
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        write_back(&session.device, true);
+    }
+}
+
+/// [`keep`], or with `now` [`flush`].
+fn write_back(device: &ash::Device, now: bool) {
     let (Some(path), Some(kept)) = (KEEP_AT.get(), KEPT.get()) else {
         return;
     };
     let Ok(mut kept) = kept.lock() else {
         return;
     };
+    if !now && kept.at.is_some_and(|at| at.elapsed() < KEEP_EVERY) {
+        return;
+    }
     if cache_size(device, kept.cache).is_none_or(|size| size <= kept.written) {
         return;
     }
-    // SAFETY: the cache was created on this device and is live for the process.
-    let Ok(data) = (unsafe { device.get_pipeline_cache_data(kept.cache) }) else {
-        return;
-    };
-    let partial = path.with_extension("partial");
-    if std::fs::write(&partial, &data).is_ok() && std::fs::rename(&partial, path).is_ok() {
-        kept.written = data.len();
-    }
+    kept.at = Some(std::time::Instant::now());
+    orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::KeepPipelineCache, || {
+        // SAFETY: the cache was created on this device and is live for the process.
+        let Ok(data) = (unsafe { device.get_pipeline_cache_data(kept.cache) }) else {
+            return;
+        };
+        let partial = path.with_extension("partial");
+        if std::fs::write(&partial, &data).is_ok() && std::fs::rename(&partial, path).is_ok() {
+            kept.written = data.len();
+        }
+    });
 }
 
 #[cfg(test)]

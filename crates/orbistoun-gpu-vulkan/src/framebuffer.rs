@@ -4529,8 +4529,13 @@ fn build_pipeline(
             "a pipeline built with no draw-buffer set to bind (D733)".to_owned(),
         ));
     };
-    let (vertex, fragment) = create_shader_modules(device, shaders)?;
-    let resources = create_bound_resources(devices, bound)?;
+    let (vertex, fragment) =
+        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildModules, || {
+            create_shader_modules(device, shaders)
+        })?;
+    let resources = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildResources, || {
+        create_bound_resources(devices, bound)
+    })?;
     let set_layout = create_set_layout(device)?;
     let layout = create_pipeline_layout(device, &[set_layout, buffers_layout], geometry)?;
     let (descriptor_pool, set) = allocate_set(device, &[set_layout])?;
@@ -4969,10 +4974,11 @@ fn create_graphics_pipeline(
         Some(state) => info.depth_stencil_state(state),
         None => info,
     }];
-    // SAFETY: every referenced object is live and every slice outlives the call.
-    let pipelines =
+    let pipelines = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::BuildPipeline, || {
+        // SAFETY: every referenced object is live and every slice outlives the call.
         unsafe { device.create_graphics_pipelines(crate::pipeline_cache::cache(), &infos, None) }
-            .map_err(|(_, e)| DispatchError::Vulkan("create_graphics_pipelines", e))?;
+    })
+    .map_err(|(_, e)| DispatchError::Vulkan("create_graphics_pipelines", e))?;
     crate::pipeline_cache::keep(device);
     Ok(pipelines[0])
 }
