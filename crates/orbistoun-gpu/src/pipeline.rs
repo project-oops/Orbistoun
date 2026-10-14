@@ -6061,31 +6061,6 @@ fn with_mip_levels_now(
     {
         return base;
     }
-    let read_levels = || {
-        let layout = crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(4)?;
-        let mut more = Vec::new();
-        for level in descriptor.base_level + 1..=last {
-            let surface = crate::registers::chain_level(
-                (descriptor.base, descriptor.pipe_bank_xor),
-                (descriptor.width, descriptor.height),
-                (descriptor.levels, level),
-                layout,
-            )?;
-            if !surface.layout.models(surface.pipe_bank_xor) {
-                return None;
-            }
-            let bytes = memory.read(surface.base, surface.words() * 4)?;
-            let words: Vec<u32> = bytes
-                .chunks_exact(4)
-                .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
-                .collect();
-            more.extend(surface.detile_mapped(&words, |w| w));
-        }
-        Some(more)
-    };
-    let Some(more) = read_levels() else {
-        return base;
-    };
     let RenderCommand::BindTexture {
         slot,
         hash,
@@ -6100,13 +6075,23 @@ fn with_mip_levels_now(
     else {
         return base;
     };
-    let mut all = texels.to_vec();
-    all.extend(more);
+    let Some((hash, texels)) = kept_chain(descriptor, last, (hash, &texels), memory) else {
+        return RenderCommand::BindTexture {
+            slot,
+            hash,
+            texels,
+            width,
+            height,
+            sampling,
+            encoding,
+            faces,
+            levels: 1,
+        };
+    };
     RenderCommand::BindTexture {
         slot,
-        // The base's hash, joined with the levels after it.
-        hash: hash.rotate_left(1) ^ crate::content_hash(&all[texels.len()..]),
-        texels: all.into(),
+        hash,
+        texels,
         width,
         height,
         sampling,
@@ -6114,6 +6099,124 @@ fn with_mip_levels_now(
         faces,
         levels: last - descriptor.base_level + 1,
     }
+}
+
+/// A chain's levels after its base, read and detiled, kept while nothing writes their memory, with
+/// the last chain they were joined into.
+struct KeptLevels {
+    /// The bytes the levels lie in, first and length, and the host's mark of when they were read.
+    span: (u64, u64),
+    since: Option<u64>,
+    texels: Vec<u32>,
+    hash: u64,
+    /// The base's hash and the chain - the base's texels, then these - last bound with it.
+    joined: Option<(u64, std::sync::Arc<[u32]>)>,
+}
+
+/// How many chains' levels are kept before all are let go.
+const LEVELS_KEPT: usize = 1024;
+
+/// `base`'s chain through `last`: its hash - the base's joined with the levels' - and its texels,
+/// the base's then each level's after it. The levels are read and detiled once and kept while the
+/// host reports nothing written to them, and the chain is kept with them for the same base: a guest
+/// binds one chain draw after draw, and reading and detiling it each time was a quarter of a
+/// title's run (SuperTuxKart, 72,000 binds in 45 s). `None` when a level cannot be read.
+fn kept_chain(
+    descriptor: &ImageDescriptor,
+    last: u32,
+    (base_hash, base): (u64, &std::sync::Arc<[u32]>),
+    memory: &impl GuestMemory,
+) -> Option<(u64, std::sync::Arc<[u32]>)> {
+    use std::hash::{Hash, Hasher};
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, KeptLevels>>> =
+        std::sync::OnceLock::new();
+    let layout = crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(4)?;
+    let mut surfaces = Vec::new();
+    for level in descriptor.base_level + 1..=last {
+        let surface = crate::registers::chain_level(
+            (descriptor.base, descriptor.pipe_bank_xor),
+            (descriptor.width, descriptor.height),
+            (descriptor.levels, level),
+            layout,
+        )?;
+        if !surface.layout.models(surface.pipe_bank_xor) {
+            return None;
+        }
+        surfaces.push(surface);
+    }
+    let first = surfaces.iter().map(|surface| surface.base).min()?;
+    let end = surfaces
+        .iter()
+        .map(|surface| surface.base + surface.words() as u64 * 4)
+        .max()?;
+    let span = (first, end - first);
+    let key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (
+            descriptor.base,
+            (descriptor.width, descriptor.height, descriptor.format),
+            (descriptor.pipe_bank_xor, descriptor.levels),
+            (descriptor.base_level, last),
+            layout_tag(layout),
+        )
+            .hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut kept = KEPT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let unchanged = kept.get(&key).is_some_and(|levels| {
+        levels.span == span
+            && levels.since.and_then(|since| {
+                crate::perf::span(crate::perf::Span::TextureWatch, || {
+                    orbistoun_mem::watch::written_since(span.0, span.1, since)
+                })
+            }) == Some(false)
+    });
+    if unchanged {
+        crate::perf::span(crate::perf::Span::TextureKept, || ());
+    } else {
+        // Marked before the bytes are read, so a write racing the read is seen next time.
+        let since = texture_mark(span.0, span.1);
+        let mut texels = Vec::new();
+        for surface in &surfaces {
+            let bytes = memory.read(surface.base, surface.words() * 4)?;
+            let words: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+                .collect();
+            texels.extend(surface.detile_mapped(&words, |w| w));
+        }
+        if kept.len() >= LEVELS_KEPT && !kept.contains_key(&key) {
+            kept.clear();
+        }
+        let hash = crate::content_hash(&texels);
+        kept.insert(
+            key,
+            KeptLevels {
+                span,
+                since,
+                texels,
+                hash,
+                joined: None,
+            },
+        );
+    }
+    let levels = kept.get_mut(&key)?;
+    // The base's hash, joined with the levels after it.
+    let hash = base_hash.rotate_left(1) ^ levels.hash;
+    if let Some((joined_base, chain)) = &levels.joined
+        && *joined_base == base_hash
+        && chain.len() == base.len() + levels.texels.len()
+    {
+        return Some((hash, std::sync::Arc::clone(chain)));
+    }
+    let mut chain = base.to_vec();
+    chain.extend_from_slice(&levels.texels);
+    let chain: std::sync::Arc<[u32]> = chain.into();
+    levels.joined = Some((base_hash, std::sync::Arc::clone(&chain)));
+    Some((hash, chain))
 }
 
 /// The bit a texel cache key carries for the layout its texels were detiled from, so the same
