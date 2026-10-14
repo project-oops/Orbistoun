@@ -3855,15 +3855,27 @@ impl Pipeline {
         {
             return resource;
         }
+        // Every chunk but the last has the same geometry - where each starts is its index buffer's -
+        // and so the same module, which is worked out once: a world drawn in wave-sized chunks
+        // looked each one up again, through its buffers' formats in guest memory (CRFT00001, 25 us
+        // a draw).
+        let mut last: Option<(GeometryInputs, Option<ResourceId>)> = None;
         let modules: Option<Vec<ResourceId>> = plans
             .iter()
             .map(|plan| {
-                self.bind_for_draw(
+                if let Some((geometry, module)) = last
+                    && geometry == plan.geometry
+                {
+                    return module;
+                }
+                let module = self.bind_for_draw(
                     candidate,
                     (memory, &Ok(plan.geometry), window_space, words),
                     by_geometry,
                     submission,
-                )
+                );
+                last = Some((plan.geometry, module));
+                module
             })
             .collect();
         *chunked = modules.unwrap_or_default();
