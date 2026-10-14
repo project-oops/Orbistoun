@@ -6121,6 +6121,23 @@ fn reads_own_address(
     decoded: Option<&orbistoun_shader::Decode>,
     (encodings, operands): (&EncodingTable, &OperandTable),
 ) -> bool {
+    /// Answers kept by the program's content hash: a function of its bytes, asked with every
+    /// submission's every shader, and decoding the program again for it each time was most of
+    /// what preparing a cached shader cost.
+    static KNOWN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u64, bool>>> =
+        std::sync::OnceLock::new();
+    /// A bound on the answers kept, against a guest generating programs as it goes.
+    const KEPT: usize = 4096;
+    let known = KNOWN.get_or_init(Default::default);
+    let hash = content_hash(shader);
+    if let Some(&reads) = known
+        .lock()
+        .ok()
+        .and_then(|known| known.get(&hash).copied())
+        .as_ref()
+    {
+        return reads;
+    }
     let again;
     let decoded = if let Some(decoded) = decoded {
         decoded
@@ -6128,13 +6145,20 @@ fn reads_own_address(
         again = decode_program(shader, encodings, operands);
         &again
     };
-    decoded.instructions.iter().any(|instruction| {
+    let reads = decoded.instructions.iter().any(|instruction| {
         instruction
             .encoding
             .and_then(|encoding| encodings.encodings().get(usize::from(encoding)))
             .and_then(|family| encodings.mnemonic_for(&family.name, instruction.opcode))
             == Some("s_getpc_b64")
-    })
+    });
+    if let Ok(mut known) = known.lock() {
+        if known.len() >= KEPT {
+            known.clear();
+        }
+        known.insert(hash, reads);
+    }
+    reads
 }
 
 fn layout_salt(user_data: &UserData) -> u64 {
