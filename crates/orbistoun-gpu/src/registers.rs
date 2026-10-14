@@ -1476,6 +1476,9 @@ pub struct ColourTargetDcc {
     pub single_slice: bool,
     /// `CB_COLOR0_ATTRIB`'s sample and fragment counts both one.
     pub single_sample: bool,
+    /// The colour a block whose key says "clear to the register" holds: `CB_COLOR0_CLEAR_WORD0`
+    /// and `_WORD1` as they stand, `None` where the stream wrote neither.
+    pub clear: Option<[u32; 2]>,
 }
 
 /// Colour target zero's DCC from the live registers, or `None` when `CB_COLOR0_INFO` is unset or
@@ -1518,8 +1521,18 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
         levels: (attrib2 >> 28) + 1,
         single_slice,
         single_sample: samples_and_fragments == 0,
+        clear: last(CB_COLOR0_CLEAR_WORD0)
+            .zip(last(CB_COLOR0_CLEAR_WORD1))
+            .map(|(low, high)| [low, high]),
     })
 }
+
+/// `CB_COLOR0_CLEAR_WORD0` and `_WORD1` (`gfx103.json`, bytes `167052` and `167056`, dwords
+/// `0xA323` and `0xA324`): the colour a fast-cleared block holds, radeonsi's
+/// `color_clear_value` (`si_state.c` 2790-2791).
+const CB_COLOR0_CLEAR_WORD0: u32 = 0xA323;
+/// See [`CB_COLOR0_CLEAR_WORD0`].
+const CB_COLOR0_CLEAR_WORD1: u32 = 0xA324;
 
 /// The register that carries which colour targets are written, and on which channels.
 ///
@@ -4996,6 +5009,7 @@ mod tests {
                 levels: 1,
                 single_slice: true,
                 single_sample: true,
+                clear: None,
             })
         );
         // The surface's high address bits are `CB_COLOR0_BASE_EXT`'s: PPSA25872's target lies at

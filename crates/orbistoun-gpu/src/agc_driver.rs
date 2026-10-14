@@ -765,6 +765,7 @@ impl GuestCp<'_> {
             surface,
             extent,
             levels,
+            clear,
             ..
         } = target;
         let start = crate::dcc::meta_start(dcc);
@@ -779,13 +780,21 @@ impl GuestCp<'_> {
             .ok()
             .and_then(|length| cp::CpMemory::read(self, start, length))
             .ok_or("its DCC keys are not readable guest memory")?;
-        match crate::dcc::classify(&keys) {
-            crate::dcc::Keys::Uncompressed => Ok(()),
-            crate::dcc::Keys::Clear0000 => {
+        // A fast clear to the register's colour fills every block with it, as a clear to `0000`
+        // fills them with zeros.
+        let fill = match crate::dcc::classify(&keys) {
+            crate::dcc::Keys::Uncompressed => return Ok(()),
+            crate::dcc::Keys::Clear0000 => Some(0),
+            crate::dcc::Keys::Other => {
+                crate::dcc::cleared_fill(&keys, clear, 1 << layout.texel_log2())
+            }
+        };
+        match fill {
+            Some(word) => {
                 let span = usize::try_from(layout.chain_bytes(extent.width, extent.height, levels))
                     .map_err(|_| "its surface is larger than this host addresses".to_owned())?;
                 let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
-                if cp::CpMemory::fill(self, surface, 0, span)
+                if cp::CpMemory::fill(self, surface, word, span)
                     && cp::CpMemory::fill(self, start, keys_uncompressed, keys.len())
                 {
                     Ok(())
@@ -793,11 +802,15 @@ impl GuestCp<'_> {
                     Err("its cleared DCC blocks could not be expanded in guest memory".to_owned())
                 }
             }
-            crate::dcc::Keys::Other => Err(concat!(
-                "its DCC keys are neither all uncompressed nor all cleared to 0000, and decoding ",
-                "them needs per-block key addressing, which is not modelled"
-            )
-            .to_owned()),
+            None => Err(format!(
+                concat!(
+                    "its DCC keys are neither all uncompressed nor all one clear, and decoding ",
+                    "them needs per-block key addressing, which is not modelled ({}; clear words ",
+                    "{:x?})"
+                ),
+                crate::dcc::census(&keys),
+                clear
+            )),
         }
     }
 
@@ -6706,6 +6719,7 @@ mod tests {
                 levels,
                 single_slice: true,
                 single_sample: true,
+                clear: None,
             };
             let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
             let mut cp = GuestCp {

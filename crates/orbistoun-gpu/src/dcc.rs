@@ -21,6 +21,23 @@ use crate::registers::SwizzleMode;
 pub const KEY_UNCOMPRESSED: u8 = 0xFF;
 /// `DCC_CLEAR_0000` (`ac_descriptors.h:29`): every bit of the block is zero, whatever memory holds.
 pub const KEY_CLEAR_0000: u8 = 0x00;
+/// `GFX8_DCC_CLEAR_REG` (`ac_descriptors.h:37`), the form GFX10 keeps: every texel of the block is
+/// the colour `CB_COLORn_CLEAR_WORD0/1` hold, whatever memory holds.
+pub const KEY_CLEAR_REGISTER: u8 = 0x20;
+
+/// The word every word of a fast-cleared surface holds, where its keys say so exactly without
+/// knowing which key is which block's: every key a clear to `0000` or to the register with the
+/// register colour zero, or every key a clear to the register with a four-byte texel, which the
+/// colour's low word is. `None` for anything else, or a register colour the stream never wrote.
+#[must_use]
+pub fn cleared_fill(keys: &[u8], clear: Option<[u32; 2]>, texel_bytes: u32) -> Option<u32> {
+    let clear = clear?;
+    let only = |codes: &[u8]| keys.iter().all(|key| codes.contains(key));
+    if clear == [0, 0] && only(&[KEY_CLEAR_0000, KEY_CLEAR_REGISTER]) {
+        return Some(0);
+    }
+    (texel_bytes == 4 && only(&[KEY_CLEAR_REGISTER])).then_some(clear[0])
+}
 
 /// `log2` of the pipe count addrlib is configured with (`GB_ADDR_CONFIG.NUM_PIPES = 4`).
 const PIPES_LOG2: u32 = 4;
@@ -191,6 +208,33 @@ pub fn classify(keys: &[u8]) -> Keys {
     }
 }
 
+/// How many of `keys` mark their block uncompressed, how many cleared to all-zero bits, how many
+/// cleared to the register's colour, and how many compressed, with the most common compressed key:
+/// what a refusal of mixed keys says, since the first three are exact with per-block addressing and
+/// the last needs the block's encoding.
+#[must_use]
+pub fn census(keys: &[u8]) -> String {
+    let mut counts = [0_usize; 256];
+    for &key in keys {
+        counts[usize::from(key)] += 1;
+    }
+    let (uncompressed, cleared, register) = (
+        counts[usize::from(KEY_UNCOMPRESSED)],
+        counts[usize::from(KEY_CLEAR_0000)],
+        counts[usize::from(KEY_CLEAR_REGISTER)],
+    );
+    let compressed = keys.len() - uncompressed - cleared - register;
+    let common = (0..=255_u8)
+        .filter(|&key| ![KEY_UNCOMPRESSED, KEY_CLEAR_0000, KEY_CLEAR_REGISTER].contains(&key))
+        .max_by_key(|&key| counts[usize::from(key)])
+        .filter(|_| compressed > 0)
+        .map_or_else(String::new, |key| format!(", most often {key:#04x}"));
+    format!(
+        "{} key(s): {uncompressed} uncompressed, {cleared} cleared to 0000, {register} cleared to the register, {compressed} compressed{common}",
+        keys.len()
+    )
+}
+
 /// Why a DCC target's metadata is not one this writes back to, or `None` when it is: a
 /// single-sample, single-slice 2D `64KB_R_X` surface of any number of levels - the case whose
 /// metadata is one run of whole blocks ([`chain_meta_bytes`]).
@@ -213,7 +257,38 @@ pub const fn unsupported(
 
 #[cfg(test)]
 mod tests {
-    use super::{Dcc, Keys, MetaBlock, classify, meta_block, meta_bytes, meta_start};
+    use super::{Dcc, Keys, MetaBlock, census, classify, meta_block, meta_bytes, meta_start};
+
+    /// A fast clear fills its surface exactly where its keys need no per-block addressing: zeros
+    /// for clears to `0000` and to a zero register colour together, the colour for clears to the
+    /// register alone over four-byte texels, and nothing where the colour is unknown, the texel
+    /// wider, or a block is compressed.
+    #[test]
+    fn a_fast_clear_fills_its_surface_where_its_keys_say_so() {
+        use super::cleared_fill;
+        assert_eq!(cleared_fill(&[0x00, 0x20, 0x20], Some([0, 0]), 4), Some(0));
+        assert_eq!(
+            cleared_fill(&[0x20, 0x20], Some([0x1122_3344, 0]), 4),
+            Some(0x1122_3344)
+        );
+        assert_eq!(cleared_fill(&[0x00, 0x20], Some([0x1122_3344, 0]), 4), None);
+        assert_eq!(cleared_fill(&[0x20, 0x20], None, 4), None);
+        assert_eq!(cleared_fill(&[0x20, 0x20], Some([1, 0]), 8), None);
+        assert_eq!(cleared_fill(&[0x20, 0x44], Some([0, 0]), 4), None);
+    }
+
+    /// A census counts each kind of key and names the commonest compressed one.
+    #[test]
+    fn a_census_counts_each_kind_of_key() {
+        assert_eq!(
+            census(&[0xFF, 0x00, 0x00, 0x20, 0x44, 0x44, 0x40]),
+            "7 key(s): 1 uncompressed, 2 cleared to 0000, 1 cleared to the register, 3 compressed, most often 0x44"
+        );
+        assert_eq!(
+            census(&[0xFF, 0x00]),
+            "2 key(s): 1 uncompressed, 1 cleared to 0000, 0 cleared to the register, 0 compressed"
+        );
+    }
 
     /// A 32-bit pipe-aligned surface's metadata block is 4 KiB covering 512x512 texels, and an
     /// unaligned one is too: `GetMetaBlkSize` with 16 pipes and no RB+.
