@@ -253,6 +253,13 @@ pub struct TableSnapshot {
 }
 
 impl TableSnapshot {
+    /// Where each table it holds lies, as (first byte, bytes).
+    pub fn spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.tables
+            .iter()
+            .map(|(address, bytes)| (*address, bytes.len() as u64))
+    }
+
     /// Reads every table `walk`'s indirect loads name from `memory`, as a load reads
     /// one; a table not readable is left to be read live, and is refused there as before.
     #[must_use]

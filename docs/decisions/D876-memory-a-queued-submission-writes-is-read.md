@@ -41,5 +41,6 @@ once the write has been carried out; `a_stream_writes_where_its_packets_land` ch
 
 **Not covered:** a depth or stencil target a queued submission draws into, and memory written by
 packets the command processor here does not carry out (they stop the queue, D710), are still read
-as they stood before the submission. The spans a dispatch writes include every byte of its buffers
-and window, read or stored, so a read of a buffer a queued dispatch only reads also waits.
+as they stood before the submission. The spans a dispatch writes are every byte of each buffer it
+stores through and of its window where it stores through that (D882), not only the bytes it
+stores, so a read of a part of one it leaves alone still waits.

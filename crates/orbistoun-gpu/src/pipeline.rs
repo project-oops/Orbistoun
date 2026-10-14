@@ -689,6 +689,10 @@ pub struct Submission {
     pub dispatch_states: Vec<Option<crate::dispatch::DispatchState>>,
     /// Whether any of its draws streams out (D861), writing buffers through a compute wave.
     pub streams_out: bool,
+    /// Whether its preparation read memory a submission queued ahead of it draws into, or the frame
+    /// pending while one was queued, before that submission had drawn it (D882): carried out, its
+    /// draws are prepared again from the stream, after the ones ahead of it.
+    pub read_ahead_of_draws: bool,
     /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`). `None` when the
     /// stream set none: a draw with no depth control has no depth test.
     pub depth_control: Option<DepthControl>,
@@ -1829,9 +1833,10 @@ impl Pipeline {
 
     /// The guest memory a compute dispatch can write, as (first byte, bytes), worked out from its
     /// bindings without running or translating it (D876): each buffer it binds on its own (D746)
-    /// and the window over its other buffer accesses, every byte of them, read or stored. `None`
-    /// where that does not bound it: a program that does not decode or trace, or one that stores
-    /// other than through a buffer - an image, a global or flat address.
+    /// that one of its buffer stores or atomics goes through, and the window over its other buffer
+    /// accesses where one of those stores through it - a buffer or window it only reads, it does
+    /// not write (D882). `None` where that does not bound it: a program that does not decode or
+    /// trace, or one that stores other than through a buffer - an image, a global or flat address.
     #[must_use]
     pub fn dispatch_write_spans(
         &self,
@@ -1844,32 +1849,51 @@ impl Pipeline {
             return None;
         }
         let families = self.encodings.encodings();
-        let stores_elsewhere = decoded.instructions.iter().any(|instruction| {
-            instruction
+        // Where each buffer store or atomic is, by its offset in the program.
+        let mut stores = Vec::new();
+        for instruction in &decoded.instructions {
+            let Some(name) = instruction
                 .encoding
                 .and_then(|e| families.get(usize::from(e)))
                 .and_then(|family| {
                     self.encodings
                         .mnemonic_for(&family.name, instruction.opcode)
                 })
-                .is_some_and(|name| {
-                    (name.contains("store") || name.contains("atomic"))
-                        && !name.starts_with("buffer_")
-                        && !name.starts_with("ds_")
-                })
-        });
-        if stores_elsewhere {
-            return None;
+            else {
+                continue;
+            };
+            if !(name.contains("store") || name.contains("atomic")) || name.starts_with("ds_") {
+                continue;
+            }
+            if !name.starts_with("buffer_") {
+                return None;
+            }
+            stores.push(instruction.offset);
         }
-        let (served, mut spans, _, _, _) = self.dispatch_buffers(state, &decoded, memory).ok()?;
-        let placed = crate::dispatch::place_window_except(
-            state,
-            (&decoded, &self.encodings),
-            &served,
-            |at, len| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some()),
-        )
-        .ok()?;
-        spans.extend(placed.map(|window| (window.address(), u64::from(window.words()) * 4)));
+        if stores.is_empty() {
+            return Some(Vec::new());
+        }
+        let (served, buffers, _, _, _) = self.dispatch_buffers(state, &decoded, memory).ok()?;
+        let mut spans: Vec<(u64, u64)> = Vec::new();
+        let mut through_window = false;
+        for at in &stores {
+            match served.get(at) {
+                Some(&slot) => spans.extend(buffers.get(slot as usize).copied()),
+                None => through_window = true,
+            }
+        }
+        spans.sort_unstable();
+        spans.dedup();
+        if through_window {
+            let placed = crate::dispatch::place_window_except(
+                state,
+                (&decoded, &self.encodings),
+                &served,
+                |at, len| usize::try_from(len).is_ok_and(|len| memory.read(at, len).is_some()),
+            )
+            .ok()?;
+            spans.extend(placed.map(|window| (window.address(), u64::from(window.words()) * 4)));
+        }
         Some(spans)
     }
 
@@ -9581,6 +9605,11 @@ mod tests {
             .expect("the copy prepares");
         assert_eq!(prepared.buffers, [(SOURCE, 256), (DESTINATION, 256)]);
         assert!(prepared.window.is_none(), "nothing is left to a window");
+        // What carrying it out writes is the buffer it stores to, not the one it only reads (D882).
+        assert_eq!(
+            pipeline.dispatch_write_spans(&state(DESTINATION), &memory),
+            Some(vec![(DESTINATION, 256)])
+        );
         let overlapping = pipeline
             .prepare_dispatch(&state(SOURCE + 16), &memory)
             .expect_err("two copies of one byte");

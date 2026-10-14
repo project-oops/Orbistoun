@@ -652,7 +652,8 @@ impl GuestCp<'_> {
         let whole = self
             .submission
             .ok_or("no submission is being carried out")?;
-        if segment.whole {
+        // Prepared ahead of the draws it samples, a submission is drawn as a segment is (D882).
+        if segment.whole && !whole.read_ahead_of_draws {
             let whole = with_bound_modules(whole);
             return keeping_refused(&whole, self.draw_noting_delivery(&whole));
         }
@@ -4462,10 +4463,13 @@ fn submit_described_timed(descriptor: u64) -> u64 {
         return SUBMIT_OK;
     };
     // Asynchronously, a preparation that read what a queued submission writes is made again once
-    // the queue has drained, the live pipeline free meanwhile for the command processor (D876).
-    let (submission, writes) = crate::perf::measure(crate::perf::Phase::Prepare, || {
-        command_processor::preparing(|| prepare_live(&bytes, &memory))
-    });
+    // the queue has drained, the live pipeline free meanwhile for the command processor (D876);
+    // one that read only what a queued submission draws is drawn again as it is carried out (D882).
+    let ((mut submission, writes), read_ahead) =
+        crate::perf::measure(crate::perf::Phase::Prepare, || {
+            command_processor::preparing(|| prepare_live(&bytes, &memory))
+        });
+    submission.read_ahead_of_draws = read_ahead;
     // The next submission is prepared from the registers this one leaves, so they are carried here,
     // in submission order, before it is carried out anywhere.
     carry_registers(&bytes, &submission);
@@ -4513,13 +4517,21 @@ fn prepare_live(bytes: &[u8], memory: &MappedRegions) -> (Submission, QueuedWrit
             let submission = pipeline.submit(bytes, Queue::Draw, &[], &reads);
             keep_new_translations(pipeline);
             note_made(&submission);
-            let writes = if asynchronous() {
-                crate::perf::span(crate::perf::Span::QueuedWrites, || {
-                    queued_writes(pipeline, bytes, &submission, &reads)
-                })
-            } else {
-                Some(Vec::new())
-            };
+            // What the submission carries forward - the tables its registers load from, the
+            // bindings its queued writes are worked out from - is read after what is queued
+            // ahead of it: a read of it over a queued write makes the preparation again (D882).
+            let writes = command_processor::carrying(|| {
+                for (address, length) in submission.tables.spans() {
+                    command_processor::settle_over(address, length);
+                }
+                if asynchronous() {
+                    crate::perf::span(crate::perf::Span::QueuedWrites, || {
+                        queued_writes(pipeline, bytes, &submission, &reads)
+                    })
+                } else {
+                    Some(Vec::new())
+                }
+            });
             (submission, writes)
         },
     )
@@ -4595,17 +4607,22 @@ mod command_processor {
     }
 
     impl Queued {
-        /// Whether carrying it out writes any of `[address, address + length)`.
-        fn writes_over(&self, address: u64, length: u64) -> bool {
-            let end = address.saturating_add(length);
+        /// Whether it draws into any of `[address, address + length)`.
+        fn draws_over(&self, address: u64, length: u64) -> bool {
             self.targets
                 .iter()
                 .any(|target| overlaps_target(*target, address, length))
-                || self.writes.as_ref().is_none_or(|spans| {
-                    spans
-                        .iter()
-                        .any(|&(at, bytes)| at < end && address < at.saturating_add(bytes))
-                })
+        }
+
+        /// Whether carrying it out writes any of `[address, address + length)` other than by
+        /// drawing into it.
+        fn writes_otherwise_over(&self, address: u64, length: u64) -> bool {
+            let end = address.saturating_add(length);
+            self.writes.as_ref().is_none_or(|spans| {
+                spans
+                    .iter()
+                    .any(|&(at, bytes)| at < end && address < at.saturating_add(bytes))
+            })
         }
     }
 
@@ -4634,6 +4651,12 @@ mod command_processor {
         /// it waits for, instead of waited on.
         static NOTING: Cell<bool> = const { Cell::new(false) };
         static CROSSED: Cell<Option<u64>> = const { Cell::new(None) };
+        /// Whether a read inside [`preparing`] was over what a queued submission draws or writes,
+        /// which the command processor reads again as it carries the submission out (D882).
+        static AHEAD: Cell<bool> = const { Cell::new(false) };
+        /// Whether this thread is reading what a preparation carries forward ([`carrying`]): a
+        /// read over a queued write is noted in `CROSSED`, so the preparation is made again.
+        static CARRYING: Cell<bool> = const { Cell::new(false) };
     }
 
     /// A prepared submission and its command stream, boxed so a refused send hands back a pointer.
@@ -4723,10 +4746,14 @@ mod command_processor {
     /// latest submission read over, with the pipeline free, and `prepare` runs again (D876). The
     /// command processor carries a dispatch or a run of draws out through that pipeline, so a read
     /// waiting while it was held waited out [`SETTLE_LIMIT`] and then read what it would have read
-    /// without the wait.
-    pub(super) fn preparing<T>(mut prepare: impl FnMut() -> T) -> T {
+    /// without the wait. Only a read of what the preparation carries forward ([`carrying`]) is made
+    /// again so: any other read over a queued write, or over the frame pending, feeds only the
+    /// submission's own draws, and is answered beside the preparation kept - the command processor
+    /// prepares those draws again as it carries the submission out, after the writes (D882).
+    pub(super) fn preparing<T>(mut prepare: impl FnMut() -> T) -> (T, bool) {
         let was = NOTING.replace(true);
         CROSSED.set(None);
+        AHEAD.set(false);
         let mut prepared = prepare();
         let mut made = 1;
         while let Some(last) = CROSSED.get()
@@ -4736,12 +4763,23 @@ mod command_processor {
             prepared = crate::perf::span(crate::perf::Span::PrepareAgain, || {
                 settle_through(last, SETTLE_LIMIT);
                 CROSSED.set(None);
+                AHEAD.set(false);
                 prepare()
             });
         }
         NOTING.set(was);
         CROSSED.set(None);
-        prepared
+        (prepared, AHEAD.replace(false))
+    }
+
+    /// Runs `read`, reading what a preparation carries forward past the submission itself - the
+    /// tables its registers load from, the bindings of what it writes: inside [`preparing`], a read
+    /// of it over a queued write makes the preparation again rather than answering it read ahead.
+    pub(super) fn carrying<T>(read: impl FnOnce() -> T) -> T {
+        let was = CARRYING.replace(true);
+        let read = read();
+        CARRYING.set(was);
+        read
     }
 
     /// Carries out the queued submissions up to the latest that writes over `[address, address +
@@ -4751,40 +4789,54 @@ mod command_processor {
     /// submission read; preparing it here, ahead of them, read the memory from before they wrote
     /// it. Submissions queued after the latest one are not waited for, and a read overlapping
     /// nothing queued keeps the guest running on while the command processor works. Inside
-    /// [`preparing`] the read is only noted, and the preparation made again once they have run.
+    /// [`preparing`] the read is only noted: of what the preparation carries forward, it is made
+    /// again once they have run; otherwise its draws are prepared again as it is carried out.
     pub(super) fn settle_over(address: u64, length: u64) {
         if ON_PROCESSOR.get() {
             return;
         }
         let over_pending =
             pending_target().is_some_and(|(target, _)| overlaps_target(target, address, length));
-        // The latest queued submission that writes over the read: every one, over the pending
-        // frame, since any of them can write it back.
-        let last = {
+        // The latest queued submission that draws over the read - every one, over the pending
+        // frame, since any of them can write it back - and the latest that writes over it
+        // otherwise.
+        let (drawn, written) = {
             let queued = IN_FLIGHT
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if over_pending {
-                queued.back()
-            } else {
+            let latest = |over: &dyn Fn(&Queued) -> bool| {
                 queued
                     .iter()
                     .rev()
-                    .find(|submission| submission.writes_over(address, length))
-            }
-            .map(|submission| submission.order)
+                    .find(|submission| over(submission))
+                    .map(|submission| submission.order)
+            };
+            let drawn = if over_pending {
+                queued.back().map(|submission| submission.order)
+            } else {
+                latest(&|submission| submission.draws_over(address, length))
+            };
+            (
+                drawn,
+                latest(&|submission| submission.writes_otherwise_over(address, length)),
+            )
         };
-        if let Some(last) = last {
-            if NOTING.get() {
+        let Some(last) = drawn.max(written) else {
+            return;
+        };
+        if NOTING.get() {
+            if CARRYING.get() {
                 CROSSED.set(Some(
                     CROSSED.get().map_or(last, |crossed| crossed.max(last)),
                 ));
             } else {
-                crate::perf::span(crate::perf::Span::SettleOver, || {
-                    settle_through(last, SETTLE_LIMIT);
-                });
+                AHEAD.set(true);
             }
+        } else {
+            crate::perf::span(crate::perf::Span::SettleOver, || {
+                settle_through(last, SETTLE_LIMIT);
+            });
         }
     }
 }
@@ -7424,10 +7476,10 @@ mod tests {
 
     /// Asynchronously, memory a queued submission writes other than by drawing - through its
     /// command processor's packets or its dispatches - is read only once it has been carried out
-    /// (D876): a preparation that read it is made again after the queue drains, and does not wait
-    /// holding the pipeline. A read past what it writes is made once; a submission whose writes are
-    /// not bounded holds every read. The command processor is held off by holding the queue's
-    /// stall slot.
+    /// (D876): a preparation that read it as what it carries forward is made again after the queue
+    /// drains, and does not wait holding the pipeline (D882). A read past what it writes is made
+    /// once; a submission whose writes are not bounded holds every read. The command processor is
+    /// held off by holding the queue's stall slot.
     #[test]
     fn a_preparation_reading_what_a_queued_submission_writes_is_made_again_after_it() {
         use super::{GuestMemory, MappedRegions, SettledReads, Submission};
@@ -7438,12 +7490,14 @@ mod tests {
         let base = memory.as_ptr() as usize as u64;
         set_guest_regions(vec![region_of(memory)]);
         let regions = MappedRegions::current();
-        // How many times a preparation reading `address` is made.
+        // How many times a preparation reading `address`, as what it carries forward, is made.
         let preparations = |address: u64| {
             let made = AtomicUsize::new(0);
             super::command_processor::preparing(|| {
                 made.fetch_add(1, Ordering::SeqCst);
-                let _ = SettledReads(&regions).read(address, 4);
+                super::command_processor::carrying(|| {
+                    let _ = SettledReads(&regions).read(address, 4);
+                });
             });
             made.into_inner()
         };
@@ -7504,6 +7558,83 @@ mod tests {
             (false, 2, true),
             "a submission whose writes are not bounded holds any read"
         );
+    }
+
+    /// Asynchronously, a preparation reading for its draws a texture a queued submission draws
+    /// into, or a buffer a queued dispatch stores to, does not wait for it and is not made again
+    /// (D882): it is answered as read ahead of them, and the command processor prepares its draws
+    /// again as it carries it out, after them. A read past both is not read ahead. The command
+    /// processor is held off by holding the queue's stall slot.
+    #[test]
+    fn a_preparation_sampling_what_a_queued_submission_draws_runs_on_and_is_drawn_again() {
+        use super::{ColourTarget, GuestMemory, MappedRegions, SettledReads, Submission};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; span * 2].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        set_guest_regions(vec![region_of(memory)]);
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        let regions = MappedRegions::current();
+        // How many times a preparation reading `address` is made, and whether it read ahead.
+        let preparations = |address: u64| {
+            let made = AtomicUsize::new(0);
+            let ((), ahead) = super::command_processor::preparing(|| {
+                made.fetch_add(1, Ordering::SeqCst);
+                let _ = SettledReads(&regions).read(address, 4);
+            });
+            (made.into_inner(), ahead)
+        };
+
+        super::set_asynchronous(true);
+        let held = super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        super::command_processor::queue(
+            Vec::new(),
+            Submission {
+                drawn_targets: vec![target],
+                ..Submission::default()
+            },
+            Some(Vec::new()),
+        );
+        let stored = base + span as u64 + 0x100;
+        super::command_processor::queue(
+            Vec::new(),
+            Submission::default(),
+            Some(vec![(stored, 0x100)]),
+        );
+        let over = preparations(base);
+        let over_stored = preparations(stored);
+        let past = preparations(base + span as u64);
+        let still_queued = !super::settle(Duration::ZERO);
+        drop(held);
+        let carried_out = super::settle(Duration::from_secs(5));
+        super::set_asynchronous(false);
+        assert!(carried_out, "the queue drains once the processor can run");
+        assert!(
+            still_queued,
+            "neither preparation waited for the submission drawing the target"
+        );
+        assert_eq!(
+            over,
+            (1, true),
+            "a read over the target is made once and answered as read ahead of its draws"
+        );
+        assert_eq!(
+            over_stored,
+            (1, true),
+            "so is a read over what a queued dispatch stores to"
+        );
+        assert_eq!(past, (1, false), "a read past the target is not read ahead");
     }
 
     /// A descriptor whose command buffer is outside every region is refused, not dereferenced: the
