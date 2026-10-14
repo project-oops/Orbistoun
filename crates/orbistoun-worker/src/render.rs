@@ -1640,15 +1640,23 @@ fn log_execution() {
     }
     // What each program's dispatches wrote: one that writes only zeros produces nothing.
     for (module, writes) in orbistoun_gpu::agc_driver::dispatch_writes_by_module() {
+        let span = |span: Option<(u64, u64)>| {
+            span.map_or_else(
+                || "none".to_owned(),
+                |(at, bytes)| format!("{at:#x} ({bytes} bytes)"),
+            )
+        };
         tracing::info!(
-            "dispatch module {module:016x}: {} carried out, {} byte(s) written back, {}",
+            "dispatch module {module:016x}: {} carried out, {} byte(s) written back, {}; fetches an image at {}, stores one at {}",
             writes.dispatches,
             writes.bytes,
             if writes.lit {
                 "some of them not zero"
             } else {
                 "every one zero"
-            }
+            },
+            span(writes.fetched),
+            span(writes.stored)
         );
     }
     // The program a refused dispatch runs, to read the refusal against.

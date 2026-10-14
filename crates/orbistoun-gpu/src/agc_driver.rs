@@ -1375,6 +1375,10 @@ pub struct DispatchWrites {
     pub bytes: u64,
     /// Whether any byte they wrote is not zero.
     pub lit: bool,
+    /// Where the last of them fetched its image, as (first byte, bytes).
+    pub fetched: Option<(u64, u64)>,
+    /// Where the last of them stored its image, as (first byte, bytes).
+    pub stored: Option<(u64, u64)>,
 }
 
 /// [`DispatchWrites`] by the translated module's content hash.
@@ -1385,10 +1389,11 @@ fn dispatch_writes() -> &'static Mutex<std::collections::BTreeMap<u64, DispatchW
 }
 
 /// Counts a dispatch of `module` and what it wrote back: its runs, its scattered buffer words and
-/// its fills.
+/// its fills; and where its `images` lie.
 fn note_dispatch_writes(
     module: u64,
     (writes, scattered, fills): (&GuestWrites, &[Scattered<'_>], &[cp::Fill]),
+    images: &crate::pipeline::DispatchImages,
 ) {
     let mut bytes = writes.bytes.len() as u64;
     let mut lit = writes.bytes.iter().any(|&byte| byte != 0);
@@ -1409,6 +1414,12 @@ fn note_dispatch_writes(
     entry.dispatches += 1;
     entry.bytes += bytes;
     entry.lit |= lit;
+    entry.fetched = images.fetched_span.or(entry.fetched);
+    entry.stored = images
+        .stored_surface
+        .as_ref()
+        .map(|(surface, _)| (surface.base(), surface.bytes() as u64))
+        .or(entry.stored);
 }
 
 /// What each translated program's dispatches wrote back this run, by its module's content hash.
@@ -1998,7 +2009,11 @@ impl GuestCp<'_> {
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &scattered, &buffer_fills)
         })?;
-        note_dispatch_writes(prepared.module_hash, (&writes, &scattered, &buffer_fills));
+        note_dispatch_writes(
+            prepared.module_hash,
+            (&writes, &scattered, &buffer_fills),
+            &prepared.images,
+        );
         writes.keep();
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
         let fills = uniform_buffers(&prepared.buffers, (&buffers_before, &buffers_after));
@@ -6506,7 +6521,11 @@ mod tests {
             pattern: 0,
             count: 8,
         };
-        note_dispatch_writes(module, (&zeros, &[quiet], &[fill]));
+        let images = crate::pipeline::DispatchImages {
+            fetched_span: Some((0x7400_5b89_1000, 0x80_0000)),
+            ..crate::pipeline::DispatchImages::default()
+        };
+        note_dispatch_writes(module, (&zeros, &[quiet], &[fill]), &images);
         let found = |module| {
             dispatch_writes_by_module()
                 .into_iter()
@@ -6515,9 +6534,16 @@ mod tests {
         };
         let first = found(module).expect("counted");
         assert_eq!((first.dispatches, first.bytes, first.lit), (1, 16, false));
+        // Where its images lie, so a texture a draw reads can be matched to the program writing it.
+        assert_eq!(first.fetched, Some((0x7400_5b89_1000, 0x80_0000)));
+        assert_eq!(first.stored, None);
         let mut lit = GuestWrites::default();
         lit.push(0x1000, &[0, 7]);
-        note_dispatch_writes(module, (&lit, &[], &[]));
+        note_dispatch_writes(
+            module,
+            (&lit, &[], &[]),
+            &crate::pipeline::DispatchImages::default(),
+        );
         let both = found(module).expect("counted");
         assert_eq!((both.dispatches, both.bytes, both.lit), (2, 18, true));
     }
