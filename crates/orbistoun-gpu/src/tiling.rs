@@ -1123,6 +1123,18 @@ impl SurfaceLayout {
         }
     }
 
+    /// Byte offset of texel `(x, y)` in a `64KB_R_X` surface `width` texels wide of four- or
+    /// eight-byte texels, under no pipe-bank XOR: where a DCC compress block's 256 bytes start
+    /// (D873). `None` for any other layout.
+    #[must_use]
+    pub fn compress_block_offset(self, x: u32, y: u32, width: u32) -> Option<usize> {
+        match self {
+            Self::Rx64Kb => Some(tiled_byte_offset_64kb_rx_bpp4_surface(x, y, width)),
+            Self::Rx64KbBpp8 => Some(tiled_byte_offset_64kb_rx_bpp8_surface(x, y, width)),
+            _ => None,
+        }
+    }
+
     /// Whether this is a linear layout, whose levels each have rows of their own.
     pub(crate) const fn is_linear(self) -> bool {
         matches!(self, Self::Linear | Self::LinearBpp1)

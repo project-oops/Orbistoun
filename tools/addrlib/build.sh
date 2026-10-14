@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds equation.cpp against Mesa's addrlib from the oops-mesa submodule beside orbistoun.
 #
-#   tools/addrlib/build.sh            # builds target/addrlib/equation
+#   tools/addrlib/build.sh            # builds target/addrlib/equation and target/addrlib/dcc
 #   target/addrlib/equation 64KB_R_X 8
+#   target/addrlib/dcc 8 1             # a 64KB_R_X surface's DCC key equation
 #
 # A local clang 21 on PATH, as for every C build in the collection (CONVENTIONS section 8). The
 # addrlib sources are compiled as Mesa's own meson file lists them, with its flags.
@@ -39,3 +40,5 @@ done
 
 clang++ "${args[@]}" "$HERE/equation.cpp" -o "$OUT/equation"
 echo "built $OUT/equation"
+clang++ "${args[@]}" "$HERE/dcc.cpp" -o "$OUT/dcc"
+echo "built $OUT/dcc"

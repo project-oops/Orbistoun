@@ -25,6 +25,128 @@ pub const KEY_CLEAR_0000: u8 = 0x00;
 /// the colour `CB_COLORn_CLEAR_WORD0/1` hold, whatever memory holds.
 pub const KEY_CLEAR_REGISTER: u8 = 0x20;
 
+/// GFX10's DCC key equation for a single-sample `64KB_R_X` surface (D873): which key byte describes
+/// the compress block at a texel. Read off addrlib under the console's configuration by
+/// `tools/addrlib/dcc` - `Addr2ComputeDccInfo`'s `equation.gfx10_bits` from element four, as Mesa
+/// keeps it (`ac_copy_dcc_equation`, `ac_surface.c` 2189-2198) - which also checks the address
+/// [`KeyEquation::key_offset`] computes against `Addr2ComputeDccAddrFromCoord` for every compress
+/// block of three surfaces under three pipe XORs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyEquation {
+    /// A compress block's texels across and down: one key's.
+    pub compress: (u32, u32),
+    /// `log2` of a meta block's texels across and down.
+    meta_log2: (u32, u32),
+    /// `log2` of a texel's bytes.
+    texel_log2: u32,
+    /// Element `4i + c`: which bits of coordinate `c` (x, y, z, sample) XOR into address bit `i + 1`.
+    bits: [u16; 64],
+}
+
+/// The equations [`key_equation`] answers: four-byte texels, then eight, each pipe aligned then not,
+/// as `tools/addrlib/dcc` printed them.
+const KEY_EQUATIONS: [(u32, bool, [u16; 48]); 4] = [
+    (
+        4,
+        true,
+        [
+            0x8, 0, 0, 0, 0, 0x10, 0, 0, 0x40, 0, 0, 0, 0, 0x40, 0, 0, 0x80, 0, 0, 0, 0, 0x80, 0,
+            0, 0x100, 0, 0, 0, 0, 0x100, 0, 0, 0x8, 0x8, 0x8, 0, 0x10, 0x10, 0x4, 0, 0x40, 0x20,
+            0x2, 0, 0x20, 0x40, 0x1, 0,
+        ],
+    ),
+    (
+        4,
+        false,
+        [
+            0x8, 0, 0, 0, 0, 0x8, 0, 0, 0x10, 0, 0, 0, 0, 0x10, 0, 0, 0x20, 0, 0, 0, 0, 0x20, 0, 0,
+            0x40, 0, 0, 0, 0, 0x40, 0, 0, 0x80, 0, 0, 0, 0, 0x80, 0, 0, 0x100, 0, 0, 0, 0, 0x100,
+            0, 0,
+        ],
+    ),
+    (
+        8,
+        true,
+        [
+            0, 0x4, 0, 0, 0x8, 0, 0, 0, 0, 0x10, 0, 0, 0x40, 0, 0, 0, 0, 0x40, 0, 0, 0x80, 0, 0, 0,
+            0, 0x80, 0, 0, 0x100, 0, 0, 0, 0x8, 0x8, 0x8, 0, 0x10, 0x10, 0x4, 0, 0x40, 0x20, 0x2,
+            0, 0x20, 0x40, 0x1, 0,
+        ],
+    ),
+    (
+        8,
+        false,
+        [
+            0, 0x4, 0, 0, 0x8, 0, 0, 0, 0, 0x8, 0, 0, 0x10, 0, 0, 0, 0, 0x10, 0, 0, 0x20, 0, 0, 0,
+            0, 0x20, 0, 0, 0x40, 0, 0, 0, 0, 0x40, 0, 0, 0x80, 0, 0, 0, 0, 0x80, 0, 0, 0x100, 0, 0,
+            0,
+        ],
+    ),
+];
+
+/// The key equation for a `64KB_R_X` surface of `texel_bytes`-byte texels, or `None` for a texel
+/// size not read off addrlib. Its compress block is a 256-byte micro block, and its meta block
+/// 4 KiB: 8 x 8 texels and 512 x 512 at four bytes, 8 x 4 and 512 x 256 at eight.
+#[must_use]
+pub fn key_equation(texel_bytes: u32, pipe_aligned: bool) -> Option<KeyEquation> {
+    let (_, _, terms) = KEY_EQUATIONS
+        .iter()
+        .find(|(bytes, aligned, _)| *bytes == texel_bytes && *aligned == pipe_aligned)?;
+    let mut bits = [0_u16; 64];
+    bits[..terms.len()].copy_from_slice(terms);
+    let texel_log2 = texel_bytes.trailing_zeros();
+    // A compress block is 256 bytes, eight texels across; a meta block 4 KiB of keys, 512 across.
+    let compress = (8, 256 >> texel_log2 >> 3);
+    Some(KeyEquation {
+        compress,
+        meta_log2: (9, 12 + 8 - texel_log2 - 9),
+        texel_log2,
+        bits,
+    })
+}
+
+impl KeyEquation {
+    /// A surface `width` texels across, as its keys are pitched: whole meta blocks.
+    #[must_use]
+    pub const fn pitch(&self, width: u32) -> u32 {
+        width.next_multiple_of(1 << self.meta_log2.0)
+    }
+
+    /// The byte of the keys, from their first, that describes the compress block holding texel
+    /// `(x, y)` of a surface whose keys are `pitch` texels across, under `pipe_xor` - Mesa's
+    /// `gfx10_nir_meta_addr_from_coord` (`ac_nir_surface.c` 11-57) as `ac_nir_dcc_addr_from_coord`
+    /// calls it, for one slice and sample.
+    #[must_use]
+    pub fn key_offset(&self, (x, y): (u32, u32), pitch: u32, pipe_xor: u32) -> u64 {
+        let (width_log2, height_log2) = self.meta_log2;
+        // The meta block's key bytes, `log2`, as a nibble address: the bias is `log2(bytes) - 8`.
+        let size_log2 = width_log2 + height_log2 + self.texel_log2 - 8;
+        let coords = [x, y, 0, 0];
+        let mut address = 0_u64;
+        for i in 1..=size_log2 {
+            let mut v = 0_u32;
+            for (c, coord) in coords.iter().enumerate() {
+                let mut mask = self
+                    .bits
+                    .get((i as usize - 1) * 4 + c)
+                    .copied()
+                    .unwrap_or(0);
+                while mask != 0 {
+                    v ^= (coord >> mask.trailing_zeros()) & 1;
+                    mask &= mask - 1;
+                }
+            }
+            address |= u64::from(v) << i;
+        }
+        let block_mask = (1_u64 << size_log2) - 1;
+        let pipe =
+            (u64::from(pipe_xor) & ((1 << PIPES_LOG2) - 1)) << PIPE_INTERLEAVE_LOG2 & block_mask;
+        let index = u64::from(y >> height_log2) * u64::from(pitch >> width_log2)
+            + u64::from(x >> width_log2);
+        (index << size_log2) + ((address >> 1) ^ pipe)
+    }
+}
+
 /// The word every word of a fast-cleared surface holds, where its keys say so exactly without
 /// knowing which key is which block's: every key a clear to `0000` or to the register with the
 /// register colour zero, or every key a clear to the register with a four-byte texel, which the
@@ -275,6 +397,36 @@ mod tests {
         assert_eq!(cleared_fill(&[0x20, 0x20], None, 4), None);
         assert_eq!(cleared_fill(&[0x20, 0x20], Some([1, 0]), 8), None);
         assert_eq!(cleared_fill(&[0x20, 0x44], Some([0, 0]), 4), None);
+    }
+
+    /// The key equation answers addrlib's key byte for a compress block: the samples
+    /// `tools/addrlib/dcc 8 1` and `dcc 4 1` print from `Addr2ComputeDccAddrFromCoord`, for a
+    /// 1920 x 1080 pipe-aligned surface.
+    #[test]
+    fn a_key_offset_is_addrlib_s() {
+        use super::key_equation;
+        let eight = key_equation(8, true).expect("eight-byte texels");
+        let four = key_equation(4, true).expect("four-byte texels");
+        assert_eq!((eight.compress, four.compress), ((8, 4), (8, 8)));
+        assert_eq!(eight.pitch(1920), 2048);
+        for (equation, expected) in [
+            (eight, [0x102, 0x204, 0x93b, 0x93be, 0x1348f, 0x5103]),
+            (four, [0x101, 0x202, 0x91d, 0x535f, 0xb447, 0x1181]),
+        ] {
+            let samples = [
+                (8, 0, 0),
+                (0, 16, 0),
+                (200, 100, 0),
+                (1000, 600, 5),
+                (1912, 1076, 13),
+                (520, 260, 0),
+            ];
+            for ((x, y, pipe_xor), want) in samples.into_iter().zip(expected) {
+                let got = equation.key_offset((x, y), equation.pitch(1920), pipe_xor);
+                assert_eq!(got, want, "({x}, {y}) under pipe xor {pipe_xor}");
+            }
+        }
+        assert!(key_equation(2, true).is_none());
     }
 
     /// A census counts each kind of key and names the commonest compressed one.

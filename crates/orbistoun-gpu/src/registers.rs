@@ -1479,6 +1479,8 @@ pub struct ColourTargetDcc {
     /// The colour a block whose key says "clear to the register" holds: `CB_COLOR0_CLEAR_WORD0`
     /// and `_WORD1` as they stand, `None` where the stream wrote neither.
     pub clear: Option<[u32; 2]>,
+    /// The surface's pipe-bank XOR, the low byte of `CB_COLOR0_BASE`.
+    pub pipe_bank_xor: u8,
 }
 
 /// Colour target zero's DCC from the live registers, or `None` when `CB_COLOR0_INFO` is unset or
@@ -1521,6 +1523,7 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
         levels: (attrib2 >> 28) + 1,
         single_slice,
         single_sample: samples_and_fragments == 0,
+        pipe_bank_xor: (last(CB_COLOR0_BASE)? & 0xFF) as u8,
         clear: last(CB_COLOR0_CLEAR_WORD0)
             .zip(last(CB_COLOR0_CLEAR_WORD1))
             .map(|(low, high)| [low, high]),
@@ -5010,6 +5013,8 @@ mod tests {
                 single_slice: true,
                 single_sample: true,
                 clear: None,
+                // The low byte of its base.
+                pipe_bank_xor: 0xC0,
             })
         );
         // The surface's high address bits are `CB_COLOR0_BASE_EXT`'s: PPSA25872's target lies at

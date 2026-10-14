@@ -766,6 +766,7 @@ impl GuestCp<'_> {
             extent,
             levels,
             clear,
+            pipe_bank_xor,
             ..
         } = target;
         let start = crate::dcc::meta_start(dcc);
@@ -802,15 +803,96 @@ impl GuestCp<'_> {
                     Err("its cleared DCC blocks could not be expanded in guest memory".to_owned())
                 }
             }
-            None => Err(format!(
-                concat!(
-                    "its DCC keys are neither all uncompressed nor all one clear, and decoding ",
-                    "them needs per-block key addressing, which is not modelled ({}; clear words ",
-                    "{:x?})"
-                ),
-                crate::dcc::census(&keys),
-                clear
-            )),
+            // Block by block, each by its own key (D873).
+            None => self
+                .expand_dcc_blocks(
+                    (&keys, start, dcc),
+                    (surface, extent, levels, pipe_bank_xor),
+                    (layout, clear),
+                )
+                .map_err(|why| {
+                    format!(
+                        "{why} ({}; clear words {clear:x?})",
+                        crate::dcc::census(&keys)
+                    )
+                }),
+        }
+    }
+
+    /// A DCC target's blocks expanded one at a time (D873): each compress block's key found by the
+    /// GFX10 key equation, a block cleared to `0000` written as zeros, one cleared to the register
+    /// as the clear colour, one uncompressed kept, and every key then marked uncompressed. Refused,
+    /// with nothing written, where a key says the block is compressed - whose encoding is not
+    /// published - or the surface is one the equation was not read for: a single level of four-
+    /// or eight-byte `64KB_R_X` texels under no data pipe-bank XOR.
+    fn expand_dcc_blocks(
+        &mut self,
+        (keys, start, dcc): (&[u8], u64, crate::dcc::Dcc),
+        (surface, extent, levels, pipe_bank_xor): (
+            u64,
+            crate::registers::ColourTargetExtent,
+            u32,
+            u8,
+        ),
+        (layout, clear): (tiling::SurfaceLayout, Option<[u32; 2]>),
+    ) -> Result<(), String> {
+        let texel_bytes = 1_u32 << layout.texel_log2();
+        let equation = crate::dcc::key_equation(texel_bytes, dcc.pipe_aligned)
+            .filter(|_| levels == 1 && pipe_bank_xor == 0)
+            .filter(|_| layout.compress_block_offset(0, 0, 1).is_some())
+            .ok_or("its DCC keys need per-block decoding the key equation was not read for")?;
+        let pitch = equation.pitch(extent.width);
+        // The keys' pipe XOR, which radeonsi ORs into the base's low bits (`ac_descriptors.c`
+        // 1504-1506).
+        let pipe_xor = u32::try_from((dcc.base - start) >> 8).unwrap_or(0);
+        let clear_block: Option<Vec<u8>> = clear.map(|[low, high]| {
+            let texel: Vec<u8> = if texel_bytes == 8 {
+                [low.to_le_bytes(), high.to_le_bytes()].concat()
+            } else {
+                low.to_le_bytes().to_vec()
+            };
+            texel.iter().copied().cycle().take(256).collect()
+        });
+        let (across, down) = equation.compress;
+        // Every block's key first: nothing is written unless every one is decoded.
+        let mut blocks = Vec::new();
+        for y in (0..extent.height).step_by(down as usize) {
+            for x in (0..extent.width).step_by(across as usize) {
+                let at = usize::try_from(equation.key_offset((x, y), pitch, pipe_xor))
+                    .map_err(|_| "a DCC key outside this host's address range".to_owned())?;
+                let key = *keys.get(at).ok_or("a DCC key past the target's keys")?;
+                let offset = layout
+                    .compress_block_offset(x, y, extent.width)
+                    .ok_or("a compress block the layout does not place")?;
+                let block = match key {
+                    crate::dcc::KEY_UNCOMPRESSED => continue,
+                    crate::dcc::KEY_CLEAR_0000 => None,
+                    crate::dcc::KEY_CLEAR_REGISTER => Some(
+                        clear_block
+                            .as_ref()
+                            .ok_or("a block cleared to a register colour the stream never wrote")?,
+                    ),
+                    _ => {
+                        return Err(
+                            "a DCC block is compressed, whose encoding is not published".to_owned()
+                        );
+                    }
+                };
+                blocks.push((surface + (offset as u64 & !0xFF), block));
+            }
+        }
+        let zeros = [0_u8; 256];
+        for (address, block) in blocks {
+            let bytes = block.map_or(&zeros[..], Vec::as_slice);
+            if !cp::CpMemory::write(self, address, bytes) {
+                return Err("an expanded DCC block could not be written to guest memory".to_owned());
+            }
+        }
+        let keys_uncompressed = u32::from_le_bytes([crate::dcc::KEY_UNCOMPRESSED; 4]);
+        if cp::CpMemory::fill(self, start, keys_uncompressed, keys.len()) {
+            Ok(())
+        } else {
+            Err("the expanded DCC keys could not be written to guest memory".to_owned())
         }
     }
 
@@ -6752,14 +6834,94 @@ mod tests {
             assert!(buffer[..span].iter().all(|&b| b == 0x5A), "left as it is");
 
             buffer[at(meta) + keys - 1] = 0x20;
-            assert!(
-                cp.expand_dcc(target, crate::tiling::SurfaceLayout::Rx64Kb)
-                    .is_err()
-            );
+            let expanded = cp.expand_dcc(target, crate::tiling::SurfaceLayout::Rx64Kb);
+            if levels == 1 {
+                // The last key byte describes no block of a 16 x 8 surface (D873): its blocks'
+                // keys say uncompressed, so nothing moves.
+                assert_eq!(expanded, Ok(()));
+            } else {
+                // A chain's keys are not read block by block.
+                assert!(expanded.is_err());
+                assert_eq!(buffer[at(meta) + keys - 1], 0x20);
+            }
             assert!(buffer[..span].iter().all(|&b| b == 0x5A), "nothing written");
-            assert_eq!(buffer[at(meta) + keys - 1], 0x20);
             super::forget_written();
         }
+    }
+
+    /// A DCC target whose keys mix clears is expanded block by block (D873): each compress block
+    /// by the key the GFX10 equation finds for it - zeros for a clear to `0000`, the clear colour
+    /// for a clear to the register - and a compressed block is refused with nothing written.
+    #[test]
+    fn a_dcc_target_s_mixed_clears_are_expanded_block_by_block() {
+        use super::{GuestCp, MappedRegions};
+        use crate::registers::{ColourTargetDcc, ColourTargetExtent};
+        let _guard = serial();
+        let (span, keys) = (0x1_0000, 0x1000);
+        let buffer = off_page(span + keys + 0x2000, 0);
+        let buffer_at = buffer.as_ptr() as usize as u64;
+        allow_writes_to(buffer_at, buffer.len() as u64);
+        set_guest_regions(vec![region_of(buffer)]);
+        let meta = (buffer_at + span as u64 + 0xFFF) & !0xFFF;
+        let target = ColourTargetDcc {
+            dcc: crate::dcc::Dcc {
+                base: meta | 0x300,
+                pipe_aligned: true,
+            },
+            surface: buffer_at,
+            extent: ColourTargetExtent {
+                width: 16,
+                height: 8,
+            },
+            levels: 1,
+            single_slice: true,
+            single_sample: true,
+            clear: Some([0x1122_3344, 0]),
+            pipe_bank_xor: 0,
+        };
+        let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
+        let layout = crate::tiling::SurfaceLayout::Rx64Kb;
+        let equation = crate::dcc::key_equation(4, true).expect("four-byte texels");
+        let key_of = |x, y| {
+            at(meta)
+                + usize::try_from(equation.key_offset((x, y), equation.pitch(16), 3))
+                    .expect("small")
+        };
+        let block_of = |x, y| layout.compress_block_offset(x, y, 16).expect("placed") & !0xFF;
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+
+        buffer[..span].fill(0xAB);
+        buffer[at(meta)..at(meta) + keys].fill(0xFF);
+        buffer[key_of(0, 0)] = 0x00;
+        buffer[key_of(8, 0)] = 0x20;
+        assert_eq!(cp.expand_dcc(target, layout), Ok(()));
+        let (zeroed, coloured) = (block_of(0, 0), block_of(8, 0));
+        assert!(
+            buffer[zeroed..zeroed + 256].iter().all(|&b| b == 0),
+            "cleared to 0000"
+        );
+        assert!(
+            buffer[coloured..coloured + 256]
+                .chunks(4)
+                .all(|texel| texel == 0x1122_3344_u32.to_le_bytes()),
+            "cleared to the register's colour"
+        );
+        let untouched = (0..span)
+            .filter(|&byte| !(zeroed..zeroed + 256).contains(&byte))
+            .filter(|&byte| !(coloured..coloured + 256).contains(&byte))
+            .all(|byte| buffer[byte] == 0xAB);
+        assert!(untouched, "nothing but the two blocks moved");
+        assert!(buffer[at(meta)..at(meta) + keys].iter().all(|&b| b == 0xFF));
+
+        buffer[..span].fill(0xAB);
+        buffer[key_of(0, 0)] = 0x00;
+        buffer[key_of(8, 0)] = 0x44;
+        assert!(cp.expand_dcc(target, layout).is_err(), "a compressed block");
+        assert!(buffer[..span].iter().all(|&b| b == 0xAB), "nothing written");
+        super::forget_written();
     }
 
     /// A fill over the whole pending target drops the frame rather than writing it back (D719), and
