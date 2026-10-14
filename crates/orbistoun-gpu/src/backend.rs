@@ -437,6 +437,9 @@ pub enum TargetEncoding {
     /// `COLOR_16_16_16_16` `FLOAT` (D845): four half floats a texel, red first - the bits
     /// Vulkan's `R16G16B16A16_SFLOAT` holds. Eight bytes a texel.
     Float16x4,
+    /// `COLOR_16_16` `FLOAT` (D847): two half floats a texel, red then green - the bits Vulkan's
+    /// `R16G16_SFLOAT` holds. Four bytes a texel.
+    Float16x2,
 }
 
 /// What a bound texture's words are.

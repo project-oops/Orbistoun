@@ -2281,6 +2281,9 @@ pub const COLOR_10_11_11: u32 = 6;
 /// `ColorFormat` `COLOR_32` (`gfx103.json`): what Mesa targets a one-channel 32-bit format at
 /// (`ac_formats.c` 489).
 pub const COLOR_32: u32 = 4;
+/// `ColorFormat` `COLOR_16_16` (`gfx103.json`): what Mesa targets a two-channel 16-bit format at
+/// (`ac_formats.c` 500).
+pub const COLOR_16_16: u32 = 5;
 /// `ColorFormat` `COLOR_16_16_16_16` (`gfx103.json`): what Mesa targets a four-channel 16-bit
 /// format at (`ac_formats.c` 527).
 pub const COLOR_16_16_16_16: u32 = 12;
@@ -2371,6 +2374,15 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a four-byte `16_16` `FLOAT` target in its standard order, red then green
+    /// (`ac_formats.c` 592): two half floats a texel, drawn and written back as it is held (D847).
+    #[must_use]
+    pub const fn is_float_16_16(&self) -> bool {
+        self.format == COLOR_16_16
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is an eight-byte `16_16_16_16` `FLOAT` target in its standard order, red
     /// first: four half floats a texel, drawn and written back as it is held (D845).
     #[must_use]
@@ -2389,6 +2401,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Float32
         } else if self.is_float_16_16_16_16() {
             crate::TargetEncoding::Float16x4
+        } else if self.is_float_16_16() {
+            crate::TargetEncoding::Float16x2
         } else if self.is_srgb() {
             crate::TargetEncoding::Srgb8
         } else {
@@ -2397,11 +2411,16 @@ impl ColourTargetFormat {
     }
 
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
-    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`] and [`Self::is_float_32`], eight for
+    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`], [`Self::is_float_32`] and
+    /// [`Self::is_float_16_16`], eight for
     /// [`Self::is_float_16_16_16_16`], one for [`Self::is_r8_class`].
     #[must_use]
     pub const fn written_back_bytes(&self) -> Option<u32> {
-        if self.is_rgba8_class() || self.is_float_11_11_10() || self.is_float_32() {
+        if self.is_rgba8_class()
+            || self.is_float_11_11_10()
+            || self.is_float_32()
+            || self.is_float_16_16()
+        {
             Some(4)
         } else if self.is_float_16_16_16_16() {
             Some(8)
@@ -2417,7 +2436,8 @@ impl ColourTargetFormat {
 /// mask (bit 0 red): `CB_TARGET_MASK`'s `TARGET0_ENABLE`, limited to the channels the target's
 /// format holds. A one-channel target, `8` or `32` (`ac_formats.c` 830), holds red under
 /// `SWAP_STD` and alpha under `SWAP_ALT_REV` (`ac_translate_colorswap`); a drawer standing in a
-/// four-channel frame for it must leave the others alone. Any other format keeps the mask as it is.
+/// four-channel frame for it must leave the others alone. A two-channel `16_16` target holds red
+/// and green under `SWAP_STD` (592). Any other format keeps the mask as it is.
 #[must_use]
 pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
     let format = decode_colour_target_format(info);
@@ -2427,6 +2447,8 @@ pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
             ComponentSwap::Other(3) => 0x8,
             _ => 0xF,
         }
+    } else if format.format == COLOR_16_16 && matches!(format.swap, ComponentSwap::Standard) {
+        0x3
     } else {
         0xF
     };
@@ -3478,6 +3500,13 @@ mod tests {
         );
         // PPSA04263's half-resolution target: `16_16_16_16`, `NUMBER_FLOAT`, `SWAP_STD` - four
         // half floats a texel, red first, written back eight bytes a texel (D845).
+        // PPSA04263's full-resolution two-channel target: `16_16`, `NUMBER_FLOAT`, `SWAP_STD` - two
+        // half floats a texel, red then green (`ac_formats.c` 500, 592), four bytes (D847).
+        let pair = decode_colour_target_format(0x0001_8014 | (7 << 8));
+        assert!(pair.is_float_16_16());
+        assert_eq!(pair.encoding(), crate::TargetEncoding::Float16x2);
+        assert_eq!(pair.written_back_bytes(), Some(4));
+        assert!(!decode_colour_target_format(0x0001_8014 | (7 << 8) | (1 << 11)).is_float_16_16());
         let half = decode_colour_target_format(0x0001_8030 | (7 << 8));
         assert!(half.is_float_16_16_16_16());
         assert_eq!(half.encoding(), crate::TargetEncoding::Float16x4);
@@ -4510,6 +4539,8 @@ mod tests {
         assert_eq!(colour_write_mask(0xF, a8), 0x8);
         // A one-channel 32-bit target holds one channel as an 8 does (`ac_formats.c` 830): red
         // under `SWAP_STD`, alpha under `SWAP_ALT_REV` (D844).
+        // A two-channel `16_16` target holds red and green under `SWAP_STD` (`ac_formats.c` 592).
+        assert_eq!(colour_write_mask(0xF, 5 << 2 | 7 << 8), 0x3);
         let r32 = 4 << 2 | 7 << 8;
         assert_eq!(colour_write_mask(0xF, r32), 0x1);
         assert_eq!(colour_write_mask(0xF, r32 | 3 << 11), 0x8);
