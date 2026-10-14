@@ -1545,7 +1545,8 @@ struct Texture {
     staging_memory: vk::DeviceMemory,
     width: u32,
     height: u32,
-    /// How many levels it has: two where the image is big enough for a second, one otherwise.
+    /// How many levels it has: a guest's chain's (D833), the harness's two where the image is big
+    /// enough for a second, one otherwise.
     levels: u32,
     /// Its layers: one, or a cube's six faces seen through a cube view (D811).
     faces: u32,
@@ -1613,6 +1614,16 @@ pub(crate) struct TextureWords<'a> {
     /// A volume's slices, one after another, each `width` x `height`: sampled as one
     /// three-dimensional image (D823). `None` for a flat image or a cube.
     pub(crate) slices: Option<u32>,
+    /// The mip levels the words hold, finest first, each its own extent (D833).
+    pub(crate) levels: u32,
+}
+
+/// Texels a `levels`-level chain of a `width` x `height` image holds: each level's sides the level
+/// above's halved, never below one (D833).
+pub(crate) fn chain_texels(width: u32, height: u32, levels: u32) -> usize {
+    (0..levels)
+        .map(|level| (width >> level).max(1) as usize * (height >> level).max(1) as usize)
+        .sum()
 }
 
 impl<'a> TextureWords<'a> {
@@ -1628,6 +1639,7 @@ impl<'a> TextureWords<'a> {
             encoding: orbistoun_gpu::TextureEncoding::Rgba8,
             faces: 1,
             slices: None,
+            levels: 1,
         }
     }
 }
@@ -1748,7 +1760,18 @@ fn staged_texture(texture: &TextureWords<'_>, coarse_level: bool) -> (vk::Format
     // A cube's faces follow one another, each its full extent: staged as they are, its height
     // the one it was given.
     let flat = texture.faces <= 1 && texture.slices.is_none();
+    // A guest's mip chain, every level as it was read (D833).
+    let chain = || Staged {
+        texels: texture.words.to_vec(),
+        width: texture.width,
+        height: texture.height.unwrap_or(1),
+        levels: texture.levels,
+    };
     match texture.encoding {
+        orbistoun_gpu::TextureEncoding::Rgba8 if flat && texture.levels > 1 => (FORMAT, chain()),
+        orbistoun_gpu::TextureEncoding::Rgba8Srgb if flat && texture.levels > 1 => {
+            (vk::Format::R8G8B8A8_SRGB, chain())
+        }
         orbistoun_gpu::TextureEncoding::Rgba8 if !flat => (FORMAT, as_they_are()),
         orbistoun_gpu::TextureEncoding::Rgba8 => {
             (FORMAT, staged(texture.words, texture.width, coarse_level))
@@ -2001,26 +2024,32 @@ fn upload_texture(device: &ash::Device, command: vk::CommandBuffer, texture: &Te
                 depth: texture.depth,
             }),
     ];
-    if texture.levels > 1 {
-        let fine = vk::DeviceSize::from(texture.width) * vk::DeviceSize::from(texture.height) * 4;
+    // Each level after the first follows the one before, at its sides halved and floored: the
+    // harness's sentinel level, or a guest's chain (D833).
+    let mut offset = vk::DeviceSize::from(texture.width) * vk::DeviceSize::from(texture.height) * 4;
+    for level in 1..texture.levels {
+        let (width, height) = (
+            (texture.width >> level).max(1),
+            (texture.height >> level).max(1),
+        );
         regions.push(
             vk::BufferImageCopy::default()
-                .buffer_offset(fine)
+                .buffer_offset(offset)
                 .buffer_row_length(0)
                 .buffer_image_height(0)
                 .image_subresource(
                     vk::ImageSubresourceLayers::default()
                         .aspect_mask(vk::ImageAspectFlags::COLOR)
-                        .mip_level(1)
+                        .mip_level(level)
                         .layer_count(1),
                 )
-                // Halved and floored: the extent `create_texture` filled with the sentinel.
                 .image_extent(vk::Extent3D {
-                    width: (texture.width / 2).max(1),
-                    height: (texture.height / 2).max(1),
+                    width,
+                    height,
                     depth: 1,
                 }),
         );
+        offset += vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
     }
     // SAFETY: recording is open, the image is in TRANSFER_DST_OPTIMAL because of the barrier
     // above, and the staging buffer holds exactly the texels these extents describe.
@@ -5719,6 +5748,7 @@ pub fn draw_with_bc3_texture(
                 encoding: orbistoun_gpu::TextureEncoding::Bc3,
                 faces: 1,
                 slices: None,
+                levels: 1,
             }),
             ..Bound::default()
         },
@@ -5752,6 +5782,7 @@ pub fn draw_with_cube_texture(
                 encoding: orbistoun_gpu::TextureEncoding::Rgba8,
                 faces: CUBE_FACES,
                 slices: None,
+                levels: 1,
             }),
             ..Bound::default()
         },
@@ -5785,6 +5816,7 @@ pub fn draw_with_volume_texture(
                 encoding: orbistoun_gpu::TextureEncoding::Rgba8,
                 faces: 1,
                 slices: Some(depth),
+                levels: 1,
             }),
             ..Bound::default()
         },

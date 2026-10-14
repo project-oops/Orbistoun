@@ -174,6 +174,8 @@ struct BoundTexture {
     faces: u32,
     /// A volume's slices, or `None` for a flat image or a cube (D823).
     slices: Option<u32>,
+    /// Its mip levels, finest first (D833).
+    levels: u32,
 }
 
 impl BoundTexture {
@@ -186,6 +188,7 @@ impl BoundTexture {
             encoding: self.encoding,
             faces: self.faces,
             slices: self.slices,
+            levels: self.levels,
         }
     }
 }
@@ -513,6 +516,7 @@ impl VulkanBackend {
             sampling,
             encoding,
             faces,
+            levels,
         } = command
         else {
             return Ok(());
@@ -539,7 +543,23 @@ impl VulkanBackend {
                 width.div_ceil(4) as usize * height.div_ceil(4) as usize * 2
             }
         };
-        let words = face_words * faces as usize;
+        // A mip chain's levels follow the base, each its own extent (D833): four-byte texels of a
+        // flat image only.
+        let chained = matches!(
+            encoding,
+            orbistoun_gpu::TextureEncoding::Rgba8 | orbistoun_gpu::TextureEncoding::Rgba8Srgb
+        ) && faces == 1;
+        if levels != 1 && !chained {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: "BindTexture of a mip chain that is not a flat four-byte image",
+            });
+        }
+        let words = if levels > 1 {
+            framebuffer::chain_texels(width, height, levels)
+        } else {
+            face_words * faces as usize
+        };
         if texels.len() != words {
             return Err(BackendError::Device(format!(
                 "BindTexture carries {} texels for a {width}x{height} texture of {faces} face(s)",
@@ -556,6 +576,7 @@ impl VulkanBackend {
             sampling,
             faces,
             slices: None,
+            levels,
         });
         let Some(texture) = usize::try_from(slot)
             .ok()
@@ -601,6 +622,7 @@ impl VulkanBackend {
             sampling,
             faces: 1,
             slices: Some(depth),
+            levels: 1,
         });
         let Some(texture) = usize::try_from(slot)
             .ok()
@@ -670,6 +692,7 @@ impl VulkanBackend {
             sampling,
             faces: 1,
             slices: None,
+            levels: 1,
         });
         Ok(())
     }

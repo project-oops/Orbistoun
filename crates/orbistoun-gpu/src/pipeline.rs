@@ -4819,6 +4819,7 @@ fn null_texture(slot: u32, cube: bool) -> RenderCommand {
         sampling: crate::registers::TextureSampling::default(),
         encoding: crate::backend::TextureEncoding::Rgba8,
         faces,
+        levels: 1,
     }
 }
 
@@ -4941,6 +4942,7 @@ fn linear_depth_compare(
         sampling,
         encoding: crate::backend::TextureEncoding::DepthCompare,
         faces: 1,
+        levels: 1,
     })
 }
 
@@ -5012,6 +5014,8 @@ fn texture_from_words(
         _ => return None,
     }
     let (base, (width, height), pitch, faces) = linear_texture_surface(&descriptor, words, shape)?;
+    // The whole chain, for the levels after the base a flat image carries (D833).
+    let chain = descriptor;
     let descriptor = ImageDescriptor {
         base,
         width,
@@ -5039,6 +5043,7 @@ fn texture_from_words(
                 (descriptor.width, descriptor.height, faces),
                 crate::backend::TextureEncoding::Rgba8,
             ),
+            (&chain, memory),
             shape.1,
             (format, selects),
         );
@@ -5083,21 +5088,24 @@ fn texture_from_words(
             (descriptor.width, descriptor.height, faces),
             texture_encoding(format),
         ),
+        (&chain, memory),
         shape.1,
         (format, selects),
     )
 }
 
-/// A linear texture's bind: a flat image's or a cube's as [`swizzled_texture`] leaves it, and a
-/// volume's the same texels - its `faces` its slices - as a [`RenderCommand::BindVolumeTexture`]
+/// A linear texture's bind: a flat image's - with the levels after its base in `chain` (D833) - or
+/// a cube's as [`swizzled_texture`] leaves it, and a volume's the same texels - its `faces` its slices - as a [`RenderCommand::BindVolumeTexture`]
 /// (D823), read only as they are: a volume whose selects move a channel, or that is not
 /// `8_8_8_8_UNORM`, is `None`.
 fn linear_bind(
     bound: RenderCommand,
+    (chain, memory): (&ImageDescriptor, &impl GuestMemory),
     volume: bool,
     (format, selects): (TexelFormat, [u32; 4]),
 ) -> Option<RenderCommand> {
     if !volume {
+        let bound = with_mip_levels(bound, chain, format, memory);
         return Some(swizzled_texture(bound, format, selects));
     }
     if format != TexelFormat::Rgba8 || selects != IDENTITY_SELECTS {
@@ -5301,6 +5309,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         sampling,
         encoding: crate::backend::TextureEncoding::Rgba8,
         faces: 1,
+        levels,
     } = bound
     else {
         return bound;
@@ -5315,6 +5324,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             sampling,
             encoding: crate::backend::TextureEncoding::Rgba8,
             faces: 1,
+            levels,
         };
     }
     let moved = crate::content_hash(&[
@@ -5352,6 +5362,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
         sampling,
         encoding: crate::backend::TextureEncoding::Rgba8,
         faces: 1,
+        levels,
     }
 }
 
@@ -5430,6 +5441,120 @@ fn read_tiled_texture(
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
+    let base = read_tiled_base(descriptor, format, slot, memory, texels)?;
+    Some(with_mip_levels(base, descriptor, format, memory))
+}
+
+/// `base` - a texture's base level, bound - with the levels after it to the descriptor's
+/// `LAST_LEVEL` (D833): each where the chain's layout places it, detiled, its texels after the
+/// level before's. A four-byte, uncompressed, flat image only; the base alone wherever a level
+/// cannot be placed or read, as it was bound before chains were.
+fn with_mip_levels(
+    base: RenderCommand,
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    memory: &impl GuestMemory,
+) -> RenderCommand {
+    let last = descriptor
+        .last_level
+        .min(descriptor.levels.saturating_sub(1));
+    if last <= descriptor.base_level
+        || descriptor.compression.is_some()
+        || format.bytes() != 4
+        || !matches!(
+            &base,
+            RenderCommand::BindTexture {
+                faces: 1,
+                levels: 1,
+                ..
+            }
+        )
+    {
+        return base;
+    }
+    let read_levels = || {
+        let layout = crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(4)?;
+        let mut more = Vec::new();
+        for level in descriptor.base_level + 1..=last {
+            let surface = crate::registers::chain_level(
+                (descriptor.base, descriptor.pipe_bank_xor),
+                (descriptor.width, descriptor.height),
+                (descriptor.levels, level),
+                layout,
+            )?;
+            if !surface.layout.models(surface.pipe_bank_xor) {
+                return None;
+            }
+            let bytes = memory.read(surface.base, surface.words() * 4)?;
+            let words: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+                .collect();
+            more.extend(surface.detile_mapped(&words, |w| w));
+        }
+        Some(more)
+    };
+    let Some(more) = read_levels() else {
+        return base;
+    };
+    let RenderCommand::BindTexture {
+        slot,
+        hash,
+        texels,
+        width,
+        height,
+        sampling,
+        encoding,
+        faces,
+        ..
+    } = base
+    else {
+        return base;
+    };
+    let mut all = texels.to_vec();
+    all.extend(more);
+    RenderCommand::BindTexture {
+        slot,
+        // The base's hash, joined with the levels after it.
+        hash: hash.rotate_left(1) ^ crate::content_hash(&all[texels.len()..]),
+        texels: all.into(),
+        width,
+        height,
+        sampling,
+        encoding,
+        faces,
+        levels: last - descriptor.base_level + 1,
+    }
+}
+
+/// The bit a texel cache key carries for the layout its texels were detiled from, so the same
+/// bytes read under two layouts are two entries.
+const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
+    match layout {
+        crate::tiling::SurfaceLayout::Rx64Kb => 0,
+        crate::tiling::SurfaceLayout::Dx4Kb => 1 << 31,
+        crate::tiling::SurfaceLayout::Linear => 1 << 27,
+        crate::tiling::SurfaceLayout::Rx64KbBpp1 => 1 << 26,
+        crate::tiling::SurfaceLayout::LinearBpp1 => 1 << 25,
+        crate::tiling::SurfaceLayout::Dx64KbBpp16 => 1 << 24,
+        crate::tiling::SurfaceLayout::Dx4KbBpp16 => 1 << 23,
+        crate::tiling::SurfaceLayout::S64KbBpp16 => 1 << 21,
+        crate::tiling::SurfaceLayout::S4KbBpp16 => 1 << 20,
+        crate::tiling::SurfaceLayout::S4Kb => 1 << 19,
+        crate::tiling::SurfaceLayout::S4KbBpp8 => 1 << 18,
+        crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
+        crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
+    }
+}
+
+/// [`read_tiled_texture`]'s base level, read and kept as every texture's was before chains (D833).
+fn read_tiled_base(
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
     let layout =
         crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(format.bytes())?;
     let surface = crate::registers::chain_level(
@@ -5444,21 +5569,7 @@ fn read_tiled_texture(
     let cleared = texture_keys_cleared(descriptor, surface.layout, memory)?;
     let (width, height) = (surface.width, surface.height);
     let span = surface.words() * 4;
-    let layout_tag = match surface.layout {
-        crate::tiling::SurfaceLayout::Rx64Kb => 0,
-        crate::tiling::SurfaceLayout::Dx4Kb => 1 << 31,
-        crate::tiling::SurfaceLayout::Linear => 1 << 27,
-        crate::tiling::SurfaceLayout::Rx64KbBpp1 => 1 << 26,
-        crate::tiling::SurfaceLayout::LinearBpp1 => 1 << 25,
-        crate::tiling::SurfaceLayout::Dx64KbBpp16 => 1 << 24,
-        crate::tiling::SurfaceLayout::Dx4KbBpp16 => 1 << 23,
-        crate::tiling::SurfaceLayout::S64KbBpp16 => 1 << 21,
-        crate::tiling::SurfaceLayout::S4KbBpp16 => 1 << 20,
-        crate::tiling::SurfaceLayout::S4Kb => 1 << 19,
-        crate::tiling::SurfaceLayout::S4KbBpp8 => 1 << 18,
-        crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
-        crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
-    };
+    let layout_tag = layout_tag(surface.layout);
     let tail_tag = match surface.place {
         crate::registers::Place::Whole => 0,
         crate::registers::Place::Within { origin: (x, y), .. } => {
@@ -5487,6 +5598,7 @@ fn read_tiled_texture(
             sampling: crate::registers::TextureSampling::default(),
             encoding,
             faces: 1,
+            levels: 1,
         });
     }
     let since = texture_mark(surface.base, span as u64);
@@ -5530,6 +5642,7 @@ fn read_tiled_texture(
         sampling: crate::registers::TextureSampling::default(),
         encoding,
         faces: 1,
+        levels: 1,
     })
 }
 
@@ -5674,6 +5787,7 @@ fn block_bind(
         sampling: crate::registers::TextureSampling::default(),
         encoding,
         faces,
+        levels: 1,
     }
 }
 
@@ -7059,6 +7173,7 @@ mod tests {
             sampling: crate::registers::TextureSampling::CLAMPED_POINT,
             encoding: crate::backend::TextureEncoding::Rgba8,
             faces: 1,
+            levels: 1,
         };
         // Blue, green, red, alpha: not the identity, so the texels are swizzled.
         let selects = [6, 5, 4, 7];
@@ -7186,6 +7301,61 @@ mod tests {
         let tags: Vec<u32> = texels.chunks(2).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
         assert_eq!(texels[1], 1, "a block's words in order");
+    }
+
+    /// A linear `8_8_8_8_UNORM` chain binds every level from its base to its last, each read where
+    /// the linear chain places it (D833): gl1-probe's `mipmap-levels` texture, an 8 x 8 image with
+    /// four levels and no pitch of its own (its descriptor as oops-gl wrote it, moved to 0x10000).
+    #[test]
+    fn a_linear_mip_chain_binds_every_level() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; 0x4000];
+        for level in 0..4u32 {
+            let (offset, pitch) =
+                crate::tiling::linear_level_of(8, 8, (4, level), 4).expect("a level of the chain");
+            let side = 8 >> level;
+            for y in 0..side {
+                for x in 0..side {
+                    let at = offset as usize + (y * pitch + x) as usize * 4;
+                    bytes[at..at + 4].copy_from_slice(&(0x1111_1111 * (level + 1)).to_le_bytes());
+                }
+            }
+        }
+        let words = [
+            0x100,
+            // oops-gl's word, its base's high byte (0x74) cleared.
+            0xc380_0000,
+            0x8001_c001,
+            0x9003_0fac,
+            0,
+            0x0040_0030,
+            0,
+            0,
+        ];
+        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let Some(RenderCommand::BindTexture {
+            texels,
+            width: 8,
+            height: 8,
+            levels: 4,
+            ..
+        }) = bound
+        else {
+            panic!("bound with its four levels: {bound:?}");
+        };
+        let mut expected = Vec::new();
+        for level in 0..4u32 {
+            let side = (8 >> level) as usize;
+            expected.extend(std::iter::repeat_n(0x1111_1111 * (level + 1), side * side));
+        }
+        assert_eq!(texels[..], expected[..], "each level after the one before");
     }
 
     /// A 32-bpp texture in `4KB_S` binds, each texel read from where that swizzle puts it: the

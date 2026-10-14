@@ -217,6 +217,10 @@ pub enum RenderCommand {
         /// How many faces the words hold one after another: 1 for a flat image, 6 for a cube,
         /// +x, -x, +y, -y, +z, -z, which the host samples through a cube view (D811).
         faces: u32,
+        /// How many mip levels the words hold, finest first: each after the level before, at that
+        /// level's side halved and never below one (D833). One for a texture bound as its base
+        /// level alone.
+        levels: u32,
     },
     /// A three-dimensional texture the draws that follow sample, at a texture slot (D823): `depth`
     /// slices of `width` x `height` texels, one after another, each the guest's four bytes in memory
