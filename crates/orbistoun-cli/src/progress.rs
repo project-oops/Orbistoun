@@ -23,6 +23,8 @@ pub(crate) fn report_progress(
         );
         print_standing(after);
         print_quiet(after);
+        print_threads(after);
+        print_waits(after);
         print_abi(after);
         print_link_plan(after);
         print_said(after);
@@ -429,6 +431,12 @@ fn print_waits(trace: &orbistoun_report::trace::CallTrace) {
             } else {
                 let writers: Vec<String> = word.writers.iter().map(|w| format!("{w:#x}")).collect();
                 println!("           written before {}", writers.join(", "));
+            }
+            if word.handed_to.is_empty() {
+                println!("           no call whose arguments were dumped was handed its object");
+            }
+            for call in &word.handed_to {
+                println!("           handed to {call}");
             }
         }
     }

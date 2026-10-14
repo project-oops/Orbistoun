@@ -2463,12 +2463,27 @@ fn wait_note(waiting: &crate::waits::Waiting, calls: usize) -> orbistoun_report:
         .collect();
     let word = crate::waits::resolved(waiting.host, waiting.site)
         .and_then(|resolved| resolved.word)
-        .map(|word| orbistoun_report::trace::WaitedWord {
-            address: word.address,
-            register: names.get(word.register).copied().unwrap_or("?").to_owned(),
-            offset: word.offset,
-            read_after: word.read_after,
-            writers: word.writers,
+        .map(|word| {
+            let object = word.address.wrapping_sub(word.offset);
+            let dumps = orbistoun_thunk::argument_dumps();
+            let handed_to = crate::waits::handed_to(object, crate::waits::OBJECT_BYTES, &dumps)
+                .into_iter()
+                .map(|(index, slot, how)| {
+                    let how = match how {
+                        crate::waits::Handed::Argument => "points into it",
+                        crate::waits::Handed::Pointee => "points at a pointer into it",
+                    };
+                    format!("{} (argument {slot} {how})", labelled(index as usize))
+                })
+                .collect();
+            orbistoun_report::trace::WaitedWord {
+                address: word.address,
+                register: names.get(word.register).copied().unwrap_or("?").to_owned(),
+                offset: word.offset,
+                read_after: word.read_after,
+                writers: word.writers,
+                handed_to,
+            }
         });
     orbistoun_report::trace::Wait {
         calls: calls as u64,

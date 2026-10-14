@@ -253,6 +253,9 @@ pub struct WaitedWord {
     /// The instructions after each write to it while it was watched; empty when nothing wrote it.
     #[serde(default)]
     pub writers: Vec<u64>,
+    /// The calls handed its object, by name and argument, among those whose arguments were dumped.
+    #[serde(default)]
+    pub handed_to: Vec<String>,
 }
 
 /// One callee-saved register at a waiting call.

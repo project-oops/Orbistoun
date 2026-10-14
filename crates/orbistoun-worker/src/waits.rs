@@ -18,7 +18,7 @@ use crate::watchpoint::{self, Kind, MAX_WATCHPOINTS, Request};
 const TICK: Duration = Duration::from_millis(250);
 
 /// How far into an object a register points at the loop's word is looked for.
-const OBJECT_BYTES: u64 = 0x100;
+pub const OBJECT_BYTES: u64 = 0x100;
 
 /// How near the waiting call, in either direction, an access must be to be the loop's own: a loop
 /// around a call reads its word just before the call or just after it returns.
@@ -113,6 +113,47 @@ pub fn candidate_words(saved: &[u64], readable: &dyn Fn(u64) -> bool) -> Vec<(us
             if readable(word) && !out.iter().any(|&(_, seen)| seen == word) {
                 out.push((register, word));
             }
+        }
+    }
+    out
+}
+
+/// How a call was handed a waiting loop's object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handed {
+    /// An argument pointed into it.
+    Argument,
+    /// An argument pointed at memory holding a pointer into it, such as a callback's context.
+    Pointee,
+}
+
+/// The calls that were handed the object `[base, base + len)`, among the argument dumps: the step
+/// that names the call a waiting loop's word was to be completed by (D832). Each as
+/// `(import, argument, how)`, in the order the dumps were taken.
+#[must_use]
+pub fn handed_to(
+    base: u64,
+    len: u64,
+    dumps: &[orbistoun_thunk::ArgumentDump],
+) -> Vec<(u32, u8, Handed)> {
+    let inside = |value: u64| value >= base && value < base.saturating_add(len);
+    let mut out: Vec<(u32, u8, Handed)> = Vec::new();
+    for dump in dumps {
+        let how = if inside(dump.address) {
+            Handed::Argument
+        } else if dump
+            .bytes
+            .chunks_exact(8)
+            .filter_map(|word| word.try_into().ok().map(u64::from_le_bytes))
+            .any(inside)
+        {
+            Handed::Pointee
+        } else {
+            continue;
+        };
+        let call = (dump.index, dump.slot, how);
+        if !out.contains(&call) {
+            out.push(call);
         }
     }
     out
@@ -256,7 +297,42 @@ fn resolve(target: Waiting) -> Resolved {
 
 #[cfg(test)]
 mod tests {
-    use super::{OBJECT_BYTES, candidate_words, is_the_loops};
+    use super::{Handed, OBJECT_BYTES, candidate_words, handed_to, is_the_loops};
+    use orbistoun_thunk::{ArgumentDump, Pointing};
+
+    /// A dump of argument `slot` of import `index` at `address`, holding `words`.
+    fn dump(index: u32, slot: u8, address: u64, words: [u64; 4]) -> ArgumentDump {
+        let mut bytes = [0_u8; orbistoun_thunk::DUMP_BYTES];
+        for (at, word) in words.iter().enumerate() {
+            bytes[at * 8..at * 8 + 8].copy_from_slice(&word.to_le_bytes());
+        }
+        ArgumentDump {
+            index,
+            slot,
+            address,
+            pointing: Pointing::Mapped,
+            bytes,
+            returned: None,
+        }
+    }
+
+    /// A call handed the object, or a pointer to memory holding a pointer into it, is named; one
+    /// handed neither is not, and a call is named once however often it was dumped.
+    #[test]
+    fn the_calls_handed_the_object_are_named() {
+        let base = 0x7400_0610_b2c0;
+        let dumps = [
+            dump(3, 1, base + 0x10, [0; 4]),
+            dump(4, 2, 0x6000_0080_0000, [0, base + 0x80, 0, 0]),
+            dump(5, 0, 0x6000_0080_1000, [base + 0x100, 0, 0, 0]),
+            dump(3, 1, base + 0x10, [0; 4]),
+        ];
+        assert_eq!(
+            handed_to(base, 0x100, &dumps),
+            vec![(3, 1, Handed::Argument), (4, 2, Handed::Pointee)],
+            "the third points one past the object"
+        );
+    }
 
     /// Each register's object is watched a word at a time, unreadable words skipped and a word two
     /// registers share watched once.
