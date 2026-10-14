@@ -142,6 +142,41 @@ pub fn decode_update(body: &[u32]) -> Result<Update, &'static str> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Offsets(pub [Option<u32>; BUFFERS]);
 
+/// Each stream's primitive counters, as `SAMPLE_STREAMOUTSTATS` samples them: the primitives
+/// written to its buffers, and the primitives its draws needed room for - counting up from the
+/// first streamout draw, a query reading the difference between two samples.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// `NumPrimitivesWritten`, a stream each.
+    pub written: [u64; BUFFERS],
+    /// `PrimitiveStorageNeeded`, a stream each.
+    pub needed: [u64; BUFFERS],
+}
+
+/// The counters the queue holds, kept across submissions as the hardware keeps them.
+pub fn stats() -> &'static Mutex<Stats> {
+    static STATS: Mutex<Stats> = Mutex::new(Stats {
+        written: [0; BUFFERS],
+        needed: [0; BUFFERS],
+    });
+    &STATS
+}
+
+/// The stream an `EVENT_WRITE` samples the counters of, where it is a `SAMPLE_STREAMOUTSTATS`:
+/// event type 32 for stream 0 and 1-3 for the others, at event index 3 (`gfx10.json`
+/// `VGT_EVENT_TYPE`; radeonsi `emit_sample_streamout`).
+#[must_use]
+pub const fn stats_event_stream(initiator: u32) -> Option<usize> {
+    if (initiator >> 8) & 0xF != 3 {
+        return None;
+    }
+    match initiator & 0x3F {
+        32 => Some(0),
+        stream @ 1..=3 => Some(stream as usize),
+        _ => None,
+    }
+}
+
 /// The offsets the queue holds, kept across submissions as the hardware keeps them.
 pub fn offsets() -> &'static Mutex<Offsets> {
     static OFFSETS: Mutex<Offsets> = Mutex::new(Offsets([None; BUFFERS]));
@@ -152,10 +187,15 @@ pub fn offsets() -> &'static Mutex<Offsets> {
 /// has written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// The dispatch that carries the draw out.
-    pub dispatch: DispatchState,
+    /// The dispatches that carry the draw out, a wave each, in order.
+    pub dispatches: Vec<DispatchState>,
     /// How many vertices it writes: the draw's, or fewer where a buffer fills.
     pub vertices: u32,
+    /// The primitives written, and the primitives the draw needed room for: what the stream's
+    /// counters move by.
+    pub primitives: (u64, u64),
+    /// Whether the draw is also rasterized: its streamout is made alongside drawing it (D881).
+    pub rasterized: bool,
     /// The offsets after it.
     pub after: Offsets,
 }
@@ -189,6 +229,7 @@ fn latest_at(writes: &[RegisterWrite], packet_offset: u32) -> impl Fn(u32) -> Op
 
 /// What a streamout draw's registers say about how it runs.
 struct Shape {
+    rasterized: bool,
     width: Width,
     lanes: u32,
     per_primitive: u32,
@@ -198,10 +239,7 @@ struct Shape {
 
 /// The wave width, the vertices a primitive takes and the buffers written, or what is not
 /// carried out ([`plan`]).
-fn shape(latest: &impl Fn(u32) -> Option<u32>, vertices: u32) -> Result<Shape, &'static str> {
-    if latest(crate::depth::PA_CL_CLIP_CNTL).unwrap_or(0) & RASTERIZATION_KILL == 0 {
-        return Err("streamout with rasterization on is not modelled");
-    }
+fn shape(latest: &impl Fn(u32) -> Option<u32>) -> Result<Shape, &'static str> {
     let stages = latest(VGT_SHADER_STAGES_EN).unwrap_or(0);
     if stages & PRIMGEN_EN != 0 {
         return Err("streamout from a primitive shader is not modelled");
@@ -219,14 +257,12 @@ fn shape(latest: &impl Fn(u32) -> Option<u32>, vertices: u32) -> Result<Shape, &
     }
     let per_primitive = vertices_per_primitive(latest(VGT_PRIMITIVE_TYPE).unwrap_or(0))
         .ok_or("streamout of a strip, fan or other primitive type is not modelled")?;
-    if vertices > lanes {
-        return Err("a streamout draw of more vertices than one wave has lanes is not modelled");
-    }
     let buffers = latest(VGT_STRMOUT_BUFFER_CONFIG).unwrap_or(0);
     if buffers & !0xF != 0 {
         return Err("streamout to a stream other than the first is not modelled");
     }
     Ok(Shape {
+        rasterized: latest(crate::depth::PA_CL_CLIP_CNTL).unwrap_or(0) & RASTERIZATION_KILL == 0,
         width,
         lanes,
         per_primitive,
@@ -255,13 +291,14 @@ fn vertex_program(latest: &impl Fn(u32) -> Option<u32>) -> Result<(u64, u32, u32
 }
 
 /// Plans the `DRAW_INDEX_AUTO` of `vertices` at `packet_offset` as a streamout pass (D861): the
-/// legacy vertex program as one compute wave, a thread per vertex, with the streamout words after
-/// its user data.
+/// legacy vertex program as compute waves of whole primitives, a thread per vertex, each with the
+/// streamout words after its user data - its vertex count, its first vertex as the write index,
+/// and the buffers' offsets.
 ///
 /// # Errors
 ///
 /// Each thing not carried out, by name: rasterization left on, a primitive shader, another stage,
-/// a strip or fan, more vertices than one wave, an offset or base index, a buffer no update set,
+/// a strip or fan, an offset or base index, a buffer no update set,
 /// or a program field outside the modelled ones.
 pub fn plan(
     writes: &[RegisterWrite],
@@ -271,11 +308,12 @@ pub fn plan(
 ) -> Result<Plan, &'static str> {
     let latest = latest_at(writes, packet_offset);
     let Shape {
+        rasterized,
         width,
         lanes,
         per_primitive,
         buffers,
-    } = shape(&latest, vertices)?;
+    } = shape(&latest)?;
     let (program, rsrc1, rsrc2) = vertex_program(&latest)?;
 
     // Each enabled buffer's room, from its offset to its end, in whole primitives.
@@ -300,26 +338,58 @@ pub fn plan(
     if user_sgprs > USER_DATA_VS_WORDS {
         return Err("more user SGPRs than there are vertex user-data registers");
     }
-    let mut user_data: Vec<Option<u32>> = (0..user_sgprs)
+    let user_data: Vec<Option<u32>> = (0..user_sgprs)
         .map(|i| latest(USER_DATA_VS_0 + i))
         .collect();
-    // `streamout_config`: the wave's vertex count in bits 22:16, stream 0 in bits 25:24; then
-    // `streamout_write_index`, the wave's first vertex - every draw's own, since its offsets carry
-    // what earlier draws wrote; then each base-enabled buffer's offset in dwords.
-    user_data.push(Some(written << 16));
-    user_data.push(Some(0));
+    // Each base-enabled buffer's offset in dwords, as the draw starts: every wave's.
+    let mut bases = Vec::new();
     for (n, offset) in offsets.0.iter().enumerate() {
         if rsrc2 >> (SO_BASE0_EN + n as u32) & 1 != 0 {
-            user_data.push(Some(
-                offset.ok_or("a streamout base enabled for an unset buffer")? / 4,
-            ));
+            bases.push(offset.ok_or("a streamout base enabled for an unset buffer")? / 4);
         }
     }
-    let unwritten_user_data = user_data
-        .iter()
-        .enumerate()
-        .filter(|(_, word)| word.is_none())
-        .fold(0, |mask, (i, _)| mask | 1 << i);
+    // A wave of whole primitives at a time, as the geometry engine hands them out.
+    let per_wave = lanes / per_primitive * per_primitive;
+    let dispatches = (0..written)
+        .step_by(per_wave.max(1) as usize)
+        .map(|first| {
+            let count = per_wave.min(written - first);
+            // `streamout_config`: the wave's vertex count in bits 22:16, stream 0 in bits 25:24;
+            // `streamout_write_index`: the wave's first vertex, counted from the draw's, whose
+            // offsets carry what earlier draws wrote; then the buffers' offsets.
+            let mut words = user_data.clone();
+            words.push(Some(count << 16));
+            words.push(Some(first));
+            words.extend(bases.iter().map(|&base| Some(base)));
+            let unwritten_user_data = words
+                .iter()
+                .enumerate()
+                .filter(|(_, word)| word.is_none())
+                .fold(0, |mask, (i, _)| mask | 1 << i);
+            DispatchState {
+                program,
+                user_data: words,
+                inputs: ComputeInputs {
+                    workgroup_ids: [false; 3],
+                    thread_id_components: 1,
+                    threads: [lanes, 1, 1],
+                    unwritten_user_data,
+                    partial: Some(PartialGroups {
+                        last: [0, 0, 0],
+                        threads: [count, 1, 1],
+                    }),
+                    integer_images: [false; 2],
+                    // Its lanes' vertex ids, which its `v0` holds.
+                    first_thread: first,
+                },
+                width,
+                dx10_clamp: Some(rsrc1 & DX10_CLAMP != 0),
+                local_words: None,
+                groups: [1, 1, 1],
+                vertex_streamout: true,
+            }
+        })
+        .collect();
 
     let mut after = offsets;
     for (n, offset) in after.0.iter_mut().enumerate() {
@@ -330,27 +400,13 @@ pub fn plan(
         }
     }
     Ok(Plan {
-        dispatch: DispatchState {
-            program,
-            user_data,
-            inputs: ComputeInputs {
-                workgroup_ids: [false; 3],
-                thread_id_components: 1,
-                threads: [lanes, 1, 1],
-                unwritten_user_data,
-                partial: Some(PartialGroups {
-                    last: [0, 0, 0],
-                    threads: [vertices.max(1), 1, 1],
-                }),
-                integer_images: [false; 2],
-            },
-            width,
-            dx10_clamp: Some(rsrc1 & DX10_CLAMP != 0),
-            local_words: None,
-            groups: [1, 1, 1],
-            vertex_streamout: true,
-        },
+        dispatches,
         vertices: written,
+        primitives: (
+            u64::from(written / per_primitive),
+            u64::from(vertices / per_primitive),
+        ),
+        rasterized,
         after,
     })
 }
@@ -395,14 +451,14 @@ mod tests {
         pairs.extend((0..9).map(|i| (USER_DATA_VS_0 + i, 0x100 + i)));
         let at = Offsets([Some(0), None, None, None]);
         let plan = plan(&writes(&pairs), 0x40, 1, at).unwrap();
-        assert_eq!(plan.dispatch.program, 0x4_0280_0400);
-        assert_eq!(plan.dispatch.width, Width::Wave32);
-        assert_eq!(plan.dispatch.user_data.len(), 12);
+        assert_eq!(plan.dispatches[0].program, 0x4_0280_0400);
+        assert_eq!(plan.dispatches[0].width, Width::Wave32);
+        assert_eq!(plan.dispatches[0].user_data.len(), 12);
         assert_eq!(
-            plan.dispatch.user_data[9..],
+            plan.dispatches[0].user_data[9..],
             [Some(1 << 16), Some(0), Some(0)]
         );
-        assert_eq!(plan.dispatch.inputs.unwritten_user_data, 0);
+        assert_eq!(plan.dispatches[0].inputs.unwritten_user_data, 0);
         assert_eq!(plan.vertices, 1);
         assert_eq!(plan.after, Offsets([Some(4), None, None, None]));
     }
@@ -424,10 +480,67 @@ mod tests {
         .unwrap();
         // Seven dwords of room at a dword a vertex: two triangles.
         assert_eq!(ran.vertices, 6);
-        assert_eq!(ran.dispatch.user_data[9], Some(6 << 16));
+        assert_eq!(ran.dispatches[0].user_data[9], Some(6 << 16));
         assert_eq!(ran.after.0[0], Some(28));
         let full = plan(&writes(&pairs), 0x40, 3, ran.after).unwrap();
         assert_eq!(full.vertices, 0);
+    }
+
+    /// A draw larger than a wave is carried out a wave of whole primitives at a time: each wave's
+    /// count and write index its own, its lanes' vertex ids from its first, the buffers' offsets
+    /// the draw's.
+    #[test]
+    fn a_draw_larger_than_a_wave_runs_a_wave_at_a_time() {
+        let mut pairs = one_point();
+        pairs.push((VGT_PRIMITIVE_TYPE, 4));
+        pairs.push((BUFFER_SIZE_0, 1000));
+        pairs.extend((0..9).map(|i| (USER_DATA_VS_0 + i, 0)));
+        let ran = plan(
+            &writes(&pairs),
+            0x40,
+            70,
+            Offsets([Some(8), None, None, None]),
+        )
+        .unwrap();
+        // Wave32 holds ten whole triangles: thirty vertices, thirty, then the last nine.
+        let waves: Vec<(Option<u32>, Option<u32>, u32)> = ran
+            .dispatches
+            .iter()
+            .map(|d| (d.user_data[9], d.user_data[10], d.inputs.first_thread))
+            .collect();
+        assert_eq!(
+            waves,
+            [
+                (Some(30 << 16), Some(0), 0),
+                (Some(30 << 16), Some(30), 30),
+                (Some(9 << 16), Some(60), 60)
+            ]
+        );
+        assert!(ran.dispatches.iter().all(|d| d.user_data[11] == Some(2)));
+        assert_eq!(ran.vertices, 69);
+        assert_eq!(ran.after.0[0], Some(8 + 69 * 4));
+    }
+
+    /// A pass whose rasterizer is killed is streamout alone; one left rasterizing is drawn too
+    /// (D881). Either moves the counters by the primitives written and those it needed room for.
+    #[test]
+    fn a_pass_says_whether_it_is_drawn_and_what_it_counts() {
+        let mut pairs = one_point();
+        pairs.extend((0..9).map(|i| (USER_DATA_VS_0 + i, 0)));
+        let at = Offsets([Some(0), None, None, None]);
+        let killed = plan(&writes(&pairs), 0x40, 3, at).unwrap();
+        // One dword of room: one point written of the three.
+        assert_eq!((killed.rasterized, killed.primitives), (false, (1, 3)));
+        pairs.push((crate::depth::PA_CL_CLIP_CNTL, 0));
+        assert!(plan(&writes(&pairs), 0x40, 3, at).unwrap().rasterized);
+        assert_eq!(stats_event_stream(0x320), Some(0));
+        assert_eq!(stats_event_stream(0x302), Some(2));
+        assert_eq!(
+            stats_event_stream(0x115),
+            None,
+            "ZPASS_DONE is no streamout sample"
+        );
+        assert_eq!(stats_event_stream(0x120), None, "only at event index 3");
     }
 
     /// What is not carried out is refused by name.
@@ -439,12 +552,10 @@ mod tests {
             pairs.push(extra);
             plan(&writes(&pairs), 0x40, vertices, at).unwrap_err()
         };
-        assert!(refused((crate::depth::PA_CL_CLIP_CNTL, 0), 1).contains("rasterization on"));
         assert!(refused((VGT_SHADER_STAGES_EN, 1 << 13), 1).contains("primitive shader"));
         assert!(refused((VGT_PRIMITIVE_TYPE, 6), 3).contains("strip"));
         assert!(refused((VGT_INDX_OFFSET, 5), 1).contains("base vertex"));
         assert!(refused((PGM_RSRC2_VS, 0x1113), 1).contains("scratch"));
-        assert!(refused((VGT_SHADER_STAGES_EN, 0x0081_0000), 33).contains("one wave"));
         let unset = plan(&writes(&one_point()), 0x40, 1, Offsets::default()).unwrap_err();
         assert!(unset.contains("no update set"));
     }

@@ -222,6 +222,7 @@ pub fn state_at(
             unwritten_user_data,
             partial,
             integer_images: [false; 2],
+            first_thread: 0,
         },
         width: if initiator_word & initiator::CS_W32_EN != 0 {
             Width::Wave32
@@ -505,6 +506,7 @@ mod tests {
                 unwritten_user_data: 1 << 1,
                 partial: None,
                 integer_images: [false; 2],
+                first_thread: 0,
             }
         );
         assert_eq!(state.width, Width::Wave64);

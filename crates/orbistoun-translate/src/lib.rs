@@ -1508,6 +1508,7 @@ mod tests {
                         unwritten_user_data: 0,
                         partial: None,
                         integer_images: [false; 2],
+                        first_thread: 0,
                     }),
                     ..UserData::default()
                 },

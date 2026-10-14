@@ -3,23 +3,31 @@
 **Status:** decided
 **Date:** 2026-10-14
 
-Transform feedback from a legacy vertex shader, with the rasterizer killed, is carried out by the
-command processor as an exact compute dispatch (D705, D746) of that vertex program.
+Transform feedback from a legacy vertex shader is carried out by the command processor as exact
+compute dispatches (D705, D746) of that vertex program. A draw left rasterizing is then drawn as
+well, its stores dropped there (D881).
 
 - **Offsets.** `STRMOUT_BUFFER_UPDATE` keeps each streamout buffer's offset, in bytes, across draws
   and submissions, as the hardware does. A begin sets it from the packet (zero) or from a filled
   size in memory. An end stores it. Each streamout draw advances it by what it wrote.
 - **The draw.** A `DRAW_INDEX_AUTO` whose registers enable streamout runs the program at
-  `SPI_SHADER_PGM_LO/HI_VS` as one compute wave of `VS_W32_EN`'s width, one thread per vertex.
-  Its user data is the `USER_DATA_VS` words, then the words `SO_EN` and `SO_BASEn_EN` add:
-  - `streamout_config`, the vertex count in bits 22:16;
-  - `streamout_write_index`, zero, since the offsets already carry what earlier draws wrote;
-  - each enabled buffer's offset in dwords.
+  `SPI_SHADER_PGM_LO/HI_VS` as compute waves of `VS_W32_EN`'s width. Each wave takes whole
+  primitives, one thread per vertex, and its `v0` holds the draw's vertex id
+  (`ComputeInputs::first_thread`). Its user data is the `USER_DATA_VS` words, then the words
+  `SO_EN` and `SO_BASEn_EN` add:
+  - `streamout_config`, the wave's vertex count in bits 22:16;
+  - `streamout_write_index`, the wave's first vertex counted from the draw's, since the offsets
+    already carry what earlier draws wrote;
+  - each enabled buffer's offset in dwords, as the draw starts.
 - **Clamping.** The count is clamped to whole primitives that fit every enabled buffer, which is
   inferred from radeonsi's use of the filled size.
-- **Exports.** The program's position and parameter exports are dropped. With
-  `DX_RASTERIZATION_KILL` they reach nothing on the hardware either, so the translator drops
-  them under `discard_vertex_exports`, which is part of the module's cache key.
+- **Exports.** The pass drops the program's position and parameter exports, under
+  `discard_vertex_exports`, which is part of the module's cache key. With `DX_RASTERIZATION_KILL`
+  they reach nothing on the hardware either. Without it they are the draw's, made by the draw.
+- **Counters.** Each stream keeps the primitives written and the primitives its draws needed room
+  for. A `SAMPLE_STREAMOUTSTATS` event (type 32 for stream 0, 1-3 for the others, at event index
+  3) writes the two as 64-bit words with bit 63 set, the fence radeonsi waits on
+  (`si_query.c`).
 - **Loads.** The program loads its buffer descriptor itself, from radeonsi's internal table at
   `{s0, 4}`. A scalar load the buffer tracer gives a slot reads the buffer bound there, as
   `s_buffer_load` already did. The host-side prefix evaluation (D753) also follows the path that
@@ -28,10 +36,8 @@ command processor as an exact compute dispatch (D705, D746) of that vertex progr
 
 Refused by name:
 
-- rasterization left on;
 - a primitive shader (NGG) or an earlier stage;
 - strips and fans;
-- more vertices than one wave;
 - a base vertex index;
 - a stream other than the first;
 - indexed draws;

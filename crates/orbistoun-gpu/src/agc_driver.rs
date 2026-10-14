@@ -1791,20 +1791,27 @@ impl GuestCp<'_> {
             matches!(packet.kind, crate::packet::PacketKind::Command { opcode } if cp::is_draw(opcode))
                 && (segment.first..segment.end).contains(&packet.offset)
         });
+        let mut rasterized = false;
         for draw in draws {
-            if let Err(why) = self.streamout_draw(segment.stream, draw) {
-                return Some(Err(why));
+            match self.streamout_draw(segment.stream, draw) {
+                Ok(also_rasterized) => rasterized |= also_rasterized,
+                Err(why) => return Some(Err(why)),
             }
+        }
+        // A draw left rasterizing is drawn too, its legacy vertex shader's stores dropped there
+        // (D881): the streamout above made them.
+        if rasterized {
+            return Some(self.draw_segment(segment));
         }
         Some(Ok(()))
     }
 
-    /// One streamout draw ([`Self::streamout_segment`]).
+    /// One streamout draw ([`Self::streamout_segment`]), answering whether it is also rasterized.
     fn streamout_draw(
         &mut self,
         stream: &[u8],
         draw: &crate::packet::Packet,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if draw.kind
             != (crate::packet::PacketKind::Command {
                 opcode: crate::packet::build::measured::DRAW_INDEX_AUTO,
@@ -1826,13 +1833,21 @@ impl GuestCp<'_> {
             }
             crate::streamout::plan(writes, draw.offset, vertices, offsets).map_err(str::to_owned)
         })?;
-        if plan.vertices > 0 {
-            self.run_prepared(&|cp: &Self| cp.prepare_state(&plan.dispatch))?;
+        // A wave at a time, each storing its vertices after the last's (D861).
+        for dispatch in &plan.dispatches {
+            self.run_prepared(&|cp: &Self| cp.prepare_state(dispatch))?;
+        }
+        {
+            let mut stats = crate::streamout::stats()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            stats.written[0] += plan.primitives.0;
+            stats.needed[0] += plan.primitives.1;
         }
         *crate::streamout::offsets()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = plan.after;
-        Ok(())
+        Ok(plan.rasterized)
     }
 
     fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
@@ -3898,6 +3913,13 @@ impl cp::CpMemory for GuestCp<'_> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         true
+    }
+
+    fn streamout_stats(&mut self, stream: usize) -> Option<(u64, u64)> {
+        let stats = crate::streamout::stats()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some((*stats.written.get(stream)?, *stats.needed.get(stream)?))
     }
 
     fn samples_passed(&mut self) -> Option<u64> {

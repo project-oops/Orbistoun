@@ -2054,6 +2054,8 @@ impl Pipeline {
             ^ u64::from(integer_images[1]) << 63
             // A streamout pass drops the exports a dispatch of the same program would refuse.
             ^ u64::from(state.vertex_streamout) << 61
+            // A streamout wave's first vertex is compiled in (D861).
+            ^ u64::from(inputs.first_thread).rotate_left(36)
             ^ local_words_salt(state.local_words);
         Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()

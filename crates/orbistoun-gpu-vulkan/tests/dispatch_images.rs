@@ -96,6 +96,7 @@ fn translated_with(
                 unwritten_user_data: 0,
                 partial,
                 integer_images,
+                first_thread: 0,
             }),
             ..UserData::default()
         },
@@ -304,6 +305,7 @@ fn a_dispatch_stores_to_a_volume() {
                 unwritten_user_data: 0,
                 partial: None,
                 integer_images: [false, true],
+                first_thread: 0,
             }),
             ..UserData::default()
         },
@@ -376,6 +378,7 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
                 unwritten_user_data: 0,
                 partial: None,
                 integer_images: [false, false],
+                first_thread: 0,
             }),
             ..UserData::default()
         },
@@ -487,6 +490,7 @@ fn a_sixteen_word_load_names_two_images_of_its_table() {
                 unwritten_user_data: 0,
                 partial: None,
                 integer_images: [false; 2],
+                first_thread: 0,
             }),
             ..UserData::default()
         },
@@ -609,6 +613,7 @@ fn a_dispatch_fetches_from_two_images() {
                 unwritten_user_data: 0,
                 partial: None,
                 integer_images: [false; 2],
+                first_thread: 0,
             }),
             ..UserData::default()
         },

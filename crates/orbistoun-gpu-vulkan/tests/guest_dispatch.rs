@@ -97,6 +97,7 @@ fn translated_with(
                 unwritten_user_data: unwritten,
                 partial,
                 integer_images: [false; 2],
+                first_thread: 0,
             }),
             ..UserData::default()
         },

@@ -42,6 +42,11 @@ pub struct ComputeInputs {
     /// shader's sampled type agree. Raw words move through them unconverted.
     #[serde(default)]
     pub integer_images: [bool; 2],
+    /// What is added to every thread's x id: zero for a dispatch, and for a streamout pass's wave
+    /// of a larger draw the vertex its first lane is, which its `v0` - the vertex id - holds
+    /// (D861).
+    #[serde(default)]
+    pub first_thread: u32,
 }
 
 /// Where a dispatch's partial-group shape sits in the push-constant block (D855): the last group's
@@ -243,6 +248,7 @@ impl DispatchState {
                 .take(inputs.thread_id_components as usize)
                 .enumerate()
             {
+                let value = offset_x(module, register, value, inputs.first_thread);
                 let pointer = module.lane_pointer(u32::try_from(register).unwrap_or(0), lane);
                 module.builder.function(op::STORE, &[pointer.0, value.0]);
             }
@@ -433,6 +439,16 @@ impl DispatchState {
 }
 
 /// `left operation right` on words.
+/// A thread's id in `register` as the module stores it: the x id moved by `first_thread`
+/// ([`ComputeInputs::first_thread`]), every other as it is.
+fn offset_x(module: &mut Wavefront<'_>, register: usize, value: Id, first_thread: u32) -> Id {
+    if register != 0 || first_thread == 0 {
+        return value;
+    }
+    let first = Model::constant(module, first_thread);
+    binary(module, op::IADD, value, first)
+}
+
 fn binary(module: &mut Wavefront<'_>, operation: u16, left: Id, right: Id) -> Id {
     let u32_type = module.u32_type;
     let result = module.builder.id();
@@ -481,6 +497,7 @@ mod tests {
             unwritten_user_data: 0,
             partial: None,
             integer_images: [false; 2],
+            first_thread: 0,
         }
     }
 

@@ -156,6 +156,12 @@ pub trait CpMemory {
     fn samples_passed(&mut self) -> Option<u64> {
         None
     }
+    /// A stream's streamout counters as they stand ([`crate::streamout::Stats`]):
+    /// `(NumPrimitivesWritten, PrimitiveStorageNeeded)`. `None` when nothing counts them, which
+    /// leaves the event as a stop.
+    fn streamout_stats(&mut self, _stream: usize) -> Option<(u64, u64)> {
+        None
+    }
     /// Runs `edit` over the streamout buffers' offsets the queue holds between draws (D861),
     /// answering whether there are any. The default keeps none, which leaves a
     /// `STRMOUT_BUFFER_UPDATE` as a stop.
@@ -917,6 +923,19 @@ fn event_write(
     let [initiator, addr_low, addr_high, ..] = *body else {
         return Err(Stop::NeedsGpu);
     };
+    // A streamout query's sample: the stream's two counters, each with bit 63 set as the fence
+    // radeonsi waits on (`si_query.c`, "the 64th bit in qw is used as fence").
+    if let Some(stream) = crate::streamout::stats_event_stream(initiator) {
+        let (written, needed) = memory.streamout_stats(stream).ok_or(Stop::NeedsGpu)?;
+        let destination = address(addr_low & !0x7, addr_high & 0xFFFF);
+        for (at, value) in [(destination, written), (destination + 8, needed)] {
+            if !memory.write(at, &(value | ZPASS_VALID).to_le_bytes()) {
+                return Err(Stop::OutOfBounds(at));
+            }
+            result.bytes_written += 8;
+        }
+        return Ok(());
+    }
     if initiator & 0x3F != ZPASS_DONE {
         return Err(Stop::NeedsGpu);
     }
@@ -1055,6 +1074,8 @@ mod tests {
         samples: Option<u64>,
         /// The streamout offsets held; `None` keeps none.
         streamout: Option<crate::streamout::Offsets>,
+        /// The streamout counters held, for stream 0; `None` counts none.
+        stats: Option<(u64, u64)>,
     }
 
     impl Fake {
@@ -1096,6 +1117,9 @@ mod tests {
         }
         fn with_streamout(&mut self, edit: &mut dyn FnMut(&mut crate::streamout::Offsets)) -> bool {
             self.streamout.as_mut().map(edit).is_some()
+        }
+        fn streamout_stats(&mut self, stream: usize) -> Option<(u64, u64)> {
+            (stream == 0).then_some(self.stats).flatten()
         }
     }
 
@@ -1200,6 +1224,30 @@ mod tests {
 
         let mut keeps_none = Fake::default();
         let ran = execute(&update([0x80, 0, 0, 0, 0]), &mut keeps_none);
+        assert!(matches!(ran.stopped, Stopped::NeedsGpu { .. }));
+    }
+
+    /// A streamout query's sample writes the stream's two counters, each with bit 63 set, where the
+    /// counters are kept; with none kept it is a stop.
+    #[test]
+    fn a_streamout_sample_writes_its_streams_counters() {
+        let sample = [command_header(measured::EVENT_WRITE, 3), 0x320, 0x2000, 0];
+        let mut memory = Fake {
+            stats: Some((5, 7)),
+            ..Fake::default()
+        };
+        let ran = execute(&bytes(&sample), &mut memory);
+        assert_eq!((ran.stopped, ran.bytes_written), (Stopped::Completed, 16));
+        assert_eq!(
+            [
+                memory.word(0x2000),
+                memory.word(0x2004),
+                memory.word(0x2008),
+                memory.word(0x200C)
+            ],
+            [5, 1 << 31, 7, 1 << 31]
+        );
+        let ran = execute(&bytes(&sample), &mut Fake::default());
         assert!(matches!(ran.stopped, Stopped::NeedsGpu { .. }));
     }
 
