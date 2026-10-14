@@ -70,6 +70,80 @@ pub fn scalar_prefix(
     system: &[(u32, u32)],
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Result<Option<Scalars>, &'static str> {
+    // Each path a branch on the execution mask can take to the access, followed in turn: the
+    // decisions taken so far, depth first.
+    let mut pending: Vec<Vec<bool>> = vec![Vec::new()];
+    let mut merged: Option<Scalars> = None;
+    let mut runs = 0;
+    while let Some(decisions) = pending.pop() {
+        runs += 1;
+        if runs > MOST_PATHS {
+            return Err("the program's paths to the access are too many to follow (D753)");
+        }
+        let path = prefix_path(
+            decode,
+            encodings,
+            (until, program_address),
+            (first_register, user_data),
+            system,
+            (read, &decisions),
+        )?;
+        match path {
+            Path::Reached(scalars) => {
+                let scalars = *scalars;
+                merged = Some(match merged {
+                    None => scalars,
+                    // Known only where every path to the access agrees.
+                    Some(earlier) => {
+                        let mut both = earlier;
+                        for (kept, other) in both.iter_mut().zip(scalars) {
+                            if *kept != other {
+                                *kept = None;
+                            }
+                        }
+                        both
+                    }
+                });
+            }
+            Path::Skipped => {}
+            Path::Undecided => {
+                for decision in [true, false] {
+                    let mut next = decisions.clone();
+                    next.push(decision);
+                    pending.push(next);
+                }
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// How many paths [`scalar_prefix`] follows to one access before it gives up: six branches on the
+/// execution mask before it, each both ways, and one more.
+const MOST_PATHS: usize = 1 << 7;
+
+/// Where one path through a prefix ended.
+enum Path {
+    /// At the access, with these scalars.
+    Reached(Box<Scalars>),
+    /// Past it, by a branch that jumps over it (D800).
+    Skipped,
+    /// At a branch on the execution mask whose way the decisions given do not say.
+    Undecided,
+}
+
+/// One path of [`scalar_prefix`]: each branch on the execution mask that the host cannot know and
+/// that lands before the access takes the way `decisions` gives, in order - taken for `true`. A
+/// scalar instruction runs whatever the mask holds, so every way is a way the wave may go.
+fn prefix_path(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (until, program_address): (u32, Option<u64>),
+    (first_register, user_data): (u32, &[u32]),
+    system: &[(u32, u32)],
+    (read, decisions): (&mut dyn FnMut(u64) -> Option<u32>, &[bool]),
+) -> Result<Path, &'static str> {
+    let mut decided = decisions.iter().copied();
     let mut model = Concrete::new(encodings, decode.instructions.len());
     model.program_address = program_address;
     for &(register, word) in system {
@@ -90,7 +164,7 @@ pub fn scalar_prefix(
             break;
         }
         if instruction.offset > until {
-            return Ok(None);
+            return Ok(Path::Skipped);
         }
         steps += 1;
         if steps > 4 * decode.instructions.len() {
@@ -115,6 +189,11 @@ pub fn scalar_prefix(
                     "s_cbranch_execz" | "s_cbranch_execnz" if jumps_past(instruction, until) => {
                         Some(false)
                     }
+                    // One landing before the access is followed both ways, a path each (D753).
+                    "s_cbranch_execz" | "s_cbranch_execnz" => match decided.next() {
+                        Some(taken) => Some(taken),
+                        None => return Ok(Path::Undecided),
+                    },
                     _ => None,
                 };
                 let Some(taken) = taken else {
@@ -129,7 +208,7 @@ pub fn scalar_prefix(
                     let target = i64::from(instruction.offset) + 4 + 4 * jump;
                     // The prefix ends at the access: a jump beyond it skips it (D800).
                     if target > i64::from(until) {
-                        return Ok(None);
+                        return Ok(Path::Skipped);
                     }
                     at = decode
                         .instructions
@@ -160,7 +239,7 @@ pub fn scalar_prefix(
             _ => model.forget_vector_writes(instruction, name),
         }
     }
-    Ok(Some(model.scalars))
+    Ok(Path::Reached(Box::new(model.scalars)))
 }
 
 /// Whether a branch's target lies beyond the access at `until`.
@@ -1471,6 +1550,24 @@ mod tests {
         0xbf81_0000,
         0xbf81_0000,
     ];
+
+    /// A branch on the execution mask that lands before the access is followed both ways (D753):
+    /// `s_mov_b32 s0, 5; s_cbranch_execz 1; s_mov_b32 s1, 7`, then the access. Both ways leave `s0`
+    /// five, so it is known; only the way that falls through sets `s1`, so it is not. PPSA21564's
+    /// compute program at `0x50053c700` loads its descriptor so, after a skippable block.
+    #[test]
+    fn an_execz_branch_before_the_access_is_followed_both_ways() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [0xbe80_0385_u32, 0xbf88_0001, 0xbe81_0387, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions.last().expect("the access").offset;
+        let scalars = reached(&decode, &encodings, access, (0, &[]), &mut |_| None)
+            .expect("both ways reach the access");
+        assert_eq!(scalars[0], Some(5), "s0 is five either way");
+        assert_eq!(scalars[1], None, "s1 is seven one way only");
+    }
 
     #[test]
     fn a_streamout_store_past_an_execz_branch_is_evaluated() {

@@ -89,6 +89,8 @@ pub const SUPPORTED: &[&str] = &[
     "s_xor_b64",
     "s_nor_b64",
     "s_orn2_b64",
+    "s_nand_b64",
+    "s_not_b64",
     "s_lshr_b32",
     "s_add_u32",
     "s_addc_u32",
@@ -182,6 +184,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_gt_f32_e32",
     "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
+    "v_cmp_ngt_f32_e32",
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_lt_u32_e32",
@@ -646,6 +649,8 @@ pub fn writes_condition_code(name: &str) -> bool {
             | "s_nor_b64"
             | "s_orn2_b64"
             | "s_andn2_b64"
+            | "s_nand_b64"
+            | "s_not_b64"
             // The unsigned add sets it to the carry out; the bit test to the bit; the saving and
             // the count to whether the new mask or the count is non-zero.
             | "s_add_u32"
@@ -2546,9 +2551,10 @@ fn scalar_instruction<M: Model + ?Sized>(
 
         // The 64-bit scalar logic a guest computes masks with: narrow by anding with a comparison
         // result, widen by oring, and take the other branch's lanes with `s_andn2_b64`.
-        "s_and_b64" | "s_or_b64" | "s_andn2_b64" | "s_xor_b64" | "s_nor_b64" | "s_orn2_b64" => {
-            scalar_logic(model, instruction, name)
-        }
+        "s_and_b64" | "s_or_b64" | "s_andn2_b64" | "s_xor_b64" | "s_nor_b64" | "s_orn2_b64"
+        | "s_nand_b64" => scalar_logic(model, instruction, name),
+        // The complement of a mask: `s_not_b64 exec, exec` enters the other side of a branch.
+        "s_not_b64" => scalar_not_64(model, instruction),
         "s_bfe_u64" => scalar_bit_field_64(model, instruction),
         "s_lshl_b64" | "s_lshr_b64" => scalar_shift_64(model, instruction, name),
         "s_bitcmp1_b32" => scalar_bit_test(model, instruction),
@@ -4748,8 +4754,8 @@ fn scalar_logic<M: Model + ?Sized>(
 
     let low = model.binary(opcode, first_low, second_low);
     let high = model.binary(opcode, first_high, second_high);
-    // `s_nor_b64` is the complement of the or.
-    let (low, high) = if name == "s_nor_b64" {
+    // `s_nor_b64` is the complement of the or, `s_nand_b64` of the and.
+    let (low, high) = if name == "s_nor_b64" || name == "s_nand_b64" {
         (model.not(low), model.not(high))
     } else {
         (low, high)
@@ -4758,6 +4764,35 @@ fn scalar_logic<M: Model + ?Sized>(
     // These set the condition code to whether the result is non-zero, as the instruction set
     // documents: `s_and_b64 exec, exec, vcc` then a branch on the code skips a block once no lane
     // survives.
+    write_logic_result(model, instruction, destination, (low, high))
+}
+
+/// `s_not_b64`: the complement of a 64-bit source, both halves.
+fn scalar_not_64<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [destination, source] = instruction.operands.as_slice() else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a 64-bit complement decodes to a destination and a source; this one did not",
+        });
+    };
+    let (low, high) = sixty_four_bit_source(model, instruction, source)?;
+    let (low, high) = (model.not(low), model.not(high));
+    write_logic_result(model, instruction, destination, (low, high))
+}
+
+/// A 64-bit scalar logic result written to `destination` - a register pair or a lane mask - with
+/// the condition code set to whether it is non-zero, as the instruction set documents for the
+/// whole family: `s_and_b64 exec, exec, vcc` then a branch on the code skips a block once no lane
+/// survives.
+fn write_logic_result<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    destination: &Operand,
+    (low, high): (Id, Id),
+) -> Result<(), TranslateError> {
     let either = model.binary(op::BITWISE_OR, low, high);
     let non_zero = model.is_not_zero(either);
     model.set_condition_code(non_zero);
@@ -4798,7 +4833,7 @@ const ANDN2: &str = "s_andn2_b64";
 /// The SPIR-V opcode a 64-bit scalar logical instruction maps to.
 fn op_for_logic(instruction: &Instruction, name: &str) -> Result<u16, TranslateError> {
     match name {
-        "s_and_b64" | ANDN2 => Ok(op::BITWISE_AND),
+        "s_and_b64" | ANDN2 | "s_nand_b64" => Ok(op::BITWISE_AND),
         "s_or_b64" | "s_nor_b64" | "s_orn2_b64" => Ok(op::BITWISE_OR),
         "s_xor_b64" => Ok(op::BITWISE_XOR),
         _ => Err(TranslateError::Unsupported {
@@ -6718,6 +6753,7 @@ pub const SDWA_COMPARE: &[&str] = &[
     "v_cmp_gt_f32_e32",
     "v_cmp_ge_f32_e32",
     "v_cmp_neq_f32_e32",
+    "v_cmp_ngt_f32_e32",
     // The forms whose answer narrows the execution mask.
     "v_cmpx_lt_f32_e32",
     "v_cmpx_eq_f32_e32",

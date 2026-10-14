@@ -6713,6 +6713,33 @@ fn not_equal_is_true_for_a_nan() {
     );
 }
 
+/// `v_cmp_ngt_f32` is not-greater-than-or-unordered: false only where the first is greater, and
+/// true whenever either is a NaN. PPSA21564's compute program at `0x50053c700` tests with it.
+#[test]
+fn not_greater_than_is_true_for_a_nan() {
+    if !device_or_skip("not_greater_than_is_true_for_a_nan") {
+        return;
+    }
+    let lanes_written = |left: u32, right: u32| -> u32 {
+        let mut program = Vec::new();
+        program.extend(v_mov_literal(0, left));
+        program.extend(v_mov_literal(1, right));
+        program.extend([
+            v_cmp_f32("v_cmp_ngt_f32_e32", vgpr_code(0), 1),
+            s_logic_b64("s_and_b64", 126, 126, 106),
+            v_mov_inline(2, 63),
+            s_endpgm(),
+        ]);
+        let (registers, _) = run_memory(Fidelity::Wavefront, &program);
+        vector(&registers, 2)
+    };
+    let (one, two) = (1.0_f32.to_bits(), 2.0_f32.to_bits());
+    assert_eq!(lanes_written(two, one), 0, "2.0 > 1.0");
+    assert_eq!(lanes_written(one, two), 63, "1.0 is not greater than 2.0");
+    assert_eq!(lanes_written(one, one), 63, "1.0 is not greater than 1.0");
+    assert_eq!(lanes_written(BITS_QUIET_NAN, one), 63, "NaN is unordered");
+}
+
 /// The long-form float compares take each source's absolute and negate flags: `|-2| == 2`,
 /// `-2 <= 2`, `-(-2) >= 2`, and `-2 >= 2` is false. In a thirty-two-lane wave the mask is one
 /// register, and the next is left as it was.
@@ -7353,7 +7380,8 @@ fn sop1(name: &str, dst: u32, source: u32) -> u32 {
 }
 
 /// The culling shader's 64-bit scalar logic and bit-field extract, each writing the condition code
-/// a select then reads: xor, nor and or-not across a pair, and a field of a pair.
+/// a select then reads: xor, nor, or-not, not-and and the complement across a pair - the last two
+/// as PPSA21564's compute program at `0x50053c700` forms its masks - and a field of a pair.
 #[test]
 fn the_sixty_four_bit_scalar_logic_and_extract_compute_as_published() {
     if !device_or_skip("the_sixty_four_bit_scalar_logic_and_extract_compute_as_published") {
@@ -7369,6 +7397,21 @@ fn the_sixty_four_bit_scalar_logic_and_extract_compute_as_published() {
     program.push(s_endpgm());
     let registers = run(&program);
     for at in [2, 4, 6] {
+        assert_eq!(
+            (scalar(&registers, at), scalar(&registers, at + 1)),
+            (0xf0f0_f0f0, 0x7fff_fffe),
+            "s[{at}:{}]",
+            at + 1
+        );
+    }
+    let mut program = Vec::new();
+    program.extend(s_mov_literal(0, 0x0f0f_0f0f));
+    program.extend(s_mov_literal(1, 0x8000_0001));
+    program.push(sop2("s_nand_b64", 2, minus_one, 0)); // s[2:3] = ~(-1 & s[0:1])
+    program.push(sop1("s_not_b64", 4, 0)); // s[4:5] = ~s[0:1]
+    program.push(s_endpgm());
+    let registers = run(&program);
+    for at in [2, 4] {
         assert_eq!(
             (scalar(&registers, at), scalar(&registers, at + 1)),
             (0xf0f0_f0f0, 0x7fff_fffe),

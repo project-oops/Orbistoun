@@ -105,15 +105,33 @@ struct ForDraw {
 /// No texture slot's coordinates saturated.
 const UNSATURATED: [[bool; 2]; MAX_TEXTURES] = [[false; 2]; MAX_TEXTURES];
 
-/// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
-/// position space (D731), in the cache key.
-/// A refusal for an instruction with no name, naming the program at `address` and the instruction,
-/// so a report quotes what the opcode tables lack; any other refusal unchanged.
-fn name_the_unnamed(
+/// The program of the most recent dispatch refused while its buffers were traced, and where it
+/// lies: what a run writes beside its report, so the refusal can be read against the code.
+fn refused_program() -> &'static std::sync::Mutex<Option<(u64, Vec<u8>)>> {
+    static PROGRAM: std::sync::Mutex<Option<(u64, Vec<u8>)>> = std::sync::Mutex::new(None);
+    &PROGRAM
+}
+
+/// The program [`refused_program`] keeps, and where it lies.
+#[must_use]
+pub fn last_refused_program() -> Option<(u64, Vec<u8>)> {
+    refused_program()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// A dispatch refused while its buffers were traced: its program kept ([`last_refused_program`]),
+/// and a refusal for an instruction with no name naming the program at `address` and the
+/// instruction, so a report quotes what the opcode tables lack.
+fn dispatch_refusal(
     why: String,
     (decoded, encodings): (&orbistoun_shader::Decode, &EncodingTable),
-    address: u64,
+    (address, program): (u64, &[u8]),
 ) -> String {
+    *refused_program()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((address, program.to_vec()));
     if !why.contains("has no name") {
         return why;
     }
@@ -123,6 +141,8 @@ fn name_the_unnamed(
     }
 }
 
+/// Distinguishes the same primitive shader translated for different draws' geometry (D730) or
+/// position space (D731), in the cache key.
 fn for_draw_salt(for_draw: ForDraw) -> u64 {
     let geometry = for_draw.geometry.map_or(0, |g| {
         0x4745_4f4d_0000_0000
@@ -1399,7 +1419,9 @@ impl Pipeline {
         // (D746); the window covers the rest.
         let (served, buffers, formats, unread) = self
             .dispatch_buffers(state, &decoded, memory)
-            .map_err(|why| name_the_unnamed(why, (&decoded, &self.encodings), address))?;
+            .map_err(|why| {
+                dispatch_refusal(why, (&decoded, &self.encodings), (address, program))
+            })?;
         let placed = crate::dispatch::place_window_except(
             state,
             (&decoded, &self.encodings),

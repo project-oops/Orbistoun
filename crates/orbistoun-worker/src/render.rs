@@ -1615,6 +1615,20 @@ fn log_execution() {
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
     }
+    // The program a refused dispatch runs, to read the refusal against.
+    if let (Some((address, program)), Some(dir)) = (
+        orbistoun_gpu::pipeline::last_refused_program(),
+        frames_dir(),
+    ) {
+        match std::fs::write(dir.join("refused-dispatch-program.bin"), &program) {
+            Ok(()) => tracing::info!(
+                "the refused dispatch's program, {} bytes at {address:#x}, is refused-dispatch-program.bin in {}",
+                program.len(),
+                dir.display()
+            ),
+            Err(e) => tracing::warn!("the refused dispatch's program could not be written: {e}"),
+        }
+    }
     if let Some(why) = orbistoun_gpu::agc_driver::last_draw_refusal() {
         tracing::info!("a draw segment was not carried out - {why}");
     }

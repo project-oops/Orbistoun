@@ -87,6 +87,20 @@ s_or_b64 s[6:7], s[10:11], 0
 s_andn2_b64 s[8:9], 0, s[12:13]
 s_andn2_b64 s[10:11], s[14:15], -1
 
+// The complement of a mask - `s_not_b64 exec, exec` enters the other side of a branch - and the
+// complement of an and, as PPSA21564's compute program at 0x50053c700 computes its masks. Each
+// field with a high sample and an inline constant.
+s_not_b64 s[0:1], s[2:3]
+s_not_b64 exec, exec
+s_not_b64 s[86:87], s[100:101]
+s_not_b64 s[24:25], exec
+s_not_b64 s[22:23], -1
+s_nand_b64 s[0:1], s[2:3], s[4:5]
+s_nand_b64 vcc, vcc, s[2:3]
+s_nand_b64 s[86:87], s[100:101], s[34:35]
+s_nand_b64 s[0:1], -1, s[4:5]
+s_nand_b64 s[2:3], s[6:7], 0
+
 // ---- SOPP branches: a signed word offset in the low half -------------------------
 //
 // The family declares an empty operand layout, which is a genuine claim about most of
