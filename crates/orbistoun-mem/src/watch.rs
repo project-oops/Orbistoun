@@ -64,11 +64,13 @@ static GUARDING: AtomicBool = AtomicBool::new(false);
 /// How many guards stand, so a release with none to find takes no lock.
 static GUARDS: AtomicUsize = AtomicUsize::new(0);
 
-/// The shortest range a mark guards: below it, asking the host costs little.
-const GUARDED_FROM: u64 = 1 << 20;
+/// The shortest range a mark guards: below it, asking the host costs little. Asking costs some
+/// microseconds a range whatever its size - Craft's 16 KiB to 1 MiB chunk buffers, asked of every
+/// draw, spent 13% of its run there - so a range of sixteen pages or more is guarded.
+const GUARDED_FROM: u64 = 64 << 10;
 
-/// The most guards that stand at once.
-const GUARDS_MOST: usize = 64;
+/// The most guards that stand at once: a title asks of hundreds of buffers.
+const GUARDS_MOST: usize = 1024;
 
 /// Lets [`mark`] guard large ranges from now on. Called by whoever installs the fault handler that
 /// asks [`write_faulted`], once it is installed.
