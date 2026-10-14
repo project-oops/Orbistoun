@@ -1050,25 +1050,11 @@ pub fn take_snapshot(id: u64) -> Option<Vec<u32>> {
 /// (D862).
 fn take_sized_snapshot(id: u64) -> Option<((u32, u32), Vec<u32>)> {
     on_device(move || {
-        let pixels = live_backend()
+        live_backend()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()?
-            .take_snapshot(id)?;
-        let extent = (pixels.width, pixels.height);
-        Some((
-            extent,
-            <[u32] as zerocopy::FromBytes>::ref_from_bytes(&pixels.bytes).map_or_else(
-                |_| {
-                    pixels
-                        .bytes
-                        .chunks_exact(4)
-                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                        .collect()
-                },
-                <[u32]>::to_vec,
-            ),
-        ))
+            .take_snapshot_words(id)
     })
     .flatten()
 }

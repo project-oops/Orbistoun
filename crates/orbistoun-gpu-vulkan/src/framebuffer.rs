@@ -1918,6 +1918,44 @@ impl FrameSnapshot {
         self.texel_bytes
     }
 
+    /// Its extent and its pixels as words, read straight out of its mapping: [`Self::read`]
+    /// without the bytes a caller would make into words again.
+    pub(crate) fn read_words(&self) -> Result<((u32, u32), Vec<u32>), DispatchError> {
+        let session = crate::compute::session()?;
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The copy into it was submitted unwaited; this is where it is waited for.
+        settle(&session)?;
+        let size =
+            vk::DeviceSize::from(self.width) * vk::DeviceSize::from(self.height) * self.texel_bytes;
+        let words = usize::try_from(size / 4).unwrap_or(0);
+        // SAFETY: the memory is host-visible and coherent, the copy into it has been waited on,
+        // and nothing else maps it.
+        let mapped = unsafe {
+            session
+                .device
+                .map_memory(self.memory, 0, size, vk::MemoryMapFlags::empty())
+        }
+        .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
+        let mut out = Vec::<u32>::with_capacity(words);
+        // SAFETY: the mapping covers `size` bytes, `words * 4` of them, and `out` has room for
+        // exactly that many words; the two cannot overlap. The bytes are the texels little-endian,
+        // as this host reads words.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                mapped.cast::<u8>(),
+                out.as_mut_ptr().cast::<u8>(),
+                words * 4,
+            );
+        }
+        // SAFETY: the copy above initialised all `words` words of the capacity.
+        unsafe { out.set_len(words) };
+        // SAFETY: mapped immediately above and not used after unmapping.
+        unsafe { session.device.unmap_memory(self.memory) };
+        Ok(((self.width, self.height), out))
+    }
+
     /// Its pixels, as its attachment held them.
     pub(crate) fn read(&self) -> Result<Pixels, DispatchError> {
         let session = crate::compute::session()?;
@@ -7169,6 +7207,13 @@ mod tests {
         target.snapshot_into(&shown).expect("snapshot taken");
         let pixels = shown.read().expect("snapshot read");
         assert_eq!((pixels.width, pixels.height), (4, 4));
+        let (extent, words) = shown.read_words().expect("snapshot read as words");
+        assert_eq!(extent, (4, 4));
+        assert_eq!(
+            zerocopy::IntoBytes::as_bytes(words.as_slice()),
+            pixels.bytes.as_slice(),
+            "the same texels, read as words"
+        );
         for (y, x) in (0..4).flat_map(|y| (0..4).map(move |x| (y, x))) {
             let at = pixels.at(x, y).map(u32::from_le_bytes);
             assert_eq!(at, Some(given[(y / 2 * 2 + x / 2) as usize]), "({x}, {y})");

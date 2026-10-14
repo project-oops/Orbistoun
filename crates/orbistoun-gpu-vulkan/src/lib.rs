@@ -951,6 +951,21 @@ impl VulkanBackend {
         }
     }
 
+    /// [`Self::take_snapshot`]'s pixels as words, read straight out of the snapshot's mapping rather
+    /// than as bytes made into words after: a whole frame copied once, not twice.
+    pub fn take_snapshot_words(&mut self, id: u64) -> Option<((u32, u32), Vec<u32>)> {
+        let snapshot = self.snapshots.remove(&id)?;
+        let words = snapshot.read_words();
+        self.release_snapshot(snapshot);
+        match words {
+            Ok(words) => Some(words),
+            Err(e) => {
+                tracing::warn!("a kept frame could not be read: {e:?}");
+                None
+            }
+        }
+    }
+
     /// Releases snapshot `id` unread - the copy it stood for was overwritten before anything read it.
     pub fn drop_snapshot(&mut self, id: u64) {
         if let Some(snapshot) = self.snapshots.remove(&id) {
