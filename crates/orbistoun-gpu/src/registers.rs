@@ -2297,6 +2297,12 @@ pub const COLOR_16_16: u32 = 5;
 /// `ColorFormat` `COLOR_16_16_16_16` (`gfx103.json`): what Mesa targets a four-channel 16-bit
 /// format at (`ac_formats.c` 527).
 pub const COLOR_16_16_16_16: u32 = 12;
+/// `SurfaceNumber` `NUMBER_UINT` (`gfx103.json`, enum `SurfaceNumber`): a target that holds
+/// unsigned integers.
+pub const NUMBER_UINT: u32 = 4;
+/// `SurfaceNumber` `NUMBER_SINT` (`gfx103.json`, enum `SurfaceNumber`): a target that holds signed
+/// integers.
+pub const NUMBER_SINT: u32 = 5;
 /// `SurfaceNumber` `NUMBER_FLOAT` (`gfx103.json`).
 pub const NUMBER_FLOAT: u32 = 7;
 
@@ -2410,6 +2416,13 @@ impl ColourTargetFormat {
         self.format == COLOR_16_16_16_16
             && self.number_type == NUMBER_FLOAT
             && matches!(self.swap, ComponentSwap::Standard)
+    }
+
+    /// Whether it holds integers, `NUMBER_UINT` or `NUMBER_SINT`: a pixel shader's output into it is
+    /// an integer vector (D851).
+    #[must_use]
+    pub const fn is_integer(&self) -> bool {
+        self.number_type == NUMBER_UINT || self.number_type == NUMBER_SINT
     }
 
     /// How its texels hold colour, for the attachment a draw writes through.

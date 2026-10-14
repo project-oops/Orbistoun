@@ -456,6 +456,11 @@ pub struct UserData {
     /// the module is translated for no particular address, and then that instruction is refused.
     #[serde(default)]
     pub program_address: Option<u64>,
+    /// The colour targets a draw's pixel shader writes that hold integers, bit `K` for `mrtK`
+    /// (D851): their outputs are `uvec4`s that take the exported bits as they are, which an
+    /// attachment of an integer format requires. Zero for every float or normalised target.
+    #[serde(default)]
+    pub integer_targets: u8,
 }
 
 /// Each attribute a pixel shader reads both interpolated and flat, with the flat location the draw
@@ -1098,7 +1103,7 @@ fn declare_colour_output(
     b: &mut Builder,
     (f32_type, vec4): (Id, Id),
     output_ptr: Id,
-    (output, stage): (Option<Id>, Stage),
+    (output, stage, unsigned_ptr): (Option<Id>, Stage, Option<Id>),
 ) -> Option<(Id, Id)> {
     let Some(colour) = output else {
         if stage == Stage::Compute {
@@ -1108,7 +1113,11 @@ fn declare_colour_output(
     };
     b.declare(op::TYPE_VECTOR, &[vec4.0, f32_type.0, 4]);
     b.declare(op::TYPE_POINTER, &[output_ptr.0, OUTPUT, vec4.0]);
-    b.declare(op::VARIABLE, &[output_ptr.0, colour.0, OUTPUT]);
+    // An integer target's output is a `uvec4` (D851); the `vec4` stays the module's float vector.
+    b.declare(
+        op::VARIABLE,
+        &[unsigned_ptr.unwrap_or(output_ptr).0, colour.0, OUTPUT],
+    );
     Some((vec4, colour))
 }
 
@@ -1149,6 +1158,12 @@ struct FragmentOutputs {
     more_colour: [Option<Id>; 8],
     /// The `float` `FragDepth` output, declared for one that exports depth.
     depth: Option<(Id, Id)>,
+    /// The colour targets that hold integers, bit `K` for `mrtK` (D851): their outputs are
+    /// `uvec4`s rather than `vec4`s.
+    integer: u8,
+    /// The `uvec4` type and the `Output` pointer to it the integer targets' outputs are declared
+    /// with, when there are any.
+    unsigned: Option<(Id, Id)>,
 }
 
 impl FragmentOutputs {
@@ -1156,14 +1171,34 @@ impl FragmentOutputs {
     /// ([`declare_colour_output`]) and, when reserved, the depth one ([`declare_depth_output`]).
     fn declare(
         b: &mut Builder,
-        (f32_type, vec4): (Id, Id),
+        (f32_type, u32_type, vec4): (Id, Id, Id),
         output_ptr: Id,
-        (colour, depth, stage): (Option<Id>, Option<Id>, Stage),
+        (colour, depth, stage, integer): (Option<Id>, Option<Id>, Stage, u8),
     ) -> Self {
+        let integer = if stage == Stage::Fragment { integer } else { 0 };
+        let unsigned = (integer != 0).then(|| {
+            let vector = b.declare_type(op::TYPE_VECTOR, &[u32_type.0, 4]);
+            let pointer = b.id();
+            b.declare(op::TYPE_POINTER, &[pointer.0, OUTPUT, vector.0]);
+            (vector, pointer)
+        });
+        let zero = unsigned
+            .filter(|_| integer & 1 != 0)
+            .map(|(_, pointer)| pointer);
         Self {
-            colour: declare_colour_output(b, (f32_type, vec4), output_ptr, (colour, stage)),
+            colour: declare_colour_output(b, (f32_type, vec4), output_ptr, (colour, stage, zero)),
             more_colour: [None; 8],
             depth: depth.map(|variable| declare_depth_output(b, f32_type, variable)),
+            integer,
+            unsigned,
+        }
+    }
+
+    /// The type of `mrtK`'s output: the `uvec4` for a target that holds integers, else `vec4`.
+    fn colour_type(&self, target: u32, vec4: Id) -> Id {
+        match self.unsigned {
+            Some((unsigned, _)) if target < 8 && self.integer >> target & 1 == 1 => unsigned,
+            _ => vec4,
         }
     }
 
@@ -1177,7 +1212,11 @@ impl FragmentOutputs {
         for (location, variable) in (0u32..).zip(more) {
             if let Some(variable) = variable {
                 b.annotate(op::DECORATE, &[variable.0, decoration::LOCATION, location]);
-                b.declare(op::VARIABLE, &[output_ptr.0, variable.0, OUTPUT]);
+                let pointer = match self.unsigned {
+                    Some((_, unsigned)) if self.integer >> location & 1 == 1 => unsigned,
+                    _ => output_ptr,
+                };
+                b.declare(op::VARIABLE, &[pointer.0, variable.0, OUTPUT]);
             }
         }
         self.more_colour = more;
@@ -2442,9 +2481,13 @@ impl<'a> Wavefront<'a> {
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
         emit_header(&mut b, (stage, primitive, per_lane), main, (output, depth));
         declare_base_types(&mut b, &ids);
-        let output =
-            FragmentOutputs::declare(&mut b, (f32_type, vec4), output_ptr, (output, depth, stage))
-                .with_more_colour(&mut b, output_ptr, more_colour);
+        let output = FragmentOutputs::declare(
+            &mut b,
+            (f32_type, u32_type, vec4),
+            output_ptr,
+            (output, depth, stage, user_data.integer_targets),
+        )
+        .with_more_colour(&mut b, output_ptr, more_colour);
         let inputs = declare_attribute_inputs(&mut b, (f32_type, vec4), &input_ids);
         system.declare(&mut b, vec4, bool_type);
         let mesh = declare_mesh_outputs(
@@ -3862,16 +3905,21 @@ impl Model for Wavefront<'_> {
 
     fn colour_output(&self, target: u32) -> Option<(Id, Id)> {
         let (vec4, colour) = self.output.colour?;
+        let kind = self.output.colour_type(target, vec4);
         match target {
-            0 => Some((vec4, colour)),
+            0 => Some((kind, colour)),
             _ => self
                 .output
                 .more_colour
                 .get(usize::try_from(target).ok()?)
                 .copied()
                 .flatten()
-                .map(|variable| (vec4, variable)),
+                .map(|variable| (kind, variable)),
         }
+    }
+
+    fn colour_is_integer(&self, target: u32) -> bool {
+        self.output.colour.is_some() && target < 8 && self.output.integer >> target & 1 == 1
     }
 
     fn depth_output(&self) -> Option<(Id, Id)> {

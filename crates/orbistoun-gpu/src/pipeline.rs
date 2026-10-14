@@ -98,6 +98,8 @@ struct ForDraw {
     buffer_formats: Option<orbistoun_translate::wavefront::BufferFormats>,
     flat_twins: Option<FlatTwins>,
     saturated: [[bool; 2]; MAX_TEXTURES],
+    /// The colour targets that hold integers, bit `K` for `mrtK` (D851).
+    integer_targets: u8,
 }
 
 /// No texture slot's coordinates saturated.
@@ -154,10 +156,16 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
     } else {
         0x5341_5455_0000_0000 ^ saturated
     };
+    let integer = if for_draw.integer_targets == 0 {
+        0
+    } else {
+        0x494e_5400_0000_0000 ^ u64::from(for_draw.integer_targets)
+    };
     geometry
         ^ formats
         ^ twins
         ^ saturated
+        ^ integer
         ^ match for_draw.window_space {
             WindowSpace::Clip => 0,
             WindowSpace::Divided => 0x5749_4e44_5350_4345,
@@ -550,6 +558,21 @@ fn attachment_buffers(writes: &[RegisterWrite]) -> Vec<u32> {
     }
 }
 
+/// The colour targets a segment's pixel shader writes that hold integers, bit `K` for `mrtK`
+/// (D851): those whose `CB_COLORn_INFO` names `NUMBER_UINT` or `NUMBER_SINT`, `mrtK` being the
+/// `K`th colour buffer `SPI_SHADER_COL_FORMAT` formats.
+fn integer_targets_of(writes: &[RegisterWrite]) -> u8 {
+    attachment_buffers(writes)
+        .iter()
+        .take(8)
+        .enumerate()
+        .fold(0, |bits, (target, &buffer)| {
+            let view = crate::colour_slots::colour_buffer_writes(writes, buffer);
+            let integer = colour_target_format_at(&view).is_some_and(|f| f.is_integer());
+            bits | u8::from(integer) << target
+        })
+}
+
 /// The colour attachments `buffers` are, each read through the decoders colour buffer zero's are,
 /// up to the first the stream gave no extent: attachment `K` is always `mrtK`'s buffer, so an
 /// export to that one or a later one is refused as unbound rather than drawn into the next.
@@ -756,6 +779,8 @@ struct ByGeometry {
     flat_twins: Option<FlatTwins>,
     /// The coordinates the draw being bound has its pixel shader's samples saturate (D743).
     saturated: [[bool; 2]; MAX_TEXTURES],
+    /// The colour targets of the segment being bound that hold integers (D851).
+    integer_targets: u8,
 }
 
 /// `VGT_PRIMITIVE_TYPE` (`gfx103.json`, byte `198920`, uconfig dword `0xC242`): the draw's input
@@ -1511,6 +1536,7 @@ impl Pipeline {
             saturated: UNSATURATED,
             local_words: state.local_words,
             program_address: None,
+            integer_targets: 0,
         };
         let key = content_hash(program)
             // The formats are compiled in, so a dispatch through other formats is another module.
@@ -2613,6 +2639,7 @@ impl Pipeline {
         submission: &mut Submission,
     ) -> (Vec<DrawShaders>, Vec<Vec<Chunk>>) {
         let mut by_geometry = self.bind_up_front(candidates, memory, submission);
+        by_geometry.integer_targets = integer_targets_of(writes);
         let registered_stages: Vec<ShaderStage> = candidates
             .iter()
             .filter(|c| {
@@ -3283,8 +3310,8 @@ impl Pipeline {
         let key = (candidate.stage as u32, candidate.address);
         // A draw that gives attributes flat twins prepares both stages for them (D742), and one
         // whose samplers clamp to half a border its pixel shader (D743).
-        let saturates =
-            candidate.stage == ShaderStage::Fragment && by_geometry.saturated != UNSATURATED;
+        let saturates = candidate.stage == ShaderStage::Fragment
+            && (by_geometry.saturated != UNSATURATED || by_geometry.integer_targets != 0);
         if !by_geometry.needs.contains_key(&key) && by_geometry.flat_twins.is_none() && !saturates {
             let plain = self.plain_key(candidate.stage, candidate.address, window_space);
             if let Some(known) = by_geometry.plain.get(&plain) {
@@ -3296,6 +3323,7 @@ impl Pipeline {
                 buffer_formats: None,
                 flat_twins: None,
                 saturated: UNSATURATED,
+                integer_targets: 0,
             };
             match self.prepare_candidate(candidate, (memory, for_draw), submission) {
                 Ok(resource) => {
@@ -3459,10 +3487,10 @@ impl Pipeline {
             }
             None => return None,
         };
-        let saturated = if candidate.stage == ShaderStage::Fragment {
-            by_geometry.saturated
+        let (saturated, integer_targets) = if candidate.stage == ShaderStage::Fragment {
+            (by_geometry.saturated, by_geometry.integer_targets)
         } else {
-            UNSATURATED
+            (UNSATURATED, 0)
         };
         let for_draw = ForDraw {
             geometry,
@@ -3470,6 +3498,7 @@ impl Pipeline {
             buffer_formats,
             flat_twins,
             saturated,
+            integer_targets,
         };
         let key = (candidate.stage as u32, candidate.address, for_draw);
         if let Some(known) = by_geometry.prepared.get(&key) {
@@ -3746,6 +3775,7 @@ impl Pipeline {
             ShaderStage::Fragment => UserData {
                 flat_twins: for_draw.flat_twins,
                 saturated: for_draw.saturated,
+                integer_targets: for_draw.integer_targets,
                 ..self.user_data[1]
             },
             ShaderStage::Compute => UserData::default(),
@@ -5952,6 +5982,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             saturated: UNSATURATED,
             local_words,
             program_address: None,
+            integer_targets: 0,
         },
         UserData {
             first_register: 0,
@@ -5971,6 +6002,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             saturated: UNSATURATED,
             local_words: None,
             program_address: None,
+            integer_targets: 0,
         },
     ]
 }

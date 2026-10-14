@@ -736,6 +736,12 @@ pub trait Model {
         None
     }
 
+    /// Whether `mrtK`'s colour target holds integers, so its output is a `uvec4` that takes the
+    /// exported bits as they are (D851); `false` for every module without such a target.
+    fn colour_is_integer(&self, _target: u32) -> bool {
+        false
+    }
+
     /// The `float` depth output of a fragment module that exports depth, and its type; [`None`]
     /// for any other module.
     fn depth_output(&self) -> Option<(Id, Id)> {
@@ -2088,7 +2094,8 @@ fn discard_inactive<M: Model + ?Sized>(model: &mut M, instruction: &Instruction)
 /// `exp`: hands four registers to a render target.
 ///
 /// The sources are read for lane zero, reinterpreted as floats (not converted), assembled into a
-/// `vec4` and stored to the module's colour output. Refused separately:
+/// `vec4` and stored to the module's colour output; for a colour target that holds integers they
+/// are kept as the bits they are, assembled into a `uvec4` (D851). Refused separately:
 ///
 /// - A module with no colour output: a compute dispatch has nowhere to export to
 ///   ([`Model::colour_output`]).
@@ -2160,6 +2167,9 @@ fn export<M: Model + ?Sized>(
         return depth_export(model, instruction, a);
     }
     let (vec4, colour) = colour_target_output(model, instruction, *target, (vec4, colour))?;
+    // An integer target takes the exported bits as they are, and a compressed export to one packs
+    // 16-bit integers, not halves (D851).
+    let integer = u32::try_from(*target).is_ok_and(|target| model.colour_is_integer(target));
 
     // The channels written (`EN`, bits 0-3, `aco_assembler.cpp:1005`). No channel is an export that
     // writes nothing, such as one raised only to end the wave, so nothing is stored. A compressed
@@ -2189,15 +2199,23 @@ fn export<M: Model + ?Sized>(
             let low = model.binary(op::BITWISE_AND, packed, mask);
             let high = model.binary(op::SHIFT_RIGHT_LOGICAL, packed, sixteen);
             for half in [low, high] {
-                let bits = model.half_to_float_bits(half);
-                components.push(model.as_float(bits).0);
+                if integer {
+                    components.push(half.0);
+                } else {
+                    let bits = model.half_to_float_bits(half);
+                    components.push(model.as_float(bits).0);
+                }
             }
         }
     } else {
         for source in [a, b, c, d] {
             // Lane zero: one fragment is one pixel.
             let bits = model.read_source(instruction, source, 0)?;
-            components.push(model.as_float(bits).0);
+            components.push(if integer {
+                bits.0
+            } else {
+                model.as_float(bits).0
+            });
         }
     }
 

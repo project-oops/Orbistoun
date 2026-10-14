@@ -768,6 +768,7 @@ mod tests {
                     saturated: [[false; 2]; crate::wavefront::MAX_TEXTURES],
                     local_words: None,
                     program_address: None,
+                    integer_targets: 0,
                 },
             )
         };
@@ -977,6 +978,60 @@ mod tests {
         )
         .expect("translates");
         assert!(translated.warnings.is_empty(), "{:?}", translated.warnings);
+    }
+
+    /// A colour target the draw holds integers in (`integer_targets` bit `K` for `mrtK`) is a
+    /// `uvec4` output, which an attachment of an integer format takes; any other is a `vec4`
+    /// (D851). `exp mrt0 v0, v1, v2, v3 done` into each.
+    #[test]
+    fn an_integer_colour_target_is_an_unsigned_output() {
+        const EXP_MRT0: [u32; 3] = [0xF800_080F, 0x0302_0100, 0xBF81_0000];
+        let (table, operands) = tables();
+        let decoded = decode(&stream(&EXP_MRT0), &table, &operands);
+        let translate_for = |integer_targets| {
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::default(),
+                (
+                    super::wavefront::Stage::Fragment,
+                    super::wavefront::MeshPrimitive::default(),
+                ),
+                Window::default(),
+                super::wavefront::UserData {
+                    integer_targets,
+                    ..super::wavefront::UserData::default()
+                },
+            )
+            .expect("translates")
+            .module
+        };
+        // Whether the module has an `Output` variable of a four-component vector of `u32`.
+        let unsigned_output = |module: &[u32]| {
+            const TYPE_INT: u32 = 21;
+            const TYPE_VECTOR: u32 = 23;
+            const TYPE_POINTER: u32 = 32;
+            const VARIABLE: u32 = 59;
+            const OUTPUT: u32 = 3;
+            let mut at = 5;
+            let (mut u32s, mut uvec4s, mut pointers) = (Vec::new(), Vec::new(), Vec::new());
+            let mut found = false;
+            while at < module.len() {
+                let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xFFFF);
+                let operands = &module[at + 1..at + count.max(1)];
+                match (opcode, operands) {
+                    (TYPE_INT, [id, 32, 0]) => u32s.push(*id),
+                    (TYPE_VECTOR, [id, of, 4]) if u32s.contains(of) => uvec4s.push(*id),
+                    (TYPE_POINTER, [id, OUTPUT, to]) if uvec4s.contains(to) => pointers.push(*id),
+                    (VARIABLE, [ty, _, OUTPUT, ..]) if pointers.contains(ty) => found = true,
+                    _ => {}
+                }
+                at += count.max(1);
+            }
+            found
+        };
+        assert!(unsigned_output(&translate_for(1)), "mrt0 holds integers");
+        assert!(!unsigned_output(&translate_for(0)), "mrt0 holds floats");
     }
 
     /// `Auto` is never reported as itself, and only the subgroup level sets a subgroup width.
