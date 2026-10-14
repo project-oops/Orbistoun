@@ -80,11 +80,14 @@ impl DispatchImage<'_> {
     }
 }
 
-/// The images a dispatch binds: the one it fetches from and the one it stores to.
+/// The images a dispatch binds: those it fetches from and the one it stores to.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DispatchImages<'a> {
-    /// Bound at the texture binding.
+    /// Bound at the texture binding: the first texture slot's.
     pub fetched: Option<DispatchImage<'a>>,
+    /// The further texture slots' images, in order, each at its slot's binding
+    /// ([`orbistoun_spirv::TEXTURE_BINDINGS`]).
+    pub more_fetched: &'a [DispatchImage<'a>],
     /// Bound at the storage-image binding, and read back after the dispatch.
     pub stored: Option<DispatchImage<'a>>,
 }
@@ -125,10 +128,22 @@ impl BoundImages {
         images: &DispatchImages<'_>,
     ) -> Result<Self, DispatchError> {
         let mut bound = Self::none();
-        let wanted = [
+        if images.more_fetched.len() + 1 > orbistoun_spirv::TEXTURE_BINDINGS.len() {
+            return Err(DispatchError::Unsupported(
+                "more fetched images than a stage has texture bindings".to_owned(),
+            ));
+        }
+        let mut wanted = vec![
             (images.fetched, orbistoun_spirv::TEXTURE_BINDING, false),
             (images.stored, orbistoun_spirv::STORAGE_IMAGE_BINDING, true),
         ];
+        wanted.extend(
+            images
+                .more_fetched
+                .iter()
+                .zip(&orbistoun_spirv::TEXTURE_BINDINGS[1..])
+                .map(|(image, binding)| (Some(*image), *binding, false)),
+        );
         for (image, binding, stored) in wanted {
             let Some(image) = image else { continue };
             let key = SpareKey {
@@ -804,6 +819,7 @@ mod tests {
     /// A dispatch that fetches `texels` as one image of that extent.
     fn images(texels: &[u32]) -> DispatchImages<'_> {
         DispatchImages {
+            more_fetched: &[],
             fetched: Some(DispatchImage {
                 texels,
                 format: DispatchFormat::Rgba8,

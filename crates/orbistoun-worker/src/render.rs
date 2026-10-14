@@ -750,8 +750,14 @@ pub fn execute_dispatch(
         &[orbistoun_gpu::dispatch::BufferBefore],
     ),
 ) -> Result<orbistoun_gpu::agc_driver::DispatchDone, String> {
+    let more: Vec<_> = images
+        .more_fetched
+        .iter()
+        .map(|(texels, _)| dispatch_image(texels))
+        .collect();
     let bound = orbistoun_gpu_vulkan::compute_images::DispatchImages {
         fetched: images.fetched.as_ref().map(dispatch_image),
+        more_fetched: &more,
         stored: images.stored.as_ref().map(dispatch_image),
     };
     // A buffer the program only stores to goes over unread, as its length alone (D809).

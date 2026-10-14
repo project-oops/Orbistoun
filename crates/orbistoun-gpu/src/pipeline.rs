@@ -1453,10 +1453,7 @@ impl Pipeline {
             )?;
             let images = dispatch_images(state, &sources, memory, &mut self.detiled)?;
             let wanted = [
-                images
-                    .fetched
-                    .as_ref()
-                    .is_some_and(|t| t.format.is_integer()),
+                fetched_integer(&images)?,
                 images
                     .stored
                     .as_ref()
@@ -1972,10 +1969,13 @@ fn last_clear(walked: &PacketWalk) -> Option<u32> {
 /// back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DispatchImages {
-    /// The fetched image.
+    /// The fetched image: the program's first texture slot.
     pub fetched: Option<DispatchTexels>,
     /// Where the fetched image was read: its first byte and the bytes it spans.
     pub fetched_span: Option<(u64, u64)>,
+    /// The images its further texture slots fetch from, in slot order, each with where it was
+    /// read.
+    pub more_fetched: Vec<(DispatchTexels, (u64, u64))>,
     /// The stored image, as it was before the dispatch.
     pub stored: Option<DispatchTexels>,
     /// Where each channel of the stored image lies in memory, where its descriptor reorders them:
@@ -1993,11 +1993,14 @@ impl DispatchImages {
     /// The guest memory its images were read from, as (first byte, bytes): the fetched image's and
     /// the stored one's.
     pub fn read_spans(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.fetched_span.into_iter().chain(
-            self.stored_surface
-                .as_ref()
-                .map(|(surface, _)| (surface.base(), surface.bytes() as u64)),
-        )
+        self.fetched_span
+            .into_iter()
+            .chain(self.more_fetched.iter().map(|(_, span)| *span))
+            .chain(
+                self.stored_surface
+                    .as_ref()
+                    .map(|(surface, _)| (surface.base(), surface.bytes() as u64)),
+            )
     }
 }
 
@@ -2346,50 +2349,31 @@ const fn volume_depth(surface: &DispatchSurface) -> Option<u32> {
 ///
 /// # Errors
 ///
-/// Each refusal by name: a second fetched image, a descriptor not readable or not written, an image
-/// that is not a single 2D `8_8_8_8_UNORM` level in a modelled layout, or compression whose keys say
-/// anything but what a plain read or write keeps exact.
+/// Each refusal by name: more fetched images than a stage binds, a descriptor not readable or not
+/// written, an image that is not a single 2D `8_8_8_8_UNORM` level in a modelled layout, or
+/// compression whose keys say anything but what a plain read or write keeps exact.
 fn dispatch_images(
     state: &crate::dispatch::DispatchState,
     (textures, storage): &orbistoun_translate::wavefront::ImageSources,
     memory: &impl GuestMemory,
     detiled: &mut DetiledImages,
 ) -> Result<DispatchImages, String> {
-    if textures.len() > 1 {
-        return Err("the program fetches from more than one image, and one is bound".to_owned());
+    if textures.len() > MAX_TEXTURES {
+        return Err(format!(
+            "the program fetches from {} images, more than the {MAX_TEXTURES} a stage binds",
+            textures.len()
+        ));
     }
     let mut images = DispatchImages::default();
-    if let Some(source) = textures.first() {
-        let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
-        let (width, height) = surface.extent();
-        let texels = match surface_keys(&descriptor, format, memory)? {
-            crate::dcc::Keys::Uncompressed => {
-                let texels = detiled.detile(&surface, &read_spanned(&surface, memory)?);
-                match order {
-                    Some(order) => texels
-                        .into_iter()
-                        .map(|texel| to_shader_channels(texel, order))
-                        .collect(),
-                    None => texels,
-                }
-            }
-            crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize],
-            crate::dcc::Keys::Other => {
-                return Err(concat!(
-                    "the fetched image's compression keys need per-block addressing, which is ",
-                    "not modelled"
-                )
-                .to_owned());
-            }
-        };
-        images.fetched = Some(DispatchTexels {
-            texels,
-            format,
-            width,
-            height,
-            depth: volume_depth(&surface),
-        });
-        images.fetched_span = Some((surface.base(), surface.bytes() as u64));
+    // Each texture slot's image, bound at its slot's binding as a draw's are (D690).
+    for (slot, source) in textures.iter().enumerate() {
+        let (texels, span) = fetched_image(state, source, memory, detiled)?;
+        if slot == 0 {
+            images.fetched = Some(texels);
+            images.fetched_span = Some(span);
+        } else {
+            images.more_fetched.push((texels, span));
+        }
     }
     if let Some(source) = storage {
         let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
@@ -2450,6 +2434,65 @@ fn dispatch_images(
         images.stored_surface = Some((surface, spanned));
     }
     Ok(images)
+}
+
+/// One fetched image's texels, read through `source`'s descriptor, and where they were read.
+fn fetched_image(
+    state: &crate::dispatch::DispatchState,
+    source: &TextureSource,
+    memory: &impl GuestMemory,
+    detiled: &mut DetiledImages,
+) -> Result<(DispatchTexels, (u64, u64)), String> {
+    let (surface, descriptor, format, order) = dispatch_image_surface(state, source, memory)?;
+    let (width, height) = surface.extent();
+    let texels = match surface_keys(&descriptor, format, memory)? {
+        crate::dcc::Keys::Uncompressed => {
+            let texels = detiled.detile(&surface, &read_spanned(&surface, memory)?);
+            match order {
+                Some(order) => texels
+                    .into_iter()
+                    .map(|texel| to_shader_channels(texel, order))
+                    .collect(),
+                None => texels,
+            }
+        }
+        crate::dcc::Keys::Clear0000 => vec![0; surface.texels() * format.words() as usize],
+        crate::dcc::Keys::Other => {
+            return Err(concat!(
+                "the fetched image's compression keys need per-block addressing, which is ",
+                "not modelled"
+            )
+            .to_owned());
+        }
+    };
+    Ok((
+        DispatchTexels {
+            texels,
+            format,
+            width,
+            height,
+            depth: volume_depth(&surface),
+        },
+        (surface.base(), surface.bytes() as u64),
+    ))
+}
+
+/// Whether a dispatch's fetched images hold integers, which its module declares for all of them at
+/// once: refused where some do and some do not.
+fn fetched_integer(images: &DispatchImages) -> Result<bool, String> {
+    let mut each = images
+        .fetched
+        .iter()
+        .chain(images.more_fetched.iter().map(|(texels, _)| texels))
+        .map(|texels| texels.format.is_integer());
+    let first = each.next().unwrap_or(false);
+    if each.any(|integer| integer != first) {
+        return Err(
+            "the program fetches from integer and float images, which one module declares alike"
+                .to_owned(),
+        );
+    }
+    Ok(first)
 }
 
 /// The texels dispatch images last detiled to, each with the surface and the bytes it came from: a

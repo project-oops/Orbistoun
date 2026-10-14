@@ -123,6 +123,7 @@ fn a_dispatch_copies_one_image_into_another() {
             &[0],
             (&[0; 16], [1, 1, 1]),
             &DispatchImages {
+                more_fetched: &[],
                 fetched: Some(DispatchImage {
                     texels: &source,
                     format: DispatchFormat::Rgba8,
@@ -174,6 +175,7 @@ fn an_inactive_thread_stores_nothing() {
             &[0],
             (&push, [1, 1, 1]),
             &DispatchImages {
+                more_fetched: &[],
                 fetched: Some(DispatchImage {
                     texels: &source,
                     format: DispatchFormat::Rgba8,
@@ -253,6 +255,7 @@ fn a_dispatch_copies_an_unsigned_image_word_for_word() {
         &[0],
         (&[0; 16], [1, 1, 1]),
         &DispatchImages {
+            more_fetched: &[],
             fetched: Some(image(&source)),
             stored: Some(image(&destination)),
         },
@@ -314,6 +317,7 @@ fn a_dispatch_stores_to_a_volume() {
         &[0],
         (&[0; 8], [1, 1, 1]),
         &DispatchImages {
+            more_fetched: &[],
             fetched: None,
             stored: Some(DispatchImage {
                 texels: &destination,
@@ -383,6 +387,7 @@ fn a_dispatch_stores_to_a_ten_bit_volume() {
         &[0],
         (&[0; 8], [1, 1, 1]),
         &DispatchImages {
+            more_fetched: &[],
             fetched: None,
             stored: Some(DispatchImage {
                 texels: &destination,
@@ -430,6 +435,7 @@ fn a_dispatch_copies_a_single_channel_image() {
         &[0],
         (&[0; 16], [1, 1, 1]),
         &DispatchImages {
+            more_fetched: &[],
             fetched: Some(image(&source)),
             stored: Some(image(&destination)),
         },
@@ -526,6 +532,7 @@ fn a_dispatch_asks_an_image_s_size() {
         &[0],
         (&[0; 16], [1, 1, 1]),
         &DispatchImages {
+            more_fetched: &[],
             fetched: Some(DispatchImage {
                 texels: &source,
                 format: DispatchFormat::Rgba8,
@@ -550,4 +557,90 @@ fn a_dispatch_asks_an_image_s_size() {
         "{:?}",
         &stored[..8]
     );
+}
+
+/// Three descriptors from the table at `s[0:1]` - `s_load_dwordx16 s[16:31], s[0:1], null` and
+/// `s_load_dwordx8 s[32:39], s[0:1], 0x40` - then `image_load` from the images at `s[16:23]` and
+/// `s[32:39]`, and the second's texels stored through `s[24:31]`.
+const SECOND_IMAGE_COPY: [u32; 14] = [
+    0xf410_0400,
+    0xfa00_0000,
+    0xf40c_0800,
+    0xfa00_0040,
+    0xbf8c_0000,
+    0xf000_1f08,
+    0x0004_0200,
+    0xf000_1f08,
+    0x0008_0600,
+    0xbf8c_0000,
+    0xf020_1f08,
+    0x0006_0600,
+    0xbf81_0000,
+    0xbf9f_0000,
+];
+
+/// A dispatch fetching from two images binds each at its texture slot's binding, as a draw's are
+/// (D690): the second image's texels, stored, are its own, not the first's. PPSA21564's compute
+/// program at `0x50053c700` reads two images and asks the size of a third.
+#[test]
+fn a_dispatch_fetches_from_two_images() {
+    if !device_or_skip("two fetched images") {
+        return;
+    }
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    let bytes: Vec<u8> = SECOND_IMAGE_COPY
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let (module, _, (textures, storage)) = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::default(),
+        UserData {
+            count: 2,
+            compute: Some(ComputeInputs {
+                workgroup_ids: [false, false, false],
+                thread_id_components: 2,
+                threads: [SIDE, SIDE, 1],
+                unwritten_user_data: 0,
+                partial: None,
+                integer_images: [false; 2],
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect("the copy translates");
+    assert_eq!(
+        textures.iter().map(|t| t.table_offset).collect::<Vec<_>>(),
+        [Some(0), Some(0x40)],
+        "two fetched images, in slot order"
+    );
+    assert_eq!(storage.and_then(|t| t.table_offset), Some(32));
+    let image = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba8,
+        width: SIDE,
+        height: SIDE,
+        depth: None,
+    };
+    let first = vec![0x1111_1111_u32; (SIDE * SIDE) as usize];
+    let second: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0a0b_0c00 | i).collect();
+    let destination = vec![0_u32; (SIDE * SIDE) as usize];
+    let done = dispatch_guest(
+        &module,
+        &[0],
+        (&[0; 16], [1, 1, 1]),
+        &DispatchImages {
+            fetched: Some(image(&first)),
+            more_fetched: &[image(&second)],
+            stored: Some(image(&destination)),
+        },
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    assert_eq!(done.stored.as_deref(), Some(second.as_slice()));
 }
