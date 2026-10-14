@@ -317,6 +317,19 @@ The census is what a capability request is filed from: group its rows by library
 layer and file one obSCEne request per group, with any reference emulator's answers attached
 as predictions (D818, [THE_LOOP.md](THE_LOOP.md#the-capability-sub-loop)).
 
+## A surface layout from addrlib
+
+```bash
+tools/addrlib/build.sh                        # builds against oops-mesa's addrlib, with clang 21
+target/addrlib/equation 64KB_R_X 8            # a swizzle mode at a texel size, in bytes
+```
+
+A layout `tiling.rs` does not model yet is read off Mesa's addrlib under the console's
+configuration (family NV, revision `0x82`, `GB_ADDR_CONFIG` `0x4`). It prints each coordinate
+bit's term in the block's byte offset, and the terms bits above the block add. It then checks
+every texel of two surfaces against row-major blocks under those terms, exiting non-zero on any
+disagreement. The terms go into `tiling.rs` as data; the tool is how they were read.
+
 ## Settings and the environment
 
 | | Where | What belongs in it |
