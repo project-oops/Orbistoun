@@ -399,7 +399,8 @@ pub(crate) struct DrawStateSent {
     bias: Option<DepthBias>,
     /// Whether draws count their passing samples, as last sent; a stream starts not counting.
     counting: bool,
-    /// The user clip planes last sent; `None` until a stream enables one.
+    /// The user clip planes last sent, all zero for none enabled; `None` before a submission's
+    /// first draw, which always sends them, since the backend keeps the last submission's.
     clip_planes: Option<[[u32; 4]; 6]>,
 }
 
@@ -485,12 +486,12 @@ impl DrawStateSent {
             commands.push(RenderCommand::SetSampleCounting(counting));
             self.counting = counting;
         }
-        // The user clip planes, sent once a stream enables one, and zero again when it disables
-        // them all (D830).
-        let planes = clip_planes_from(|register| sweep.latest(at, register));
-        if planes != self.clip_planes && (planes.is_some() || self.clip_planes.is_some()) {
-            commands.push(RenderCommand::SetClipPlanes(planes.unwrap_or_default()));
-            self.clip_planes = planes;
+        // The user clip planes, zero where none is enabled (D830): sent at a submission's first
+        // draw, since a backend holds the last submission's, and whenever they change.
+        let planes = clip_planes_from(|register| sweep.latest(at, register)).unwrap_or_default();
+        if self.clip_planes != Some(planes) {
+            commands.push(RenderCommand::SetClipPlanes(planes));
+            self.clip_planes = Some(planes);
         }
         // A clear draw writes the clear value wherever it covers; the backend clears the whole
         // target, which is what a clear draw over the whole target does.

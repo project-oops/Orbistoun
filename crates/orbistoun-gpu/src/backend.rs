@@ -166,8 +166,8 @@ pub enum RenderCommand {
     SetSampleCounting(bool),
     /// The user clip planes the draws that follow are clipped against, as the stream's
     /// `PA_CL_UCP_0` to `_5` stand at them, each four `f32`s' bits; a plane `PA_CL_CLIP_CNTL` does
-    /// not enable is zero, which clips nothing (D830). Emitted before a draw whenever they changed,
-    /// and only once a stream enables one.
+    /// not enable is zero, which clips nothing (D830). Emitted before a submission's first draw,
+    /// and before any draw where they changed.
     SetClipPlanes([[u32; 4]; 6]),
     /// The depth and stencil tests the draws that follow run under, as the stream's
     /// `DB_DEPTH_CONTROL`, `DB_STENCIL_CONTROL` and `DB_STENCILREFMASK` pair stand at them.
