@@ -296,6 +296,28 @@ pub struct ProfilingSettings {
     /// Where the Tracy tools are, before the copy installed under the data root
     /// (`ORBISTOUN_TRACY_TOOLS`).
     pub tools: Option<PathBuf>,
+    /// What the window's performance overlay shows.
+    pub overlay: OverlaySettings,
+}
+
+/// What the window's performance overlay (F3) shows beside its frame rate (D831).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct OverlaySettings {
+    /// Each phase of presenting a frame as its share of the second.
+    pub phases: bool,
+    /// How many of the finer spans to list, most time first, when the run measures them; none
+    /// at zero.
+    pub spans: u8,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self {
+            phases: true,
+            spans: 10,
+        }
+    }
 }
 
 impl ProfilingSettings {

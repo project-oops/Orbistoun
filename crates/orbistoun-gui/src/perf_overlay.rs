@@ -11,7 +11,10 @@ pub(crate) const TOGGLE: egui::Key = egui::Key::F3;
 
 /// The lines the overlay shows, and which of them is the biggest share. Pure, so what it says is
 /// testable without a window.
-pub(crate) fn lines(report: &PerfReport) -> (Vec<String>, Option<usize>) {
+pub(crate) fn lines(
+    report: &PerfReport,
+    shown: &orbistoun_service::OverlaySettings,
+) -> (Vec<String>, Option<usize>) {
     let seconds = (report.window_ms / 1000.0).max(f64::EPSILON);
     let per_second = |n: u64| f64::from(u32::try_from(n).unwrap_or(u32::MAX)) / seconds;
     let mut lines = vec![
@@ -74,6 +77,9 @@ pub(crate) fn lines(report: &PerfReport) -> (Vec<String>, Option<usize>) {
             share((report.window_ms - measured).max(0.0)),
         )),
     }
+    if !shown.phases {
+        shares.clear();
+    }
     let biggest = shares
         .iter()
         .enumerate()
@@ -86,27 +92,23 @@ pub(crate) fn lines(report: &PerfReport) -> (Vec<String>, Option<usize>) {
     );
     // The finer spans, when the run measures them (D831): milliseconds of each second, most
     // first. They nest, so they are listed apart from the shares above, which add up.
-    if !report.spans.is_empty() {
+    if !report.spans.is_empty() && shown.spans > 0 {
         lines.push("spans, ms a second".to_owned());
-        lines.extend(
-            report
-                .spans
-                .iter()
-                .take(SPANS_SHOWN)
-                .map(|(name, ms, count)| {
-                    format!("{:>6.1}  {name} x{:.0}", ms / seconds, per_second(*count))
-                }),
-        );
+        lines.extend(report.spans.iter().take(usize::from(shown.spans)).map(
+            |(name, ms, count)| format!("{:>6.1}  {name} x{:.0}", ms / seconds, per_second(*count)),
+        ));
     }
     (lines, biggest)
 }
 
-/// How many spans the overlay lists.
-const SPANS_SHOWN: usize = 10;
-
 /// Draws the overlay in the top-left corner of `over`.
-pub(crate) fn draw(ui: &egui::Ui, over: egui::Rect, report: &PerfReport) {
-    let (lines, biggest) = lines(report);
+pub(crate) fn draw(
+    ui: &egui::Ui,
+    over: egui::Rect,
+    report: &PerfReport,
+    shown: &orbistoun_service::OverlaySettings,
+) {
+    let (lines, biggest) = lines(report, shown);
     let font = egui::FontId::monospace(13.0);
     let line_height = 16.0;
     let width = 320.0;
@@ -151,7 +153,8 @@ mod tests {
                 ("draw whole".to_owned(), 10.0, 20),
             ],
         };
-        let (lines, biggest) = super::lines(&report);
+        let shown = orbistoun_service::OverlaySettings::default();
+        let (lines, biggest) = super::lines(&report, &shown);
         let header = lines
             .iter()
             .position(|line| line == "spans, ms a second")
@@ -159,6 +162,25 @@ mod tests {
         assert_eq!(lines[header + 1].trim(), "80.0  cp: dispatch x10");
         assert_eq!(lines[header + 2].trim(), "20.0  draw whole x40");
         assert!(biggest.is_some_and(|index| index < header));
+
+        // Configured down: one span, no shares, and no highlight among shares that are not shown.
+        let fewer = orbistoun_service::OverlaySettings {
+            phases: false,
+            spans: 1,
+        };
+        let (lines, biggest) = super::lines(&report, &fewer);
+        assert!(!lines.iter().any(|line| line.contains('%')), "{lines:?}");
+        assert_eq!(biggest, None);
+        assert_eq!(
+            lines.last().map(|line| line.trim()),
+            Some("80.0  cp: dispatch x10")
+        );
+        let none = orbistoun_service::OverlaySettings {
+            phases: true,
+            spans: 0,
+        };
+        let (lines, _) = super::lines(&report, &none);
+        assert!(!lines.iter().any(|line| line.starts_with("spans")));
     }
 
     /// Rates are per second and the unmeasured remainder is shown and can be the highlight.
@@ -177,7 +199,8 @@ mod tests {
             ],
             spans: Vec::new(),
         };
-        let (lines, biggest) = super::lines(&report);
+        let (lines, biggest) =
+            super::lines(&report, &orbistoun_service::OverlaySettings::default());
         assert_eq!(lines[0], "20.0 fps");
         assert!(lines[1].contains("8000 draws/s"));
         assert!(

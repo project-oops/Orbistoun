@@ -1609,7 +1609,8 @@ impl eframe::App for App {
         }
         let overlay = self.perf.clone().filter(|_| self.show_perf);
         let keyboard = self.keyboard.clone();
-        let overlay = (overlay.as_ref(), keyboard.as_ref());
+        let shown = self.prefs.file.profiling.overlay.clone();
+        let overlay = (overlay.as_ref(), keyboard.as_ref(), &shown);
         match (self.view, playing) {
             (View::Shell, Some(frame)) => {
                 egui::CentralPanel::default()
@@ -1775,23 +1776,24 @@ const DOCS: &[oops_docs::Doc] = &[
 fn live_frame(
     ui: &mut egui::Ui,
     (texture, size): (egui::TextureId, egui::Vec2),
-    (overlay, keyboard): (
+    (overlay, keyboard, shown): (
         Option<&orbistoun_proto::PerfReport>,
         Option<&orbistoun_shell::keyboard::View>,
+        &orbistoun_service::OverlaySettings,
     ),
 ) {
     let room = ui.available_size();
     let scale = (room.x / size.x).min(room.y / size.y).max(0.0);
-    let shown = ui
+    let picture = ui
         .centered_and_justified(|ui| ui.add(egui::Image::new((texture, size * scale))))
         .inner;
     // Where the time goes, over the picture it went into.
     if let Some(report) = overlay {
-        crate::perf_overlay::draw(ui, shown.rect, report);
+        crate::perf_overlay::draw(ui, picture.rect, report, shown);
     }
     // The system keyboard the title opened, over everything it drew (D826).
     if let Some(view) = keyboard {
-        crate::keyboard_draw::draw(ui, shown.rect, view);
+        crate::keyboard_draw::draw(ui, picture.rect, view);
     }
 }
 

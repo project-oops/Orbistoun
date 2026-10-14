@@ -114,6 +114,20 @@ orbistoun-cli compat list                 # how far each title got, furthest fir
 on a citation is a different act from changing a guess, so check it before editing an
 implementation.
 
+## Profiling
+
+```bash
+orbistoun-cli perf --install-tracy           # fetch the Tracy tools this build's client speaks, once
+orbistoun-cli perf <module> [--seconds N]    # record a run with Tracy; frame times, zones by self and total time
+orbistoun-cli perf <module> --open           # ... and open the recording in the Tracy viewer
+orbistoun-cli bench [title...] [--seconds N] # every title in turn, costs ranked across them, against the last bench
+```
+
+A recording and its report go in the title's `perf` directory, and a benchmark under the data
+root's `bench`; neither touches a compat record. Ranking by self time names what to make faster,
+and the frame-time percentiles name what a player feels, which an average hides. See
+[profiling with Tracy](features/graphics.md#profiling-with-tracy) and D831.
+
 ## Recording what a turn produced
 
 ```bash

@@ -219,10 +219,22 @@ pub(crate) fn pane_contents(
 fn profiling(ui: &mut egui::Ui, prefs: &mut Preferences) {
     ui.heading("profiling");
     let settings = &mut prefs.file.profiling;
+    ui.label("the performance overlay (F3)");
+    ui.checkbox(
+        &mut settings.overlay.phases,
+        "each phase of presenting a frame, as its share of the second",
+    );
     ui.checkbox(
         &mut settings.detail,
-        "show where each submission's time goes in the overlay (F3)",
+        "measure where each submission's time goes, finer, in the next run",
     );
+    ui.add_enabled_ui(settings.detail, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("spans listed");
+            ui.add(egui::DragValue::new(&mut settings.overlay.spans).range(0..=30));
+        });
+    });
+    ui.separator();
     ui.checkbox(
         &mut settings.tracy,
         "start the Tracy profiler's client with each run",

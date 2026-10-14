@@ -164,7 +164,7 @@ the folder again. Settings apply to the next run.
 | memory | whether direct memory is mapped for real; see [memory](memory.md) |
 | shell | the machine's users and which one is signed in, the language as a BCP 47 tag (`en-GB`), and which button confirms, south or east |
 | controllers | ports, what drives each, and the key for each button; see [controllers](controllers.md) |
-| profiling | whether the overlay shows where each submission's time goes, whether each run starts the Tracy profiler's client and on which port, and the Tracy tools: where they were found, installing them, and opening the viewer; see [profiling with Tracy](graphics.md#profiling-with-tracy) |
+| profiling | what the performance overlay (F3) shows - each phase's share, and how many of the finer spans when the run measures them - whether each run starts the Tracy profiler's client and on which port, and the Tracy tools: where they were found, installing them, and opening the viewer; see [profiling with Tracy](graphics.md#profiling-with-tracy) |
 
 A user's name reaches the guest as text. The language and confirm-button settings reach a
 guest only through an encoding measured on hardware; a question with no measured encoding is

@@ -18,6 +18,8 @@
 #   ./bin/orbistoun fix            # cargo fmt + clippy --fix. More than `fmt`, so it is
 #                                  # asked for by name rather than folded into it.
 #   ./bin/orbistoun run <title>    # boot one title: refresh names if stale, run, report
+#   ./bin/orbistoun perf <title>   # record a run with Tracy and rank where its time went (D831)
+#   ./bin/orbistoun bench          # every title recorded in turn, costs ranked across them
 #   ./bin/orbistoun turn <title>   # one turn of the loop with nobody reading the findings
 #   ./bin/orbistoun cli <args...>  # the orbistoun binary, raw
 #   ./bin/orbistoun docs           # build the API docs AND open them in a browser
@@ -1238,6 +1240,46 @@ $(list_titles)"
 }
 
 
+# Where a title's time goes: one run recorded with the Tracy profiler and read back (D831).
+#
+# Resolved as `run` resolves a title, so `./bin/orbistoun perf MDEM00001` is the whole command.
+# Anything after `--` goes to `orbistoun-cli perf`: `--seconds 60`, `--open`, `--input <script>`.
+# The tools are fetched the first time, by `orbistoun-cli perf --install-tracy`.
+perf() {
+    preflight
+    local wanted="${1:-}"
+    if [ -z "$wanted" ]; then
+        printf 'usage: ./bin/orbistoun perf <title-id> [-- <perf options>]
+
+available:
+'
+        list_titles
+        exit 1
+    fi
+    shift || true
+
+    step "cargo build --release -p orbistoun-cli"
+    cargo build --release -p orbistoun-cli
+
+    local module
+    if ! module="$(resolve_module "$wanted")"; then
+        die "no guest module for '$wanted'. Available:
+$(list_titles)"
+    fi
+    if [ "${1:-}" = "--" ]; then shift; fi
+    ./target/release/orbistoun-cli perf "$module" "$@"
+}
+
+# Every title recorded in turn and the costs ranked across them, beside the last benchmark
+# (D831). Arguments go to `orbistoun-cli bench`: title names to bench only those, `--seconds N`.
+bench() {
+    preflight
+    step "cargo build --release -p orbistoun-cli"
+    cargo build --release -p orbistoun-cli
+    ./target/release/orbistoun-cli bench "$@"
+}
+
+
 # One turn of the loop with nobody reading the findings.
 #
 # The same resolution and the same symbol database `run` uses, and that is the whole
@@ -1376,6 +1418,8 @@ case "$cmd" in
     sweep)      sweep ;;
     doctor)     doctor "$@" ;;
     run)        run "$@" ;;
+    perf)       perf "$@" ;;
+    bench)      bench "$@" ;;
     turn)       turn "$@" ;;
     cli)        cargo run -q -p orbistoun-cli -- "$@" ;;
     ""|-h|--help|help) usage ;;
