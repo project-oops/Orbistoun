@@ -653,7 +653,8 @@ impl GuestCp<'_> {
             .submission
             .ok_or("no submission is being carried out")?;
         if segment.whole {
-            return keeping_refused(whole, self.draw_into_target(whole));
+            let whole = with_bound_modules(whole);
+            return keeping_refused(&whole, self.draw_noting_delivery(&whole));
         }
         // A segment that draws into more than one colour target is drawn a run at a time, each run
         // into its own target.
@@ -717,7 +718,7 @@ impl GuestCp<'_> {
         whole: &Submission,
     ) -> Result<(), String> {
         let bytes = segment_stream(segment);
-        let mut prepared = {
+        let prepared = {
             let mut live = live_pipeline()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -734,16 +735,21 @@ impl GuestCp<'_> {
                 &whole.tables.over(&SettledReads(&self.memory)),
             );
             keep_new_translations(pipeline);
+            note_made(&prepared);
             prepared
         };
-        for (id, module) in &whole.modules {
-            prepared
-                .modules
-                .entry(*id)
-                .or_insert_with(|| module.clone());
-        }
-        let drawn = self.draw_into_target(&prepared);
+        let prepared = with_bound_modules(&prepared);
+        let drawn = self.draw_noting_delivery(&prepared);
         keeping_refused(&prepared, drawn)
+    }
+
+    /// [`Self::draw_into_target`], and when it drew, the modules it carried are the backend's.
+    fn draw_noting_delivery(&mut self, submission: &Submission) -> Result<(), String> {
+        let drawn = self.draw_into_target(submission);
+        if drawn.is_ok() {
+            note_delivered(submission);
+        }
+        drawn
     }
 
     /// Leaves every block of a DCC target stored uncompressed, with its key saying so, before its
@@ -4286,12 +4292,72 @@ fn keep_new_translations(pipeline: &mut Pipeline) {
     }
 }
 
-/// Translated modules whose submission was not drawn, carried into the next one.
+/// Every module the live pipeline made that no drawn submission has yet carried to the backend.
+///
+/// A module travels with the preparation that made it, but the pipeline is shared: asynchronously
+/// the guest prepares submissions ahead of the one carried out (D821), and a segment re-prepared
+/// then on the command processor's thread finds a module one of those later submissions made
+/// already translated, and binds it while its words wait in the queue behind it. So what a
+/// submission binds is looked up here as it is carried out, not where it was prepared, and a
+/// module whose draws were refused stays here for the next submission that binds it.
 fn undelivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>
 {
     static PENDING: OnceLock<Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>> =
         OnceLock::new();
     PENDING.get_or_init(Default::default)
+}
+
+/// Keeps the modules a preparation made until a drawn submission carries them. Called with the
+/// live pipeline still held, so no other preparation can bind one before it is kept.
+fn note_made(submission: &Submission) {
+    if submission.modules.is_empty() {
+        return;
+    }
+    undelivered_modules()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(submission.modules.iter().map(|(id, m)| (*id, m.clone())));
+}
+
+/// `submission`, carrying every module it binds that the backend may not have yet; itself,
+/// uncopied, when it carries them all already.
+fn with_bound_modules(submission: &Submission) -> std::borrow::Cow<'_, Submission> {
+    let missing: Vec<(crate::ResourceId, Vec<u32>)> = {
+        let pending = undelivered_modules()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        submission
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                crate::RenderCommand::BindShader { shader, .. }
+                    if !submission.modules.contains_key(shader) =>
+                {
+                    pending.get(shader).map(|module| (*shader, module.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    if missing.is_empty() {
+        return std::borrow::Cow::Borrowed(submission);
+    }
+    let mut carrying = submission.clone();
+    carrying.modules.extend(missing);
+    std::borrow::Cow::Owned(carrying)
+}
+
+/// Forgets the modules a drawn submission carried: the backend holds them now.
+fn note_delivered(submission: &Submission) {
+    if submission.modules.is_empty() {
+        return;
+    }
+    let mut pending = undelivered_modules()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for id in submission.modules.keys() {
+        pending.remove(id);
+    }
 }
 
 /// Reads one submit descriptor, walks the command buffer it names, and keeps the submission - the
@@ -4370,20 +4436,11 @@ fn submit_described_timed(descriptor: u64) -> u64 {
             .map(|pipeline| {
                 let submission = pipeline.submit(&bytes, Queue::Draw, &[], &SettledReads(&memory));
                 keep_new_translations(pipeline);
+                note_made(&submission);
                 submission
             })
             .unwrap_or_default()
     });
-    // A module travels once, with the first submission to use it, so one whose draws never reached
-    // the backend is carried forward until a submission is drawn; re-sending one the backend has is
-    // a no-op.
-    let mut submission = submission;
-    if let Ok(mut pending) = undelivered_modules().lock() {
-        for (id, module) in std::mem::take(&mut *pending) {
-            submission.modules.entry(id).or_insert(module);
-        }
-    }
-    let submission = submission;
     // The next submission is prepared from the registers this one leaves, so they are carried here,
     // in submission order, before it is carried out anywhere.
     carry_registers(&bytes, &submission);
@@ -4571,11 +4628,6 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         )
     });
     hand_releases_to_display();
-    if executed.draws == 0
-        && let Ok(mut pending) = undelivered_modules().lock()
-    {
-        pending.extend(submission.modules.iter().map(|(id, m)| (*id, m.clone())));
-    }
     if let Ok(mut record) = execution_record().lock() {
         record.submissions += 1;
         record.completed += u64::from(executed.stopped == cp::Stopped::Completed);
@@ -4637,6 +4689,46 @@ mod tests {
     };
     use crate::dispatch::{BufferAfter, BufferBefore};
     use std::sync::{Mutex, PoisonError};
+
+    /// A module another preparation made is carried by the first submission that binds it and is
+    /// carried out, even though that submission was prepared without it, and once drawn it is not
+    /// carried again. Ids far from any the live pipeline hands out, as other tests share the store.
+    #[test]
+    fn a_bound_module_made_elsewhere_travels_until_it_is_drawn() {
+        use crate::{RenderCommand, ResourceId, ShaderStage};
+        let made_ahead = crate::pipeline::Submission {
+            modules: [(ResourceId(0xdead_0010), vec![0x0723_0203, 1])].into(),
+            ..Default::default()
+        };
+        super::note_made(&made_ahead);
+        let binding = crate::pipeline::Submission {
+            commands: vec![
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Fragment,
+                    shader: ResourceId(0xdead_0010),
+                },
+                RenderCommand::BindShader {
+                    stage: ShaderStage::Vertex,
+                    shader: ResourceId(0xdead_0011),
+                },
+            ],
+            ..Default::default()
+        };
+        let carried = super::with_bound_modules(&binding);
+        assert_eq!(
+            carried.modules.keys().copied().collect::<Vec<_>>(),
+            [ResourceId(0xdead_0010)],
+            "the module bound and not yet drawn travels; one never made is left to the backend"
+        );
+        super::note_delivered(&carried);
+        assert!(
+            matches!(
+                super::with_bound_modules(&binding),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "a drawn module is the backend's, and is not carried again"
+        );
+    }
 
     /// The runs found a chunk at a time are the runs an element-by-element comparison finds: at
     /// chunk edges, across them, at either end, and with nothing or everything changed.
