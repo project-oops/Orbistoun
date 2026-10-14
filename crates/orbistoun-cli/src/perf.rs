@@ -396,6 +396,13 @@ fn render_ab(before: &[BenchEntry], after: &[BenchEntry], top: usize) -> String 
     out
 }
 
+/// Whether `module` is a build staged under the library's `data/homebrew`.
+fn staged_homebrew(module: &Path) -> bool {
+    let mut above = module.ancestors().skip(2).map(Path::file_name);
+    above.next() == Some(Some(std::ffi::OsStr::new("homebrew")))
+        && above.next() == Some(Some(std::ffi::OsStr::new("data")))
+}
+
 /// Every title in the library, by its module: each title directory's `eboot.bin`, and each staged
 /// build's under `data/homebrew`.
 fn library() -> Vec<PathBuf> {
@@ -466,10 +473,17 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
     }
     let mut entries = Vec::new();
     for module in library {
-        let title = crate::common::title_id(&module).unwrap_or_default();
-        if !only.is_empty() && !only.contains(&title) {
+        let id = crate::common::title_id(&module).unwrap_or_default();
+        if !only.is_empty() && !only.contains(&id) {
             continue;
         }
+        // A staged homebrew build is its own line beside a title of the same id, so each is
+        // compared with its own last measurement.
+        let title = if staged_homebrew(&module) {
+            format!("{id} (homebrew)")
+        } else {
+            id.clone()
+        };
         let skipped = |why: String| BenchEntry {
             title: title.clone(),
             fps: None,
@@ -484,7 +498,7 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
             entries.push(skipped(format!("the GPU was {busy:.0}% busy")));
             continue;
         }
-        let input = pad_script(&title);
+        let input = pad_script(&id);
         println!("{title}: recording {seconds} s");
         match record(&tools, &module, seconds, input.as_deref(), None) {
             Ok(recorded) => entries.push(BenchEntry::of(title.clone(), recorded)),
@@ -593,7 +607,20 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
 
 #[cfg(test)]
 mod tests {
-    use super::{BenchEntry, render_ab, render_bench};
+    use super::{BenchEntry, render_ab, render_bench, staged_homebrew};
+
+    /// A module under the library's `data/homebrew` is a staged build; a title's own is not.
+    #[test]
+    fn a_staged_build_is_told_by_where_it_lies() {
+        let library = std::path::Path::new("titles");
+        assert!(staged_homebrew(
+            &library.join("data/homebrew/STKT00001/eboot.bin")
+        ));
+        assert!(!staged_homebrew(&library.join("MDEM00001/eboot.bin")));
+        assert!(!staged_homebrew(
+            &library.join("homebrew/STKT00001/eboot.bin")
+        ));
+    }
 
     use orbistoun_perf::ZoneStat;
 
