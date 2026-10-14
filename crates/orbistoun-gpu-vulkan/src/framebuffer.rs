@@ -19,8 +19,8 @@ pub struct Pixels {
     pub width: u32,
     /// Height in pixels, as asked for.
     pub height: u32,
-    /// The bytes, tightly packed, four per pixel in the order the format names:
-    /// `R8G8B8A8_UNORM`, so red first.
+    /// The bytes, tightly packed, as the attachment's format holds them: four per pixel for
+    /// `R8G8B8A8_UNORM`, red first, and [`texel_bytes`] per pixel for any other (D845).
     pub bytes: Vec<u8>,
 }
 
@@ -53,6 +53,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Srgb8 => vk::Format::R8G8B8A8_SRGB,
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
         TargetEncoding::Float32 => vk::Format::R32_SFLOAT,
+        TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
     }
 }
 
@@ -62,8 +63,26 @@ const fn image_format(encoding: TargetEncoding) -> vk::Format {
     match encoding {
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
         TargetEncoding::Float32 => vk::Format::R32_SFLOAT,
+        TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Unorm8 | TargetEncoding::Srgb8 => FORMAT,
     }
+}
+
+/// The bytes one texel of an attachment of `encoding` takes, in its image and in every buffer that
+/// seeds or reads it back: eight for a `16_16_16_16` float target (D845), four for every other.
+pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
+    match encoding {
+        TargetEncoding::Float16x4 => 8,
+        TargetEncoding::Unorm8
+        | TargetEncoding::Srgb8
+        | TargetEncoding::Float11_11_10
+        | TargetEncoding::Float32 => 4,
+    }
+}
+
+/// The size in bytes of a `width` x `height` attachment of `encoding`.
+fn attachment_bytes((width, height): (u32, u32), encoding: TargetEncoding) -> vk::DeviceSize {
+    vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * texel_bytes(encoding)
 }
 
 /// Creates a device-local image usable as a colour attachment and as a copy source; an sRGB one
@@ -749,7 +768,7 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (instance, physical, device) = (&session.instance, session.physical, &session.device);
-        let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
+        let size = attachment_bytes((width, height), encoding);
         let initial = initial.filter(|bytes| bytes.len() as u64 == size);
         let (image, memory) =
             create_attachment(instance, physical, device, (width, height), encoding)?;
@@ -856,7 +875,7 @@ impl ResidentAttachment {
     /// The device is settled first, so nothing still reads the buffer when it is written.
     pub(crate) fn reload(&self, pixels: &[u8]) -> Result<(), DispatchError> {
         let (width, height) = self.extent();
-        let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
+        let size = attachment_bytes((width, height), self.encoding);
         if pixels.len() as u64 != size {
             return Err(DispatchError::Unsupported(
                 "a reload of another extent cannot fill this attachment".to_owned(),
@@ -922,7 +941,7 @@ impl ResidentAttachment {
     /// touches the buffer.
     pub(crate) fn reload_uniform(&self, word: u32) -> Result<(), DispatchError> {
         let (width, height) = self.extent();
-        let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
+        let size = attachment_bytes((width, height), self.encoding);
         let session = crate::compute::session()?;
         let session = session
             .lock()
@@ -1020,7 +1039,8 @@ impl ResidentAttachment {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.copy_out(&session, self.buffer, true)?;
         let (width, height) = self.extent();
-        let bytes = read_host_memory(&session.device, self.buffer_memory, width, height)?;
+        let size = attachment_bytes((width, height), self.encoding);
+        let bytes = read_host_memory(&session.device, self.buffer_memory, size)?;
         Ok(Pixels {
             width,
             height,
@@ -1032,7 +1052,9 @@ impl ResidentAttachment {
     /// later draws do not change it and nothing reaches the host until [`FrameSnapshot::read`].
     /// What a guest's copy of its colour target sees at that point in the stream.
     pub(crate) fn snapshot_into(&self, snapshot: &FrameSnapshot) -> Result<(), DispatchError> {
-        if (snapshot.width, snapshot.height) != self.extent() {
+        if (snapshot.width, snapshot.height) != self.extent()
+            || snapshot.texel_bytes != texel_bytes(self.encoding)
+        {
             return Err(DispatchError::Unsupported(
                 "a frame snapshot of another extent cannot hold this frame".to_owned(),
             ));
@@ -1140,15 +1162,13 @@ impl ResidentAttachment {
     }
 }
 
-/// Reads a `width` x `height` `Rgba8` frame out of host-visible, coherent `memory` that a waited-on
-/// copy filled.
+/// Reads `size` bytes of a frame out of host-visible, coherent `memory` that a waited-on copy
+/// filled.
 fn read_host_memory(
     device: &ash::Device,
     memory: vk::DeviceMemory,
-    width: u32,
-    height: u32,
+    size: vk::DeviceSize,
 ) -> Result<Vec<u8>, DispatchError> {
-    let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
     // SAFETY: the memory is host-visible and coherent, the copy into it has been waited on, and
     // nothing else maps it.
     let mapped = unsafe { device.map_memory(memory, 0, size, vk::MemoryMapFlags::empty()) }
@@ -1171,17 +1191,23 @@ pub(crate) struct FrameSnapshot {
     memory: vk::DeviceMemory,
     width: u32,
     height: u32,
+    /// The bytes a texel of the frame takes ([`texel_bytes`]).
+    texel_bytes: vk::DeviceSize,
 }
 
 impl FrameSnapshot {
-    /// A snapshot buffer for a `width` x `height` frame, empty until
+    /// A snapshot buffer for a `width` x `height` frame of `texel_bytes` a texel, empty until
     /// [`ResidentAttachment::snapshot_into`] fills it.
-    pub(crate) fn create(width: u32, height: u32) -> Result<Self, DispatchError> {
+    pub(crate) fn create(
+        width: u32,
+        height: u32,
+        texel_bytes: vk::DeviceSize,
+    ) -> Result<Self, DispatchError> {
         let session = crate::compute::session()?;
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
+        let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * texel_bytes;
         let (buffer, memory) =
             create_readback_buffer(&session.instance, session.physical, &session.device, size)?;
         Ok(Self {
@@ -1189,6 +1215,7 @@ impl FrameSnapshot {
             memory,
             width,
             height,
+            texel_bytes,
         })
     }
 
@@ -1197,7 +1224,12 @@ impl FrameSnapshot {
         (self.width, self.height)
     }
 
-    /// Its pixels, `Rgba8`.
+    /// The bytes a texel of the frame it holds takes.
+    pub(crate) const fn texel_bytes(&self) -> vk::DeviceSize {
+        self.texel_bytes
+    }
+
+    /// Its pixels, as its attachment held them.
     pub(crate) fn read(&self) -> Result<Pixels, DispatchError> {
         let session = crate::compute::session()?;
         let session = session
@@ -1205,7 +1237,9 @@ impl FrameSnapshot {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The copy into it was submitted unwaited; this is where it is waited for.
         settle(&session)?;
-        let bytes = read_host_memory(&session.device, self.memory, self.width, self.height)?;
+        let size =
+            vk::DeviceSize::from(self.width) * vk::DeviceSize::from(self.height) * self.texel_bytes;
+        let bytes = read_host_memory(&session.device, self.memory, size)?;
         Ok(Pixels {
             width: self.width,
             height: self.height,
@@ -2732,7 +2766,7 @@ fn render_over(
         return render_resident(&session, resident, shaders, geometry, bound);
     }
 
-    let size = vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * 4;
+    let size = attachment_bytes((width, height), bound.encoding);
     // Starting pixels only when they cover the attachment exactly; anything else clears.
     let initial = bound
         .initial

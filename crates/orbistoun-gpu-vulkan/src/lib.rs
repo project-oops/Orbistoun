@@ -866,13 +866,14 @@ impl VulkanBackend {
         }
         let resident = self.resident.get(&target)?;
         let extent = resident.extent();
+        let texel_bytes = framebuffer::texel_bytes(resident.encoding());
         let spare = self
             .spare_snapshots
             .iter()
-            .position(|spare| spare.extent() == extent)
+            .position(|spare| spare.extent() == extent && spare.texel_bytes() == texel_bytes)
             .map(|index| self.spare_snapshots.swap_remove(index));
         let snapshot = match spare.map_or_else(
-            || framebuffer::FrameSnapshot::create(extent.0, extent.1),
+            || framebuffer::FrameSnapshot::create(extent.0, extent.1, texel_bytes),
             Ok,
         ) {
             Ok(snapshot) => snapshot,

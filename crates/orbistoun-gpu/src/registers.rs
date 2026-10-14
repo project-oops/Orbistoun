@@ -1413,10 +1413,14 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
         None if levels == 1 => crate::tiling::SurfaceLayout::default(),
         None => return None,
     };
-    // A one-byte `COLOR_8` element lies by its own layout, where one is modelled; any other format
-    // keeps the 32-bpp one, and is written back only if it is a four-byte one.
+    // A one-byte `COLOR_8` element and an eight-byte `16_16_16_16` one lie by their own layouts,
+    // where one is modelled; any other format keeps the 32-bpp one, and is written back only if it
+    // is a four-byte one.
     let layout = match last(CB_COLOR0_INFO).map(decode_colour_target_format) {
         Some(format) if format.format == COLOR_8 => layout.at_bytes_per_texel(1).unwrap_or(layout),
+        Some(format) if format.format == COLOR_16_16_16_16 => {
+            layout.at_bytes_per_texel(8).unwrap_or(layout)
+        }
         _ => layout,
     };
     // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
@@ -2277,6 +2281,9 @@ pub const COLOR_10_11_11: u32 = 6;
 /// `ColorFormat` `COLOR_32` (`gfx103.json`): what Mesa targets a one-channel 32-bit format at
 /// (`ac_formats.c` 489).
 pub const COLOR_32: u32 = 4;
+/// `ColorFormat` `COLOR_16_16_16_16` (`gfx103.json`): what Mesa targets a four-channel 16-bit
+/// format at (`ac_formats.c` 527).
+pub const COLOR_16_16_16_16: u32 = 12;
 /// `SurfaceNumber` `NUMBER_FLOAT` (`gfx103.json`).
 pub const NUMBER_FLOAT: u32 = 7;
 
@@ -2364,6 +2371,15 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is an eight-byte `16_16_16_16` `FLOAT` target in its standard order, red
+    /// first: four half floats a texel, drawn and written back as it is held (D845).
+    #[must_use]
+    pub const fn is_float_16_16_16_16(&self) -> bool {
+        self.format == COLOR_16_16_16_16
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// How its texels hold colour, for the attachment a draw writes through.
     #[must_use]
     pub const fn encoding(&self) -> crate::TargetEncoding {
@@ -2371,6 +2387,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Float11_11_10
         } else if self.is_float_32() {
             crate::TargetEncoding::Float32
+        } else if self.is_float_16_16_16_16() {
+            crate::TargetEncoding::Float16x4
         } else if self.is_srgb() {
             crate::TargetEncoding::Srgb8
         } else {
@@ -2379,12 +2397,14 @@ impl ColourTargetFormat {
     }
 
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
-    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`] and [`Self::is_float_32`], one for
-    /// [`Self::is_r8_class`].
+    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`] and [`Self::is_float_32`], eight for
+    /// [`Self::is_float_16_16_16_16`], one for [`Self::is_r8_class`].
     #[must_use]
     pub const fn written_back_bytes(&self) -> Option<u32> {
         if self.is_rgba8_class() || self.is_float_11_11_10() || self.is_float_32() {
             Some(4)
+        } else if self.is_float_16_16_16_16() {
+            Some(8)
         } else if self.is_r8_class() {
             Some(1)
         } else {
@@ -3456,6 +3476,15 @@ mod tests {
             !decode_colour_target_format(0x0001_8010).is_float_32(),
             "not UNORM"
         );
+        // PPSA04263's half-resolution target: `16_16_16_16`, `NUMBER_FLOAT`, `SWAP_STD` - four
+        // half floats a texel, red first, written back eight bytes a texel (D845).
+        let half = decode_colour_target_format(0x0001_8030 | (7 << 8));
+        assert!(half.is_float_16_16_16_16());
+        assert_eq!(half.encoding(), crate::TargetEncoding::Float16x4);
+        assert_eq!(half.written_back_bytes(), Some(8));
+        assert!(
+            !decode_colour_target_format(0x0001_8030 | (7 << 8) | (1 << 11)).is_float_16_16_16_16()
+        );
         assert_eq!(srgb.encoding(), crate::TargetEncoding::Srgb8);
         assert_eq!(measured.encoding(), crate::TargetEncoding::Unorm8);
         assert!(!measured.is_srgb());
@@ -4454,6 +4483,13 @@ mod tests {
         assert_eq!(
             colour_target_at(&rgba).map(|t| t.layout),
             Some(crate::tiling::SurfaceLayout::Rx64Kb)
+        );
+        // An eight-byte `16_16_16_16` element lies by the 64-bpp layout (D845).
+        let mut half = page.to_vec();
+        half.push(write(0xA31C, 12 << 2 | 7 << 8));
+        assert_eq!(
+            colour_target_at(&half).map(|t| t.layout),
+            Some(crate::tiling::SurfaceLayout::Rx64KbBpp8)
         );
     }
 

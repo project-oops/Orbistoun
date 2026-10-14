@@ -5595,6 +5595,7 @@ const fn layout_tag(layout: crate::tiling::SurfaceLayout) -> u32 {
         crate::tiling::SurfaceLayout::S4KbBpp8 => 1 << 18,
         crate::tiling::SurfaceLayout::S4KbBpp1 => 1 << 16,
         crate::tiling::SurfaceLayout::S64Kb => 1 << 15,
+        crate::tiling::SurfaceLayout::Rx64KbBpp8 => 1 << 28,
     }
 }
 

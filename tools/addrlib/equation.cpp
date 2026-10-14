@@ -22,7 +22,8 @@
 // Family NV (0x8F), revision 0x82, `GB_ADDR_CONFIG` 0x4: the configuration whose 32-bpp
 // `64KB_R_X` equation is the layout measured on the console (see `tiling.rs`).
 //
-// Usage: equation <swizzle mode> <bytes per texel>
+// Usage: equation <swizzle mode> <bytes per texel> [blocks]
+//   blocks: how many blocks a side the terms are read and checked over, a power of two (8)
 //   swizzle mode: 64KB_R_X, 64KB_D_X, 4KB_D_X, 64KB_S, 4KB_S
 //
 // Build with build.sh beside this file.
@@ -104,8 +105,8 @@ UINT_32 log2_of(UINT_32 value) {
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc != 3) {
-    std::fprintf(stderr, "usage: equation <swizzle mode> <bytes per texel>\n");
+  if (argc != 3 && argc != 4) {
+    std::fprintf(stderr, "usage: equation <swizzle mode> <bytes per texel> [blocks]\n");
     return 1;
   }
   const Mode *chosen = nullptr;
@@ -160,13 +161,14 @@ int main(int argc, char **argv) {
   // One basis term per coordinate bit, up to an eight-block surface: the in-block equation, then
   // what each bit above the block adds inside the block beyond moving to the next one. A layout
   // whose pipe or bank bits draw on higher coordinates shows terms above the block.
-  constexpr UINT_32 kMostBlocks = 8;
+  const UINT_32 most_blocks =
+      argc == 4 ? static_cast<UINT_32>(std::strtoul(argv[3], nullptr, 0)) : 8;
   const UINT_32 x_block_bits = log2_of(block_width);
   const UINT_32 y_block_bits = log2_of(block_height);
-  const UINT_32 x_bits = x_block_bits + log2_of(kMostBlocks);
-  const UINT_32 y_bits = y_block_bits + log2_of(kMostBlocks);
-  const Surface widest = {created.hLib, chosen->mode, bytes * 8, kMostBlocks * block_width,
-                          kMostBlocks * block_height};
+  const UINT_32 x_bits = x_block_bits + log2_of(most_blocks);
+  const UINT_32 y_bits = y_block_bits + log2_of(most_blocks);
+  const Surface widest = {created.hLib, chosen->mode, bytes * 8, most_blocks * block_width,
+                          most_blocks * block_height};
   auto row_major = [&](const Surface &surface, UINT_32 x, UINT_32 y) {
     const UINT_64 per_row = surface.width / block_width;
     return ((y / block_height) * per_row + (x / block_width)) * block_bytes;
