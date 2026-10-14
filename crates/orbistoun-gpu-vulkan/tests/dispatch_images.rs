@@ -482,6 +482,39 @@ fn a_dispatch_copies_a_single_channel_image() {
     });
 }
 
+/// A single-channel eight-bit unsigned image copies exactly through a module that declares it
+/// integer: every byte value reaches the same place, bound as `R8_UINT` on both sides. Grand Theft
+/// Auto V's compute program reads a linear `8_UINT` image.
+#[test]
+fn a_dispatch_copies_an_eight_bit_integer_image() {
+    both_models(|| {
+        if !device_or_skip("eight-bit integer image copy") {
+            return;
+        }
+        let source: Vec<u32> = (0..SIDE * SIDE).map(|i| (i * 7 + 1) & 0xff).collect();
+        let destination = vec![0_u32; (SIDE * SIDE) as usize];
+        let image = |texels| DispatchImage {
+            texels,
+            format: DispatchFormat::R8Uint,
+            width: SIDE,
+            height: SIDE,
+            depth: None,
+        };
+        let done = dispatch_guest(
+            &translated_for(&COPY_R8, [true, true]),
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(image(&source)),
+                stored: Some(image(&destination)),
+            },
+        )
+        .expect("dispatched");
+        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+    });
+}
+
 /// Both descriptors loaded from the table at `s[0:1]` by one `s_load_dwordx16 s[16:31], s[0:1], 0`
 /// (its encoding as LLVM 18.1.8 assembles it), then `image_load` through `s[16:23]` and
 /// `image_store` through `s[24:31]`.

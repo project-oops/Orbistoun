@@ -2528,6 +2528,8 @@ pub enum TexelFormat {
     Rgba8,
     /// One eight-bit normalised channel, a texel a byte.
     R8,
+    /// One eight-bit unsigned integer channel, a texel a byte: the guest's `8_UINT`.
+    R8Uint,
     /// Four thirty-two-bit unsigned channels, a texel four words.
     Rgba32Uint,
     /// One thirty-two-bit unsigned channel, a texel a word: the guest's `32_UINT`.
@@ -2556,7 +2558,7 @@ impl TexelFormat {
             | Self::Rgb10A2
             | Self::R32Uint
             | Self::R32Float => 4,
-            Self::R8 => 1,
+            Self::R8 | Self::R8Uint => 1,
             Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,
         }
@@ -2571,7 +2573,7 @@ impl TexelFormat {
     /// Whether the format's channels are unsigned integers, which a shader declares as such.
     #[must_use]
     pub const fn is_integer(self) -> bool {
-        matches!(self, Self::Rgba32Uint | Self::R32Uint)
+        matches!(self, Self::Rgba32Uint | Self::R32Uint | Self::R8Uint)
     }
 }
 
@@ -3258,11 +3260,36 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         // One channel, read with the constants a one-channel image answers for the others - which
         // the host's one-channel view answers too - or written, where the selects say nothing.
         FORMAT_32_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Uint),
+        FORMAT_8_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R8Uint),
         FORMAT_32_FLOAT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Float),
         _ => Err(format!(
             "a dispatch image of format {}",
             describe_dispatch_image(descriptor, words)
         )),
+    }
+}
+
+#[cfg(test)]
+mod dispatch_format_tests {
+    /// A linear `8_UINT` image read through one channel is a one-byte unsigned integer image: what
+    /// Grand Theft Auto V's compute program reads, 2048 by 4096.
+    #[test]
+    fn an_eight_bit_unsigned_image_is_one_byte_of_integer() {
+        // Format 5 in dword 1 bits 28:20, width and height less one, `X001` selects, a 2D image.
+        let words = [
+            0,
+            5 << 20 | (2047 & 3) << 30,
+            2047 >> 2 | 4095 << 14,
+            4 | 5 << 3 | 6 << 6 | 7 << 9 | 9 << 28,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let descriptor = crate::registers::decode_image_descriptor(words);
+        let format = super::dispatch_format(&descriptor, words).expect("bound");
+        assert_eq!(format, super::TexelFormat::R8Uint);
+        assert_eq!((format.bytes(), format.is_integer()), (1, true));
     }
 }
 
@@ -5327,6 +5354,8 @@ const ONE_CUBE_LAST_LAYER: u32 = CUBE_FACES - 1;
 const FORMAT_8_8_8_8_UNORM: u32 = 56;
 /// `GFX10_FORMAT_8_UNORM` (`gfx10-rsrc.json:6`): one eight-bit normalised channel.
 const FORMAT_8_UNORM: u32 = 1;
+/// `GFX10_FORMAT_8_UINT` (`gfx10-rsrc.json`, value 5): one eight-bit unsigned integer channel.
+const FORMAT_8_UINT: u32 = 5;
 /// `GFX10_FORMAT_BC3_UNORM` (`gfx10-rsrc.json:127`): four-by-four texels to a sixteen-byte block.
 const FORMAT_BC3_UNORM: u32 = 173;
 /// `GFX10_FORMAT_BC1_SRGB` (`gfx10-rsrc.json:124`): four-by-four texels to an eight-byte block,
@@ -6377,6 +6406,7 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         // such format.
         TexelFormat::Rgba8
         | TexelFormat::R8
+        | TexelFormat::R8Uint
         | TexelFormat::Rgba32Uint
         | TexelFormat::R32Uint
         | TexelFormat::R32Float
@@ -6488,7 +6518,7 @@ fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std
                 | TexelFormat::Float11_11_10
                 | TexelFormat::Rgba8Srgb
                 | TexelFormat::Rgb10A2 => texel.to_le_bytes(),
-                TexelFormat::R8 => [texel.to_le_bytes()[0], 0, 0, 0xFF],
+                TexelFormat::R8 | TexelFormat::R8Uint => [texel.to_le_bytes()[0], 0, 0, 0xFF],
             };
             u32::from_le_bytes(selects.map(|select| pick(channels, select)))
         })
