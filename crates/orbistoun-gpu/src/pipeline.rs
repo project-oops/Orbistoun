@@ -33,9 +33,9 @@ use crate::registers::{
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
-    colour_target_format_at, decode_image_descriptor, depth_control_at, dispatch_calls,
-    primitive_topology_at, register_writes, register_writes_reading, shader_candidates,
-    stencil_control_at, viewport_transform_from,
+    colour_target_format_at, colour_target_runs, decode_image_descriptor, depth_control_at,
+    dispatch_calls, primitive_topology_at, register_writes, register_writes_reading,
+    shader_candidates, stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
@@ -537,6 +537,10 @@ pub struct Submission {
     /// How many distinct colour target zero bases the stream wrote: one frame is written back only
     /// when all draws went to one target.
     pub colour_target_bases: usize,
+    /// Every colour target zero the draws draw into, one per run of draws into a base: what
+    /// carrying the submission out writes, which a later submission's preparation reads only once
+    /// it has been carried out (D874). Empty when nothing is drawn.
+    pub drawn_targets: Vec<ColourTarget>,
     /// The depth- and stencil-test state a draw runs under (`DB_DEPTH_CONTROL`). `None` when the
     /// stream set none: a draw with no depth control has no depth test.
     pub depth_control: Option<DepthControl>,
@@ -596,6 +600,33 @@ fn record_colour_target(submission: &mut Submission, writes: &[RegisterWrite], d
     submission.colour_target_dcc = colour_target_dcc_at(writes);
     let draw_offsets: Vec<u32> = draws.iter().map(|draw| draw.packet_offset).collect();
     submission.colour_target_bases = colour_target_bases_in(writes, &draw_offsets);
+    submission.drawn_targets = drawn_targets(submission, writes, &draw_offsets);
+}
+
+/// The colour target zero each run of draws draws into ([`colour_target_runs`]), from the writes
+/// before the run's first draw. One base needs no sweep: it is [`Submission::colour_target`].
+fn drawn_targets(
+    submission: &Submission,
+    writes: &[RegisterWrite],
+    draw_offsets: &[u32],
+) -> Vec<ColourTarget> {
+    if draw_offsets.is_empty() {
+        return Vec::new();
+    }
+    if submission.colour_target_bases <= 1 {
+        return submission.colour_target.into_iter().collect();
+    }
+    let spans: Vec<(u32, u32)> = draw_offsets.iter().map(|&at| (at, at + 1)).collect();
+    let mut targets: Vec<ColourTarget> = colour_target_runs(writes, &spans)
+        .into_iter()
+        .filter_map(|(first, _)| {
+            // Carried state rides at offset zero, ahead of the stream's own writes, in order.
+            let before = writes.partition_point(|write| write.packet_offset <= first);
+            colour_target_at(&writes[..before])
+        })
+        .collect();
+    targets.dedup();
+    targets
 }
 
 /// The shaders one draw runs, by stage.
@@ -7246,6 +7277,43 @@ fn stage_of(name: &str) -> Option<ShaderStage> {
 #[cfg(test)]
 mod tests {
     use super::{Cached, ResourceId};
+
+    /// What a submission draws into is every target a run of its draws draws into, each from the
+    /// base in force at the run (D874): a later submission's preparation waits on all of them.
+    #[test]
+    fn a_submission_draws_into_the_target_of_each_run() {
+        use super::{RegisterWrite, Submission, colour_target_at, drawn_targets};
+        let write = |packet_offset, register, value| RegisterWrite {
+            packet_offset,
+            register,
+            value,
+        };
+        // CB_COLOR0_BASE and CB_COLOR0_ATTRIB2 (16 x 8): carried in, then the stream's own.
+        let (base, attrib2) = (0xA318, 0xA3B0);
+        let writes = [
+            write(0, attrib2, (15 << 14) | 7),
+            write(0, base, 0x100),
+            write(24, base, 0x200),
+        ];
+        let first = colour_target_at(&writes[..2]).expect("the first target");
+        let second = colour_target_at(&writes).expect("the second target");
+        assert_ne!(first.base, second.base);
+        let one = Submission {
+            colour_target: Some(second),
+            colour_target_bases: 1,
+            ..Submission::default()
+        };
+        assert_eq!(drawn_targets(&one, &writes, &[32, 40]), [second]);
+        assert!(
+            drawn_targets(&one, &writes, &[]).is_empty(),
+            "nothing drawn"
+        );
+        let two = Submission {
+            colour_target_bases: 2,
+            ..one
+        };
+        assert_eq!(drawn_targets(&two, &writes, &[16, 32, 40]), [first, second]);
+    }
 
     /// A `32_UINT` image is bound one-channel only where its selects read X then zero, zero and one,
     /// as constants or as the channels it lacks; any other order is a view the host does not give.

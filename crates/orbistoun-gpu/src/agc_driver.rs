@@ -4115,12 +4115,15 @@ impl MappedRegions {
 /// carried out (D719). The
 /// hardware ran the earlier submission before this one read, so a texture drawn into by one is
 /// what the next samples. Only the reads that overlap pay for it; the many submissions a frame
-/// draws into one target never read that target while preparing.
+/// draws into one target never read that target while preparing. Asynchronously, a submission
+/// still queued that draws over the read, or could write back the frame pending over it, is
+/// carried out first (D874).
 struct SettledReads<'m>(&'m MappedRegions);
 
 impl GuestMemory for SettledReads<'_> {
     fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
         let span = length as u64;
+        command_processor::settle_over(address, span);
         // Settled as a flip settles it - deferred onto the target's own pages where it can be
         // (D719) - and then carried out by this read, with any other copy over it.
         if pending_target().is_some_and(|(target, _)| overlaps_target(target, address, span)) {
@@ -4409,7 +4412,9 @@ pub fn settle(limit: std::time::Duration) -> bool {
 
 /// The command processor's thread, and the submissions queued for it (D821).
 mod command_processor {
-    use super::{Submission, run_submission};
+    use super::{ColourTarget, Submission, overlaps_target, pending_target, run_submission};
+    use std::cell::Cell;
+    use std::collections::VecDeque;
     use std::sync::mpsc::{SyncSender, sync_channel};
     use std::sync::{Condvar, Mutex, OnceLock};
 
@@ -4418,8 +4423,20 @@ mod command_processor {
     /// span.
     const DEPTH: usize = 4;
 
-    /// Submissions queued and not yet carried out, and the signal that the count fell.
-    static IN_FLIGHT: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+    /// Submissions queued and not yet carried out, oldest first, each as the colour targets it
+    /// draws into ([`Submission::drawn_targets`]), and the signal that one was carried out.
+    static IN_FLIGHT: (Mutex<VecDeque<Vec<ColourTarget>>>, Condvar) =
+        (Mutex::new(VecDeque::new()), Condvar::new());
+
+    /// How long a preparation read waits for the queue: a submission is never held by the guest,
+    /// so this bounds a fault, not a wait.
+    const SETTLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    std::thread_local! {
+        /// Whether this thread is the command processor's: what it reads, it reads after every
+        /// submission ahead of the one it is carrying out, so it never waits on the queue.
+        static ON_PROCESSOR: Cell<bool> = const { Cell::new(false) };
+    }
 
     /// A prepared submission and its command stream, boxed so a refused send hands back a pointer.
     type Work = Box<(Vec<u8>, Submission)>;
@@ -4432,13 +4449,15 @@ mod command_processor {
                 std::thread::Builder::new()
                     .name("orbistoun-command-processor".to_owned())
                     .spawn(move || {
+                        ON_PROCESSOR.set(true);
                         for work in receive {
                             let (bytes, submission) = *work;
                             run_submission(&bytes, submission);
-                            let (count, fell) = &IN_FLIGHT;
-                            *count
+                            let (queued, fell) = &IN_FLIGHT;
+                            queued
                                 .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .pop_front();
                             fell.notify_all();
                         }
                     })
@@ -4454,10 +4473,11 @@ mod command_processor {
             run_submission(&bytes, submission);
             return;
         };
-        *IN_FLIGHT
+        IN_FLIGHT
             .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(submission.drawn_targets.clone());
         let sent = crate::perf::span(crate::perf::Span::QueueFull, || {
             sender
                 .lock()
@@ -4465,22 +4485,51 @@ mod command_processor {
                 .send(Box::new((bytes, submission)))
         });
         if let Err(std::sync::mpsc::SendError(work)) = sent {
-            *IN_FLIGHT
+            IN_FLIGHT
                 .0
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) -= 1;
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_back();
             let (bytes, submission) = *work;
             run_submission(&bytes, submission);
         }
     }
 
     pub(super) fn settle(limit: std::time::Duration) -> bool {
-        let (count, fell) = &IN_FLIGHT;
-        let held = count
+        let (queued, fell) = &IN_FLIGHT;
+        let held = queued
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        fell.wait_timeout_while(held, limit, |queued| *queued > 0)
-            .is_ok_and(|(left, _)| *left == 0)
+        fell.wait_timeout_while(held, limit, |queued| !queued.is_empty())
+            .is_ok_and(|(left, _)| left.is_empty())
+    }
+
+    /// Carries out every queued submission before a preparation reads `[address, address +
+    /// length)`, when one of them draws over it, or could write back the frame pending over it in
+    /// the middle of the read (D874). The hardware ran them before this submission read; preparing
+    /// it here, ahead of them, read the texels from before their draws. A read overlapping nothing
+    /// queued keeps the guest running on while the command processor works.
+    pub(super) fn settle_over(address: u64, length: u64) {
+        if ON_PROCESSOR.get() {
+            return;
+        }
+        let over_pending =
+            pending_target().is_some_and(|(target, _)| overlaps_target(target, address, length));
+        let over_queued = {
+            let queued = IN_FLIGHT
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            !queued.is_empty()
+                && (over_pending
+                    || queued
+                        .iter()
+                        .flatten()
+                        .any(|target| overlaps_target(*target, address, length)))
+        };
+        if over_queued {
+            let _ = settle(SETTLE_LIMIT);
+        }
     }
 }
 
@@ -7015,6 +7064,69 @@ mod tests {
             label[..4],
             0xfeed_f00d_u32.to_le_bytes(),
             "and the label is written"
+        );
+    }
+
+    /// Asynchronously, a texture a queued submission draws into is read only once that submission
+    /// has been carried out (D874): the hardware runs it before the next submission samples, so
+    /// preparing the next waits for the queue to drain. A read of nothing queued does not wait.
+    /// The command processor is held off by holding the queue's stall slot.
+    #[test]
+    fn a_read_while_preparing_waits_for_a_queued_submission_drawing_over_it() {
+        use super::{ColourTarget, GuestMemory, MappedRegions, SettledReads, Submission};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory: &'static mut [u8] = Box::leak(vec![0u8; span * 2].into_boxed_slice());
+        let base = memory.as_ptr() as usize as u64;
+        set_guest_regions(vec![region_of(memory)]);
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+
+        super::set_asynchronous(true);
+        let held = super::queue_stall()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        super::command_processor::queue(
+            Vec::new(),
+            Submission {
+                drawn_targets: vec![target],
+                ..Submission::default()
+            },
+        );
+        let regions = MappedRegions::current();
+        let _ = SettledReads(&regions).read(base + span as u64, 4);
+        assert!(
+            !super::settle(Duration::ZERO),
+            "a read past the target leaves the submission queued"
+        );
+        let returned = AtomicBool::new(false);
+        let drained = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let _ = SettledReads(&regions).read(base, 4);
+                returned.store(true, Ordering::SeqCst);
+                super::settle(Duration::ZERO)
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            let early = returned.load(Ordering::SeqCst);
+            drop(held);
+            let drained = reader.join().expect("the reader returns");
+            (early, drained)
+        });
+        let carried_out = super::settle(Duration::from_secs(5));
+        super::set_asynchronous(false);
+        assert!(carried_out, "the queue drains once the processor can run");
+        assert_eq!(
+            drained,
+            (false, true),
+            "the read over the target waited for the submission drawing it, and returned after it"
         );
     }
 
