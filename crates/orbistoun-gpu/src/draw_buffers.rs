@@ -722,7 +722,8 @@ pub(crate) fn dispatch_global_range(
                                     group[c] != partial.last[c] || id[c] < partial.threads[c]
                                 })
                             });
-                            runs.then_some(id)
+                            // The x id counts from the dispatch's first thread (D861).
+                            runs.then_some([id[0] + inputs.first_thread, id[1], id[2]])
                         })
                         .collect();
                     let entry = WaveEntry {
@@ -1412,6 +1413,15 @@ mod tests {
             super::dispatch_global_range(&global, (&[0x1000, 7], inputs, [2, 1, 1], 64), &memory);
         // Group 1's thread 103 reads the last byte, 0x19d past the base.
         assert_eq!(range, Ok((0x7_0000_1000, 0x1a0)));
+        // A wave of a larger streamout draw numbers its threads from its first (D861).
+        let later = ComputeInputs {
+            first_thread: 1000,
+            ..inputs
+        };
+        assert_eq!(
+            super::dispatch_global_range(&global, (&[0x1000, 7], later, [2, 1, 1], 64), &memory),
+            Ok((0x7_0000_1000 + 4000, 0x1a0))
+        );
         assert!(
             super::dispatch_global_range(
                 &global,
