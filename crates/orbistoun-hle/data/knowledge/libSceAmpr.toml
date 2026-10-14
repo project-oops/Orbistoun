@@ -34,9 +34,10 @@ purpose = "Resets a command-buffer object for reuse."
 returns = "status"
 edge_cases = [
     "MEASURED after a 0x1000-byte SetBuffer: answers 0 and changes no byte of the object - the bound buffer and its size are kept.",
+    "GUEST-OBSERVED (D877): with commands in the buffer it rewinds it - the bytes used (+4) and the command count (+8) to zero, the binding kept. PPSA04263 resets a command buffer it filled and appends again; unrewound, the append overflowed and the title trapped. Unmeasured on hardware: obSCEne REQ-20261014T1710Z-ar01 asks.",
 ]
 found_by = "generated"
-known_by = "measured"
+known_by = "guest-observed"
 cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arm ampr-cb-reset-after-2 (REQ a5b1)."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-06"

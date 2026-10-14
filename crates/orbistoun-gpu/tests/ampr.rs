@@ -99,6 +99,54 @@ fn set_buffer_binds_a_large_buffer_and_refuses_a_small_one() {
     assert_eq!(obj[..], expected[..], "a reset keeps the binding");
 }
 
+/// A reset rewinds a buffer with commands in it (D877, guest-observed): two write-address commands
+/// take 24 bytes and count 2, and after the reset both are zero, the binding kept, and the next
+/// command lands at the buffer's start again. Grand Theft Auto V resets a command buffer it filled
+/// and writes to it again; one never rewound overflowed and its write was refused.
+#[test]
+fn a_reset_rewinds_the_commands_in_its_buffer() {
+    let mut obj = object();
+    let at = obj.as_mut_ptr() as u64;
+    call("sceAmprCommandBufferConstructor", [at, at, 0, 0, 0, 0x47d]);
+    let buffer = object();
+    let address = buffer.as_ptr() as u64;
+    let slot = object();
+    let slot = slot.as_ptr() as u64 & !7;
+    assert_eq!(
+        call(
+            "sceAmprCommandBufferSetBuffer",
+            [at, address, 0x1000, 0, 0, 0]
+        ),
+        0
+    );
+    let counters = |obj: &[u8]| {
+        let word = |at: usize| u32::from_le_bytes(obj[at..at + 4].try_into().expect("a word"));
+        (word(4), word(8))
+    };
+    for _ in 0..2 {
+        assert_eq!(
+            call(
+                "sceAmprCommandBufferWriteAddress_04_00",
+                [at, slot, 0x1234_5678, 0, 0, 0]
+            ),
+            0
+        );
+    }
+    assert_eq!(counters(&obj[..]), (24, 2));
+    assert_eq!(call("sceAmprCommandBufferReset", [at, 0, 0, 0, 0, 0]), 0);
+    assert_eq!(counters(&obj[..]), (0, 0), "rewound");
+    assert_eq!(obj[12..16], 0x1000_u32.to_le_bytes(), "the size kept");
+    assert_eq!(obj[16..24], address.to_le_bytes(), "the buffer kept");
+    assert_eq!(
+        call(
+            "sceAmprCommandBufferWriteAddress_04_00",
+            [at, slot, 0x1234_5678, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(counters(&obj[..]), (12, 1), "written from the start again");
+}
+
 /// `ampr-sb40-*` (obSCEne `reports/report-1791286625.txt` 8770-9240, REQ sb40): every size from
 /// 0x20 to 0x800 a multiple of 0x20 binds, PPSA21564's 0x400 among them with its non-zero `a4`;
 /// 0x401 is refused with `0x80020016` and binds nothing.

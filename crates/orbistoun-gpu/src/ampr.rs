@@ -226,8 +226,18 @@ fn command_buffer_get_current_offset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 }
 
 /// `sceAmprCommandBufferReset(obj)`: answers 0 and, measured after a binding, leaves the object as
-/// it was - the bound buffer and its size kept.
-fn command_buffer_reset(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+/// it was - the bound buffer and its size kept. With commands in the buffer it rewinds it: the
+/// bytes used (+4) and the command count (+8) to zero, so the next command is written from the
+/// buffer's start (D877, guest-observed: PPSA04263 resets a buffer it filled and writes again,
+/// where an unrewound one overflows). An object that cannot be written answers the placeholder.
+fn command_buffer_reset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let object = args[0];
+    // SAFETY: the guest's own constructed object, at its measured fields.
+    let used = unsafe { guest::write_u32(object + USED_AT, 0) };
+    // SAFETY: as above.
+    if !used || !unsafe { guest::write_u32(object + COUNT_AT, 0) } {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
     0
 }
 
