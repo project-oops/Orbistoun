@@ -33,15 +33,9 @@ use crate::registers::{
     DrawKind, ImageDescriptor, PrimitiveTopology, RegisterWrite, StencilControl, SwizzleMode,
     ViewportTransform, Vocabulary, WaveWidths, blend_control_at, colour_swizzle_mode_at,
     colour_target_at, colour_target_bases_in, colour_target_dcc_at, colour_target_extent_at,
-<<<<<<< crates/orbistoun-gpu/src/pipeline.rs
-    colour_target_format_at, decode_image_descriptor, depth_control_at, dispatch_calls,
-    register_writes, register_writes_reading, shader_candidates, stencil_control_at,
-    viewport_transform_from,
-=======
     colour_target_format_at, colour_target_runs, decode_image_descriptor, depth_control_at,
-    dispatch_calls, primitive_topology_at, register_writes, register_writes_reading,
-    shader_candidates, stencil_control_at, viewport_transform_from,
->>>>>>> C:\Users\Andrew\AppData\Local\Temp/claude/C--git-OOPS/b2a98b80-a30f-475c-a824-bf51afcdd542/scratchpad/m.new
+    dispatch_calls, register_writes, register_writes_reading, shader_candidates,
+    stencil_control_at, viewport_transform_from,
 };
 
 /// Which queue a command buffer was submitted to.
