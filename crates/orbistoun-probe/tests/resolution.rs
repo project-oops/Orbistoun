@@ -56,7 +56,7 @@ fn the_outcome_stops_before_the_request_s_own_fields() {
 #[test]
 fn a_claim_no_row_holds_is_unbacked() {
     let found = resolutions(WORKLOG, "Orbistoun");
-    let claims = unbacked(&found[0].outcome, LOG);
+    let claims = unbacked(&found[0].outcome, &[LOG]);
     assert_eq!(
         claims,
         [
@@ -70,7 +70,7 @@ fn a_claim_no_row_holds_is_unbacked() {
 #[test]
 fn a_function_no_row_names_is_not_decisive_alone() {
     let found = resolutions(WORKLOG, "Orbistoun");
-    let claims = unbacked(&found[0].outcome, LOG);
+    let claims = unbacked(&found[0].outcome, &[LOG]);
     let decisive: Vec<bool> = claims.iter().map(Unbacked::is_decisive).collect();
     assert_eq!(decisive, [false, true, true]);
 }
@@ -90,11 +90,24 @@ fn measurements_after_a_failed_set_up_are_unbacked() {
     );
     let outcome = "measured in `000-boot/ids` and `000-boot/np`: ids `{0, 1, 2}`";
     assert_eq!(
-        unbacked(outcome, rows),
+        unbacked(outcome, &[rows]),
         [Unbacked::AfterFailedSetUp(
             "000-boot/ids: queue-create-rc 0xffffffff, then stored-id-0".into()
         )]
     );
+}
+
+/// A section is judged within each log it appears in: ix02 cited an older sweep whose run of the
+/// section failed its set-up and a newer one whose run succeeded, and the newer one's measurements
+/// do not come after the older one's failure.
+#[test]
+fn a_failed_set_up_in_one_log_does_not_taint_another() {
+    let older = "OBS|measure|000-boot/ids|gpu|queue-create-rc|0xffffffff|code\n";
+    let newer = concat!(
+        "OBS|measure|000-boot/ids|setup|queue-create-rc|0x0|code\n",
+        "OBS|measure|000-boot/ids|arm1|stored-id-0|0x0|id\n",
+    );
+    assert_eq!(unbacked("in `000-boot/ids`", &[older, newer]), []);
 }
 
 /// A row an outcome quotes must be in the log it cites, word for word: gp02 quoted
@@ -113,7 +126,7 @@ fn a_quoted_row_the_log_does_not_hold_is_unbacked() {
         "    ```\n",
     );
     assert_eq!(
-        unbacked(outcome, rows),
+        unbacked(outcome, &[rows]),
         [Unbacked::QuotedRowAbsent(
             "OBS|measure|000-boot/q|setup|fn-create-queue-bound|0x1|bool".into()
         )]
@@ -122,6 +135,6 @@ fn a_quoted_row_the_log_does_not_hold_is_unbacked() {
 
 #[test]
 fn a_claim_the_rows_hold_is_backed() {
-    let claims = unbacked("`sceSaveDataInitialize3` answers `0x809f0001`", LOG);
+    let claims = unbacked("`sceSaveDataInitialize3` answers `0x809f0001`", &[LOG]);
     assert!(claims.is_empty(), "{claims:?}");
 }

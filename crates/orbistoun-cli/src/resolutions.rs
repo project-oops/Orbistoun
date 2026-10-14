@@ -27,17 +27,19 @@ pub(crate) fn cmd_resolutions(
         if resolution.logs.is_empty() {
             problems.push("cites no log".to_owned());
         }
-        // A claim is backed by a row in any of the logs the request cites.
-        let mut rows = String::new();
+        // A claim is backed by a row in any of the logs the request cites; a set-up is judged
+        // within each.
+        let mut texts: Vec<String> = Vec::new();
         for log in &resolution.logs {
             match std::fs::read_to_string(reports.join(log)) {
-                Ok(text) => rows.push_str(&text),
+                Ok(text) => texts.push(text),
                 Err(_) => problems.push(format!("{log} cannot be read")),
             }
         }
         let mut notes: Vec<String> = Vec::new();
-        if !rows.is_empty() {
-            let claims = unbacked(&resolution.outcome, &rows);
+        if !texts.is_empty() {
+            let logs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let claims = unbacked(&resolution.outcome, &logs);
             let of = |kind: fn(&Unbacked) -> Option<&str>| {
                 claims
                     .iter()

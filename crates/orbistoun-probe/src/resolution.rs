@@ -147,19 +147,28 @@ fn cited_logs(block: &[&str]) -> Vec<String> {
     logs
 }
 
-/// The claims of `outcome` the rows of `log` do not back, in the order the outcome makes them,
+/// The claims of `outcome` the rows of `logs` do not back, in the order the outcome makes them,
 /// then each section it cites that measured after its own set-up failed (`after_failed_set_up`),
-/// then each row it quotes that the log does not hold (`quoted_rows_absent`).
+/// then each row it quotes that no log holds (`quoted_rows_absent`).
+///
+/// Claims and quoted rows are backed by any of the logs. A section's set-up is judged within each
+/// log, since each is a run of its own: a newer sweep's run is not measured after an older one's
+/// failure.
 ///
 /// A claim is a status code (`0x8` and seven more hex digits) or a platform function (`sce`
 /// followed by a capital). A code is backed by any row holding it; a function by any row naming
 /// it that is not about binding it, or by one saying it bound.
 #[must_use]
-pub fn unbacked(outcome: &str, log: &str) -> Vec<Unbacked> {
-    let rows: Vec<Vec<&str>> = log
-        .lines()
-        .filter_map(|line| line.find("OBS|").map(|at| line[at..].split('|').collect()))
-        .collect();
+pub fn unbacked(outcome: &str, logs: &[&str]) -> Vec<Unbacked> {
+    let rows: Vec<Vec<&str>> = logs.iter().flat_map(|log| rows_of(log)).collect();
+    let mut set_up: Vec<Unbacked> = Vec::new();
+    for log in logs {
+        for failed in after_failed_set_up(outcome, &rows_of(log)) {
+            if !set_up.contains(&failed) {
+                set_up.push(failed);
+            }
+        }
+    }
     let mut claims: Vec<&str> = Vec::new();
     for word in outcome.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
         if (is_code(word) || is_function(word)) && !claims.contains(&word) {
@@ -184,16 +193,17 @@ pub fn unbacked(outcome: &str, log: &str) -> Vec<Unbacked> {
                 None
             }
         })
-        .chain(after_failed_set_up(outcome, &rows))
-        .chain(quoted_rows_absent(outcome, log))
+        .chain(set_up)
+        .chain(quoted_rows_absent(outcome, logs))
         .collect()
 }
 
 /// Each `OBS|` row `outcome` quotes, from `OBS|` to the end of its line, that no line of `log`
 /// holds: a quotation of a row the log does not have is not evidence of anything.
-fn quoted_rows_absent(outcome: &str, log: &str) -> Vec<Unbacked> {
-    let held: std::collections::HashSet<&str> = log
-        .lines()
+fn quoted_rows_absent(outcome: &str, logs: &[&str]) -> Vec<Unbacked> {
+    let held: std::collections::HashSet<&str> = logs
+        .iter()
+        .flat_map(|log| log.lines())
         .filter_map(|line| line.find("OBS|").map(|at| line[at..].trim_end()))
         .collect();
     outcome
@@ -265,6 +275,13 @@ fn failed_set_up(scope: &str, key: &str, value: &str) -> bool {
     !scope.starts_with("arm")
         && (key == "rc" || key.ends_with("-rc"))
         && matches!(value, "0xffffffff" | "0xffffffffffffffff")
+}
+
+/// A log's `OBS|` rows, each split into its fields.
+fn rows_of(log: &str) -> Vec<Vec<&str>> {
+    log.lines()
+        .filter_map(|line| line.find("OBS|").map(|at| line[at..].split('|').collect()))
+        .collect()
 }
 
 /// A status code as the platform writes one: `0x8` and seven more hex digits.
