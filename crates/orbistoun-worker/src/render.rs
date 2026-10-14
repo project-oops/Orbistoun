@@ -1658,6 +1658,16 @@ fn log_execution() {
             span(writes.fetched),
             span(writes.stored)
         );
+        for &(at, bytes, lit) in &writes.buffers {
+            tracing::info!(
+                "  it binds a buffer at {at:#x} ({bytes} bytes), {}",
+                match lit {
+                    Some(true) => "read, some of it not zero",
+                    Some(false) => "read, every word zero",
+                    None => "only stored to",
+                }
+            );
+        }
     }
     // The program a refused dispatch runs, to read the refusal against.
     if let (Some((address, program)), Some(dir)) = (

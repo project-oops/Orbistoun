@@ -1367,7 +1367,7 @@ struct GuestWrites {
 
 /// What a translated program's dispatches have written back this run: how many were carried out,
 /// the bytes they changed, and whether any changed byte is not zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DispatchWrites {
     /// Dispatches carried out.
     pub dispatches: u64,
@@ -1379,6 +1379,9 @@ pub struct DispatchWrites {
     pub fetched: Option<(u64, u64)>,
     /// Where the last of them stored its image, as (first byte, bytes).
     pub stored: Option<(u64, u64)>,
+    /// The buffers the last of them bound, each as (first byte, bytes, whether any word it read is
+    /// not zero) - `None` for one it only stores to, which is not read.
+    pub buffers: Vec<(u64, u64, Option<bool>)>,
 }
 
 /// [`DispatchWrites`] by the translated module's content hash.
@@ -1389,11 +1392,15 @@ fn dispatch_writes() -> &'static Mutex<std::collections::BTreeMap<u64, DispatchW
 }
 
 /// Counts a dispatch of `module` and what it wrote back: its runs, its scattered buffer words and
-/// its fills; and where its `images` lie.
+/// its fills; where its `images` lie; and the buffers it bound at `ranges`, as they were `read`.
 fn note_dispatch_writes(
     module: u64,
     (writes, scattered, fills): (&GuestWrites, &[Scattered<'_>], &[cp::Fill]),
-    images: &crate::pipeline::DispatchImages,
+    (images, ranges, read): (
+        &crate::pipeline::DispatchImages,
+        &[(u64, u64)],
+        &[crate::dispatch::BufferBefore],
+    ),
 ) {
     let mut bytes = writes.bytes.len() as u64;
     let mut lit = writes.bytes.iter().any(|&byte| byte != 0);
@@ -1420,6 +1427,17 @@ fn note_dispatch_writes(
         .as_ref()
         .map(|(surface, _)| (surface.base(), surface.bytes() as u64))
         .or(entry.stored);
+    entry.buffers = ranges
+        .iter()
+        .zip(read)
+        .map(|(&(at, bytes), before)| {
+            let lit = match before {
+                crate::dispatch::BufferBefore::Words(words) => Some(words.iter().any(|&w| w != 0)),
+                crate::dispatch::BufferBefore::Unread(_) => None,
+            };
+            (at, bytes, lit)
+        })
+        .collect();
 }
 
 /// What each translated program's dispatches wrote back this run, by its module's content hash.
@@ -1429,7 +1447,7 @@ pub fn dispatch_writes_by_module() -> Vec<(u64, DispatchWrites)> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(|(module, writes)| (*module, *writes))
+        .map(|(module, writes)| (*module, writes.clone()))
         .collect()
 }
 
@@ -2012,7 +2030,7 @@ impl GuestCp<'_> {
         note_dispatch_writes(
             prepared.module_hash,
             (&writes, &scattered, &buffer_fills),
-            &prepared.images,
+            (&prepared.images, &prepared.buffers, &buffers_before),
         );
         writes.keep();
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
@@ -6525,7 +6543,17 @@ mod tests {
             fetched_span: Some((0x7400_5b89_1000, 0x80_0000)),
             ..crate::pipeline::DispatchImages::default()
         };
-        note_dispatch_writes(module, (&zeros, &[quiet], &[fill]), &images);
+        // Two buffers read: one of zeros, one holding something; and one only stored to.
+        let read = [
+            BufferBefore::Words(vec![0, 0]),
+            BufferBefore::Words(vec![0, 5]),
+            BufferBefore::Unread(4),
+        ];
+        note_dispatch_writes(
+            module,
+            (&zeros, &[quiet], &[fill]),
+            (&images, &[(0x5000, 8), (0x6000, 8), (0x7000, 16)], &read),
+        );
         let found = |module| {
             dispatch_writes_by_module()
                 .into_iter()
@@ -6537,12 +6565,21 @@ mod tests {
         // Where its images lie, so a texture a draw reads can be matched to the program writing it.
         assert_eq!(first.fetched, Some((0x7400_5b89_1000, 0x80_0000)));
         assert_eq!(first.stored, None);
+        // What it read through its buffers: where, how much, and whether any of it is not zero.
+        assert_eq!(
+            first.buffers,
+            vec![
+                (0x5000, 8, Some(false)),
+                (0x6000, 8, Some(true)),
+                (0x7000, 16, None)
+            ]
+        );
         let mut lit = GuestWrites::default();
         lit.push(0x1000, &[0, 7]);
         note_dispatch_writes(
             module,
             (&lit, &[], &[]),
-            &crate::pipeline::DispatchImages::default(),
+            (&crate::pipeline::DispatchImages::default(), &[], &[]),
         );
         let both = found(module).expect("counted");
         assert_eq!((both.dispatches, both.bytes, both.lit), (2, 18, true));
