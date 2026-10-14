@@ -1320,6 +1320,11 @@ pub const HOST_PRIORITY: &str = "host_priority";
 /// integer from one to four; one for the guest's own (D862).
 pub const RENDER_SCALE: &str = "render_scale";
 
+/// How many seconds a measured run of a title records when the measurement names none, an integer:
+/// long enough to pass its start, where a title that loads for half a minute shows only a loading
+/// screen (D831).
+pub const PERF_SECONDS: &str = "perf_seconds";
+
 #[cfg(test)]
 mod tests {
     use super::{

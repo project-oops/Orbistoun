@@ -155,7 +155,7 @@ fn run_worker(
 /// `perf` - record a run of one title and rank where its time went.
 pub(crate) fn cmd_perf(
     path: Option<&Path>,
-    (seconds, top): (u64, usize),
+    (seconds, top): (Option<u64>, usize),
     input: Option<&Path>,
     (open, install): (bool, bool),
 ) -> Result<()> {
@@ -168,6 +168,7 @@ pub(crate) fn cmd_perf(
     let title = crate::common::title_id(path).unwrap_or_default();
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
+    let seconds = run_seconds(&title, seconds);
     let recorded = record(&tools, path, seconds, input, None)?;
     let text = format!(
         "{}  {} zones, {:.1} s recorded, {:.1} fps by the capture's own count\n\n{}",
@@ -187,6 +188,24 @@ pub(crate) fn cmd_perf(
     }
     Ok(())
 }
+
+/// How long a measured run of `title` records: `given`, else the title's own `perf_seconds`
+/// setting, else [`RUN_SECONDS`].
+fn run_seconds(title: &str, given: Option<u64>) -> u64 {
+    given
+        .or_else(|| {
+            orbistoun_overrides::Resolved::for_run(
+                title,
+                &orbistoun_paths::Paths::resolve().overrides_dir(),
+            )
+            .int(orbistoun_overrides::PERF_SECONDS)
+            .and_then(|seconds| u64::try_from(seconds).ok())
+        })
+        .unwrap_or(RUN_SECONDS)
+}
+
+/// How long a measured run records where nothing says otherwise.
+const RUN_SECONDS: u64 = 30;
 
 /// The pad script `title`'s compat record replays, when it has one.
 fn pad_script(title: &str) -> Option<PathBuf> {
@@ -256,7 +275,7 @@ impl BenchEntry {
 pub(crate) fn cmd_ab(
     path: &Path,
     (baseline, against): (Option<&Path>, Option<&str>),
-    (seconds, rounds, top): (u64, usize, usize),
+    (seconds, rounds, top): (Option<u64>, usize, usize),
     (input, warm_up): (Option<&Path>, bool),
 ) -> Result<()> {
     let built;
@@ -277,6 +296,7 @@ pub(crate) fn cmd_ab(
     let title = crate::common::title_id(path).unwrap_or_default();
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
+    let seconds = run_seconds(&title, seconds);
     // A build's first run after it was built fills the shader and pipeline caches its later runs
     // take from, and whichever went first would pay for it alone (NVRB00001: 4.3 fps cold, 7.2 and
     // 7.6 warm). Each runs once uncounted.
@@ -476,7 +496,7 @@ const GPU_BUSY_MOST: f64 = 35.0;
 /// `bench` - record every title in turn and rank the costs across them, against the last benchmark.
 pub(crate) fn cmd_bench(
     only: &[String],
-    (seconds, top): (u64, usize),
+    (every, top): (Option<u64>, usize),
     at: Option<&str>,
 ) -> Result<()> {
     let tools = tools(false)?;
@@ -526,6 +546,7 @@ pub(crate) fn cmd_bench(
             continue;
         }
         let input = pad_script(&id);
+        let seconds = run_seconds(&id, every);
         println!("{title}: recording {seconds} s");
         match record(
             &tools,
@@ -552,15 +573,32 @@ pub(crate) fn cmd_bench(
     Ok(())
 }
 
-/// The most recent benchmark kept in `dir`.
+/// Each title's most recent measurement among the benchmarks kept in `dir`.
 fn latest_bench(dir: &Path) -> Option<Vec<BenchEntry>> {
-    let latest = std::fs::read_dir(dir)
+    let mut kept: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .max()?;
-    serde_json::from_slice(&std::fs::read(latest).ok()?).ok()
+        .collect();
+    kept.sort();
+    // Each title's latest measurement, from whichever benchmark last measured it: a benchmark of
+    // one title is not every other title's last.
+    let mut latest: Vec<BenchEntry> = Vec::new();
+    for path in kept.iter().rev() {
+        let Some(entries) = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<BenchEntry>>(&bytes).ok())
+        else {
+            continue;
+        };
+        for entry in entries.into_iter().filter(|entry| entry.fps.is_some()) {
+            if !latest.iter().any(|kept| kept.title == entry.title) {
+                latest.push(entry);
+            }
+        }
+    }
+    (!latest.is_empty()).then_some(latest)
 }
 
 /// A benchmark as text: each title's frame rate and frame times beside the last benchmark's, then

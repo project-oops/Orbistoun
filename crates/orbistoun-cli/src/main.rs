@@ -335,9 +335,9 @@ enum Command {
     Perf {
         /// Path to a guest executable. Omit with `--install-tracy` to install the tools alone.
         path: Option<std::path::PathBuf>,
-        /// Seconds of the run to record.
-        #[arg(long, default_value_t = 30)]
-        seconds: u64,
+        /// Seconds of the run to record: the title's `perf_seconds` setting, else 30.
+        #[arg(long)]
+        seconds: Option<u64>,
         /// How many zones each ranking lists.
         #[arg(long, default_value_t = 15)]
         top: usize,
@@ -367,9 +367,9 @@ enum Command {
         /// the data root's `ab` directory from a clean export, and kept for the next comparison.
         #[arg(long)]
         against: Option<String>,
-        /// Seconds of each run to record.
-        #[arg(long, default_value_t = 30)]
-        seconds: u64,
+        /// Seconds of each run to record: the title's `perf_seconds` setting, else 30.
+        #[arg(long)]
+        seconds: Option<u64>,
         /// How many runs of each build.
         #[arg(long, default_value_t = 3)]
         rounds: usize,
@@ -391,9 +391,10 @@ enum Command {
     Bench {
         /// Only these titles, by their directory names.
         titles: Vec<String>,
-        /// Seconds of each title to record.
-        #[arg(long, default_value_t = 30)]
-        seconds: u64,
+        /// Seconds of each title to record, for every title; unset, each title's own
+        /// `perf_seconds` setting, else 30.
+        #[arg(long)]
+        seconds: Option<u64>,
         /// How many zones the ranking across titles lists.
         #[arg(long, default_value_t = 20)]
         top: usize,

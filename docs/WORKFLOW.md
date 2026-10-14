@@ -122,6 +122,13 @@ orbistoun-cli perf <module> [--seconds N]    # record a run with Tracy; frame ti
 orbistoun-cli perf <module> --open           # ... and open the recording in the Tracy viewer
 orbistoun-cli bench [title...] [--seconds N] # every title in turn, costs ranked across them, against the last bench
 orbistoun-cli bench --at HEAD                # ... of a revision's clean build, not this tree's
+```
+
+A measured run records 30 seconds, or a title's own `perf_seconds` setting where it needs longer to
+pass its start; `--seconds` sets every title's. Each title is compared with its own last
+measurement, from whichever benchmark took it.
+
+```bash
 orbistoun-cli ab <module> --baseline <exe>   # another build and this one, alternately; fps and the zones that moved
 orbistoun-cli ab <module> --against HEAD     # ... against a revision, built with Tracy from a clean export and kept
 ```
