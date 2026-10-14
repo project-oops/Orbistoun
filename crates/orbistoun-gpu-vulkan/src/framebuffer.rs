@@ -2380,8 +2380,33 @@ fn kept_textures() -> &'static std::sync::Mutex<KeptTextures> {
 }
 
 /// How many bytes of textures are kept before they are all released, with the pipelines whose sets
-/// point at them: a guest whose sampled render targets change every frame makes new ones each.
-const TEXTURE_BYTES_KEPT: vk::DeviceSize = 256 << 20;
+/// point at them: a guest whose sampled render targets change every frame makes new ones each. A
+/// quarter of the device's largest local heap, from a quarter to two gibibytes: a Unity title binds
+/// textures of tens of megabytes, and a fixed quarter gibibyte released and made them again every
+/// few draws (PPSA25872, 743 builds of 17 ms in 30 s; 24 -> 88 fps at a gibibyte).
+fn texture_bytes_kept(session: &crate::compute::Session) -> vk::DeviceSize {
+    static KEPT: std::sync::OnceLock<vk::DeviceSize> = std::sync::OnceLock::new();
+    *KEPT.get_or_init(|| {
+        // SAFETY: the physical device is the session's, valid for its life.
+        let properties = unsafe {
+            session
+                .instance
+                .get_physical_device_memory_properties(session.physical)
+        };
+        let largest = properties
+            .memory_heaps_as_slice()
+            .iter()
+            .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .map(|heap| heap.size)
+            .max()
+            .unwrap_or(0);
+        (largest / 4).clamp(TEXTURE_BYTES_KEPT_LEAST, TEXTURE_BYTES_KEPT_MOST)
+    })
+}
+
+/// The least and most [`texture_bytes_kept`] keeps.
+const TEXTURE_BYTES_KEPT_LEAST: vk::DeviceSize = 256 << 20;
+const TEXTURE_BYTES_KEPT_MOST: vk::DeviceSize = 2 << 30;
 
 /// What a texture is kept by: its texels' hash, taken once at its bind, with everything that makes
 /// the same texels a different image or sampler. `None` when its words carry no hash.
@@ -2430,25 +2455,40 @@ fn kept_texture(
 }
 
 /// Records `textures`' kept ones as copied in, once the copy has run.
-fn kept_uploaded(textures: &[Texture]) {
+///
+/// A kept texture's texels are on the device from then on, so its staging buffer is let go: kept
+/// textures hold up to [`texture_bytes_kept`] of the device, which their staging would hold again
+/// of the host.
+fn kept_uploaded(device: &ash::Device, textures: &[Texture]) {
     let mut kept = kept_textures()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for key in textures.iter().filter_map(|texture| texture.kept) {
-        if let Some(entry) = kept.textures.get_mut(&key) {
+        if let Some(entry) = kept.textures.get_mut(&key)
+            && !entry.1
+        {
             entry.1 = true;
+            let texture = &mut entry.0;
+            // SAFETY: created on this device for this texture; the copy out of it has run - the
+            // caller waited for the device - and no copy is made again, so nothing uses it. Its
+            // handles become null, which a later release destroys as nothing.
+            unsafe { device.destroy_buffer(texture.staging, None) };
+            // SAFETY: as above, and the buffer bound to it is destroyed.
+            unsafe { device.free_memory(texture.staging_memory, None) };
+            texture.staging = vk::Buffer::null();
+            texture.staging_memory = vk::DeviceMemory::null();
         }
     }
 }
 
-/// Releases every kept texture once they hold more than [`TEXTURE_BYTES_KEPT`], with every cached
+/// Releases every kept texture once they hold more than [`texture_bytes_kept`], with every cached
 /// pipeline, whose sets point at them, after the draws recorded so far have run. Called before a
 /// pipeline is built, so none is held outside the cache.
 fn make_room_for_textures(session: &crate::compute::Session) -> Result<(), DispatchError> {
     let mut kept = kept_textures()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if kept.bytes < TEXTURE_BYTES_KEPT {
+    if kept.bytes < texture_bytes_kept(session) {
         return Ok(());
     }
     settle(session)?;
@@ -5158,7 +5198,7 @@ fn render_resident_with(
                     open_storage_image(device, command, &built.storage_image);
                 }
             })?;
-            kept_uploaded(&built.textures);
+            kept_uploaded(device, &built.textures);
         }
         built.textures_uploaded = true;
     }
@@ -7251,7 +7291,7 @@ mod tests {
             first.shared && first.upload && again.upload,
             "not yet copied"
         );
-        super::kept_uploaded(&[first]);
+        super::kept_uploaded(&session.device, &[first]);
         let after = super::kept_texture(devices, key, words, sampling).expect("texture");
         assert_eq!(first.view, after.view);
         assert!(!after.upload, "copied in once");
