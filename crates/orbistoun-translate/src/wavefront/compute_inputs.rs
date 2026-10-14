@@ -89,24 +89,37 @@ impl ComputeInputs {
     ///
     /// # Errors
     ///
-    /// An empty group, a group wider than the wave (its waves would share a local data share one
-    /// invocation cannot), or a thread id count outside one to three.
-    pub fn check(self, lanes: u32) -> Result<(), TranslateError> {
+    /// An empty group, a group wider than the wave - its waves would share a local data share one
+    /// invocation cannot, and the refusal says what `program` shares between them - or a thread id
+    /// count outside one to three.
+    pub fn check(self, lanes: u32, program: GroupProgram) -> Result<(), TranslateError> {
         let threads = self.group_threads();
         if threads == 0 {
             return Err(refusal("a thread group of no threads"));
         }
         if threads > lanes {
-            return Err(refusal(concat!(
-                "a thread group larger than one wave: its waves share a local data share, and one ",
-                "translated invocation is one wave"
-            )));
+            return Err(TranslateError::WaveGroup {
+                threads,
+                waves: threads.div_ceil(lanes.max(1)),
+                barrier: program.barrier,
+                local_share: program.local_share,
+            });
         }
         if !(1..=3).contains(&self.thread_id_components) {
             return Err(refusal("a thread id of other than one to three components"));
         }
         Ok(())
     }
+}
+
+/// What a compute program shares between the waves of its group: whether it waits at `s_barrier`,
+/// and whether it reads or writes the local data share.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupProgram {
+    /// Whether it executes `s_barrier`.
+    pub barrier: bool,
+    /// Whether it uses the local data share (`ds_*`).
+    pub local_share: bool,
 }
 
 fn refusal(detail: &'static str) -> TranslateError {
@@ -359,7 +372,7 @@ impl DispatchState {
 
 #[cfg(test)]
 mod tests {
-    use super::ComputeInputs;
+    use super::{ComputeInputs, GroupProgram};
 
     fn inputs(threads: [u32; 3], components: u32) -> ComputeInputs {
         ComputeInputs {
@@ -376,14 +389,43 @@ mod tests {
     /// no components are refused.
     #[test]
     fn a_group_must_fit_one_wave() {
-        assert!(inputs([64, 1, 1], 1).check(64).is_ok());
-        assert!(inputs([8, 8, 1], 2).check(64).is_ok());
+        let plain = GroupProgram::default();
+        assert!(inputs([64, 1, 1], 1).check(64, plain).is_ok());
+        assert!(inputs([8, 8, 1], 2).check(64, plain).is_ok());
         assert!(
-            inputs([64, 1, 1], 1).check(32).is_err(),
+            inputs([64, 1, 1], 1).check(32, plain).is_err(),
             "wider than a wave32"
         );
-        assert!(inputs([0, 1, 1], 1).check(64).is_err());
-        assert!(inputs([64, 1, 1], 0).check(64).is_err());
-        assert!(inputs([64, 1, 1], 4).check(64).is_err());
+        assert!(inputs([0, 1, 1], 1).check(64, plain).is_err());
+        assert!(inputs([64, 1, 1], 0).check(64, plain).is_err());
+        assert!(inputs([64, 1, 1], 4).check(64, plain).is_err());
+    }
+
+    /// A group of more than one wave is refused saying how many waves it is and what its program
+    /// shares between them: whether it waits at `s_barrier` and whether it uses the local data
+    /// share - what running its waves together has to keep.
+    #[test]
+    fn a_group_of_waves_says_what_its_waves_share() {
+        let program = GroupProgram {
+            barrier: true,
+            local_share: true,
+        };
+        let refused = inputs([256, 1, 1], 1).check(64, program).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            concat!(
+                "a thread group of 256 threads is 4 waves, and one translated invocation is one ",
+                "wave; its program waits at s_barrier and uses the local data share"
+            )
+        );
+        let alone = GroupProgram::default();
+        let refused = inputs([8, 8, 2], 3).check(32, alone).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            concat!(
+                "a thread group of 128 threads is 4 waves, and one translated invocation is one ",
+                "wave; its program waits at no barrier and uses no local data share"
+            )
+        );
     }
 }

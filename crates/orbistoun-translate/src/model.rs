@@ -5205,7 +5205,7 @@ fn local_share_pair<M: Model + ?Sized>(
 }
 
 /// A local-data-share instruction's GDS bit, 17 of its first word on GFX10 (`aco_assembler.cpp:513`).
-const DS_GDS: u32 = 1 << 17;
+pub(crate) const DS_GDS: u32 = 1 << 17;
 
 /// The local-data-share accesses that merge into a word: `ds_write_b8 address, data offset` stores
 /// the data's low byte at its byte, `ds_read_u8 d, address offset` reads one byte zero-extended,

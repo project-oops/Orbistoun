@@ -174,6 +174,25 @@ pub enum TranslateError {
         offset: u32,
     },
 
+    /// A compute dispatch's thread group is more than one wave, and one translated invocation is
+    /// one wave; what its program shares between its waves is named, since that is what running
+    /// them together has to keep.
+    #[error(
+        "a thread group of {threads} threads is {waves} waves, and one translated invocation is one wave; its program {} and {}",
+        if *barrier { "waits at s_barrier" } else { "waits at no barrier" },
+        if *local_share { "uses the local data share" } else { "uses no local data share" }
+    )]
+    WaveGroup {
+        /// Threads in one group.
+        threads: u32,
+        /// Waves those threads are.
+        waves: u32,
+        /// Whether the program executes `s_barrier`.
+        barrier: bool,
+        /// Whether the program uses the local data share.
+        local_share: bool,
+    },
+
     /// An instruction this translator does not handle yet.
     ///
     /// Never silently skipped: a shader missing one instruction computes the wrong thing

@@ -5626,6 +5626,27 @@ pub fn exports_depth(decode: &Decode, encodings: &EncodingTable) -> bool {
     })
 }
 
+/// What a compute program shares between the waves of its group: whether any instruction is
+/// `s_barrier`, and whether any is a local data share access (`ds_*`, the GDS forms aside).
+#[must_use]
+pub fn group_program(decode: &Decode, encodings: &EncodingTable) -> compute_inputs::GroupProgram {
+    let mut program = compute_inputs::GroupProgram::default();
+    for instruction in &decode.instructions {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        match named {
+            Some("s_barrier") => program.barrier = true,
+            Some(name) if name.starts_with("ds_") && instruction.word & model::DS_GDS == 0 => {
+                program.local_share = true;
+            }
+            _ => {}
+        }
+    }
+    program
+}
+
 /// Whether a shader reads its quad's other lanes: any DPP16 form, which needs the quad
 /// capability and the subgroup index declared before the entry point is.
 #[must_use]
@@ -5801,7 +5822,7 @@ pub fn translate_with_user_data(
         inputs.seeded()?;
     }
     if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
-        inputs.check(width.lanes())?;
+        inputs.check(width.lanes(), group_program(decode, encodings))?;
     }
     // A primitive shader that exports its entry `v0` was compiled for passthrough, whatever the
     // stream wrote (D759).
