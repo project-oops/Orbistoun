@@ -767,6 +767,10 @@ pub(crate) fn allocate(size: usize, align: usize) -> u64 {
         FILLED_HEAP_BYTES.fetch_add(size as u64, std::sync::atomic::Ordering::Relaxed);
     }
     let body = body as usize as u64;
+    live_blocks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(body, size.max(1) as u64);
     if align as u64 >= orbistoun_core::GUEST_PAGE_SIZE {
         if let Ok(mut blocks) = page_blocks().lock() {
             blocks.insert(
@@ -779,6 +783,32 @@ pub(crate) fn allocate(size: usize, align: usize) -> u64 {
         }
     }
     body
+}
+
+/// Every live heap block `malloc` and its family handed out, by where it starts, to the bytes asked
+/// for: what the command processor may read and write besides the kernel's mappings (D846).
+fn live_blocks() -> &'static std::sync::Mutex<std::collections::BTreeMap<u64, u64>> {
+    static LIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeMap<u64, u64>>> =
+        std::sync::OnceLock::new();
+    LIVE.get_or_init(Default::default)
+}
+
+/// Whether `[address, address + len)` lies wholly inside one live heap block (D846).
+///
+/// A title hands the GPU memory it allocated on its heap - a fence, a label - and on the console its
+/// GPU writes there. This heap is the host's, outside every mapping the kernel records, so the
+/// command processor asks here before it reads or writes one.
+#[must_use]
+pub fn heap_block_holds(address: u64, len: u64) -> bool {
+    let Some(end) = address.checked_add(len) else {
+        return false;
+    };
+    live_blocks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .range(..=address)
+        .next_back()
+        .is_some_and(|(&start, &size)| end <= start.saturating_add(size))
 }
 
 /// A live block aligned to the guest page size: the only kind whose pages it owns outright, so the
@@ -980,6 +1010,10 @@ pub(crate) fn free(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         return 0;
     }
     release_page_block(pointer);
+    live_blocks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&pointer);
     // A block from an mspace created over a base carries no header: its arena keeps its length.
     if mspace::release(pointer) {
         return 0;
@@ -4416,6 +4450,19 @@ mod tests {
             "the old contents must survive"
         );
         call("free", [bigger, 0, 0, 0, 0, 0]);
+    }
+
+    /// A live heap block is one the command processor may reach, wholly inside it only, and a freed
+    /// one is not (D846).
+    #[test]
+    fn a_live_heap_block_is_reachable_until_freed() {
+        let block = call("malloc", [64, 0, 0, 0, 0, 0]);
+        assert_ne!(block, 0);
+        assert!(super::heap_block_holds(block, 64));
+        assert!(super::heap_block_holds(block + 16, 8));
+        assert!(!super::heap_block_holds(block + 60, 8), "past its end");
+        call("free", [block, 0, 0, 0, 0, 0]);
+        assert!(!super::heap_block_holds(block, 8), "freed");
     }
 
     #[test]

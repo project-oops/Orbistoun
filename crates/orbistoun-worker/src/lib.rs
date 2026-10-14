@@ -1299,9 +1299,17 @@ fn install_guest_region_lookups() {
     // every mapping the guest holds when it submits. Not the direct-memory map, whose spans are
     // physical and start at zero - the guest reaches them only where it mapped them, and taking
     // them as addresses made the null page readable.
-    orbistoun_gpu::agc_driver::install_region_lookup(orbistoun_kernel::is_guest_readable);
+    // And a live block on the guest's heap, which the console's GPU reaches as it reaches any of
+    // the title's memory (D846).
+    orbistoun_gpu::agc_driver::install_region_lookup(|address, len| {
+        orbistoun_kernel::is_guest_readable(address, len)
+            || orbistoun_libc::heap_block_holds(address, len)
+    });
     // Where the command processor may write: a fill, a copy, a fence.
-    orbistoun_gpu::agc_driver::install_write_lookup(orbistoun_kernel::is_guest_writable);
+    orbistoun_gpu::agc_driver::install_write_lookup(|address, len| {
+        orbistoun_kernel::is_guest_writable(address, len)
+            || orbistoun_libc::heap_block_holds(address, len)
+    });
     orbistoun_gpu::agc_driver::install_queue_registration(
         orbistoun_video::queued::register_end_of_pipe,
     );
