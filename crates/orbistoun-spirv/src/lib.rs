@@ -489,6 +489,9 @@ pub mod built_in {
     /// This invocation's index within its subgroup: the guest's lane number when one invocation is
     /// one lane.
     pub const SUBGROUP_LOCAL_INVOCATION_ID: u32 = 41;
+    /// Which subgroup of its workgroup this invocation is in: the guest's wave, where a dispatch's
+    /// waves are subgroups (D884).
+    pub const SUBGROUP_ID: u32 = 40;
     /// This invocation's index within its workgroup, flattened: the guest's lane number when one
     /// invocation is one lane and the wave is wider than a subgroup.
     pub const LOCAL_INVOCATION_INDEX: u32 = 29;

@@ -445,7 +445,7 @@ fn stage_strategy(strategy: Strategy, stage: Stage, widths: WaveWidths) -> (Stra
 }
 
 /// Distinguishes a primitive shader run one invocation per lane (D760), and the subgroup it runs on,
-/// in the cache key.
+/// in the cache key; for a dispatch, the subgroup its masks may be made by (D884).
 const fn per_lane_salt(subgroup: Option<u32>) -> u64 {
     match subgroup {
         Some(width) => 0x5045_524c_414e_4500 ^ width as u64,
@@ -2004,7 +2004,9 @@ impl Pipeline {
             compute: Some(inputs),
             geometry: None,
             window_space: WindowSpace::Clip,
-            per_invocation: None,
+            // The host's subgroup, which a program reading a mask whole makes its masks by where
+            // it holds the wave (D884); the translation decides whether it runs per lane at all.
+            per_invocation: crate::host_subgroup(),
             // Its buffers are bound on their own where traced (D746).
             draw_buffers: true,
             buffer_formats: formats,
@@ -2056,12 +2058,14 @@ impl Pipeline {
             ^ u64::from(state.vertex_streamout) << 61
             // A streamout wave's first vertex is compiled in (D861).
             ^ u64::from(inputs.first_thread).rotate_left(36)
-            ^ local_words_salt(state.local_words);
+            ^ local_words_salt(state.local_words)
+            ^ per_lane_salt(user_data.per_invocation);
         Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()
         } else {
             // The cheapest model the program runs exactly in: one invocation per lane where it
-            // never meets its wave, else the whole wave in one (D880).
+            // never meets its wave (D880) or meets it only through masks its lanes can exchange
+            // (D884), else the whole wave in one.
             let strategy = Strategy::Predicated {
                 fidelity: orbistoun_translate::Fidelity::Auto,
                 width: state.width,

@@ -16,6 +16,8 @@
 //!
 //! The clear never meets its wave, so it runs both ways: the whole wave in one invocation, and one
 //! invocation per lane (D880). Every test that runs it runs both and holds each to the same words.
+//! So does the clear with a branch on its execution mask, which runs per lane with every lane's
+//! bits made by ballot or through workgroup memory (D884).
 
 use orbistoun_gpu_vulkan::compute::{Availability, probe};
 use orbistoun_gpu_vulkan::compute_images::DispatchImages;
@@ -90,12 +92,36 @@ fn translated_with(
     translated_program(&CLEAR, (unwritten, partial, threads), per_lane)
 }
 
+/// The device's subgroup width, which a module run per lane makes its whole masks by where it holds
+/// the wave (D884); zero where there is no device.
+fn host_subgroup() -> u32 {
+    match probe() {
+        Availability::Available { properties } => properties.subgroup_size,
+        Availability::Unavailable { .. } => 0,
+    }
+}
+
 /// `program`, translated for groups of `threads`, the last perhaps partial, with the user-data words
-/// in `unwritten` marked as never written; one invocation per lane where `per_lane` (D880).
+/// in `unwritten` marked as never written; one invocation per lane where `per_lane` (D880), on the
+/// device's subgroup.
 fn translated_program(
     program: &[u32],
-    (unwritten, partial, threads): (u32, Option<PartialGroups>, [u32; 3]),
+    shape: (u32, Option<PartialGroups>, [u32; 3]),
     per_lane: bool,
+) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
+    translated_for(
+        program,
+        shape,
+        (per_lane.then(host_subgroup), Width::Wave64),
+    )
+}
+
+/// [`translated_program`] in waves of `width`, one invocation per lane where `subgroup` is the host's
+/// subgroup width to run on (zero where it is not known).
+fn translated_for(
+    program: &[u32],
+    (unwritten, partial, threads): (u32, Option<PartialGroups>, [u32; 3]),
+    (subgroup, width): (Option<u32>, Width),
 ) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
@@ -104,7 +130,7 @@ fn translated_program(
     translate_with_user_data(
         &decoded,
         &encodings,
-        Width::Wave64,
+        width,
         (Stage::Compute, MeshPrimitive::default()),
         Window::spanning_address(WINDOW, WINDOW_WORDS).expect("a window"),
         UserData {
@@ -120,7 +146,7 @@ fn translated_program(
                 integer_images: [false; 2],
                 first_thread: 0,
             }),
-            per_invocation: per_lane.then_some(64),
+            per_invocation: subgroup,
             ..UserData::default()
         },
     )
@@ -207,19 +233,154 @@ fn a_per_lane_bit_selects_as_the_whole_wave_does() {
     }
 }
 
-/// A program that reads a mask whole is refused one invocation per lane, naming why: `s_cbranch_vccz`
-/// branches on every lane's bit (D880).
+/// A program that reads a mask whole runs one invocation per lane where its lanes can exchange the
+/// mask - a subgroup that holds the wave, or a group of one wave - and is refused, naming why, in a
+/// group of several waves on a narrower subgroup (D884): `s_cbranch_vccz` branches on every lane's
+/// bit.
 #[test]
-fn a_program_reading_a_mask_whole_is_refused_per_lane() {
+fn a_program_reading_a_mask_whole_is_refused_only_across_waves() {
     // s_cbranch_vccz +0; s_endpgm.
-    let refused = translated_program(&[0xbf86_0000, 0xbf81_0000], (0, None, [64, 1, 1]), true)
+    let program = [0xbf86_0000, 0xbf81_0000];
+    let refused = translated_for(&program, (0, None, [128, 1, 1]), (Some(32), Width::Wave64))
         .expect_err("refused")
         .to_string();
     assert!(refused.contains("lane mask whole"), "{refused}");
+    for (threads, subgroup, width) in [
+        (64, Some(32), Width::Wave64),
+        (64, Some(0), Width::Wave64),
+        (128, Some(64), Width::Wave64),
+        (128, Some(32), Width::Wave32),
+    ] {
+        assert!(
+            translated_for(&program, (0, None, [threads, 1, 1]), (subgroup, width)).is_ok(),
+            "{threads} threads of {width:?} on a subgroup of {subgroup:?}"
+        );
+    }
     assert!(
-        translated_program(&[0xbf86_0000, 0xbf81_0000], (0, None, [64, 1, 1]), false).is_ok(),
+        translated_for(&program, (0, None, [128, 1, 1]), (None, Width::Wave64)).is_ok(),
         "the whole wave runs it"
     );
+}
+
+/// The clear, with each thread past `threshold` storing as its first word how many of its wave's
+/// threads are, by a branch on the execution mask: `v_cmp_lt_u32 vcc, threshold, v0` after the
+/// thread id is formed, `s_and_saveexec s20, vcc`, `s_cbranch_execz` over `s_bcnt1_i32_b64 s22`
+/// of the mask and `v_mov_b32 v4, s22`, and the mask restored by `s_or exec, exec, s20`. A wave
+/// none of whose threads passes the threshold takes the branch. The saved mask, the branch and the
+/// count read the mask whole (D884): a lane holding only its own bit would count one. A wave of 32
+/// counts its mask copied to `s24` beside a zero `s25`, there being no 32-bit count.
+fn branching_clear(width: Width, threshold: u32) -> Vec<u32> {
+    // Scalar operand codes: vcc_lo, exec_lo, and the inline zero; an inline integer n is 128 + n.
+    const VCC_LO: u32 = 106;
+    const EXEC_LO: u32 = 126;
+    const ZERO: u32 = 128;
+    // Where the count lands.
+    const COUNT: u32 = 22;
+    // SOP1 and SOP2: sdst at bit 16, ssrc1 at 8, ssrc0 at 0.
+    let scalar = |name: &str, (sdst, ssrc1, ssrc0): (u32, u32, u32)| {
+        encoded(name, (sdst << 16) | (ssrc1 << 8) | ssrc0)
+    };
+    // VOPC: vsrc1 at bit 9, src0 at 0.
+    let compare = encoded("v_cmp_lt_u32_e32", ZERO + threshold);
+    let (save, block, restore) = match width {
+        Width::Wave64 => (
+            "s_and_saveexec_b64",
+            vec![scalar("s_bcnt1_i32_b64", (22, 0, EXEC_LO))],
+            "s_or_b64",
+        ),
+        Width::Wave32 => (
+            "s_and_saveexec_b32",
+            vec![
+                scalar("s_mov_b32", (24, 0, EXEC_LO)),
+                scalar("s_mov_b32", (25, 0, ZERO)),
+                scalar("s_bcnt1_i32_b64", (22, 0, 24)),
+            ],
+            "s_or_b32",
+        ),
+    };
+    let mut program = CLEAR[..2].to_vec();
+    program.push(compare);
+    program.extend_from_slice(&CLEAR[2..6]);
+    program.push(scalar(save, (20, 0, VCC_LO)));
+    program.push(encoded("s_cbranch_execz", block.len() as u32 + 1));
+    program.extend(block);
+    // VOP1: vdst at bit 17, src0 at 0.
+    program.extend([
+        encoded("v_mov_b32_e32", (4 << 17) | COUNT),
+        scalar(restore, (EXEC_LO, 20, EXEC_LO)),
+    ]);
+    program.extend_from_slice(&CLEAR[6..]);
+    program
+}
+
+/// A program that branches on its execution mask stores, run per lane, what the whole wave stores
+/// (D884): in waves of 64, a group of one wave whose mask is made through workgroup memory where the
+/// subgroup is narrower; in waves of 32, two waves to a group of 64, each wave a subgroup whose
+/// ballot is its mask. A threshold of 63 leaves the first group's waves no thread past it, so they
+/// take the branch; a partial last group of 37 threads seeds its mask from its lanes too.
+#[test]
+fn a_branch_on_the_execution_mask_runs_per_lane_as_the_whole_wave_does() {
+    if !device_or_skip("guest clear, branching on the execution mask") {
+        return;
+    }
+    let subgroup = host_subgroup();
+    for width in [Width::Wave64, Width::Wave32] {
+        for threshold in [31, 63] {
+            for partial_threads in [None, Some(37)] {
+                let partial = partial_threads.map(|threads| PartialGroups {
+                    last: [1, 0, 0],
+                    threads: [threads, 1, 1],
+                });
+                let mut push = user_data(WINDOW, 2 * 64 * 16);
+                if let Some(partial) = partial {
+                    push.resize(
+                        orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize,
+                        0,
+                    );
+                    push.extend(partial.push_words());
+                }
+                let mut results = Vec::new();
+                for (model, per_lane) in MODELS {
+                    let case = format!("{model}, {width:?}, past {threshold}, {partial_threads:?}");
+                    let module = translated_for(
+                        &branching_clear(width, threshold),
+                        (0, partial, [64, 1, 1]),
+                        (per_lane.then_some(subgroup), width),
+                    )
+                    .unwrap_or_else(|e| panic!("{case}: {e}"));
+                    let before = vec![BEFORE; WINDOW_WORDS as usize];
+                    let done = dispatch_guest(
+                        &module,
+                        &before,
+                        (&push, [2, 1, 1]),
+                        &DispatchImages::default(),
+                    )
+                    .expect("dispatched");
+                    assert!(!done.escaped, "{case}");
+                    let threads = 64 + partial_threads.unwrap_or(64) as usize;
+                    let lanes = if width == Width::Wave64 { 64 } else { 32 };
+                    // How many of a wave's running threads are past the threshold.
+                    let past = |thread: usize| {
+                        let first = thread / lanes * lanes;
+                        (first..first + lanes)
+                            .filter(|&t| t < threads && t > threshold as usize)
+                            .count() as u32
+                    };
+                    for (index, &word) in done.memory.iter().enumerate() {
+                        let thread = index / 4;
+                        let expected = match (thread, index % 4) {
+                            (t, _) if t >= threads => BEFORE,
+                            (t, 0) if t > threshold as usize => past(t),
+                            (_, component) => VALUE[component],
+                        };
+                        assert_eq!(word, expected, "{case}: word {index}");
+                    }
+                    results.push(done.memory);
+                }
+                assert_eq!(results[0], results[1], "both ways leave the same memory");
+            }
+        }
+    }
 }
 
 /// The user-data block: words 4-7 the value, 8-11 a raw descriptor at `base` of `records` bytes.

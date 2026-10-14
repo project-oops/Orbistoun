@@ -17,6 +17,7 @@ use orbistoun_spirv::{
 };
 
 use crate::buffer;
+use crate::lane_exact::LaneMasks;
 use crate::model::{self, Model};
 use crate::predicated::{MEMORY_WORDS, OBSERVED_REGISTERS, OBSERVED_WORDS, REGISTER_COUNT};
 use crate::{TranslateError, Width};
@@ -496,6 +497,10 @@ pub struct UserData {
     /// its lanes read by subgroup ballot and shuffle where the subgroup holds the whole wave, and
     /// through workgroup memory between barriers where it does not. `None` simulates the whole wave
     /// in one invocation.
+    ///
+    /// A guest dispatch's is the same: run one invocation per lane (D880) on a subgroup this wide,
+    /// zero where the host's subgroup is not known. Its program's needs decide how its masks are
+    /// held ([`crate::lane_exact::lane_masks`], D884).
     #[serde(default)]
     pub per_invocation: Option<u32>,
     /// Whether a draw binds the buffers this stage's shader reads through (D733). With it every
@@ -1878,17 +1883,26 @@ fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
 /// Whether a module for `stage` runs one invocation per lane (D760) - the wave's width, and whether
 /// its lanes exchange through workgroup memory because the host's subgroup is narrower - and how
 /// many lanes the per-lane loops run: one then, else the lanes one invocation simulates. A guest
-/// dispatch run per lane exchanges nothing (D880).
+/// dispatch run per lane exchanges through workgroup memory only where its `masks` say (D880,
+/// D884).
 fn lanes_per_invocation(
     stage: Stage,
     width: Width,
     user_data: &UserData,
+    masks: Option<LaneMasks>,
 ) -> (Option<(u32, bool)>, u32) {
     let dispatch = stage == Stage::Compute && user_data.compute.is_some();
     let per_lane = user_data
         .per_invocation
         .filter(|_| stage == Stage::Mesh || dispatch)
-        .map(|subgroup| (width.lanes(), !dispatch && subgroup < width.lanes()));
+        .map(|subgroup| {
+            let exchanges = if dispatch {
+                masks == Some(LaneMasks::Exchange)
+            } else {
+                subgroup < width.lanes()
+            };
+            (width.lanes(), exchanges)
+        });
     let modelled = if per_lane.is_some() {
         1
     } else {
@@ -1906,33 +1920,45 @@ type DrawBuffersDeclared = (buffer::DrawBufferArray, BTreeMap<u32, u32>);
 struct PerLane {
     input: Id,
     exchange: Option<(Id, Id)>,
+    /// The `SubgroupId` input, where a guest dispatch's group of several waves makes its masks by
+    /// ballot: each wave is a subgroup (D884).
+    subgroup: Option<Id>,
 }
 
 impl PerLane {
     /// Declares them for a wave of `lanes`, exchanging where `exchanges`; `element` is the workgroup
     /// word pointer type the local data share declared. `by_index` takes the lane from the
     /// invocation's place in its workgroup though nothing is exchanged: a guest dispatch's, whose
-    /// workgroup may be several waves (D880).
+    /// workgroup may be several waves (D880) - unless `by_subgroup`, where its waves are subgroups
+    /// whose ballots are its masks (D884).
     fn declare(
         b: &mut Builder,
         (u32_type, element): (Id, Id),
         (lanes, exchanges): (u32, bool),
-        by_index: bool,
+        (by_index, by_subgroup): (bool, bool),
     ) -> Self {
         Self {
             input: declare_lane_input(b, u32_type, exchanges || by_index),
             exchange: exchanges.then(|| declare_exchange(b, (u32_type, element), lanes)),
+            subgroup: by_subgroup.then(|| declare_subgroup_id(b, u32_type)),
         }
     }
 
     /// The variables the entry point names.
     fn interface(&self) -> Vec<u32> {
-        let mut variables = vec![self.input.0];
+        let mut variables = self.inputs();
         variables.extend(
             self.exchange
                 .iter()
                 .flat_map(|(mask, lanes)| [mask.0, lanes.0]),
         );
+        variables
+    }
+
+    /// The inputs alone, which a module below SPIR-V 1.4 names and no other variable.
+    fn inputs(&self) -> Vec<u32> {
+        let mut variables = vec![self.input.0];
+        variables.extend(self.subgroup.map(|input| input.0));
         variables
     }
 
@@ -1961,10 +1987,24 @@ fn declare_lane_input(b: &mut Builder, u32_type: Id, exchange: bool) -> Id {
     variable
 }
 
+/// Declares the `SubgroupId` built-in input: which subgroup of its workgroup an invocation is in.
+fn declare_subgroup_id(b: &mut Builder, u32_type: Id) -> Id {
+    let pointer = b.id();
+    let variable = b.id();
+    b.annotate(
+        op::DECORATE,
+        &[variable.0, decoration::BUILT_IN, built_in::SUBGROUP_ID],
+    );
+    b.declare(op::TYPE_POINTER, &[pointer.0, INPUT, u32_type.0]);
+    b.declare(op::VARIABLE, &[pointer.0, variable.0, INPUT]);
+    variable
+}
+
 /// This invocation's lane when each invocation is one lane, and - for a guest dispatch whose group
 /// is several waves of `width` run one invocation per lane (D880) - the first lane of its wave as a
 /// place in its group: the invocation's place is the input, its lane that place's low bits, and its
-/// wave's start the place less the lane.
+/// wave's start the place less the lane. Where its waves are subgroups (D884), its lane is its place
+/// in its subgroup and its wave's start its subgroup's number times the width.
 fn lane_and_wave(
     b: &mut Builder,
     u32_type: Id,
@@ -1977,6 +2017,14 @@ fn lane_and_wave(
     let Some(width) = width else {
         return (Some(index), None);
     };
+    if let Some(subgroup) = lane.and_then(|lane| lane.subgroup) {
+        let (number, wide) = (b.id(), b.id());
+        b.function(op::LOAD, &[u32_type.0, number.0, subgroup.0]);
+        b.declare(op::CONSTANT, &[u32_type.0, wide.0, width]);
+        let base = b.id();
+        b.function(op::IMUL, &[u32_type.0, base.0, number.0, wide.0]);
+        return (Some(index), Some(base));
+    }
     let low_bits = b.id();
     b.declare(op::CONSTANT, &[u32_type.0, low_bits.0, width - 1]);
     let lane = b.id();
@@ -2067,6 +2115,9 @@ pub struct Wavefront<'a> {
     /// The first lane of this invocation's wave, as a place in its group, where a guest dispatch's
     /// group of several waves runs one invocation per lane (D880).
     wave_base: Option<Id>,
+    /// How a guest dispatch run one invocation per lane holds its masks (D880, D884); `None` for
+    /// every other module.
+    lane_masks: Option<LaneMasks>,
     /// A fragment module that reads its quad's other lanes: this invocation's index in its
     /// subgroup, whose low two bits are its place in its quad. `None` everywhere else.
     quad_invocation: Option<Id>,
@@ -2643,13 +2694,15 @@ fn declare_user_data_source(
 
 /// What a module is prepared against beside its stage: the guest-memory window, the user data,
 /// the draw buffers it reads, whether it exports depth ([`exports_depth`]), whether it reads
-/// its quad's other lanes ([`reads_quad`]), the colour targets it exports to, and whether it
-/// exports a layer ([`exports_layer`]).
+/// its quad's other lanes ([`reads_quad`]), the colour targets it exports to, whether it
+/// exports a layer ([`exports_layer`]), and how a guest dispatch run per lane holds its masks
+/// ([`crate::lane_exact::lane_masks`]).
 type StageContext<'b> = (
     Window,
     UserData,
     &'b crate::draw_buffers::DrawBuffers,
     (bool, bool, u8, (bool, bool)),
+    Option<LaneMasks>,
 );
 
 impl Wavefront<'_> {
@@ -2726,6 +2779,7 @@ impl<'a> Wavefront<'a> {
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
                 (false, false, 0, (false, false)),
+                None,
             ),
         )
     }
@@ -2742,7 +2796,7 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data, buffers, (writes_depth, reads_quad, colour_targets, layered)): StageContext<
+        (window, user_data, buffers, (writes_depth, reads_quad, colour_targets, layered), masks): StageContext<
             '_,
         >,
     ) -> Self {
@@ -2766,7 +2820,9 @@ impl<'a> Wavefront<'a> {
         let clip_mask = model::exported_clip_distances(user_data.position_vectors);
         let mesh_reserved = MeshReserved::new(&mut b, stage, parameters, (layered, clip_mask));
         let layered = layered.0;
-        let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
+        let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data, masks);
+        let lane_masks = per_lane.and(masks).filter(|_| stage == Stage::Compute);
+        let ballots = lane_masks == Some(LaneMasks::Ballot);
         // A guest dispatch's group runs as one invocation per wave (D858).
         let waves = user_data
             .compute
@@ -2804,9 +2860,18 @@ impl<'a> Wavefront<'a> {
                 &mut b,
                 (u32_type, ids.local_ptr),
                 shape,
-                stage == Stage::Compute,
+                (stage == Stage::Compute && !ballots, ballots && waves > 1),
             )
         });
+        // A guest dispatch whose waves are subgroups makes its masks by their ballots (D884).
+        if ballots {
+            for needed in [
+                capability::GROUP_NON_UNIFORM,
+                capability::GROUP_NON_UNIFORM_BALLOT,
+            ] {
+                b.header(op::CAPABILITY, &[needed]);
+            }
+        }
         // A fragment module that reads its quad's other lanes reads them as the host's quad
         // neighbours, and finds its own place in the quad from its subgroup index.
         let quad_input = (stage == Stage::Fragment && reads_quad).then(|| {
@@ -2855,9 +2920,11 @@ impl<'a> Wavefront<'a> {
                 .flat_map(compute_inputs::DispatchState::interface),
         );
         interface.extend(quad_input.map(|input| input.0));
-        // A guest dispatch run one invocation per lane reads its lane (D880).
+        // A guest dispatch run one invocation per lane reads its lane (D880), and its subgroup
+        // where its waves are subgroups (D884). Its exchange is workgroup memory, which a module
+        // below SPIR-V 1.4 does not name.
         if stage == Stage::Compute {
-            interface.extend(lane_ids.iter().flat_map(PerLane::interface));
+            interface.extend(lane_ids.iter().flat_map(PerLane::inputs));
         }
         // The block the user clip planes arrive in (D857).
         interface.extend(mesh.as_ref().map(|mesh| mesh.plane_block.0.0));
@@ -2881,6 +2948,7 @@ impl<'a> Wavefront<'a> {
         let mut this = Self {
             invocation,
             wave_base,
+            lane_masks,
             quad_invocation: quad_input.map(|input| {
                 let loaded = b.id();
                 b.function(op::LOAD, &[u32_type.0, loaded.0, input.0]);
@@ -4896,9 +4964,10 @@ impl Model for Wavefront<'_> {
         let Some(invocation) = self.invocation else {
             return model::constant_lane_bit(self, halves, lane, condition);
         };
-        // A guest dispatch run per lane holds only its own lane's bits: its program reads no mask
-        // whole, only each lane its own bit (D880).
-        if self.stage == Stage::Compute {
+        // A guest dispatch run per lane holds only its own lane's bits where its program reads no
+        // mask whole, only each lane its own bit (D880); one that reads a mask whole makes every
+        // lane's, by ballot or exchange as a primitive shader does (D884).
+        if self.lane_masks == Some(LaneMasks::Own) {
             return self.own_lane_bit(halves, invocation, condition);
         }
         if let Some((mask, _)) = self.exchange {
@@ -6659,21 +6728,7 @@ pub fn translate_with_user_data(
     if let (Stage::Fragment, Some(inputs)) = (stage, user_data.pixel_inputs) {
         inputs.seeded()?;
     }
-    if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
-        inputs.check(width.lanes(), group_program(decode, encodings))?;
-        // One invocation per lane is exact only for a program that never meets its wave (D880).
-        if user_data.per_invocation.is_some()
-            && let Some(&(need, offset, _)) =
-                crate::lane_exact::lane_needs(decode, encodings, width.lanes())
-                    .needs
-                    .first()
-        {
-            return Err(TranslateError::Unsupported {
-                offset,
-                detail: crate::lane_exact::refusal(need),
-            });
-        }
-    }
+    let masks = dispatch_masks(decode, encodings, (stage, width), &user_data)?;
     // A primitive shader that exports its entry `v0` was compiled for passthrough, whatever the
     // stream wrote (D759).
     let mut user_data = user_data;
@@ -6738,6 +6793,7 @@ pub fn translate_with_user_data(
                                 && exports_point_size(decode, encodings)),
                 ),
             ),
+            masks,
         ),
     );
     module.descriptor_loads = descriptor_table_loads(decode, encodings, user_data.first_register);
@@ -6745,6 +6801,44 @@ pub fn translate_with_user_data(
     let sources = module.image_sources();
     let (words, translated) = module.finish()?;
     Ok((words, translated, sources))
+}
+
+/// A guest dispatch's entry state checked against its program, and - run one invocation per lane on
+/// the subgroup its `per_invocation` gives - how it holds its masks (D880, D884). `None` for any
+/// other module, and for a dispatch that keeps the whole wave in one invocation.
+fn dispatch_masks(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (stage, width): (Stage, Width),
+    user_data: &UserData,
+) -> Result<Option<LaneMasks>, TranslateError> {
+    let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) else {
+        return Ok(None);
+    };
+    inputs.check(width.lanes(), group_program(decode, encodings))?;
+    let Some(subgroup) = user_data.per_invocation else {
+        return Ok(None);
+    };
+    // One invocation per lane is exact only for a program that never meets its wave (D880), or
+    // meets it only through masks its lanes can exchange (D884).
+    let needs = crate::lane_exact::lane_needs(decode, encodings, width.lanes());
+    let held = crate::lane_exact::lane_masks(
+        &needs,
+        width.lanes(),
+        Some(subgroup).filter(|&lanes| lanes != 0),
+        inputs.waves(width.lanes()),
+    );
+    held.map(Some)
+        .map_err(|detail| TranslateError::Unsupported {
+            // The need that refused it: any but a whole mask before one.
+            offset: needs
+                .needs
+                .iter()
+                .find(|(need, _, _)| *need != crate::lane_exact::LaneNeed::WholeMask)
+                .or_else(|| needs.needs.first())
+                .map_or(0, |&(_, offset, _)| offset),
+            detail,
+        })
 }
 
 #[cfg(test)]

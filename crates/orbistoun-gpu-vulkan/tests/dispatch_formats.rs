@@ -250,20 +250,53 @@ const TITLE_WORD3: u32 = 0x0001_4004;
 const CONSTANTS_WORD3: u32 = 0x0004_dfac;
 const CONSTANTS: u64 = 0x4_1a60_0000;
 
-#[test]
-fn the_titles_formatted_fill_runs_as_its_program_says() {
-    // The fill reads `vcc_lo` as a value - a lane mask whole - so it keeps the whole wave in one
-    // invocation (D880).
-    match probe() {
-        Availability::Available { properties } => println!("device: {}", properties.device),
+/// PPSA25872's buffer copy, word for word: the thread's index is `s12` times 64 plus its lane; a
+/// thread at or past the count in the constant buffer's third word drops out (`v_cmpx_gt_u32`, with
+/// `s_cbranch_execz` past the copy); the rest load element `index` plus the constant buffer's second
+/// word and store it at `index` plus its first.
+const OFFSET_COPY: [u32; 19] = [
+    0xbfa0_0001, // s_inst_prefetch 0x1
+    0xd746_0001, // v_lshl_add_u32 v1, s12, 6, v0
+    0x0401_0c0c,
+    0xf420_1a84, // s_buffer_load_dword vcc_lo, s[8:11], 0x8
+    0xfa00_0008,
+    0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+    0x7da8_026a, // v_cmpx_gt_u32_e32 vcc_lo, v1
+    0xbf88_000a, // s_cbranch_execz 10
+    0xf424_1a84, // s_buffer_load_dwordx2 vcc, s[8:11], null
+    0xfa00_0000,
+    0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+    0x4a00_026b, // v_add_nc_u32_e32 v0, vcc_hi, v1
+    0x4a02_026a, // v_add_nc_u32_e32 v1, vcc_lo, v1
+    0xe000_2000, // buffer_load_format_x v0, v0, s[0:3], 0 idxen
+    0x8000_0000,
+    0xbf8c_3f70, // s_waitcnt vmcnt(0)
+    0xe010_2000, // buffer_store_format_x v0, v1, s[4:7], 0 idxen
+    0x8001_0001,
+    0xbf81_0000, // s_endpgm
+];
+
+/// The destination a title's program over a constant buffer, a source and a destination of 128
+/// elements leaves, run over two groups of 64: the whole wave in one invocation, or one invocation
+/// per lane on the device's subgroup (D884). `None` where there is no device.
+fn run_titles_program(
+    program: &[u32],
+    (constants, source): (&[u32], &[u32]),
+    per_lane: bool,
+) -> Option<Vec<u32>> {
+    let subgroup = match probe() {
+        Availability::Available { properties } => {
+            println!("device: {}", properties.device);
+            properties.subgroup_size
+        }
         Availability::Unavailable { reason } => {
             println!("SKIPPED - no device: {reason}");
-            return;
+            return None;
         }
-    }
+    };
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
-    let bytes: Vec<u8> = AGC_FILL.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
     let decoded = decode(&bytes, &encodings, &operands);
     let mut formats = BufferFormats::default();
     // Slots in the order the program first reaches each buffer: constants, source, destination.
@@ -288,15 +321,16 @@ fn the_titles_formatted_fill_runs_as_its_program_says() {
             }),
             draw_buffers: true,
             buffer_formats: Some(formats),
-            per_invocation: per_invocation(),
+            per_invocation: per_lane.then_some(subgroup),
             ..UserData::default()
         },
     )
-    .expect("the title's fill translates");
+    .expect("the title's program translates");
 
+    let records = u32::try_from(source.len()).expect("small");
     let mut block = vec![0_u32; 32];
     for (at, base, stride, records, word3) in [
-        (0, SOURCE, 4, 4, TITLE_WORD3),
+        (0, SOURCE, 4, records, TITLE_WORD3),
         (4, DESTINATION, 4, 128, TITLE_WORD3),
         (8, CONSTANTS, 16, 1, CONSTANTS_WORD3),
     ] {
@@ -305,27 +339,62 @@ fn the_titles_formatted_fill_runs_as_its_program_says() {
         block[at + 2] = records;
         block[at + 3] = word3;
     }
-    let source = vec![0x1111_0000, 0x2222_0001, 0x3333_0002, 0x4444_0003];
     let done = dispatch_guest_with_buffers(
         &module,
         &[0],
         (&block, [2, 1, 1]),
         &DispatchImages::default(),
         &[
-            BufferIn::Words(&[100, 3, 0, 0]),
-            BufferIn::Words(&source),
+            BufferIn::Words(constants),
+            BufferIn::Words(source),
             BufferIn::Words(&[0xdead_beef; 128]),
         ],
     )
     .expect("dispatched");
     assert!(!done.escaped, "nothing left the bound buffers");
-    for (index, &stored) in done.buffers[2].words.iter().enumerate() {
-        let expected = if index < 100 {
-            source[index & 3]
-        } else {
-            0xdead_beef
+    Some(done.buffers[2].words.clone())
+}
+
+/// The fill reads `vcc_lo` as a value and writes the execution mask by `v_cmpx`: a lane mask
+/// whole, which one invocation per lane holds by exchanging its lanes' bits (D884). Both ways
+/// store the same elements.
+#[test]
+fn the_titles_formatted_fill_runs_as_its_program_says() {
+    let source = [0x1111_0000, 0x2222_0001, 0x3333_0002, 0x4444_0003];
+    for per_lane in [false, true] {
+        let Some(stored) = run_titles_program(&AGC_FILL, (&[100, 3, 0, 0], &source), per_lane)
+        else {
+            return;
         };
-        assert_eq!(stored, expected, "element {index}");
+        for (index, &word) in stored.iter().enumerate() {
+            let expected = if index < 100 {
+                source[index & 3]
+            } else {
+                0xdead_beef
+            };
+            assert_eq!(word, expected, "per lane {per_lane}: element {index}");
+        }
+    }
+}
+
+/// PPSA25872's copy moves `count` elements from the source at an offset to the destination at
+/// another, the same both ways (D884): 100 elements from 3 to 5.
+#[test]
+fn the_titles_offset_copy_runs_as_its_program_says() {
+    let source: Vec<u32> = (0..128).map(|i| 0x7000_0000 | (i * 7)).collect();
+    for per_lane in [false, true] {
+        let Some(stored) = run_titles_program(&OFFSET_COPY, (&[5, 3, 100, 0], &source), per_lane)
+        else {
+            return;
+        };
+        for (index, &word) in stored.iter().enumerate() {
+            let expected = if (5..105).contains(&index) {
+                source[index - 2]
+            } else {
+                0xdead_beef
+            };
+            assert_eq!(word, expected, "per lane {per_lane}: element {index}");
+        }
     }
 }
 

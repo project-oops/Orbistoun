@@ -618,9 +618,11 @@ fn modifier_of(
 
 /// Why a module was built at the slowest fidelity, when that was not what was asked for: a
 /// graphics stage, a guest dispatch whose program meets its wave (D880), or a shader that touches
-/// a lane mask. `dispatch` is why a guest dispatch kept the whole wave in one invocation.
+/// a lane mask. `dispatch` is why a guest dispatch kept the whole wave in one invocation, and
+/// `per_lane` whether it runs one invocation per lane instead, which warns of nothing: a program
+/// that reads a mask whole runs so too (D884).
 fn fidelity_warnings(
-    (staged, dispatch): (bool, Option<&'static str>),
+    (staged, dispatch, per_lane): (bool, Option<&'static str>, bool),
     asked_for: Fidelity,
     fidelity: Fidelity,
     width: Width,
@@ -640,7 +642,7 @@ fn fidelity_warnings(
             because,
             subgroup_would_need: width.lanes(),
         }]
-    } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
+    } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront && !per_lane {
         vec![Warning::SlowestFidelity {
             because: concat!(
                 "the shader reads or writes a lane mask, which the per-lane model cannot ",
@@ -654,32 +656,41 @@ fn fidelity_warnings(
 }
 
 /// Whether a guest dispatch runs one invocation per lane (D880): asked for the lane model or left to
-/// choose, and its program never meets its wave. When it does not, why the whole wave stays in one
-/// invocation. Neither for a module that is not a guest dispatch.
+/// choose, and its program never meets its wave, or meets it only through masks its lanes can
+/// exchange (D884) on the host subgroup its caller gave as its `per_invocation`. When it does not,
+/// why the whole wave stays in one invocation. Neither for a module that is not a guest dispatch,
+/// `None` here. A dispatch's `per_invocation` is left the subgroup it runs per lane on, zero where
+/// that is not known, or `None` where it keeps the whole wave.
 fn dispatch_per_lane(
     decode: &Decode,
     encodings: &EncodingTable,
     (asked_for, width): (Fidelity, Width),
-    dispatch: bool,
+    user_data: Option<&mut wavefront::UserData>,
 ) -> (bool, Option<&'static str>) {
-    if !dispatch {
+    let Some(user_data) = user_data else {
         return (false, None);
-    }
-    let meets = lane_exact::lane_needs(decode, encodings, width.lanes())
-        .needs
-        .first()
-        .map(|&(need, _, _)| need);
-    if matches!(asked_for, Fidelity::Auto | Fidelity::Lane) && meets.is_none() {
-        return (true, None);
-    }
-    let because = meets.map_or(
-        concat!(
-            "the module is a guest dispatch, and the subgroup model has none of its entry state ",
-            "or exact memory"
+    };
+    let subgroup = user_data.per_invocation.filter(|&lanes| lanes != 0);
+    user_data.per_invocation = None;
+    let Some(inputs) = user_data.compute else {
+        return (false, None);
+    };
+    let needs = lane_exact::lane_needs(decode, encodings, width.lanes());
+    let lanes = width.lanes();
+    match lane_exact::lane_masks(&needs, lanes, subgroup, inputs.waves(lanes)) {
+        Ok(_) if matches!(asked_for, Fidelity::Auto | Fidelity::Lane) => {
+            user_data.per_invocation = Some(subgroup.unwrap_or(0));
+            (true, None)
+        }
+        Ok(_) => (
+            false,
+            Some(concat!(
+                "the module is a guest dispatch, and the subgroup model has none of its entry ",
+                "state or exact memory"
+            )),
         ),
-        lane_exact::refusal,
-    );
-    (false, Some(because))
+        Err(because) => (false, Some(because)),
+    }
 }
 
 /// As [`translate_windowed_primitive`], for a module that reads its stage's user data at entry
@@ -709,21 +720,21 @@ pub fn translate_with_user_data(
     let staged = stage != wavefront::Stage::Compute;
     // A guest dispatch's entry state and exact memory are the wavefront model's. Its emitter runs
     // one invocation per lane for a program that never meets its wave, which is the lane model a
-    // dispatch has (D880); any other keeps the whole wave in one invocation.
+    // dispatch has (D880), or only through its masks (D884); any other keeps the whole wave.
     let dispatch = !staged && user_data.compute.is_some();
-    let (per_lane, kept_whole) = dispatch_per_lane(decode, encodings, (asked_for, width), dispatch);
     let mut user_data = user_data;
+    let held = dispatch.then_some(&mut user_data);
+    let (per_lane, kept_whole) = dispatch_per_lane(decode, encodings, (asked_for, width), held);
     if per_lane {
         fidelity = Fidelity::Lane;
-        user_data.per_invocation = Some(width.lanes());
     } else if staged || dispatch {
         fidelity = Fidelity::Wavefront;
     }
 
     // A fragment module simulates one lane, its pixel, so only a mesh module pays for the whole
     // wavefront in one invocation.
-    let simulates_wavefront = staged && stage != wavefront::Stage::Fragment;
-    let warnings = fidelity_warnings((simulates_wavefront, kept_whole), asked_for, needed, width);
+    let whole = staged && stage != wavefront::Stage::Fragment;
+    let warnings = fidelity_warnings((whole, kept_whole, per_lane), asked_for, needed, width);
 
     if decode.desynchronised {
         return Err(TranslateError::UntrustworthyDecode {
@@ -1072,6 +1083,50 @@ mod tests {
         )
         .expect("translates");
         assert!(translated.warnings.is_empty(), "{:?}", translated.warnings);
+    }
+
+    /// A guest dispatch whose program reads a mask whole runs one invocation per lane where its
+    /// lanes can exchange the mask, and says nothing; a group of several waves on a narrower
+    /// subgroup keeps the whole wave and says why (D884). `s_cbranch_vccz +0` reads `vcc` whole.
+    #[test]
+    fn a_dispatch_reading_a_mask_whole_warns_only_where_it_keeps_the_wave() {
+        let (table, operands) = tables();
+        let decoded = decode(&stream(&[0xBF86_0000, TRIVIAL[0]]), &table, &operands);
+        let dispatch = |threads| {
+            super::translate_with_user_data(
+                &decoded,
+                &table,
+                Strategy::default(),
+                (
+                    super::wavefront::Stage::Compute,
+                    super::wavefront::MeshPrimitive::default(),
+                ),
+                Window::default(),
+                super::wavefront::UserData {
+                    compute: Some(super::wavefront::ComputeInputs {
+                        thread_id_components: 1,
+                        threads: [threads, 1, 1],
+                        ..super::wavefront::ComputeInputs::default()
+                    }),
+                    per_invocation: Some(32),
+                    ..super::wavefront::UserData::default()
+                },
+            )
+            .expect("translates")
+        };
+        let one_wave = dispatch(64);
+        assert_eq!(one_wave.fidelity, Fidelity::Lane);
+        assert!(one_wave.warnings.is_empty(), "{:?}", one_wave.warnings);
+        let two_waves = dispatch(128);
+        assert_eq!(two_waves.fidelity, Fidelity::Wavefront);
+        assert!(
+            two_waves
+                .warnings
+                .iter()
+                .any(|w| w.to_string().contains("D884")),
+            "{:?}",
+            two_waves.warnings
+        );
     }
 
     /// A colour target the draw holds integers in (`integer_targets` bit `K` for `mrtK`) is a

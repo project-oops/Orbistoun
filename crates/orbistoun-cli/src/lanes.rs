@@ -21,6 +21,11 @@ struct Tally {
     /// Of the exact ones, how many are wave32, and how many are groups of several waves.
     exact_wave32: usize,
     exact_multiwave: usize,
+    /// Of those that need a whole mask and nothing else, how many are wave32, and how many are
+    /// groups of one wave: per lane by ballot on a 32-wide subgroup, and through workgroup memory
+    /// on any (D884).
+    mask_wave32: usize,
+    mask_one_wave: usize,
 }
 
 impl Tally {
@@ -44,6 +49,13 @@ impl Tally {
                 "\n{:<18}   {any:>4} need {need} ({only} only that)",
                 ""
             );
+            if *need == LaneNeed::WholeMask {
+                let _ = write!(
+                    line,
+                    "; of those, {} wave32 and {} a group of one wave",
+                    self.mask_wave32, self.mask_one_wave
+                );
+            }
         }
         line
     }
@@ -54,6 +66,8 @@ impl Tally {
         self.lane_bits += other.lane_bits;
         self.exact_wave32 += other.exact_wave32;
         self.exact_multiwave += other.exact_multiwave;
+        self.mask_wave32 += other.mask_wave32;
+        self.mask_one_wave += other.mask_one_wave;
         for (need, (any, only)) in &other.needs {
             let held = self.needs.entry(*need).or_default();
             held.0 += any;
@@ -115,6 +129,10 @@ pub(crate) fn cmd_lanes() -> Result<()> {
                 one.exact_multiwave = usize::from(inputs.waves(width.lanes()) > 1);
             }
             let only = needs.needs.len() == 1;
+            if only && needs.has(LaneNeed::WholeMask) {
+                one.mask_wave32 = usize::from(width == Width::Wave32);
+                one.mask_one_wave = usize::from(inputs.waves(width.lanes()) == 1);
+            }
             for (need, _, _) in &needs.needs {
                 one.needs.insert(*need, (1, usize::from(only)));
             }

@@ -10,6 +10,10 @@
 //! and a selection or a carry-in reads one; where no other instruction reads that register, each
 //! invocation can hold only its own lane's bit. [`lane_needs`] counts those apart from the masks
 //! read whole.
+//!
+//! A program that reads a mask whole and needs nothing else of its wave runs per lane too, each
+//! invocation holding every lane's bits (D884): by the host subgroup's ballot where the subgroup is
+//! the wave, and through workgroup memory where the group is one wave. [`lane_masks`] says which.
 
 use std::collections::BTreeSet;
 
@@ -71,6 +75,57 @@ pub const fn refusal(need: LaneNeed) -> &'static str {
             "the program stores or makes an atomic through the scalar unit, which one invocation ",
             "per lane would make once for every lane (D880)"
         ),
+    }
+}
+
+/// How a dispatch run one invocation per lane holds its lane masks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneMasks {
+    /// Each invocation its own lane's bits: nothing reads a mask whole (D880).
+    Own,
+    /// Every lane's bits, by the host subgroup's ballot: the subgroup is the wave (D884).
+    Ballot,
+    /// Every lane's bits, through workgroup memory between barriers: the group is one wave (D884).
+    Exchange,
+}
+
+/// Why a program that reads a mask whole is not run one invocation per lane where neither exchange
+/// serves (D884).
+pub const WHOLE_MASK_ACROSS_WAVES: &str = concat!(
+    "the program reads or writes a lane mask whole, its group is several waves, and the host's ",
+    "subgroup does not hold a wave: a mask made through workgroup memory would place barriers ",
+    "in control flow the group's waves do not share (D884)"
+);
+
+/// How a dispatch of a program with `needs`, in waves of `lanes`, groups of `waves` of them, runs
+/// one invocation per lane on a host whose subgroup is `subgroup` wide (`None` where it is not
+/// known), or why it does not.
+///
+/// # Errors
+///
+/// Why the program keeps the whole wave in one invocation: any need but a whole mask (D880), or a
+/// whole mask in a group of several waves the host's subgroup cannot ballot (D884).
+pub fn lane_masks(
+    needs: &LaneNeeds,
+    lanes: u32,
+    subgroup: Option<u32>,
+    waves: u32,
+) -> Result<LaneMasks, &'static str> {
+    if let Some(&(need, _, _)) = needs
+        .needs
+        .iter()
+        .find(|(need, _, _)| *need != LaneNeed::WholeMask)
+    {
+        return Err(refusal(need));
+    }
+    if !needs.has(LaneNeed::WholeMask) {
+        Ok(LaneMasks::Own)
+    } else if subgroup == Some(lanes) {
+        Ok(LaneMasks::Ballot)
+    } else if waves == 1 {
+        Ok(LaneMasks::Exchange)
+    } else {
+        Err(WHOLE_MASK_ACROSS_WAVES)
     }
 }
 
@@ -269,7 +324,7 @@ fn whole_mask(instruction: &Instruction, name: &str, lane_masks: &BTreeSet<u16>)
 
 #[cfg(test)]
 mod tests {
-    use super::{LaneNeed, lane_needs};
+    use super::{LaneMasks, LaneNeed, lane_masks, lane_needs};
     use orbistoun_shader::{EncodingTable, OperandTable, decode};
 
     const END: u32 = 0xBF81_0000;
@@ -304,5 +359,32 @@ mod tests {
         let word = encoding.value | (opcode << encoding.opcode.shift) | (126 << 16) | 128;
         let found = needs(&[word, END]);
         assert!(found.has(LaneNeed::WholeMask), "{found:?}");
+    }
+
+    /// A whole mask is made by ballot where the subgroup is the wave, through workgroup memory in a
+    /// group of one wave, and not at all in a group of several on a narrower subgroup (D884).
+    #[test]
+    fn a_whole_mask_is_exchanged_where_the_host_can() {
+        let whole = super::LaneNeeds {
+            needs: vec![(LaneNeed::WholeMask, 0, "s_cbranch_execz".to_owned())],
+            lane_bits: true,
+        };
+        assert_eq!(lane_masks(&whole, 32, Some(32), 4), Ok(LaneMasks::Ballot));
+        assert_eq!(lane_masks(&whole, 64, Some(64), 2), Ok(LaneMasks::Ballot));
+        assert_eq!(lane_masks(&whole, 64, Some(32), 1), Ok(LaneMasks::Exchange));
+        assert_eq!(lane_masks(&whole, 64, None, 1), Ok(LaneMasks::Exchange));
+        assert!(lane_masks(&whole, 64, Some(32), 2).is_err());
+        assert_eq!(
+            lane_masks(&super::LaneNeeds::default(), 64, Some(32), 2),
+            Ok(LaneMasks::Own)
+        );
+        let shared = super::LaneNeeds {
+            needs: vec![
+                (LaneNeed::WholeMask, 0, "s_cbranch_execz".to_owned()),
+                (LaneNeed::LocalShare, 4, "ds_write_b32".to_owned()),
+            ],
+            lane_bits: false,
+        };
+        assert!(lane_masks(&shared, 32, Some(32), 1).is_err());
     }
 }

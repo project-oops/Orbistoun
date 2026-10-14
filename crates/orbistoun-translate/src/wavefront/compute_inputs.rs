@@ -19,6 +19,7 @@ use orbistoun_spirv::{Builder, Id, op};
 
 use super::{EXEC_HI, EXEC_LO, PRIVATE, Wavefront};
 use crate::TranslateError;
+use crate::lane_exact::LaneMasks;
 use crate::model::Model;
 
 /// A guest compute dispatch's entry state: which workgroup id components follow the user data, and
@@ -281,8 +282,8 @@ impl DispatchState {
 
     /// Seeds `lane` of a dispatch run one invocation per lane (D880): its thread ids in its own
     /// registers, and the execution mask - every lane's bits where they are known at translation, a
-    /// group of one wave with no partial groups, and otherwise this lane's bit alone. Its program
-    /// reads no mask whole, so no other lane's bit is ever wanted.
+    /// group of one wave with no partial groups, and otherwise this lane's bit alone where its
+    /// program reads no mask whole, or every lane's, exchanged, where it does (D884).
     fn seed_lane(module: &mut Wavefront<'_>, (id, inputs): (Id, ComputeInputs), lane: Id) {
         let place = match module.wave_base {
             Some(base) => binary(module, op::IADD, base, lane),
@@ -302,6 +303,24 @@ impl DispatchState {
         let (low, high) = if module.wave_base.is_none() && inputs.partial.is_none() {
             let (low, high) = first_threads(threads);
             (Model::constant(module, low), Model::constant(module, high))
+        } else if module.lane_masks != Some(LaneMasks::Own) {
+            // Every lane's bit, made from whether each lane's thread runs, as a comparison's is.
+            let last = Self::last_groups(module, (id, inputs));
+            let end = (threads % module.lanes != 0).then(|| Model::constant(module, threads));
+            match thread_off(module, (&last, end), (ids, Some(place))) {
+                None => {
+                    let (low, high) = first_threads(module.lanes);
+                    (Model::constant(module, low), Model::constant(module, high))
+                }
+                Some(off) => {
+                    let (bool_type, zero) = (module.bool_type, Model::constant(module, 0));
+                    let runs = module.builder.id();
+                    module
+                        .builder
+                        .function(op::LOGICAL_NOT, &[bool_type.0, runs.0, off.0]);
+                    module.set_lane_bit((zero, zero), 0, runs)
+                }
+            }
         } else {
             let last = Self::last_groups(module, (id, inputs));
             let end = (threads % module.lanes != 0).then(|| Model::constant(module, threads));
