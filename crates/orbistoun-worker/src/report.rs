@@ -2411,13 +2411,18 @@ fn tail_of_recorded() -> Vec<TracedCall> {
 /// first argument may be no address.
 fn waited_on(call: &str, first: u64) -> Option<String> {
     use orbistoun_kernel::sync;
+    // With what each holds, so a wake that never came reads apart from one that was missed.
     if let Ok(handle) = i32::try_from(first)
         && let Some(name) = sync::semaphore_name_of(handle)
     {
-        return Some(format!("semaphore {name:?} {first:#x}"));
+        let count = sync::semaphore_count(handle).unwrap_or(0);
+        return Some(format!("semaphore {name:?} {first:#x} holding {count}"));
     }
     if let Some(name) = sync::event_flag_name_of(first) {
-        return Some(format!("event flag {name:?} {first:#x}"));
+        let (bits, waiting) = sync::event_flag_state(first).unwrap_or((0, 0));
+        return Some(format!(
+            "event flag {name:?} {first:#x} holding {bits:#x}, {waiting} waiting"
+        ));
     }
     if call.contains("OnAddressWait") && orbistoun_thunk::is_mapped(first) {
         // SAFETY: an address wait's first argument, inside a span the run published as readable

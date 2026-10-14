@@ -359,6 +359,11 @@ pub fn semaphore_destroy(handle: SemaphoreHandle) -> bool {
         .is_ok_and(|mut t| t.remove(&handle).is_some())
 }
 
+/// How many a semaphore holds now, if it names one.
+pub fn semaphore_count(handle: SemaphoreHandle) -> Option<u32> {
+    with_semaphore(handle, |s| s.state.lock().ok().map(|count| *count)).flatten()
+}
+
 /// What a semaphore was called, if it names one.
 pub fn semaphore_name_of(handle: SemaphoreHandle) -> Option<String> {
     with_semaphore(handle, |s| s.name.clone())
@@ -1375,6 +1380,15 @@ pub fn event_flag_destroy(handle: EventFlagHandle) -> bool {
         .is_ok_and(|mut t| t.remove(&handle).is_some())
 }
 
+/// An event flag's bits now, and how many threads wait on it, if it names one.
+pub fn event_flag_state(handle: EventFlagHandle) -> Option<(u64, u64)> {
+    with_event_flag(handle, |e| {
+        let bits = *e.bits.lock().ok()?;
+        Some((bits, e.waiting.load(Ordering::SeqCst)))
+    })
+    .flatten()
+}
+
 /// What an event flag was called.
 pub fn event_flag_name_of(handle: EventFlagHandle) -> Option<String> {
     with_event_flag(handle, |e| e.name.clone())
@@ -1774,6 +1788,21 @@ mod tests {
         assert_eq!(unlock(m, 1), Some(true));
         waiter.join().expect("the waiter should be released");
         assert!(ENTERED.load(Ordering::SeqCst), "and then it gets in");
+    }
+
+    /// What a blocked thread's flag or semaphore holds is how a report tells a wake that never
+    /// came from one that came and was missed (D832).
+    #[test]
+    fn a_blocked_threads_object_says_what_it_holds() {
+        let flag = super::create_event_flag(0x4, "dependency");
+        assert_eq!(
+            super::event_flag_state(flag),
+            Some((0x4, 0)),
+            "its bits, nobody waiting"
+        );
+        let sema = super::create_semaphore(3, 8, "sema");
+        assert_eq!(super::semaphore_count(sema), Some(3));
+        assert_eq!(super::event_flag_state(0xdead_0000), None, "names nothing");
     }
 
     #[test]
