@@ -66,13 +66,15 @@ fn module() -> Vec<u32> {
 
 /// The clear, translated with the user-data words in `unwritten` marked as never written.
 fn translated(unwritten: u32) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
-    translated_with(unwritten, None)
+    translated_with(unwritten, None, [64, 1, 1])
 }
 
-/// The clear, translated for a dispatch whose last group may be a partial one.
+/// The clear, translated for a dispatch of groups of `threads` whose last group may be a partial
+/// one.
 fn translated_with(
     unwritten: u32,
     partial: Option<PartialGroups>,
+    threads: [u32; 3],
 ) -> Result<Vec<u32>, orbistoun_translate::TranslateError> {
     let encodings = EncodingTable::builtin().expect("encodings");
     let operands = OperandTable::builtin().expect("operands");
@@ -91,7 +93,7 @@ fn translated_with(
             compute: Some(ComputeInputs {
                 workgroup_ids: [true, false, false],
                 thread_id_components: 1,
-                threads: [64, 1, 1],
+                threads,
                 unwritten_user_data: unwritten,
                 partial,
                 integer_images: [false; 2],
@@ -165,6 +167,7 @@ fn a_partial_last_group_runs_only_its_partial_threads() {
             last: [1, 0, 0],
             threads: [10, 1, 1],
         }),
+        [64, 1, 1],
     )
     .expect("the clear translates");
     for partial_threads in [10, 37] {
@@ -198,6 +201,68 @@ fn a_partial_last_group_runs_only_its_partial_threads() {
             assert_eq!(word, expected, "{partial_threads} threads, word {index}");
         }
     }
+}
+
+/// A thread group of more than one wave runs every wave (D858): one group of 256 threads is four
+/// waves and clears 256 slots, and one of 100 is a whole wave and 36 threads of the next and clears
+/// 100. The clear waits at no barrier and uses no local data share, so its waves never meet.
+#[test]
+fn a_group_of_waves_runs_every_wave() {
+    if !device_or_skip("guest clear, a group of waves") {
+        return;
+    }
+    for threads in [256, 100] {
+        let module = translated_with(0, None, [threads, 1, 1]).expect("the clear translates");
+        let before = vec![BEFORE; WINDOW_WORDS as usize];
+        let done = dispatch_guest(
+            &module,
+            &before,
+            (&user_data(WINDOW, 256 * 16), [1, 1, 1]),
+            &DispatchImages::default(),
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        let end = threads as usize * 4;
+        for (index, &word) in done.memory.iter().enumerate() {
+            let expected = if index < end {
+                VALUE[index % 4]
+            } else {
+                BEFORE
+            };
+            assert_eq!(word, expected, "{threads} threads, word {index}");
+        }
+    }
+}
+
+/// A group of waves whose program waits at `s_barrier` is refused: its waves meet there, and
+/// waves run as separate invocations are not held for one another.
+#[test]
+fn a_group_of_waves_that_meets_at_a_barrier_is_refused() {
+    let encodings = EncodingTable::builtin().expect("encodings");
+    let operands = OperandTable::builtin().expect("operands");
+    // s_barrier; s_endpgm.
+    let words = [0xbf8a_0000_u32, 0xbf81_0000];
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let decoded = decode(&bytes, &encodings, &operands);
+    let refused = translate_with_user_data(
+        &decoded,
+        &encodings,
+        Width::Wave64,
+        (Stage::Compute, MeshPrimitive::default()),
+        Window::spanning_address(WINDOW, WINDOW_WORDS).expect("a window"),
+        UserData {
+            compute: Some(ComputeInputs {
+                workgroup_ids: [true, false, false],
+                thread_id_components: 1,
+                threads: [256, 1, 1],
+                ..ComputeInputs::default()
+            }),
+            ..UserData::default()
+        },
+    )
+    .expect_err("refused")
+    .to_string();
+    assert!(refused.contains("waits at s_barrier"), "{refused}");
 }
 
 /// A raw buffer's bounds hold: stores past its record count are dropped, as the hardware drops

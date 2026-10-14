@@ -839,10 +839,11 @@ pub(crate) fn declare_inf_nan_preserve(b: &mut Builder, main: Id) {
 }
 
 /// Emits the module header: capabilities, the memory model, the entry point and its execution mode,
-/// and a fragment output's location.
+/// and a fragment output's location. A compute module's workgroup is `waves` invocations, one per
+/// wave of the guest's thread group (D858).
 fn emit_header(
     b: &mut Builder,
-    (stage, primitive, per_lane): (Stage, MeshPrimitive, Option<(u32, bool)>),
+    (stage, primitive, per_lane, waves): (Stage, MeshPrimitive, Option<(u32, bool)>, u32),
     main: Id,
     (output, depth): (Option<Id>, Option<Id>),
 ) {
@@ -874,7 +875,7 @@ fn emit_header(
 
     match stage {
         Stage::Compute => {
-            b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, 1, 1, 1]);
+            b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, waves, 1, 1]);
         }
         // Required of every fragment entry point: Vulkan's framebuffer origin is the top left.
         Stage::Fragment => {
@@ -2498,7 +2499,16 @@ impl<'a> Wavefront<'a> {
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
         let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
-        emit_header(&mut b, (stage, primitive, per_lane), main, (output, depth));
+        // A guest dispatch's group runs as one invocation per wave (D858).
+        let waves = user_data
+            .compute
+            .map_or(1, |inputs| inputs.waves(width.lanes()));
+        emit_header(
+            &mut b,
+            (stage, primitive, per_lane, waves),
+            main,
+            (output, depth),
+        );
         declare_base_types(&mut b, &ids);
         let output = FragmentOutputs::declare(
             &mut b,
@@ -2535,7 +2545,12 @@ impl<'a> Wavefront<'a> {
         let reads_buffers = !buffers.served.is_empty() || indexed;
         let user_data_source =
             declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, &user_data);
-        let dispatch = compute_inputs::DispatchState::for_stage(&mut b, &ids, stage, &user_data);
+        let dispatch = compute_inputs::DispatchState::for_stage(
+            &mut b,
+            (&ids, width.lanes()),
+            stage,
+            &user_data,
+        );
         let draw_buffers = declare_draw_buffers(&mut b, u32_type, (stage, indexed), buffers);
         let write_mask = (stage == Stage::Compute && draw_buffers.is_some()).then(|| {
             buffer::declare_draw_buffers(
@@ -2555,7 +2570,11 @@ impl<'a> Wavefront<'a> {
         interface.extend(system.interface());
         interface.extend(output.interface());
         interface.extend(mesh_reserved.interface(stage));
-        interface.extend(dispatch.map(compute_inputs::DispatchState::interface));
+        interface.extend(
+            dispatch
+                .into_iter()
+                .flat_map(compute_inputs::DispatchState::interface),
+        );
         interface.extend(quad_input.map(|input| input.0));
         // The block the user clip planes arrive in (D857).
         interface.extend(mesh.as_ref().map(|mesh| mesh.plane_block.0.0));
