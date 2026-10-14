@@ -494,6 +494,30 @@ s_andn2_b32 exec_lo, exec_lo, s9
 // ---- v_nop: VOP1 opcode 0, no operands (PPSA03416's vertex shader) --------------------------
 v_nop
 
+// ---- the 16-bit export packs: two values to a 16-bit channel each, packed - normalised
+// signed and unsigned, and integers (ACO `aco_opcodes.py` 1405-1409). Grand Theft Auto V's pixel
+// shader packs into a `16_16` `UNORM` target so. Plain operands, varied, so each field is solved.
+v_cvt_pknorm_u16_f32 v0, v1, v2
+v_cvt_pknorm_u16_f32 v200, v13, v9
+v_cvt_pknorm_u16_f32 v255, v12, v130
+v_cvt_pknorm_u16_f32 v9, s7, v77
+v_cvt_pknorm_u16_f32 v130, v88, s101
+v_cvt_pknorm_i16_f32 v0, v1, v2
+v_cvt_pknorm_i16_f32 v200, v13, v9
+v_cvt_pknorm_i16_f32 v255, v12, v130
+v_cvt_pknorm_i16_f32 v9, s7, v77
+v_cvt_pknorm_i16_f32 v130, v88, s101
+v_cvt_pk_u16_u32 v0, v1, v2
+v_cvt_pk_u16_u32 v200, v13, v9
+v_cvt_pk_u16_u32 v255, v12, v130
+v_cvt_pk_u16_u32 v9, s7, v77
+v_cvt_pk_u16_u32 v130, v88, s101
+v_cvt_pk_i16_i32 v0, v1, v2
+v_cvt_pk_i16_i32 v200, v13, v9
+v_cvt_pk_i16_i32 v255, v12, v130
+v_cvt_pk_i16_i32 v9, s7, v77
+v_cvt_pk_i16_i32 v130, v88, s101
+
 // ---- v_cvt_pkrtz_f16_f32: two floats to halves, round toward zero, packed (its pixel shader) --
 v_cvt_pkrtz_f16_f32_e64 v0, v1, v2
 v_cvt_pkrtz_f16_f32_e64 v200, s5, v9

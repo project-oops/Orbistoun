@@ -939,6 +939,26 @@ name = "v_readlane_b32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 872
+name = "v_cvt_pknorm_i16_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 873
+name = "v_cvt_pknorm_u16_f32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 874
+name = "v_cvt_pk_u16_u32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 875
+name = "v_cvt_pk_i16_i32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 877
 name = "v_add3_u32"
 

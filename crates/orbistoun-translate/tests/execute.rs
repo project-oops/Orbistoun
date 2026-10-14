@@ -7708,6 +7708,58 @@ fn a_compact_move_sets_m0() {
     assert_eq!(scalar(&registers, 2), 0x1001);
 }
 
+/// The 16-bit export packs, the first source in bits 15:0 and the second in 31:16 (AMD's
+/// published RDNA instruction set; Mesa's `pack_unorm_2x16` and `pack_snorm_2x16` lowerings): a
+/// normalised pack clamps to `[0, 1]` or `[-1, 1]`, reads a NaN as zero, scales by 65535 or 32767
+/// and rounds to the nearest, a tie to the even - 0.5 is `0x8000` - and an integer pack saturates
+/// unsigned or signed. Grand Theft Auto V's pixel shader packs its `16_16` `UNORM` output so.
+#[test]
+fn the_sixteen_bit_packs_clamp_round_and_saturate() {
+    if !device_or_skip("the_sixteen_bit_packs_clamp_round_and_saturate") {
+        return;
+    }
+    let pack = |name, dst, [low, high]: [u32; 2]| {
+        vop3(name, dst, [vgpr_code(low), vgpr_code(high), 0], 0, 0)
+    };
+    let mut program = Vec::new();
+    // Sources from v10 up; results in v0 to v5, the registers a run reads back.
+    program.extend(v_mov_literal(10, 0.5f32.to_bits()));
+    program.extend(v_mov_literal(11, 2.0f32.to_bits()));
+    program.extend(v_mov_literal(12, (-0.25f32).to_bits()));
+    program.extend(v_mov_literal(13, 0x7fc0_0000));
+    program.extend(v_mov_literal(14, (-3.0f32).to_bits()));
+    program.extend(v_mov_literal(15, 70_000));
+    program.extend(v_mov_literal(16, 5));
+    program.extend(v_mov_literal(17, (-40_000_i32) as u32));
+    program.extend(v_mov_literal(18, 40_000));
+    program.extend(pack("v_cvt_pknorm_u16_f32", 0, [10, 11]));
+    program.extend(pack("v_cvt_pknorm_u16_f32", 1, [12, 13]));
+    program.extend(pack("v_cvt_pknorm_i16_f32", 2, [12, 11]));
+    program.extend(pack("v_cvt_pknorm_i16_f32", 3, [13, 14]));
+    program.extend(pack("v_cvt_pk_u16_u32", 4, [15, 16]));
+    program.extend(pack("v_cvt_pk_i16_i32", 5, [17, 18]));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(
+        vector(&registers, 0),
+        0xffff_8000,
+        "0.5 to even, 2.0 clamped"
+    );
+    assert_eq!(vector(&registers, 1), 0, "below zero, and a NaN");
+    assert_eq!(vector(&registers, 2), 0x7fff_e000, "-0.25 and 2.0, signed");
+    assert_eq!(
+        vector(&registers, 3),
+        0x8001_0000,
+        "a NaN, and -3.0 clamped"
+    );
+    assert_eq!(vector(&registers, 4), 0x0005_ffff, "70000 saturated, 5");
+    assert_eq!(
+        vector(&registers, 5),
+        0x7fff_8000,
+        "-40000 and 40000 saturated"
+    );
+}
+
 /// `v_cvt_pkrtz_f16_f32`: the first source as a half in bits 15:0 and the second in 31:16, each
 /// rounded toward zero (AMD's published RDNA instruction set), as PPSA03416's pixel shader packs
 /// its colour; and `v_nop` changes nothing (its vertex shader opens with one). Round toward zero

@@ -113,6 +113,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmpx_gt_u32_e32",
     "v_nop",
     "v_cvt_pkrtz_f16_f32_e64",
+    "v_cvt_pknorm_u16_f32",
+    "v_cvt_pknorm_i16_f32",
+    "v_cvt_pk_u16_u32",
+    "v_cvt_pk_i16_i32",
     "s_bfm_b32",
     "s_bfm_b64",
     "s_buffer_load_dword",
@@ -2885,10 +2889,8 @@ fn vector_instruction<M: Model + ?Sized>(
 
         // The long-form vector ALU: the short forms' arithmetic plus per-source negate and absolute
         // flags, in bits neither the operand layout nor the encoding table describes; read
-        // separately and refused where not implemented.
-        "v_cndmask_b32_e64" | "v_add_f32_e64" | "v_sub_f32_e64" | "v_subrev_f32_e64"
-        | "v_mul_f32_e64" | "v_mac_f32_e64" | "v_fma_f32" | "v_mad_f32" | "v_div_fixup_f32"
-        | "v_div_fmas_f32" | "v_rcp_f32_e64" => long_form_arithmetic(model, instruction, name),
+        // separately and refused where not implemented ([`LONG_FORM`]).
+        _ if LONG_FORM.contains(&name) => long_form_arithmetic(model, instruction, name),
 
         // The division pre-scale, and the carry-producing arithmetic that writes a per-lane carry
         // mask as a second destination; 64-bit address arithmetic is built from these.
@@ -3478,6 +3480,88 @@ fn pack_halves<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// The long-form vector ALU instructions [`long_form_arithmetic`] translates: the short forms'
+/// arithmetic under per-source negate and absolute flags, and the 16-bit packs a pixel shader
+/// prepares a compressed export for a 16-bit target with.
+const LONG_FORM: [&str; 15] = [
+    "v_cndmask_b32_e64",
+    "v_add_f32_e64",
+    "v_sub_f32_e64",
+    "v_subrev_f32_e64",
+    "v_mul_f32_e64",
+    "v_mac_f32_e64",
+    "v_fma_f32",
+    "v_mad_f32",
+    "v_div_fixup_f32",
+    "v_div_fmas_f32",
+    "v_rcp_f32_e64",
+    "v_cvt_pknorm_u16_f32",
+    "v_cvt_pknorm_i16_f32",
+    "v_cvt_pk_u16_u32",
+    "v_cvt_pk_i16_i32",
+];
+
+/// A float's bits as a normalised 16-bit value in the low half (AMD's published RDNA instruction
+/// set, `V_CVT_PKNORM_U16_F32`/`_I16_F32`; Mesa's `pack_unorm_2x16` and `pack_snorm_2x16`
+/// lowerings): a NaN read as zero, clamped to `[0, 1]` or, `signed`, `[-1, 1]`, scaled by 65535 or
+/// 32767 and rounded to the nearest, a tie to the even.
+fn normalised_16<M: Model + ?Sized>(model: &mut M, bits: Id, signed: bool) -> Id {
+    let float = model.as_float(bits);
+    let nan = {
+        let bool_type = model.bool_type();
+        let b = model.builder();
+        let nan = b.id();
+        b.function(op::IS_NAN, &[bool_type.0, nan.0, float.0]);
+        nan
+    };
+    let zero = model.constant(0);
+    let bits = model.select(nan, zero, bits);
+    let (bottom, scale) = if signed {
+        ((-1.0_f32).to_bits(), 32767.0_f32.to_bits())
+    } else {
+        (0, 65535.0_f32.to_bits())
+    };
+    let bottom = model.constant(bottom);
+    let one = model.constant(ONE_F32);
+    let clamped = model.f32_ext_binary(GLSL_FMAX, bits, bottom);
+    let clamped = model.f32_ext_binary(GLSL_FMIN, clamped, one);
+    let scale = model.constant(scale);
+    let scaled = model.f32_binary(op::FMUL, clamped, scale);
+    let rounded = model.f32_ext_unary(GLSL_ROUND_EVEN, scaled);
+    let whole = if signed {
+        float_to_signed_saturated(model, rounded)
+    } else {
+        float_to_unsigned_saturated(model, rounded)
+    };
+    let low_half = model.constant(0xFFFF);
+    model.binary(op::BITWISE_AND, whole, low_half)
+}
+
+/// An integer as a 16-bit one in the low half, saturated: unsigned to `[0, 65535]`, or `signed` to
+/// `[-32768, 32767]` (AMD's published RDNA instruction set, `V_CVT_PK_U16_U32`/`_I16_I32`).
+fn saturated_16<M: Model + ?Sized>(model: &mut M, value: Id, signed: bool) -> Id {
+    let saturated = if signed {
+        let (top, bottom) = (model.constant(0x7FFF), model.constant(0xFFFF_8000));
+        let over = model.compare(op::SGREATER_THAN, value, top);
+        let under = model.compare(op::SLESS_THAN, value, bottom);
+        let kept = model.select(over, top, value);
+        model.select(under, bottom, kept)
+    } else {
+        let top = model.constant(0xFFFF);
+        let over = model.compare(op::UGREATER_THAN, value, top);
+        model.select(over, top, value)
+    };
+    let low_half = model.constant(0xFFFF);
+    model.binary(op::BITWISE_AND, saturated, low_half)
+}
+
+/// Two 16-bit values in their words' low halves, the first in bits 15:0 and the second in 31:16.
+fn pack_two_16<M: Model + ?Sized>(model: &mut M, low: Id, high: Id) -> Id {
+    let sixteen = model.constant(16);
+    let high = model.binary(op::SHIFT_LEFT_LOGICAL, high, sixteen);
+    model.binary(op::BITWISE_OR, low, high)
 }
 
 /// Two floats' bits as halves rounded toward zero, the first in bits 15:0.
@@ -4444,6 +4528,18 @@ fn combine<M: Model + ?Sized>(
 ) -> Result<Id, TranslateError> {
     match (name, sources) {
         ("v_cvt_pkrtz_f16_f32_e64", [low, high]) => Ok(pack_two_halves(model, *low, *high)),
+        ("v_cvt_pknorm_u16_f32" | "v_cvt_pknorm_i16_f32", [low, high]) => {
+            let signed = name == "v_cvt_pknorm_i16_f32";
+            let low = normalised_16(model, *low, signed);
+            let high = normalised_16(model, *high, signed);
+            Ok(pack_two_16(model, low, high))
+        }
+        ("v_cvt_pk_u16_u32" | "v_cvt_pk_i16_i32", [low, high]) => {
+            let signed = name == "v_cvt_pk_i16_i32";
+            let low = saturated_16(model, *low, signed);
+            let high = saturated_16(model, *high, signed);
+            Ok(pack_two_16(model, low, high))
+        }
         ("v_max_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMAX, *first, *second)),
         ("v_min_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMIN, *first, *second)),
         // The reciprocal ACO takes of a cube coordinate's major axis, `|ma|` through the long
