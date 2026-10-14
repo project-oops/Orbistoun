@@ -2067,8 +2067,10 @@ fn mesh_layer_export<M: Model + ?Sized>(
         if model.write_mesh_layer(lane, layer).is_none() {
             return Err(TranslateError::Unsupported {
                 offset: instruction.offset,
-                detail: "a layer export needs the layers a mesh module declares, and this module \
-                         is not one - translate at the mesh stage (D688, D859)",
+                detail: concat!(
+                    "a layer export needs the layers a mesh module declares, and this module ",
+                    "is not one - translate at the mesh stage (D688, D859)"
+                ),
             });
         }
     }

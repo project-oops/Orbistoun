@@ -674,7 +674,8 @@ pub enum WindowSpace {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct GeometryInputs {
-    /// The vertex id of the first vertex thread.
+    /// The vertex id of the first vertex thread; for an indexed draw, what is added to each index
+    /// it fetches (`GE_INDX_OFFSET`, D843).
     pub first_vertex: u32,
     /// Vertex threads: the draw's vertex count.
     pub vertices: u32,
@@ -2874,6 +2875,7 @@ impl<'a> Wavefront<'a> {
                 // A lane past the draw's vertices reads the first index and keeps zero.
                 let position = self.select(is_vertex, at, zero);
                 let id = self.index_at(index_slot, width, position);
+                let id = self.offset_index(id, first_vertex);
                 let id = self.select(is_vertex, id, zero);
                 self.store_lane_masked(VERTEX_ID_REGISTER, lane, id);
             }
@@ -2933,9 +2935,20 @@ impl<'a> Wavefront<'a> {
         if let Some(width) = indices {
             let position = self.select(is_vertex, at, zero);
             let id = self.index_at(index_slot, width, position);
+            let id = self.offset_index(id, first_vertex);
             let id = self.select(is_vertex, id, zero);
             self.store_lane_masked(VERTEX_ID_REGISTER, 0, id);
         }
+    }
+
+    /// A fetched index with the draw's index offset added (D843): `GE_INDX_OFFSET` moves each
+    /// index an indexed draw fetches.
+    fn offset_index(&mut self, index: Id, offset: u32) -> Id {
+        if offset == 0 {
+            return index;
+        }
+        let offset = self.constant(offset);
+        self.binary(op::IADD, index, offset)
     }
 
     /// [`Assembly::vertices_of`] for a primitive `at` known only at run time (D760).

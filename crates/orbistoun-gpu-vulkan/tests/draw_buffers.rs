@@ -523,16 +523,17 @@ fn vertex_id_primitive_shader_at(width: Width, per_invocation: Option<u32>) -> V
     vertex_id_primitive_shader_with(
         width,
         per_invocation,
-        Some(orbistoun_translate::wavefront::IndexWidth::Bits32),
+        (Some(orbistoun_translate::wavefront::IndexWidth::Bits32), 0),
     )
 }
 
 /// [`vertex_id_primitive_shader_at`] for a draw with `indices`, or none: a non-indexed draw counts
-/// its vertex ids up from the first vertex its draw words carry (D761).
+/// its vertex ids up from the first vertex its draw words carry (D761), and an indexed one adds
+/// `offset` to each index it fetches (D843).
 fn vertex_id_primitive_shader_with(
     width: Width,
     per_invocation: Option<u32>,
-    indices: Option<orbistoun_translate::wavefront::IndexWidth>,
+    (indices, offset): (Option<orbistoun_translate::wavefront::IndexWidth>, u32),
 ) -> Vec<u32> {
     use orbistoun_translate::wavefront::{Assembly, GeometryInputs};
     let words: [u32; 38] = [
@@ -604,7 +605,7 @@ fn vertex_id_primitive_shader_with(
             draw_buffers: true,
             per_invocation,
             geometry: Some(GeometryInputs {
-                first_vertex: 0,
+                first_vertex: offset,
                 vertices: 0,
                 primitives: 0,
                 assembly: Assembly::List,
@@ -695,6 +696,25 @@ fn draw_vertex_ids(mesh: &Vec<u32>, firsts: &[u32]) -> [u8; 4] {
         .expect("the centre")
 }
 
+/// An indexed draw's index offset is added to each index it fetches (D843, measured by obSCEne
+/// ix01): indices 0 to 2 under offset 3 colour the centre as ids 3 to 5 do.
+#[test]
+fn an_index_offset_moves_each_fetched_index() {
+    if !device_or_skip("an_index_offset_moves_each_fetched_index") {
+        return;
+    }
+    let indexed = Some(orbistoun_translate::wavefront::IndexWidth::Bits32);
+    let offset = vertex_id_primitive_shader_with(Width::Wave64, None, (indexed, 3));
+    let red = |ids: [f32; 3]| ((0.5 * ids[0] + 0.25 * ids[1] + 0.25 * ids[2]) / 8.0 * 255.0) as i32;
+    let near = |got: u8, want: i32| (i32::from(got) - want).abs() <= 3;
+    let got = draw_vertex_ids(&offset, &[0]);
+    assert!(near(got[0], red([3.0, 4.0, 5.0])), "ids 3 to 5: {got:?}");
+    assert!(
+        !near(got[0], red([0.0, 1.0, 2.0])),
+        "not ids 0 to 2: {got:?}"
+    );
+}
+
 /// Chunks of an indexed draw each read their own vertex ids (D740, D741): a chunk of ids 0 to 2
 /// colours the centre by their weighted mean, and a second chunk of ids 3 to 5 drawn over it, in
 /// the same batch, by its own. At the centre of the covering triangle the weights are a half and
@@ -731,7 +751,7 @@ fn non_indexed_chunks_count_from_their_first_vertex() {
     if !device_or_skip("non_indexed_chunks_count_from_their_first_vertex") {
         return;
     }
-    let mesh = vertex_id_primitive_shader_with(Width::Wave64, None, None);
+    let mesh = vertex_id_primitive_shader_with(Width::Wave64, None, (None, 0));
     let mut backend = VulkanBackend::new();
     let pixel = orbistoun_spirv::passthrough_fragment_module();
     for (id, words) in [(TRIANGLE, &mesh), (PIXEL, &pixel)] {

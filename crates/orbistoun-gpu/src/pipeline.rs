@@ -839,9 +839,8 @@ const DI_PT_2D_RECTANGLE: u32 = 7;
 /// the primitive shader its primitive already packed in `v0` ([`GeometryInputs::passthrough`]).
 const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
 const PRIMGEN_PASSTHRU_EN: u32 = 1 << 25;
-/// `GE_INDX_OFFSET` (`gfx103.json`, byte `198952`, uconfig dword `0xC24A`): added to every vertex
-/// index, generated or fetched, as Mesa's r600 driver uses the same register under its older name
-/// `VGT_INDX_OFFSET` (D843).
+/// `GE_INDX_OFFSET` (`gfx103.json`, byte `198952`, uconfig dword `0xC24A`): added to every index an
+/// indexed draw fetches, and to nothing an auto draw generates - measured (D843, obSCEne ix01).
 const GE_INDX_OFFSET: u32 = 0xC24A;
 
 /// The geometry-engine inputs a draw hands its primitive shader whole (D730), or why it cannot: a
@@ -907,15 +906,11 @@ fn draw_geometry(
     };
     let passthrough =
         latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0);
-    // The offset is added to every vertex index (D843): a non-indexed draw's ids count up from it.
+    // The offset is added to each index an indexed draw fetches; an auto draw's ids count up from
+    // zero whatever it holds (D843, obSCEne ix01).
     let offset = latest(GE_INDX_OFFSET).unwrap_or(0);
-    if offset != 0 && indices.is_some() {
-        return Err(format!(
-            "an indexed draw with an index offset (GE_INDX_OFFSET {offset:#x})'s vertex ids are not seeded"
-        ));
-    }
     Ok(GeometryInputs {
-        first_vertex: offset,
+        first_vertex: if indices.is_some() { offset } else { 0 },
         vertices,
         primitives,
         assembly,
@@ -979,7 +974,13 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
             };
             ChunkPlan {
                 geometry: GeometryInputs {
-                    first_vertex: 0,
+                    // An indexed chunk's fetched indices take the draw's index offset (D843); an
+                    // auto chunk's ids are its words' (D761).
+                    first_vertex: if whole.indices.is_some() {
+                        whole.first_vertex
+                    } else {
+                        0
+                    },
                     vertices: whole.assembly.vertices_for(primitives),
                     primitives,
                     assembly: whole.assembly,
@@ -9853,11 +9854,11 @@ mod tests {
         }
     }
 
-    /// An index offset is added to every vertex index (D843, from Mesa's r600 `VGT_INDX_OFFSET`):
-    /// a non-indexed draw's ids count up from it. An indexed draw's fetched indices are not offset
-    /// here, so one with an offset is refused, naming it so a request can quote it.
+    /// An index offset moves an indexed draw's fetched indices and not an auto draw's ids (D843,
+    /// measured by obSCEne ix01: offset 5 gave an auto draw ids 0, 1, 2 and an indexed one 5, 6,
+    /// 7).
     #[test]
-    fn an_index_offset_is_where_an_auto_draw_s_ids_start() {
+    fn an_index_offset_moves_fetched_indices_only() {
         use super::{DI_PT_RECTLIST, GE_INDX_OFFSET, VGT_PRIMITIVE_TYPE, draw_geometry};
         use crate::registers::{DrawCall, DrawKind};
         let auto = DrawCall {
@@ -9872,8 +9873,8 @@ mod tests {
         };
         assert_eq!(
             draw_geometry(&auto, registers).map(|g| (g.first_vertex, g.vertices)),
-            Ok((5, 3)),
-            "the ids are 5, 6 and 7"
+            Ok((0, 3)),
+            "the ids are 0, 1 and 2"
         );
         let indexed = DrawCall {
             kind: DrawKind::Indexed {
@@ -9883,11 +9884,9 @@ mod tests {
             ..auto
         };
         assert_eq!(
-            draw_geometry(&indexed, registers),
-            Err(
-                "an indexed draw with an index offset (GE_INDX_OFFSET 0x5)'s vertex ids are not seeded"
-                    .to_owned()
-            )
+            draw_geometry(&indexed, registers).map(|g| (g.first_vertex, g.indices.is_some())),
+            Ok((5, true)),
+            "each fetched index has 5 added"
         );
     }
 

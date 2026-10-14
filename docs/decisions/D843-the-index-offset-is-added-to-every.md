@@ -2,7 +2,15 @@
 
 **Status:** decided
 **Date:** 2026-10-14
-**known_by:** assumed
+**known_by:** measured
+
+**Correction (2026-10-14):** measured by obSCEne `REQ-20261014T0415Z-ix01`
+(`report-20261014-batch4.log`, `000-boot/ge-indx-offset`): the offset moves only the indices an
+indexed draw fetches. A three-vertex `DRAW_INDEX_AUTO` stored ids 0, 1, 2 under offsets 0, 5 and
+`0x10000`; a `DRAW_INDEX_2` of `{0, 1, 2}` stored 5, 6, 7 under offset 5; and the register keeps
+its value across submissions. orbistoun now seeds an auto draw's ids from zero whatever the offset
+holds, and adds it to each index an indexed draw fetches, which it no longer refuses. The r600
+reading below does not hold on this part; it is kept for the record.
 
 `GE_INDX_OFFSET` (uconfig `0xC24A`) is added to every vertex index before it becomes a vertex id.
 A non-indexed draw (`DRAW_INDEX_AUTO`) of `n` vertices under offset `k` has ids `k` to `k + n - 1`,
