@@ -1657,6 +1657,8 @@ pub struct PreparedDispatch {
     pub module: std::sync::Arc<[u32]>,
     /// Its [`crate::content_hash`], which the device names its pipeline by.
     pub module_hash: u64,
+    /// Where the guest program it was translated from lies.
+    pub program: u64,
     /// The guest memory it reads and writes through its buffers; `None` for a program that
     /// addresses none.
     pub window: Option<Window>,
@@ -1805,6 +1807,7 @@ impl Pipeline {
         Ok(PreparedDispatch {
             module,
             module_hash,
+            program: address,
             window: window_or_none,
             images,
             // The whole block the module declares; a word the stream never wrote, which the

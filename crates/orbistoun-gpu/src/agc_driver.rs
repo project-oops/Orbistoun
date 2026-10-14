@@ -1375,6 +1375,8 @@ pub struct DispatchWrites {
     pub bytes: u64,
     /// Whether any byte they wrote is not zero.
     pub lit: bool,
+    /// Where the guest program they run lies.
+    pub program: Option<u64>,
     /// Where the last of them fetched its image, as (first byte, bytes).
     pub fetched: Option<(u64, u64)>,
     /// Where the last of them stored its image, as (first byte, bytes).
@@ -1394,7 +1396,7 @@ fn dispatch_writes() -> &'static Mutex<std::collections::BTreeMap<u64, DispatchW
 /// Counts a dispatch of `module` and what it wrote back: its runs, its scattered buffer words and
 /// its fills; where its `images` lie; and the buffers it bound at `ranges`, as they were `read`.
 fn note_dispatch_writes(
-    module: u64,
+    (module, program): (u64, u64),
     (writes, scattered, fills): (&GuestWrites, &[Scattered<'_>], &[cp::Fill]),
     (images, ranges, read): (
         &crate::pipeline::DispatchImages,
@@ -1421,6 +1423,7 @@ fn note_dispatch_writes(
     entry.dispatches += 1;
     entry.bytes += bytes;
     entry.lit |= lit;
+    entry.program = Some(program);
     entry.fetched = images.fetched_span.or(entry.fetched);
     entry.stored = images
         .stored_surface
@@ -2028,7 +2031,7 @@ impl GuestCp<'_> {
             self.write_back_dispatch(&writes, &scattered, &buffer_fills)
         })?;
         note_dispatch_writes(
-            prepared.module_hash,
+            (prepared.module_hash, prepared.program),
             (&writes, &scattered, &buffer_fills),
             (&prepared.images, &prepared.buffers, &buffers_before),
         );
@@ -6550,7 +6553,7 @@ mod tests {
             BufferBefore::Unread(4),
         ];
         note_dispatch_writes(
-            module,
+            (module, 0x7400_4314_7600),
             (&zeros, &[quiet], &[fill]),
             (&images, &[(0x5000, 8), (0x6000, 8), (0x7000, 16)], &read),
         );
@@ -6565,6 +6568,8 @@ mod tests {
         // Where its images lie, so a texture a draw reads can be matched to the program writing it.
         assert_eq!(first.fetched, Some((0x7400_5b89_1000, 0x80_0000)));
         assert_eq!(first.stored, None);
+        // The guest program it runs, so the module can be read against its code.
+        assert_eq!(first.program, Some(0x7400_4314_7600));
         // What it read through its buffers: where, how much, and whether any of it is not zero.
         assert_eq!(
             first.buffers,
@@ -6577,7 +6582,7 @@ mod tests {
         let mut lit = GuestWrites::default();
         lit.push(0x1000, &[0, 7]);
         note_dispatch_writes(
-            module,
+            (module, 0x7400_4314_7600),
             (&lit, &[], &[]),
             (&crate::pipeline::DispatchImages::default(), &[], &[]),
         );

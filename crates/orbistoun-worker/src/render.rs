@@ -1647,7 +1647,10 @@ fn log_execution() {
             )
         };
         tracing::info!(
-            "dispatch module {module:016x}: {} carried out, {} byte(s) written back, {}; fetches an image at {}, stores one at {}",
+            "dispatch module {module:016x}, the program at {}: {} carried out, {} byte(s) written back, {}; fetches an image at {}, stores one at {}",
+            writes
+                .program
+                .map_or_else(|| "?".to_owned(), |at| format!("{at:#x}")),
             writes.dispatches,
             writes.bytes,
             if writes.lit {
