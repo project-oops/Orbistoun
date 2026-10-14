@@ -1,0 +1,3 @@
+	.text
+	.amdgcn_target "amdgcn-amd-amdhsa--gfx1013"
+	v_cmp_ge_f32_e32 vcc, v4, v5            ; encoding: [0x04,0x0b,0x0c,0x7c]

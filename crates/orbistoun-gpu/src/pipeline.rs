@@ -3229,9 +3229,7 @@ impl Pipeline {
                     let mut read = |register| {
                         crate::colour_slots::read_as_buffer(&mut latest, register, buffer)
                     };
-                    // Written where both the target mask and the shader mask enable a channel.
-                    let mask = read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF)
-                        & read(crate::registers::CB_SHADER_MASK).unwrap_or(0xF);
+                    let mask = read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF);
                     let info = read(crate::registers::CB_COLOR0_INFO).unwrap_or(0);
                     crate::registers::colour_write_mask(mask, info) & !exported != 0
                 })
@@ -4087,8 +4085,7 @@ fn push_colour_output(
     let info = latest(crate::registers::CB_COLOR0_INFO);
     match latest(crate::registers::CB_TARGET_MASK) {
         Some(mask) => {
-            let shader = latest(crate::registers::CB_SHADER_MASK).unwrap_or(u32::MAX);
-            let channels = crate::registers::colour_write_mask(mask & shader, info.unwrap_or(0));
+            let channels = crate::registers::colour_write_mask(mask, info.unwrap_or(0));
             if sent.mask != Some(channels) {
                 commands.push(RenderCommand::SetWriteMask(channels));
                 sent.mask = Some(channels);
@@ -4125,8 +4122,7 @@ fn push_more_colour_outputs(
                 blend: read(crate::registers::CB_BLEND0_CONTROL)
                     .map(|value| crate::registers::target_blend_control(value, info)),
                 write_mask: crate::registers::colour_write_mask(
-                    read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF)
-                        & read(crate::registers::CB_SHADER_MASK).unwrap_or(0xF),
+                    read(crate::registers::CB_TARGET_MASK).unwrap_or(0xF),
                     info,
                 ),
             }

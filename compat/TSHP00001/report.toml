@@ -6,7 +6,7 @@ master_version = "01.00"
 
 [reproduce]
 module_sha256 = "28dc00fa7003619e761f0e742b99e584ef032112e3320a3ce9b18984e5b3347f"
-limit_seconds = 120
+limit_seconds = 25
 frame_every = 30
 sheet_frames = 10
 frames = "local"
@@ -18,14 +18,16 @@ frames = "local"
 [status]
 reach = "presented"
 outcome = "ran to the time limit"
-imports = 72
-calls = 3421974
+imports = 73
+calls = 635694
 standing = 100
 default_return = "unimplemented"
-frames = 817
-unanswered = 4
-limit_seconds = 120
-build = "v0.1.0 - 06f66d3"
-measured_on = "2026-10-09"
+frames = 267
+unanswered = 0
+limit_seconds = 25
+build = "v0.1.0 - 093229f-dirty"
+measured_on = "2026-10-14"
 link_plan = "3ef8c8d01946b36b"
-link_plan_stored = "match"
+link_plan_stored = "new"
+presented_by = "drawn"
+shown = true

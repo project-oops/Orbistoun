@@ -117,20 +117,29 @@ fn outcome(block: &[&str]) -> String {
 
 /// The report paths a request block names, once each.
 fn cited_logs(block: &[&str]) -> Vec<String> {
+    /// The fields a resolver writes beside its outcome.
+    const RESOLVER: [&str; 4] = ["outcome", "logs", "sweep", "resolved"];
     let mut logs: Vec<String> = Vec::new();
+    let mut inside = false;
     for line in block {
-        for dir in REPORT_DIRS {
-            for (at, _) in line.match_indices(dir) {
-                let path: String = line[at..]
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || "/._-".contains(*c))
-                    .collect();
-                let path = path.trim_end_matches('.');
-                let is_report = std::path::Path::new(path).extension().is_some_and(|e| {
-                    e.eq_ignore_ascii_case("log") || e.eq_ignore_ascii_case("txt")
-                });
-                if is_report && !logs.iter().any(|known| known == path) {
-                    logs.push(path.to_owned());
+        if let Some(rest) = line.strip_prefix(FIELD) {
+            let name = rest.split(':').next().unwrap_or_default();
+            inside = RESOLVER.contains(&name);
+        }
+        if inside {
+            for dir in REPORT_DIRS {
+                for (at, _) in line.match_indices(dir) {
+                    let path: String = line[at..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || "/._-".contains(*c))
+                        .collect();
+                    let path = path.trim_end_matches('.');
+                    let is_report = std::path::Path::new(path).extension().is_some_and(|e| {
+                        e.eq_ignore_ascii_case("log") || e.eq_ignore_ascii_case("txt")
+                    });
+                    if is_report && !logs.iter().any(|known| known == path) {
+                        logs.push(path.to_owned());
+                    }
                 }
             }
         }
@@ -214,14 +223,14 @@ fn after_failed_set_up(outcome: &str, rows: &[Vec<&str>]) -> Vec<Unbacked> {
         .filter_map(|section| {
             let mut failed: Option<(&str, &str)> = None;
             for row in rows {
-                let [_, "measure", at, _, key, value, ..] = row.as_slice() else {
+                let [_, "measure", at, scope, key, value, ..] = row.as_slice() else {
                     continue;
                 };
                 if *at != section {
                     continue;
                 }
                 match failed {
-                    None if failed_set_up(key, value) => failed = Some((key, value)),
+                    None if failed_set_up(scope, key, value) => failed = Some((key, value)),
                     Some((why, was)) if !is_set_up(key) => {
                         return Some(Unbacked::AfterFailedSetUp(format!(
                             "{section}: {why} {was}, then {key}"
@@ -246,14 +255,16 @@ fn is_section(word: &str) -> bool {
 
 /// Whether a row's key names set-up: binding a function, or a call's return code.
 fn is_set_up(key: &str) -> bool {
-    ["bound", "resolved", "status", "how", "rc"]
+    ["bound", "resolved", "status", "how", "rc", "errno"]
         .iter()
         .any(|word| key == *word || key.ends_with(&format!("-{word}")))
 }
 
 /// Whether a set-up row says it failed: a call answered -1.
-fn failed_set_up(key: &str, value: &str) -> bool {
-    (key == "rc" || key.ends_with("-rc")) && matches!(value, "0xffffffff" | "0xffffffffffffffff")
+fn failed_set_up(scope: &str, key: &str, value: &str) -> bool {
+    !scope.starts_with("arm")
+        && (key == "rc" || key.ends_with("-rc"))
+        && matches!(value, "0xffffffff" | "0xffffffffffffffff")
 }
 
 /// A status code as the platform writes one: `0x8` and seven more hex digits.

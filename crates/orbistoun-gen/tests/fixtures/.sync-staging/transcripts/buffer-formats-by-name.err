@@ -1,0 +1,105 @@
+<stdin>:5:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_10_10_10_2_FLOAT] idxen
+                                                 ^
+<stdin>:8:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_10_10_10_2_SRGB] idxen
+                                                 ^
+<stdin>:16:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_10_11_11_SRGB] idxen
+                                                 ^
+<stdin>:24:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_11_11_10_SRGB] idxen
+                                                 ^
+<stdin>:32:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_16_SRGB] idxen
+                                                 ^
+<stdin>:40:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_16_16_SRGB] idxen
+                                                 ^
+<stdin>:48:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_16_16_16_16_SRGB] idxen
+                                                 ^
+<stdin>:53:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_2_10_10_10_FLOAT] idxen
+                                                 ^
+<stdin>:56:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_2_10_10_10_SRGB] idxen
+                                                 ^
+<stdin>:57:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_USCALED] idxen
+                                                 ^
+<stdin>:58:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_SSCALED] idxen
+                                                 ^
+<stdin>:59:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_UNORM] idxen
+                                                 ^
+<stdin>:60:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_SNORM] idxen
+                                                 ^
+<stdin>:64:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_SRGB] idxen
+                                                 ^
+<stdin>:65:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_USCALED] idxen
+                                                 ^
+<stdin>:66:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_SSCALED] idxen
+                                                 ^
+<stdin>:67:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_UNORM] idxen
+                                                 ^
+<stdin>:68:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_SNORM] idxen
+                                                 ^
+<stdin>:72:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_SRGB] idxen
+                                                 ^
+<stdin>:73:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_USCALED] idxen
+                                                 ^
+<stdin>:74:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_SSCALED] idxen
+                                                 ^
+<stdin>:75:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_UNORM] idxen
+                                                 ^
+<stdin>:76:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_SNORM] idxen
+                                                 ^
+<stdin>:80:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_SRGB] idxen
+                                                 ^
+<stdin>:81:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_32_USCALED] idxen
+                                                 ^
+<stdin>:82:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_32_SSCALED] idxen
+                                                 ^
+<stdin>:83:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_32_UNORM] idxen
+                                                 ^
+<stdin>:84:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_32_SNORM] idxen
+                                                 ^
+<stdin>:88:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_32_32_32_32_SRGB] idxen
+                                                 ^
+<stdin>:93:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_8_FLOAT] idxen
+                                                 ^
+<stdin>:96:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_8_SRGB] idxen
+                                                 ^
+<stdin>:101:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_8_8_FLOAT] idxen
+                                                 ^
+<stdin>:104:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_8_8_SRGB] idxen
+                                                 ^
+<stdin>:109:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_8_8_8_8_FLOAT] idxen
+                                                 ^
+<stdin>:112:50: error: unsupported format
+tbuffer_load_format_x v0, v1, s[8:11], 0 format:[BUF_FMT_8_8_8_8_SRGB] idxen
+                                                 ^

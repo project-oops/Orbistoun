@@ -6,7 +6,7 @@ master_version = "01.00"
 
 [reproduce]
 module_sha256 = "d3e7cd4649be6972cb7a256323c89efb01050cf96e908499e774044526120198"
-limit_seconds = 20
+limit_seconds = 30
 frame_every = 30
 sheet_frames = 10
 frames = "local"
@@ -16,18 +16,21 @@ frames = "local"
 [settings]
 
 [status]
-reach = "entered"
+reach = "presented"
 outcome = "ran to the time limit"
-imports = 18
-calls = 30048
+imports = 20
+calls = 104611
 standing = 100
 default_return = "unimplemented"
+frames = 2
 unanswered = 0
-limit_seconds = 20
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
+limit_seconds = 30
+build = "v0.1.0 - 58d289f-dirty"
+measured_on = "2026-10-14"
 link_plan = "297884c655c12e41"
 link_plan_stored = "new"
+presented_by = "drawn"
+shown = true
 
 [experiment]
 reach = "flipped"

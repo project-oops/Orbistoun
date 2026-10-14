@@ -5,8 +5,8 @@ content_version = "01.00"
 master_version = "01.00"
 
 [reproduce]
-module_sha256 = "c84824e3e8e9bc9a8942bde7258826508226383a545533fc4f0a8a552b419d87"
-limit_seconds = 30
+module_sha256 = "1a6cc0101910d429733d45457385bb0b2db16e70b7bc5f9891542f6940e6c3fe"
+limit_seconds = 25
 frame_every = 30
 sheet_frames = 10
 frames = "local"
@@ -18,14 +18,16 @@ frames = "local"
 [status]
 reach = "presented"
 outcome = "ran to the time limit"
-imports = 55
-calls = 6267850
+imports = 62
+calls = 5510859
 standing = 100
 default_return = "unimplemented"
-frames = 3691
-unanswered = 8
-limit_seconds = 30
-build = "v0.1.0 - 80f56d2"
-measured_on = "2026-09-28"
-link_plan = "135e110d3e230943"
+frames = 3510
+unanswered = 0
+limit_seconds = 25
+build = "v0.1.0 - 093229f-dirty"
+measured_on = "2026-10-14"
+link_plan = "d21697e5f0d2fa2e"
 link_plan_stored = "new"
+presented_by = "drawn"
+shown = true

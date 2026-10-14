@@ -1,0 +1,639 @@
+[[step]]
+at_flip = 1
+
+[[step]]
+at_flip = 400
+buttons = ["south"]
+
+[[step]]
+at_flip = 403
+
+[[step]]
+at_flip = 440
+buttons = ["south"]
+
+[[step]]
+at_flip = 443
+
+[[step]]
+at_flip = 480
+buttons = ["south"]
+
+[[step]]
+at_flip = 483
+
+[[step]]
+at_flip = 520
+buttons = ["south"]
+
+[[step]]
+at_flip = 523
+
+[[step]]
+at_flip = 560
+buttons = ["south"]
+
+[[step]]
+at_flip = 563
+
+[[step]]
+at_flip = 600
+buttons = ["south"]
+
+[[step]]
+at_flip = 603
+
+[[step]]
+at_flip = 640
+buttons = ["south"]
+
+[[step]]
+at_flip = 643
+
+[[step]]
+at_flip = 680
+buttons = ["south"]
+
+[[step]]
+at_flip = 683
+
+[[step]]
+at_flip = 720
+buttons = ["south"]
+
+[[step]]
+at_flip = 723
+
+[[step]]
+at_flip = 760
+buttons = ["south"]
+
+[[step]]
+at_flip = 763
+
+[[step]]
+at_flip = 800
+buttons = ["south"]
+
+[[step]]
+at_flip = 803
+
+[[step]]
+at_flip = 840
+buttons = ["south"]
+
+[[step]]
+at_flip = 843
+
+[[step]]
+at_flip = 880
+buttons = ["south"]
+
+[[step]]
+at_flip = 883
+
+[[step]]
+at_flip = 920
+buttons = ["south"]
+
+[[step]]
+at_flip = 923
+
+[[step]]
+at_flip = 960
+buttons = ["south"]
+
+[[step]]
+at_flip = 963
+
+[[step]]
+at_flip = 1000
+buttons = ["south"]
+
+[[step]]
+at_flip = 1003
+
+[[step]]
+at_flip = 1040
+buttons = ["south"]
+
+[[step]]
+at_flip = 1043
+
+[[step]]
+at_flip = 1080
+buttons = ["south"]
+
+[[step]]
+at_flip = 1083
+
+[[step]]
+at_flip = 1120
+buttons = ["south"]
+
+[[step]]
+at_flip = 1123
+
+[[step]]
+at_flip = 1160
+buttons = ["south"]
+
+[[step]]
+at_flip = 1163
+
+[[step]]
+at_flip = 1200
+buttons = ["south"]
+
+[[step]]
+at_flip = 1203
+
+[[step]]
+at_flip = 1240
+buttons = ["south"]
+
+[[step]]
+at_flip = 1243
+
+[[step]]
+at_flip = 1280
+buttons = ["south"]
+
+[[step]]
+at_flip = 1283
+
+[[step]]
+at_flip = 1320
+buttons = ["south"]
+
+[[step]]
+at_flip = 1323
+
+[[step]]
+at_flip = 1360
+buttons = ["south"]
+
+[[step]]
+at_flip = 1363
+
+[[step]]
+at_flip = 1400
+buttons = ["south"]
+
+[[step]]
+at_flip = 1403
+
+[[step]]
+at_flip = 1440
+buttons = ["south"]
+
+[[step]]
+at_flip = 1443
+
+[[step]]
+at_flip = 1480
+buttons = ["south"]
+
+[[step]]
+at_flip = 1483
+
+[[step]]
+at_flip = 1520
+buttons = ["south"]
+
+[[step]]
+at_flip = 1523
+
+[[step]]
+at_flip = 1560
+buttons = ["south"]
+
+[[step]]
+at_flip = 1563
+
+[[step]]
+at_flip = 1600
+buttons = ["south"]
+
+[[step]]
+at_flip = 1603
+
+[[step]]
+at_flip = 1640
+buttons = ["south"]
+
+[[step]]
+at_flip = 1643
+
+[[step]]
+at_flip = 1680
+buttons = ["south"]
+
+[[step]]
+at_flip = 1683
+
+[[step]]
+at_flip = 1720
+buttons = ["south"]
+
+[[step]]
+at_flip = 1723
+
+[[step]]
+at_flip = 1760
+buttons = ["south"]
+
+[[step]]
+at_flip = 1763
+
+[[step]]
+at_flip = 1800
+buttons = ["south"]
+
+[[step]]
+at_flip = 1803
+
+[[step]]
+at_flip = 1840
+buttons = ["south"]
+
+[[step]]
+at_flip = 1843
+
+[[step]]
+at_flip = 1880
+buttons = ["south"]
+
+[[step]]
+at_flip = 1883
+
+[[step]]
+at_flip = 1920
+buttons = ["south"]
+
+[[step]]
+at_flip = 1923
+
+[[step]]
+at_flip = 1960
+buttons = ["south"]
+
+[[step]]
+at_flip = 1963
+
+[[step]]
+at_flip = 2000
+buttons = ["south"]
+
+[[step]]
+at_flip = 2003
+
+[[step]]
+at_flip = 2040
+buttons = ["south"]
+
+[[step]]
+at_flip = 2043
+
+[[step]]
+at_flip = 2080
+buttons = ["south"]
+
+[[step]]
+at_flip = 2083
+
+[[step]]
+at_flip = 2120
+buttons = ["south"]
+
+[[step]]
+at_flip = 2123
+
+[[step]]
+at_flip = 2160
+buttons = ["south"]
+
+[[step]]
+at_flip = 2163
+
+[[step]]
+at_flip = 2200
+buttons = ["south"]
+
+[[step]]
+at_flip = 2203
+
+[[step]]
+at_flip = 2240
+buttons = ["south"]
+
+[[step]]
+at_flip = 2243
+
+[[step]]
+at_flip = 2280
+buttons = ["south"]
+
+[[step]]
+at_flip = 2283
+
+[[step]]
+at_flip = 2320
+buttons = ["south"]
+
+[[step]]
+at_flip = 2323
+
+[[step]]
+at_flip = 2360
+buttons = ["south"]
+
+[[step]]
+at_flip = 2363
+
+[[step]]
+at_flip = 2400
+buttons = ["south"]
+
+[[step]]
+at_flip = 2403
+
+[[step]]
+at_flip = 2440
+buttons = ["south"]
+
+[[step]]
+at_flip = 2443
+
+[[step]]
+at_flip = 2480
+buttons = ["south"]
+
+[[step]]
+at_flip = 2483
+
+[[step]]
+at_flip = 2520
+buttons = ["south"]
+
+[[step]]
+at_flip = 2523
+
+[[step]]
+at_flip = 2560
+buttons = ["south"]
+
+[[step]]
+at_flip = 2563
+
+[[step]]
+at_flip = 2600
+buttons = ["south"]
+
+[[step]]
+at_flip = 2603
+
+[[step]]
+at_flip = 2640
+buttons = ["south"]
+
+[[step]]
+at_flip = 2643
+
+[[step]]
+at_flip = 2680
+buttons = ["south"]
+
+[[step]]
+at_flip = 2683
+
+[[step]]
+at_flip = 2720
+buttons = ["south"]
+
+[[step]]
+at_flip = 2723
+
+[[step]]
+at_flip = 2760
+buttons = ["south"]
+
+[[step]]
+at_flip = 2763
+
+[[step]]
+at_flip = 2800
+buttons = ["south"]
+
+[[step]]
+at_flip = 2803
+
+[[step]]
+at_flip = 2840
+buttons = ["south"]
+
+[[step]]
+at_flip = 2843
+
+[[step]]
+at_flip = 2880
+buttons = ["south"]
+
+[[step]]
+at_flip = 2883
+
+[[step]]
+at_flip = 2920
+buttons = ["south"]
+
+[[step]]
+at_flip = 2923
+
+[[step]]
+at_flip = 2960
+buttons = ["south"]
+
+[[step]]
+at_flip = 2963
+
+[[step]]
+at_flip = 3000
+buttons = ["south"]
+
+[[step]]
+at_flip = 3003
+
+[[step]]
+at_flip = 3040
+buttons = ["south"]
+
+[[step]]
+at_flip = 3043
+
+[[step]]
+at_flip = 3080
+buttons = ["south"]
+
+[[step]]
+at_flip = 3083
+
+[[step]]
+at_flip = 3120
+buttons = ["south"]
+
+[[step]]
+at_flip = 3123
+
+[[step]]
+at_flip = 3160
+buttons = ["south"]
+
+[[step]]
+at_flip = 3163
+
+[[step]]
+at_flip = 3200
+buttons = ["south"]
+
+[[step]]
+at_flip = 3203
+
+[[step]]
+at_flip = 3240
+buttons = ["south"]
+
+[[step]]
+at_flip = 3243
+
+[[step]]
+at_flip = 3280
+buttons = ["south"]
+
+[[step]]
+at_flip = 3283
+
+[[step]]
+at_flip = 3320
+buttons = ["south"]
+
+[[step]]
+at_flip = 3323
+
+[[step]]
+at_flip = 3360
+buttons = ["south"]
+
+[[step]]
+at_flip = 3363
+
+[[step]]
+at_flip = 3400
+buttons = ["south"]
+
+[[step]]
+at_flip = 3403
+
+[[step]]
+at_flip = 3440
+buttons = ["south"]
+
+[[step]]
+at_flip = 3443
+
+[[step]]
+at_flip = 3480
+buttons = ["south"]
+
+[[step]]
+at_flip = 3483
+
+[[step]]
+at_flip = 3520
+buttons = ["south"]
+
+[[step]]
+at_flip = 3523
+
+[[step]]
+at_flip = 3560
+buttons = ["south"]
+
+[[step]]
+at_flip = 3563
+
+[[step]]
+at_flip = 3600
+buttons = ["south"]
+
+[[step]]
+at_flip = 3603
+
+[[step]]
+at_flip = 3640
+buttons = ["south"]
+
+[[step]]
+at_flip = 3643
+
+[[step]]
+at_flip = 3680
+buttons = ["south"]
+
+[[step]]
+at_flip = 3683
+
+[[step]]
+at_flip = 3720
+buttons = ["south"]
+
+[[step]]
+at_flip = 3723
+
+[[step]]
+at_flip = 3760
+buttons = ["south"]
+
+[[step]]
+at_flip = 3763
+
+[[step]]
+at_flip = 3800
+buttons = ["south"]
+
+[[step]]
+at_flip = 3803
+
+[[step]]
+at_flip = 3840
+buttons = ["south"]
+
+[[step]]
+at_flip = 3843
+
+[[step]]
+at_flip = 3880
+buttons = ["south"]
+
+[[step]]
+at_flip = 3883
+
+[[step]]
+at_flip = 3920
+buttons = ["south"]
+
+[[step]]
+at_flip = 3923
+
+[[step]]
+at_flip = 3960
+buttons = ["south"]
+
+[[step]]
+at_flip = 3963
+
+[[step]]
+at_flip = 4000
+buttons = ["south"]
+
+[[step]]
+at_flip = 4003

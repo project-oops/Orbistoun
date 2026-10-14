@@ -21,23 +21,23 @@ out of date.
 | TSHP00001 | presented | 72 | 3,421,974 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` match |
 | SOHK00001 | presented | 72 | 4,303,539 | 100% | `ran to the time limit` | `b1a48bbb026652be` new |
 | OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
+| NVRB00001 | presented | 60 | 14,801,432 | 100% | `ran to the time limit` | `5e07176c4b817acd` new |
 | BGII00001 | presented | 55 | 6,267,850 | 100% | `ran to the time limit` | `135e110d3e230943` new |
 | BUGD00001 | presented | 55 | 88,848,677 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` new |
-| NVRB00001 | presented | 55 | 76,909,371 | 100% | `ran to the time limit` | `a89b785aee25443a` new |
 | NVPT00001 | presented | 53 | 72,190,754 | 100% | `ran to the time limit` | `f199db87cde691e2` new |
 | ETXR00001 | presented | 50 | 10,538,918 | 100% | `ran to the time limit` | `4a82e3e7b64097e7` new |
 | SCSH00001 | presented | 40 | 9,205 | 100% | `ran to the time limit` | `57ff1ceb38d5822b` new |
 | GLCB00001 | presented | 32 | 4,146,360 | 100% | `ran to the time limit` | `1ba0eae876769e17` new |
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
+| GLTC00001 | presented | 24 | 38,809 | 100% | `ran to the time limit` | `1785f6a8b01771d2` match |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
 | MDEM00001 | flipped | 94 | 236,798 | 100% | `ran to the time limit` | `c9768bbd359ab941` new |
-| GLTC00001 | flipped | 24 | 19,886 | 100% | `ran to the time limit` | `1785f6a8b01771d2` new |
-| PPSA21564-app0 | entered | 263 | 1,201,761 | 100% | `ran to the time limit` | `3bcd709f97eadd19` match |
+| GLPB00001 | flipped | 20 | 104,514 | 100% | `ran to the time limit` | `297884c655c12e41` new |
+| PPSA21564-app0 | entered | 285 | 20,017,021 | 100% | `spent its call budget` | `3bcd709f97eadd19` new |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
 | MESA00001 | entered | 33 | 362 | 100% | `ran to the time limit` | `a072d7cef4f013a8` new |
-| GLTP00001 | entered | 20 | 101,253 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
-| GLPB00001 | entered | 18 | 30,048 | 100% | `ran to the time limit` | `297884c655c12e41` new |
+| GLTP00001 | entered | 20 | 101,264 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
 | dist | entered | 0 | 0 | 100% | `0x1` | - |
 
 Under a measured policy - stubs answering by name, so these reach further by
@@ -87,10 +87,10 @@ construction and are not comparable with the table above:
 
 | | |
 |---|---|
-| Functions declared / implemented | 1283 / 1169 |
+| Functions declared / implemented | 1276 / 1160 |
 | Declared in a library that serves nothing | 40 across 5 libraries - names written down, no implementation |
-| Recorded behaviours | 1191 - 428 published, 303 measured, 123 guest-observed, 324 assumed |
-| Open questions a hardware probe could settle | 904 |
+| Recorded behaviours | 1182 - 428 published, 297 measured, 123 guest-observed, 321 assumed |
+| Open questions a hardware probe could settle | 901 |
 | Symbol database | 30191 names - 718 from this repository, 29456 from this repository and the module, 17 from this repository and a run of the module, 0 unaccounted |
 
 <!-- end generated -->
