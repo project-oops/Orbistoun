@@ -2366,6 +2366,9 @@ pub const COLOR_16: u32 = 2;
 /// `ColorFormat` `COLOR_2_10_10_10` (`gfx103.json`): what Mesa targets a 10-10-10-2 format at,
 /// red in the low bits (`ac_formats.c` 536).
 pub const COLOR_2_10_10_10: u32 = 9;
+/// `ColorFormat` `COLOR_8_8` (`gfx103.json`): two eight-bit channels, red then green under
+/// `SWAP_STD` (`ac_formats.c` `ac_translate_colorswap`, `XY__`).
+pub const COLOR_8_8: u32 = 3;
 /// `ColorFormat` `COLOR_16_16` (`gfx103.json`): what Mesa targets a two-channel 16-bit format at
 /// (`ac_formats.c` 500).
 pub const COLOR_16_16: u32 = 5;
@@ -2504,6 +2507,16 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a two-byte `8_8` `UNORM` target holding red then green (`SWAP_STD`, `XY__`):
+    /// drawn through an `Rgba8` attachment with alpha one and blue zero, as a format without them
+    /// reads (D869).
+    #[must_use]
+    pub const fn is_unorm_8_8(&self) -> bool {
+        self.format == COLOR_8_8
+            && self.number_type == NUMBER_UNORM
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a two-byte `16` `FLOAT` target holding red (`SWAP_STD`): one half float a
     /// texel, drawn as a 32-bit float and held as the half (D868).
     #[must_use]
@@ -2568,6 +2581,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Snorm8
         } else if self.is_float_16() {
             crate::TargetEncoding::Float16
+        } else if self.is_unorm_8_8() {
+            crate::TargetEncoding::Unorm8x2
         } else if self.is_uint_16() {
             crate::TargetEncoding::Uint16
         } else if self.is_float_32_32_32_32() {
@@ -2596,7 +2611,7 @@ impl ColourTargetFormat {
             Some(4)
         } else if self.is_float_16_16_16_16() {
             Some(8)
-        } else if self.is_uint_16() || self.is_float_16() {
+        } else if self.is_uint_16() || self.is_float_16() || self.is_unorm_8_8() {
             Some(2)
         } else if self.is_float_32_32_32_32() {
             Some(16)
@@ -2624,7 +2639,9 @@ pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
             ComponentSwap::Other(3) => 0x8,
             _ => 0xF,
         }
-    } else if format.format == COLOR_16_16 && matches!(format.swap, ComponentSwap::Standard) {
+    } else if (format.format == COLOR_16_16 || format.format == COLOR_8_8)
+        && matches!(format.swap, ComponentSwap::Standard)
+    {
         0x3
     } else {
         0xF
@@ -3709,6 +3726,13 @@ mod tests {
             !decode_colour_target_format(0x0001_8008).is_uint_16(),
             "not UNORM"
         );
+        // `COLOR_8_8` `UNORM` (D869), red then green, and only those two written.
+        let pair_of_bytes = decode_colour_target_format(0x0001_800c);
+        assert!(pair_of_bytes.is_unorm_8_8());
+        assert_eq!(pair_of_bytes.encoding(), crate::TargetEncoding::Unorm8x2);
+        assert_eq!(pair_of_bytes.written_back_bytes(), Some(2));
+        assert_eq!(super::colour_write_mask(0xF, 0x0001_800c), 0x3);
+        assert!(!decode_colour_target_format(0x0001_800c | (1 << 11)).is_unorm_8_8());
         // `COLOR_16` `FLOAT` (D868), as Grand Theft Auto V's second submission draws into next.
         let half = decode_colour_target_format(0x0001_8008 | (7 << 8));
         assert!(half.is_float_16());

@@ -49,7 +49,7 @@ const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 /// the same packed format it is held in (D773).
 const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
     match encoding {
-        TargetEncoding::Unorm8 => FORMAT,
+        TargetEncoding::Unorm8 | TargetEncoding::Unorm8x2 => FORMAT,
         TargetEncoding::Srgb8 => vk::Format::R8G8B8A8_SRGB,
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
         TargetEncoding::Float32 | TargetEncoding::Float16 => vk::Format::R32_SFLOAT,
@@ -74,7 +74,7 @@ const fn image_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Snorm8 => vk::Format::R8G8B8A8_SNORM,
         TargetEncoding::Uint16 => vk::Format::R32_UINT,
         TargetEncoding::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
-        TargetEncoding::Unorm8 | TargetEncoding::Srgb8 => FORMAT,
+        TargetEncoding::Unorm8 | TargetEncoding::Srgb8 | TargetEncoding::Unorm8x2 => FORMAT,
     }
 }
 
@@ -92,32 +92,41 @@ pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
         | TargetEncoding::Unorm10x3A2
         | TargetEncoding::Snorm8
         | TargetEncoding::Uint16
-        | TargetEncoding::Float16 => 4,
+        | TargetEncoding::Float16
+        | TargetEncoding::Unorm8x2 => 4,
     }
 }
 
+/// Whether an attachment of `encoding` holds its texels otherwise than the host carries them: a
+/// two-byte target, carried in each word's low half, drawn wider.
+const fn widened_on_device(encoding: TargetEncoding) -> bool {
+    matches!(encoding, TargetEncoding::Float16 | TargetEncoding::Unorm8x2)
+}
+
 /// A word a host hands an attachment of `encoding`, as the device holds it: a half-float target's
-/// half, in the word's low half, widened to the 32-bit float its attachment draws in (D868). Every
-/// other encoding's words are the device's own.
+/// half widened to the 32-bit float its attachment draws in (D868), an `8_8` target's two bytes
+/// given blue zero and alpha one (D869). Every other encoding's words are the device's own.
 const fn device_word(encoding: TargetEncoding, word: u32) -> u32 {
     match encoding {
         TargetEncoding::Float16 => crate::half::widened(word as u16),
+        TargetEncoding::Unorm8x2 => (word & 0xFFFF) | 0xFF00_0000,
         _ => word,
     }
 }
 
 /// [`device_word`]'s inverse: a word an attachment of `encoding` holds, as a host is handed it - a
-/// half-float target's float rounded to the nearest half (D868).
+/// half-float target's float rounded to the nearest half (D868), an `8_8` target's red and green.
 const fn host_word(encoding: TargetEncoding, word: u32) -> u32 {
     match encoding {
         TargetEncoding::Float16 => crate::half::narrowed(word) as u32,
+        TargetEncoding::Unorm8x2 => word & 0xFFFF,
         _ => word,
     }
 }
 
 /// The bytes a host hands an attachment of `encoding`, as the device holds them ([`device_word`]).
 fn device_bytes(encoding: TargetEncoding, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    if !matches!(encoding, TargetEncoding::Float16) {
+    if !widened_on_device(encoding) {
         return std::borrow::Cow::Borrowed(bytes);
     }
     std::borrow::Cow::Owned(
@@ -133,7 +142,7 @@ fn device_bytes(encoding: TargetEncoding, bytes: &[u8]) -> std::borrow::Cow<'_, 
 
 /// The bytes an attachment of `encoding` holds, as a host is handed them ([`host_word`]).
 fn host_bytes(encoding: TargetEncoding, mut bytes: Vec<u8>) -> Vec<u8> {
-    if matches!(encoding, TargetEncoding::Float16) {
+    if widened_on_device(encoding) {
         for word in bytes.chunks_exact_mut(4) {
             let held = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
             word.copy_from_slice(&host_word(encoding, held).to_le_bytes());
@@ -180,7 +189,8 @@ const fn resample_filter(encoding: TargetEncoding) -> vk::Filter {
         | TargetEncoding::Float16x4
         | TargetEncoding::Float16x2
         | TargetEncoding::Unorm10x3A2
-        | TargetEncoding::Snorm8 => vk::Filter::LINEAR,
+        | TargetEncoding::Snorm8
+        | TargetEncoding::Unorm8x2 => vk::Filter::LINEAR,
     }
 }
 
@@ -7313,6 +7323,36 @@ mod tests {
             read.bytes,
             [0x10, 0x20, 0x40, 0x80].repeat((width * height) as usize),
             "every pixel the word, red in the first byte"
+        );
+    }
+
+    /// A two-channel `8_8` target (D869) hands back the red and green it was given, and a uniform
+    /// fill reads back as its two bytes everywhere: alpha one and blue zero live on the device only.
+    #[test]
+    fn a_two_channel_target_hands_back_its_pairs() {
+        if crate::compute::session().is_err() {
+            eprintln!("no Vulkan device: the two-channel target is not exercised here");
+            return;
+        }
+        let (width, height) = (8_u32, 4_u32);
+        let pairs: Vec<u32> = (0..width * height).map(|i| (i * 0x0705) & 0xFFFF).collect();
+        let bytes: Vec<u8> = pairs.iter().flat_map(|pair| pair.to_le_bytes()).collect();
+        let resident = super::ResidentAttachment::create(
+            (width, height),
+            Some(&bytes),
+            [0.0; 4],
+            orbistoun_gpu::TargetEncoding::Unorm8x2,
+        )
+        .expect("an attachment");
+        let seeded = resident.read_back().expect("read back");
+        resident.reload_uniform(0x8040).expect("reloaded");
+        let filled = resident.read_back().expect("read back");
+        resident.destroy();
+        assert_eq!(seeded.bytes, bytes, "every pair as it was given");
+        assert_eq!(
+            filled.bytes,
+            0x8040_u32.to_le_bytes().repeat((width * height) as usize),
+            "the uniform pair everywhere"
         );
     }
 
