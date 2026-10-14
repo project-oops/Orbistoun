@@ -20,10 +20,18 @@ struct Kept {
     written: usize,
 }
 
-/// Keeps compiled pipelines at `path`. Takes effect for a device opened after the call; the
-/// first place named is the one used.
+/// Keeps compiled pipelines at `path`; the first place named is the one used. A device already
+/// open has its cache opened now: the worker names the place once it knows the title, and by then
+/// the device can be open already - which left every run since without a cache, each compute
+/// pipeline compiled afresh at 257 ms (STKT00001).
 pub fn keep_pipelines_at(path: PathBuf) {
     let _ = KEEP_AT.set(path);
+    if let Some(session) = crate::compute::opened_session() {
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        open(&session.instance, session.physical, &session.device);
+    }
 }
 
 /// The length of a pipeline cache's version-one header: its own length, its version, the vendor
@@ -50,6 +58,9 @@ pub(crate) fn open(instance: &ash::Instance, physical: vk::PhysicalDevice, devic
     let Some(path) = KEEP_AT.get() else {
         return;
     };
+    if KEPT.get().is_some() {
+        return;
+    }
     // SAFETY: the physical device came from this live instance.
     let properties = unsafe { instance.get_physical_device_properties(physical) };
     let data = std::fs::read(path)
@@ -61,10 +72,30 @@ pub(crate) fn open(instance: &ash::Instance, physical: vk::PhysicalDevice, devic
     let Ok(cache) = (unsafe { device.create_pipeline_cache(&info, None) }) else {
         return;
     };
+    // What the driver kept of the file, not the file's length: a driver drops entries it no longer
+    // uses, so a cache kept from older modules loads smaller than its file. Measured against the
+    // file, it never grew past it and was never written again - STKT00001's stayed five days old
+    // while every run compiled each compute pipeline afresh, 257 ms apiece.
     let _ = KEPT.set(Mutex::new(Kept {
         cache,
-        written: data.len(),
+        written: cache_size(device, cache).unwrap_or(0),
     }));
+}
+
+/// How many bytes the driver would write for `cache` now.
+fn cache_size(device: &ash::Device, cache: vk::PipelineCache) -> Option<usize> {
+    let mut size = 0;
+    // SAFETY: the cache was created on this device and is live for the process; a null data
+    // pointer asks only for the size, which is written to a live local.
+    let sized = unsafe {
+        (device.fp_v1_0().get_pipeline_cache_data)(
+            device.handle(),
+            cache,
+            &raw mut size,
+            std::ptr::null_mut(),
+        )
+    };
+    (sized == vk::Result::SUCCESS).then_some(size)
 }
 
 /// The cache a pipeline is created through: the session's, or none.
@@ -88,18 +119,7 @@ pub(crate) fn keep(device: &ash::Device) {
     let Ok(mut kept) = kept.lock() else {
         return;
     };
-    let mut size = 0;
-    // SAFETY: the cache was created on this device and is live for the process; a null data
-    // pointer asks only for the size, which is written to a live local.
-    let sized = unsafe {
-        (device.fp_v1_0().get_pipeline_cache_data)(
-            device.handle(),
-            kept.cache,
-            &raw mut size,
-            std::ptr::null_mut(),
-        )
-    };
-    if sized != vk::Result::SUCCESS || size <= kept.written {
+    if cache_size(device, kept.cache).is_none_or(|size| size <= kept.written) {
         return;
     }
     // SAFETY: the cache was created on this device and is live for the process.

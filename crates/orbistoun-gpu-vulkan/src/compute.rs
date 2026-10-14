@@ -599,6 +599,9 @@ fn make_pipeline(
         device.create_compute_pipelines(crate::pipeline_cache::cache(), &pipeline_info, None)
     }
     .map_err(|(_, e)| DispatchError::Vulkan("create_compute_pipelines", e))?;
+    // Kept for the next run as a draw's pipeline is (D744): a guest compute pipeline compiles in
+    // a quarter of a second.
+    crate::pipeline_cache::keep(device);
 
     Ok(KeptPipeline {
         shader,
@@ -749,13 +752,19 @@ pub(crate) fn sampler_anisotropy() -> bool {
 /// A failure is cached with the stage that failed, so a machine with no device does not repeat the
 /// setup on every call, and "no device" stays distinct from "a device that refused us".
 pub(crate) fn session() -> Result<&'static std::sync::Mutex<Session>, DispatchError> {
-    static SESSION: std::sync::OnceLock<
-        Result<std::sync::Mutex<Session>, (&'static str, vk::Result)>,
-    > = std::sync::OnceLock::new();
     SESSION
         .get_or_init(|| Session::new().map(std::sync::Mutex::new))
         .as_ref()
         .map_err(|(stage, result)| DispatchError::Vulkan(stage, *result))
+}
+
+/// The shared session, created on first use by [`session`].
+static SESSION: std::sync::OnceLock<Result<std::sync::Mutex<Session>, (&'static str, vk::Result)>> =
+    std::sync::OnceLock::new();
+
+/// The shared session when it is already open, without opening it.
+pub(crate) fn opened_session() -> Option<&'static std::sync::Mutex<Session>> {
+    SESSION.get()?.as_ref().ok()
 }
 
 impl Session {
