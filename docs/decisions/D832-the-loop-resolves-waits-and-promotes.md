@@ -41,6 +41,13 @@ at the end of a run and searched for stores, and each step was mechanical. A pro
 waits for a person to copy it out of a candidate file is a wall moved once and forgotten; staging
 it, labelled for what it is and with its measurement requested, keeps it.
 
+A waiting loop is one import, from one site, handed the same first argument at least sixteen times
+running: a wait asks the same thing each time, and a loop doing work hands each call something
+new. Watching a word traps on every access to it, so the sub-loop never starts in a profiled run
+(D831), whose time would then be the trap handler's. Ship of Harkinian's font atlas frees one
+glyph buffer after another through one `munmap`; taken for a wait, its stack was watched, the
+rasterizer trapped on every step, and a third of runs never left it.
+
 **Amends:** D322 - a policy patch that passes its trial and the corpus check is staged without
 waiting for a person; it is committed through the gate like any other change. Rust is still
 written and merged by a person.

@@ -96,7 +96,10 @@ pub fn waiting(recorded: &[orbistoun_thunk::RecordedCall]) -> Vec<Waiting> {
         .filter_map(|host| {
             let own: Vec<&orbistoun_thunk::RecordedCall> =
                 recorded.iter().filter(|call| call.thread == host).collect();
-            let calls: Vec<(u32, u64)> = own.iter().map(|call| (call.index, call.from)).collect();
+            let calls: Vec<(u32, u64, u64)> = own
+                .iter()
+                .map(|call| (call.index, call.from, call.args[0]))
+                .collect();
             let (_, site) = orbistoun_report::trace::waiting_loop(&calls)?;
             let newest = own.iter().max_by_key(|call| call.sequence)?;
             Some(Waiting {
@@ -195,9 +198,10 @@ pub const fn is_the_loops(after: u64, site: u64) -> bool {
 }
 
 /// Starts resolving waiting threads in the background. Silent when the run armed watchpoints of
-/// its own, which this would replace.
+/// its own, which this would replace, and in a profiled run (D831): a watched word traps on every
+/// access, which is the emulator's time a profile would then report.
 pub fn start() {
-    if watchpoint::armed() {
+    if watchpoint::armed() || orbistoun_env::TRACY.get().as_deref() == Some("1") {
         return;
     }
     let _ = std::thread::Builder::new()

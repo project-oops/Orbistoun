@@ -216,12 +216,17 @@ pub const WAIT_CALLS: usize = 16;
 /// The registers a [`Wait`] reports, in the order the call ring keeps them.
 pub const CALLEE_SAVED: [&str; 6] = ["rbx", "rbp", "r12", "r13", "r14", "r15"];
 
-/// The import and call site a thread's recorded calls, as `(import, site)`, all repeat, when
-/// there are at least [`WAIT_CALLS`] of them: a thread waiting in a loop around one call (D832).
+/// The import and call site a thread's recorded calls, as `(import, site, first argument)`, all
+/// repeat, when there are at least [`WAIT_CALLS`] of them: a thread waiting in a loop around one
+/// call (D832). The argument too, because a wait asks the same thing each time - the same sleep,
+/// the same condition, the same queue - where a loop doing work hands each call something new: a
+/// font atlas freeing one glyph buffer after another calls one import from one site, and watching
+/// its stack made every access a trap.
 #[must_use]
-pub fn waiting_loop(calls: &[(u32, u64)]) -> Option<(u32, u64)> {
+pub fn waiting_loop(calls: &[(u32, u64, u64)]) -> Option<(u32, u64)> {
     let &first = calls.first()?;
-    (calls.len() >= WAIT_CALLS && calls.iter().all(|&call| call == first)).then_some(first)
+    (calls.len() >= WAIT_CALLS && calls.iter().all(|&call| call == first))
+        .then_some((first.0, first.1))
 }
 
 /// A thread waiting in a loop around one call: the first step of the wait sub-loop (D832).
@@ -1449,8 +1454,16 @@ mod tests {
     /// around it (D832); a second site, a second import or too few calls is not one.
     #[test]
     fn one_import_from_one_site_enough_times_is_a_waiting_loop() {
-        let looping = vec![(7, 0x4000_02b5_f0e5); super::WAIT_CALLS];
+        let looping = vec![(7, 0x4000_02b5_f0e5, 16_000); super::WAIT_CALLS];
         assert_eq!(super::waiting_loop(&looping), Some((7, 0x4000_02b5_f0e5)));
+        let working: Vec<(u32, u64, u64)> = (0..super::WAIT_CALLS as u64)
+            .map(|block| (7, 0x4000_02b5_f0e5, 0x7400_0000_0000 + block * 0x1_0000))
+            .collect();
+        assert_eq!(
+            super::waiting_loop(&working),
+            None,
+            "a call handed something new each time is work, not a wait"
+        );
         assert_eq!(
             super::waiting_loop(&looping[1..]),
             None,
