@@ -152,6 +152,7 @@ tested against the wall it first found.
 | record what was learned by hand | a person, via `learn` | no, deliberately |
 | rank what no measurement covers, corpus-wide | orbistoun, via `census` | yes |
 | file a census batch to obSCEne, with predictions | a person | no |
+| check a resolution against the rows it cites | orbistoun, via `resolutions` | yes |
 | record what the title reached | `compat record`, prompted by the run | prompted |
 
 ## Step 17: the dispatcher
@@ -421,7 +422,7 @@ flowchart LR
     A["orbistoun-cli census<br/>imports with no measured entry,<br/>refusals by reason,<br/>ranked by titles reached"] --> B["group by area:<br/>one library, one GPU layer"]
     B --> C["one obSCEne request per area,<br/>many arms; predictions attached<br/>where a reference has them"]
     C --> D["obSCEne sweep rows"]
-    D --> E{"rows settle<br/>every arm?"}
+    D --> E{"rows settle<br/>every arm?<br/>(resolutions)"}
     E -- no --> F["re-file the arms<br/>the rows missed"]
     F --> C
     E -- yes --> G["knowledge entry,<br/>known_by: measured"]
@@ -440,6 +441,9 @@ flowchart LR
 3. Where a reference emulator has an answer, it travels with the request as a prediction
    (D818): a first arm for the probe and nothing more. The request resolves only on obSCEne's
    own rows, and an arm the rows miss is re-filed, never assumed.
+   `orbistoun-cli resolutions <worklog> --reports <obSCEne repository>` checks each resolution
+   against the rows of the logs it cites. A status code or function no row holds, or one whose
+   rows say it never bound, sends the request back with those rows quoted (D840).
 4. A resolved row becomes a knowledge entry with `known_by: measured`, and a fixture test that
    asserts the value before any implementation uses it ([TESTING.md](TESTING.md#a-measurement-lands-as-a-fixture)).
 5. Every refuted prediction goes into `crates/orbistoun-hle/data/oracle-ledger.toml`, so the

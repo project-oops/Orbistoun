@@ -18,6 +18,7 @@ mod probe;
 mod progress;
 mod questions;
 mod records;
+mod resolutions;
 mod run;
 mod shaders;
 mod status;
@@ -42,6 +43,7 @@ use crate::module::{
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
 use crate::questions::{cmd_question_spec, cmd_questions};
+use crate::resolutions::cmd_resolutions;
 use crate::run::{cmd_handoff, cmd_link, cmd_native_build, cmd_run};
 use crate::shaders::cmd_shaders;
 use crate::status::cmd_status;
@@ -469,6 +471,24 @@ enum Command {
         /// How many rows of each table to show.
         #[arg(long, default_value_t = 50)]
         top: usize,
+    },
+    /// Check the bus's resolutions against the rows of the logs they cite.
+    ///
+    /// Every resolved request the asker filed: each status code and platform function its outcome
+    /// names is looked for among the cited log's `OBS|` rows. One with no row, or a function whose
+    /// rows say it never bound, is printed; that resolution is filed again, not ingested (D840).
+    Resolutions {
+        /// The bus file: a worklog of requests.
+        worklog: std::path::PathBuf,
+        /// The resolver's repository, which the cited log paths are relative to.
+        #[arg(long)]
+        reports: std::path::PathBuf,
+        /// Whose requests to check: the `from` a request names.
+        #[arg(long, default_value = "Orbistoun")]
+        from: String,
+        /// Only requests from this id on, e.g. `REQ-20261014`.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Rebuild the standard-library word list from a FreeBSD source tree.
     ///
@@ -1018,6 +1038,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Questions { .. }
         | Command::Worklist { .. }
         | Command::Census { .. }
+        | Command::Resolutions { .. }
         | Command::Harvest { .. }
         | Command::Audit { .. } => dispatch_reports(&cli.command, service)?,
     }
@@ -1260,6 +1281,12 @@ fn dispatch_reports(command: &Command, service: &Service) -> Result<()> {
                 top,
             },
         )?,
+        Command::Resolutions {
+            ref worklog,
+            ref reports,
+            ref from,
+            ref since,
+        } => cmd_resolutions(worklog, reports, from, since.as_deref())?,
         Command::Harvest {
             ref source,
             ref out,

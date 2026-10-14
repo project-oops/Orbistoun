@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod resolution;
 pub mod respond;
 pub mod script;
 

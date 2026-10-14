@@ -295,7 +295,13 @@ announces it (obSCEne `REQ-20261012T1848Z-3feb`).
 orbistoun-cli census                                  # both tables
 orbistoun-cli census --imports --titles PPSA02664,PPSA21564 --json
 orbistoun-cli census --refusals --top 20
+orbistoun-cli resolutions <worklog> --reports <obSCEne repository> --since REQ-20261014
 ```
+
+`resolutions` checks what came back: every resolved request orbistoun filed, its outcome's
+status codes and functions looked for among the `OBS|` rows of the logs it cites. A claim no row
+holds, or a function whose rows say it never bound, is printed, and that request is filed again
+rather than ingested (D840).
 
 `census --imports` lists every import of every module a title in the library runs - its
 executable and the modules it ships - whose knowledge entry is missing or not
