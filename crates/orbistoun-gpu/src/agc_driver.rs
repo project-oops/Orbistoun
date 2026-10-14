@@ -580,10 +580,10 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
             shader_failures(submission)
         ));
     }
-    if let (refused @ 1.., why) = report.unbound_buffers {
+    if let (refused @ 1.., why) = &report.unbound_buffers {
         return Some(format!(
             "{refused} draw(s) read through a buffer that could not be bound: {}",
-            why.unwrap_or("no reason was kept")
+            why.as_deref().unwrap_or("no reason was kept")
         ));
     }
     None
@@ -6720,6 +6720,7 @@ mod tests {
                 single_slice: true,
                 single_sample: true,
                 clear: None,
+                pipe_bank_xor: 0,
             };
             let at = |address: u64| usize::try_from(address - buffer_at).expect("inside");
             let mut cp = GuestCp {

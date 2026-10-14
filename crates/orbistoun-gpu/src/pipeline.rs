@@ -447,7 +447,7 @@ pub struct SubmissionReport {
     pub unwindowed_draws: (usize, Option<String>),
     /// Draws whose shaders read through a buffer the draw could not bind exactly (D733), and why the
     /// first was refused.
-    pub unbound_buffers: (usize, Option<&'static str>),
+    pub unbound_buffers: (usize, Option<std::borrow::Cow<'static, str>>),
     /// Draws a stage's shader was not prepared for, which would run whatever shader was bound
     /// before them.
     pub unshaded_draws: usize,
@@ -4282,7 +4282,7 @@ const fn refused_instruction(error: &orbistoun_translate::TranslateError) -> Opt
 
 /// The instruction at `offset` as a report quotes it: its name, operands and first word, so a
 /// refusal says what it refused without the shader's bytes in hand.
-fn instruction_text(
+pub(crate) fn instruction_text(
     decoded: &orbistoun_shader::decode::Decode,
     encodings: &EncodingTable,
     offset: u32,

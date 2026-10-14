@@ -49,6 +49,20 @@ const LOGICAL_NOT_EQUAL: u16 = 165;
 /// What each scalar register code holds after a prefix, where the host can know it.
 pub type Scalars = [Option<u32>; SCALAR_CODES];
 
+/// Why a scalar register is unknown at an access, where something made it so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unknown {
+    /// The instruction at this byte left it unknown: a vector result, the execution mask, a read
+    /// the host could not make, or an operation the semantics do not run.
+    LeftBy(u32),
+    /// The paths to the access left it holding different values.
+    PathsDisagree,
+}
+
+/// Why each scalar register code is unknown at an access ([`Unknown`]); `None` where it is known,
+/// or where nothing before the access ever set it.
+pub type Unknowns = [Option<Unknown>; SCALAR_CODES];
+
 /// Runs `decode`'s instructions up to byte `until` over a stage whose user-data words land from
 /// scalar register `first_register`, with the system registers `system` seeds as the module seeds
 /// them, reading guest memory word by word through `read`. A branch whose condition the host
@@ -70,10 +84,35 @@ pub fn scalar_prefix(
     system: &[(u32, u32)],
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Result<Option<Scalars>, &'static str> {
+    scalar_prefix_explained(
+        decode,
+        encodings,
+        (until, program_address),
+        (first_register, user_data),
+        system,
+        read,
+    )
+    .map(|reached| reached.map(|(scalars, _)| scalars))
+}
+
+/// [`scalar_prefix`], with why each register unknown at the access is unknown ([`Unknowns`]): what
+/// a refusal names when a draw cannot know what it reads through.
+///
+/// # Errors
+///
+/// As [`scalar_prefix`].
+pub fn scalar_prefix_explained(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (until, program_address): (u32, Option<u64>),
+    (first_register, user_data): (u32, &[u32]),
+    system: &[(u32, u32)],
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<Option<(Scalars, Box<Unknowns>)>, &'static str> {
     // Each path a branch on the execution mask can take to the access, followed in turn: the
     // decisions taken so far, depth first.
     let mut pending: Vec<Vec<bool>> = vec![Vec::new()];
-    let mut merged: Option<Scalars> = None;
+    let mut merged: Option<(Scalars, Box<Unknowns>)> = None;
     let mut runs = 0;
     while let Some(decisions) = pending.pop() {
         runs += 1;
@@ -89,19 +128,24 @@ pub fn scalar_prefix(
             (read, &decisions),
         )?;
         match path {
-            Path::Reached(scalars) => {
-                let scalars = *scalars;
+            Path::Reached(reached) => {
+                let (scalars, unknowns) = *reached;
                 merged = Some(match merged {
-                    None => scalars,
+                    None => (scalars, Box::new(unknowns)),
                     // Known only where every path to the access agrees.
-                    Some(earlier) => {
+                    Some((earlier, mut why)) => {
                         let mut both = earlier;
-                        for (kept, other) in both.iter_mut().zip(scalars) {
+                        for (register, (kept, other)) in both.iter_mut().zip(scalars).enumerate() {
                             if *kept != other {
+                                why[register] = match (*kept, other) {
+                                    (Some(_), Some(_)) => Some(Unknown::PathsDisagree),
+                                    (None, _) => why[register].or(unknowns[register]),
+                                    (Some(_), None) => unknowns[register],
+                                };
                                 *kept = None;
                             }
                         }
-                        both
+                        (both, why)
                     }
                 });
             }
@@ -124,8 +168,8 @@ const MOST_PATHS: usize = 1 << 7;
 
 /// Where one path through a prefix ended.
 enum Path {
-    /// At the access, with these scalars.
-    Reached(Box<Scalars>),
+    /// At the access, with these scalars, and why those unknown are.
+    Reached(Box<(Scalars, Unknowns)>),
     /// Past it, by a branch that jumps over it (D800).
     Skipped,
     /// At a branch on the execution mask whose way the decisions given do not say.
@@ -157,6 +201,7 @@ fn prefix_path(
         }
     }
     let mut at = 0usize;
+    let mut unknowns: Unknowns = [None; SCALAR_CODES];
     // A bound on the steps, since a known branch can go backwards.
     let mut steps = 0usize;
     while let Some(instruction) = decode.instructions.get(at) {
@@ -174,6 +219,53 @@ fn prefix_path(
         let Some((family, name)) = named(encodings, instruction) else {
             return Err("an instruction before the access has no name (D753)");
         };
+        // A register this step leaves unknown is unknown because of it; one it makes known has no
+        // cause any more.
+        let before = model.scalars;
+        let step = step_prefix(
+            &mut model,
+            (instruction, family, name),
+            (decode, until),
+            (&mut decided, read),
+        )?;
+        for (register, (was, now)) in before.iter().zip(model.scalars).enumerate() {
+            match (was, now) {
+                (Some(_), None) => unknowns[register] = Some(Unknown::LeftBy(instruction.offset)),
+                (_, Some(_)) => unknowns[register] = None,
+                (None, None) => {}
+            }
+        }
+        match step {
+            Step::Next => {}
+            Step::Jump(to) => at = to,
+            Step::Ended(path) => return Ok(path),
+        }
+    }
+    Ok(Path::Reached(Box::new((model.scalars, unknowns))))
+}
+
+/// Where a step of [`prefix_path`] leaves the walk.
+enum Step {
+    /// On to the next instruction.
+    Next,
+    /// On from the instruction at this index.
+    Jump(usize),
+    /// The path ends here.
+    Ended(Path),
+}
+
+/// Runs one instruction of a prefix: a branch, a scalar load, scalar arithmetic, or what a vector
+/// instruction writes into the scalars.
+fn step_prefix(
+    model: &mut Concrete<'_>,
+    (instruction, family, name): (&Instruction, &str, &str),
+    (decode, until): (&Decode, u32),
+    (decided, read): (
+        &mut impl Iterator<Item = bool>,
+        &mut dyn FnMut(u64) -> Option<u32>,
+    ),
+) -> Result<Step, &'static str> {
+    {
         match family {
             "SOPP" if branches(name) => {
                 let taken = match name {
@@ -192,7 +284,7 @@ fn prefix_path(
                     // One landing before the access is followed both ways, a path each (D753).
                     "s_cbranch_execz" | "s_cbranch_execnz" => match decided.next() {
                         Some(taken) => Some(taken),
-                        None => return Ok(Path::Undecided),
+                        None => return Ok(Step::Ended(Path::Undecided)),
                     },
                     _ => None,
                 };
@@ -208,9 +300,9 @@ fn prefix_path(
                     let target = i64::from(instruction.offset) + 4 + 4 * jump;
                     // The prefix ends at the access: a jump beyond it skips it (D800).
                     if target > i64::from(until) {
-                        return Ok(Path::Skipped);
+                        return Ok(Step::Ended(Path::Skipped));
                     }
-                    at = decode
+                    let at = decode
                         .instructions
                         .iter()
                         .position(|i| i64::from(i.offset) == target)
@@ -218,6 +310,7 @@ fn prefix_path(
                     if at == decode.instructions.len() && target != i64::from(until) {
                         return Err("a branch into the middle of an instruction (D753)");
                     }
+                    return Ok(Step::Jump(at));
                 }
             }
             "SOPP" => {}
@@ -231,7 +324,7 @@ fn prefix_path(
                         "the program branches before the access, which is not followed (D753)",
                     );
                 }
-                if model::instruction(&mut model, instruction).is_err() {
+                if model::instruction(model, instruction).is_err() {
                     model.forget_written(instruction, name);
                 }
                 model.catch_up();
@@ -239,7 +332,7 @@ fn prefix_path(
             _ => model.forget_vector_writes(instruction, name),
         }
     }
-    Ok(Path::Reached(Box::new(model.scalars)))
+    Ok(Step::Next)
 }
 
 /// Whether a branch's target lies beyond the access at `until`.
@@ -1437,6 +1530,52 @@ mod tests {
     ) -> Result<Scalars, &'static str> {
         scalar_prefix(decode, encodings, (until, None), user_data, &[], read)
             .map(|scalars| scalars.expect("the access is reached"))
+    }
+
+    /// The prefix says which instruction left a register unknown at the access: a vector result
+    /// read into `s4` by `v_readlane_b32 s4, v0, 0` at byte 0 before a load through `s[4:7]` - a
+    /// draw buffer then names it rather than listing what might have. A register no step touched
+    /// has no cause.
+    #[test]
+    fn a_register_left_unknown_names_the_instruction() {
+        use super::{Unknown, scalar_prefix_explained};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings
+            .find_by_name("v_readlane_b32")
+            .expect("v_readlane_b32");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // v_readlane_b32 s4, v0, 0; s_buffer_load_dword s0, s[4:7], 0x0; s_endpgm.
+        let words = [
+            encoding.value | (opcode << encoding.opcode.shift) | 4,
+            256 | (128 << 9),
+            0xf420_0002,
+            0xfa00_0000,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[1].offset;
+        let (scalars, unknowns) = scalar_prefix_explained(
+            &decode,
+            &encodings,
+            (access, None),
+            (4, &[1, 2, 3, 4]),
+            &[],
+            &mut |_| None,
+        )
+        .expect("evaluated")
+        .expect("reached");
+        // A destination the semantics do not run is forgotten as wide as a pair.
+        assert_eq!((scalars[4], scalars[5], scalars[6]), (None, None, Some(3)));
+        assert_eq!(unknowns[4], Some(Unknown::LeftBy(0)));
+        assert_eq!(unknowns[5], Some(Unknown::LeftBy(0)));
+        assert_eq!(unknowns[6], None);
+        assert_eq!(unknowns[9], None, "never set, by nothing");
     }
 
     /// A wave whose execution mask the module seeds from merged_wave_info skips an access it

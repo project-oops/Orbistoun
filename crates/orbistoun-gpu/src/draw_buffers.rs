@@ -21,6 +21,9 @@ use crate::backend::{
 use crate::pipeline::GuestMemory;
 use crate::registers::decode_buffer_descriptor;
 
+/// Why a draw buffer could not be bound: a fixed reason, or one naming what the program did.
+type Refusal = std::borrow::Cow<'static, str>;
+
 /// The bytes from a descriptor's base every read the program makes through it can reach, as the
 /// descriptor's bounds rules admit them, or why nothing bounds them.
 ///
@@ -277,16 +280,16 @@ pub(crate) fn evaluate_computed(
     computed: &Computed,
     (user_data, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
     memory: &impl GuestMemory,
-) -> Result<Option<([u32; 4], u32)>, &'static str> {
+) -> Result<Option<([u32; 4], u32)>, Refusal> {
     const UNKNOWN: &str = concat!(
         "a buffer descriptor the program computes from something the host cannot know for the ",
-        "draw - a vector result, the execution mask, or an operation not evaluated (D753)"
+        "draw (D753)"
     );
     let (encodings, decode) = decoded_prefix(&computed.prefix)?;
     let count = usize::try_from(computed.user_data)
         .unwrap_or(USER_DATA_WORDS)
         .min(USER_DATA_WORDS);
-    let scalars = orbistoun_translate::evaluate::scalar_prefix(
+    let explained = orbistoun_translate::evaluate::scalar_prefix_explained(
         &decode,
         encodings,
         (computed.at, computed.program_address),
@@ -297,8 +300,29 @@ pub(crate) fn evaluate_computed(
             Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         },
     )?;
-    let Some(scalars) = scalars else {
+    let Some((scalars, unknowns)) = explained else {
         return Ok(None);
+    };
+    // The register the draw cannot know, and the instruction that left it so.
+    let unknown = |register: usize| -> Refusal {
+        let name = match register {
+            0..=105 => format!("s{register}"),
+            106 => "vcc_lo".to_owned(),
+            107 => "vcc_hi".to_owned(),
+            code => format!("scalar code {code}"),
+        };
+        let cause = match unknowns.get(register).copied().flatten() {
+            Some(orbistoun_translate::evaluate::Unknown::LeftBy(at)) => format!(
+                "after {} at {at:#x}",
+                crate::pipeline::instruction_text(&decode, encodings, at)
+                    .unwrap_or_else(|| "an instruction".to_owned())
+            ),
+            Some(orbistoun_translate::evaluate::Unknown::PathsDisagree) => {
+                "where the paths to the access disagree".to_owned()
+            }
+            None => "and nothing before the access set it".to_owned(),
+        };
+        format!("{UNKNOWN}: {name} is unknown {cause}").into()
     };
     let (first, count) = match computed.through {
         ComputedAccess::Descriptor { first, .. } => (usize::from(first), 4),
@@ -310,7 +334,7 @@ pub(crate) fn evaluate_computed(
             .get(first + step)
             .copied()
             .flatten()
-            .ok_or(UNKNOWN)?;
+            .ok_or_else(|| unknown(first + step))?;
     }
     // The offset field's codes: a scalar register, `null` (125), or an inline integer, 128 to 192
     // counting up from zero and 193 to 208 down from -1.
@@ -322,7 +346,7 @@ pub(crate) fn evaluate_computed(
             .get(usize::from(code))
             .copied()
             .flatten()
-            .ok_or(UNKNOWN)?,
+            .ok_or_else(|| unknown(usize::from(code)))?,
     };
     Ok(Some((words, soffset)))
 }
@@ -655,7 +679,7 @@ pub(crate) fn resolve_range(
     source: &BufferSource,
     draw: (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
     memory: &impl GuestMemory,
-) -> Result<(u64, u64), &'static str> {
+) -> Result<(u64, u64), Refusal> {
     span(Span::BufferResolve, || {
         resolve_range_now(source, draw, memory)
     })
@@ -666,7 +690,7 @@ fn resolve_range_now(
     source: &BufferSource,
     (user_data, vertices, system): (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
     memory: &impl GuestMemory,
-) -> Result<(u64, u64), &'static str> {
+) -> Result<(u64, u64), Refusal> {
     let (address, length) = match source {
         BufferSource::Global(global) => global_range(global, user_data, vertices, memory)?,
         BufferSource::Pointer { base, extent } => {
@@ -708,10 +732,10 @@ fn resolve_range_now(
     // The module reads whole words counted from the range's first byte, as the hardware does from
     // a word-aligned base.
     if address % 4 != 0 {
-        return Err("a draw buffer whose base is not word-aligned (D733)");
+        return Err("a draw buffer whose base is not word-aligned (D733)".into());
     }
     if length > MOST_BYTES {
-        return Err("a draw buffer larger than one draw binds (D733)");
+        return Err("a draw buffer larger than one draw binds (D733)".into());
     }
     Ok((address, length))
 }
@@ -771,7 +795,7 @@ pub fn bind_draw_buffers(
         &mut BufferCache,
     ),
     memory: &impl GuestMemory,
-    refused: &mut (usize, Option<&'static str>),
+    refused: &mut (usize, Option<Refusal>),
 ) {
     const STAGES: [ShaderStage; 2] = [ShaderStage::Vertex, ShaderStage::Fragment];
     let index = |stage: ShaderStage| STAGES.iter().position(|s| *s == stage);
@@ -779,7 +803,7 @@ pub fn bind_draw_buffers(
     let mut modules: [Option<ResourceId>; 2] = [None; 2];
     let mut bound: [Option<Vec<(u64, usize, u64)>>; 2] = [None, None];
     // Ranges read this submission: guest memory does not change while it is prepared.
-    let mut read: BTreeMap<(u64, u64), Result<DrawBuffer, &'static str>> = BTreeMap::new();
+    let mut read: BTreeMap<(u64, u64), Result<DrawBuffer, Refusal>> = BTreeMap::new();
     let mut out = Vec::with_capacity(commands.len());
     for command in commands.drain(..) {
         match &command {
@@ -832,14 +856,16 @@ pub fn bind_draw_buffers(
                             resolve_range(source, (&words[at], vertices, &system), memory).map(Some)
                         })
                         .chain(indices.map(|found| {
-                            found.map(|(buffer, count)| match buffer {
-                                IndexBuffer::Guest { address, bytes } => {
-                                    Some((address, u64::from(count) * u64::from(bytes)))
-                                }
-                                IndexBuffer::Counting { .. } => None,
-                            })
+                            found
+                                .map_err(Into::into)
+                                .map(|(buffer, count)| match buffer {
+                                    IndexBuffer::Guest { address, bytes } => {
+                                        Some((address, u64::from(count) * u64::from(bytes)))
+                                    }
+                                    IndexBuffer::Counting { .. } => None,
+                                })
                         }));
-                    let resolved: Result<Vec<DrawBuffer>, &'static str> = ranges
+                    let resolved: Result<Vec<DrawBuffer>, Refusal> = ranges
                         .map(|range| {
                             let Some(range) = range? else {
                                 return Ok(counting_indices(indices));
@@ -848,7 +874,7 @@ pub fn bind_draw_buffers(
                                 .or_insert_with(|| {
                                     let length = usize::try_from(range.1)
                                         .map_err(|_| "a draw buffer larger than this host holds")?;
-                                    cache.read(range.0, length, memory)
+                                    Ok(cache.read(range.0, length, memory)?)
                                 })
                                 .clone()
                         })
@@ -1072,6 +1098,47 @@ mod tests {
             let start = usize::try_from(address.checked_sub(self.0)?).ok()?;
             self.1.get(start..start.checked_add(length)?)
         }
+    }
+
+    /// A computed descriptor the draw cannot know is refused naming the register and the instruction
+    /// that left it unknown: `v_readlane_b32 s4, v0, 0` at byte 0 overwrites the first word of the
+    /// descriptor in `s[4:7]` with a vector result, and the refusal says so rather than listing what
+    /// might have.
+    #[test]
+    fn an_unknown_descriptor_names_the_instruction_that_left_it_so() {
+        use orbistoun_translate::draw_buffers::{BufferSource, Computed};
+        let encodings = orbistoun_shader::EncodingTable::builtin().expect("encodings");
+        let (family, opcode) = encodings
+            .find_by_name("v_readlane_b32")
+            .expect("v_readlane_b32");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        let source = BufferSource::Computed(Box::new(Computed {
+            prefix: vec![
+                encoding.value | (opcode << encoding.opcode.shift) | 4,
+                256 | (128 << 9),
+            ],
+            at: 8,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Descriptor {
+                first: 4,
+                reads: scalar(16),
+            },
+            soffset: 125,
+            first_register: 4,
+            user_data: 4,
+            program_address: None,
+        }));
+        let mut user_data = [0u32; super::USER_DATA_WORDS];
+        user_data[..4].copy_from_slice(&[0x100, 0, 16, RAW]);
+        let refused = super::resolve_range(&source, (&user_data, 3, &[]), &At(0, Vec::new()))
+            .expect_err("refused");
+        assert!(
+            refused.contains("s4 is unknown after `v_readlane_b32") && refused.contains("at 0x0"),
+            "{refused}"
+        );
     }
 
     /// A computed descriptor the program branches past (D800) is null: its range binds nothing and
