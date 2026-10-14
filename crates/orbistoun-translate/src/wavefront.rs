@@ -6111,6 +6111,60 @@ mod unwritten_user_data_tests {
 }
 
 #[cfg(test)]
+mod exact_memory_tests {
+    /// A guest dispatch's access to guest memory that is not yet checked against its window is
+    /// refused naming the instruction, so a report says which access a program needs: Grand Theft
+    /// Auto V's first sixteen-wave dispatch was refused at its offset alone.
+    #[test]
+    fn an_unchecked_access_is_refused_by_name() {
+        use super::{
+            ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings
+            .find_by_name("global_load_dword")
+            .expect("global_load_dword");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // global_load_dword v1, v[0:1], off; s_endpgm.
+        let words = [
+            encoding.value | (opcode << encoding.opcode.shift),
+            (0x7d << 16) | (1 << 24),
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let refused = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::spanning_address(0x4_0000_0000, 1024).expect("a window"),
+            UserData {
+                compute: Some(ComputeInputs {
+                    threads: [64, 1, 1],
+                    thread_id_components: 1,
+                    ..ComputeInputs::default()
+                }),
+                ..UserData::default()
+            },
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refused.contains("(global_load_dword)") && refused.contains("checked against"),
+            "{refused}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod wave32_mask_tests {
     /// In a thirty-two-lane wave a lane mask is one scalar register: `v_cndmask_b32_e64`'s mask
     /// `s[6:7]` reads `s6` alone, as the compare that wrote it wrote `s6` alone. Reading `s7` too

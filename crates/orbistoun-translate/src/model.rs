@@ -2680,8 +2680,9 @@ fn memory_instruction<M: Model + ?Sized>(
         && (!name.starts_with("s_buffer_load_dword")
             || model.draw_buffer_slot(instruction).is_none())
     {
-        return Err(TranslateError::Unsupported {
+        return Err(TranslateError::NotTranslated {
             offset: instruction.offset,
+            mnemonic: name.to_owned(),
             detail: concat!(
                 "a guest dispatch writes guest memory for real, and this access is not yet ",
                 "checked against its window, so where it lands could not be made exact"

@@ -205,7 +205,9 @@ pub enum TranslateError {
         detail: &'static str,
     },
 
-    /// An instruction the decoder named and this translator has no translation for.
+    /// An instruction the decoder named and this translator has no translation for, or none that
+    /// holds where it sits - a guest dispatch's access to memory not yet checked against its
+    /// window.
     ///
     /// The mnemonic is carried so a report names the instruction a shader needs, not only where
     /// it sits.
@@ -215,7 +217,7 @@ pub enum TranslateError {
         offset: u32,
         /// The instruction's name, as the encoding table gives it.
         mnemonic: String,
-        /// Why: [`model::NO_TRANSLATION`].
+        /// Why: [`model::NO_TRANSLATION`], or what keeps the translation from holding.
         detail: &'static str,
     },
 
