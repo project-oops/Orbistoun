@@ -296,25 +296,102 @@ pub(crate) fn evaluate_computed(
     computed: &Computed,
     (user_data, system): (&[u32; USER_DATA_WORDS], &[(u32, u32)]),
     memory: &impl GuestMemory,
-) -> Result<Option<([u32; 4], u32)>, Refusal> {
+) -> Evaluation {
+    let count = usize::try_from(computed.user_data)
+        .unwrap_or(USER_DATA_WORDS)
+        .min(USER_DATA_WORDS);
+    let user_data = &user_data[..count];
+    let read = |address: u64| {
+        let bytes = memory.read(address, 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let fingerprint = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (computed, user_data, system).hash(&mut hasher);
+        hasher.finish()
+    };
+    let kept = evaluated().lock().ok().and_then(|evaluated| {
+        evaluated
+            .get(&fingerprint)?
+            .iter()
+            .find(|kept| {
+                kept.computed == *computed
+                    && kept.user_data == user_data
+                    && kept.system == system
+                    && kept.reads.iter().all(|&(at, held)| read(at) == Some(held))
+            })
+            .map(|kept| kept.answer.clone())
+    });
+    if let Some(answer) = kept {
+        return answer;
+    }
+    let mut reads = Vec::new();
+    let answer = evaluate_computed_now(computed, (user_data, system), &mut |address| {
+        let held = read(address)?;
+        reads.push((address, held));
+        Some(held)
+    });
+    if let Ok(mut evaluated) = evaluated().lock() {
+        if evaluated.len() >= EVALUATED_KEPT {
+            evaluated.clear();
+        }
+        evaluated.entry(fingerprint).or_default().push(Evaluated {
+            computed: computed.clone(),
+            user_data: user_data.to_vec(),
+            system: system.to_vec(),
+            reads,
+            answer: answer.clone(),
+        });
+    }
+    answer
+}
+
+/// What [`evaluate_computed`] answers.
+pub(crate) type Evaluation = Result<Option<([u32; 4], u32)>, Refusal>;
+
+/// An answer [`evaluate_computed`] gave, with what it was asked and each guest word its replay read
+/// and what that held: asked the same again, it holds while every one of those words does. A
+/// title's draws compute their descriptors from tables that stay put from frame to frame, and
+/// replaying the program for each was 30 us a draw (PPSA02664, a sixth of a run), half of them
+/// asked before.
+struct Evaluated {
+    computed: Computed,
+    user_data: Vec<u32>,
+    system: Vec<(u32, u32)>,
+    reads: Vec<(u64, u32)>,
+    answer: Evaluation,
+}
+
+/// The answers [`evaluate_computed`] keeps, by a hash of what each was asked.
+fn evaluated() -> &'static std::sync::Mutex<std::collections::HashMap<u64, Vec<Evaluated>>> {
+    static EVALUATED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, Vec<Evaluated>>>,
+    > = std::sync::OnceLock::new();
+    EVALUATED.get_or_init(Default::default)
+}
+
+/// The most hashes of answers [`evaluated`] keeps before it lets them all go.
+const EVALUATED_KEPT: usize = 4096;
+
+/// [`evaluate_computed`], replayed: guest memory's words come through `read`.
+fn evaluate_computed_now(
+    computed: &Computed,
+    (user_data, system): (&[u32], &[(u32, u32)]),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Evaluation {
     const UNKNOWN: &str = concat!(
         "a buffer descriptor the program computes from something the host cannot know for the ",
         "draw (D753)"
     );
     let (encodings, decode) = decoded_prefix(&computed.prefix)?;
-    let count = usize::try_from(computed.user_data)
-        .unwrap_or(USER_DATA_WORDS)
-        .min(USER_DATA_WORDS);
     let explained = orbistoun_translate::evaluate::scalar_prefix_explained(
         &decode,
         encodings,
         (computed.at, computed.program_address),
-        (computed.first_register, &user_data[..count]),
+        (computed.first_register, user_data),
         system,
-        &mut |address| {
-            let bytes = memory.read(address, 4)?;
-            Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-        },
+        read,
     )?;
     let Some((scalars, unknowns)) = explained else {
         return Ok(None);
@@ -1638,6 +1715,48 @@ mod tests {
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
         assert!(super::resolve_range(&source, (&user_data, 0, &[]), &memory).is_err());
+    }
+
+    /// A computed descriptor asked for again is answered as kept only while the guest words its
+    /// program read still hold what they did: the same program and user data over a table whose
+    /// descriptor moved reads the new one.
+    #[test]
+    fn a_kept_computed_descriptor_holds_only_while_what_it_read_does() {
+        use orbistoun_translate::draw_buffers::{BufferSource, Computed};
+        let table_at = |base: u32| {
+            let mut table = Vec::new();
+            for word in [base, 16 << 16, 4, STRUCTURED] {
+                table.extend(word.to_le_bytes());
+            }
+            At(0x5_1000, table)
+        };
+        let source = BufferSource::Computed(Box::new(Computed {
+            // s_load_dwordx4 s[0:3], s[4:5], 0x0; s_waitcnt lgkmcnt(0)
+            prefix: vec![0xf408_0002, 0xfa00_0000, 0xbf8c_c07f],
+            at: 12,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Descriptor {
+                first: 0,
+                reads: vector(Some(16), true),
+            },
+            soffset: 125,
+            first_register: 4,
+            user_data: 2,
+            program_address: None,
+        }));
+        let mut user_data = [0u32; super::USER_DATA_WORDS];
+        user_data[0] = 0x5_1000;
+        let range = |memory: &At| super::resolve_range(&source, (&user_data, 0, &[]), memory);
+        assert_eq!(range(&table_at(0x6000)), Ok((0x6000, 4 * 16)));
+        assert_eq!(
+            range(&table_at(0x6000)),
+            Ok((0x6000, 4 * 16)),
+            "asked again"
+        );
+        assert_eq!(
+            range(&table_at(0x7000)),
+            Ok((0x7000, 4 * 16)),
+            "the descriptor moved, so the kept answer does not hold"
+        );
     }
 
     /// The open-toolchain GL context's vertex prologue and one four-component attribute fetch
