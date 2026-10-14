@@ -179,7 +179,8 @@ pub struct DrawBuffers {
 ///
 /// Nothing is traced in a program that writes memory, which a snapshot bound for the draw would
 /// not see - unless `stores` (a dispatch, whose buffers are written back, D746) and every write is
-/// a buffer store through a descriptor, which is traced like a load. With `globals` (a primitive
+/// a buffer store through a descriptor, which is traced like a load, or a store to an image the
+/// dispatch binds whole and writes back the same way. With `globals` (a primitive
 /// shader, D758), its global loads with no scalar base share one buffer after the others.
 #[must_use]
 pub fn trace(
@@ -207,8 +208,9 @@ pub fn trace(
         .zip(&named)
         .find_map(|(instruction, named)| {
             let (_, name) = (*named)?;
-            (writes_memory(name) && !(stores && bound_buffer_store(name)))
-                .then(|| (instruction.offset, name.to_owned()))
+            (writes_memory(name)
+                && !(stores && (bound_buffer_store(name) || bound_image_access(name))))
+            .then(|| (instruction.offset, name.to_owned()))
         });
     if untraced_by.is_some() {
         return DrawBuffers {
@@ -510,6 +512,12 @@ fn writes_memory(name: &str) -> bool {
 /// or one converting by its descriptor's format (D738), which addresses the buffer the same way.
 fn bound_buffer_store(name: &str) -> bool {
     name.starts_with("buffer_store_dword") || name.starts_with("buffer_store_format_")
+}
+
+/// Whether an instruction reaches an image a dispatch binds whole and writes back exactly, as it
+/// does its buffers (D746): such an access needs no window and keeps no buffer from being traced.
+pub(crate) fn bound_image_access(name: &str) -> bool {
+    matches!(name, "image_load" | "image_load_mip" | "image_store")
 }
 
 /// `null` in a scalar memory instruction's `SOFFSET` field, bits 31:25 of its second word: no
@@ -821,6 +829,47 @@ mod tests {
         0x8003_0100,
         END,
     ];
+
+    /// A dispatch's image store does not keep its buffers from being traced: the image is bound
+    /// whole and written back, as the dispatch's buffers are (D746). Grand Theft Auto V's first
+    /// sixteen-wave dispatch reads its constants through a buffer and stores through an image. A
+    /// draw's image store, which no snapshot would see, still traces nothing.
+    #[test]
+    fn a_dispatch_s_image_store_leaves_its_buffers_traced() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings.find_by_name("image_store").expect("image_store");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // image_store v[2:5], v0, s[16:23] dmask:0xf dim:SQ_RSRC_IMG_2D
+        let store = [
+            encoding.value | (opcode << encoding.opcode.shift) | (0xf << 8) | (1 << 3),
+            (2 << 8) | (4 << 16),
+        ];
+        let mut program = COPY[..3].to_vec();
+        program.extend(store);
+        program.push(END);
+        let bytes: Vec<u8> = program.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let names: Vec<String> = decoded
+            .instructions
+            .iter()
+            .map(|i| crate::instruction_name(i, &encodings))
+            .collect();
+        assert_eq!(
+            names,
+            ["buffer_load_dword", "s_waitcnt", "image_store", "s_endpgm"],
+            "the hand-assembled program"
+        );
+        let dispatch = trace(&decoded, &encodings, (0, 24), (true, false));
+        assert_eq!(dispatch.untraced_by, None);
+        assert_eq!(dispatch.served, std::collections::BTreeMap::from([(0, 0)]));
+        let draw = trace(&decoded, &encodings, (0, 24), (false, false));
+        assert_eq!(draw.untraced_by, Some((12, "image_store".to_owned())));
+    }
 
     /// A computed descriptor after a multiply-add with an inline constant is traced with the program
     /// before it whole: `v_madmk_f32`'s constant is a dword of its own that no literal operand

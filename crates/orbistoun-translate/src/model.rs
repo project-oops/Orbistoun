@@ -2682,7 +2682,7 @@ fn memory_instruction<M: Model + ?Sized>(
     if model.exact_memory()
         && !name.starts_with("buffer_")
         && !name.starts_with("ds_")
-        && !matches!(name, "image_load" | "image_load_mip" | "image_store")
+        && !crate::draw_buffers::bound_image_access(name)
         && (!name.starts_with("s_buffer_load_dword")
             || model.draw_buffer_slot(instruction).is_none())
     {
