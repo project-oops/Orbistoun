@@ -271,11 +271,8 @@ pub(crate) fn cmd_question_spec(
 /// The first argument signature a stored run recorded for `function`, by its bare name.
 fn recorded_shape(function: &str) -> Option<String> {
     let dir = orbistoun_paths::Paths::resolve().traces_dir();
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+    orbistoun_report::trace::latest_traces(&dir)
+        .into_iter()
         .filter_map(|path| std::fs::read_to_string(path).ok())
         .filter_map(|text| serde_json::from_str::<orbistoun_report::trace::CallTrace>(&text).ok())
         .find_map(|trace| {

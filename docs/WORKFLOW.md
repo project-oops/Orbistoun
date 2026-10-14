@@ -418,7 +418,7 @@ next instruction; naming the instruction itself would mean disassembling a vendo
 
 | Artifact | Where | Written by |
 |---|---|---|
-| Call traces | `<data>/traces/*.json` | every run, on every outcome |
+| Call traces, frames, submission dumps | `<data>/traces/runs/<title>/<run>/` | every run, on every outcome |
 | Run reports | `<data>/reports/` | `orbistoun-cli report` |
 | Learned answers | `<data>/learned.toml` | `orbistoun-cli turn --apply` |
 | Names worked out | `symbols/generated.json` | `./bin/orbistoun names`, accumulating |
@@ -429,8 +429,10 @@ next instruction; naming the instruction itself would mean disassembling a vendo
 | Window captures | `<data>/screenshots/*.png` | the GUI toolbar's capture button (D162) |
 
 `<data>` is the platform data directory, or the binary's own directory in portable mode;
-`orbistoun-cli paths` prints it. Traces are keyed by module, and `worklist` totals across all
-of them.
+`orbistoun-cli paths` prints it. Each run writes its `trace.json`, frames and dumps into a
+directory of its own, so concurrent runs never overwrite each other's, and a title keeps its last
+four runs (D865). The previous run is the title's latest that wrote a trace, and `worklist` totals
+across each title's latest.
 
 ## Run limits
 

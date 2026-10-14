@@ -8,11 +8,10 @@
 //! reads through [`read_frame`] rather than reimplementing it, and cannot disagree with the writer.
 
 use orbistoun_proto::{Event, FrameFormat};
-use orbistoun_report::RunId;
 use std::path::{Component, Path, PathBuf};
 
-/// The runs of one title whose frames and dumps are kept; an older run's directory goes when a run
-/// starts. A run leaves up to a ring of frames, 8 MB each at 1080p and 32 MB at 2160p, beside its
+/// The runs of one title whose traces, frames and dumps are kept; an older run's directory goes
+/// when a run starts. A run leaves up to a ring of frames, 8 MB each at 1080p and 32 MB at 2160p, beside its
 /// submission dumps.
 pub const KEPT_RUNS: usize = 4;
 
@@ -22,19 +21,13 @@ pub fn region_name(sequence: u64) -> String {
     format!("frame-{sequence}.bin")
 }
 
-/// Where the run `run` of `module` writes its frame regions: `frames/<title>/<run>/` under
-/// `traces`, the title named as its trace is (D865).
-#[must_use]
-pub fn run_dir(traces: &Path, module: &str, run: &RunId) -> PathBuf {
-    let trace = orbistoun_report::trace::trace_file_name(module);
-    traces
-        .join("frames")
-        .join(trace.trim_end_matches(".json"))
-        .join(run.as_str())
-}
+/// Where the run `run` of `module` writes its frame regions, beside its trace: `runs/<title>/<run>/`
+/// under `traces` (D865).
+pub use orbistoun_report::trace::run_dir;
 
-/// Removes the frame directories of the title `run` belongs to, all but the newest [`KEPT_RUNS`]
-/// (run ids sort chronologically). Best effort: a directory that cannot be removed is left.
+/// Removes the directories of the title `run` belongs to, traces included, all but the newest
+/// [`KEPT_RUNS`] (run ids sort chronologically). Best effort: a directory that cannot be removed is
+/// left.
 pub fn prune_runs(run: &Path) {
     let Some(title) = run.parent() else {
         return;

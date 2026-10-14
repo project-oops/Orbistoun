@@ -115,12 +115,8 @@ fn rank_refusals(rows: &mut [RefusalRow]) {
 /// failures for refusals, and both come from the same files.
 fn read_traces() -> Vec<orbistoun_report::trace::CallTrace> {
     let dir = orbistoun_paths::Paths::resolve().traces_dir();
-    std::fs::read_dir(&dir)
+    orbistoun_report::trace::latest_traces(&dir)
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .filter_map(|text| serde_json::from_str(&text).ok())
         .collect()

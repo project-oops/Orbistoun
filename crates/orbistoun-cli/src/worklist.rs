@@ -290,11 +290,12 @@ fn print_ranked(totals: &std::collections::BTreeMap<String, (u64, usize)>, top: 
 pub(crate) fn cmd_worklist(top: usize) {
     let paths = orbistoun_paths::Paths::resolve();
     let dir = paths.traces_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    let traces = orbistoun_report::trace::latest_traces(&dir);
+    if traces.is_empty() {
         println!("no traces yet at {}", dir.display());
         println!("run a guest first:  ./bin/orbistoun crunch");
         return;
-    };
+    }
 
     // Totalled by label, not by index: a stub index is per-module, so summing by index is wrong as
     // soon as a second module is involved.
@@ -310,11 +311,7 @@ pub(crate) fn cmd_worklist(top: usize) {
     let mut kernel: std::collections::BTreeMap<u64, KernelCall> = std::collections::BTreeMap::new();
     let mut modules = 0;
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
+    for path in traces {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };

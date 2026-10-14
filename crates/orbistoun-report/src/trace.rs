@@ -1064,13 +1064,13 @@ pub fn status_of(trace: &CallTrace, measured_on: String) -> orbistoun_overrides:
     }
 }
 
-/// The file name a module's trace is written to.
+/// The name a module's title goes by on disk: the last two path components, because
+/// `eboot.bin` alone is the same in every title.
 ///
-/// Declared once, because the worker writes the file and a shim reads it back, and the two
-/// must agree. The last two path components, because `eboot.bin` alone is the same in
-/// every title.
-pub fn trace_file_name(module: &str) -> String {
-    let stem: String = std::path::Path::new(module)
+/// Declared once, because the worker writes a run's files and a shim reads them back, and the
+/// two must agree.
+pub fn title_stem(module: &str) -> String {
+    std::path::Path::new(module)
         .components()
         .rev()
         .take(2)
@@ -1079,17 +1079,66 @@ pub fn trace_file_name(module: &str) -> String {
         .join("-")
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    format!("{stem}.json")
+        .collect()
 }
 
-/// Reads the trace a previous run of `module` left behind.
+/// The directory under the traces directory holding every run's own directory (D865).
+pub const RUNS: &str = "runs";
+
+/// The file in a run's directory its trace is written to.
+pub const TRACE_FILE: &str = "trace.json";
+
+/// The directory holding the runs of `module`: `runs/<title>/` under `traces`.
+pub fn title_runs(traces: &std::path::Path, module: &str) -> std::path::PathBuf {
+    traces.join(RUNS).join(title_stem(module))
+}
+
+/// The directory of the run `run` of `module`, which holds its trace, frames and dumps: the
+/// traces directory is shared by every session's runs, so each writes into its own (D865).
+pub fn run_dir(traces: &std::path::Path, module: &str, run: &crate::RunId) -> std::path::PathBuf {
+    title_runs(traces, module).join(run.as_str())
+}
+
+/// The newest trace among the runs in `title`, a [`title_runs`] directory. Run ids sort
+/// chronologically, and a run that wrote no trace is passed over.
+fn newest_trace_in(title: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut runs: Vec<std::path::PathBuf> = std::fs::read_dir(title)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    runs.sort();
+    runs.into_iter()
+        .rev()
+        .map(|run| run.join(TRACE_FILE))
+        .find(|trace| trace.is_file())
+}
+
+/// The trace the latest run of `module` that wrote one left behind.
+pub fn latest_trace_path(
+    traces: &std::path::Path,
+    module: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    newest_trace_in(&title_runs(traces, &module.to_string_lossy()))
+}
+
+/// Every title's latest trace, one per title, for a reading across titles that must not count a
+/// title's older runs again.
+pub fn latest_traces(traces: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(traces.join(RUNS))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|title| newest_trace_in(&title.path()))
+        .collect()
+}
+
+/// Reads the trace a previous run of `module` left behind: its latest run's.
 ///
 /// `None` covers both "no previous run" and "the file is unreadable or stale-format": the
 /// caller acts the same either way, and a first run is not an error.
 pub fn load_previous(traces_dir: &std::path::Path, module: &std::path::Path) -> Option<CallTrace> {
-    let name = trace_file_name(&module.to_string_lossy());
-    let text = std::fs::read_to_string(traces_dir.join(name)).ok()?;
+    let text = std::fs::read_to_string(latest_trace_path(traces_dir, module)?).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -1105,10 +1154,9 @@ pub struct Stamp {
     pub len: u64,
 }
 
-/// The identity of `module`'s trace file, or `None` if there is not one.
+/// The identity of `module`'s latest trace file, or `None` if there is not one.
 pub fn stamp_of(traces_dir: &std::path::Path, module: &std::path::Path) -> Option<Stamp> {
-    let name = trace_file_name(&module.to_string_lossy());
-    let data = std::fs::metadata(traces_dir.join(name)).ok()?;
+    let data = std::fs::metadata(latest_trace_path(traces_dir, module)?).ok()?;
     Some(Stamp {
         modified: data.modified().ok()?,
         len: data.len(),
@@ -2444,5 +2492,86 @@ mod ladder {
             "a guest that exited having done nothing must not outrank one that rendered"
         );
         assert!(rendered.beats(&trivial), "and the richer run wins");
+    }
+}
+
+#[cfg(test)]
+mod per_run {
+    use crate::RunId;
+    use std::path::{Path, PathBuf};
+
+    const GTA: &str = "/titles/PPSA04263/eboot.bin";
+    const NEVERBALL: &str = "/titles/NVRB00001/eboot.bin";
+
+    /// Writes a trace of `calls` total calls as the run at `ms` of `module` left it.
+    fn plant(traces: &Path, module: &str, ms: u64, calls: u64) -> PathBuf {
+        let dir = super::run_dir(traces, module, &RunId::new(ms, 0));
+        std::fs::create_dir_all(&dir).expect("run dir");
+        let path = dir.join(super::TRACE_FILE);
+        let text = format!(
+            r#"{{"module":"{module}","reached":"Entered","total_calls":{calls},"distinct":1,"calls":[]}}"#
+        );
+        std::fs::write(&path, text).expect("trace");
+        path
+    }
+
+    /// Two runs of one title keep their own traces, and the previous run is the newer one: runs
+    /// in several sessions share the traces directory (D865).
+    #[test]
+    fn two_runs_traces_do_not_collide_and_the_newest_is_previous() {
+        let traces = tempfile::tempdir().expect("tempdir");
+        let older = plant(traces.path(), GTA, 1_760_000_000_000, 11);
+        let newer = plant(traces.path(), GTA, 1_760_000_060_000, 22);
+        plant(traces.path(), NEVERBALL, 1_760_000_120_000, 33);
+
+        assert_ne!(older, newer);
+        assert!(older.exists() && newer.exists(), "each run's trace is kept");
+        let previous = super::load_previous(traces.path(), Path::new(GTA)).expect("a trace");
+        assert_eq!(
+            previous.total_calls, 22,
+            "the newest run of this title, not another title's"
+        );
+        assert_eq!(
+            super::latest_trace_path(traces.path(), Path::new(GTA)),
+            Some(newer)
+        );
+    }
+
+    /// A run that wrote no trace leaves the last trace as the previous one, and its stamp
+    /// unchanged, so it is not reported as this run's (D470).
+    #[test]
+    fn a_run_that_wrote_no_trace_is_not_this_run_s() {
+        let traces = tempfile::tempdir().expect("tempdir");
+        plant(traces.path(), GTA, 1_760_000_000_000, 11);
+        let before = super::stamp_of(traces.path(), Path::new(GTA));
+        let silent = super::run_dir(traces.path(), GTA, &RunId::new(1_760_000_060_000, 0));
+        std::fs::create_dir_all(&silent).expect("a run that died before writing");
+        let after = super::stamp_of(traces.path(), Path::new(GTA));
+
+        assert!(before.is_some());
+        assert!(!super::wrote_a_trace(before, after));
+        assert_eq!(
+            super::load_previous(traces.path(), Path::new(GTA))
+                .expect("a trace")
+                .total_calls,
+            11
+        );
+    }
+
+    /// The traces read across titles are each title's newest, once, so a title's older runs do
+    /// not count its calls again.
+    #[test]
+    fn every_title_s_newest_trace_is_listed_once() {
+        let traces = tempfile::tempdir().expect("tempdir");
+        plant(traces.path(), GTA, 1_760_000_000_000, 11);
+        let gta = plant(traces.path(), GTA, 1_760_000_060_000, 22);
+        let neverball = plant(traces.path(), NEVERBALL, 1_760_000_000_000, 33);
+
+        let mut listed = super::latest_traces(traces.path());
+        listed.sort();
+        let mut expected = vec![gta, neverball];
+        expected.sort();
+        assert_eq!(listed, expected);
+        assert!(super::latest_traces(&traces.path().join("missing")).is_empty());
     }
 }

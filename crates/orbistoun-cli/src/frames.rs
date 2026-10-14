@@ -68,12 +68,12 @@ pub(crate) fn spread(kept: &[Kept], count: usize) -> Vec<Kept> {
         .collect()
 }
 
-/// Where a run of `module` keeps its frames: a directory of its own under `traces`, named as its
-/// trace is. The traces directory is shared by every run on the machine, and a sheet made from
+/// Where a run of `module` keeps its frames: a directory of its own under `traces`, named by its
+/// title. The traces directory is shared by every run on the machine, and a sheet made from
 /// it took in frames another title's run, in another session, kept there at the same time.
 pub(crate) fn run_dir(traces: &std::path::Path, module: &std::path::Path) -> std::path::PathBuf {
-    let trace = orbistoun_report::trace::trace_file_name(&module.to_string_lossy());
-    traces.join("frames").join(trace.trim_end_matches(".json"))
+    let title = orbistoun_report::trace::title_stem(&module.to_string_lossy());
+    traces.join("frames").join(title)
 }
 
 /// The directory a run's frames are read from for its sheet: the one `ORBISTOUN_FRAME_DIR` names,

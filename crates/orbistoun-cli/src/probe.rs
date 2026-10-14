@@ -478,15 +478,8 @@ fn print_wanted_exports(
 ///
 /// Read from the same traces `worklist` ranks, so the two agree on what "unnamed" means.
 fn hashes_a_guest_wanted(paths: &orbistoun_paths::Paths) -> Vec<(String, u64)> {
-    let Ok(entries) = std::fs::read_dir(paths.traces_dir()) else {
-        return Vec::new();
-    };
     let mut out: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
+    for path in orbistoun_report::trace::latest_traces(&paths.traces_dir()) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };

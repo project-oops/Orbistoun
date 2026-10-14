@@ -1133,24 +1133,19 @@ fn prepare_diagnostics(
     install_presentation();
     prepare_translations(service, module);
 
-    // Where the trace goes. Named after the module so a sweep over titles leaves one file per
-    // title.
+    // Where the trace goes, with the rendered frames' regions the shim reads back (D695) and every
+    // dump of the run's frames and submissions: a directory of this run's own under the traces
+    // directory, named by title and run, so another session's run cannot overwrite them (D865).
+    // The process id tells apart two runs started in the same millisecond.
     if let Some(paths) = service.paths() {
-        report::trace_to(
-            paths
-                .traces_dir()
-                .join(orbistoun_report::trace::trace_file_name(module)),
-        );
-        report::describe_module(module.to_owned());
-        // A rendered frame's region, and every dump of the run's frames and submissions, goes under
-        // the traces directory, where the shim reads a region back (D695), in a directory of this
-        // run's own, named by title and run (D865). The process id tells apart two runs started in
-        // the same millisecond.
-        render::frames_to(frame_region::run_dir(
+        let run = frame_region::run_dir(
             &paths.traces_dir(),
             module,
             &orbistoun_report::RunId::now(std::process::id()),
-        ));
+        );
+        report::trace_to(run.join(orbistoun_report::trace::TRACE_FILE));
+        report::describe_module(module.to_owned());
+        render::frames_to(run);
     }
 
     // Names for every slot of the shared table, not the executable's alone, so a call trace says

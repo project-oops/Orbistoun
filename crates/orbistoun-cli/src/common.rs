@@ -139,14 +139,7 @@ pub(crate) fn calls_by_function() -> std::collections::BTreeMap<String, (u64, us
     let mut totals: std::collections::BTreeMap<String, (u64, usize)> =
         std::collections::BTreeMap::new();
     let paths = orbistoun_paths::Paths::resolve();
-    let Ok(entries) = std::fs::read_dir(paths.traces_dir()) else {
-        return totals;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|e| e != "json") {
-            continue;
-        }
+    for path in orbistoun_report::trace::latest_traces(&paths.traces_dir()) {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
