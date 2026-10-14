@@ -76,6 +76,10 @@ macro_rules! span_labels {
             Span::BufferCompare => $as!("buffers: compare"),
             Span::BufferRead => $as!("buffers: read"),
             Span::TextureKept => $as!("textures: kept"),
+            Span::TextureBase => $as!("textures: base level"),
+            Span::TextureLevels => $as!("textures: levels"),
+            Span::TextureBlocks => $as!("textures: blocks"),
+            Span::TextureWatch => $as!("textures: watch"),
             Span::TextureUnwatched => $as!("textures: unwatched"),
             Span::TextureSwizzle => $as!("textures: swizzle"),
             Span::CpWalk => $as!("cp: walk"),
@@ -397,6 +401,14 @@ pub enum Span {
     BufferRead,
     /// A texture's texels kept from an earlier read, nothing having written them since. Counted.
     TextureKept,
+    /// A tiled texture's base level, kept or read and detiled.
+    TextureBase,
+    /// A tiled texture's levels after its base, read and detiled (D833).
+    TextureLevels,
+    /// A block-compressed texture's blocks, read.
+    TextureBlocks,
+    /// The host asked whether a kept texture's pages were written since it was kept.
+    TextureWatch,
     /// A texture read whose memory the host does not write-watch, so the next binding reads it
     /// again. Counted.
     TextureUnwatched,
@@ -444,7 +456,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 65] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::CommandProcessor,
@@ -487,6 +499,10 @@ impl Span {
         Self::BufferCompare,
         Self::BufferRead,
         Self::TextureKept,
+        Self::TextureBase,
+        Self::TextureLevels,
+        Self::TextureBlocks,
+        Self::TextureWatch,
         Self::TextureUnwatched,
         Self::TextureSwizzle,
         Self::CpWalk,

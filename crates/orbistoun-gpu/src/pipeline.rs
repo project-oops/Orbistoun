@@ -5049,10 +5049,7 @@ fn linear_depth_compare(
     };
     let (w, h, row_bytes) = (width as usize, height as usize, pitch as usize * 4);
     let bytes = memory.read(base, row_bytes * (h - 1) + w * 4)?;
-    let texels: std::sync::Arc<[u32]> = face_rows(bytes, (w, h, 1), (row_bytes, 0))
-        .flat_map(|row| row.chunks_exact(4))
-        .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
-        .collect();
+    let texels = row_words(face_rows(bytes, (w, h, 1), (row_bytes, 0)), w * h);
     Some(RenderCommand::BindTexture {
         slot: source.slot,
         hash: crate::content_hash(&texels),
@@ -5112,7 +5109,9 @@ fn texture_from_words(
 ) -> Result<RenderCommand, &'static str> {
     let descriptor = decode_image_descriptor(words);
     if let Some(block) = block_format(descriptor.format) {
-        return read_block_texture(&descriptor, &words, block, slot, memory, texels);
+        return crate::perf::span(crate::perf::Span::TextureBlocks, || {
+            read_block_texture(&descriptor, &words, block, slot, memory, texels)
+        });
     }
     texel_texture(&descriptor, words, slot, memory, texels)
         .ok_or("its format, selects, tiling or shape is not one sampled exactly")
@@ -5198,10 +5197,7 @@ fn texel_texture(
     let hash = hasher.finish();
     let shared = match texels.get(&key) {
         Some(cached) if cached.hash == hash => cached.texels.clone(),
-        _ => rows
-            .flat_map(|row| row.chunks_exact(4))
-            .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
-            .collect(),
+        _ => row_words(rows, count),
     };
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
         texels.clear();
@@ -5273,15 +5269,39 @@ fn linear_bind(
 /// the `span` bytes there since they were read, as far as the host's write tracking reports.
 fn kept_texels(texels: &TexelCache, key: (u64, u32, u32, u32), span: u64) -> Option<&CachedTexels> {
     let cached = texels.get(&key)?;
-    let kept = cached
-        .since
-        .and_then(|since| orbistoun_mem::watch::written_since(key.0, span, since))
-        == Some(false);
+    let kept = cached.since.and_then(|since| {
+        crate::perf::span(crate::perf::Span::TextureWatch, || {
+            orbistoun_mem::watch::written_since(key.0, span, since)
+        })
+    }) == Some(false);
     kept.then(|| crate::perf::span(crate::perf::Span::TextureKept, || cached))
 }
 
 /// The rows of a linear image's faces, `width` four-byte texels each, `row_bytes` apart within a
 /// face and the faces `slice_bytes` apart, face after face.
+/// `rows` of four-byte texels as words, `count` of them, each row copied whole rather than a texel
+/// at a time: a guest's linear textures are read again whenever they are written, and converting
+/// them a word at a time was a tenth of a title's preparation.
+fn row_words<'a>(rows: impl Iterator<Item = &'a [u8]>, count: usize) -> std::sync::Arc<[u32]> {
+    let mut words = vec![0_u32; count];
+    let bytes = zerocopy::IntoBytes::as_mut_bytes(words.as_mut_slice());
+    let mut at = 0;
+    for row in rows {
+        let Some(into) = bytes.get_mut(at..at + row.len()) else {
+            break;
+        };
+        into.copy_from_slice(row);
+        at += row.len();
+    }
+    // The words are the bytes read little-endian, as the guest stored them.
+    if cfg!(target_endian = "big") {
+        for word in &mut words {
+            *word = u32::from_le(*word);
+        }
+    }
+    words.into()
+}
+
 fn face_rows(
     bytes: &[u8],
     (width, height, faces): (usize, usize, usize),
@@ -5575,7 +5595,10 @@ fn read_tiled_texture(
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> Option<RenderCommand> {
-    let base = read_tiled_base(descriptor, format, slot, memory, texels)?;
+    use crate::perf::{Span, span};
+    let base = span(Span::TextureBase, || {
+        read_tiled_base(descriptor, format, slot, memory, texels)
+    })?;
     Some(with_mip_levels(base, descriptor, format, memory))
 }
 
@@ -5584,6 +5607,18 @@ fn read_tiled_texture(
 /// level before's. A four-byte, uncompressed, flat image only; the base alone wherever a level
 /// cannot be placed or read, as it was bound before chains were.
 fn with_mip_levels(
+    base: RenderCommand,
+    descriptor: &ImageDescriptor,
+    format: TexelFormat,
+    memory: &impl GuestMemory,
+) -> RenderCommand {
+    crate::perf::span(crate::perf::Span::TextureLevels, || {
+        with_mip_levels_now(base, descriptor, format, memory)
+    })
+}
+
+/// [`with_mip_levels`], timed there.
+fn with_mip_levels_now(
     base: RenderCommand,
     descriptor: &ImageDescriptor,
     format: TexelFormat,
@@ -6631,6 +6666,25 @@ fn stage_of(name: &str) -> Option<ShaderStage> {
 #[cfg(test)]
 mod tests {
     use super::{Cached, ResourceId};
+
+    /// A pitched texture's rows become its texels row by row, each the bytes read little-endian,
+    /// the pitch's padding left out - as converting them a texel at a time gives.
+    #[test]
+    fn rows_become_words_as_texel_by_texel_would() {
+        let (width, height, pitch) = (3_usize, 4_usize, 5_usize);
+        let bytes: Vec<u8> = (0..pitch * 4 * height)
+            .map(|i| (i * 37 % 251) as u8)
+            .collect();
+        let rows = || super::face_rows(&bytes, (width, height, 1), (pitch * 4, 0));
+        let expected: Vec<u32> = rows()
+            .flat_map(|row| row.chunks_exact(4))
+            .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]))
+            .collect();
+        assert_eq!(
+            &*super::row_words(rows(), width * height),
+            expected.as_slice()
+        );
+    }
 
     /// The GL cube's vertex program as the hardware ran it: the first 64 words of oracle record B's
     /// payload (`tests/captures/agc-gl-cube-fw1240-b.payload.hex`).
