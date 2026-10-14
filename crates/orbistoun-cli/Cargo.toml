@@ -28,6 +28,8 @@ orbistoun-corpus = { workspace = true }
 orbistoun-report = { workspace = true }
 # A run recorded with the Tracy profiler, and read back (D831).
 orbistoun-perf = { workspace = true }
+# The span table, which says which spans wait on another thread's (D831).
+orbistoun-gpu = { workspace = true }
 # The dispatcher. Deliberately *not* `orbistoun-propose`, which carries a model runtime this
 # binary has no use for - the crate boundary is what keeps candle and reqwest out of the CLI,
 # rather than a feature flag nobody re-checks (D293).

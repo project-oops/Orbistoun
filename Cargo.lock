@@ -3013,6 +3013,7 @@ dependencies = [
  "orbistoun-corpus",
  "orbistoun-env",
  "orbistoun-firmware",
+ "orbistoun-gpu",
  "orbistoun-hle",
  "orbistoun-names",
  "orbistoun-nid",

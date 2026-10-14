@@ -97,7 +97,10 @@ fn record(
         return Err(error);
     }
     let (trace, summary) = capture.finish().context("finishing the capture")?;
-    let report = orbistoun_perf::Report::read(tools, &trace).map_err(anyhow::Error::msg)?;
+    let mut report = orbistoun_perf::Report::read(tools, &trace).map_err(anyhow::Error::msg)?;
+    for (waiting, done) in orbistoun_gpu::perf::WAITS_ON {
+        report.waits_on(waiting.label(), done.label());
+    }
     Ok(Recorded {
         trace,
         summary,

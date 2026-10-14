@@ -136,8 +136,10 @@ A round of making a title faster goes:
 
 1. `perf` the title, long enough to pass its start: a homebrew title may show a controls card for
    ten seconds and build its fonts before it draws anything, so 30 seconds rather than 15.
-2. Take the largest *self* time that is work, not waiting: `execute hand-off` is a guest thread
-   waiting on the device thread, whose own zones say what it was doing.
+2. Take the largest *self* time. A span that waits on another thread's - `execute hand-off`, a
+   guest thread waiting on the device thread - keeps only the hand-off as its own time; the work
+   is ranked under the device thread's zones. A new such pair goes in `WAITS_ON` beside the span
+   table in `crates/orbistoun-gpu/src/perf.rs`.
 3. Where that zone has nothing finer, add a span inside it - one line in the span table of
    `crates/orbistoun-gpu/src/perf.rs` and a `perf::span` around the work - and record again,
    rather than timing it by hand. A span kept is the next round's answer.

@@ -536,6 +536,11 @@ impl Span {
     }
 }
 
+/// Spans a thread spends waiting on another thread's span, each with the one it waits on: the
+/// profiler counts the wait as the waiting span's own time, since what it waits on runs on another
+/// thread, and a report subtracts it (D831).
+pub const WAITS_ON: [(Span, Span); 1] = [(Span::ExecuteHandOff, Span::ExecuteOnDevice)];
+
 const SPANS: usize = Span::ALL.len();
 static DETAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SPAN_SPENT: [AtomicU64; SPANS] = [const { AtomicU64::new(0) }; SPANS];

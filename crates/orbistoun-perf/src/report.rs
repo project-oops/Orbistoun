@@ -153,6 +153,26 @@ impl Report {
     }
 }
 
+impl Report {
+    /// Takes `done`'s whole time out of `waiting`'s own: `waiting` is a thread waiting on `done`,
+    /// which runs on another thread, so the profiler counts it in both (D831). What is left is the
+    /// hand-off itself.
+    pub fn waits_on(&mut self, waiting: &str, done: &str) {
+        let Some(done) = self
+            .by_total
+            .iter()
+            .find(|zone| zone.name == done)
+            .map(|zone| zone.total_ns)
+        else {
+            return;
+        };
+        if let Some(zone) = self.by_self.iter_mut().find(|zone| zone.name == waiting) {
+            zone.total_ns = zone.total_ns.saturating_sub(done);
+        }
+        self.by_self = sorted(std::mem::take(&mut self.by_self));
+    }
+}
+
 /// Zones, most time first.
 fn sorted(mut zones: Vec<ZoneStat>) -> Vec<ZoneStat> {
     zones.sort_by(|a, b| {
@@ -197,6 +217,36 @@ fn parse_plot(csv: &str, name: &str) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::{FrameTimes, Report, ZoneStat, parse_plot, parse_zones, sorted};
+
+    /// A span waiting on another thread's keeps only the hand-off as its own time, and ranks by
+    /// it: the work it waited on is counted where it ran.
+    #[test]
+    fn a_wait_on_another_thread_is_not_its_own_time() {
+        let zone = |name: &str, total_ns| ZoneStat {
+            name: name.to_owned(),
+            total_ns,
+            count: 1,
+            max_ns: total_ns,
+        };
+        let mut report = Report {
+            by_self: sorted(vec![
+                zone("hand-off", 900),
+                zone("draws", 500),
+                zone("other", 200),
+            ]),
+            by_total: vec![zone("on device", 800), zone("hand-off", 900)],
+            frames: FrameTimes::default(),
+        };
+        report.waits_on("hand-off", "on device");
+        let names: Vec<(&str, u64)> = report
+            .by_self
+            .iter()
+            .map(|zone| (zone.name.as_str(), zone.total_ns))
+            .collect();
+        assert_eq!(names, [("draws", 500), ("other", 200), ("hand-off", 100)]);
+        report.waits_on("hand-off", "not recorded");
+        assert_eq!(report.by_self[2].total_ns, 100, "nothing to take");
+    }
 
     /// The exporter's statistics, as `tracy-csvexport` 0.14.1 wrote them for a run of MDEM00001.
     const ZONES: &str = concat!(
