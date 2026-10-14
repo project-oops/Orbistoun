@@ -884,7 +884,8 @@ impl App {
                     "# [settings]\n",
                     "# frame_limit = 60           # most flips a second; 0 for none\n",
                     "# host_cores = 4             # host cores the run may use; 0 for all\n",
-                    "# host_priority = \"idle\"    # idle, below-normal, normal or above-normal\n"
+                    "# host_priority = \"idle\"    # idle, below-normal, normal or above-normal\n",
+                    "# render_scale = 2           # draw at twice the title's size; 1 for its own\n"
                 ),
                 name
             )

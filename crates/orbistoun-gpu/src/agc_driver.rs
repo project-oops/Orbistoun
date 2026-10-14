@@ -1940,7 +1940,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
     set_pending(None);
     // The display's own copy, beside memory's: released by whoever shows it.
     let shown = show
-        .then(|| crate::perf::span(crate::perf::Span::KeepSnapshot, hooks.snapshot))
+        .then(|| crate::perf::span(crate::perf::Span::KeepSnapshot, hooks.show))
         .flatten()
         .map(|snapshot| ShownFrame {
             snapshot,
@@ -2656,6 +2656,10 @@ fn overlaps_target(target: ColourTarget, address: u64, length: u64) -> bool {
 pub struct LazyCopies {
     /// Keeps the frame the executor last drew, as it stands now; an id to take it by.
     pub snapshot: fn() -> Option<u64>,
+    /// Keeps the frame the executor last drew for the display: at the extent it was drawn at, which
+    /// a render scale makes larger than the target's (D862). Taken by the display, never written to
+    /// guest memory.
+    pub show: fn() -> Option<u64>,
     /// The kept frame's pixels as linear `Rgba8` words, releasing it.
     pub take: fn(u64) -> Option<Vec<u32>>,
     /// Releases a kept frame unread.
@@ -5412,6 +5416,7 @@ mod tests {
         pub(super) fn install() {
             super::super::install_lazy_copies(super::super::LazyCopies {
                 snapshot: || Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst)),
+                show: || Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst)),
                 take: |_| {
                     TAKEN.fetch_add(1, Ordering::SeqCst);
                     Some(frame())

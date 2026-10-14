@@ -258,10 +258,26 @@ fn performance(ui: &mut egui::Ui, settings: &mut orbistoun_service::PerformanceS
                 }
             });
     });
+    ui.horizontal(|ui| {
+        ui.label("render scale");
+        settings.render_scale = settings.render_scale.max(1);
+        ui.add(
+            egui::DragValue::new(&mut settings.render_scale)
+                .range(1..=orbistoun_service::RENDER_SCALE_MOST)
+                .suffix("x"),
+        );
+        ui.label(if settings.render_scale == 1 {
+            "the title's own size"
+        } else {
+            "its size, across and down"
+        });
+    });
     ui.small(concat!(
         "The frame limit paces a title that flips freely as a display would; the host limits keep ",
-        "a run to some cores, or behind your other programs. A title's own frame_limit, host_cores ",
-        "and host_priority settings, in its overrides, take the place of these for its runs.",
+        "a run to some cores, or behind your other programs. The render scale draws a title's ",
+        "frames larger than it asks for and shows them so; what it reads of its own frames stays ",
+        "its size. A title's own frame_limit, host_cores, host_priority and render_scale settings, ",
+        "in its overrides, take the place of these for its runs.",
     ));
 }
 

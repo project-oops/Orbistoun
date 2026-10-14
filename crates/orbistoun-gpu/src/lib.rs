@@ -192,6 +192,10 @@ pub use registers::{
     stencil_control_at, target_mask_at,
 };
 pub use render::{FrameOutcome, drive};
+
+/// The largest render scale (D862): a backend draws resident targets at most this many times the
+/// guest's size across and down, sixteen times its pixels.
+pub const RENDER_SCALE_MOST: u32 = 4;
 pub use tiling::{DetileError, detile_64kb_rx_bpp4, tiled_byte_offset_64kb_rx_bpp4};
 
 use orbistoun_hle::guest_module;

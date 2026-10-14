@@ -92,6 +92,66 @@ pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
     }
 }
 
+/// How many times the guest's size, across and down, a resident target is drawn at (D862): one
+/// unless the player's render scale asks for more. Read when a target is made, so it is set before
+/// a run's first draw.
+static RENDER_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+/// Draws resident targets at `scale` times the guest's size from now on, within `1..=`
+/// [`orbistoun_gpu::RENDER_SCALE_MOST`] (D862); zero is one.
+pub fn set_render_scale(scale: u32) {
+    RENDER_SCALE.store(
+        scale.clamp(1, orbistoun_gpu::RENDER_SCALE_MOST),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The render scale targets made now are drawn at.
+pub(crate) fn render_scale() -> u32 {
+    RENDER_SCALE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `extent` drawn at `scale`.
+pub(crate) const fn scaled((width, height): (u32, u32), scale: u32) -> (u32, u32) {
+    (width.saturating_mul(scale), height.saturating_mul(scale))
+}
+
+/// How a scaled target is resampled to and from the guest's size: averaged where its format filters
+/// everywhere, the nearest texel for an integer or 32-bit float target, which need not filter.
+const fn resample_filter(encoding: TargetEncoding) -> vk::Filter {
+    match encoding {
+        TargetEncoding::Uint16 | TargetEncoding::Float32 | TargetEncoding::Float32x4 => {
+            vk::Filter::NEAREST
+        }
+        TargetEncoding::Unorm8
+        | TargetEncoding::Srgb8
+        | TargetEncoding::Float11_11_10
+        | TargetEncoding::Float16x4
+        | TargetEncoding::Float16x2
+        | TargetEncoding::Unorm10x3A2 => vk::Filter::LINEAR,
+    }
+}
+
+/// A blit of the whole of `from` onto the whole of `to`.
+fn whole_blit(
+    (from_width, from_height): (u32, u32),
+    (to_width, to_height): (u32, u32),
+) -> vk::ImageBlit {
+    let layer = vk::ImageSubresourceLayers::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .layer_count(1);
+    let corner = |width: u32, height: u32| vk::Offset3D {
+        x: i32::try_from(width).unwrap_or(i32::MAX),
+        y: i32::try_from(height).unwrap_or(i32::MAX),
+        z: 1,
+    };
+    vk::ImageBlit::default()
+        .src_subresource(layer)
+        .src_offsets([vk::Offset3D::default(), corner(from_width, from_height)])
+        .dst_subresource(layer)
+        .dst_offsets([vk::Offset3D::default(), corner(to_width, to_height)])
+}
+
 /// The size in bytes of a `width` x `height` attachment of `encoding`.
 fn attachment_bytes((width, height): (u32, u32), encoding: TargetEncoding) -> vk::DeviceSize {
     vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * texel_bytes(encoding)
@@ -546,8 +606,14 @@ pub(crate) struct ResidentAttachment {
     /// readback comes out through it.
     buffer: vk::Buffer,
     buffer_memory: vk::DeviceMemory,
+    /// The guest's extent, which its buffer holds and the guest reads and writes.
     width: u32,
     height: u32,
+    /// How many times that extent, across and down, its image is drawn at (D862).
+    scale: u32,
+    /// An image of the guest's extent its pixels pass through on the way to and from the buffer
+    /// when it is drawn larger, resampled on the device; `None` at a scale of one.
+    guest_image: Option<(vk::Image, vk::DeviceMemory)>,
     /// How its texels hold colour, and so the format it is drawn through ([`drawn_format`]).
     encoding: TargetEncoding,
     /// The pass drawing on it with a depth attachment beside it, made for one depth attachment.
@@ -612,8 +678,8 @@ impl ResidentAttachment {
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&views)
-            .width(self.width)
-            .height(self.height)
+            .width(self.drawn_extent().0)
+            .height(self.drawn_extent().1)
             .layers(1);
         // SAFETY: the render pass and both views are live and the slice outlives the call.
         let framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None) }
@@ -685,8 +751,8 @@ impl ResidentAttachment {
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&attachments)
-            .width(self.width)
-            .height(self.height)
+            .width(self.drawn_extent().0)
+            .height(self.drawn_extent().1)
             .layers(1);
         // SAFETY: the render pass and every view are live and the slice outlives the call.
         let framebuffer = unsafe { device.create_framebuffer(&framebuffer_info, None) }
@@ -745,14 +811,14 @@ impl ResidentAttachment {
             .map(|pass| DrawPass {
                 render_pass: pass.render_pass,
                 framebuffer: pass.framebuffer,
-                extent: self.extent(),
+                extent: self.drawn_extent(),
             })
     }
 
     /// The pass a draw records into: the one with its depth attachment when `depth`, else colour
     /// alone. `None` when a depth pass is asked for and none is attached.
     pub(crate) fn pass(&self, depth: bool) -> Option<DrawPass> {
-        let extent = self.extent();
+        let extent = self.drawn_extent();
         if !depth {
             return Some(DrawPass {
                 render_pass: self.render_pass,
@@ -775,6 +841,16 @@ impl ResidentAttachment {
         clear: [f32; 4],
         encoding: TargetEncoding,
     ) -> Result<Self, DispatchError> {
+        Self::create_scaled((width, height), initial, clear, (encoding, render_scale()))
+    }
+
+    /// [`Self::create`], drawn at `scale` times the extent (D862).
+    fn create_scaled(
+        (width, height): (u32, u32),
+        initial: Option<&[u8]>,
+        clear: [f32; 4],
+        (encoding, scale): (TargetEncoding, u32),
+    ) -> Result<Self, DispatchError> {
         let session = crate::compute::session()?;
         let session = session
             .lock()
@@ -782,8 +858,19 @@ impl ResidentAttachment {
         let (instance, physical, device) = (&session.instance, session.physical, &session.device);
         let size = attachment_bytes((width, height), encoding);
         let initial = initial.filter(|bytes| bytes.len() as u64 == size);
-        let (image, memory) =
-            create_attachment(instance, physical, device, (width, height), encoding)?;
+        let drawn = scaled((width, height), scale);
+        let (image, memory) = create_attachment(instance, physical, device, drawn, encoding)?;
+        let guest_image = if scale > 1 {
+            Some(create_attachment(
+                instance,
+                physical,
+                device,
+                (width, height),
+                encoding,
+            )?)
+        } else {
+            None
+        };
         let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
         if let Some(bytes) = initial {
             fill_host_memory(device, buffer_memory, bytes)?;
@@ -791,73 +878,19 @@ impl ResidentAttachment {
         let format = drawn_format(encoding);
         let render_pass = create_resident_render_pass(device, format)?;
         let (view, framebuffer) =
-            view_and_framebuffer(device, image, render_pass, ((width, height), format))?;
+            view_and_framebuffer(device, image, render_pass, (drawn, format))?;
+        let loads = Loads {
+            image,
+            guest_image: guest_image.map(|(guest, _)| guest),
+            buffer,
+            extent: (width, height),
+            scale,
+            filter: resample_filter(encoding),
+        };
 
+        // Its starting pixels copied in, or the clear, before it is drawn on.
         one_shot(&session, |device, command| {
-            let top = (
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::AccessFlags::empty(),
-            );
-            let transfer_write = (
-                vk::PipelineStageFlags::TRANSFER,
-                vk::AccessFlags::TRANSFER_WRITE,
-            );
-            transition(
-                device,
-                command,
-                image,
-                (
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                ),
-                top,
-                transfer_write,
-            );
-            let range = vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .level_count(1)
-                .layer_count(1);
-            if initial.is_some() {
-                let regions = [whole_image(width, height)];
-                // SAFETY: recording is open; the buffer holds the image's bytes and the image is in
-                // the transfer-destination layout.
-                unsafe {
-                    device.cmd_copy_buffer_to_image(
-                        command,
-                        buffer,
-                        image,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &regions,
-                    );
-                }
-            } else {
-                let colour = vk::ClearColorValue { float32: clear };
-                // SAFETY: recording is open and the image is in the transfer-destination layout.
-                unsafe {
-                    device.cmd_clear_color_image(
-                        command,
-                        image,
-                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                        &colour,
-                        &[range],
-                    );
-                }
-            }
-            transition(
-                device,
-                command,
-                image,
-                (
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                ),
-                transfer_write,
-                (
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::AccessFlags::COLOR_ATTACHMENT_READ
-                        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                ),
-            );
+            loads.seed(device, command, initial.is_none().then_some(clear));
         })?;
         Ok(Self {
             image,
@@ -869,10 +902,24 @@ impl ResidentAttachment {
             buffer_memory,
             width,
             height,
+            scale,
+            guest_image,
             encoding,
             depth_pass: None,
             more_pass: None,
         })
+    }
+
+    /// What copying through its buffer needs.
+    fn loads(&self) -> Loads {
+        Loads {
+            image: self.image,
+            guest_image: self.guest_image.map(|(guest, _)| guest),
+            buffer: self.buffer,
+            extent: self.extent(),
+            scale: self.scale,
+            filter: resample_filter(self.encoding),
+        }
     }
 
     /// How its texels hold colour.
@@ -899,7 +946,7 @@ impl ResidentAttachment {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         settle(&session)?;
         fill_host_memory(&session.device, self.buffer_memory, pixels)?;
-        let (image, buffer) = (self.image, self.buffer);
+        let (image, loads) = (self.image, self.loads());
         one_shot_unwaited(&session, |device, command| {
             let attachment = (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -921,18 +968,7 @@ impl ResidentAttachment {
                 attachment,
                 transfer_write,
             );
-            let regions = [whole_image(width, height)];
-            // SAFETY: recording is open; the buffer holds the image's bytes and the image is in the
-            // transfer-destination layout.
-            unsafe {
-                device.cmd_copy_buffer_to_image(
-                    command,
-                    buffer,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &regions,
-                );
-            }
+            loads.copy_in(device, command);
             transition(
                 device,
                 command,
@@ -958,7 +994,7 @@ impl ResidentAttachment {
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (image, buffer) = (self.image, self.buffer);
+        let (image, buffer, loads) = (self.image, self.buffer, self.loads());
         one_shot_unwaited(&session, |device, command| {
             let transfer = vk::PipelineStageFlags::TRANSFER;
             // After whatever last read or wrote the buffer: a reload's copy, a readback.
@@ -1012,18 +1048,7 @@ impl ResidentAttachment {
                 attachment,
                 transfer_write,
             );
-            let regions = [whole_image(width, height)];
-            // SAFETY: recording is open; the buffer holds the image's bytes and the image is in the
-            // transfer-destination layout.
-            unsafe {
-                device.cmd_copy_buffer_to_image(
-                    command,
-                    buffer,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &regions,
-                );
-            }
+            loads.copy_in(device, command);
             transition(
                 device,
                 command,
@@ -1038,9 +1063,19 @@ impl ResidentAttachment {
         })
     }
 
-    /// The extent it was created at.
+    /// The extent it was created at: the guest's, which its pixels are read and given at.
     pub(crate) const fn extent(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// How many times the guest's extent, across and down, it is drawn at.
+    pub(crate) const fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    /// The extent it is drawn at: the guest's times the render scale (D862).
+    pub(crate) const fn drawn_extent(&self) -> (u32, u32) {
+        scaled((self.width, self.height), self.scale)
     }
 
     /// Copies the attachment out and returns its pixels, leaving it ready to draw on again.
@@ -1049,7 +1084,7 @@ impl ResidentAttachment {
         let session = session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.copy_out(&session, self.buffer, true)?;
+        self.copy_out(&session, (self.buffer, false), true)?;
         let (width, height) = self.extent();
         let size = attachment_bytes((width, height), self.encoding);
         let bytes = read_host_memory(&session.device, self.buffer_memory, size)?;
@@ -1062,9 +1097,11 @@ impl ResidentAttachment {
 
     /// The frame as it stands now, copied on the device into a host-visible buffer of its own, so
     /// later draws do not change it and nothing reaches the host until [`FrameSnapshot::read`].
-    /// What a guest's copy of its colour target sees at that point in the stream.
+    /// What a guest's copy of its colour target sees at that point in the stream, at its extent;
+    /// or at its drawn extent, what the display shows (D862).
     pub(crate) fn snapshot_into(&self, snapshot: &FrameSnapshot) -> Result<(), DispatchError> {
-        if (snapshot.width, snapshot.height) != self.extent()
+        let drawn = (snapshot.width, snapshot.height) == self.drawn_extent();
+        if !drawn && (snapshot.width, snapshot.height) != self.extent()
             || snapshot.texel_bytes != texel_bytes(self.encoding)
         {
             return Err(DispatchError::Unsupported(
@@ -1076,17 +1113,19 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Not waited for: nothing reads the snapshot until `FrameSnapshot::read`, which settles.
-        self.copy_out(&session, snapshot.buffer, false)
+        self.copy_out(&session, (snapshot.buffer, drawn), false)
     }
 
-    /// Copies the image into `buffer` (the image's size) and waits for the copy.
+    /// Copies the image into `buffer` - at the guest's extent, or at its drawn extent when `drawn` -
+    /// waiting for the copy when `wait`.
     fn copy_out(
         &self,
         session: &crate::compute::Session,
-        buffer: vk::Buffer,
+        (buffer, drawn): (vk::Buffer, bool),
         wait: bool,
     ) -> Result<(), DispatchError> {
-        let (image, (width, height)) = (self.image, self.extent());
+        let (image, (width, height)) = (self.image, self.drawn_extent());
+        let loads = self.loads();
         let record = |device: &ash::Device, command: vk::CommandBuffer| {
             let attachment = (
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -1107,17 +1146,21 @@ impl ResidentAttachment {
                 attachment,
                 transfer_read,
             );
-            let regions = [whole_image(width, height)];
-            // SAFETY: recording is open, the image is in the transfer-source layout and the buffer
-            // is the image's size.
-            unsafe {
-                device.cmd_copy_image_to_buffer(
-                    command,
-                    image,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    buffer,
-                    &regions,
-                );
+            if drawn || loads.guest_image.is_none() {
+                let regions = [whole_image(width, height)];
+                // SAFETY: recording is open, the image is in the transfer-source layout and the
+                // buffer is the image's size.
+                unsafe {
+                    device.cmd_copy_image_to_buffer(
+                        command,
+                        image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        buffer,
+                        &regions,
+                    );
+                }
+            } else {
+                loads.copy_out(device, command, buffer);
             }
             transition(
                 device,
@@ -1167,10 +1210,232 @@ impl ResidentAttachment {
         unsafe { device.destroy_image(self.image, None) };
         // SAFETY: as above; the image bound to it is destroyed.
         unsafe { device.free_memory(self.memory, None) };
+        if let Some((guest, guest_memory)) = self.guest_image {
+            // SAFETY: as above.
+            unsafe { device.destroy_image(guest, None) };
+            // SAFETY: as above; the image bound to it is destroyed.
+            unsafe { device.free_memory(guest_memory, None) };
+        }
         // SAFETY: as above.
         unsafe { device.destroy_buffer(self.buffer, None) };
         // SAFETY: as above; the buffer bound to it is destroyed.
         unsafe { device.free_memory(self.buffer_memory, None) };
+    }
+}
+
+/// A resident attachment's image and buffer, and how its pixels pass between them: copied at a
+/// scale of one, and through an image of the guest's extent, resampled, when drawn larger (D862).
+#[derive(Clone, Copy)]
+struct Loads {
+    image: vk::Image,
+    guest_image: Option<vk::Image>,
+    buffer: vk::Buffer,
+    /// The guest's extent, which the buffer holds.
+    extent: (u32, u32),
+    scale: u32,
+    filter: vk::Filter,
+}
+
+impl Loads {
+    /// Records an attachment's first contents: the buffer's pixels, or `clear` everywhere when
+    /// given, leaving it ready to draw on.
+    fn seed(self, device: &ash::Device, command: vk::CommandBuffer, clear: Option<[f32; 4]>) {
+        let top = (
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::AccessFlags::empty(),
+        );
+        let transfer_write = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        transition(
+            device,
+            command,
+            self.image,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            top,
+            transfer_write,
+        );
+        let range = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .level_count(1)
+            .layer_count(1);
+        if let Some(clear) = clear {
+            let colour = vk::ClearColorValue { float32: clear };
+            // SAFETY: recording is open and the image is in the transfer-destination layout.
+            unsafe {
+                device.cmd_clear_color_image(
+                    command,
+                    self.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &colour,
+                    &[range],
+                );
+            }
+        } else {
+            self.copy_in(device, command);
+        }
+        transition(
+            device,
+            command,
+            self.image,
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            transfer_write,
+            (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ),
+        );
+    }
+
+    /// Records the buffer's pixels into the image, which is in `TRANSFER_DST_OPTIMAL`; a scaled one
+    /// takes each guest pixel over its whole square of drawn pixels.
+    fn copy_in(self, device: &ash::Device, command: vk::CommandBuffer) {
+        let (width, height) = self.extent;
+        let regions = [whole_image(width, height)];
+        let Some(guest) = self.guest_image else {
+            // SAFETY: recording is open; the buffer holds the image's bytes and the image is in
+            // the transfer-destination layout.
+            unsafe {
+                device.cmd_copy_buffer_to_image(
+                    command,
+                    self.buffer,
+                    self.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &regions,
+                );
+            }
+            return;
+        };
+        let transfer_write = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        let transfer_read = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        // What it held before is replaced whole.
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            transfer_read,
+            transfer_write,
+        );
+        // SAFETY: recording is open; the buffer holds the guest image's bytes and the image is in
+        // the transfer-destination layout.
+        unsafe {
+            device.cmd_copy_buffer_to_image(
+                command,
+                self.buffer,
+                guest,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &regions,
+            );
+        }
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            transfer_write,
+            transfer_read,
+        );
+        let blits = [whole_blit(self.extent, scaled(self.extent, self.scale))];
+        // SAFETY: recording is open, the guest image is a transfer source and the image a transfer
+        // destination, both of one format; a scaled-up blit takes the nearest texel, which every
+        // format allows.
+        unsafe {
+            device.cmd_blit_image(
+                command,
+                guest,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &blits,
+                vk::Filter::NEAREST,
+            );
+        }
+    }
+
+    /// Records the image, which is in `TRANSFER_SRC_OPTIMAL`, into `buffer` at the guest's extent,
+    /// resampled through the guest image.
+    fn copy_out(self, device: &ash::Device, command: vk::CommandBuffer, buffer: vk::Buffer) {
+        let Some(guest) = self.guest_image else {
+            return;
+        };
+        let transfer_write = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_WRITE,
+        );
+        let transfer_read = (
+            vk::PipelineStageFlags::TRANSFER,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ),
+            transfer_read,
+            transfer_write,
+        );
+        let blits = [whole_blit(scaled(self.extent, self.scale), self.extent)];
+        // SAFETY: recording is open, the image is a transfer source and the guest image a transfer
+        // destination, both of one format; the filter is one the format allows
+        // ([`resample_filter`]).
+        unsafe {
+            device.cmd_blit_image(
+                command,
+                self.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                guest,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &blits,
+                self.filter,
+            );
+        }
+        transition(
+            device,
+            command,
+            guest,
+            (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ),
+            transfer_write,
+            transfer_read,
+        );
+        let (width, height) = self.extent;
+        let regions = [whole_image(width, height)];
+        // SAFETY: recording is open, the guest image is in the transfer-source layout and the
+        // buffer is its size.
+        unsafe {
+            device.cmd_copy_image_to_buffer(
+                command,
+                guest,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &regions,
+            );
+        }
     }
 }
 
@@ -2606,6 +2871,34 @@ pub(crate) fn drawn_viewport(
         min_depth: viewport.min_depth.clamp(0.0, 1.0),
         max_depth: viewport.max_depth.clamp(0.0, 1.0),
         ..viewport
+    }
+}
+
+/// `viewport`, in guest pixels, over a target drawn at `scale` (D862). Its depth range is not a
+/// distance in pixels and stays as it is.
+fn scaled_viewport(viewport: vk::Viewport, scale: u32) -> vk::Viewport {
+    let by = f32_from(scale);
+    vk::Viewport {
+        x: viewport.x * by,
+        y: viewport.y * by,
+        width: viewport.width * by,
+        height: viewport.height * by,
+        ..viewport
+    }
+}
+
+/// `rect`, in guest pixels, over a target drawn at `scale` (D862).
+const fn scaled_rect(rect: vk::Rect2D, scale: u32) -> vk::Rect2D {
+    let by = scale as i32;
+    vk::Rect2D {
+        offset: vk::Offset2D {
+            x: rect.offset.x.saturating_mul(by),
+            y: rect.offset.y.saturating_mul(by),
+        },
+        extent: vk::Extent2D {
+            width: rect.extent.width.saturating_mul(scale),
+            height: rect.extent.height.saturating_mul(scale),
+        },
     }
 }
 
@@ -4739,7 +5032,11 @@ fn build_pipeline(
 ) -> Result<Pipeline, DispatchError> {
     let device = devices.device;
     if let Some(transform) = bound.viewport {
-        viewport_within_limits(devices, drawn_viewport(transform, tests_depth(&bound)))?;
+        let scale = bound.resident.map_or(1, ResidentAttachment::scale);
+        viewport_within_limits(
+            devices,
+            scaled_viewport(drawn_viewport(transform, tests_depth(&bound)), scale),
+        )?;
     }
     let (Some(buffers_layout), Some(draw_buffers)) =
         (bound.draw_buffers.layout, bound.draw_buffers.set)
@@ -5186,6 +5483,8 @@ fn create_graphics_pipeline(
     bound: Bound<'_>,
 ) -> Result<vk::Pipeline, DispatchError> {
     let (width, height) = size;
+    // Guest pixels to drawn ones: a resident target may be drawn larger than the guest's (D862).
+    let scale = bound.resident.map_or(1, ResidentAttachment::scale);
     let stages = pipeline_stages(modules, geometry);
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
     let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
@@ -5201,7 +5500,7 @@ fn create_graphics_pipeline(
             min_depth: 0.0,
             max_depth: 1.0,
         },
-        |transform| drawn_viewport(transform, tests_depth(&bound)),
+        |transform| scaled_viewport(drawn_viewport(transform, tests_depth(&bound)), scale),
     )];
     // The whole attachment unless the draw set a scissor, which restricts rasterisation so pixels
     // outside keep the clear. Clamped to the attachment, because Vulkan refuses a scissor past it.
@@ -5209,9 +5508,9 @@ fn create_graphics_pipeline(
         offset: vk::Offset2D { x: 0, y: 0 },
         extent: vk::Extent2D { width, height },
     };
-    let scissors = [bound
-        .scissor
-        .map_or(full, |rect| clamp_scissor(rect, width, height))];
+    let scissors = [bound.scissor.map_or(full, |rect| {
+        clamp_scissor(scaled_rect(rect, scale), width, height)
+    })];
     // A guest clipping z to `-w..w`, as GL does, clips so here too: under Vulkan's own `0..w`
     // everything nearer than the middle of its depth range is lost, the near plane's HUD with it.
     let negative_one_to_one = bound
@@ -5238,7 +5537,10 @@ fn create_graphics_pipeline(
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(cull_mode)
         .front_face(front_face)
-        .line_width(drawn_line_width(bound.line_width));
+        .line_width(
+            (drawn_line_width(bound.line_width) * f32_from(scale))
+                .min(crate::compute::max_line_width()),
+        );
     // The guest's polygon offset, resolved before a draw reaches here; only a pass with a depth
     // attachment has a depth to move.
     let raster = biased(raster, bound.depth_bias.filter(|_| bound.depth.is_some()));
@@ -6392,6 +6694,40 @@ mod tests {
             "a filled slot is its own"
         );
         assert!(!first.textures[0].shared);
+    }
+
+    /// A target drawn at twice the guest's extent holds each guest pixel over a 2x2 square, shows
+    /// the display those squares, and reads back to the guest exactly what it was given (D862).
+    #[test]
+    fn a_scaled_target_round_trips_its_guest_pixels() {
+        if crate::compute::session().is_err() {
+            return;
+        }
+        // Two by two, each pixel its own colour.
+        let given: [u32; 4] = [0xff00_00ff, 0xff00_ff00, 0xffff_0000, 0x80ff_ffff];
+        let bytes = zerocopy::IntoBytes::as_bytes(&given);
+        let target = super::ResidentAttachment::create_scaled(
+            (2, 2),
+            Some(bytes),
+            [0.0; 4],
+            (super::TargetEncoding::Unorm8, 2),
+        )
+        .expect("attachment");
+        assert_eq!(target.extent(), (2, 2));
+        assert_eq!(target.drawn_extent(), (4, 4));
+        let back = target.read_back().expect("read back");
+        assert_eq!((back.width, back.height), (2, 2));
+        assert_eq!(back.bytes, bytes, "the guest's pixels, exactly");
+        let shown = super::FrameSnapshot::create(4, 4, 4).expect("snapshot");
+        target.snapshot_into(&shown).expect("snapshot taken");
+        let pixels = shown.read().expect("snapshot read");
+        assert_eq!((pixels.width, pixels.height), (4, 4));
+        for (y, x) in (0..4).flat_map(|y| (0..4).map(move |x| (y, x))) {
+            let at = pixels.at(x, y).map(u32::from_le_bytes);
+            assert_eq!(at, Some(given[(y / 2 * 2 + x / 2) as usize]), "({x}, {y})");
+        }
+        shown.destroy();
+        target.destroy();
     }
 
     /// A texture kept by its content is made once and copied in until a copy has run: a second

@@ -740,6 +740,9 @@ impl VulkanBackend {
         id: ResourceId,
         extent: (u32, u32),
     ) -> Result<(Option<depth::DepthDraw>, Option<depth::DepthClear>), BackendError> {
+        // Drawn beside the colour target at its drawn extent (D862). Nothing writes it back to
+        // guest memory, and a depth texture read from it samples at whatever extent it holds.
+        let extent = framebuffer::scaled(extent, framebuffer::render_scale());
         let device_error = |e: DispatchError| BackendError::Device(format!("depth target: {e:?}"));
         let mut pending = self.depth_clears.remove(&id);
         if self.depths.get(&id).is_some_and(|d| d.extent() != extent) {
@@ -873,12 +876,27 @@ impl VulkanBackend {
     /// an id to read it by later. `None` when that frame is not resident with draws the host has
     /// not seen, the only case a snapshot saves a read.
     pub fn snapshot_last_frame(&mut self) -> Option<u64> {
+        self.snapshot_last_frame_at(false)
+    }
+
+    /// [`Self::snapshot_last_frame`] for the display: at the extent the frame was drawn at, which a
+    /// render scale makes larger than the guest's (D862), rather than the guest's own.
+    pub fn snapshot_last_frame_shown(&mut self) -> Option<u64> {
+        self.snapshot_last_frame_at(true)
+    }
+
+    /// A snapshot of the last drawn frame at its guest extent, or its drawn one when `drawn`.
+    fn snapshot_last_frame_at(&mut self, drawn: bool) -> Option<u64> {
         let target = self.last_drawn?.0;
         if !self.unread.contains(&target) {
             return None;
         }
         let resident = self.resident.get(&target)?;
-        let extent = resident.extent();
+        let extent = if drawn {
+            resident.drawn_extent()
+        } else {
+            resident.extent()
+        };
         let texel_bytes = framebuffer::texel_bytes(resident.encoding());
         let spare = self
             .spare_snapshots

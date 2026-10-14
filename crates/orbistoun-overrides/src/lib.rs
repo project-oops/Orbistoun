@@ -1309,6 +1309,10 @@ pub const HOST_CORES: &str = "host_cores";
 /// `above-normal` (D835).
 pub const HOST_PRIORITY: &str = "host_priority";
 
+/// How many times the guest's size, across and down, a title's runs draw its targets at, an
+/// integer from one to four; one for the guest's own (D862).
+pub const RENDER_SCALE: &str = "render_scale";
+
 #[cfg(test)]
 mod tests {
     use super::{

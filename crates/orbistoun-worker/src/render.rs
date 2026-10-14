@@ -428,13 +428,14 @@ fn present_later(job: PresentJob) -> bool {
 /// Reads a shown frame's device copy and streams it, converting each pixel from its memory order
 /// to `Rgba8` as [`present_tiled`] does from memory (D719).
 fn present_shown(shown: orbistoun_gpu::agc_driver::ShownFrame, sink: fn(&Event), dir: &Path) {
-    let Some(frame) = take_snapshot(shown.snapshot) else {
+    let Some((extent, frame)) = take_sized_snapshot(shown.snapshot) else {
         return;
     };
     // The device copy is linear `Rgba8`, the colours the title drew: shown as-is (D784), which for
-    // the SDK's alternate-order targets is exactly what their B, G, R, A scanout shows.
+    // the SDK's alternate-order targets is exactly what their B, G, R, A scanout shows. At the
+    // extent it was drawn at, which a render scale makes larger than the target's (D862).
     let bytes = zerocopy::IntoBytes::as_bytes(frame.as_slice());
-    emit_presented((shown.target.width, shown.target.height), bytes, sink, dir);
+    emit_presented(extent, bytes, sink, dir);
 }
 
 /// A scanout pixel, B, G, R, A in memory, as `Rgba8`: red and blue trade places.
@@ -966,6 +967,18 @@ pub fn keep_frame_on_device() -> Option<u64> {
     .flatten()
 }
 
+/// Keeps the frame the executor last drew for the display, at the extent it was drawn at (D862).
+pub fn keep_frame_shown() -> Option<u64> {
+    on_device(|| {
+        live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()?
+            .snapshot_last_frame_shown()
+    })
+    .flatten()
+}
+
 /// Releases kept frame `old` unread and keeps the frame as it stands now, in one trip to the
 /// device thread.
 pub fn replace_snapshot(old: u64) -> Option<u64> {
@@ -982,13 +995,21 @@ pub fn replace_snapshot(old: u64) -> Option<u64> {
 
 /// A kept frame's pixels as linear `Rgba8` words, releasing it.
 pub fn take_snapshot(id: u64) -> Option<Vec<u32>> {
+    take_sized_snapshot(id).map(|(_, words)| words)
+}
+
+/// [`take_snapshot`], with the extent the frame was kept at: a display copy's is the drawn extent
+/// (D862).
+fn take_sized_snapshot(id: u64) -> Option<((u32, u32), Vec<u32>)> {
     on_device(move || {
         let pixels = live_backend()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_mut()?
             .take_snapshot(id)?;
-        Some(
+        let extent = (pixels.width, pixels.height);
+        Some((
+            extent,
             <[u32] as zerocopy::FromBytes>::ref_from_bytes(&pixels.bytes).map_or_else(
                 |_| {
                     pixels
@@ -999,7 +1020,7 @@ pub fn take_snapshot(id: u64) -> Option<Vec<u32>> {
                 },
                 <[u32]>::to_vec,
             ),
-        )
+        ))
     })
     .flatten()
 }

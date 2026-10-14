@@ -283,8 +283,9 @@ pub struct FileConfig {
     pub performance: PerformanceSettings,
 }
 
-/// How fast a run may go and how much of the host it takes (D835). A title's own `frame_limit`,
-/// `host_cores` and `host_priority` settings take the place of these for its runs.
+/// How fast a run may go, how much of the host it takes (D835) and how large it draws (D862). A
+/// title's own `frame_limit`, `host_cores`, `host_priority` and `render_scale` settings take the
+/// place of these for its runs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct PerformanceSettings {
@@ -294,7 +295,12 @@ pub struct PerformanceSettings {
     pub host_cores: u32,
     /// The run's priority among the host's programs.
     pub host_priority: orbistoun_kernel::thread::HostPriority,
+    /// How many times the guest's size, across and down, its targets are drawn at, up to
+    /// [`RENDER_SCALE_MOST`]; the guest's own at one, or zero.
+    pub render_scale: u32,
 }
+
+pub use orbistoun_gpu::RENDER_SCALE_MOST;
 
 /// What a front end starts its runs with to profile them (D831): each is the variable a worker
 /// reads, written down so a window can keep it between sessions.

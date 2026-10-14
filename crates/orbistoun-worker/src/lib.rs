@@ -371,8 +371,9 @@ struct Limits {
     calls: Option<u64>,
 }
 
-/// The run's frame limit and host limits (D835): `config.toml`'s `[performance]`, each value the
-/// title's own `frame_limit`, `host_cores` or `host_priority` setting replaces where it names one.
+/// The run's frame limit and host limits (D835) and render scale (D862): `config.toml`'s
+/// `[performance]`, each value the title's own `frame_limit`, `host_cores`, `host_priority` or
+/// `render_scale` setting replaces where it names one.
 fn apply_performance(module: &str) {
     let paths = orbistoun_paths::Paths::resolve();
     let title = orbistoun_service::linkplan::title_of(Path::new(module));
@@ -382,6 +383,7 @@ fn apply_performance(module: &str) {
     let own = orbistoun_overrides::Resolved::for_run(&title, &paths.overrides_dir());
     let performance = effective_performance(global, &own);
     orbistoun_video::limit_frames(performance.frame_limit);
+    orbistoun_gpu_vulkan::framebuffer::set_render_scale(performance.render_scale);
     if let Err(why) =
         orbistoun_kernel::thread::limit_host(performance.host_cores, performance.host_priority)
     {
@@ -389,10 +391,11 @@ fn apply_performance(module: &str) {
     }
     if performance != orbistoun_service::PerformanceSettings::default() {
         tracing::info!(
-            "performance: frame limit {}, host cores {}, host priority {}",
+            "performance: frame limit {}, host cores {}, host priority {}, render scale {}",
             performance.frame_limit,
             performance.host_cores,
-            performance.host_priority.name()
+            performance.host_priority.name(),
+            performance.render_scale.max(1)
         );
     }
 }
@@ -411,6 +414,7 @@ fn effective_performance(
             .text(orbistoun_overrides::HOST_PRIORITY)
             .and_then(orbistoun_kernel::thread::HostPriority::named)
             .unwrap_or(global.host_priority),
+        render_scale: count(orbistoun_overrides::RENDER_SCALE).unwrap_or(global.render_scale),
     }
 }
 
@@ -630,6 +634,7 @@ fn install_presentation() {
     // touched (D717); the fault handler that notices the touch is `report`'s.
     orbistoun_gpu::agc_driver::install_lazy_copies(orbistoun_gpu::agc_driver::LazyCopies {
         snapshot: render::keep_frame_on_device,
+        show: render::keep_frame_shown,
         take: render::take_snapshot,
         discard: render::discard_snapshot,
         replace: render::replace_snapshot,
