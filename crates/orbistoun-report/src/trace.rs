@@ -1178,6 +1178,10 @@ pub struct Progress {
     pub distinct_delta: i64,
     /// Change in total calls made.
     pub calls_delta: i128,
+    /// The imports this run reached and the one before did not, by label, in label order.
+    pub gained: Vec<String>,
+    /// The imports the run before reached and this one did not, by label, in label order.
+    pub lost: Vec<String>,
     /// Where this run died, described.
     pub fault: String,
     /// Where the previous run died, if it differed.
@@ -1244,6 +1248,17 @@ pub const SPENT_THE_BUDGET: &str = "spent its call budget";
 /// this too, so it does not claim the guest was waiting.
 pub const QUIET_TO_LIMIT: &str = "went quiet, then ran to the time limit";
 
+/// The labels of the imports `one` called and `other` did not, in label order.
+fn only_in(one: &CallTrace, other: &CallTrace) -> Vec<String> {
+    let theirs: std::collections::BTreeSet<&str> =
+        other.calls.iter().map(|c| c.label.as_str()).collect();
+    let mine: std::collections::BTreeSet<&str> =
+        one.calls.iter().map(|c| c.label.as_str()).collect();
+    mine.difference(&theirs)
+        .map(|&label| label.to_owned())
+        .collect()
+}
+
 /// Compares a run against the one before it.
 ///
 /// Pure, so the verdict is testable without running a guest (D129).
@@ -1255,6 +1270,8 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
         return Progress {
             distinct_delta: 0,
             calls_delta: 0,
+            gained: Vec::new(),
+            lost: Vec::new(),
             fault,
             previous_fault: None,
             verdict: Verdict::FirstRun,
@@ -1289,6 +1306,8 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
     Progress {
         distinct_delta: after.distinct as i64 - before.distinct as i64,
         calls_delta: i128::from(after.total_calls) - i128::from(before.total_calls),
+        gained: only_in(after, before),
+        lost: only_in(before, after),
         fault,
         previous_fault: (previous != describe_end(after)).then_some(previous),
         verdict,
@@ -1810,6 +1829,26 @@ mod tests {
             "it reached the same imports: {}",
             progress.verdict.summary()
         );
+    }
+
+    /// A change in the count says which imports: the ones only this run reached, and the ones
+    /// only the run before did, each by label and in label order.
+    #[test]
+    fn progress_names_the_imports_gained_and_lost() {
+        let called = |label: &str| CalledImport {
+            index: 0,
+            label: label.to_owned(),
+            calls: 1,
+            implemented: true,
+            shape: String::new(),
+        };
+        let mut before = trace(2, 2, Some("image"), Some(0x100));
+        before.calls = vec![called("libkernel::b"), called("libkernel::a")];
+        let mut after = trace(2, 2, Some("image"), Some(0x100));
+        after.calls = vec![called("libkernel::c"), called("libkernel::b")];
+        let progress = compare(Some(&before), &after);
+        assert_eq!(progress.gained, ["libkernel::c"]);
+        assert_eq!(progress.lost, ["libkernel::a"]);
     }
 
     #[test]

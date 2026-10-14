@@ -36,6 +36,11 @@ pub(crate) fn report_progress(
         "  imports  {} distinct ({:+}), {} calls ({:+})",
         after.distinct, progress.distinct_delta, after.total_calls, progress.calls_delta
     );
+    for (sign, labels) in [("+", &progress.gained), ("-", &progress.lost)] {
+        if !labels.is_empty() {
+            println!("           {sign} {}", labels.join(", "));
+        }
+    }
     print_standing(after);
     print_quiet(after);
     print_threads(after);
