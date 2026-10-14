@@ -12,16 +12,18 @@
 //!   with:
 //!   - PGM_LO/HI (`0x148`/`0x149`) taken from A's code address;
 //!   - B's first two `0x100` entries carrying A's two `0x100` values;
-//!   - `0x10a` (RSRC1) with A's VGPR field;
+//!   - `0x10a` (RSRC1) with the larger of the two VGPR fields;
 //!   - `0x10b` (RSRC2) with A's user-SGPR field.
 //! - `0xe486(out, A, B, state, n, 0)` answers 0 and writes `{u64 0x50, u64 4}` into `out`, for `n`
 //!   4 and 1, leaving `state` untouched. 0x50 is B's SH register count times eight, the bytes of the
 //!   list `0x0a4e` writes, and 4 is B's CX register count, both from B's header.
 //! - Either with A and B swapped answers `0x8a6c0008`.
 //!
-//! Three rules are generalised from that one pair: VGPRs and user SGPRs take the larger of the two
-//! shaders', where A's happened to be larger; A's `0x100` values fill B's `0x100` entries in order;
-//! and the sizes come from B. Any other pair of stages is refused `0x8a6c0008`, as the census
+//! `REQ-20261014T0026Z-sp04` (`report-20261014-batch1.log` 18024-18032) separated the rules on a
+//! pair edited so A's fields were the smaller and B's first `0x100` values not zero: the VGPR field
+//! is the larger of the two (B's 0x11 over A's 8), the user-SGPR field is A's even where smaller (2
+//! over B's 10), and A's `0x100` values replace B's first entries, as many as A's user-SGPR count -
+//! two of A's three, over B's own nonzero values. The sizes come from B. Any other pair of stages is refused `0x8a6c0008`, as the census
 //! measured for a vertex and pixel shader `sceAgcCreateShader` had just made, and for the vertex
 //! shader alone (`REQ-20261009T1130Z-cn11`). obSCEne `REQ-20261013T2000Z-sp03` asks for a second
 //! stage-5/stage-7 pair.
@@ -97,13 +99,21 @@ fn merged_list(a: u64, b: u64) -> Option<Vec<(u32, u32)>> {
     let code = unsafe { guest::read_u64(a + CODE) }?;
     let first = sh_list(a)?;
     let field = |reg: u32| first.iter().find(|(r, _)| *r == reg).map(|(_, v)| *v);
+    // A's user data, as many words as A's own user-SGPR count says (sp04: a count of two took two
+    // of A's three; the measured pair's 26 took both of its two).
+    let a_user_sgprs = field(RSRC2).map_or(0, |value| (value & RSRC2_USER_SGPR) >> 1);
     let mut user_data = first
         .iter()
         .filter(|(r, _)| *r == USER_DATA)
-        .map(|(_, v)| *v);
+        .map(|(_, v)| *v)
+        .take(a_user_sgprs as usize);
     let larger = |mine: u32, theirs: Option<u32>, mask: u32| {
         let theirs = theirs.unwrap_or(0) & mask;
         (mine & !mask) | (mine & mask).max(theirs)
+    };
+    let theirs = |mine: u32, theirs: Option<u32>, mask: u32| match theirs {
+        Some(theirs) => (mine & !mask) | (theirs & mask),
+        None => mine,
     };
     Some(
         sh_list(b)?
@@ -114,7 +124,7 @@ fn merged_list(a: u64, b: u64) -> Option<Vec<(u32, u32)>> {
                     PGM_HI => (code >> 40) as u32,
                     USER_DATA => user_data.next().unwrap_or(value),
                     RSRC1 => larger(value, field(RSRC1), RSRC1_VGPRS),
-                    RSRC2 => larger(value, field(RSRC2), RSRC2_USER_SGPR),
+                    RSRC2 => theirs(value, field(RSRC2), RSRC2_USER_SGPR),
                     _ => value,
                 };
                 (reg, value)
@@ -197,18 +207,31 @@ mod tests {
 
     impl Pair {
         fn new() -> Self {
+            Self::with(
+                &[
+                    (0x10a, 0x0043_3a3a),
+                    (0x10b, 0x74),
+                    (0x14a, 0x0300_0005),
+                    (0x100, 0x1d00_03e0),
+                    (0x100, 0x5624_e9ee),
+                ],
+                [0, 0],
+            )
+        }
+
+        /// The measured pair with A's list `a_list`, its count in A's header, and B's first two
+        /// `0x100` values `b_user`.
+        fn with(a_list: &[(u32, u32)], b_user: [u32; 2]) -> Self {
             let mut a = vec![0_u8; 0x140];
             let mut b = vec![0_u8; 0x180];
             put(&mut a, 0x00, 0x0000_0018_3433_3231);
             put(&mut a, 0x10, 0x01d9_b100);
-            put(&mut a, 0x58, 0x0000_0005_0005_0030);
-            let a_list = pairs(&[
-                (0x10a, 0x0043_3a3a),
-                (0x10b, 0x74),
-                (0x14a, 0x0300_0005),
-                (0x100, 0x1d00_03e0),
-                (0x100, 0x5624_e9ee),
-            ]);
+            put(
+                &mut a,
+                0x58,
+                0x0000_0000_0005_0030 | (a_list.len() as u64) << 32,
+            );
+            let a_list = pairs(a_list);
             a[0xa8..0xa8 + a_list.len()].copy_from_slice(&a_list);
             let at = a.as_ptr() as u64 + 0xa8;
             put(&mut a, 0x20, at);
@@ -224,8 +247,8 @@ mod tests {
             let b_list = pairs(&[
                 (0x148, 0x005b_7320),
                 (0x149, 0x74),
-                (0x100, 0),
-                (0x100, 0),
+                (0x100, b_user[0]),
+                (0x100, b_user[1]),
                 (0x10a, 0x312c_01d1),
                 (0x10b, 0x006c_0094),
                 (0x108, 0),
@@ -293,6 +316,46 @@ mod tests {
             aux.as_mut_ptr() as u64,
         );
         assert_eq!(super::merge_shaders(&swapped), 0x8a6c_0008);
+    }
+
+    /// sp04's edited pair (`report-20261014-batch1.log` 18026-18032): A's VGPR field 8 under B's
+    /// 0x11, A's user-SGPR count 2 under B's 10, a third `0x100` value in A and nonzero first ones
+    /// in B. The console took B's VGPRs, A's user-SGPR count, and A's first two values over B's.
+    #[test]
+    fn the_edited_pair_merges_as_the_console_wrote_it() {
+        let pair = Pair::with(
+            &[
+                (0x10a, 0x0043_3a08),
+                (0x10b, 0x04),
+                (0x14a, 0x0300_0005),
+                (0x100, 0x1d00_03e0),
+                (0x100, 0x5624_e9ee),
+                (0x100, 0x3333_3333),
+            ],
+            [0x1111_1111, 0x2222_2222],
+        );
+        let mut out = [0xcc_u8; 0x200];
+        let mut aux = [0xcc_u8; 0x200];
+        let args = Pair::args(
+            out.as_mut_ptr() as u64,
+            &pair.a,
+            &pair.b,
+            aux.as_mut_ptr() as u64,
+        );
+        assert_eq!(super::merge_shaders(&args), 0);
+        let expected = pairs(&[
+            (0x148, 0x0001_d9b1),
+            (0x149, 0),
+            (0x100, 0x1d00_03e0),
+            (0x100, 0x5624_e9ee),
+            (0x10a, 0x312c_01d1),
+            (0x10b, 0x006c_0084),
+            (0x108, 0),
+            (0x109, 0),
+            (0x100, 0x4700_0df0),
+            (0x100, 0x8f0f_cc11),
+        ]);
+        assert_eq!(&aux[..0x50], &expected[..]);
     }
 
     #[test]

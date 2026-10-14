@@ -1117,10 +1117,11 @@ edge_cases = [
     "MEASURED (200-census/libSceAgc/0x0a4e469ba741de7d, NID fd5Bp5tGTgo): 0x8a6c0008 with every argument a buffer, with the real shape over 0xa5-filled records, with shader objects sceAgcCreateShader had just made, and with the vertex shader alone; nothing written in any. All arguments zero faulted (signal 11).",
     "On PPSA04263's own pair - shader A stage 5, B stage 7 - (out, A, B, aux, n, 0) answers 0 for n 4 and 1: out gets B's first 0x60 bytes with +0x08 cleared, +0x20 pointing at aux and the stage byte at +0x5a 3; aux gets B's SH register list, ten {reg, value} pairs, with PGM_LO/HI from A's code address, A's two 0x100 values in B's first two 0x100 entries, and RSRC1's VGPR and RSRC2's user-SGPR fields from A.",
     "With A and B swapped it answers 0x8a6c0008.",
+    "MEASURED on that pair edited (REQ-sp04, report-20261014-batch1.log 18024-18032): A's VGPR field 8 under B's 0x11, A's user-SGPR count 2 under B's 10, a third 0x100 value in A, B's first two 0x100 values nonzero. The merged RSRC1 took B's VGPR field (the larger), RSRC2 A's user-SGPR field (the smaller), and B's first two 0x100 entries A's first two values; A's third went unused and B's last two stayed.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-20261009T1130Z-cn11 (reports/hardware/20261009-205500-complete.log lines 16996-17017) and REQ-20261013T1800Z-sp02 (reports/hardware/report-20261013-184500.log, 200-census/libSceAgc/ppsa04263-shader-pair)."
-note = "Served by crates/orbistoun-gpu/src/agc_merge.rs. One pair was measured, so three rules are generalised from it: the VGPR and user-SGPR fields take the larger of the two shaders' (A's was larger), and A's 0x100 values fill B's in order. obSCEne REQ-20261013T2000Z-sp03 asks for a second pair."
+cites = "obSCEne REQ-20261009T1130Z-cn11 (reports/hardware/20261009-205500-complete.log lines 16996-17017), REQ-20261013T1800Z-sp02 (reports/hardware/report-20261013-184500.log, 200-census/libSceAgc/ppsa04263-shader-pair) and REQ-20261014T0026Z-sp04 (reports/hardware/report-20261014-batch1.log lines 18024-18032)."
+note = "Served by crates/orbistoun-gpu/src/agc_merge.rs: the VGPR field the larger of the two, the user-SGPR field A's, and A's 0x100 values into B's first entries, as many as A's user-SGPR count. Two pairs fit these rules; that the count of values taken is A's user-SGPR count, rather than a fixed two, is the reading that fits both."
 found_in = ["PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-09"
 
@@ -1133,7 +1134,7 @@ edge_cases = [
 ]
 known_by = "measured"
 cites = "obSCEne REQ-20261009T1130Z-cn11 (reports/hardware/20261009-205500-complete.log) and REQ-20261013T1800Z-sp02 (reports/hardware/report-20261013-184500.log, 200-census/libSceAgc/ppsa04263-shader-pair)."
-note = "Served by crates/orbistoun-gpu/src/agc_merge.rs. That both sizes come from B is generalised from the one measured pair."
+note = "Served by crates/orbistoun-gpu/src/agc_merge.rs. Both sizes came from B on the measured pair and on its edited copy (REQ-sp04: {0x50, 4} again); a pair whose B has another count is unmeasured."
 found_in = ["PPSA04263-app0", "PPSA21564-app0"]
 found_on = "2026-10-09"
 
