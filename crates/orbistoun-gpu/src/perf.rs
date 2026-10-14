@@ -61,6 +61,7 @@ macro_rules! span_labels {
             Span::DrawCommand => $as!("draw command"),
             Span::StateCommand => $as!("state command"),
             Span::DrawJoined => $as!("draw joined"),
+            Span::DrawRoom => $as!("execute: draw room"),
             Span::JoinedBuffers => $as!("joined: buffers"),
             Span::DrawWhole => $as!("draw whole"),
             Span::WholeWindow => $as!("whole: window"),
@@ -81,11 +82,14 @@ macro_rules! span_labels {
             Span::BuildPipeline => $as!("build: pipeline"),
             Span::KeepPipelineCache => $as!("build: keep cache"),
             Span::BufferResolve => $as!("buffers: resolve"),
+            Span::BufferEvaluate => $as!("buffers: evaluate"),
             Span::BufferWatch => $as!("buffers: watch"),
             Span::BufferCompare => $as!("buffers: compare"),
             Span::BufferRead => $as!("buffers: read"),
             Span::TextureKept => $as!("textures: kept"),
             Span::TextureBase => $as!("textures: base level"),
+            Span::TextureLinear => $as!("textures: linear read"),
+            Span::TextureBorders => $as!("textures: borders"),
             Span::TextureLevels => $as!("textures: levels"),
             Span::TextureBlocks => $as!("textures: blocks"),
             Span::TextureWatch => $as!("textures: watch"),
@@ -380,6 +384,9 @@ pub enum Span {
     DrawJoined,
     /// Working out whether a joining draw's re-bound buffers leave the batch's set unchanged.
     JoinedBuffers,
+    /// Making room in the draw-data buffer for a draw: when it is full, closing the pass and
+    /// waiting for the device mid-frame.
+    DrawRoom,
     /// A draw that could not join the open batch, and took the whole path.
     DrawWhole,
     /// A whole-path draw's guest-memory window, uploaded when it changed.
@@ -419,6 +426,9 @@ pub enum Span {
     KeepPipelineCache,
     /// Within [`Self::BufferBind`]: a draw buffer's range resolved from its descriptor.
     BufferResolve,
+    /// Within [`Self::BufferResolve`]: the program before an access replayed for the descriptor
+    /// it computes (D753), where no kept answer still holds.
+    BufferEvaluate,
     /// Within [`Self::BufferBind`]: the host asked whether a kept large range was written.
     BufferWatch,
     /// Within [`Self::BufferBind`]: a small range read and compared with what was kept.
@@ -429,6 +439,10 @@ pub enum Span {
     TextureKept,
     /// A tiled texture's base level, kept or read and detiled.
     TextureBase,
+    /// A linear texture read from guest memory and hashed, its kept texels written since.
+    TextureLinear,
+    /// The border colours a submission's samplers name, read from its border table.
+    TextureBorders,
     /// A tiled texture's levels after its base, read and detiled (D833).
     TextureLevels,
     /// A block-compressed texture's blocks, read.
@@ -488,7 +502,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 75] = [
+    pub const ALL: [Self; 79] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -514,6 +528,7 @@ impl Span {
         Self::DrawCommand,
         Self::StateCommand,
         Self::DrawJoined,
+        Self::DrawRoom,
         Self::JoinedBuffers,
         Self::DrawWhole,
         Self::WholeWindow,
@@ -534,11 +549,14 @@ impl Span {
         Self::BuildPipeline,
         Self::KeepPipelineCache,
         Self::BufferResolve,
+        Self::BufferEvaluate,
         Self::BufferWatch,
         Self::BufferCompare,
         Self::BufferRead,
         Self::TextureKept,
         Self::TextureBase,
+        Self::TextureLinear,
+        Self::TextureBorders,
         Self::TextureLevels,
         Self::TextureBlocks,
         Self::ReadBand,

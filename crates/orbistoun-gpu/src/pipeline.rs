@@ -3912,7 +3912,9 @@ impl Pipeline {
                     &mut submission.report.first_unbound_texture,
                 ),
             );
-            read_table_borders(&mut submission.commands, submission.border_table, memory);
+            span(Span::TextureBorders, || {
+                read_table_borders(&mut submission.commands, submission.border_table, memory);
+            });
         });
         span(Span::BufferBind, || {
             crate::draw_buffers::bind_draw_buffers(
@@ -6130,6 +6132,7 @@ fn texel_texture(
             (format, selects),
         );
     }
+    let _reading = crate::perf::SpanGuard::start(crate::perf::Span::TextureLinear);
     // Marked before the bytes are hashed, so a write racing the hash is seen next time.
     let since = texture_mark(descriptor.base, span as u64);
     let texels_bytes = memory.read(descriptor.base, span)?;

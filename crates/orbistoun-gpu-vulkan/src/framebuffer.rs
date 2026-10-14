@@ -6936,6 +6936,7 @@ fn write_draw_data(draws: &[DrawWords]) -> Option<u32> {
 /// Makes room for the open batch and one more draw: when the buffer has none, the pass is closed
 /// (recording its batch), the device waited for, and the buffer taken back (D718).
 fn ensure_draw_room(session: &crate::compute::Session) -> Result<(), DispatchError> {
+    let _making_room = orbistoun_gpu::perf::SpanGuard::start(orbistoun_gpu::perf::Span::DrawRoom);
     let pending = open_pass()
         .lock()
         .ok()

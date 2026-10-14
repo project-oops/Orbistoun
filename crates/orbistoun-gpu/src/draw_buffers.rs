@@ -327,10 +327,12 @@ pub(crate) fn evaluate_computed(
         return answer;
     }
     let mut reads = Vec::new();
-    let answer = evaluate_computed_now(computed, (user_data, system), &mut |address| {
-        let held = read(address)?;
-        reads.push((address, held));
-        Some(held)
+    let answer = span(Span::BufferEvaluate, || {
+        evaluate_computed_now(computed, (user_data, system), &mut |address| {
+            let held = read(address)?;
+            reads.push((address, held));
+            Some(held)
+        })
     });
     if let Ok(mut evaluated) = evaluated().lock() {
         if evaluated.len() >= EVALUATED_KEPT {
