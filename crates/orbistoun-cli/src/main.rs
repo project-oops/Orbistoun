@@ -1316,9 +1316,15 @@ fn dispatch_reports(command: &Command, service: &Service) -> Result<()> {
 fn main() -> Result<()> {
     // The shared logging setup; the guard is held for the whole of `main`, and `let _` would drop
     // it here.
-    let _logging = oops_log::Logging::new("orbistoun")
-        .build(orbistoun_env::build::line_static())
-        .init();
+    let logging = oops_log::Logging::new("orbistoun").build(orbistoun_env::build::line_static());
+    // Colour only for a terminal: a worker logging into a profiled run's file (D831), or any
+    // output piped somewhere, gets plain text.
+    let logging = if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        logging
+    } else {
+        logging.without_colour()
+    };
+    let _logging = logging.init();
 
     // Checked before clap sees the arguments: worker mode is not a user-facing verb.
     if std::env::args().any(|a| a == orbistoun_worker::WORKER_FLAG) {

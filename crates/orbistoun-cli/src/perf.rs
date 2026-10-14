@@ -86,7 +86,11 @@ fn record(
     // Longer than the run, so the capture ends when the worker's client goes, with all of it.
     let capture = orbistoun_perf::Capture::start(tools, &trace, port, seconds + 120)
         .context("starting tracy-capture")?;
-    let ran = run_worker(path, seconds, input);
+    // The worker's log and the guest's own output, beside the recording: a title printing every
+    // frame would bury the report, and a bench of every title would be unreadable.
+    let log = trace.with_extension("log");
+    let ran = run_worker(path, seconds, input, &log);
+    println!("  the run's log: {}", log.display());
     if let Err(error) = ran {
         capture.abandon();
         return Err(error);
@@ -101,9 +105,9 @@ fn record(
 }
 
 /// One run of `path` in a worker, stopped after `seconds`.
-fn run_worker(path: &Path, seconds: u64, input: Option<&Path>) -> Result<()> {
-    let mut worker =
-        orbistoun_worker::WorkerHandle::spawn_self().context("spawning a worker process")?;
+fn run_worker(path: &Path, seconds: u64, input: Option<&Path>, log: &Path) -> Result<()> {
+    let mut worker = orbistoun_worker::WorkerHandle::spawn_self_logging_to(&[], log)
+        .context("spawning a worker process")?;
     let events = worker
         .request(&orbistoun_proto::Request::Run {
             path: path.to_path_buf(),

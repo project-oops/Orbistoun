@@ -3345,13 +3345,26 @@ impl WorkerHandle {
 
     /// [`Self::spawn`], with `env` beside what the worker inherits.
     pub fn spawn_with(exe: &Path, env: &[(&str, String)]) -> io::Result<Self> {
+        // stderr is inherited, so the worker's log reaches the same place the shim's does.
+        Self::spawn_logging(exe, env, Stdio::inherit())
+    }
+
+    /// [`Self::spawn_self_with`], the worker's log and the guest's own output written to `log`
+    /// rather than the shim's terminal: a profiled run's report is read there, and a title printing
+    /// every frame would bury it (D831).
+    pub fn spawn_self_logging_to(env: &[(&str, String)], log: &Path) -> io::Result<Self> {
+        let exe = std::env::current_exe()?;
+        Self::spawn_logging(&exe, env, Stdio::from(std::fs::File::create(log)?))
+    }
+
+    /// Spawns `exe` in worker mode, its stderr to `stderr`.
+    fn spawn_logging(exe: &Path, env: &[(&str, String)], stderr: Stdio) -> io::Result<Self> {
         let mut child = Command::new(exe)
             .arg(WORKER_FLAG)
             .envs(env.iter().map(|(name, value)| (*name, value.as_str())))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // stderr is inherited, so the worker's log reaches the same place the shim's does.
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()?;
 
         let stdin = child
