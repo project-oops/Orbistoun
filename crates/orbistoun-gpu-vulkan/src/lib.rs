@@ -15,6 +15,7 @@ pub mod compute_images;
 mod depth;
 mod draw_buffers;
 pub mod framebuffer;
+mod half;
 pub mod pipeline_cache;
 pub use compute::{
     Availability, DispatchError, GuestDispatch, Output, dispatch, dispatch_guest,
@@ -909,7 +910,7 @@ impl VulkanBackend {
             || framebuffer::FrameSnapshot::create(extent.0, extent.1, texel_bytes),
             Ok,
         ) {
-            Ok(snapshot) => snapshot,
+            Ok(snapshot) => snapshot.holding(resident.encoding()),
             Err(e) => {
                 tracing::warn!("a frame snapshot could not be made: {e:?}");
                 return None;

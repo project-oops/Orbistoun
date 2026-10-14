@@ -52,7 +52,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
         TargetEncoding::Unorm8 => FORMAT,
         TargetEncoding::Srgb8 => vk::Format::R8G8B8A8_SRGB,
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
-        TargetEncoding::Float32 => vk::Format::R32_SFLOAT,
+        TargetEncoding::Float32 | TargetEncoding::Float16 => vk::Format::R32_SFLOAT,
         TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Float16x2 => vk::Format::R16G16_SFLOAT,
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
@@ -67,7 +67,7 @@ const fn drawn_format(encoding: TargetEncoding) -> vk::Format {
 const fn image_format(encoding: TargetEncoding) -> vk::Format {
     match encoding {
         TargetEncoding::Float11_11_10 => vk::Format::B10G11R11_UFLOAT_PACK32,
-        TargetEncoding::Float32 => vk::Format::R32_SFLOAT,
+        TargetEncoding::Float32 | TargetEncoding::Float16 => vk::Format::R32_SFLOAT,
         TargetEncoding::Float16x4 => vk::Format::R16G16B16A16_SFLOAT,
         TargetEncoding::Float16x2 => vk::Format::R16G16_SFLOAT,
         TargetEncoding::Unorm10x3A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
@@ -91,8 +91,55 @@ pub(crate) const fn texel_bytes(encoding: TargetEncoding) -> vk::DeviceSize {
         | TargetEncoding::Float16x2
         | TargetEncoding::Unorm10x3A2
         | TargetEncoding::Snorm8
-        | TargetEncoding::Uint16 => 4,
+        | TargetEncoding::Uint16
+        | TargetEncoding::Float16 => 4,
     }
+}
+
+/// A word a host hands an attachment of `encoding`, as the device holds it: a half-float target's
+/// half, in the word's low half, widened to the 32-bit float its attachment draws in (D868). Every
+/// other encoding's words are the device's own.
+const fn device_word(encoding: TargetEncoding, word: u32) -> u32 {
+    match encoding {
+        TargetEncoding::Float16 => crate::half::widened(word as u16),
+        _ => word,
+    }
+}
+
+/// [`device_word`]'s inverse: a word an attachment of `encoding` holds, as a host is handed it - a
+/// half-float target's float rounded to the nearest half (D868).
+const fn host_word(encoding: TargetEncoding, word: u32) -> u32 {
+    match encoding {
+        TargetEncoding::Float16 => crate::half::narrowed(word) as u32,
+        _ => word,
+    }
+}
+
+/// The bytes a host hands an attachment of `encoding`, as the device holds them ([`device_word`]).
+fn device_bytes(encoding: TargetEncoding, bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if !matches!(encoding, TargetEncoding::Float16) {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    std::borrow::Cow::Owned(
+        bytes
+            .chunks_exact(4)
+            .flat_map(|word| {
+                let word = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                device_word(encoding, word).to_le_bytes()
+            })
+            .collect(),
+    )
+}
+
+/// The bytes an attachment of `encoding` holds, as a host is handed them ([`host_word`]).
+fn host_bytes(encoding: TargetEncoding, mut bytes: Vec<u8>) -> Vec<u8> {
+    if matches!(encoding, TargetEncoding::Float16) {
+        for word in bytes.chunks_exact_mut(4) {
+            let held = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+            word.copy_from_slice(&host_word(encoding, held).to_le_bytes());
+        }
+    }
+    bytes
 }
 
 /// How many times the guest's size, across and down, a resident target is drawn at (D862): one
@@ -123,9 +170,10 @@ pub(crate) const fn scaled((width, height): (u32, u32), scale: u32) -> (u32, u32
 /// everywhere, the nearest texel for an integer or 32-bit float target, which need not filter.
 const fn resample_filter(encoding: TargetEncoding) -> vk::Filter {
     match encoding {
-        TargetEncoding::Uint16 | TargetEncoding::Float32 | TargetEncoding::Float32x4 => {
-            vk::Filter::NEAREST
-        }
+        TargetEncoding::Uint16
+        | TargetEncoding::Float32
+        | TargetEncoding::Float32x4
+        | TargetEncoding::Float16 => vk::Filter::NEAREST,
         TargetEncoding::Unorm8
         | TargetEncoding::Srgb8
         | TargetEncoding::Float11_11_10
@@ -877,7 +925,7 @@ impl ResidentAttachment {
         };
         let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
         if let Some(bytes) = initial {
-            fill_host_memory(device, buffer_memory, bytes)?;
+            fill_host_memory(device, buffer_memory, &device_bytes(encoding, bytes))?;
         }
         let format = drawn_format(encoding);
         let render_pass = create_resident_render_pass(device, format)?;
@@ -949,7 +997,11 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         settle(&session)?;
-        fill_host_memory(&session.device, self.buffer_memory, pixels)?;
+        fill_host_memory(
+            &session.device,
+            self.buffer_memory,
+            &device_bytes(self.encoding, pixels),
+        )?;
         let (image, loads) = (self.image, self.loads());
         one_shot_unwaited(&session, |device, command| {
             let attachment = (
@@ -992,6 +1044,7 @@ impl ResidentAttachment {
     /// the copy follows, all recorded after what the queue holds, so the host never waits or
     /// touches the buffer.
     pub(crate) fn reload_uniform(&self, word: u32) -> Result<(), DispatchError> {
+        let word = device_word(self.encoding, word);
         let (width, height) = self.extent();
         let size = attachment_bytes((width, height), self.encoding);
         let session = crate::compute::session()?;
@@ -1095,7 +1148,7 @@ impl ResidentAttachment {
         Ok(Pixels {
             width,
             height,
-            bytes,
+            bytes: host_bytes(self.encoding, bytes),
         })
     }
 
@@ -1241,7 +1294,7 @@ impl ResidentAttachment {
         Ok(Pixels {
             width,
             height: count,
-            bytes,
+            bytes: host_bytes(self.encoding, bytes),
         })
     }
 
@@ -1268,7 +1321,11 @@ impl ResidentAttachment {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         settle(&session)?;
-        fill_host_memory(&session.device, self.buffer_memory, pixels)?;
+        fill_host_memory(
+            &session.device,
+            self.buffer_memory,
+            &device_bytes(self.encoding, pixels),
+        )?;
         let (image, loads) = (self.image, self.loads());
         one_shot_unwaited(&session, |device, command| {
             let attachment = (
@@ -1796,6 +1853,9 @@ pub(crate) struct FrameSnapshot {
     height: u32,
     /// The bytes a texel of the frame takes ([`texel_bytes`]).
     texel_bytes: vk::DeviceSize,
+    /// How the frame it holds keeps its texels, which a read hands back as the host carries them
+    /// ([`host_bytes`]): snapshots are kept for reuse by their texel size alone.
+    encoding: TargetEncoding,
 }
 
 impl FrameSnapshot {
@@ -1819,7 +1879,13 @@ impl FrameSnapshot {
             width,
             height,
             texel_bytes,
+            encoding: TargetEncoding::Unorm8,
         })
+    }
+
+    /// The same buffer, holding a frame of `encoding` from now on.
+    pub(crate) const fn holding(self, encoding: TargetEncoding) -> Self {
+        Self { encoding, ..self }
     }
 
     /// The extent it holds a frame of.
@@ -1846,7 +1912,7 @@ impl FrameSnapshot {
         Ok(Pixels {
             width: self.width,
             height: self.height,
-            bytes,
+            bytes: host_bytes(self.encoding, bytes),
         })
     }
 
@@ -3615,7 +3681,7 @@ fn render_over(
     let render_pass = create_render_pass(device, initial.is_some(), format)?;
     let (buffer, buffer_memory) = create_readback_buffer(instance, physical, device, size)?;
     if let Some(bytes) = initial {
-        fill_host_memory(device, buffer_memory, bytes)?;
+        fill_host_memory(device, buffer_memory, &device_bytes(bound.encoding, bytes))?;
     }
 
     let (view, framebuffer) =
@@ -3683,6 +3749,7 @@ fn render_over(
     unsafe { std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), bytes.as_mut_ptr(), bytes.len()) };
     // SAFETY: mapped immediately above and not used after unmapping.
     unsafe { device.unmap_memory(buffer_memory) };
+    let bytes = host_bytes(bound.encoding, bytes);
 
     // The guest-memory window and the storage image as the draw left them, read before the pipeline
     // is released.
@@ -7246,6 +7313,40 @@ mod tests {
             read.bytes,
             [0x10, 0x20, 0x40, 0x80].repeat((width * height) as usize),
             "every pixel the word, red in the first byte"
+        );
+    }
+
+    /// A half-float target (D868) hands back the halves it was given, through every edge words
+    /// cross: seeded with one half a word - one, negative two, the smallest subnormal, the largest
+    /// finite, and others - it reads back the same words, and filled with one it reads back that one
+    /// everywhere. Grand Theft Auto V's second submission draws into such a target.
+    #[test]
+    fn a_half_float_target_hands_back_its_halves() {
+        if crate::compute::session().is_err() {
+            eprintln!("no Vulkan device: the half-float target is not exercised here");
+            return;
+        }
+        let (width, height) = (8_u32, 4_u32);
+        let halves: Vec<u32> = (0..width * height)
+            .map(|i| [0x3C00, 0xC000, 0x0001, 0x7BFF][i as usize % 4] ^ (i << 2))
+            .collect();
+        let bytes: Vec<u8> = halves.iter().flat_map(|half| half.to_le_bytes()).collect();
+        let resident = super::ResidentAttachment::create(
+            (width, height),
+            Some(&bytes),
+            [0.0; 4],
+            orbistoun_gpu::TargetEncoding::Float16,
+        )
+        .expect("an attachment");
+        let seeded = resident.read_back().expect("read back");
+        resident.reload_uniform(0x3555).expect("reloaded");
+        let filled = resident.read_back().expect("read back");
+        resident.destroy();
+        assert_eq!(seeded.bytes, bytes, "every half as it was given");
+        assert_eq!(
+            filled.bytes,
+            0x3555_u32.to_le_bytes().repeat((width * height) as usize),
+            "the uniform half everywhere"
         );
     }
 

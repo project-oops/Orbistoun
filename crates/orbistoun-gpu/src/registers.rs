@@ -2504,6 +2504,15 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a two-byte `16` `FLOAT` target holding red (`SWAP_STD`): one half float a
+    /// texel, drawn as a 32-bit float and held as the half (D868).
+    #[must_use]
+    pub const fn is_float_16(&self) -> bool {
+        self.format == COLOR_16
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a four-byte `8_8_8_8` `SNORM` target in an order [`Self::swap`] names, as
     /// [`Self::is_rgba8_class`] takes them: drawn through a signed-normalised attachment, its bytes
     /// moved as they are held (D866).
@@ -2557,6 +2566,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Unorm10x3A2
         } else if self.is_snorm_8_8_8_8() {
             crate::TargetEncoding::Snorm8
+        } else if self.is_float_16() {
+            crate::TargetEncoding::Float16
         } else if self.is_uint_16() {
             crate::TargetEncoding::Uint16
         } else if self.is_float_32_32_32_32() {
@@ -2585,7 +2596,7 @@ impl ColourTargetFormat {
             Some(4)
         } else if self.is_float_16_16_16_16() {
             Some(8)
-        } else if self.is_uint_16() {
+        } else if self.is_uint_16() || self.is_float_16() {
             Some(2)
         } else if self.is_float_32_32_32_32() {
             Some(16)
@@ -3698,6 +3709,13 @@ mod tests {
             !decode_colour_target_format(0x0001_8008).is_uint_16(),
             "not UNORM"
         );
+        // `COLOR_16` `FLOAT` (D868), as Grand Theft Auto V's second submission draws into next.
+        let half = decode_colour_target_format(0x0001_8008 | (7 << 8));
+        assert!(half.is_float_16());
+        assert!(!half.is_uint_16());
+        assert_eq!(half.encoding(), crate::TargetEncoding::Float16);
+        assert_eq!(half.written_back_bytes(), Some(2));
+        assert!(!decode_colour_target_format(0x0001_8008 | (7 << 8) | (3 << 11)).is_float_16());
         // `COLOR_8_8_8_8` `SNORM` (D866), as Grand Theft Auto V's second submission draws into.
         let signed = decode_colour_target_format(0x0001_80a8 | (1 << 8));
         assert!(signed.is_snorm_8_8_8_8());

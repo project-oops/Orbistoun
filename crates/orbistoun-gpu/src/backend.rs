@@ -450,6 +450,10 @@ pub enum TargetEncoding {
     /// `COLOR_2_10_10_10` `UNORM` (D848): red, green and blue in ten bits each from the low end,
     /// alpha in the top two - the bits Vulkan's `A2B10G10R10_UNORM_PACK32` holds.
     Unorm10x3A2,
+    /// `COLOR_16` `FLOAT` (D868): one half float a texel, red, which a host carries in each word's
+    /// low half - as [`Self::Uint16`] carries its integer - and a device draws as the 32-bit float
+    /// of Vulkan's `R32_SFLOAT`, widened on the way in and rounded back on the way out.
+    Float16,
     /// `COLOR_8_8_8_8` `SNORM` (D866): four signed-normalised bytes a texel, red first - the bits
     /// Vulkan's `R8G8B8A8_SNORM` holds.
     Snorm8,
