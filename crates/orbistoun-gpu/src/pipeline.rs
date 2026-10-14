@@ -261,6 +261,27 @@ mod refusal_tests {
         );
     }
 
+    /// An access refused as not translated is quoted with its operands too: what it reads through
+    /// is what decides how it can be made exact.
+    #[test]
+    fn a_refusal_not_translated_quotes_its_operands() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [0x7e00_0280_u32, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let error = orbistoun_translate::TranslateError::NotTranslated {
+            offset: 0,
+            mnemonic: "v_mov_b32_e32".to_owned(),
+            detail: "refused",
+        };
+        let why = super::compute_refusal(&error, (&decoded, &encodings), (0x7400_4560, &bytes));
+        assert!(
+            why.ends_with("(`v_mov_b32_e32 v0, 0`, word 0x7e000280)"),
+            "{why}"
+        );
+    }
+
     /// A compute program the translator refuses is named by the instruction it refused, words and
     /// all, and kept beside the report, as a refused shader is.
     #[test]
@@ -4564,6 +4585,8 @@ impl Pipeline {
 const fn refused_instruction(error: &orbistoun_translate::TranslateError) -> Option<u32> {
     match error {
         orbistoun_translate::TranslateError::Unsupported { offset, .. }
+        | orbistoun_translate::TranslateError::NotTranslated { offset, .. }
+        | orbistoun_translate::TranslateError::Untraced { offset, .. }
         | orbistoun_translate::TranslateError::Unrecognised { offset } => Some(*offset),
         _ => None,
     }
