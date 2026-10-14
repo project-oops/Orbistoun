@@ -2820,6 +2820,15 @@ fn carry_out_overlapping(address: u64, length: u64) -> bool {
         return false;
     };
     let range = (address, length);
+    // Asked before every read a submission's preparation makes, a word at a time for a draw's
+    // descriptors: when nothing deferred is there the list is left as it is, not taken apart and
+    // rebuilt.
+    if !list
+        .iter()
+        .any(|copy| ranges_overlap((copy.pages.0, copy.pages.1), range))
+    {
+        return true;
+    }
     let (touched, kept): (Vec<Deferred>, Vec<Deferred>) = std::mem::take(&mut *list)
         .into_iter()
         .partition(|copy| ranges_overlap((copy.pages.0, copy.pages.1), range));

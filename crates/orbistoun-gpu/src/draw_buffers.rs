@@ -438,13 +438,23 @@ fn global_range(
     let count = usize::try_from(global.user_data)
         .unwrap_or(USER_DATA_WORDS)
         .min(USER_DATA_WORDS);
-    let word = |address: u64| {
+    let mut word = |address: u64| {
         let bytes = memory.read(address, 4)?;
         Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     };
+    let hash = crate::content_hash(&global.prefix);
+    let prepared = prepared_program(global, hash)?;
+    let draw = (
+        (global.first_register, &user_data[..count]),
+        (global.width, vertices),
+    );
+    // A program whose native run is trusted runs in less than keeping its answer costs: a title
+    // drawing a triangle at a time never draws the same user data twice (D850).
+    if let Some(found) = prepared.trusted(draw, &mut word) {
+        return Ok(span_of(global, found));
+    }
     // The same program over the same user data and vertices reads the same words; while they hold
     // what they held, the lanes form the same addresses.
-    let hash = crate::content_hash(&global.prefix);
     let mut key = vec![
         hash as u32,
         (hash >> 32) as u32,
@@ -461,11 +471,13 @@ fn global_range(
         return *answer;
     }
     let mut reads = Vec::new();
-    let answer = run_global_loads(global, (&user_data[..count], vertices), &mut |address| {
-        let value = word(address);
-        reads.push((address, value));
-        value
-    });
+    let answer = prepared
+        .lanes(draw, &mut |address| {
+            let value = word(address);
+            reads.push((address, value));
+            value
+        })
+        .map(|found| span_of(global, found));
     if let Ok(mut runs) = runs.lock() {
         if runs.len() >= RUNS_KEPT {
             runs.clear();
@@ -475,40 +487,111 @@ fn global_range(
     answer
 }
 
-/// [`global_range`] found by running the program, reading guest memory through `read`.
-fn run_global_loads(
+/// How many runs of a program check its native answer against the model's before the native one
+/// is taken alone (D850).
+const QUICK_CHECKS: u32 = 64;
+
+/// A global-load program prepared for runs, and how far its native run is trusted (D850).
+struct Prepared {
+    program: orbistoun_translate::evaluate::LaneProgram,
+    /// Whether its native run is still taken: until an answer differs from the model's.
+    quick: std::sync::atomic::AtomicBool,
+    /// How many native answers have matched the model's.
+    checks: std::sync::atomic::AtomicU32,
+}
+
+/// A draw as a lane run sees it: the first user-data register and the words, then the wave's width
+/// and the draw's vertices.
+type Draw<'a> = ((u32, &'a [u32]), (u32, u32));
+
+impl Prepared {
+    /// Each load's lanes' addresses natively, once its native run has matched the model's
+    /// [`QUICK_CHECKS`] times; `None` before that, or where the native run declines.
+    fn trusted(
+        &self,
+        (user_data, lanes): Draw<'_>,
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) -> Option<orbistoun_translate::evaluate::LaneAddresses> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.quick.load(Relaxed) || self.checks.load(Relaxed) < QUICK_CHECKS {
+            return None;
+        }
+        orbistoun_translate::evaluate::quick_lane_addresses(&self.program, user_data, lanes, read)
+    }
+
+    /// Each load's lanes' addresses: through the model, and natively beside it while the native
+    /// run is being checked. A native answer that differs from the model's stops the native run
+    /// for the program, and says so.
+    fn lanes(
+        &self,
+        (user_data, lanes): Draw<'_>,
+        read: &mut dyn FnMut(u64) -> Option<u32>,
+    ) -> Result<orbistoun_translate::evaluate::LaneAddresses, &'static str> {
+        use orbistoun_translate::evaluate::{lane_addresses, quick_lane_addresses};
+        use std::sync::atomic::Ordering::Relaxed;
+        let (encodings, _) = tables()?;
+        let quick = if self.quick.load(Relaxed) {
+            quick_lane_addresses(&self.program, user_data, lanes, read)
+        } else {
+            None
+        };
+        let model = lane_addresses(&self.program, encodings, user_data, lanes, read);
+        if let Some(found) = quick {
+            if model.as_ref() == Ok(&found) {
+                self.checks.fetch_add(1, Relaxed);
+            } else if self.quick.swap(false, Relaxed) {
+                tracing::warn!(
+                    concat!(
+                        "a global load's native lane run answered {:x?} where the model answers ",
+                        "{:x?}; this program runs through the model from now (D850)"
+                    ),
+                    found,
+                    model
+                );
+            }
+        }
+        model
+    }
+}
+
+/// The program `global` runs, prepared once: decoded, sliced and compiled for native runs. Kept by
+/// its words' content hash and length, since hashing a few hundred words with a map's own hasher
+/// every draw cost more than the native run.
+fn prepared_program(
     global: &GlobalLoads,
-    (user_data, vertices): (&[u32], u32),
-    read: &mut dyn FnMut(u64) -> Option<u32>,
-) -> Result<(u64, u64), &'static str> {
-    use orbistoun_translate::evaluate::LaneProgram;
-    /// Programs prepared for runs, by their words: each is decoded and sliced once.
-    type Programs = std::collections::HashMap<Vec<u32>, std::sync::Arc<LaneProgram>>;
+    hash: u64,
+) -> Result<std::sync::Arc<Prepared>, &'static str> {
+    type Programs = std::collections::HashMap<(u64, usize), std::sync::Arc<Prepared>>;
     static PROGRAMS: std::sync::OnceLock<std::sync::Mutex<Programs>> = std::sync::OnceLock::new();
-    let (encodings, _) = tables()?;
     let programs = PROGRAMS.get_or_init(Default::default);
-    let known = programs
+    let key = (hash, global.prefix.len());
+    if let Some(known) = programs
         .lock()
         .ok()
-        .and_then(|programs| programs.get(&global.prefix).cloned());
-    let program = if let Some(program) = known {
-        program
-    } else {
-        let (_, decode) = decode_prefix(&global.prefix)?;
-        let offsets: Vec<u32> = global.loads.iter().map(|&(at, _)| at).collect();
-        let program = std::sync::Arc::new(LaneProgram::new(decode, encodings, &offsets));
-        if let Ok(mut programs) = programs.lock() {
-            programs.insert(global.prefix.clone(), program.clone());
-        }
-        program
-    };
-    let found = orbistoun_translate::evaluate::lane_addresses(
-        &program,
-        encodings,
-        (global.first_register, user_data),
-        (global.width, vertices),
-        read,
-    )?;
+        .and_then(|programs| programs.get(&key).cloned())
+    {
+        return Ok(known);
+    }
+    let (encodings, decode) = decode_prefix(&global.prefix)?;
+    let offsets: Vec<u32> = global.loads.iter().map(|&(at, _)| at).collect();
+    let program = orbistoun_translate::evaluate::LaneProgram::new(decode, encodings, &offsets);
+    let prepared = std::sync::Arc::new(Prepared {
+        quick: std::sync::atomic::AtomicBool::new(program.runs_quickly()),
+        checks: std::sync::atomic::AtomicU32::new(0),
+        program,
+    });
+    if let Ok(mut programs) = programs.lock() {
+        programs.insert(key, prepared.clone());
+    }
+    Ok(prepared)
+}
+
+/// The range the loads' lanes read: from the word the lowest address is in to the end of the
+/// widest read from the highest; empty, at zero, when no lane reached a load.
+fn span_of(
+    global: &GlobalLoads,
+    found: orbistoun_translate::evaluate::LaneAddresses,
+) -> (u64, u64) {
     let mut span: Option<(u64, u64)> = None;
     for (at, addresses) in found {
         let reads = global
@@ -524,7 +607,7 @@ fn run_global_loads(
         }
     }
     // Whole words, from the word the lowest address is in, as the module reads them.
-    Ok(span.map_or((0, 0), |(low, high)| (low & !3, high - (low & !3))))
+    span.map_or((0, 0), |(low, high)| (low & !3, high - (low & !3)))
 }
 
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and

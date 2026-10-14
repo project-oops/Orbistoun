@@ -202,6 +202,7 @@ pub fn lane_addresses(
         until,
         kept: needed,
         crosses,
+        ..
     } = program;
     let (loads, until) = (loads.as_slice(), *until);
     let mut model = Concrete::new(encodings, decode.instructions.len());
@@ -309,6 +310,9 @@ pub struct LaneProgram {
     kept: Vec<bool>,
     /// Whether a kept instruction reads across lanes ([`crosses_lanes`]).
     crosses: bool,
+    /// The program compiled for native runs, where every instruction a run reaches is one they
+    /// carry out exactly and no lane reads another's (D850).
+    quick: Option<crate::quick_lanes::Program>,
 }
 
 impl LaneProgram {
@@ -317,14 +321,35 @@ impl LaneProgram {
     pub fn new(decode: Decode, encodings: &EncodingTable, loads: &[u32]) -> Self {
         let kept = address_slice(&decode, encodings, loads);
         let crosses = crosses_lanes(&decode, encodings, &kept);
+        let quick = (!crosses)
+            .then(|| crate::quick_lanes::compile(&decode, encodings, loads, &kept))
+            .flatten();
         Self {
             until: loads.iter().copied().max().unwrap_or(0),
             loads: loads.to_vec(),
             decode,
             kept,
             crosses,
+            quick,
         }
     }
+
+    /// Whether it runs natively as well as through the model (D850).
+    #[must_use]
+    pub const fn runs_quickly(&self) -> bool {
+        self.quick.is_some()
+    }
+}
+
+/// [`lane_addresses`] found natively, where the program compiled for that and the run knows every
+/// value it needs (D850); `None` otherwise, and the model then decides.
+pub fn quick_lane_addresses(
+    program: &LaneProgram,
+    user_data: (u32, &[u32]),
+    lanes: (u32, u32),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Option<LaneAddresses> {
+    crate::quick_lanes::run(program.quick.as_ref()?, user_data, lanes, read)
 }
 
 /// Which instructions a lane run must run for the addresses at `loads`: by index, every one but the
@@ -1497,6 +1522,79 @@ mod tests {
         // Four components, so the branch skips the three-component load.
         assert_eq!(run(64), Ok(vec![(loads[1], expected.clone())]));
         assert_eq!(run(2), Ok(vec![(loads[1], expected[..2].to_vec())]));
+
+        // The native run finds what the model finds (D850), for each base vertex, lane count and
+        // component count, the three-component load's branch included.
+        assert!(
+            program.runs_quickly(),
+            "every instruction it reaches is one it runs"
+        );
+        for components in [3, 4] {
+            let mut memory = memory.clone();
+            memory.insert(table + 12, components);
+            for base in [0, 3, 0x7fff_fffe] {
+                let user_data = [0x1000_0000, 0, table as u32, (table >> 32) as u32, base];
+                for lanes in [1, 2, 3, 7, 32] {
+                    let read = |address: u64| memory.get(&address).copied();
+                    let model = lane_addresses(
+                        &program,
+                        &encodings,
+                        (8, &user_data),
+                        (32, lanes),
+                        &mut |a| read(a),
+                    );
+                    let quick = super::quick_lane_addresses(
+                        &program,
+                        (8, &user_data),
+                        (32, lanes),
+                        &mut |a| read(a),
+                    );
+                    assert_eq!(
+                        quick.map(Ok),
+                        Some(model),
+                        "{components} components, base {base:#x}, {lanes} lanes"
+                    );
+                }
+            }
+        }
+        // A program kept only through its last load, as a draw's prefix is: the branch over the
+        // four-component load goes past its words. Taken, the model refuses it and the native run
+        // declines; not taken, both find the load.
+        let cut: Vec<u32> = GL_FETCH
+            .iter()
+            .chain(&GL_FETCH_TAIL[..3])
+            .copied()
+            .collect();
+        let cut_bytes: Vec<u8> = cut.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let cut_program = super::LaneProgram::new(
+            decode_program(&cut_bytes, &encodings, &operands),
+            &encodings,
+            &loads,
+        );
+        assert!(cut_program.runs_quickly());
+        for components in [3, 4] {
+            let mut memory = memory.clone();
+            memory.insert(table + 12, components);
+            let read = |address: u64| memory.get(&address).copied();
+            let model = lane_addresses(
+                &cut_program,
+                &encodings,
+                (8, &user_data),
+                (32, 3),
+                &mut |a| read(a),
+            );
+            let quick =
+                super::quick_lane_addresses(&cut_program, (8, &user_data), (32, 3), &mut |a| {
+                    read(a)
+                });
+            match model {
+                Ok(found) => assert_eq!(quick, Some(found), "{components} components"),
+                Err(_) => assert_eq!(quick, None, "{components} components"),
+            }
+        }
+        // A descriptor it cannot read leaves the native run to the model.
+        let quick = super::quick_lane_addresses(&program, (8, &user_data), (32, 3), &mut |_| None);
+        assert_eq!(quick, None);
     }
 
     /// A prefix follows a branch whose condition the host knows (D753, as D758 does for lanes):
