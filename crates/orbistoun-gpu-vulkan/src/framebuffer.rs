@@ -1394,6 +1394,7 @@ pub const STORAGE_IMAGE_SIZE: (u32, u32) = (8, 8);
 /// Created for every pipeline, because a binding a module uses and the layout lacks is an invalid
 /// pipeline, and the harness does not read which bindings a module uses. Its layout is `GENERAL`
 /// throughout: the only layout a storage image may be written in, and one a transfer may read.
+#[derive(Clone, Copy)]
 struct StorageImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -1602,9 +1603,18 @@ struct Texture {
     depth: u32,
     /// What its texels are: colour, or a depth sampled through a compare (D817).
     aspect: vk::ImageAspectFlags,
-    /// The session's default texture ([`shared_default_texture`]), which every pipeline binds in a
-    /// slot nothing asked for: uploaded once and never released with a pipeline.
+    /// Whether a pipeline's release leaves it alone: the session's default texture
+    /// ([`shared_default_texture`]), bound in every slot nothing asked for, and a resident draw's
+    /// texture kept by what it holds ([`kept_texture`], D860).
     shared: bool,
+    /// Whether the pipeline holding this copy must copy its texels in: a texture of its own, and a
+    /// shared one until a pipeline has, since copying in again would discard the texels earlier
+    /// draws still sample.
+    upload: bool,
+    /// Its key among the kept textures, when it is one.
+    kept: Option<u64>,
+    /// The bytes it holds on the device, as its staging buffer holds them on the host.
+    bytes: vk::DeviceSize,
 }
 
 /// The default white texel with default sampling, made once for the session and bound in every
@@ -1628,17 +1638,162 @@ fn shared_default_texture(devices: Devices<'_>) -> Result<Texture, DispatchError
             orbistoun_gpu::TextureSampling::default(),
         )?
     };
-    *shared = Some(texture);
+    // Copied in by the pipeline that made it, and by none after.
+    *shared = Some(Texture {
+        upload: false,
+        ..texture
+    });
     Ok(texture)
 }
 
-/// Whether `texture` still needs its texels copied in: every texture of its own, and the shared
-/// default only the first time a pipeline asks, since copying in again would discard the texels
-/// earlier draws still sample.
-fn needs_upload(texture: &Texture) -> bool {
-    static SHARED_UPLOADED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    !texture.shared || !SHARED_UPLOADED.swap(true, std::sync::atomic::Ordering::Relaxed)
+/// Whether `texture` still needs its texels copied in.
+const fn needs_upload(texture: &Texture) -> bool {
+    texture.upload
+}
+
+/// Textures resident draws sampled, by what they hold and how they are sampled (D860), and whether
+/// each has been copied in, with the bytes they hold altogether.
+#[derive(Default)]
+struct KeptTextures {
+    textures: std::collections::HashMap<u64, (Texture, bool)>,
+    bytes: vk::DeviceSize,
+}
+
+fn kept_textures() -> &'static std::sync::Mutex<KeptTextures> {
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<KeptTextures>> = std::sync::OnceLock::new();
+    KEPT.get_or_init(Default::default)
+}
+
+/// How many bytes of textures are kept before they are all released, with the pipelines whose sets
+/// point at them: a guest whose sampled render targets change every frame makes new ones each.
+const TEXTURE_BYTES_KEPT: vk::DeviceSize = 256 << 20;
+
+/// What a texture is kept by: its texels' hash, taken once at its bind, with everything that makes
+/// the same texels a different image or sampler. `None` when its words carry no hash.
+fn kept_key(words: &TextureWords<'_>, sampling: orbistoun_gpu::TextureSampling) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let content = words.hash?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        content,
+        words.width,
+        words.height,
+        words.encoding,
+        (words.faces, words.slices, words.levels),
+        sampling,
+    )
+        .hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The texture kept under `key`, made from `words` when none is (D860). A pipeline built while a
+/// guest changes only which textures a draw samples then makes and copies in nothing it already
+/// has, and never waits on the device to.
+fn kept_texture(
+    devices: Devices<'_>,
+    key: u64,
+    words: TextureWords<'_>,
+    sampling: orbistoun_gpu::TextureSampling,
+) -> Result<Texture, DispatchError> {
+    let mut kept = kept_textures()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&(texture, uploaded)) = kept.textures.get(&key) {
+        return Ok(Texture {
+            upload: !uploaded,
+            ..texture
+        });
+    }
+    let texture = Texture {
+        shared: true,
+        kept: Some(key),
+        ..create_texture(devices, words, false, sampling)?
+    };
+    kept.bytes += texture.bytes;
+    kept.textures.insert(key, (texture, false));
+    Ok(texture)
+}
+
+/// Records `textures`' kept ones as copied in, once the copy has run.
+fn kept_uploaded(textures: &[Texture]) {
+    let mut kept = kept_textures()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for key in textures.iter().filter_map(|texture| texture.kept) {
+        if let Some(entry) = kept.textures.get_mut(&key) {
+            entry.1 = true;
+        }
+    }
+}
+
+/// Releases every kept texture once they hold more than [`TEXTURE_BYTES_KEPT`], with every cached
+/// pipeline, whose sets point at them, after the draws recorded so far have run. Called before a
+/// pipeline is built, so none is held outside the cache.
+fn make_room_for_textures(session: &crate::compute::Session) -> Result<(), DispatchError> {
+    let mut kept = kept_textures()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if kept.bytes < TEXTURE_BYTES_KEPT {
+        return Ok(());
+    }
+    settle(session)?;
+    let device = &session.device;
+    if let Ok(mut cache) = cached_pipelines().lock() {
+        for (_, old) in cache.drain() {
+            release_pipeline(device, &old);
+        }
+    }
+    for (_, (texture, _)) in kept.textures.drain() {
+        release_texture(device, &texture);
+    }
+    kept.bytes = 0;
+    Ok(())
+}
+
+/// Whose a pipeline's observation buffer and storage image are (D860).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outputs {
+    /// Its own, made and released with it.
+    Own,
+    /// Those every resident pipeline shares; `opens` for the first, which makes the image writable.
+    Shared { opens: bool },
+}
+
+impl Outputs {
+    /// Whether the pipeline releases them.
+    const fn owned(self) -> bool {
+        matches!(self, Self::Own)
+    }
+
+    /// Whether the pipeline's setup makes the storage image writable.
+    const fn opens(self) -> bool {
+        matches!(self, Self::Own | Self::Shared { opens: true })
+    }
+}
+
+/// The observation buffer and storage image every resident pipeline binds, with whether the image
+/// is yet to be made writable. Nothing reads either back after a resident draw, so one of each
+/// serves them all, rather than five allocations per pipeline (D860).
+fn shared_resident_outputs(
+    devices: Devices<'_>,
+) -> Result<((vk::Buffer, vk::DeviceMemory), StorageImage, bool), DispatchError> {
+    type Outputs = ((vk::Buffer, vk::DeviceMemory), StorageImage);
+    static SHARED: std::sync::Mutex<Option<Outputs>> = std::sync::Mutex::new(None);
+    let mut shared = SHARED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((observation, storage)) = *shared {
+        return Ok((observation, storage, false));
+    }
+    let observation = create_storage_buffer(
+        devices.instance,
+        devices.physical,
+        devices.device,
+        words_to_bytes(DEFAULT_WINDOWS[0]),
+    )?;
+    let storage = create_storage_image(devices, STORAGE_IMAGE_SIZE)?;
+    *shared = Some((observation, storage));
+    Ok((observation, storage, true))
 }
 
 /// The texture bound when a caller does not ask for one: a single opaque white texel, the smallest
@@ -1664,6 +1819,9 @@ pub(crate) struct TextureWords<'a> {
     pub(crate) slices: Option<u32>,
     /// The mip levels the words hold, finest first, each its own extent (D833).
     pub(crate) levels: u32,
+    /// A hash of the words, taken once at the bind, by which a resident draw's texture is kept
+    /// (D860). `None` for words nothing hashed, which are made into a texture each time.
+    pub(crate) hash: Option<u64>,
 }
 
 /// Texels a `levels`-level chain of a `width` x `height` image holds: each level's sides the level
@@ -1688,6 +1846,7 @@ impl<'a> TextureWords<'a> {
             faces: 1,
             slices: None,
             levels: 1,
+            hash: None,
         }
     }
 }
@@ -1954,23 +2113,7 @@ fn create_texture(
         .map_err(|e| DispatchError::Vulkan("bind_image_memory(texture)", e))?;
 
     let size = words_to_bytes(padded.len());
-    let (staging, staging_memory) = create_host_buffer(
-        devices.instance,
-        devices.physical,
-        device,
-        size,
-        vk::BufferUsageFlags::TRANSFER_SRC,
-    )?;
-    // SAFETY: the allocation backs a host-visible, coherent buffer of exactly this size and
-    // nothing else holds a mapping of it.
-    let mapped = unsafe { device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) }
-        .map_err(|e| DispatchError::Vulkan("map_memory(texture)", e))?
-        .cast::<u32>();
-    // SAFETY: the mapping covers `padded.len()` words, the destination is exactly that long, and
-    // the two cannot overlap: one is a fresh mapping, the other host memory this process owns.
-    unsafe { std::ptr::copy_nonoverlapping(padded.as_ptr(), mapped, padded.len()) };
-    // SAFETY: mapped immediately above and no pointer into it is used after this.
-    unsafe { device.unmap_memory(staging_memory) };
+    let (staging, staging_memory) = staging_buffer(devices, &padded)?;
 
     let (aspect, compare) = texture_aspect(texture.encoding);
     let view_info = vk::ImageViewCreateInfo::default()
@@ -2010,7 +2153,37 @@ fn create_texture(
         depth,
         aspect,
         shared: false,
+        upload: true,
+        kept: None,
+        bytes: size,
     })
+}
+
+/// A host buffer holding `texels`, from which a texture's are copied in.
+fn staging_buffer(
+    devices: Devices<'_>,
+    texels: &[u32],
+) -> Result<(vk::Buffer, vk::DeviceMemory), DispatchError> {
+    let device = devices.device;
+    let size = words_to_bytes(texels.len());
+    let (staging, staging_memory) = create_host_buffer(
+        devices.instance,
+        devices.physical,
+        device,
+        size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+    )?;
+    // SAFETY: the allocation backs a host-visible, coherent buffer of exactly this size and
+    // nothing else holds a mapping of it.
+    let mapped = unsafe { device.map_memory(staging_memory, 0, size, vk::MemoryMapFlags::empty()) }
+        .map_err(|e| DispatchError::Vulkan("map_memory(texture)", e))?
+        .cast::<u32>();
+    // SAFETY: the mapping covers `texels.len()` words, the destination is exactly that long, and
+    // the two cannot overlap: one is a fresh mapping, the other host memory this process owns.
+    unsafe { std::ptr::copy_nonoverlapping(texels.as_ptr(), mapped, texels.len()) };
+    // SAFETY: mapped immediately above and no pointer into it is used after this.
+    unsafe { device.unmap_memory(staging_memory) };
+    Ok((staging, staging_memory))
 }
 
 /// How a texture of `faces` layers is made and seen: a cube is six layers of one image made
@@ -3012,13 +3185,11 @@ fn release_pipeline(device: &ash::Device, built: &Pipeline) {
         // SAFETY: created on this device for this pipeline, not in use after the queue wait, and
         // destroyed exactly once. The pool owns the set, so destroying it frees that too.
         unsafe { device.destroy_descriptor_pool(built.descriptor_pool, None) };
-        // Binding 0 is always this pipeline's; binding 1 only when it created it. A caller-owned
-        // resident window (D703) is bound and read back but never destroyed here.
-        let owned: &[(vk::Buffer, vk::DeviceMemory)] = if built.owns_guest_memory {
-            &built.buffers
-        } else {
-            &built.buffers[..1]
-        };
+        // Binding 0 when this pipeline made it, rather than sharing the resident one (D860);
+        // binding 1 only when it created it. A caller-owned resident window (D703) is bound and
+        // read back but never destroyed here.
+        let owned = &built.buffers
+            [usize::from(!built.outputs.owned())..if built.owns_guest_memory { 2 } else { 1 }];
         for &(buffer, memory) in owned {
             // SAFETY: as above.
             unsafe { device.destroy_buffer(buffer, None) };
@@ -3027,6 +3198,9 @@ fn release_pipeline(device: &ash::Device, built: &Pipeline) {
         }
         for texture in built.textures.iter().filter(|texture| !texture.shared) {
             release_texture(device, texture);
+        }
+        if !built.outputs.owned() {
+            return;
         }
         // SAFETY: as above.
         unsafe { device.destroy_image_view(built.storage_image.view, None) };
@@ -3507,17 +3681,22 @@ fn render_resident(
     let pipeline =
         orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholePipeline, || match cached {
             Some(built) => Ok(Some(built)),
-            None => build_resident_pipeline(
-                Devices {
-                    instance,
-                    physical,
-                    device,
-                },
-                pass,
-                shaders,
-                geometry,
-                bound,
-            ),
+            None => orbistoun_gpu::perf::measure(orbistoun_gpu::perf::Phase::Release, || {
+                make_room_for_textures(session)
+            })
+            .and_then(|()| {
+                build_resident_pipeline(
+                    Devices {
+                        instance,
+                        physical,
+                        device,
+                    },
+                    pass,
+                    shaders,
+                    geometry,
+                    bound,
+                )
+            }),
         })?;
     orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::WholeRecord, || {
         render_resident_with(
@@ -4192,17 +4371,24 @@ fn render_resident_with(
     // A pipeline's own setup happens once, outside any pass: its textures copied in and its storage
     // image made writable. A render pass may not contain a transfer, and a cached pipeline has had
     // this done.
+    // A pipeline whose textures are all kept and copied in, and whose storage image is the shared
+    // one already opened, has nothing to set up and does not wait on the device (D860).
     if !built.textures_uploaded {
-        one_shot(session, |device, command| {
-            for texture in built
-                .textures
-                .iter()
-                .filter(|texture| needs_upload(texture))
-            {
-                upload_texture(device, command, texture);
-            }
-            open_storage_image(device, command, &built.storage_image);
-        })?;
+        if built.outputs.opens() || built.textures.iter().any(needs_upload) {
+            one_shot(session, |device, command| {
+                for texture in built
+                    .textures
+                    .iter()
+                    .filter(|texture| needs_upload(texture))
+                {
+                    upload_texture(device, command, texture);
+                }
+                if built.outputs.opens() {
+                    open_storage_image(device, command, &built.storage_image);
+                }
+            })?;
+            kept_uploaded(&built.textures);
+        }
         built.textures_uploaded = true;
     }
     // Recorded into the open pass, not submitted: draws on one attachment share a command buffer
@@ -4498,8 +4684,10 @@ struct Pipeline {
     /// shader needs and every other module ignores.
     textures: [Texture; MAX_TEXTURES],
     /// The storage image bound at binding 3, which a guest's `image_store` writes. Created for
-    /// every pipeline, like the texture.
+    /// every pipeline, like the texture, or shared by resident ones (D860).
     storage_image: StorageImage,
+    /// Whose its storage image and observation buffer (`buffers[0]`) are.
+    outputs: Outputs,
     /// Which stage feeds the fragment stage: the two are drawn by different calls.
     geometry: Geometry,
     /// Whether binding 1 (the guest-memory buffer, `buffers[1]`) was created here. `false` when a
@@ -4637,6 +4825,7 @@ fn build_pipeline(
         buffers: resources.buffers,
         textures: resources.textures,
         storage_image: resources.storage_image,
+        outputs: resources.outputs,
         geometry,
         owns_guest_memory: resources.owns_guest_memory,
         user_data: *bound.user_data,
@@ -4703,6 +4892,7 @@ struct BoundResources {
     owns_guest_memory: bool,
     textures: [Texture; MAX_TEXTURES],
     storage_image: StorageImage,
+    outputs: Outputs,
     draw_data_info: [vk::DescriptorBufferInfo; 1],
 }
 
@@ -4717,12 +4907,21 @@ fn create_bound_resources(
     // 0, the observation window, is always created here. Binding 1, guest memory, is either a
     // caller-owned resident buffer uploaded once (D703) or one created and seeded here;
     // `owns_guest_memory` records which, so `release` destroys binding 1 only when this built it.
-    let observation = create_storage_buffer(
-        devices.instance,
-        devices.physical,
-        device,
-        words_to_bytes(windows[0]),
-    )?;
+    let resident = bound.resident.is_some();
+    let (observation, storage_image, opens_storage) = if resident {
+        shared_resident_outputs(devices)?
+    } else {
+        (
+            create_storage_buffer(
+                devices.instance,
+                devices.physical,
+                device,
+                words_to_bytes(windows[0]),
+            )?,
+            create_storage_image(devices, STORAGE_IMAGE_SIZE)?,
+            true,
+        )
+    };
     let (guest_memory, owns_guest_memory) = match bound.guest_buffer {
         Some(resident) => ((resident.buffer, resident.memory), false),
         None => (
@@ -4749,8 +4948,11 @@ fn create_bound_resources(
         let coarse = slot == 0 && bound.coarse_level;
         let empty = std::ptr::eq(words.words, TextureWords::NONE.words)
             && sampling == orbistoun_gpu::TextureSampling::default();
+        let kept = kept_key(&words, sampling).filter(|_| resident && !coarse);
         textures.push(if empty && !coarse {
             shared_default_texture(devices)?
+        } else if let Some(key) = kept {
+            kept_texture(devices, key, words, sampling)?
         } else {
             create_texture(devices, words, coarse, sampling)?
         });
@@ -4758,7 +4960,6 @@ fn create_bound_resources(
     let Ok(textures) = <[Texture; MAX_TEXTURES]>::try_from(textures) else {
         unreachable!("one texture is made for each slot");
     };
-    let storage_image = create_storage_image(devices, STORAGE_IMAGE_SIZE)?;
     // One dispatch's span of the draw-data buffer; the batch's offset is given at bind (D718).
     let draw_data_info = [vk::DescriptorBufferInfo::default()
         .buffer(ensure_draw_data(devices)?)
@@ -4769,6 +4970,13 @@ fn create_bound_resources(
         owns_guest_memory,
         textures,
         storage_image,
+        outputs: if resident {
+            Outputs::Shared {
+                opens: opens_storage,
+            }
+        } else {
+            Outputs::Own
+        },
         draw_data_info,
     })
 }
@@ -5960,6 +6168,7 @@ pub fn draw_with_bc3_texture(
                 faces: 1,
                 slices: None,
                 levels: 1,
+                hash: None,
             }),
             ..Bound::default()
         },
@@ -5994,6 +6203,7 @@ pub fn draw_with_cube_texture(
                 faces: CUBE_FACES,
                 slices: None,
                 levels: 1,
+                hash: None,
             }),
             ..Bound::default()
         },
@@ -6028,6 +6238,7 @@ pub fn draw_with_volume_texture(
                 faces: 1,
                 slices: Some(depth),
                 levels: 1,
+                hash: None,
             }),
             ..Bound::default()
         },
@@ -6181,6 +6392,47 @@ mod tests {
             "a filled slot is its own"
         );
         assert!(!first.textures[0].shared);
+    }
+
+    /// A texture kept by its content is made once and copied in until a copy has run: a second
+    /// pipeline sampling the same texels binds the same image, and once copied asks for no copy.
+    #[test]
+    fn a_kept_texture_is_made_once_and_copied_in_once() {
+        let Ok(session) = crate::compute::session() else {
+            return;
+        };
+        let session = session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let devices = super::Devices {
+            instance: &session.instance,
+            physical: session.physical,
+            device: &session.device,
+        };
+        let texel = [0x00ff_00ff_u32];
+        let words = super::TextureWords {
+            hash: Some(0x6b65_7074),
+            ..super::TextureWords::rgba8(&texel, 1)
+        };
+        let sampling = orbistoun_gpu::TextureSampling::default();
+        let key = super::kept_key(&words, sampling).expect("hashed words are kept");
+        let first = super::kept_texture(devices, key, words, sampling).expect("texture");
+        let again = super::kept_texture(devices, key, words, sampling).expect("texture");
+        assert_eq!(first.view, again.view, "one image");
+        assert!(
+            first.shared && first.upload && again.upload,
+            "not yet copied"
+        );
+        super::kept_uploaded(&[first]);
+        let after = super::kept_texture(devices, key, words, sampling).expect("texture");
+        assert_eq!(first.view, after.view);
+        assert!(!after.upload, "copied in once");
+        let other = super::TextureWords {
+            hash: Some(0x6b65_7075),
+            ..words
+        };
+        assert_ne!(super::kept_key(&other, sampling), Some(key), "other texels");
+        assert_eq!(super::kept_key(&super::TextureWords::NONE, sampling), None);
     }
 
     /// A GL guest's transform becomes a flipped Vulkan viewport over the whole target: y starts at

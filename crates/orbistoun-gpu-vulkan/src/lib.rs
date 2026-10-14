@@ -206,6 +206,7 @@ impl BoundTexture {
             faces: self.faces,
             slices: self.slices,
             levels: self.levels,
+            hash: Some(self.hash),
         }
     }
 }
