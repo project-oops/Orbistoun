@@ -11,7 +11,9 @@ copies the buffer into it, both answering 0. A request block holds the user at +
 block's address at +8; the data block holds the buffer, its length and the offset into the memory,
 as obSCEne's `130-layout/savedata-memory-5d20` built them. Before set-up a request answers
 `0x809f0001` and for another user `0x809f0011`, as measured; a span the memory does not hold is
-refused by name. Nothing persists the memory past the run.
+refused by name. `sceSaveDataSyncSaveDataMemory` writes the memory to the title's own save storage
+(D792), `/data/savedata/sce_sdmemory/memory.bin` - the directory the console's own log names - and
+the next set-up reads it back.
 
 **Why:** the only measurement after set-up came from a probe whose set-up had failed underneath:
 the system log beside the rows shows its save mount answering `ExecResult 0x809f8022` for api_id 1
@@ -28,5 +30,4 @@ failed mount.
 **Rejected:**
 - Keeping `0x809f0000` for every read: it was measured, but of a failure, and a title that works
   on hardware stops on it.
-- Serving `sceSaveDataSyncSaveDataMemory` as success: with no persistence there is nothing to sync,
-  so it stays unserved until the memory is kept between runs.
+- Keeping the memory only for the run: a title that saves through it would lose what it saved.

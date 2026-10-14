@@ -52,11 +52,24 @@ purpose = "Writes the title's save-data memory: (set), laid out as the read's re
 returns = "status"
 edge_cases = [
     "MEASURED only in the probe whose mount had failed (REQ-sd01): 0x809f0000.",
-    "orbistoun copies the buffer into save-data memory at the offset and answers 0 for the signed-in user after set-up; before set-up and for another user it answers as the read does, and a span outside the memory is refused by name (D839). Nothing persists the memory past the run.",
+    "orbistoun copies the buffer into save-data memory at the offset and answers 0 for the signed-in user after set-up; before set-up and for another user it answers as the read does, and a span outside the memory is refused by name (D839). A sync keeps the memory for the next run.",
 ]
 known_by = "assumed"
 assumptions = ["As for sceSaveDataGetSaveDataMemory2: a write after a working set-up answers 0 and is read back (D839)."]
 found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceSaveDataSyncSaveDataMemory"
+purpose = "Commits the title's save-data memory to storage: (sync), sync holding the user at +0x00."
+returns = "status"
+edge_cases = [
+    "MEASURED only where Initialize3 could not run (REQ-rf03): 0x809f0001, not initialised.",
+    "orbistoun writes save-data memory to the title's own save storage, /data/savedata/sce_sdmemory/memory.bin, where the next set-up reads it back, and answers 0 for the signed-in user after set-up; before set-up and for another user it answers as the read does (D839). PPSA25872's Unity runtime syncs its PlayerPrefs through it.",
+]
+known_by = "assumed"
+assumptions = ["That a sync after a working set-up answers 0 and keeps the memory for the next run, as the call's purpose says: no probe can set up working save-data memory (REQ-rf03) (D839)."]
+found_in = ["PPSA25872-app0"]
 found_on = "2026-10-14"
 
 [[function]]

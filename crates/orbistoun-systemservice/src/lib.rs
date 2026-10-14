@@ -918,6 +918,10 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         "sceSaveDataSetSaveDataMemory2",
         save_data::set_save_data_memory2,
     ),
+    (
+        "sceSaveDataSyncSaveDataMemory",
+        save_data::sync_save_data_memory,
+    ),
 ];
 
 #[cfg(test)]

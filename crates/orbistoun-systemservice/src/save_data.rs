@@ -102,6 +102,7 @@ pub(crate) fn setup_save_data_memory2(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
             .min(STORE_MOST);
         if let Ok(mut store) = STORE.lock() {
             *store = vec![0; usize::try_from(size).unwrap_or(0)];
+            load_kept(&mut store);
         }
         0
     }
@@ -170,6 +171,51 @@ static STORE: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 /// The most save-data memory a set-up is given, so a size read from a guest block cannot ask the
 /// host for an unbounded allocation. PPSA21564 asks for 0x200000.
 const STORE_MOST: u64 = 0x1000_0000;
+
+/// Where save-data memory is kept between runs: in the title's own save storage (D792), in the
+/// directory the console's own log names for it, `sce_sdmemory` (REQ-sd01's system log).
+const MEMORY_FILE: &str = "/data/savedata/sce_sdmemory/memory.bin";
+
+/// What a previous run kept, laid over the start of `store`.
+fn load_kept(store: &mut [u8]) {
+    let Some(host) = orbistoun_fs::mount::resolve_existing(MEMORY_FILE) else {
+        return;
+    };
+    if let Ok(kept) = std::fs::read(host) {
+        let n = kept.len().min(store.len());
+        store[..n].copy_from_slice(&kept[..n]);
+    }
+}
+
+/// `sceSaveDataSyncSaveDataMemory(sync)`: writes save-data memory to the title's own save storage,
+/// where the next set-up reads it back, and answers `0` for the signed-in user after set-up (D839,
+/// assumed); before set-up and for another user it answers as a read does, and storage that cannot
+/// be written is refused by name.
+pub(crate) fn sync_save_data_memory(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's request block, its first word the user by the call's contract.
+    let user = unsafe { guest::read_u32(args[0]) }.unwrap_or(u32::MAX);
+    let answer = get_answer(MEMORY_SET_UP.load(Ordering::Acquire), user);
+    if answer != 0 {
+        return answer;
+    }
+    let unserved = u64::from(GuestError::Unimplemented.as_raw());
+    let Some(host) = orbistoun_fs::mount::resolve_for_create(MEMORY_FILE) else {
+        return unserved;
+    };
+    if let Some(parent) = host.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return unserved;
+    }
+    let Ok(store) = STORE.lock() else {
+        return unserved;
+    };
+    if std::fs::write(host, &*store).is_ok() {
+        0
+    } else {
+        unserved
+    }
+}
 
 /// What a read after set-up answered for user 1, which is no user (line 6105).
 const NOT_A_USER: u64 = 0x809f_0011;
@@ -286,6 +332,40 @@ mod tests {
     fn bytemuck_words(words: &mut [u64; 4]) -> &mut [u8] {
         // SAFETY: four u64s are 32 initialised bytes, with no padding and any bit pattern valid.
         unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), 32) }
+    }
+
+    /// A sync keeps save-data memory in the title's own save storage, where the next set-up finds it
+    /// (D839).
+    #[test]
+    fn a_sync_keeps_save_data_memory_in_the_titles_storage() {
+        let root = std::env::temp_dir().join(format!("orbistoun-save-{}", std::process::id()));
+        let _alone = super::INITIALISING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        orbistoun_fs::mount::mount_data(root.clone());
+        orbistoun_fs::mount::allow_writes(orbistoun_fs::mount::DATA_MOUNT);
+        let at = |bytes: &mut [u8]| bytes.as_mut_ptr().expose_provenance() as u64;
+        let mut args = [0u64; GUEST_ARG_REGISTERS];
+        let _ = initialize3(&args);
+        let mut param = [0u8; 64];
+        param[8..16].copy_from_slice(&0x20_0000_u64.to_le_bytes());
+        args[0] = at(&mut param);
+        let _ = setup_save_data_memory2(&args);
+        let me = crate::signed_in_user();
+        let mut written = *b"kept between runs";
+        let mut data = [at(&mut written), written.len() as u64, 0x40, 0];
+        let mut block = [0u8; 64];
+        block[0..4].copy_from_slice(&me.to_le_bytes());
+        block[8..16].copy_from_slice(&at(bytemuck_words(&mut data)).to_le_bytes());
+        args[0] = at(&mut block);
+        assert_eq!(super::set_save_data_memory2(&args), 0, "written");
+        let mut sync = [0u8; 64];
+        sync[0..4].copy_from_slice(&me.to_le_bytes());
+        args[0] = at(&mut sync);
+        assert_eq!(super::sync_save_data_memory(&args), 0, "synced");
+        let kept = std::fs::read(root.join("savedata/sce_sdmemory/memory.bin"))
+            .expect("the memory is in the title's storage");
+        assert_eq!(&kept[0x40..0x40 + written.len()], &written);
     }
 
     #[test]
