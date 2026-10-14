@@ -166,6 +166,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_inst_prefetch",
     "s_mulk_i32",
     "s_mul_i32",
+    "s_mul_hi_u32",
     "s_or_b32",
     "s_or_b64",
     "s_pack_hh_b32_b16",
@@ -196,6 +197,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
     "v_cmp_lt_u32_e32",
+    "v_cmp_le_u32_e32",
     "v_cmp_eq_u32_e32",
     "v_cmp_ne_u32_e32",
     "v_cmp_ge_u32_e32",
@@ -249,6 +251,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_cubema_f32",
     "v_msad_u8",
     "v_readlane_b32",
+    "v_readfirstlane_b32",
     "v_permlane16_b32",
     "v_log_f32_e32",
     "v_lshlrev_b32_e32",
@@ -2795,9 +2798,11 @@ fn scalar_instruction<M: Model + ?Sized>(
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
         // as its destination.
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_or_b32" | "s_xor_b32"
-        | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_lshr_b32" | "s_add_u32" | "s_addc_u32"
-        | "s_lshl1_add_u32" | "s_lshl2_add_u32" | "s_lshl3_add_u32" | "s_lshl4_add_u32"
-        | "s_cselect_b32" => scalar_integer(model, instruction, name),
+        | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_mul_hi_u32" | "s_lshr_b32"
+        | "s_add_u32" | "s_addc_u32" | "s_lshl1_add_u32" | "s_lshl2_add_u32"
+        | "s_lshl3_add_u32" | "s_lshl4_add_u32" | "s_cselect_b32" => {
+            scalar_integer(model, instruction, name)
+        }
 
         // Field assembly that writes no condition code: two 16-bit halves into one word, and a
         // run of ones into a register pair.
@@ -2882,6 +2887,7 @@ fn vector_instruction<M: Model + ?Sized>(
         _ if FLOATS_OF_THREE.contains(&name) => float_min_max_of_three(model, instruction, name),
         _ if CUBE_FACES.contains(&name) => cube_face(model, instruction, name),
         "v_readlane_b32" => read_lane(model, instruction),
+        "v_readfirstlane_b32" => read_first_lane(model, instruction),
         "v_permlane16_b32" => permute_lanes_16(model, instruction),
         "v_perm_b32" => byte_permute(model, instruction),
 
@@ -4767,6 +4773,8 @@ fn scalar_integer<M: Model + ?Sized>(
         // `S_MUL_I32`: the product's low 32 bits, which signed and unsigned multiplication share;
         // the condition code is not written.
         "s_mul_i32" => (model.binary(op::IMUL, left, right), None),
+        // `S_MUL_HI_U32`: the unsigned product's high 32 bits; the condition code is not written.
+        "s_mul_hi_u32" => (multiply_high(model, left, right), None),
         // `S_LSHR_B32`: `D = S0 >> S1[4:0]`, logical, and whether it is non-zero.
         "s_lshr_b32" => {
             let five = model.constant(31);
@@ -9006,6 +9014,53 @@ fn read_lane<M: Model + ?Sized>(
     let lane = model.read_source(instruction, lane, 0)?;
     let low_bits = model.constant(model.lanes() - 1);
     let lane = model.binary(op::BITWISE_AND, lane, low_bits);
+    let value =
+        model
+            .read_vector_at(u32::from(*source), lane)
+            .ok_or(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a lane read at a lane known only when the program runs needs every lane",
+            })?;
+    model.write_scalar(u32::from(*destination), value);
+    model.count();
+    Ok(())
+}
+
+/// `v_readfirstlane_b32 s, v`: the scalar takes `v` at the lowest running lane, and at lane 0 where
+/// no lane runs (AMD's published RDNA instruction set).
+fn read_first_lane<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+) -> Result<(), TranslateError> {
+    let [Operand::Scalar(destination), Operand::Vector(source)] = instruction.operands.as_slice()
+    else {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "v_readfirstlane_b32 does not name a scalar and a vector register",
+        });
+    };
+    let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+    // The lowest set bit's place, as the count of the clear bits below it: 32 for a half with none.
+    let lowest = |model: &mut M, half: Id| {
+        let one = model.constant(1);
+        let below = model.binary(op::ISUB, half, one);
+        let clear = model.not(half);
+        let under = model.binary(op::BITWISE_AND, below, clear);
+        model.bit_count(under)
+    };
+    let thirty_two = model.constant(32);
+    let mut first = lowest(model, running_low);
+    let lanes = model.lanes();
+    if lanes > 32 {
+        let high = lowest(model, running_high);
+        let above = model.add(high, thirty_two);
+        let none_low = model.compare(op::IEQUAL, first, thirty_two);
+        first = model.select(none_low, above, first);
+    }
+    let every = model.constant(lanes);
+    let none = model.compare(op::IEQUAL, first, every);
+    let zero = model.constant(0);
+    let lane = model.select(none, zero, first);
     let value =
         model
             .read_vector_at(u32::from(*source), lane)

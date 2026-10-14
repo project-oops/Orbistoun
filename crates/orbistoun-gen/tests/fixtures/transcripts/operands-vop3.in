@@ -132,6 +132,11 @@ v_cmp_lt_u32_e32 vcc, v100, v200
 v_cmp_lt_u32_e32 vcc, s30, v255
 v_cmp_lt_u32_e32 vcc, 0, v77
 v_cmp_lt_u32_e32 vcc, v190, v12
+v_cmp_le_u32_e32 vcc, v0, v1
+v_cmp_le_u32_e32 vcc, v100, v200
+v_cmp_le_u32_e32 vcc, s30, v255
+v_cmp_le_u32_e32 vcc, 0, v77
+v_cmp_le_u32_e32 vcc, v190, v12
 v_cmp_ne_u32_e32 vcc, v0, v1
 v_cmp_ne_u32_e32 vcc, v100, v200
 v_cmp_ne_u32_e32 vcc, s30, v255

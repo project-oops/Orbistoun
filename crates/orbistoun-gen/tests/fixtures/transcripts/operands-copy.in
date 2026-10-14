@@ -11,6 +11,14 @@ s_mul_i32 s0, -1, s77
 s_mul_i32 s40, s3, 4
 s_mul_i32 s9, 64, s62
 
+// ---- s_mul_hi_u32: SOP2, two sources, the high word of the product ------------------------
+// Integer division takes it (ACO `aco_opcodes.py`); Grand Theft Auto V's compute program has one.
+s_mul_hi_u32 s16, s16, s4
+s_mul_hi_u32 s101, s5, s99
+s_mul_hi_u32 s0, -1, s77
+s_mul_hi_u32 s40, s3, 4
+s_mul_hi_u32 s9, 64, s62
+
 // ---- v_pk_lshlrev_b16: VOP3P, a shift count then the value ------------------------------
 v_pk_lshlrev_b16 v0, 1, v0
 v_pk_lshlrev_b16 v200, v5, v9
@@ -362,6 +370,13 @@ v_readlane_b32 s100, v9, 63
 v_readlane_b32 s0, v255, s33
 v_readlane_b32 s60, v130, 4
 v_readlane_b32 s7, v77, s90
+// The lowest running lane's value into a scalar: VOP1, its scalar destination in the vector
+// destination's field.
+v_readfirstlane_b32 s3, v4
+v_readfirstlane_b32 s100, v9
+v_readfirstlane_b32 s0, v255
+v_readfirstlane_b32 s60, v130
+v_readfirstlane_b32 s7, v77
 v_mul_lo_u32 v3, v4, v5
 v_mul_lo_u32 v200, s5, v9
 v_mul_lo_u32 v255, v12, s30

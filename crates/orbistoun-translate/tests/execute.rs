@@ -882,6 +882,51 @@ fn the_flagged_reciprocal_is_the_reciprocal() {
     assert_eq!(vector(&registers, 0), 0.25f32.to_bits());
 }
 
+/// `s_mul_hi_u32` keeps the high 32 bits of the unsigned product (AMD's published RDNA instruction
+/// set), operands whose low halves alone would carry into it among them. Grand Theft Auto V's
+/// compute program divides integers through it.
+#[test]
+fn the_scalar_high_product_is_the_upper_word() {
+    if !device_or_skip("the_scalar_high_product_is_the_upper_word") {
+        return;
+    }
+    let pairs = [
+        (0x89ab_cdef_u32, 0x1234_5678_u32),
+        (u32::MAX, u32::MAX),
+        (0x0001_0000, 0x0001_0000),
+        (7, 9),
+    ];
+    for (a, b) in pairs {
+        let mut program = s_mov_literal(4, a).to_vec();
+        program.extend(s_mov_literal(5, b));
+        program.push(sop2("s_mul_hi_u32", 6, 4, 5));
+        program.push(s_endpgm());
+        let registers = run(&program);
+        let expected = ((u64::from(a) * u64::from(b)) >> 32) as u32;
+        assert_eq!(scalar(&registers, 6), expected, "{a:#x} * {b:#x}");
+    }
+}
+
+/// `v_cmp_le_u32` sets `vcc` for the lanes whose first source is at most the second, unsigned, and
+/// `v_readfirstlane_b32` reads the lowest lane still running (AMD's published RDNA instruction
+/// set): with `5 <= lane` narrowing the mask, lane 5's index; with every lane running, lane 0's.
+/// Grand Theft Auto V's compute program divides integers through both.
+#[test]
+fn the_first_running_lane_is_read_after_an_unsigned_comparison() {
+    if !device_or_skip("the_first_running_lane_is_read_after_an_unsigned_comparison") {
+        return;
+    }
+    let mut program = lane_index_into(0).to_vec();
+    program.push(vop1_vv("v_readfirstlane_b32", 3, 0));
+    program.push(v_cmp_f32("v_cmp_le_u32_e32", 128 + 5, 0));
+    program.push(s_logic_b64("s_and_b64", 126, 126, 106));
+    program.push(vop1_vv("v_readfirstlane_b32", 2, 0));
+    program.push(s_endpgm());
+    let registers = run_at(Fidelity::Wavefront, &program);
+    assert_eq!(scalar(&registers, 3), 0, "every lane running");
+    assert_eq!(scalar(&registers, 2), 5, "lanes 0 to 4 fail 5 <= lane");
+}
+
 /// The sub-word loads read the byte or half at their address and widen it - zero-extended
 /// unsigned, sign-extended signed (AMD's published RDNA instruction set): from a word holding
 /// `0x80ff7f81` at 16, the bytes at 16, 17 and 19 and the half at 18. Grand Theft Auto V's compute

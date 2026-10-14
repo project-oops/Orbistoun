@@ -707,6 +707,13 @@ samples = 2
 operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
+family = "SOP2"
+opcode = 53
+mnemonic = "s_mul_hi_u32"
+samples = 5
+operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
 family = "SOPC"
 opcode = 0
 mnemonic = "s_cmp_eq_i32"
@@ -936,6 +943,13 @@ opcode = 1
 mnemonic = "v_mov_b32_e32"
 samples = 3
 operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP1"
+opcode = 2
+mnemonic = "v_readfirstlane_b32"
+samples = 5
+operands = [{ word = 0, shift = 17, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
 family = "VOP1"
@@ -1718,6 +1732,13 @@ operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, impl
 family = "VOPC"
 opcode = 194
 mnemonic = "v_cmp_eq_u32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
+opcode = 195
+mnemonic = "v_cmp_le_u32_e32"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, implicit = "vcc" }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
 

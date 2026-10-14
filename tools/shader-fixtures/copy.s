@@ -82,6 +82,10 @@ global_load_ushort v18, v1, s[2:3]
 global_load_sshort v18, v1, s[2:3]
 // And a reciprocal with the integer divide-by-zero flag.
 v_rcp_iflag_f32_e32 v18, v1
+// And the rest of the integer division: a high product, a lane read, an unsigned compare.
+s_mul_hi_u32 s16, s16, s4
+v_readfirstlane_b32 s16, v1
+v_cmp_le_u32_e32 vcc, v1, v2
 v_cvt_pknorm_i16_f32 v18, v1, v2
 v_cvt_pk_u16_u32 v18, v1, v2
 v_cvt_pk_i16_i32 v18, v1, v2

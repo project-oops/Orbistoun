@@ -458,6 +458,11 @@ opcode = 52
 name = "s_pack_hh_b32_b16"
 
 [[mnemonic]]
+family = "SOP2"
+opcode = 53
+name = "s_mul_hi_u32"
+
+[[mnemonic]]
 family = "SOPC"
 opcode = 4
 name = "s_cmp_lt_i32"
@@ -621,6 +626,11 @@ name = "v_nop"
 family = "VOP1"
 opcode = 1
 name = "v_mov_b32_e32"
+
+[[mnemonic]]
+family = "VOP1"
+opcode = 2
+name = "v_readfirstlane_b32"
 
 [[mnemonic]]
 family = "VOP1"
@@ -1131,6 +1141,11 @@ name = "v_cmpx_gt_i32_e32"
 family = "VOPC"
 opcode = 155
 name = "v_cmpx_le_i16_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 195
+name = "v_cmp_le_u32_e32"
 
 [[mnemonic]]
 family = "VOPC"
