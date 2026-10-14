@@ -3414,6 +3414,38 @@ fn queue_stall() -> &'static Mutex<Option<cp::CpExecution>> {
     &STALL
 }
 
+/// How many held writes are kept, newest last: a waiting thread polls the fence of the work it
+/// submitted most recently, and each kept write costs the wait sub-loop a watch.
+const HELD_MOST: usize = 64;
+
+/// The memory writes the stopped queue never made (D832).
+fn held() -> &'static Mutex<Vec<cp::HeldWrite>> {
+    static HELD: Mutex<Vec<cp::HeldWrite>> = Mutex::new(Vec::new());
+    &HELD
+}
+
+/// Keeps the writes of `bytes` from byte `from` on as held, dropping the oldest past
+/// [`HELD_MOST`].
+fn note_held(bytes: &[u8], from: u32) {
+    let mut held = held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.extend(cp::held_writes(bytes, from));
+    let excess = held.len().saturating_sub(HELD_MOST);
+    held.drain(..excess);
+}
+
+/// The memory writes the queue holds: those from where it stopped on, and those of every
+/// submission held back behind it (D710), newest last. A thread waiting on the GPU polls one of
+/// these; the wait sub-loop watches them (D832).
+#[must_use]
+pub fn held_writes() -> Vec<cp::HeldWrite> {
+    held()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 fn execution_record() -> &'static Mutex<ExecutionRecord> {
     static RECORD: OnceLock<Mutex<ExecutionRecord>> = OnceLock::new();
     RECORD.get_or_init(|| Mutex::new(ExecutionRecord::default()))
@@ -3847,6 +3879,7 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if stalled.is_some() {
+        note_held(bytes, 0);
         if let Ok(mut record) = execution_record().lock() {
             record.held_back += 1;
         }
@@ -3880,6 +3913,9 @@ fn run_submission(bytes: &[u8], submission: Submission) {
         record.drawn += u64::from(executed.draws > 0);
         record.bytes_written += executed.bytes_written;
         record.last = Some(executed);
+    }
+    if let Some(from) = executed.stopped.offset() {
+        note_held(bytes, from);
     }
     if executed.stopped != cp::Stopped::Completed {
         *queue_stall()
@@ -4826,6 +4862,10 @@ mod tests {
         *super::queue_stall()
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = None;
+        super::held()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         super::earlier_written()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -4994,6 +5034,12 @@ mod tests {
             "the wall is the stopped submission, not the one behind it: {record:?}"
         );
         assert!(record.held_back >= 1, "{record:?}");
+        assert!(
+            super::held_writes()
+                .iter()
+                .any(|held| held.address == fence_at),
+            "the fence held back is named among the writes the queue holds (D832)"
+        );
     }
 
     /// The `(start, end)` region a heap buffer occupies, its address exposed for the handler's

@@ -2481,9 +2481,32 @@ fn wait_note(waiting: &crate::waits::Waiting, calls: usize) -> orbistoun_report:
     let word = crate::waits::resolved(waiting.host, waiting.site)
         .and_then(|resolved| resolved.word)
         .map(|word| {
-            let object = word.address.wrapping_sub(word.offset);
+            // A register's word is joined through its object; a held write's through itself.
+            let (register, offset, object, len, held_write) = match word.origin {
+                crate::waits::Origin::Register(index) => {
+                    let base = waiting.saved.get(index).copied().unwrap_or(0) & !7;
+                    (
+                        names.get(index).copied().unwrap_or("?").to_owned(),
+                        word.address.wrapping_sub(base),
+                        base,
+                        crate::waits::OBJECT_BYTES,
+                        None,
+                    )
+                }
+                crate::waits::Origin::Held(write) => (
+                    String::new(),
+                    0,
+                    word.address,
+                    8,
+                    Some(format!(
+                        "{} at byte {:#x} of a submission the stopped GPU queue holds",
+                        write.packet(),
+                        write.offset
+                    )),
+                ),
+            };
             let dumps = orbistoun_thunk::argument_dumps();
-            let handed_to = crate::waits::handed_to(object, crate::waits::OBJECT_BYTES, &dumps)
+            let handed_to = crate::waits::handed_to(object, len, &dumps)
                 .into_iter()
                 .map(|(index, slot, how)| {
                     let how = match how {
@@ -2495,11 +2518,12 @@ fn wait_note(waiting: &crate::waits::Waiting, calls: usize) -> orbistoun_report:
                 .collect();
             orbistoun_report::trace::WaitedWord {
                 address: word.address,
-                register: names.get(word.register).copied().unwrap_or("?").to_owned(),
-                offset: word.offset,
+                register,
+                offset,
                 read_after: word.read_after,
                 writers: word.writers,
                 handed_to,
+                held_write,
             }
         });
     orbistoun_report::trace::Wait {

@@ -49,15 +49,22 @@ pub struct Resolved {
     pub word: Option<Word>,
 }
 
+/// Where a watched word came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The object a callee-saved register pointed at, by `CALLEE_SAVED` index.
+    Register(usize),
+    /// A write the stopped GPU queue never made: the word a thread waiting on the GPU polls.
+    Held(orbistoun_gpu::cp::HeldWrite),
+}
+
 /// The word a waiting loop reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Word {
     /// Its address: an eight-byte word holding what the loop reads.
     pub address: u64,
-    /// Which callee-saved register pointed at its object, by `CALLEE_SAVED` index.
-    pub register: usize,
-    /// How far into that object it is.
-    pub offset: u64,
+    /// Where it came from.
+    pub origin: Origin,
     /// The instruction after the loop's read.
     pub read_after: u64,
     /// The instructions after each write while it was watched; empty when nothing wrote it.
@@ -113,6 +120,27 @@ pub fn candidate_words(saved: &[u64], readable: &dyn Fn(u64) -> bool) -> Vec<(us
             if readable(word) && !out.iter().any(|&(_, seen)| seen == word) {
                 out.push((register, word));
             }
+        }
+    }
+    out
+}
+
+/// Every word to watch for the loop's read: the registers' objects ([`candidate_words`]), then the
+/// word of each write the stopped GPU queue holds, newest first, each word once and readable.
+#[must_use]
+pub fn watch_list(
+    saved: &[u64],
+    held: &[orbistoun_gpu::cp::HeldWrite],
+    readable: &dyn Fn(u64) -> bool,
+) -> Vec<(Origin, u64)> {
+    let mut out: Vec<(Origin, u64)> = candidate_words(saved, readable)
+        .into_iter()
+        .map(|(register, word)| (Origin::Register(register), word))
+        .collect();
+    for write in held.iter().rev() {
+        let word = write.address & !7;
+        if readable(word) && !out.iter().any(|&(_, seen)| seen == word) {
+            out.push((Origin::Held(*write), word));
         }
     }
     out
@@ -212,7 +240,11 @@ fn still_waiting(target: Waiting) -> bool {
 
 /// Finds the word `target` waits on, then who writes it.
 fn resolve(target: Waiting) -> Resolved {
-    let words = candidate_words(&target.saved, &readable);
+    let words = watch_list(
+        &target.saved,
+        &orbistoun_gpu::agc_driver::held_writes(),
+        &readable,
+    );
     tracing::info!(
         "a thread waits at {:#x}: watching {} word(s) of its objects for the loop's read",
         target.site,
@@ -240,19 +272,19 @@ fn resolve(target: Waiting) -> Resolved {
             .into_iter()
             .find(|hit| is_the_loops(hit.after, target.site));
         if let Some(hit) = hit {
-            let (register, _) = batch
+            let (origin, _) = batch
                 .iter()
                 .copied()
                 .find(|&(_, word)| word == hit.address)
-                .unwrap_or((0, hit.address));
-            found = Some((register, hit.address, hit.after));
+                .unwrap_or((Origin::Register(0), hit.address));
+            found = Some((origin, hit.address, hit.after));
             break;
         }
         if !still_waiting(target) {
             break;
         }
     }
-    let word = found.map(|(register, address, read_after)| {
+    let word = found.map(|(origin, address, read_after)| {
         watchpoint::rearm(&[Request {
             address,
             length: 8,
@@ -268,8 +300,7 @@ fn resolve(target: Waiting) -> Resolved {
             .collect();
         Word {
             address,
-            register,
-            offset: address.wrapping_sub(target.saved[register] & !7),
+            origin,
             read_after,
             writers,
         }
@@ -297,7 +328,9 @@ fn resolve(target: Waiting) -> Resolved {
 
 #[cfg(test)]
 mod tests {
-    use super::{Handed, OBJECT_BYTES, candidate_words, handed_to, is_the_loops};
+    use super::{
+        Handed, OBJECT_BYTES, Origin, candidate_words, handed_to, is_the_loops, watch_list,
+    };
     use orbistoun_thunk::{ArgumentDump, Pointing};
 
     /// A dump of argument `slot` of import `index` at `address`, holding `words`.
@@ -356,6 +389,36 @@ mod tests {
         assert!(
             words.contains(&(3, 0x2000)),
             "an unaligned pointer starts at its word"
+        );
+    }
+
+    /// After the registers' objects, the words the stopped GPU queue would have written are
+    /// watched: a thread waiting on the GPU polls one (D832). Each word once, a register's claim
+    /// first, and an unreadable one skipped.
+    #[test]
+    fn the_queues_held_writes_are_watched_after_the_objects() {
+        let held = |address: u64| orbistoun_gpu::cp::HeldWrite {
+            offset: 0x308,
+            opcode: 0x49,
+            address,
+        };
+        let readable = |word: u64| word >= 0x1000;
+        let list = watch_list(
+            &[0x1000],
+            &[held(0x5004), held(0x1008), held(0x10), held(0x5000)],
+            &readable,
+        );
+        let per_object = (OBJECT_BYTES / 8) as usize;
+        assert_eq!(list.len(), per_object + 1);
+        assert_eq!(
+            list[1],
+            (Origin::Register(0), 0x1008),
+            "the register's claim"
+        );
+        assert_eq!(
+            list[per_object],
+            (Origin::Held(held(0x5000)), 0x5000),
+            "the word once, aligned, claimed by the newest write to it"
         );
     }
 

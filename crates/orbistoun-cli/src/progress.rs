@@ -420,9 +420,13 @@ fn print_waits(trace: &orbistoun_report::trace::CallTrace) {
             );
         }
         if let Some(word) = &wait.word {
+            let from = word.held_write.as_ref().map_or_else(
+                || format!("{}+{:#x}", word.register, word.offset),
+                |held| format!("the GPU's write: {held}"),
+            );
             println!(
-                "           reads {:#x} ({}+{:#x}), the access before {:#x}",
-                word.address, word.register, word.offset, word.read_after
+                "           reads {:#x} ({from}), the access before {:#x}",
+                word.address, word.read_after
             );
             if word.writers.is_empty() {
                 println!(

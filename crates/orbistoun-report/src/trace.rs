@@ -256,6 +256,10 @@ pub struct WaitedWord {
     /// The calls handed its object, by name and argument, among those whose arguments were dumped.
     #[serde(default)]
     pub handed_to: Vec<String>,
+    /// When the word is one the stopped GPU queue would have written, the packet that holds it:
+    /// the loop waits on GPU work that never ran (D832). `register` and `offset` are then empty.
+    #[serde(default)]
+    pub held_write: Option<String>,
 }
 
 /// One callee-saved register at a waiting call.

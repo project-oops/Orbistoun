@@ -269,6 +269,20 @@ pub enum Stopped {
     },
 }
 
+impl Stopped {
+    /// Byte offset of the packet execution stopped at, or `None` when it completed.
+    #[must_use]
+    pub const fn offset(self) -> Option<u32> {
+        match self {
+            Self::Completed => None,
+            Self::NeedsGpu { offset, .. }
+            | Self::OutOfBounds { offset, .. }
+            | Self::WaitNeverSatisfied { offset, .. }
+            | Self::Malformed { offset } => Some(offset),
+        }
+    }
+}
+
 /// What one submission's command-processor work did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CpExecution {
@@ -408,6 +422,75 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
         }
     }
     result
+}
+
+/// A memory write a stream never made, because the queue stopped at or before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeldWrite {
+    /// Byte offset of the packet in the stream.
+    pub offset: u32,
+    /// Its opcode: `RELEASE_MEM` or `WRITE_DATA`.
+    pub opcode: u8,
+    /// The guest address it writes.
+    pub address: u64,
+}
+
+impl HeldWrite {
+    /// The packet's name, as Mesa's `sid.h` spells it.
+    #[must_use]
+    pub const fn packet(&self) -> &'static str {
+        if self.opcode == WRITE_DATA {
+            "WRITE_DATA"
+        } else {
+            "RELEASE_MEM"
+        }
+    }
+}
+
+/// The memory writes from byte `from` of `stream` on, none of which retired: each `RELEASE_MEM`
+/// that stores a value and each `WRITE_DATA` to memory. `from` is where the stream stopped, or
+/// zero for a submission held back behind it (D710). A thread waiting on the GPU polls one of these.
+#[must_use]
+pub fn held_writes(stream: &[u8], from: u32) -> Vec<HeldWrite> {
+    let walked = packet::walk(stream);
+    // A walk that lost its place may read a body as a header; no address in it is a write.
+    if !walked.is_trustworthy() {
+        return Vec::new();
+    }
+    walked
+        .packets
+        .iter()
+        .filter(|p| p.offset >= from)
+        .filter_map(|p| {
+            let PacketKind::Command { opcode } = p.kind else {
+                return None;
+            };
+            let start = p.body_offset() as usize;
+            let body: Vec<u32> = stream
+                .get(start..start + p.body_length() as usize)?
+                .chunks_exact(4)
+                .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+                .collect();
+            let address = match (opcode, body.as_slice()) {
+                (measured::RELEASE_MEM, [_, selectors, low, high, ..])
+                    if selectors >> 29 != DATA_SEL_DISCARD =>
+                {
+                    address(*low, *high)
+                }
+                (WRITE_DATA, [control, low, high, ..])
+                    if WRITE_DATA_DST_SEL_MEMORY.contains(&((control >> 8) & 0xf)) =>
+                {
+                    address(low & !0x3, *high)
+                }
+                _ => return None,
+            };
+            Some(HeldWrite {
+                offset: p.offset,
+                opcode,
+                address,
+            })
+        })
+        .collect()
 }
 
 /// The stream's draws split at every packet between two of them that is neither a draw nor
@@ -1114,6 +1197,50 @@ mod tests {
             memory.word(fence),
             0,
             "no fence for a draw that did not run"
+        );
+    }
+
+    /// A stream that stopped names the memory writes from the stop on, none of which retired: the
+    /// fence a waiting thread polls is one of them (D832). A discarded release writes nothing and a
+    /// register write is not memory, so neither is held; the fill before the stop retired.
+    #[test]
+    fn a_stopped_stream_names_the_writes_it_holds() {
+        let mut stream = fill(0x2000, 0x1111_1111, 16);
+        let draw = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend([command_header(measured::DRAW_INDEX_AUTO, 2), 3, 2]);
+        stream.extend(release(0x1000, 0, 0));
+        let label = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend(release(0x1008, 1, 0xbeef_cafe));
+        stream.extend([
+            command_header(super::WRITE_DATA, 4),
+            0x0000_0000,
+            0x40,
+            0,
+            7,
+        ]);
+        let data = u32::try_from(stream.len() * 4).expect("small");
+        stream.extend([
+            command_header(super::WRITE_DATA, 4),
+            0x0000_0500,
+            0x3002,
+            0,
+            9,
+        ]);
+
+        assert_eq!(
+            super::held_writes(&bytes(&stream), draw),
+            [
+                super::HeldWrite {
+                    offset: label,
+                    opcode: measured::RELEASE_MEM,
+                    address: 0x1008,
+                },
+                super::HeldWrite {
+                    offset: data,
+                    opcode: super::WRITE_DATA,
+                    address: 0x3000,
+                },
+            ]
         );
     }
 

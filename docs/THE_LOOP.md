@@ -285,7 +285,10 @@ flowchart LR
 1. **The wait.** The run names the thread, the call site and the call, and what the thread's
    callee-saved registers held: the objects the waiting loop reads.
 2. **The word.** Snapshots of those objects at successive iterations name the words that never
-   change; read watchpoints on them name the one the loop reads.
+   change; read watchpoints on them name the one the loop reads. After the objects, the words the
+   stopped GPU queue never wrote are watched: each value-storing `RELEASE_MEM` and memory
+   `WRITE_DATA` from where the queue stopped on, and those of every submission held back behind
+   it. A loop that reads one waits on GPU work that never ran, and its cause is the queue's wall.
 3. **The writer.** A write watchpoint on that word says whether anything writes it, and which
    thread. A writer that is itself waiting moves the question to that thread.
 4. **The cause.** The word's object is joined to the run's calls: the import handed it, a callback
@@ -442,8 +445,8 @@ flowchart LR
    (D818): a first arm for the probe and nothing more. The request resolves only on obSCEne's
    own rows, and an arm the rows miss is re-filed, never assumed.
    `orbistoun-cli resolutions <worklog> --reports <obSCEne repository>` checks each resolution
-   against the rows of the logs it cites. A status code or function no row holds, or one whose
-   rows say it never bound, sends the request back with those rows quoted (D840).
+   against the rows of the logs it cites. A status code no row holds, or a function whose rows
+   say it never bound, sends the request back with those rows quoted (D840).
 4. A resolved row becomes a knowledge entry with `known_by: measured`, and a fixture test that
    asserts the value before any implementation uses it ([TESTING.md](TESTING.md#a-measurement-lands-as-a-fixture)).
 5. Every refuted prediction goes into `crates/orbistoun-hle/data/oracle-ledger.toml`, so the

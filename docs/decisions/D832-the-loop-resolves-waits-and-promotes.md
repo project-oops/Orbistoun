@@ -10,7 +10,9 @@ resolves it in four mechanical steps, none of which decodes guest code (D276):
 1. **The wait.** The run names the thread, the call site and the call, and what the thread's
    callee-saved registers held at it. Those registers hold the objects the waiting loop reads.
 2. **The word.** A snapshot of those objects, taken at successive iterations of the wait, names
-   the words that never change. Read watchpoints on them name the word the loop reads.
+   the words that never change. Read watchpoints on them name the word the loop reads. The words a
+   stopped GPU queue never wrote - its held `RELEASE_MEM` and `WRITE_DATA` destinations - are
+   watched after them, since a thread waiting on the GPU polls a fence in no object it holds.
 3. **The writer.** A write watchpoint on that word says whether anything writes it, and which
    thread. A word nothing writes is a completion that never came.
 4. **The cause.** The word's object is joined to the run's calls: an import handed that object,
