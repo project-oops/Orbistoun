@@ -13,6 +13,7 @@ mod gamepad;
 mod icons;
 mod input;
 mod keyboard_draw;
+mod mods;
 mod payloads;
 mod perf_overlay;
 mod prefs;

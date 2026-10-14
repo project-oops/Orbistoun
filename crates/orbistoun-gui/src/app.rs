@@ -69,6 +69,8 @@ pub(crate) struct App {
     detail: Option<Detail>,
     prefs: Preferences,
     title_config: Option<TitleConfig>,
+    /// The selected title's mods, while the window for them is open (D836).
+    mods: Option<crate::mods::ModsWindow>,
     icons: Icons,
     running: Option<run::InFlight>,
     /// The frame the running title last presented, uploaded. Shown in place of the library
@@ -175,6 +177,7 @@ impl App {
             detail: None,
             prefs,
             title_config: None,
+            mods: None,
             icons: Icons::default(),
             running: None,
             live: None,
@@ -893,6 +896,17 @@ impl App {
         });
     }
 
+    /// Opens the selected title's mods.
+    fn open_mods(&mut self) {
+        let Some(title) = self.selected_title() else {
+            return;
+        };
+        // Found by the directory the module is in, as a run finds them.
+        let name = orbistoun_service::linkplan::title_of(&title.module);
+        let dir = self.paths.title_mods_dir(&name);
+        self.mods = Some(crate::mods::ModsWindow::open(name, dir));
+    }
+
     /// Where a title's user-layer overrides live.
     fn overrides_path(&self, title: &str) -> std::path::PathBuf {
         self.paths.overrides_dir().join(format!("{title}.toml"))
@@ -958,6 +972,14 @@ impl App {
                         .clicked()
                     {
                         self.open_title_config();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(has_title, egui::Button::new("title mods..."))
+                        .on_disabled_hover_text("select a title first")
+                        .clicked()
+                    {
+                        self.open_mods();
                         ui.close_menu();
                     }
                     ui.separator();
@@ -1036,6 +1058,13 @@ impl App {
                     .clicked()
                 {
                     self.open_title_config();
+                }
+                if ui
+                    .add_enabled(selected, egui::Button::new("🧩 mods"))
+                    .on_disabled_hover_text("select a title first")
+                    .clicked()
+                {
+                    self.open_mods();
                 }
 
                 ui.separator();
@@ -1438,8 +1467,13 @@ impl App {
         }
     }
 
-    /// Draws the per-title override window.
+    /// Draws the per-title windows: its overrides and its mods.
     fn title_config_window(&mut self, ctx: &egui::Context) {
+        if let Some(mods) = &mut self.mods
+            && !mods.show(ctx)
+        {
+            self.mods = None;
+        }
         let Some(config) = &mut self.title_config else {
             return;
         };

@@ -375,9 +375,76 @@ pub fn found(mods_dir: &Path) -> Vec<Mod> {
     mods
 }
 
+/// A `mod.toml`'s text with its `enabled` key set, everything else in it - comments, the
+/// description - kept as written: the key's line replaced where it has one before any table,
+/// added first otherwise.
+#[must_use]
+pub fn with_enabled(text: &str, enabled: bool) -> String {
+    let line = format!("enabled = {enabled}");
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let top_level = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let key = lines[..top_level].iter().position(|l| {
+        l.trim_start()
+            .strip_prefix("enabled")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    });
+    match key {
+        Some(at) => lines[at] = line,
+        None => lines.insert(0, line),
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+impl Mod {
+    /// Turns it on or off, in its `mod.toml`, made where it has none.
+    ///
+    /// # Errors
+    ///
+    /// A `mod.toml` that does not parse - changing it would be a guess at what it meant - or one
+    /// that cannot be written.
+    pub fn set_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        if let Some(why) = &self.unreadable {
+            return Err(format!("its {MOD_FILE} does not parse: {why}"));
+        }
+        let path = self.dir.join(MOD_FILE);
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        std::fs::write(&path, with_enabled(&text, enabled)).map_err(|e| e.to_string())?;
+        self.file.enabled = enabled;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cheat, CheatTiming, Patch, found, hex_bytes, plan_patches};
+    use super::{Cheat, CheatTiming, Patch, found, hex_bytes, plan_patches, with_enabled};
+
+    /// Turning a mod off or on rewrites only its `enabled` line, and adds one where it has none.
+    #[test]
+    fn enabling_keeps_the_rest_of_mod_toml() {
+        assert_eq!(with_enabled("", false), "enabled = false\n");
+        assert_eq!(
+            with_enabled("# mine\ndescription = \"x\"\n", false),
+            "enabled = false\n# mine\ndescription = \"x\"\n"
+        );
+        assert_eq!(
+            with_enabled("description = \"x\"\nenabled = false # off\n", true),
+            "description = \"x\"\nenabled = true\n"
+        );
+        // An `enabled` inside a table is not the mod's.
+        assert_eq!(
+            with_enabled("[extra]\nenabled = false\n", true),
+            "enabled = true\n[extra]\nenabled = false\n"
+        );
+        let text = with_enabled("description = \"d\"\n", false);
+        let file: super::ModFile = toml::from_str(&text).unwrap();
+        assert!(!file.enabled);
+        assert_eq!(file.description.as_deref(), Some("d"));
+    }
 
     /// A cheat's address is its offset from the base, then each pointer read and offset; a null
     /// or unreadable pointer leaves it nowhere.

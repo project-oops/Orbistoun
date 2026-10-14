@@ -26,6 +26,8 @@ orbistoun-proto = { workspace = true }
 orbistoun-worker = { workspace = true }
 orbistoun-env = { workspace = true }
 orbistoun-paths = { workspace = true }
+# A title's mods, listed and switched on or off (D836).
+orbistoun-overrides = { workspace = true }
 orbistoun-loader = { workspace = true }
 orbistoun-kernel = { workspace = true }
 eframe = { workspace = true }

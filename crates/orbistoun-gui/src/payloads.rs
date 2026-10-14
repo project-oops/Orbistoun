@@ -592,7 +592,7 @@ impl PayloadManager {
     }
 }
 
-fn open_in_file_manager(path: &Path) {
+pub(crate) fn open_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
     {
         let _ = std::process::Command::new("explorer").arg(path).spawn();

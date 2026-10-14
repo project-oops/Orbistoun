@@ -184,6 +184,10 @@ A title's mods sit beside it, in its directory's `mods`, one directory each (D83
     cheats.toml   values written into the running title, once or at every flip
 ```
 
+In the GUI, **mods** on the toolbar (or settings, title mods) lists the selected title's mods with
+what each changes and a switch that sets `enabled` in its `mod.toml`, and opens the mods folder to
+install one.
+
 A patch names its place by its offset from the executable's base, as a disassembler shows it, the
 bytes that must be there and the bytes written instead, as many:
 
