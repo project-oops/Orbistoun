@@ -125,8 +125,10 @@ orbistoun-cli bench [title...] [--seconds N] # every title in turn, costs ranked
 
 A recording and its report go in the title's `perf` directory, with the run's log and the guest's
 own output beside them (`<stamp>.log`, the terminal showing only the report), and a benchmark
-under the data root's `bench`; neither touches a compat record. Ranking by self time names what to make faster,
-and the frame-time percentiles name what a player feels, which an average hides. See
+under the data root's `bench`; neither touches a compat record. Ranking by self time names what to
+make faster, and the frame-time percentiles name what a player feels, which an average hides. A
+benchmark ranks each zone by the share of its title's run it took, every title weighing the same,
+so an idle title's few milliseconds of presenting do not read as all of its time. See
 [profiling with Tracy](features/graphics.md#profiling-with-tracy) and D831.
 
 ## Recording what a turn produced

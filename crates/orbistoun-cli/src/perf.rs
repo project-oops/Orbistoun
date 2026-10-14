@@ -199,6 +199,9 @@ struct BenchEntry {
     by_self: Vec<orbistoun_perf::ZoneStat>,
     /// Why it has no measurement, when it has none.
     skipped: Option<String>,
+    /// How long the recording ran, which each zone's self time is a share of.
+    #[serde(default)]
+    seconds: Option<f64>,
 }
 
 /// Every title in the library, by its module: each title directory's `eboot.bin`, and each staged
@@ -287,6 +290,7 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
             p99_ms: None,
             by_self: Vec::new(),
             skipped: Some(why),
+            seconds: None,
         };
         if let Some(busy) = others_on_the_gpu().filter(|&busy| busy > GPU_BUSY_MOST) {
             println!("{title}: skipped - something else is using {busy:.0}% of the GPU");
@@ -308,6 +312,7 @@ pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()>
                     .is_empty()
                     .then(|| "no frames presented".to_owned()),
                 by_self: recorded.report.by_self,
+                seconds: Some(recorded.summary.seconds).filter(|&seconds| seconds > 0.0),
             }),
             Err(error) => entries.push(skipped(format!("{error:#}"))),
         }
@@ -366,17 +371,23 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
                 .map_or_else(String::new, |why| format!("  ({why})")),
         );
     }
-    // Each title's self time as shares of its own, so a long-running title does not drown the rest.
+    // Each zone's self time as a share of its title's recording, so a long-running title does not
+    // drown the rest - and an idle one, whose only zone is a few milliseconds of presenting in a run
+    // of seconds, does not rank that zone as all of its time. A benchmark kept before recordings
+    // carried their length shares its zones' own total.
     let mut weight: std::collections::BTreeMap<&str, (f64, usize)> =
         std::collections::BTreeMap::new();
     for entry in entries {
-        let whole: u64 = entry.by_self.iter().map(|zone| zone.total_ns).sum();
-        if whole == 0 {
+        let zones: u64 = entry.by_self.iter().map(|zone| zone.total_ns).sum();
+        let whole = entry
+            .seconds
+            .map_or(orbistoun_perf::as_f64(zones), |seconds| seconds * 1e9);
+        if whole <= 0.0 {
             continue;
         }
         for zone in &entry.by_self {
             let slot = weight.entry(&zone.name).or_default();
-            slot.0 += orbistoun_perf::as_f64(zone.total_ns) / orbistoun_perf::as_f64(whole);
+            slot.0 += orbistoun_perf::as_f64(zone.total_ns) / whole;
             slot.1 += 1;
         }
     }
@@ -398,7 +409,7 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
     let _ = writeln!(
         out,
-        "\ncosts across titles, by self time (each title weighed equally)"
+        "\ncosts across titles, by self time as a share of each title's run (each weighed equally)"
     );
     for (name, share, titles) in ranked.into_iter().take(top) {
         let _ = writeln!(out, "  {name:<28} {share:>6.1}%  in {titles} title(s)");
@@ -436,32 +447,38 @@ mod tests {
                 })
                 .collect(),
             skipped: None,
+            seconds: Some(1.0),
         }
     }
 
-    /// Each title weighs equally: a zone that is all of a short title's time outranks one that is
-    /// a small part of a long title's, however many nanoseconds the long one spent in it.
+    /// Each title weighs equally, a zone counting as the share of its title's run it took: half of
+    /// a busy title's run outranks the few milliseconds an idle title spent presenting, though they
+    /// are all of the idle title's zones.
     #[test]
-    fn costs_across_titles_weigh_each_title_equally() {
+    fn costs_across_titles_are_shares_of_each_title_s_run() {
         let entries = [
-            entry(
-                "LONG",
-                30.0,
-                &[("draw", 9_000_000), ("dispatch", 1_000_000)],
-            ),
-            entry("SHORT", 60.0, &[("dispatch", 1_000)]),
+            entry("BUSY", 30.0, &[("draw", 500_000_000)]),
+            entry("IDLE", 1.0, &[("present", 8_000_000)]),
         ];
-        let previous = [entry("LONG", 20.0, &[])];
+        let previous = [entry("BUSY", 20.0, &[])];
         let text = render_bench(&entries, Some(&previous), 5);
-        let dispatch = text.find("dispatch").expect("ranked");
-        let draw = text
-            .lines()
-            .position(|line| line.trim_start().starts_with("draw"));
-        let dispatch_line = text
-            .lines()
-            .position(|line| line.trim_start().starts_with("dispatch"));
-        assert!(dispatch_line < draw, "{text}");
-        assert!(text[dispatch..].contains("55.0%"), "{text}");
+        let line = |zone: &str| {
+            text.lines()
+                .find(|line| line.trim_start().starts_with(zone))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert!(line("draw").contains("25.0%"), "{text}");
+        assert!(line("present").contains("0.4%"), "{text}");
+        assert!(
+            text.find("  draw") < text.find("  present"),
+            "draw ranks first: {text}"
+        );
         assert!(text.contains("20.0"), "the last benchmark's rate: {text}");
+
+        // A benchmark kept without its recordings' lengths shares each title's zones' own total.
+        let mut old = entry("OLD", 30.0, &[("draw", 1_000)]);
+        old.seconds = None;
+        assert!(render_bench(&[old], None, 5).contains("100.0%"));
     }
 }
