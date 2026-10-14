@@ -871,6 +871,17 @@ impl LaneProgram {
     }
 }
 
+/// [`wave_lane_addresses`] found natively, where the program compiled for that and the run knows
+/// every value it needs (D850, D883); `None` otherwise, and the model then decides.
+pub fn quick_wave_lane_addresses(
+    program: &LaneProgram,
+    user_data: &[u32],
+    wave: (u32, &WaveEntry),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Option<LaneAddresses> {
+    crate::quick_lanes::run_wave(program.quick.as_ref()?, user_data, wave, read)
+}
+
 /// [`lane_addresses`] found natively, where the program compiled for that and the run knows every
 /// value it needs (D850); `None` otherwise, and the model then decides.
 pub fn quick_lane_addresses(
@@ -2402,7 +2413,12 @@ mod tests {
             .filter(|&thread| thread != 66)
             .map(|thread| 0x7_0000_1000 + 5 + 4 * thread)
             .collect();
-        assert_eq!(found, Ok(vec![(load, expected)]));
+        assert_eq!(found, Ok(vec![(load, expected.clone())]));
+        // The native run finds what the model finds, from the same entry (D850).
+        assert_eq!(
+            super::quick_wave_lane_addresses(&program, &[0x1000, 7], (64, &wave), &mut |_| None),
+            Some(vec![(load, expected)])
+        );
     }
 
     /// A mask a compare writes from what the run does not know names the compare: `v_cmp_lt_u32

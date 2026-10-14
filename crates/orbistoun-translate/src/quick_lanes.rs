@@ -69,6 +69,12 @@ enum Step {
     Branch { target: usize, on: Option<bool> },
     /// `v_mov_b32`.
     Move { destination: u32, source: Source },
+    /// `v_lshlrev_b32`: `value` shifted left by `amount`'s low five bits.
+    ShiftLeft {
+        destination: u32,
+        amount: Source,
+        value: Source,
+    },
     /// `v_add_nc_u32`.
     Add {
         destination: u32,
@@ -329,6 +335,11 @@ fn vector_step(family: &str, name: &str, instruction: &Instruction) -> Option<St
             destination,
             source: at(1)?,
         },
+        ("VOP2", "v_lshlrev_b32_e32") | ("VOP3", "v_lshlrev_b32_e64") => Step::ShiftLeft {
+            destination,
+            amount: at(1)?,
+            value: at(2)?,
+        },
         ("VOP2", "v_add_nc_u32_e32") | ("VOP3", "v_add_nc_u32") => Step::Add {
             destination,
             a: at(1)?,
@@ -478,7 +489,55 @@ pub fn run(
     (width, lanes): (u32, u32),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Option<crate::evaluate::LaneAddresses> {
-    let mut state = Lanes::start((first_register, user_data), (width, lanes));
+    let state = Lanes::start((first_register, user_data), (width, lanes));
+    run_from(state, program, lanes, read)
+}
+
+/// The addresses each global load forms over one compute wave (D883), as
+/// [`crate::evaluate::wave_lane_addresses`] answers: the user data from `s0`, then the group ids;
+/// each lane with a thread its id components from `v0` and its execution-mask bit.
+pub fn run_wave(
+    program: &Program,
+    user_data: &[u32],
+    (width, wave): (u32, &crate::evaluate::WaveEntry),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Option<crate::evaluate::LaneAddresses> {
+    let width = width.clamp(1, 64);
+    let lanes = u32::try_from(wave.threads.len()).ok()?.min(width);
+    let modelled = lanes.clamp(1, width);
+    let mut state = Lanes {
+        scalars: [None; SCALAR_CODES],
+        vectors: vec![Some(0); VECTOR_REGISTERS * modelled as usize],
+        modelled,
+        condition: None,
+    };
+    for (register, word) in user_data.iter().chain(&wave.group_ids).enumerate() {
+        if register < SCALAR_REGISTERS {
+            state.scalars[register] = Some(*word);
+        }
+    }
+    let mut mask = 0u64;
+    for (lane, ids) in (0..lanes).zip(&wave.threads) {
+        let Some(ids) = ids else {
+            continue;
+        };
+        mask |= 1 << lane;
+        for (register, id) in (0..wave.components.min(3)).zip(ids) {
+            state.set_vector(register, lane, Some(*id));
+        }
+    }
+    state.scalars[EXEC] = Some(mask as u32);
+    state.scalars[EXEC + 1] = Some((mask >> 32) as u32);
+    run_from(state, program, lanes, read)
+}
+
+/// The run [`run`] and [`run_wave`] share, from the wave's entry.
+fn run_from(
+    mut state: Lanes,
+    program: &Program,
+    lanes: u32,
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Option<crate::evaluate::LaneAddresses> {
     let modelled = state.modelled;
     let mut found = Vec::new();
     let mut at = 0usize;
@@ -571,6 +630,14 @@ fn run_vector(state: &mut Lanes, step: Step) -> Option<()> {
             }
             Step::Add { destination, a, b } => {
                 let value = state.read(a, lane)?.wrapping_add(state.read(b, lane)?);
+                state.set_vector(destination, lane, Some(value));
+            }
+            Step::ShiftLeft {
+                destination,
+                amount,
+                value,
+            } => {
+                let value = state.read(value, lane)? << (state.read(amount, lane)? & 31);
                 state.set_vector(destination, lane, Some(value));
             }
             Step::MultiplyLow { destination, a, b } => {
