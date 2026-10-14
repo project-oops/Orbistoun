@@ -1624,6 +1624,19 @@ fn log_execution() {
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
     }
+    // What each program's dispatches wrote: one that writes only zeros produces nothing.
+    for (module, writes) in orbistoun_gpu::agc_driver::dispatch_writes_by_module() {
+        tracing::info!(
+            "dispatch module {module:016x}: {} carried out, {} byte(s) written back, {}",
+            writes.dispatches,
+            writes.bytes,
+            if writes.lit {
+                "some of them not zero"
+            } else {
+                "every one zero"
+            }
+        );
+    }
     // The program a refused dispatch runs, to read the refusal against.
     if let (Some((address, program)), Some(dir)) = (
         orbistoun_gpu::pipeline::last_refused_program(),

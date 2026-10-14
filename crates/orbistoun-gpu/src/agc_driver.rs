@@ -1365,6 +1365,63 @@ struct GuestWrites {
     runs: Vec<(u64, std::ops::Range<usize>)>,
 }
 
+/// What a translated program's dispatches have written back this run: how many were carried out,
+/// the bytes they changed, and whether any changed byte is not zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DispatchWrites {
+    /// Dispatches carried out.
+    pub dispatches: u64,
+    /// Bytes they changed in guest memory: runs, scattered buffer words and fills.
+    pub bytes: u64,
+    /// Whether any byte they wrote is not zero.
+    pub lit: bool,
+}
+
+/// [`DispatchWrites`] by the translated module's content hash.
+fn dispatch_writes() -> &'static Mutex<std::collections::BTreeMap<u64, DispatchWrites>> {
+    static WRITES: Mutex<std::collections::BTreeMap<u64, DispatchWrites>> =
+        Mutex::new(std::collections::BTreeMap::new());
+    &WRITES
+}
+
+/// Counts a dispatch of `module` and what it wrote back: its runs, its scattered buffer words and
+/// its fills.
+fn note_dispatch_writes(
+    module: u64,
+    (writes, scattered, fills): (&GuestWrites, &[Scattered<'_>], &[cp::Fill]),
+) {
+    let mut bytes = writes.bytes.len() as u64;
+    let mut lit = writes.bytes.iter().any(|&byte| byte != 0);
+    for buffer in scattered {
+        for (_, word, held) in buffer.words() {
+            bytes += held as u64;
+            lit |= word[..held].iter().any(|&byte| byte != 0);
+        }
+    }
+    for fill in fills {
+        bytes += fill.count;
+        lit |= fill.pattern != 0 && fill.count > 0;
+    }
+    let mut kept = dispatch_writes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = kept.entry(module).or_default();
+    entry.dispatches += 1;
+    entry.bytes += bytes;
+    entry.lit |= lit;
+}
+
+/// What each translated program's dispatches wrote back this run, by its module's content hash.
+#[must_use]
+pub fn dispatch_writes_by_module() -> Vec<(u64, DispatchWrites)> {
+    dispatch_writes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|(module, writes)| (*module, *writes))
+        .collect()
+}
+
 /// The writes a finished dispatch wrote back, emptied and kept for the next. PPSA25872's
 /// dispatches write some 34 000 runs, and growing fresh vectors for them - their pages new to the
 /// process each time - cost 0.7 ms of a dispatch.
@@ -1941,6 +1998,7 @@ impl GuestCp<'_> {
         span(Span::WriteBackGuest, || {
             self.write_back_dispatch(&writes, &scattered, &buffer_fills)
         })?;
+        note_dispatch_writes(prepared.module_hash, (&writes, &scattered, &buffer_fills));
         writes.keep();
         // A buffer cleared to one word is a fill the depth surfaces are checked against (D750).
         let fills = uniform_buffers(&prepared.buffers, (&buffers_before, &buffers_after));
@@ -6423,6 +6481,44 @@ mod tests {
     /// A buffer's listed words written straight from the list leave memory as writing them run by
     /// run does - consecutive and scattered words, the last cut where the range ends - and a buffer
     /// outside what may be written writes nothing.
+    /// Each translated program's dispatches are counted with what they wrote back: the bytes they
+    /// changed, and whether any of them is not zero - what says a dispatch that runs is producing
+    /// nothing. Zeros through a run, a scattered word or a fill count as written but not as lit.
+    #[test]
+    fn a_programs_dispatches_are_counted_with_what_they_wrote() {
+        use super::{GuestWrites, Scattered, dispatch_writes_by_module, note_dispatch_writes};
+        let module = 0x5eed_0000_0000_0883_u64;
+        let mut zeros = GuestWrites::default();
+        zeros.push(0x1000, &[0, 0, 0, 0]);
+        let indices = [0u32];
+        let values = [0u32];
+        let quiet = Scattered {
+            address: 0x2000,
+            bytes: 4,
+            indices: &indices,
+            values: &values,
+        };
+        let fill = crate::cp::Fill {
+            destination: 0x3000,
+            pattern: 0,
+            count: 8,
+        };
+        note_dispatch_writes(module, (&zeros, &[quiet], &[fill]));
+        let found = |module| {
+            dispatch_writes_by_module()
+                .into_iter()
+                .find(|(key, _)| *key == module)
+                .map(|(_, writes)| writes)
+        };
+        let first = found(module).expect("counted");
+        assert_eq!((first.dispatches, first.bytes, first.lit), (1, 16, false));
+        let mut lit = GuestWrites::default();
+        lit.push(0x1000, &[0, 7]);
+        note_dispatch_writes(module, (&lit, &[], &[]));
+        let both = found(module).expect("counted");
+        assert_eq!((both.dispatches, both.bytes, both.lit), (2, 18, true));
+    }
+
     #[test]
     fn scattered_words_write_back_as_their_runs_do() {
         use super::{GuestCp, GuestWrites, MappedRegions, Scattered};
