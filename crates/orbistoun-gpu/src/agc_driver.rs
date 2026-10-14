@@ -931,10 +931,10 @@ impl GuestCp<'_> {
             ));
         }
         // The executor holds one frame per extent, so a frame still pending for another target is
-        // written back before this one is drawn over it (D714).
-        if pending_target().is_some_and(|(pending, _)| pending != target)
-            && !write_back_pending(self)
-        {
+        // let go of before this one is drawn over it (D714): kept on the device as a flip keeps
+        // one, written back when something first touches it (D719, D885), or now where it cannot
+        // wait.
+        if pending_target().is_some_and(|(pending, _)| pending != target) && !hold_pending(self) {
             return Err(
                 "the frame pending for another target could not be written back".to_owned(),
             );
@@ -1107,8 +1107,9 @@ impl GuestCp<'_> {
     /// Draws a submission whose colour target zero is unbound (D779): its draws write only the
     /// depth the drawer keeps (the guest's depth tiling is unmeasured, so depth is never written
     /// back), and the colour the drawer produces is no target's. A frame pending for any target
-    /// is written back first, and the drawer's colour is then forgotten, so the next colour draw
-    /// starts from what guest memory holds.
+    /// is let go of first - kept on the device as a switch of target keeps it (D885) - and the
+    /// drawer's colour is then forgotten, so the next colour draw starts from what guest memory
+    /// holds, or will once that frame is carried out.
     fn draw_depth_only(
         &mut self,
         submission: &Submission,
@@ -1117,7 +1118,7 @@ impl GuestCp<'_> {
         if let Some(why) = unmodelled_draws(submission) {
             return Err(why);
         }
-        if pending_target().is_some() && !write_back_pending(self) {
+        if !hold_pending(self) {
             return Err("the frame pending for its target could not be written back".to_owned());
         }
         forget_written();
@@ -2433,6 +2434,59 @@ fn write_back_pending(memory: &mut dyn cp::CpMemory) -> bool {
     written
 }
 
+/// Lets go of the pending frame for a draw into another target (D885): deferred as a flip defers
+/// it (D719), so a frame the next draw into its target takes as held (D801) is never written back,
+/// or written back now where it cannot wait. A target whose frame, held at a switch before, was
+/// carried out by a read is written back now too: deferring a frame something then reads costs a
+/// snapshot and a guard over what the write-back costs. Either way it counts as written since the
+/// flip, which may still show it. `true` when nothing was pending or it was kept or written.
+fn hold_pending(memory: &mut dyn cp::CpMemory) -> bool {
+    let Some((target, _)) = pending_target() else {
+        return true;
+    };
+    let read_after = switch_held()
+        .lock()
+        .is_ok_and(|held| held.iter().any(|&(kept, read)| kept == target && read));
+    if read_after || defer_write_back(false).is_err() {
+        return write_back_pending(memory);
+    }
+    if let Ok(mut held) = switch_held().lock()
+        && !held.iter().any(|&(kept, _)| kept == target)
+    {
+        if held.len() >= SWITCH_HELD_KEPT {
+            held.remove(0);
+        }
+        held.push((target, false));
+    }
+    let mut early = written_since_flip()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !early.contains(&target.base) {
+        early.push(target.base);
+    }
+    true
+}
+
+/// The targets whose frames a switch of target kept on the device ([`hold_pending`]), each with
+/// whether such a frame was then carried out - something read or wrote the target's memory before
+/// a draw took the frame as held. Never locked while [`deferred`] is waited for.
+fn switch_held() -> &'static Mutex<Vec<(ColourTarget, bool)>> {
+    static HELD: Mutex<Vec<(ColourTarget, bool)>> = Mutex::new(Vec::new());
+    &HELD
+}
+
+/// How many targets [`switch_held`] remembers; the oldest is let go past it.
+const SWITCH_HELD_KEPT: usize = 16;
+
+/// Notes that a frame deferred onto `target` was carried out, for [`hold_pending`].
+fn note_carried_out(target: ColourTarget) {
+    if let Ok(mut held) = switch_held().lock()
+        && let Some(kept) = held.iter_mut().find(|(kept, _)| *kept == target)
+    {
+        kept.1 = true;
+    }
+}
+
 /// The bases of the targets whose drawn frames were written back since a flip last asked
 /// ([`frame_drawn_into`]). A frame something reads before its flip is written back then (D714) -
 /// oops-gl reads its own target after each frame's draws - and is still the frame that flip shows.
@@ -3499,6 +3553,7 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
             memory_then,
         } => (*snapshot, *target, *swap, memory_then),
     };
+    note_carried_out(target);
     let Some(frame) = crate::perf::span(crate::perf::Span::CarryOutTake, || (hooks.take)(snapshot))
     else {
         tracing::warn!(
@@ -6877,6 +6932,79 @@ mod tests {
             "memory holds the fill"
         );
         assert!(super::deferred().lock().expect("list").is_empty());
+        super::forget_written();
+    }
+
+    /// A frame let go of for a draw into another target is kept on the device, not written back
+    /// (D719), and the first read carries it out, the frame tiled in the target's order. That
+    /// target's frame is written back at the next switch rather than kept: something reads it.
+    #[test]
+    fn a_frame_switched_from_is_kept_until_read_then_written_at_the_switch() {
+        use super::{ColourTarget, ComponentSwap, GuestCp, MappedRegions, Written};
+        use fake::{SNAPSHOTS, frame};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let memory = off_page(span, 0x5A);
+        let base = memory.as_ptr() as usize as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        allow_writes_to(base, span as u64);
+        fake::install();
+        super::install_frame_reader(|| Some(frame()));
+        // The alternate order, so memory holds the frame as stored, not as drawn.
+        let pend = |memory: &[u8]| {
+            *super::last_written().lock().expect("slot") = Some(Written {
+                target,
+                contents: super::Contents::Bytes(Arc::new(memory.to_vec())),
+                since: None,
+            });
+            super::set_pending(Some((target, ComponentSwap::Alternate)));
+        };
+        let before = memory.to_vec();
+        let mut expected = super::words_of(&before);
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| {
+            super::stored(w, target, ComponentSwap::Alternate)
+        })
+        .expect("tiles");
+        let expected = zerocopy::IntoBytes::as_bytes(expected.as_slice()).to_vec();
+        let mut cp = GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+
+        pend(memory);
+        assert!(super::hold_pending(&mut cp));
+        assert!(super::pending_target().is_none(), "let go of");
+        assert_eq!(memory, before.as_slice(), "and not written back");
+        assert!(super::carry_out_before_reading(base, 4));
+        assert_eq!(
+            memory,
+            expected.as_slice(),
+            "the first read finds the frame"
+        );
+
+        // Memory as it was, so only a write-back at the switch puts the frame there.
+        memory.copy_from_slice(&before);
+        pend(memory);
+        let snapshots = SNAPSHOTS.load(Ordering::SeqCst);
+        assert!(super::hold_pending(&mut cp));
+        assert!(super::pending_target().is_none(), "let go of again");
+        assert_eq!(
+            SNAPSHOTS.load(Ordering::SeqCst),
+            snapshots,
+            "read after its last switch, it is not kept"
+        );
+        assert!(super::deferred().lock().expect("list").is_empty());
+        assert_eq!(memory, expected.as_slice(), "but written back");
+        super::switch_held().lock().expect("held").clear();
         super::forget_written();
     }
 
