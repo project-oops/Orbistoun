@@ -426,6 +426,9 @@ pub struct Submission {
     /// The tables the stream's indirect register loads read, as they stood when it was submitted:
     /// what its draw segments and the registers it carries forward read them from.
     pub tables: crate::registers::TableSnapshot,
+    /// Where the border colour table is, as `TA_BC_BASE_ADDR` last said: what a sampler's table
+    /// border colour is read from (D837). `None` where the stream set it nowhere.
+    pub border_table: Option<u64>,
     /// The register state earlier submissions left, as it stood when this one was prepared: what
     /// its draw segments and dispatches run under when it is carried out (D737), however far the
     /// carried state has moved on by then (D821).
@@ -1787,6 +1790,7 @@ impl Pipeline {
             )
         });
         record_colour_target(&mut submission, &first, &draws);
+        submission.border_table = crate::registers::border_table_at(&writes);
         submission.depth_control = depth_control_at(&writes);
         submission.stencil_control = stencil_control_at(&writes);
         submission.blend_control = blend_control_at(&first);
@@ -3028,6 +3032,7 @@ impl Pipeline {
                     &mut submission.report.first_unbound_texture,
                 ),
             );
+            read_table_borders(&mut submission.commands, submission.border_table, memory);
         });
         span(Span::BufferBind, || {
             crate::draw_buffers::bind_draw_buffers(
@@ -4782,6 +4787,37 @@ fn user_data_texture(
         }
     }
     Some(bound)
+}
+
+/// Gives each texture whose sampler takes its border colour from the table that entry's colour, as
+/// the table at `table` holds it now (D837). An entry with no table to read, or one not in guest
+/// memory, is left a table entry, which no backend samples.
+fn read_table_borders(
+    commands: &mut [RenderCommand],
+    table: Option<u64>,
+    memory: &impl GuestMemory,
+) {
+    use crate::registers::{BORDER_COLOUR_ENTRY_BYTES, BorderColour};
+    for command in commands {
+        let (RenderCommand::BindTexture { sampling, .. }
+        | RenderCommand::BindVolumeTexture { sampling, .. }) = command
+        else {
+            continue;
+        };
+        let BorderColour::Table(entry) = sampling.border else {
+            continue;
+        };
+        let at = table.map(|base| base + u64::from(entry) * BORDER_COLOUR_ENTRY_BYTES);
+        let Some(bytes) = at.and_then(|at| memory.read(at, BORDER_COLOUR_ENTRY_BYTES as usize))
+        else {
+            continue;
+        };
+        let mut colour = [0_u32; 4];
+        for (channel, chunk) in colour.iter_mut().zip(bytes.chunks_exact(4)) {
+            *channel = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        sampling.border = BorderColour::Custom(colour);
+    }
 }
 
 /// Whether the image descriptor at `at` is null, as [`is_null_image`] reads one.
@@ -7301,6 +7337,60 @@ mod tests {
         let tags: Vec<u32> = texels.chunks(2).map(|block| block[0]).collect();
         assert_eq!(tags, [0x000, 0x100, 0x1000, 0x1100], "row-major blocks");
         assert_eq!(texels[1], 1, "a block's words in order");
+    }
+
+    /// A sampler whose border is a table entry takes that entry's four floats from the table
+    /// `TA_BC_BASE_ADDR` names (D837): gl1-probe's `border-and-mirror` blue at entry 0. With no
+    /// table, or one not in memory, the entry is left unread.
+    #[test]
+    fn a_table_border_is_read_from_the_table() {
+        use super::RenderCommand;
+        use crate::registers::{BorderColour, TextureSampling};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0u8; 0x200];
+        for (i, value) in [0.0_f32, 0.0, 1.0, 1.0].iter().enumerate() {
+            bytes[0x100 + 16 + i * 4..][..4].copy_from_slice(&value.to_bits().to_le_bytes());
+        }
+        let bind = |entry| RenderCommand::BindTexture {
+            slot: 0,
+            hash: 0,
+            texels: vec![0; 1].into(),
+            width: 1,
+            height: 1,
+            sampling: TextureSampling {
+                border: BorderColour::Table(entry),
+                ..TextureSampling::default()
+            },
+            encoding: crate::backend::TextureEncoding::Rgba8,
+            faces: 1,
+            levels: 1,
+        };
+        let border = |commands: &[RenderCommand]| match &commands[0] {
+            RenderCommand::BindTexture { sampling, .. } => sampling.border,
+            _ => unreachable!(),
+        };
+        let memory = Memory(bytes);
+        let mut commands = vec![bind(1)];
+        super::read_table_borders(&mut commands, Some(0x1_0100), &memory);
+        assert_eq!(
+            border(&commands),
+            BorderColour::Custom([0, 0, 1.0_f32.to_bits(), 1.0_f32.to_bits()])
+        );
+        let mut unread = vec![bind(1)];
+        super::read_table_borders(&mut unread, None, &memory);
+        assert_eq!(border(&unread), BorderColour::Table(1), "no table");
+        super::read_table_borders(&mut unread, Some(0x9_0000), &memory);
+        assert_eq!(
+            border(&unread),
+            BorderColour::Table(1),
+            "a table not in memory"
+        );
     }
 
     /// A linear `8_8_8_8_UNORM` chain binds every level from its base to its last, each read where

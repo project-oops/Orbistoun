@@ -2715,8 +2715,9 @@ pub enum TextureWrap {
     ClampBorder,
 }
 
-/// A sampler's built-in border colour: `SQ_IMG_SAMP_WORD3.BORDER_COLOR_TYPE`
-/// (`gfx10-rsrc.json:502`), values `SQ_TEX_BORDER_COLOR` (`gfx6.json:607-613`).
+/// A sampler's border colour: `SQ_IMG_SAMP_WORD3.BORDER_COLOR_TYPE` (`gfx10-rsrc.json:502`),
+/// values `SQ_TEX_BORDER_COLOR` (`gfx6.json:607-613`) - one of three built in, or an entry of the
+/// border colour table `TA_BC_BASE_ADDR` names (D837).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BorderColour {
     /// `TRANS_BLACK` (0): `(0, 0, 0, 0)`.
@@ -2726,6 +2727,35 @@ pub enum BorderColour {
     OpaqueBlack,
     /// `OPAQUE_WHITE` (2): `(1, 1, 1, 1)`.
     OpaqueWhite,
+    /// `REGISTER` (3): entry `BORDER_COLOR_PTR` (`SQ_IMG_SAMP_WORD3` bits 11:0) of the border
+    /// colour table, not yet read.
+    Table(u16),
+    /// A table entry as read: four 32-bit floats, red to alpha, as their bits (D837).
+    Custom([u32; 4]),
+}
+
+/// `TA_BC_BASE_ADDR` (`gfx103.json`, mm 0x28080): the border colour table's address in 256-byte
+/// units, as radeonsi sets it once in its preamble (`ac_cmdbuf.c:529-530`).
+pub const TA_BC_BASE_ADDR: u32 = 0xA020;
+/// `TA_BC_BASE_ADDR_HI`: its bits 39:32.
+pub const TA_BC_BASE_ADDR_HI: u32 = 0xA021;
+
+/// The bytes of one border colour table entry: four floats.
+pub const BORDER_COLOUR_ENTRY_BYTES: u64 = 16;
+
+/// The border colour table's address as a stream last set it, or `None` where it set none.
+#[must_use]
+pub fn border_table_at(writes: &[RegisterWrite]) -> Option<u64> {
+    let last = |register: u32| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    };
+    let low = last(TA_BC_BASE_ADDR)?;
+    let high = last(TA_BC_BASE_ADDR_HI).unwrap_or(0) & 0xff;
+    Some((u64::from(high) << 32 | u64::from(low)) << 8)
 }
 
 /// A texture filter: `SQ_IMG_SAMP_WORD2.XY_MAG_FILTER` / `XY_MIN_FILTER` (`gfx10-rsrc.json:490-491`),
@@ -2815,8 +2845,8 @@ impl Default for TextureSampling {
 }
 
 /// Decodes a sampler descriptor's four words into how it samples, or names the field it cannot
-/// honour exactly: a border clamp, a mirror-once mode, a half-border clamp whose border colour is
-/// the table's, or a reserved value. Only the wrap across and down, the three filters, the
+/// honour exactly: a mirror-once mode or a reserved value. A border from the colour table is
+/// named by its entry, for the pipeline to read (D837). Only the wrap across and down, the three filters, the
 /// anisotropy ratio, the level-of-detail clamp and bias and the built-in border colour are read; a 2D texture has no third coordinate.
 /// An anisotropic filter is its point or bilinear base at `1 << MAX_ANISO_RATIO` (D775).
 pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'static str> {
@@ -2861,10 +2891,7 @@ pub fn decode_sampler_descriptor(words: [u32; 4]) -> Result<TextureSampling, &'s
         _ if wrap.contains(&TextureWrap::ClampHalfBorder)
             || wrap.contains(&TextureWrap::ClampBorder) =>
         {
-            return Err(concat!(
-                "the sampler clamps to a border whose colour is in the border colour table, ",
-                "which is not read"
-            ));
+            BorderColour::Table((words[3] & 0xfff) as u16)
         }
         _ => BorderColour::TransparentBlack,
     };
@@ -3209,10 +3236,11 @@ mod tests {
             )
         );
         let mut table = words(6, 0, 0, 0, 0);
-        table[3] = 3 << 30;
-        assert!(
-            decode_sampler_descriptor(table).is_err(),
-            "a border from the table"
+        table[3] = 3 << 30 | 2;
+        assert_eq!(
+            decode_sampler_descriptor(table).map(|s| s.border),
+            Ok(BorderColour::Table(2)),
+            "a border from the table, by its entry"
         );
         assert!(
             decode_sampler_descriptor(words(7, 0, 0, 0, 0)).is_err(),
@@ -3232,8 +3260,9 @@ mod tests {
             Ok(BorderColour::OpaqueWhite)
         );
         white[3] = 3 << 30;
-        assert!(
-            decode_sampler_descriptor(white).is_err(),
+        assert_eq!(
+            decode_sampler_descriptor(white).map(|s| s.border),
+            Ok(BorderColour::Table(0)),
             "a half border from the colour table"
         );
         assert!(
@@ -3260,8 +3289,15 @@ mod tests {
             Ok((TextureFilter::Nearest, 2))
         );
         assert_eq!(repeat_linear.anisotropy, 1, "no anisotropy asked for");
-        // The level-of-detail clamp and bias, in radv's fixed point: PPSA02664's sampler clamps
-        // to 0..15.996 (`0x00ff_f000`) unbiased; a bias of -2.5 is `0x3d80` in s5.8.
+    }
+
+    /// The level-of-detail clamp and bias, in radv's fixed point: PPSA02664's sampler clamps to
+    /// 0..15.996 (`0x00ff_f000`) unbiased; a bias of -2.5 is `0x3d80` in s5.8.
+    #[test]
+    fn a_sampler_descriptor_decodes_its_level_of_detail() {
+        use super::decode_sampler_descriptor;
+        let aniso =
+            decode_sampler_descriptor([0x6892, 0x00ff_f000, 0x0af0_0000, 0]).expect("aniso");
         assert_eq!(
             (aniso.min_lod, aniso.max_lod, aniso.lod_bias),
             (0, 0xfff, 0)

@@ -1695,11 +1695,11 @@ const MAX_LOD_BIAS: f32 = 15.0;
 /// default - point sampling clamped to the edge - for a texture no sampler names, so a test that
 /// names a texel gets exactly that texel. A depth texture (`compare`) is sampled through a compare
 /// by the descriptor's function, whose values are `VkCompareOp`'s (D817).
-fn sampler_info(
+fn sampler_info<'a>(
     sampling: orbistoun_gpu::TextureSampling,
     levels: u32,
     compare: bool,
-) -> vk::SamplerCreateInfo<'static> {
+) -> vk::SamplerCreateInfo<'a> {
     // A half-border clamp is sampled at a coordinate the shader saturated (D743), through the
     // border when both filters are linear and the edge otherwise, as Mesa lowers `GL_CLAMP`
     // (`samplerobj.h:158-183`).
@@ -1720,9 +1720,14 @@ fn sampler_info(
         }
     };
     let border = match sampling.border {
-        orbistoun_gpu::BorderColour::TransparentBlack => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
         orbistoun_gpu::BorderColour::OpaqueBlack => vk::BorderColor::FLOAT_OPAQUE_BLACK,
         orbistoun_gpu::BorderColour::OpaqueWhite => vk::BorderColor::FLOAT_OPAQUE_WHITE,
+        // Its colour rides on the create info (`with_border_colour`); a table entry never read is
+        // refused before a sampler is made (D837).
+        orbistoun_gpu::BorderColour::Custom(_) => vk::BorderColor::FLOAT_CUSTOM_EXT,
+        orbistoun_gpu::BorderColour::TransparentBlack | orbistoun_gpu::BorderColour::Table(_) => {
+            vk::BorderColor::FLOAT_TRANSPARENT_BLACK
+        }
     };
     let filter = |filter: orbistoun_gpu::TextureFilter| match filter {
         orbistoun_gpu::TextureFilter::Nearest => vk::Filter::NEAREST,
@@ -1757,6 +1762,23 @@ fn sampler_info(
         .max_anisotropy(f32::from(sampling.anisotropy))
         .compare_enable(compare)
         .compare_op(vk::CompareOp::from_raw(i32::from(sampling.depth_compare)))
+}
+
+/// A border colour of the sampler's own, as `VK_EXT_custom_border_color` takes it: the guest's
+/// table entry's four floats, with no format, which the device was created allowing (D837).
+fn border_colour_info(
+    border: orbistoun_gpu::BorderColour,
+) -> Option<vk::SamplerCustomBorderColorCreateInfoEXT<'static>> {
+    let orbistoun_gpu::BorderColour::Custom(bits) = border else {
+        return None;
+    };
+    Some(
+        vk::SamplerCustomBorderColorCreateInfoEXT::default()
+            .custom_border_color(vk::ClearColorValue {
+                float32: bits.map(f32::from_bits),
+            })
+            .format(vk::Format::UNDEFINED),
+    )
 }
 
 /// The host format a texture is created in and its texels as staged: `Rgba8` words padded and
@@ -1917,7 +1939,11 @@ fn create_texture(
     let view = unsafe { device.create_image_view(&view_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_image_view(texture)", e))?;
 
-    let sampler_info = sampler_info(sampling, levels, compare);
+    let mut custom = border_colour_info(sampling.border);
+    let mut sampler_info = sampler_info(sampling, levels, compare);
+    if let Some(custom) = custom.as_mut() {
+        sampler_info = sampler_info.push_next(custom);
+    }
     // SAFETY: the create info outlives the call and the device is live.
     let sampler = unsafe { device.create_sampler(&sampler_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_sampler", e))?;

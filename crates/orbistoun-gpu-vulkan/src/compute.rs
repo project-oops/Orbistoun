@@ -741,6 +741,16 @@ pub(crate) fn logic_op() -> bool {
 static SAMPLER_ANISOTROPY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Whether the session's device was created with `VK_EXT_custom_border_color`'s
+/// `customBorderColors` and `customBorderColorWithoutFormat` (D837).
+static CUSTOM_BORDER_COLOUR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a sampler can be made with a border colour of its own (D837).
+pub(crate) fn custom_border_colour() -> bool {
+    CUSTOM_BORDER_COLOUR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether a sampler may filter anisotropically: the device enabled `sampler_anisotropy`, whose
 /// limit is then at least sixteen, the most a guest sampler asks for (D775).
 pub(crate) fn sampler_anisotropy() -> bool {
@@ -861,6 +871,30 @@ impl Session {
         Ok((physical, family))
     }
 
+    /// Whether the device has `VK_EXT_custom_border_color`, with a colour that needs no format: a
+    /// guest sampler's border from its border colour table (D837).
+    fn custom_border_offered(
+        instance: &ash::Instance,
+        physical: vk::PhysicalDevice,
+        extensions: &[vk::ExtensionProperties],
+    ) -> bool {
+        let named = extensions.iter().any(|extension| {
+            extension
+                .extension_name_as_c_str()
+                .is_ok_and(|name| name == ash::ext::custom_border_color::NAME)
+        });
+        if !named {
+            return false;
+        }
+        let mut offered = vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default();
+        let mut chained = vk::PhysicalDeviceFeatures2::default().push_next(&mut offered);
+        // SAFETY: the handle came from enumeration on this live instance, and the chained structure
+        // outlives the call.
+        unsafe { instance.get_physical_device_features2(physical, &mut chained) };
+        offered.custom_border_colors == vk::TRUE
+            && offered.custom_border_color_without_format == vk::TRUE
+    }
+
     /// Creates the logical device with the features and extensions the emitted modules declare,
     /// returning the core features requested and whether mesh shading was enabled.
     fn create_device(
@@ -939,12 +973,14 @@ impl Session {
                 .extension_name_as_c_str()
                 .is_ok_and(|name| name == ash::ext::depth_clip_control::NAME)
         });
+        let border_offered = Self::custom_border_offered(instance, physical, &extensions);
         let enabled_extensions: Vec<*const core::ffi::c_char> = [
             (mesh_offered, ash::ext::mesh_shader::NAME.as_ptr()),
             (
                 clip_control_offered,
                 ash::ext::depth_clip_control::NAME.as_ptr(),
             ),
+            (border_offered, ash::ext::custom_border_color::NAME.as_ptr()),
         ]
         .into_iter()
         .filter_map(|(offered, name)| offered.then_some(name))
@@ -953,6 +989,9 @@ impl Session {
             vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(mesh_offered);
         let mut wanted_clip_control = vk::PhysicalDeviceDepthClipControlFeaturesEXT::default()
             .depth_clip_control(clip_control_offered);
+        let mut wanted_border = vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default()
+            .custom_border_colors(border_offered)
+            .custom_border_color_without_format(border_offered);
 
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
@@ -960,11 +999,13 @@ impl Session {
             .enabled_extension_names(&enabled_extensions)
             .push_next(&mut wanted_float16)
             .push_next(&mut wanted_mesh)
-            .push_next(&mut wanted_clip_control);
+            .push_next(&mut wanted_clip_control)
+            .push_next(&mut wanted_border);
         // SAFETY: the physical device is valid and the create info outlives the call.
         let device = unsafe { instance.create_device(physical, &device_info, None) }
             .map_err(|e| ("create_device", e))?;
         DEPTH_CLIP_CONTROL.store(clip_control_offered, std::sync::atomic::Ordering::Relaxed);
+        CUSTOM_BORDER_COLOUR.store(border_offered, std::sync::atomic::Ordering::Relaxed);
         DEPTH_BIAS_CLAMP.store(
             wanted_features.depth_bias_clamp == vk::TRUE,
             std::sync::atomic::Ordering::Relaxed,

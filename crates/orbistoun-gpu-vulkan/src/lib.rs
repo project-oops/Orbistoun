@@ -178,6 +178,21 @@ struct BoundTexture {
     levels: u32,
 }
 
+/// What a texture whose border this device cannot sample is refused as (D837).
+const BORDER_UNSAMPLABLE: &str = "BindTexture whose sampler's border colour is a table entry not read, or one of its own on a \
+     device without VK_EXT_custom_border_color";
+
+/// Whether a sampler with this border colour can be made: a built-in one always, one read from the
+/// guest's table where the device takes a colour of a sampler's own, and an entry never read never
+/// (D837).
+fn border_samplable(border: orbistoun_gpu::BorderColour) -> bool {
+    match border {
+        orbistoun_gpu::BorderColour::Table(_) => false,
+        orbistoun_gpu::BorderColour::Custom(_) => compute::custom_border_colour(),
+        _ => true,
+    }
+}
+
 impl BoundTexture {
     /// Its words as a draw binds them.
     fn words(&self) -> framebuffer::TextureWords<'_> {
@@ -555,6 +570,12 @@ impl VulkanBackend {
                 command: "BindTexture of a mip chain that is not a flat four-byte image",
             });
         }
+        if !border_samplable(sampling.border) {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: BORDER_UNSAMPLABLE,
+            });
+        }
         let words = if levels > 1 {
             framebuffer::chain_texels(width, height, levels)
         } else {
@@ -612,6 +633,12 @@ impl VulkanBackend {
                 "BindVolumeTexture carries {} texels for a {width}x{height}x{depth} volume",
                 texels.len()
             )));
+        }
+        if !border_samplable(sampling.border) {
+            self.refused += 1;
+            return Err(BackendError::Unsupported {
+                command: BORDER_UNSAMPLABLE,
+            });
         }
         let bound = Some(BoundTexture {
             texels: std::sync::Arc::clone(texels),
