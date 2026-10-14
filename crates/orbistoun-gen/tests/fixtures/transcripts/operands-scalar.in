@@ -214,3 +214,15 @@ s_brev_b32 s0, s101
 s_brev_b32 s60, s13
 s_brev_b32 s7, 64
 s_brev_b32 s9, vcc_lo
+// The add with the condition code's carry in, and the program counter read, which
+// PPSA21564's vertex shaders run (SOP2 opcode 4, SOP1 opcode 31) to form an address from the
+// program's own place.
+s_addc_u32 s0, s0, s1
+s_addc_u32 s101, s5, s100
+s_addc_u32 s7, -1, s13
+s_addc_u32 s60, s9, 64
+s_addc_u32 s9, vcc_lo, s2
+s_getpc_b64 s[0:1]
+s_getpc_b64 s[100:101]
+s_getpc_b64 s[6:7]
+s_getpc_b64 s[60:61]

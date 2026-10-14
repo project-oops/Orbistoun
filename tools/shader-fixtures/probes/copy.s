@@ -548,3 +548,17 @@ v_mul_hi_u32 v200, s5, v9
 v_mul_hi_u32 v255, v12, s30
 v_mul_hi_u32 v9, -1, v77
 v_mul_hi_u32 v130, v88, 4
+// The ordered equal compare into the execution mask, which PPSA21564's fragment shader runs
+// (VOPC opcode 18). Varied vector, scalar and inline first sources.
+v_cmpx_eq_f32_e32 v4, v5
+v_cmpx_eq_f32_e32 s5, v190
+v_cmpx_eq_f32_e32 -1, v255
+v_cmpx_eq_f32_e32 0, v7
+v_cmpx_eq_f32_e32 v130, v12
+// A wrapping subtract, first source less second, which PPSA21564's vertex shaders run (VOP2
+// opcode 38), beside v_subrev_nc_u32's reverse. Varied sources.
+v_sub_nc_u32_e32 v0, s0, v0
+v_sub_nc_u32_e32 v200, v4, v9
+v_sub_nc_u32_e32 v255, -1, v130
+v_sub_nc_u32_e32 v9, 4, v77
+v_sub_nc_u32_e32 v130, v88, v255

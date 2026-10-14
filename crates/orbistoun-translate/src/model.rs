@@ -88,6 +88,7 @@ pub const SUPPORTED: &[&str] = &[
     "s_orn2_b64",
     "s_lshr_b32",
     "s_add_u32",
+    "s_addc_u32",
     "s_cselect_b32",
     "s_bitcmp1_b32",
     "s_and_saveexec_b64",
@@ -100,6 +101,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_bfrev_b32_e32",
     "v_cmpx_gt_f32_e32",
     "v_cmpx_lt_f32_e32",
+    "v_cmpx_eq_f32_e32",
     "v_cmpx_nlt_f32_e32",
     "v_cmpx_eq_i32_e32",
     "v_cmpx_gt_i32_e32",
@@ -167,6 +169,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_add_f32_e32",
     "v_add_f32_e64",
     "v_add_nc_u32_e32",
+    "v_sub_nc_u32_e32",
     "v_subrev_nc_u32_e32",
     "v_add_co_ci_u32_e32",
     "v_add_co_ci_u32_e64",
@@ -628,6 +631,7 @@ pub fn writes_condition_code(name: &str) -> bool {
             // The unsigned add sets it to the carry out; the bit test to the bit; the saving and
             // the count to whether the new mask or the count is non-zero.
             | "s_add_u32"
+            | "s_addc_u32"
             | "s_lshl1_add_u32"
             | "s_lshl2_add_u32"
             | "s_lshl3_add_u32"
@@ -2407,7 +2411,7 @@ fn scalar_instruction<M: Model + ?Sized>(
         // The 32-bit scalar arithmetic and logic, each of which writes the condition code as well
         // as its destination.
         "s_add_i32" | "s_sub_i32" | "s_and_b32" | "s_andn2_b32" | "s_or_b32" | "s_xor_b32"
-        | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_lshr_b32" | "s_add_u32"
+        | "s_lshl_b32" | "s_bfe_u32" | "s_mul_i32" | "s_lshr_b32" | "s_add_u32" | "s_addc_u32"
         | "s_lshl1_add_u32" | "s_lshl2_add_u32" | "s_lshl3_add_u32" | "s_lshl4_add_u32"
         | "s_cselect_b32" => scalar_integer(model, instruction, name),
 
@@ -2472,8 +2476,10 @@ fn vector_instruction<M: Model + ?Sized>(
             compare_long(model, instruction, name)
         }
         "v_cmpx_le_i16_e32" | "v_cmpx_neq_f32_e32" | "v_cmpx_gt_f32_e32" | "v_cmpx_lt_f32_e32"
-        | "v_cmpx_nlt_f32_e32" | "v_cmpx_eq_i32_e32" | "v_cmpx_gt_i32_e32"
-        | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" => compare_into_exec(model, instruction, name),
+        | "v_cmpx_nlt_f32_e32" | "v_cmpx_eq_f32_e32" | "v_cmpx_eq_i32_e32"
+        | "v_cmpx_gt_i32_e32" | "v_cmpx_gt_u32_e32" | "v_cmpx_le_i32_e32" => {
+            compare_into_exec(model, instruction, name)
+        }
 
         // The short-form select, whose mask is always the condition mask.
         "v_cndmask_b32_e32" => short_form_select(model, instruction),
@@ -2572,6 +2578,7 @@ fn vector_instruction<M: Model + ?Sized>(
         | "v_lshrrev_b32_e32"
         | "v_ashrrev_i32_e32"
         | "v_add_nc_u32_e32"
+        | "v_sub_nc_u32_e32"
         | "v_subrev_nc_u32_e32"
         | "v_fmac_f32_e32"
         | "v_or_b32_e32"
@@ -2798,6 +2805,8 @@ fn short_form_arithmetic<M: Model + ?Sized>(
             // Integer: address arithmetic, and shifts whose amount comes first; read in written
             // order, `v_lshlrev` would compute `2 << index` instead of `index << 2`.
             "v_add_nc_u32_e32" => model.binary(op::IADD, lhs, rhs),
+            // The first source less the second, wrapping.
+            "v_sub_nc_u32_e32" => model.binary(op::ISUB, lhs, rhs),
             // The second source less the first, wrapping: `D = S1 - S0`, as the name's `rev` says.
             "v_subrev_nc_u32_e32" => model.binary(op::ISUB, rhs, lhs),
             "v_or_b32_e32" => model.binary(op::BITWISE_OR, lhs, rhs),
@@ -2911,6 +2920,24 @@ fn bit_reverse<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// `S_ADDC_U32`: the sum of `left`, `right` and the condition code's carry in, and the carry out of
+/// either add, which becomes the condition code.
+fn scalar_add_with_carry<M: Model + ?Sized>(
+    model: &mut M,
+    left: Id,
+    right: Id,
+) -> (Id, Option<Id>) {
+    let carry_in = crate::control::read_condition_code(model, true);
+    let one = model.constant(1);
+    let zero = model.constant(0);
+    let carry_in = model.select(carry_in, one, zero);
+    let sum = model.add(left, right);
+    let result = model.add(sum, carry_in);
+    let first = model.compare(op::ULESS_THAN, sum, left);
+    let second = model.compare(op::ULESS_THAN, result, sum);
+    (result, Some(model.either(first, second)))
 }
 
 /// `s_brev_b32`: a scalar register's bits in reverse order. The condition code is untouched.
@@ -4158,6 +4185,7 @@ fn scalar_integer<M: Model + ?Sized>(
             let result = model.add(left, right);
             (result, Some(model.compare(op::ULESS_THAN, result, left)))
         }
+        "s_addc_u32" => scalar_add_with_carry(model, left, right),
         "s_lshl1_add_u32" => shift_and_add(model, (left, 1), right),
         "s_lshl2_add_u32" => shift_and_add(model, (left, 2), right),
         "s_lshl3_add_u32" => shift_and_add(model, (left, 3), right),
@@ -4416,6 +4444,7 @@ fn compare_into_exec<M: Model + ?Sized>(
         "v_cmpx_neq_f32_e32" => (op::FUNORD_NOT_EQUAL, 0),
         "v_cmpx_gt_f32_e32" => (op::FORD_GREATER_THAN, 0),
         "v_cmpx_lt_f32_e32" => (op::FORD_LESS_THAN, 0),
+        "v_cmpx_eq_f32_e32" => (op::FORD_EQUAL, 0),
         // Not less than: true for a NaN, as `v_cmp_nlt_f32` is.
         "v_cmpx_nlt_f32_e32" => (op::FUNORD_GREATER_THAN_EQUAL, 0),
         "v_cmpx_le_i16_e32" => (op::SLESS_THAN_EQUAL, 1),

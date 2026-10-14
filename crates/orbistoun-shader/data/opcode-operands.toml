@@ -456,6 +456,13 @@ operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { w
 
 [[opcode_operands]]
 family = "SOP1"
+opcode = 31
+mnemonic = "s_getpc_b64"
+samples = 4
+operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "SOP1"
 opcode = 36
 mnemonic = "s_and_saveexec_b64"
 samples = 5
@@ -487,6 +494,13 @@ family = "SOP2"
 opcode = 3
 mnemonic = "s_sub_i32"
 samples = 3
+operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
+
+[[opcode_operands]]
+family = "SOP2"
+opcode = 4
+mnemonic = "s_addc_u32"
+samples = 5
 operands = [{ word = 0, shift = 16, width = 7, kind = "source", scale = 1 }, { word = 0, shift = 0, width = 8, kind = "source", scale = 1 }, { word = 0, shift = 8, width = 8, kind = "source", scale = 1 }]
 
 [[opcode_operands]]
@@ -1016,6 +1030,13 @@ operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { wor
 
 [[opcode_operands]]
 family = "VOP2"
+opcode = 38
+mnemonic = "v_sub_nc_u32_e32"
+samples = 5
+operands = [{ word = 0, shift = 17, width = 8, kind = "vgpr", scale = 1 }, { word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOP2"
 opcode = 39
 mnemonic = "v_subrev_nc_u32_e32"
 samples = 4
@@ -1487,6 +1508,13 @@ operands = [{ word = 0, shift = 0, width = 0, kind = "implicit", scale = 1, impl
 family = "VOPC"
 opcode = 17
 mnemonic = "v_cmpx_lt_f32_e32"
+samples = 5
+operands = [{ word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
+
+[[opcode_operands]]
+family = "VOPC"
+opcode = 18
+mnemonic = "v_cmpx_eq_f32_e32"
 samples = 5
 operands = [{ word = 0, shift = 0, width = 9, kind = "source", scale = 1 }, { word = 0, shift = 9, width = 8, kind = "vgpr", scale = 1 }]
 

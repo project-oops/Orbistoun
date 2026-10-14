@@ -7318,6 +7318,33 @@ fn the_scalar_shift_add_select_test_and_count_compute_as_published() {
     );
 }
 
+/// The 64-bit scalar add as ACO forms an address from the program counter: `s_add_u32` on the low
+/// halves, `s_addc_u32` on the high halves taking its carry and giving its own; and `s_brev_b32`.
+#[test]
+fn the_scalar_add_with_carry_chains_two_halves() {
+    if !device_or_skip("the_scalar_add_with_carry_chains_two_halves") {
+        return;
+    }
+    let minus_one = 193;
+    let program = vec![
+        sop2("s_add_u32", 0, minus_one, 128 + 2),   // 1, carry out
+        sop2("s_addc_u32", 1, 128 + 5, 128),        // 5 + 0 + 1 = 6, no carry
+        sop2("s_cselect_b32", 2, 128 + 9, 128 + 4), // carry clear: 4
+        sop2("s_add_u32", 3, minus_one, 128 + 1),   // 0, carry out
+        sop2("s_addc_u32", 4, minus_one, 128),      // -1 + 0 + 1 = 0, carry out
+        sop2("s_cselect_b32", 5, 128 + 9, 128 + 4), // carry set: 9
+        sop1("s_brev_b32", 6, 128 + 1),             // 1 reversed: the top bit
+        s_endpgm(),
+    ];
+    let registers = run(&program);
+    assert_eq!(scalar(&registers, 0), 1);
+    assert_eq!(scalar(&registers, 1), 6, "the carry in");
+    assert_eq!(scalar(&registers, 2), 4, "no carry out of 6");
+    assert_eq!(scalar(&registers, 4), 0);
+    assert_eq!(scalar(&registers, 5), 9, "a carry out of the carry's add");
+    assert_eq!(scalar(&registers, 6), 0x8000_0000);
+}
+
 /// `s_and_saveexec_b64` keeps the execution mask it narrows: lanes 0 to 3 of an all-lane mask kept,
 /// the old mask saved, and only those lanes store.
 #[test]
