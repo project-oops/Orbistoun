@@ -885,6 +885,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAvPlayerClose", av_player::close),
         ("sceAvPlayerIsActive", av_player::is_active),
         ("sceAvPlayerStreamCount", av_player::stream_count),
+        ("sceAvPlayerPostInit", av_player::post_init),
         ("scePngDecQueryMemorySize", png_dec::query_memory_size),
         ("scePngDecCreate", png_dec::create),
         ("scePngDecParseHeader", png_dec::parse_header),

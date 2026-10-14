@@ -3,8 +3,8 @@
 //! The player's lifecycle is served as obSCEne measured it (`000-boot/avplayer-lifecycle`,
 //! REQ-20261012T2011Z-625e, `reports/hardware/report-20261014-batch2.log` 1427-1452): `InitEx`
 //! takes the player's memory through the caller's allocate callback and hands back the pointer it
-//! answered as the handle, `IsActive` and `StreamCount` answer for a player with no source, and
-//! `Close` frees through the deallocate callback. Adding a source, `PostInit`, and everything that
+//! answered as the handle, `IsActive`, `StreamCount` and `PostInit` answer for a player with no
+//! source, and `Close` frees through the deallocate callback. Adding a source and everything that
 //! decodes are declared only: no media stream is measured yet.
 //!
 //! Every arity is `6`, the trampoline's full capture, not a claim about how many arguments a
@@ -159,6 +159,18 @@ pub(crate) fn is_active(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     u64::from(players().contains_key(&args[0]))
 }
 
+/// `sceAvPlayerPostInit(handle, post)`: a player with no source refuses it with
+/// [`INVALID_ARGUMENT`], for the block `{0x800000 at +0, 1 at +8, 4 at +0x1c}` (`PostInit`) and for
+/// an all-zero one (`PostInit-all-zeros`) alike. PPSA02664 passes that first block, before adding a
+/// source. A handle `InitEx` did not open answers the placeholder.
+pub(crate) fn post_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if players().contains_key(&args[0]) {
+        INVALID_ARGUMENT
+    } else {
+        placeholder()
+    }
+}
+
 /// `sceAvPlayerStreamCount(handle)`: no source, no streams (`StreamCount-before-source 0`). A handle
 /// `InitEx` did not open answers the placeholder.
 pub(crate) fn stream_count(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -208,6 +220,7 @@ mod tests {
         args[0] = 0xdead_0000;
         assert_eq!(super::is_active(&args), 0);
         assert_ne!(super::stream_count(&args), 0);
+        assert_ne!(super::post_init(&args), 0x806a_0001);
         assert_ne!(super::close(&args), 0);
     }
 }

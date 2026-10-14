@@ -46,6 +46,20 @@ found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app
 found_on = "2026-10-14"
 
 [[function]]
+name = "sceAvPlayerPostInit"
+purpose = "Completes a player's set-up from a post-init block."
+returns = "status"
+edge_cases = [
+    "MEASURED: on a player with no source, the block {u32 0x800000 at +0, u32 1 at +8, u16 4 at +0x1c} answers 0x806a0001, and so does an all-zero block. PPSA02664 passes that first block before adding a source, and on the placeholder logs '[PS5VideoPlayback] ERROR: sceAvPlayerPostInit() failed'.",
+    "orbistoun answers 0x806a0001 for any block on a player it opened, since every player here has no source; a handle InitEx did not open answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, PostInit, PostInit-all-zeros)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-14"
+
+[[function]]
 name = "sceAvPlayerStreamCount"
 purpose = "How many streams a player's source holds."
 returns = "count"
