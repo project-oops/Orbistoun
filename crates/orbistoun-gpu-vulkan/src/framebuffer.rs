@@ -20,7 +20,7 @@ pub struct Pixels {
     /// Height in pixels, as asked for.
     pub height: u32,
     /// The bytes, tightly packed, as the attachment's format holds them: four per pixel for
-    /// `R8G8B8A8_UNORM`, red first, and [`texel_bytes`] per pixel for any other (D845).
+    /// `R8G8B8A8_UNORM`, red first, and as many as the format's texel takes for any other (D845).
     pub bytes: Vec<u8>,
 }
 
