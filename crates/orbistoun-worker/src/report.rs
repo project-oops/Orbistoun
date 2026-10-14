@@ -1327,6 +1327,14 @@ fn persist_fault_trace(
             // The same identifier the recorded calls carry, so the tail can be filtered to this
             // thread (D621).
             host_thread: Some(orbistoun_thunk::current_thread()),
+            last_call_here: orbistoun_thunk::last_call_on(orbistoun_thunk::current_thread()).map(
+                |(index, from, answer)| {
+                    format!(
+                        "{}() -> {answer:#x} from {from:#x}",
+                        labelled(index as usize)
+                    )
+                },
+            ),
             registers: Some(registers),
             pointees: describe_pointees(&registers),
             frames: walk_frames(registers.rbp),
@@ -2415,13 +2423,15 @@ fn waited_on(call: &str, first: u64) -> Option<String> {
     if let Ok(handle) = i32::try_from(first)
         && let Some(name) = sync::semaphore_name_of(handle)
     {
-        let count = sync::semaphore_count(handle).unwrap_or(0);
-        return Some(format!("semaphore {name:?} {first:#x} holding {count}"));
+        let (count, signals) = sync::semaphore_state(handle).unwrap_or((0, 0));
+        return Some(format!(
+            "semaphore {name:?} {first:#x} holding {count}, signalled {signals} time(s)"
+        ));
     }
     if let Some(name) = sync::event_flag_name_of(first) {
-        let (bits, waiting) = sync::event_flag_state(first).unwrap_or((0, 0));
+        let (bits, waiting, sets) = sync::event_flag_state(first).unwrap_or((0, 0, 0));
         return Some(format!(
-            "event flag {name:?} {first:#x} holding {bits:#x}, {waiting} waiting"
+            "event flag {name:?} {first:#x} holding {bits:#x}, {waiting} waiting, set {sets} time(s)"
         ));
     }
     if call.contains("OnAddressWait") && orbistoun_thunk::is_mapped(first) {

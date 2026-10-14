@@ -772,14 +772,14 @@ fn copy_source_lead(copy: Option<&TracedCall>, fault_address: u64) -> Option<Str
 ///
 /// With no thread recorded, the last few calls of the run.
 fn on_this_thread(trace: &CallTrace, faulted_on: Option<u64>) -> Vec<String> {
-    trace
+    let recorded = trace
         .tail
         .iter()
         .rev()
         .filter(|c| faulted_on.is_none_or(|t| c.thread == t))
         .take(4)
-        .map(|c| format!("{PRECEDED_BY}{}", traced_line(c)))
-        .collect()
+        .map(|c| format!("{PRECEDED_BY}{}", traced_line(c)));
+    last_call_here(trace).into_iter().chain(recorded).collect()
 }
 
 /// A few calls from other threads, labelled as another thread's.
@@ -816,14 +816,31 @@ fn preceding(trace: &CallTrace) -> Vec<String> {
         .filter(|c| faulted_on.is_some_and(|t| c.thread != t))
         .take(2)
         .collect();
-    mine.into_iter()
-        .map(|c| format!("{PRECEDED_BY}{}", traced_line(c)))
+    last_call_here(trace)
+        .into_iter()
+        .chain(
+            mine.into_iter()
+                .map(|c| format!("{PRECEDED_BY}{}", traced_line(c))),
+        )
         .chain(
             others
                 .into_iter()
                 .map(|c| format!("{PRECEDED_BY}{}  [another thread]", traced_line(c))),
         )
         .collect()
+}
+
+/// The faulting thread's own last call, when the recorded window holds none of its calls: the
+/// answer it acted on, however long before the fault it came (D832).
+fn last_call_here(trace: &CallTrace) -> Option<String> {
+    let faulted_on = trace.fault.as_ref().and_then(|f| f.host_thread)?;
+    if trace.tail.iter().any(|c| c.thread == faulted_on) {
+        return None;
+    }
+    let line = trace.fault.as_ref()?.last_call_here.as_ref()?;
+    Some(format!(
+        "{PRECEDED_BY}{line}  [this thread, before the recorded window]"
+    ))
 }
 
 /// A placeholder code being used by the guest as a pointer.
@@ -1986,6 +2003,7 @@ mod tests {
             instruction: Vec::new(),
             thread: None,
             host_thread: None,
+            last_call_here: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: code,
@@ -2210,6 +2228,7 @@ mod tests {
             instruction: Vec::new(),
             thread: None,
             host_thread: None,
+            last_call_here: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: placeholder_code(),
@@ -2240,6 +2259,7 @@ mod tests {
                 instruction,
                 thread: None,
                 host_thread: None,
+                last_call_here: None,
                 pointees: Vec::new(),
                 kind: "read of".to_owned(),
                 address: u64::MAX, // the general-protection read a trap raises
@@ -2309,6 +2329,47 @@ mod tests {
         );
     }
 
+    /// A fault on a thread none of whose calls is in the recorded window is led by that thread's own
+    /// last call, the answer its code may have acted on, ahead of other threads' calls (D832).
+    #[test]
+    fn a_fault_names_its_own_threads_last_call_from_before_the_window() {
+        let mut trace = empty();
+        trace.total_calls = 100;
+        let mut other = call("libkernel::sceKernelUsleep", 0x1e);
+        other.thread = 9;
+        trace.tail = vec![other];
+        trace.fault = Some(FaultSite {
+            instruction: vec![0xcd, 0x41],
+            thread: Some(1),
+            host_thread: Some(5),
+            last_call_here: Some(
+                "libSceVoice::sceVoiceInit() -> 0xf7ff0004 from 0x4000".to_owned(),
+            ),
+            pointees: Vec::new(),
+            kind: "read of".to_owned(),
+            address: u64::MAX,
+            instruction_pointer: 0x4000_0000_1234,
+            region: Some("image".to_owned()),
+            offset: Some(0x1234),
+            inside_import: None,
+            registers: None,
+            frames: Vec::new(),
+        });
+        let evidence: Vec<String> = findings(&trace)
+            .into_iter()
+            .flat_map(|f| f.evidence)
+            .collect();
+        let first = evidence
+            .iter()
+            .position(|e| e.contains("sceVoiceInit") && e.contains("[this thread"))
+            .expect("the faulting thread's last call is named");
+        let other_thread = evidence
+            .iter()
+            .position(|e| e.contains("[another thread]"))
+            .expect("another thread's call is still named");
+        assert!(first < other_thread, "this thread's call leads");
+    }
+
     /// A null dereference routes itself to the call that answered zero, and falls back to the
     /// general search when nothing in the trace answered the base.
     #[test]
@@ -2323,6 +2384,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x40, 0x38], // mov rax, [rax+0x38]
             thread: Some(1),
             host_thread: Some(0),
+            last_call_here: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0x38,
@@ -2363,6 +2425,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x00],
             thread: Some(1),
             host_thread: Some(0),
+            last_call_here: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0x38,
@@ -2400,6 +2463,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x00], // an ordinary read, not a trap
             thread: Some(1),
             host_thread: Some(0),
+            last_call_here: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0xa8,
@@ -2446,6 +2510,7 @@ mod tests {
             instruction: vec![0x48, 0x8b, 0x00],
             thread: Some(1),
             host_thread: Some(0),
+            last_call_here: None,
             pointees: Vec::new(),
             kind: "read of".to_owned(),
             address: 0xa8,

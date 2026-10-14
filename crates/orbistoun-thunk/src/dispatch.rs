@@ -1530,6 +1530,7 @@ unsafe extern "sysv64" fn on_guest_call(
     }
 
     record_return(sequence, answer);
+    publish_last(index, call_site(entry_rsp), answer);
 
     answer
 }
@@ -1569,6 +1570,15 @@ static PUBLISHED_FIRST: [AtomicU64; PUBLISHED_THREADS] =
 /// The guest stack pointer at that call, whose top word is where the call returns to.
 static PUBLISHED_RSP: [AtomicU64; PUBLISHED_THREADS] =
     [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+/// The import each published thread called last, plus one; zero before its first call returns.
+static PUBLISHED_LAST: [AtomicU32; PUBLISHED_THREADS] =
+    [const { AtomicU32::new(0) }; PUBLISHED_THREADS];
+/// Where that call returned to.
+static PUBLISHED_LAST_FROM: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
+/// What it answered.
+static PUBLISHED_LAST_ANSWER: [AtomicU64; PUBLISHED_THREADS] =
+    [const { AtomicU64::new(0) }; PUBLISHED_THREADS];
 /// The next slot a thread claims.
 static PUBLISHED_CLAIMED: AtomicUsize = AtomicUsize::new(0);
 
@@ -1577,12 +1587,9 @@ thread_local! {
     static PUBLISHED_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Publishes what this thread is inside, the call's first argument and the guest stack pointer at
-/// the call, so another thread - the report - can say what a quiet thread is blocked in, on what
-/// (D806) and called from where, answering the argument and stack pointer published before. Three
-/// relaxed stores a call end, and a slot claimed on a thread's first call.
-fn publish_inside(value: u32, (first, rsp): (u64, u64)) -> (u64, u64) {
-    let slot = PUBLISHED_SLOT.with(|slot| {
+/// This thread's slot in the published table, claimed on its first use.
+fn published_slot() -> usize {
+    PUBLISHED_SLOT.with(|slot| {
         if slot.get() == 0 {
             let claimed = PUBLISHED_CLAIMED.fetch_add(1, Ordering::Relaxed);
             if claimed < PUBLISHED_THREADS {
@@ -1591,7 +1598,51 @@ fn publish_inside(value: u32, (first, rsp): (u64, u64)) -> (u64, u64) {
             slot.set(claimed + 1);
         }
         slot.get() - 1
-    });
+    })
+}
+
+/// Publishes the call this thread made last, where it returned to and what it answered, so a fault
+/// on the thread can name the answer it acted on after the ring has moved on (D832). Three relaxed
+/// stores a call.
+fn publish_last(index: u64, from: u64, answer: u64) {
+    let slot = published_slot();
+    if let (Some(last), Some(at), Some(answered)) = (
+        PUBLISHED_LAST.get(slot),
+        PUBLISHED_LAST_FROM.get(slot),
+        PUBLISHED_LAST_ANSWER.get(slot),
+    ) {
+        at.store(from, Ordering::Relaxed);
+        answered.store(answer, Ordering::Relaxed);
+        last.store(
+            u32::try_from(index + 1).unwrap_or(u32::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
+
+/// The last call the host thread `host` made, as `(import, returned to, answer)`, if it made one.
+#[must_use]
+pub fn last_call_on(host: u64) -> Option<(u32, u64, u64)> {
+    let claimed = PUBLISHED_CLAIMED
+        .load(Ordering::Relaxed)
+        .min(PUBLISHED_THREADS);
+    let slot = (0..claimed).find(|&slot| PUBLISHED_HOST[slot].load(Ordering::Relaxed) == host)?;
+    let index = PUBLISHED_LAST[slot]
+        .load(Ordering::Relaxed)
+        .checked_sub(1)?;
+    Some((
+        index,
+        PUBLISHED_LAST_FROM[slot].load(Ordering::Relaxed),
+        PUBLISHED_LAST_ANSWER[slot].load(Ordering::Relaxed),
+    ))
+}
+
+/// Publishes what this thread is inside, the call's first argument and the guest stack pointer at
+/// the call, so another thread - the report - can say what a quiet thread is blocked in, on what
+/// (D806) and called from where, answering the argument and stack pointer published before. Three
+/// relaxed stores a call end, and a slot claimed on a thread's first call.
+fn publish_inside(value: u32, (first, rsp): (u64, u64)) -> (u64, u64) {
+    let slot = published_slot();
     if let Some(published) = PUBLISHED_INSIDE.get(slot) {
         published.store(value, Ordering::Relaxed);
     }
@@ -1907,6 +1958,33 @@ mod tests {
         install_float_handlers, is_implemented, trampoline_address,
     };
     use std::sync::atomic::Ordering;
+
+    /// A thread's last call is published with where it came from and what it answered, however
+    /// long ago the ring overwrote it, so a fault on a thread can name the answer it acted on (D832).
+    #[test]
+    fn a_threads_last_call_is_published_with_its_answer() {
+        let (host, last) = std::thread::spawn(|| {
+            super::publish_last(7, 0x4000_0000_1234, 0xf7ff_0004);
+            super::publish_last(9, 0x4000_0000_5678, 0);
+            (
+                super::host_thread(),
+                super::last_call_on(super::host_thread()),
+            )
+        })
+        .join()
+        .expect("the thread ran");
+        assert_ne!(host, 0);
+        assert_eq!(
+            last,
+            Some((9, 0x4000_0000_5678, 0)),
+            "the newest, not the first"
+        );
+        assert_eq!(
+            super::last_call_on(0xdead),
+            None,
+            "a thread that never called"
+        );
+    }
 
     /// A thread inside an import is published as inside it, so a report read on another thread
     /// names what a thread blocked in a call is blocked in (D806); leaving it unpublishes it.

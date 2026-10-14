@@ -393,6 +393,10 @@ pub struct FaultSite {
     /// the thread that faulted (D621).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_thread: Option<u64>,
+    /// The faulting thread's last call, its answer and where it returned to, however long before
+    /// the fault: the answer the faulting code may have acted on (D832).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_call_here: Option<String>,
     /// Which guest thread faulted, as the guest's own handle for it.
     ///
     /// The call tail shows every thread, so this says which one the fault was on (D621).
@@ -1774,6 +1778,7 @@ mod tests {
                 instruction: Vec::new(),
                 thread: None,
                 host_thread: None,
+                last_call_here: None,
                 pointees: Vec::new(),
                 kind: "read of".to_owned(),
                 address: 0,
