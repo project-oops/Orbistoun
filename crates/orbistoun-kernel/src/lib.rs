@@ -1732,8 +1732,19 @@ fn batch_map(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
             outcome = u64::from(GuestError::InvalidArgument.as_raw());
             break;
         };
-        // `prot` is the low byte of the word at offset 24; the padding and `flags` bytes are not read.
+        // `prot` is the low byte of the word at offset 24; the four bytes at 28 name the operation,
+        // and only a map (0) is modelled. Anything else is refused by name rather than mapped:
+        // carrying out an unmap or a protect as a map places memory the guest asked to remove
+        // (D838).
         let prot = prot_word & 0xff;
+        let operation = (prot_word >> 32) as u32;
+        if operation != 0 {
+            tracing::warn!(
+                "sceKernelBatchMap entry {index} at {vaddr:#x}+{len:#x}: operation {operation} is not modelled, so it and the entries after it are not carried out"
+            );
+            outcome = u64::from(GuestError::Unimplemented.as_raw());
+            break;
+        }
         run = match run {
             Some((v, p, l, pr, n))
                 if pr == prot
@@ -8612,6 +8623,51 @@ mod tests {
             seen, 0x5eed,
             "and holds what was written through the batch map"
         );
+    }
+
+    /// An entry whose operation is not a map is refused and nothing of it is placed: the entries
+    /// before it are mapped and counted, it and those after it are not, and the call answers the
+    /// placeholder rather than mapping what may be an unmap (D838).
+    #[test]
+    fn a_batch_entry_that_is_not_a_map_is_refused() {
+        const PAGE: u64 = 0x4000;
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 4 * PAGE;
+        args[1] = 4 * PAGE;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+        let va = 0x6e60_0000_0000_u64;
+        // The protection's word carries the operation in its high half: 0 maps, 1 does not.
+        let entries: Vec<u64> = vec![
+            va,
+            physical,
+            PAGE,
+            0x33,
+            va + 2 * PAGE,
+            physical + PAGE,
+            PAGE,
+            0x33 | (1 << 32),
+        ];
+        let mut completed = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = entries.as_ptr() as usize as u64;
+        args[1] = 2;
+        args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+        assert_eq!(
+            super::batch_map(&args),
+            u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+            "an operation that is not a map is not carried out as one"
+        );
+        assert_eq!(completed, 1, "the map before it was");
+        let placed = super::mappings()
+            .lock()
+            .is_ok_and(|space| space.region_at(va + 2 * PAGE).is_some());
+        assert!(!placed, "nothing is placed for the refused entry");
     }
 
     /// A buffer batch-mapped in two batches, as oops-mesa's winsys maps a GPU address, is released
