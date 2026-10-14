@@ -1521,10 +1521,11 @@ fn log_execution() {
     if record.submissions == 0 {
         return;
     }
+    let body = record.last.map(|l| l.stopped_body).unwrap_or_default();
     let last = match record.last.map(|l| l.stopped) {
         Some(orbistoun_gpu::cp::Stopped::Completed) | None => "ran to completion".to_owned(),
         Some(orbistoun_gpu::cp::Stopped::NeedsGpu { offset, opcode }) => format!(
-            "stopped at byte {offset:#x}: opcode {opcode:#04x} needs the GPU, so nothing after it retired"
+            "stopped at byte {offset:#x}: opcode {opcode:#04x} (body {body:08x?}) needs the GPU, so nothing after it retired"
         ),
         Some(other) => format!("stopped: {other:?}"),
     };

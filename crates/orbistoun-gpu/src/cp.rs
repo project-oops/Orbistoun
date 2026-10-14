@@ -302,6 +302,23 @@ pub struct CpExecution {
     pub bytes_written: u64,
     /// Where it stopped.
     pub stopped: Stopped,
+    /// The first words of the body of the packet it stopped at, zero past its end, when it stopped
+    /// at one that needs the GPU: what a report shows of the packet, so its form is read from the
+    /// run rather than reconstructed.
+    pub stopped_body: [u32; STOPPED_BODY_WORDS],
+}
+
+/// How many body words of a packet that stopped execution are kept ([`CpExecution::stopped_body`]):
+/// enough for the control word and two addresses of the memory-writing packets.
+pub const STOPPED_BODY_WORDS: usize = 6;
+
+/// The first [`STOPPED_BODY_WORDS`] words of a packet body, zero past its end.
+fn body_head(bytes: &[u8]) -> [u32; STOPPED_BODY_WORDS] {
+    let mut head = [0; STOPPED_BODY_WORDS];
+    for (word, chunk) in head.iter_mut().zip(bytes.chunks_exact(4)) {
+        *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    head
 }
 
 /// Opcodes with no effect on memory: register state, no-ops, and cache control.
@@ -366,6 +383,7 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
                 && !memory.run_draws(segment)
             {
                 result.stopped = Stopped::NeedsGpu { offset, opcode };
+                result.stopped_body = body_head(bytes);
                 return result;
             }
             result.draws += 1;
@@ -418,6 +436,9 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
                 },
                 Stop::Malformed => Stopped::Malformed { offset },
             };
+            if matches!(result.stopped, Stopped::NeedsGpu { .. }) {
+                result.stopped_body = body_head(bytes);
+            }
             return result;
         }
     }
@@ -1011,6 +1032,31 @@ mod tests {
         let ran = execute(&bytes(&zpass(0x2000)), &mut memory);
         assert!(matches!(ran.stopped, Stopped::NeedsGpu { .. }));
         assert_eq!(memory.word(0x2000), 0);
+    }
+
+    /// A packet that needs the GPU leaves its first body words in the record, so a report shows
+    /// what it asked for: here radeonsi's legacy streamout begin, `STRMOUT_BUFFER_UPDATE` with
+    /// control `0x80` (`si_state_streamout.c:334-340`), as GCTS00001 submits it.
+    #[test]
+    fn a_stop_keeps_the_body_of_the_packet_it_stopped_at() {
+        const STRMOUT_BUFFER_UPDATE: u8 = 0x34;
+        let stream = [
+            command_header(STRMOUT_BUFFER_UPDATE, 5),
+            0x80,
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+        ];
+        let ran = execute(&bytes(&stream), &mut Fake::default());
+        assert_eq!(
+            ran.stopped,
+            Stopped::NeedsGpu {
+                offset: 0,
+                opcode: STRMOUT_BUFFER_UPDATE
+            }
+        );
+        assert_eq!(ran.stopped_body, [0x80, 0x11, 0x22, 0x33, 0x44, 0]);
     }
 
     /// A release that lands reports its address and interrupt context id, which is how a flip
