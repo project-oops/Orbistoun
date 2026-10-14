@@ -369,6 +369,10 @@ enum Command {
         /// the data root's `ab` directory from a clean export, and kept for the next comparison.
         #[arg(long)]
         against: Option<String>,
+        /// Measure the `--against` revision with these working-tree files laid over it, rather than
+        /// this build: the change alone, without whatever else a shared working tree holds.
+        #[arg(long, num_args = 1.., requires = "against")]
+        with: Vec<std::path::PathBuf>,
         /// Seconds of each run to record: the title's `perf_seconds` setting, else 30.
         #[arg(long)]
         seconds: Option<u64>,
@@ -1066,6 +1070,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             path,
             baseline,
             against,
+            with,
             seconds,
             rounds,
             top,
@@ -1073,7 +1078,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             no_warm_up,
         } => perf::cmd_ab(
             &path,
-            (baseline.as_deref(), against.as_deref()),
+            (baseline.as_deref(), against.as_deref(), &with),
             (seconds, rounds, top),
             (input.as_deref(), !no_warm_up),
         )?,

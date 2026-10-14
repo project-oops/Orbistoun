@@ -168,7 +168,10 @@ beside one says so the same way: a title bound by its guest thread loses a quart
 rate beside ten busy cores, so compare its frame rate only with a run made beside the same load -
 `ab`, which alternates the builds, does.
 Change the build in a `git archive` export rather than the shared working tree: another session's
-uncommitted edits there go into whatever is built from it.
+uncommitted edits there go into whatever is built from it. `ab --against HEAD --with <file>...`
+does that: it measures `HEAD` against `HEAD` with only the named files taken from the working tree,
+both built from exports. A file that also holds another session's hunks brings them with it - look
+at its diff first.
 
 ## Recording what a turn produced
 

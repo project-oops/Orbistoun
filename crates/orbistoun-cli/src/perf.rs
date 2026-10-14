@@ -276,7 +276,7 @@ impl BenchEntry {
 /// first each round, puts both builds through the same drift.
 pub(crate) fn cmd_ab(
     path: &Path,
-    (baseline, against): (Option<&Path>, Option<&str>),
+    (baseline, against, with): (Option<&Path>, Option<&str>, &[PathBuf]),
     (seconds, rounds, top): (Option<u64>, usize, usize),
     (input, warm_up): (Option<&Path>, bool),
 ) -> Result<()> {
@@ -289,6 +289,13 @@ pub(crate) fn cmd_ab(
         }
         (None, None) => anyhow::bail!("name a baseline build or a revision to build one from"),
     };
+    // The revision with the named files, rather than this build and all the working tree holds.
+    let candidate = match (against, with.is_empty()) {
+        (_, true) => None,
+        (Some(revision), false) => Some(build_revision_with(revision, with)?),
+        (None, false) => anyhow::bail!("--with lays files over a revision: name it with --against"),
+    };
+    let candidate = candidate.as_deref();
     anyhow::ensure!(
         baseline.is_file(),
         "no baseline build at {}",
@@ -302,13 +309,9 @@ pub(crate) fn cmd_ab(
     // A build's first run after it was built fills the shader and pipeline caches its later runs
     // take from, and whichever went first would pay for it alone (NVRB00001: 4.3 fps cold, 7.2 and
     // 7.6 warm). Each runs once uncounted.
+    let builds = [("baseline", Some(baseline)), ("this build", candidate)];
     if warm_up {
-        for exe in [Some(baseline), None] {
-            let which = if exe.is_some() {
-                "baseline"
-            } else {
-                "this build"
-            };
+        for (which, exe) in builds {
             println!("warming up: {which}, {} s", seconds.min(WARM_UP_SECONDS));
             record(&tools, path, seconds.min(WARM_UP_SECONDS), input, exe)?;
         }
@@ -317,23 +320,18 @@ pub(crate) fn cmd_ab(
     let mut beside = Vec::new();
     for round in 0..rounds {
         let order = if round % 2 == 0 {
-            [Some(baseline), None]
+            builds
         } else {
-            [None, Some(baseline)]
+            [builds[1], builds[0]]
         };
-        for exe in order {
-            let which = if exe.is_some() {
-                "baseline"
-            } else {
-                "this build"
-            };
+        for (which, exe) in order {
             println!("round {}/{rounds}: {which}, {seconds} s", round + 1);
             if let Some(line) = before_measuring() {
                 beside.push(format!("round {} ({which}) {line}\n", round + 1));
             }
             let recorded = record(&tools, path, seconds, input, exe)?;
             let entry = BenchEntry::of(which.to_owned(), recorded);
-            if exe.is_some() {
+            if which == builds[0].0 {
                 before.push(entry);
             } else {
                 after.push(entry);
@@ -369,6 +367,23 @@ fn build_revision(revision: &str) -> Result<PathBuf> {
     orbistoun_perf::baseline::build_at(
         &std::env::current_dir().context("finding the repository")?,
         revision,
+        &dir,
+    )
+    .map_err(anyhow::Error::msg)
+}
+
+/// [`build_revision`] with `files` laid over it as the working tree holds them.
+fn build_revision_with(revision: &str, files: &[PathBuf]) -> Result<PathBuf> {
+    let dir = orbistoun_paths::Paths::resolve().data_root().join("ab");
+    println!(
+        "building {revision} with {} file(s) into {}",
+        files.len(),
+        dir.display()
+    );
+    orbistoun_perf::baseline::build_with(
+        &std::env::current_dir().context("finding the repository")?,
+        revision,
+        files,
         &dir,
     )
     .map_err(anyhow::Error::msg)
