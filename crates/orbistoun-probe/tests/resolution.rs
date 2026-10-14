@@ -75,6 +75,51 @@ fn a_function_no_row_names_is_not_decisive_alone() {
     assert_eq!(decisive, [false, true, true]);
 }
 
+/// A section the outcome cites whose own set-up failed - a call answering -1 - and that reports
+/// measurements after it, measured nothing: ix01's stored vertex ids followed
+/// `queue-create-rc 0xffffffff`. A section that stops at its failure is a `not-possible`, not a
+/// claim.
+#[test]
+fn measurements_after_a_failed_set_up_are_unbacked() {
+    let rows = concat!(
+        "OBS|measure|000-boot/ids|setup|fn-create-queue-bound|0x0|bool\n",
+        "OBS|measure|000-boot/ids|gpu|queue-create-rc|0xffffffff|code\n",
+        "OBS|measure|000-boot/ids|arm1|stored-id-0|0x0|id\n",
+        "OBS|measure|000-boot/np|sceNpThing|bound|0x0|bool\n",
+        "OBS|measure|000-boot/np|sceNpThing|status|0x0|not-possible\n",
+    );
+    let outcome = "measured in `000-boot/ids` and `000-boot/np`: ids `{0, 1, 2}`";
+    assert_eq!(
+        unbacked(outcome, rows),
+        [Unbacked::AfterFailedSetUp(
+            "000-boot/ids: queue-create-rc 0xffffffff, then stored-id-0".into()
+        )]
+    );
+}
+
+/// A row an outcome quotes must be in the log it cites, word for word: gp02 quoted
+/// `fn-create-queue-bound|0x1` where its log holds `0x0`.
+#[test]
+fn a_quoted_row_the_log_does_not_hold_is_unbacked() {
+    let rows = concat!(
+        "OBS|measure|000-boot/q|setup|fn-create-queue-bound|0x0|bool\n",
+        "OBS|measure|000-boot/q|setup|handle|0x9|handle\n",
+    );
+    let outcome = concat!(
+        "  - rows:\n",
+        "    ```\n",
+        "    OBS|measure|000-boot/q|setup|handle|0x9|handle\n",
+        "    OBS|measure|000-boot/q|setup|fn-create-queue-bound|0x1|bool\n",
+        "    ```\n",
+    );
+    assert_eq!(
+        unbacked(outcome, rows),
+        [Unbacked::QuotedRowAbsent(
+            "OBS|measure|000-boot/q|setup|fn-create-queue-bound|0x1|bool".into()
+        )]
+    );
+}
+
 #[test]
 fn a_claim_the_rows_hold_is_backed() {
     let claims = unbacked("`sceSaveDataInitialize3` answers `0x809f0001`", LOG);

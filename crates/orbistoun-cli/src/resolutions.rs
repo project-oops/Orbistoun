@@ -63,6 +63,17 @@ pub(crate) fn cmd_resolutions(
             if !never.is_empty() {
                 problems.push(format!("never bound {never}"));
             }
+            for claim in &claims {
+                match claim {
+                    Unbacked::AfterFailedSetUp(what) => {
+                        problems.push(format!("measured after a failed set-up - {what}"));
+                    }
+                    Unbacked::QuotedRowAbsent(row) => {
+                        problems.push(format!("quotes a row its log does not hold: {row}"));
+                    }
+                    _ => {}
+                }
+            }
             if !unnamed.is_empty() {
                 notes.push(format!(
                     "no row names {unnamed} (rows may use a key of their own)"

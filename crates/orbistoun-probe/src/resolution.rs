@@ -23,9 +23,14 @@ pub enum Unbacked {
     Absent(String),
     /// A function whose only rows say it never bound.
     NeverBound(String),
-    /// A function no row names. Weaker than the other two: a probe may label a call's rows by a
-    /// short key of its own (`ime-dialog|abort-rc`) rather than by the function.
+    /// A function no row names. Weaker than the others: a probe may label a call's rows by a short
+    /// key of its own (`ime-dialog|abort-rc`) rather than by the function.
     Unnamed(String),
+    /// A section the outcome cites that reports measurements after its own set-up failed, as
+    /// `section: the failing row, then the first measurement after it`.
+    AfterFailedSetUp(String),
+    /// An `OBS|` row the outcome quotes that no cited log holds, word for word.
+    QuotedRowAbsent(String),
 }
 
 impl Unbacked {
@@ -133,7 +138,9 @@ fn cited_logs(block: &[&str]) -> Vec<String> {
     logs
 }
 
-/// The claims of `outcome` the rows of `log` do not back, in the order the outcome makes them.
+/// The claims of `outcome` the rows of `log` do not back, in the order the outcome makes them,
+/// then each section it cites that measured after its own set-up failed ([`after_failed_set_up`]),
+/// then each row it quotes that the log does not hold ([`quoted_rows_absent`]).
 ///
 /// A claim is a status code (`0x8` and seven more hex digits) or a platform function (`sce`
 /// followed by a capital). A code is backed by any row holding it; a function by any row naming
@@ -168,7 +175,85 @@ pub fn unbacked(outcome: &str, log: &str) -> Vec<Unbacked> {
                 None
             }
         })
+        .chain(after_failed_set_up(outcome, &rows))
+        .chain(quoted_rows_absent(outcome, log))
         .collect()
+}
+
+/// Each `OBS|` row `outcome` quotes, from `OBS|` to the end of its line, that no line of `log`
+/// holds: a quotation of a row the log does not have is not evidence of anything.
+fn quoted_rows_absent(outcome: &str, log: &str) -> Vec<Unbacked> {
+    let held: std::collections::HashSet<&str> = log
+        .lines()
+        .filter_map(|line| line.find("OBS|").map(|at| line[at..].trim_end()))
+        .collect();
+    outcome
+        .lines()
+        .filter_map(|line| line.find("OBS|").map(|at| line[at..].trim_end()))
+        // A row quoted inline ends at its closing backtick.
+        .map(|row| row.split('`').next().unwrap_or(row))
+        .filter(|row| !held.contains(row))
+        .map(|row| Unbacked::QuotedRowAbsent(row.to_owned()))
+        .collect()
+}
+
+/// Each section `outcome` cites (`000-boot/ge-indx-offset`) whose rows, in order, hold a failed
+/// set-up - a call answering -1 - followed by a measurement that is not itself set-up. Nothing
+/// after a set-up that failed ran, so such a measurement is not one; a section that stops at its
+/// failure is a `not-possible`, and is not reported. A function that did not bind is not a failed
+/// set-up by itself: ue01's section measured `CreateEvent` beside a `PostEvent` that never bound.
+fn after_failed_set_up(outcome: &str, rows: &[Vec<&str>]) -> Vec<Unbacked> {
+    let mut sections: Vec<&str> = Vec::new();
+    for word in outcome.split(|c: char| !(c.is_ascii_alphanumeric() || "/-_".contains(c))) {
+        if is_section(word) && !sections.contains(&word) {
+            sections.push(word);
+        }
+    }
+    sections
+        .into_iter()
+        .filter_map(|section| {
+            let mut failed: Option<(&str, &str)> = None;
+            for row in rows {
+                let [_, "measure", at, _, key, value, ..] = row.as_slice() else {
+                    continue;
+                };
+                if *at != section {
+                    continue;
+                }
+                match failed {
+                    None if failed_set_up(key, value) => failed = Some((key, value)),
+                    Some((why, was)) if !is_set_up(key) => {
+                        return Some(Unbacked::AfterFailedSetUp(format!(
+                            "{section}: {why} {was}, then {key}"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// A probe section's name: three digits, a dash, then a path (`000-boot/ge-indx-offset`).
+fn is_section(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    bytes.len() > 5
+        && bytes[..3].iter().all(u8::is_ascii_digit)
+        && bytes[3] == b'-'
+        && word.contains('/')
+}
+
+/// Whether a row's key names set-up: binding a function, or a call's return code.
+fn is_set_up(key: &str) -> bool {
+    ["bound", "resolved", "status", "how", "rc"]
+        .iter()
+        .any(|word| key == *word || key.ends_with(&format!("-{word}")))
+}
+
+/// Whether a set-up row says it failed: a call answered -1.
+fn failed_set_up(key: &str, value: &str) -> bool {
+    (key == "rc" || key.ends_with("-rc")) && matches!(value, "0xffffffff" | "0xffffffffffffffff")
 }
 
 /// A status code as the platform writes one: `0x8` and seven more hex digits.
