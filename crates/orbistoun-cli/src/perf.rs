@@ -169,9 +169,11 @@ pub(crate) fn cmd_perf(
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
     let seconds = run_seconds(&title, seconds);
+    let beside = before_measuring();
     let recorded = record(&tools, path, seconds, input, None)?;
     let text = format!(
-        "{}  {} zones, {:.1} s recorded, {:.1} fps by the capture's own count\n\n{}",
+        "{}{}  {} zones, {:.1} s recorded, {:.1} fps by the capture's own count\n\n{}",
+        beside.map(|line| format!("{line}\n")).unwrap_or_default(),
         recorded.trace.display(),
         recorded.summary.zones,
         recorded.summary.seconds,
@@ -312,6 +314,7 @@ pub(crate) fn cmd_ab(
         }
     }
     let (mut before, mut after) = (Vec::new(), Vec::new());
+    let mut beside = Vec::new();
     for round in 0..rounds {
         let order = if round % 2 == 0 {
             [Some(baseline), None]
@@ -325,6 +328,9 @@ pub(crate) fn cmd_ab(
                 "this build"
             };
             println!("round {}/{rounds}: {which}, {seconds} s", round + 1);
+            if let Some(line) = before_measuring() {
+                beside.push(format!("round {} ({which}) {line}\n", round + 1));
+            }
             let recorded = record(&tools, path, seconds, input, exe)?;
             let entry = BenchEntry::of(which.to_owned(), recorded);
             if exe.is_some() {
@@ -335,9 +341,10 @@ pub(crate) fn cmd_ab(
         }
     }
     let text = format!(
-        "{} against {}\n\n{}",
+        "{} against {}\n{}\n{}",
         path.display(),
         baseline.display(),
+        beside.concat(),
         render_ab(&before, &after, top)
     );
     println!("\n{text}");
@@ -487,6 +494,17 @@ fn gpu_still_busy() -> Option<f64> {
         println!("  something else is using {busy:.0}% of the GPU; waiting");
         std::thread::sleep(GPU_ASKED_EVERY);
     }
+}
+
+/// Waits, as a benchmark does, for something else to stop using the GPU before a measured run;
+/// when it does not, the line the run's report carries, since the run measures that too. Another
+/// session's run on the same device once made one in three runs of a title 2.7 times slower, its
+/// device time per dispatch 23 ms rather than 10 (PPSA28061).
+fn before_measuring() -> Option<String> {
+    let busy = gpu_still_busy()?;
+    let line = format!("measured beside something else using {busy:.0}% of the GPU");
+    println!("  {line}");
+    Some(line)
 }
 
 /// The most of the GPU something else may be using for a benchmark to measure. An idle desktop
