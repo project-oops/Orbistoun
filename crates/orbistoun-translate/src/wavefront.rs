@@ -915,6 +915,8 @@ pub enum Interpolation {
     Smooth,
     /// The provoking vertex's value, everywhere. `Flat`.
     Flat,
+    /// Interpolated linearly in screen space, from the `LINEAR_*` barycentrics. `NoPerspective`.
+    NoPerspective,
 }
 
 /// Declares that the module's 32-bit arithmetic keeps signed zeros, infinities and NaNs, as the
@@ -1140,8 +1142,14 @@ fn declare_attribute_inputs(
             input_controls::Source::Output(location) => {
                 b.annotate(op::DECORATE, &[variable.0, decoration::LOCATION, location]);
                 // Smooth is what an undecorated input does, so it takes no decoration.
-                if input.how == Interpolation::Flat {
-                    b.annotate(op::DECORATE, &[variable.0, decoration::FLAT]);
+                match input.how {
+                    Interpolation::Flat => {
+                        b.annotate(op::DECORATE, &[variable.0, decoration::FLAT]);
+                    }
+                    Interpolation::NoPerspective => {
+                        b.annotate(op::DECORATE, &[variable.0, decoration::NO_PERSPECTIVE]);
+                    }
+                    Interpolation::Smooth => {}
                 }
                 b.declare(op::VARIABLE, &[input_ptr.0, variable.0, INPUT]);
             }
@@ -5910,11 +5918,26 @@ fn offset_or_null(operand: &Operand) -> Option<i64> {
 fn interpolated_attributes(
     decode: &Decode,
     encodings: &EncodingTable,
-    twins: Option<FlatTwins>,
+    (twins, pixel_inputs): (Option<FlatTwins>, Option<PixelInputs>),
 ) -> Result<Vec<(u32, Interpolation)>, TranslateError> {
     let read = attribute_reads(decode, encodings);
+    // Which interpolated attributes read the linear barycentrics, where the shader loads any.
+    let linear = match pixel_inputs.filter(|inputs| inputs.reads_linear()) {
+        Some(inputs) => linear_attributes(decode, encodings, inputs)?,
+        None => Vec::new(),
+    };
     let mut inputs = Vec::new();
     for (attribute, smooth, flat) in read {
+        if smooth && !flat && linear.contains(&attribute) {
+            inputs.push((attribute, Interpolation::NoPerspective));
+            continue;
+        }
+        if smooth && flat && linear.contains(&attribute) {
+            return Err(TranslateError::Unsupported {
+                offset: 0,
+                detail: "an attribute read both flat and without perspective is not translated",
+            });
+        }
         match (smooth, flat) {
             (true, true) => {
                 // Both: the attribute's own location interpolates, and its flat reads take the
@@ -5930,6 +5953,76 @@ fn interpolated_attributes(
         }
     }
     Ok(inputs)
+}
+
+/// The attributes a pixel shader interpolates with the linear barycentrics (`noperspective`): each
+/// `v_interp_p1_f32` whose I register holds a `LINEAR_*` field at entry, as `inputs` lays them out.
+///
+/// # Errors
+///
+/// An interpolation whose I register an earlier instruction may have written, so which barycentrics
+/// it holds is not known, and an attribute interpolated both ways.
+fn linear_attributes(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    inputs: PixelInputs,
+) -> Result<Vec<u32>, TranslateError> {
+    let mut written = std::collections::BTreeSet::new();
+    let mut kinds: BTreeMap<u32, pixel_inputs::Barycentric> = BTreeMap::new();
+    for instruction in &decode.instructions {
+        let Some((family, name)) = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| {
+                Some((
+                    e.name.as_str(),
+                    encodings.mnemonic_for(&e.name, instruction.opcode)?,
+                ))
+            })
+        else {
+            continue;
+        };
+        if name == "v_interp_p1_f32_e32" {
+            let (Some(Operand::Vector(i)), Some(Operand::Immediate(attribute))) =
+                (instruction.operands.get(1), instruction.operands.get(2))
+            else {
+                continue;
+            };
+            let i = u32::from(*i);
+            let kind = (!written.contains(&i))
+                .then(|| inputs.barycentric_of(i))
+                .flatten()
+                .ok_or(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: concat!(
+                        "an interpolation whose barycentric register is not one the hardware ",
+                        "loads untouched, while the shader loads linear barycentrics, so whether ",
+                        "it interpolates with perspective is not known"
+                    ),
+                })?;
+            let attribute = u32::try_from(*attribute).unwrap_or(u32::MAX);
+            if kinds
+                .insert(attribute, kind)
+                .is_some_and(|before| before != kind)
+            {
+                return Err(TranslateError::Unsupported {
+                    offset: instruction.offset,
+                    detail: "an attribute interpolated both with and without perspective",
+                });
+            }
+        }
+        // What a vector instruction writes, as far as its first operand tells: a store's first
+        // operand is what it stores, and an export's is its target.
+        let stores = name.contains("store") || name.contains("write") || family == "EXP";
+        if !stores && let Some(Operand::Vector(register)) = instruction.operands.first() {
+            written.insert(u32::from(*register));
+        }
+    }
+    Ok(kinds
+        .into_iter()
+        .filter(|(_, kind)| *kind == pixel_inputs::Barycentric::Linear)
+        .map(|(attribute, _)| attribute)
+        .collect())
 }
 
 /// The attributes a pixel shader reads both interpolated and flat, which a draw gives a flat twin
@@ -6346,7 +6439,11 @@ pub fn translate_with_user_data(
     {
         return Err(TranslateError::Unsupported { offset: 0, detail });
     }
-    let attributes = interpolated_attributes(decode, encodings, user_data.flat_twins)?;
+    let attributes = interpolated_attributes(
+        decode,
+        encodings,
+        (user_data.flat_twins, user_data.pixel_inputs),
+    )?;
     if stage == Stage::Fragment {
         check_input_controls(&attributes, &user_data)?;
     }

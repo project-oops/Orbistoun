@@ -105,7 +105,57 @@ const LAYER_BITS: u32 = 13;
 /// Where the layer starts in the ancillary word.
 const LAYER_SHIFT: u32 = 16;
 
+/// The barycentrics an interpolation reads: perspective-correct, or linear in screen space
+/// (`noperspective`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Barycentric {
+    /// `PERSP_SAMPLE`, `PERSP_CENTER` or `PERSP_CENTROID`.
+    Perspective,
+    /// `LINEAR_SAMPLE`, `LINEAR_CENTER` or `LINEAR_CENTROID`.
+    Linear,
+}
+
+/// The `PERSP_*` and `LINEAR_*` fields' bits, other than `PERSP_PULL_MODEL`, which holds no I/J pair.
+const PERSPECTIVE_FIELDS: [u32; 3] = [0, 1, 2];
+const LINEAR_FIELDS: [u32; 3] = [4, 5, 6];
+
 impl PixelInputs {
+    /// Whether any linear (`noperspective`) barycentric field is loaded.
+    #[must_use]
+    pub fn reads_linear(self) -> bool {
+        LINEAR_FIELDS
+            .iter()
+            .any(|&bit| (self.enable | self.address) >> bit & 1 != 0)
+    }
+
+    /// Which barycentrics vector register `register` holds at entry, where it is the I or J of an
+    /// I/J pair the hardware loads; `None` for any other register.
+    #[must_use]
+    pub fn barycentric_of(self, register: u32) -> Option<Barycentric> {
+        let address = if self.address == 0 {
+            self.enable
+        } else {
+            self.address
+        };
+        let mut first = 0;
+        for (bit, (registers, _)) in (0u32..).zip(FIELDS) {
+            if address >> bit & 1 == 0 {
+                continue;
+            }
+            if (first..first + registers).contains(&register) {
+                return if PERSPECTIVE_FIELDS.contains(&bit) {
+                    Some(Barycentric::Perspective)
+                } else if LINEAR_FIELDS.contains(&bit) {
+                    Some(Barycentric::Linear)
+                } else {
+                    None
+                };
+            }
+            first += registers;
+        }
+        None
+    }
+
     /// The system values to seed, in field order, with their registers.
     ///
     /// # Errors
@@ -306,7 +356,28 @@ impl SystemInputs {
 
 #[cfg(test)]
 mod tests {
-    use super::{PixelInputs, Seeded, SystemValue};
+    use super::{Barycentric, PixelInputs, Seeded, SystemValue};
+
+    /// The I/J pairs sit in field order: `PERSP_CENTER` in v0-v1 and `LINEAR_CENTER` in v2-v3 when
+    /// those two are loaded; the next register is no barycentric.
+    #[test]
+    fn a_register_names_the_barycentrics_it_holds() {
+        let inputs = PixelInputs {
+            enable: 1 << 1 | 1 << 5,
+            address: 0,
+        };
+        assert!(inputs.reads_linear());
+        assert_eq!(inputs.barycentric_of(0), Some(Barycentric::Perspective));
+        assert_eq!(inputs.barycentric_of(1), Some(Barycentric::Perspective));
+        assert_eq!(inputs.barycentric_of(2), Some(Barycentric::Linear));
+        assert_eq!(inputs.barycentric_of(3), Some(Barycentric::Linear));
+        assert_eq!(inputs.barycentric_of(4), None);
+        let perspective_only = PixelInputs {
+            enable: 1 << 1,
+            address: 0,
+        };
+        assert!(!perspective_only.reads_linear());
+    }
     use crate::Width;
     use crate::wavefront::{MeshPrimitive, Stage, UserData, Window, translate_with_user_data};
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};

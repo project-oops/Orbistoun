@@ -391,6 +391,9 @@ pub mod decoration {
     /// What the guest's parameter-move instruction asks for; without it the attribute is
     /// interpolated, which differs everywhere except at one vertex.
     pub const FLAT: u32 = 14;
+    /// Interpolation linear in screen space rather than perspective-correct: what the guest's
+    /// `LINEAR_*` barycentrics give a `noperspective` attribute.
+    pub const NO_PERSPECTIVE: u32 = 13;
     /// Marks a storage image the module only ever writes.
     ///
     /// The reference compiler emits it for a write-only image, and it holds for everything stored
