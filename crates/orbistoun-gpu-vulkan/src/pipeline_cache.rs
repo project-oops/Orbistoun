@@ -3,7 +3,7 @@
 //! A translated module is megabytes of SPIR-V, and the driver takes seconds to compile one. The
 //! modules are the same from one run to the next (D113), so what the driver made of them is kept
 //! too: one pipeline cache, loaded when the device opens and written back as it grows - at most
-//! every [`KEEP_EVERY`], and once more when the run ends ([`flush`]).
+//! every two seconds (`KEEP_EVERY`), and once more when the run ends ([`flush`]).
 
 use ash::vk;
 use std::path::PathBuf;
