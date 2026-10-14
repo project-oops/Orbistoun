@@ -269,3 +269,34 @@ edge_cases = [
 known_by = "guest-observed"
 found_in = ["PPSA25872-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceVideoOutIsOutputSupported"
+arity = 2
+purpose = "(handle, output): whether the port can drive an output mode."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-rf02, on the compositor's open handle 0x4e100400): 0xd000000a and 0xd0000000 answer 0x8029001e; 0 answers 0x80290001.",
+    "Any other output is unmeasured and answered as unimplemented; a handle naming no port answers 0x8029000b, the family's code, assumed.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1930Z-rf02, reports/hardware/report-20261014-004800.log lines 18133-18135 (200-census/libSceVideoOut/0x1643ec4c4a7c2230)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceVideoOutLatencyControlWaitBeforeInput"
+arity = 3
+purpose = "(handle, buf, 0): waits, by the latency-control settings in buf, before the title samples input."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-vf01, with no port open): a zeroed 0x20-byte buf 0x8029000b, a buf of 0xcc 0x80290001, a null buf 0x80290002; buf never written.",
+    "MEASURED (REQ-rf02, on the compositor's open handle 0x4e100400): a zeroed buf and a buf of 0xcc both 0x80290001; buf never written.",
+    "orbistoun answers so: null first, then the handle for a zeroed block, then 0x80290001.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1045Z-vf01 (reports/hardware/report-20261013-172400.log) and REQ-20261013T1930Z-rf02, reports/hardware/report-20261014-004800.log lines 18127-18130."
+found_in = ["PPSA28061"]
+found_on = "2026-10-14"

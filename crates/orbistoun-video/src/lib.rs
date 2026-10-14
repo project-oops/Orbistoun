@@ -40,6 +40,10 @@ guest_module! {
         "0x1643ec4c4a7c2230" => 6,
         // Arity 1: a delivered event, as `sceKernelWaitEqueue` wrote it.
         "sceVideoOutGetEventId" => 1,
+        // (handle, output), as PPSA25872 calls it.
+        "sceVideoOutIsOutputSupported" => 2,
+        // (handle, buf, 0), as PPSA28061 calls it once a frame.
+        "sceVideoOutLatencyControlWaitBeforeInput" => 3,
     }
 }
 
@@ -72,6 +76,9 @@ mod video_error {
     /// `130-layout/video-out-unregister-buffers` `rc-unregister-active-set0`; the already-open
     /// code's value.
     pub(super) const BUSY: u64 = 0x8029_0009;
+    /// An output the port does not support. Measured: `sceVideoOutIsOutputSupported` for
+    /// `0xd000000a` and `0xd0000000` on the compositor's handle (REQ-rf02).
+    pub(super) const UNSUPPORTED: u64 = 0x8029_001e;
 }
 
 /// The shape of a registered buffer set, decoded from its attribute block.
@@ -282,6 +289,52 @@ fn video_out_1643ec4c4a7c2230(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         0 => video_error::REFUSED,
         _ => u64::from(GuestError::Unimplemented.as_raw()),
     }
+}
+
+/// `sceVideoOutIsOutputSupported(handle, output)`.
+///
+/// Measured on the compositor's open handle (REQ-20261013T1930Z-rf02,
+/// `200-census/libSceVideoOut/0x1643ec4c4a7c2230`, `report-20261014-004800.log` 18133-18135):
+/// `0xd000000a`, PPSA25872's, and `0xd0000000` answer `0x8029_001e`, and 0 answers
+/// `0x8029_0001`. Any other output is unmeasured and answered as unimplemented; a handle naming no
+/// port answers the family's invalid-handle code, assumed.
+fn video_out_is_output_supported(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if port::with(args[0], |_| ()).is_none() {
+        return video_error::INVALID_HANDLE;
+    }
+    match args[1] {
+        0xd000_000a | 0xd000_0000 => video_error::UNSUPPORTED,
+        0 => video_error::REFUSED,
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// The bytes of the block `sceVideoOutLatencyControlWaitBeforeInput` is handed, as PPSA28061 passes
+/// it.
+const LATENCY_CONTROL_BYTES: usize = 0x20;
+
+/// `sceVideoOutLatencyControlWaitBeforeInput(handle, buf, 0)`.
+///
+/// Measured (REQ-vf01, `report-20261013-172400.log`, and REQ-rf02 on the compositor's open handle,
+/// `report-20261014-004800.log` 18127-18130), never writing `buf`:
+/// - a null `buf` answers `0x8029_0002`, before the handle is checked;
+/// - a `buf` of `0xcc` answers `0x8029_0001`, on an open handle and on none;
+/// - a zeroed `buf` answers `0x8029_0001` on an open handle and `0x8029_000b` on none.
+///
+/// So on an open port it refuses whatever it is handed; the title goes on without the wait.
+fn video_out_latency_control_wait_before_input(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[1] == 0 {
+        return video_error::INVALID_VALUE;
+    }
+    let mut block = [0_u8; LATENCY_CONTROL_BYTES];
+    // SAFETY: the guest's block, read through the checked accessor.
+    if !unsafe { guest::read_into(args[1], &mut block) } {
+        return video_error::INVALID_VALUE;
+    }
+    if port::with(args[0], |_| ()).is_none() && block.iter().all(|&byte| byte == 0) {
+        return video_error::INVALID_HANDLE;
+    }
+    video_error::REFUSED
 }
 
 /// The most buffers one registration binds. A display set is a handful of frames, so this bounds
@@ -848,6 +901,14 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceVideoOutGetOutputStatus", video_out_get_output_status),
         ("0x1643ec4c4a7c2230", video_out_1643ec4c4a7c2230),
         ("sceVideoOutGetEventId", video_out_get_event_id),
+        (
+            "sceVideoOutIsOutputSupported",
+            video_out_is_output_supported,
+        ),
+        (
+            "sceVideoOutLatencyControlWaitBeforeInput",
+            video_out_latency_control_wait_before_input,
+        ),
     ]
 }
 
@@ -875,9 +936,10 @@ mod tests {
     use super::{
         BufferShape, GUEST_ARG_REGISTERS, PRESENTED_HEIGHT, PRESENTED_WIDTH, port, video_error,
         video_out_1643ec4c4a7c2230, video_out_get_flip_status, video_out_get_output_status,
-        video_out_get_resolution_status, video_out_is_flip_pending, video_out_open,
-        video_out_register_buffers, video_out_register_buffers2, video_out_set_buffer_attribute2,
-        video_out_set_flip_rate, video_out_submit_flip,
+        video_out_get_resolution_status, video_out_is_flip_pending, video_out_is_output_supported,
+        video_out_latency_control_wait_before_input, video_out_open, video_out_register_buffers,
+        video_out_register_buffers2, video_out_set_buffer_attribute2, video_out_set_flip_rate,
+        video_out_submit_flip,
     };
 
     fn args(values: [u64; 4]) -> [u64; GUEST_ARG_REGISTERS] {
@@ -1433,5 +1495,32 @@ mod tests {
             video_out_1643ec4c4a7c2230(&[0, 1, 0, 0, 0, 0]),
             video_error::INVALID_HANDLE
         );
+    }
+
+    /// `sceVideoOutIsOutputSupported` and `sceVideoOutLatencyControlWaitBeforeInput` as REQ-vf01
+    /// and REQ-rf02 measured them.
+    #[test]
+    fn output_support_and_latency_control_answer_as_measured() {
+        let _guard = serial();
+        let handle = open_on(22);
+        assert!(handle >= port::FIRST, "a port opened");
+        let supported = |output| video_out_is_output_supported(&args([handle, output, 0, 0]));
+        assert_eq!(supported(0xd000_000a), 0x8029_001e);
+        assert_eq!(supported(0xd000_0000), 0x8029_001e);
+        assert_eq!(supported(0), 0x8029_0001);
+
+        let mut zeroed = [0_u8; 0x20];
+        let mut poisoned = [0xcc_u8; 0x20];
+        let wait = |handle, buf: u64| {
+            video_out_latency_control_wait_before_input(&args([handle, buf, 0, 0]))
+        };
+        let (z, p) = (zeroed.as_mut_ptr() as u64, poisoned.as_mut_ptr() as u64);
+        assert_eq!(wait(handle, z), 0x8029_0001);
+        assert_eq!(wait(handle, p), 0x8029_0001);
+        assert_eq!(wait(0, z), 0x8029_000b);
+        assert_eq!(wait(0, p), 0x8029_0001);
+        assert_eq!(wait(0, 0), 0x8029_0002);
+        assert_eq!(zeroed, [0; 0x20], "the block is not written");
+        assert_eq!(poisoned, [0xcc; 0x20], "the block is not written");
     }
 }
