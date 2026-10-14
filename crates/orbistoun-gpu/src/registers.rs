@@ -2528,6 +2528,15 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is an eight-byte `32_32` `FLOAT` target holding red then green (`SWAP_STD`,
+    /// `XY__`): two 32-bit floats a texel, drawn and written back as it is held (D872).
+    #[must_use]
+    pub const fn is_float_32_32(&self) -> bool {
+        self.format == COLOR_32_32
+            && self.number_type == NUMBER_FLOAT
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a two-byte `8_8` `UNORM` target holding red then green (`SWAP_STD`, `XY__`):
     /// drawn through an `Rgba8` attachment with alpha one and blue zero, as a format without them
     /// reads (D869).
@@ -2616,6 +2625,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Unorm8x2
         } else if self.is_uint_32_32() {
             crate::TargetEncoding::Uint32x2
+        } else if self.is_float_32_32() {
+            crate::TargetEncoding::Float32x2
         } else if self.is_unorm_16_16() {
             crate::TargetEncoding::Unorm16x2
         } else if self.is_uint_16() {
@@ -2645,7 +2656,7 @@ impl ColourTargetFormat {
             || self.is_unorm_16_16()
         {
             Some(4)
-        } else if self.is_float_16_16_16_16() || self.is_uint_32_32() {
+        } else if self.is_float_16_16_16_16() || self.is_uint_32_32() || self.is_float_32_32() {
             Some(8)
         } else if self.is_uint_16() || self.is_float_16() || self.is_unorm_8_8() {
             Some(2)
@@ -3701,6 +3712,12 @@ mod tests {
         assert_eq!(normal_pair.encoding(), crate::TargetEncoding::Unorm16x2);
         assert_eq!(normal_pair.written_back_bytes(), Some(4));
         assert_eq!(super::colour_write_mask(0xF, 0x0001_8014), 0x3);
+        // `COLOR_32_32` `FLOAT` (D872): eight bytes a texel, red and green written.
+        let float_pair = decode_colour_target_format(0x0001_802c | (7 << 8));
+        assert!(float_pair.is_float_32_32());
+        assert!(!float_pair.is_integer());
+        assert_eq!(float_pair.encoding(), crate::TargetEncoding::Float32x2);
+        assert_eq!(float_pair.written_back_bytes(), Some(8));
         // `COLOR_32_32` `UINT` (D870): eight bytes a texel, red and green written.
         let wide_pair = decode_colour_target_format(0x0001_802c | (4 << 8));
         assert!(wide_pair.is_uint_32_32());

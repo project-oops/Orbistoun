@@ -453,6 +453,9 @@ pub enum TargetEncoding {
     /// `COLOR_16_16` `UNORM` (D871): two normalised 16-bit channels a texel, red then green - the
     /// bits Vulkan's `R16G16_UNORM` holds.
     Unorm16x2,
+    /// `COLOR_32_32` `FLOAT` (D872): two 32-bit floats a texel, red then green - the bits Vulkan's
+    /// `R32G32_SFLOAT` holds. Eight bytes a texel.
+    Float32x2,
     /// `COLOR_32_32` `UINT` (D870): two 32-bit unsigned integers a texel, red then green - the bits
     /// Vulkan's `R32G32_UINT` holds. Eight bytes a texel.
     Uint32x2,
