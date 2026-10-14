@@ -172,6 +172,22 @@ guest only through an encoding measured on hardware; a question with no measured
 refused and counted rather than answered with an invented value (D311). User identifiers are
 never reused, because save data is keyed on them.
 
+## Mods
+
+A title's mods sit beside it, in its directory's `mods`, one directory each (D836):
+
+```text
+<title directory>/mods/<name>/
+    mod.toml   optional - enabled = false turns it off; description says what it is
+    app0/      files laid over the title's own, as its /app0 sees them
+```
+
+Every mod not turned off applies, in the order of the directories' names, so where two replace the
+same file the later name's wins. A mod's files are never written: a staged title's writes land in its
+own overlay, over the mods. The run log names the mods it applied, and a mod whose `mod.toml` does
+not parse is left off with the reason. Orbistoun ships no mods and changes nothing for a title by its
+id.
+
 ## Machine profile
 
 orbistoun's `Machine` presents a platform along four axes - generation, kind, revision and

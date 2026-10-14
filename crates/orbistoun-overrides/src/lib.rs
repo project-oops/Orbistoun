@@ -1276,6 +1276,8 @@ impl Resolved {
     }
 }
 
+pub mod mods;
+
 mod shipped_records {
     include!(concat!(env!("OUT_DIR"), "/shipped.rs"));
 }

@@ -328,10 +328,21 @@ impl Paths {
         self.shared.title_dir(title).join("host-pipelines.bin")
     }
 
+    /// Where one title's mods are kept, each a directory of its own (D836).
+    pub fn title_mods_dir(&self, title: &str) -> PathBuf {
+        self.shared.title_dir(title).join("mods")
+    }
+
+    /// Where one title's profiled runs are kept, their recordings and reports (D831).
+    pub fn title_perf_dir(&self, title: &str) -> PathBuf {
+        self.shared.title_dir(title).join("perf")
+    }
+
     /// Everything orbistoun keeps in one title's directory, which is also that title's `/app0`
-    /// when it runs from the library: its link plan, frames, translations, pipelines, save states
-    /// and guest overlay. None of it is the title's, so the guest is not shown it (D756).
-    pub fn title_state_entries(&self, title: &str) -> [PathBuf; 6] {
+    /// when it runs from the library: its link plan, frames, translations, pipelines, save states,
+    /// guest overlay, mods and profiled runs. None of it is the title's, so the guest is not shown
+    /// it (D756).
+    pub fn title_state_entries(&self, title: &str) -> [PathBuf; 8] {
         [
             self.title_link_plan_file(title),
             self.title_frames_file(title),
@@ -339,6 +350,8 @@ impl Paths {
             self.title_pipelines_file(title),
             self.title_savestates_dir(title),
             self.title_overlay_dir(title),
+            self.title_mods_dir(title),
+            self.title_perf_dir(title),
         ]
     }
 

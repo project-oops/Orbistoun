@@ -20,3 +20,7 @@ toml = { workspace = true }
 [build-dependencies]
 # Reads each compatibility record's `[settings]` into the binary (build.rs).
 toml = { workspace = true }
+
+[dev-dependencies]
+# Throwaway mod directories for the mods tests (D836).
+tempfile = { workspace = true }

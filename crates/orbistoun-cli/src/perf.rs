@@ -72,9 +72,7 @@ fn record(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     let trace = orbistoun_paths::Paths::resolve()
-        .titles_dir()
-        .join(&title)
-        .join("perf")
+        .title_perf_dir(&title)
         .join(format!("{stamp}.tracy"));
     let port = orbistoun_perf::free_port().context("finding a free port for the run's client")?;
     // SAFETY: single-threaded here; the spawned worker inherits the variables at startup.

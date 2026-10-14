@@ -445,10 +445,27 @@ fn install_filesystem(module: &str) {
         &paths.staged_titles_dir(),
         RUN_STAGED.load(std::sync::atomic::Ordering::Relaxed),
     );
+    // The user's mods, laid over the title's files in the order they apply (D836).
+    let mods = orbistoun_overrides::mods::found(&paths.title_mods_dir(&title));
+    for unread in mods.iter().filter(|m| m.unreadable.is_some()) {
+        tracing::warn!(
+            "the mod {} is left off: its {} does not parse: {}",
+            unread.name,
+            orbistoun_overrides::mods::MOD_FILE,
+            unread.unreadable.as_deref().unwrap_or_default()
+        );
+    }
+    let applied: Vec<&orbistoun_overrides::mods::Mod> =
+        mods.iter().filter(|m| m.applies()).collect();
+    if !applied.is_empty() {
+        let names: Vec<&str> = applied.iter().map(|m| m.name.as_str()).collect();
+        tracing::info!("mods applied over /app0: {}", names.join(", "));
+    }
+    let trees: Vec<std::path::PathBuf> = applied.iter().filter_map(|m| m.app0()).collect();
     orbistoun_fs::sandbox::establish(
         &paths.filesystem_dir(),
         &overlay,
-        Path::new(module),
+        (Path::new(module), &trees),
         &origin,
         retention,
     );

@@ -30,11 +30,14 @@ pub enum Retention {
 /// per-title directory a guest's writes land in; `title_module` is the loaded guest, whose
 /// directory becomes `/app0`; `retention` decides whether `overlay` is emptied first. The base
 /// is installed first, each writable entry's overlay stacked over it, and the title layered
-/// over `/app0` last so its own files answer first.
+/// over `/app0` last so its own files answer first. `mods` - the trees the user's mods lay over the
+/// title's files, in the order they apply (D836) - go over the title and under a staged title's
+/// writable layer, read-only, so a later mod's file answers before an earlier one's and the
+/// title's, and a guest's write never lands in a mod.
 pub fn establish(
     base: &Path,
     overlay: &Path,
-    title_module: &Path,
+    (title_module, mods): (&Path, &[std::path::PathBuf]),
     origin: &Origin,
     retention: Retention,
 ) {
@@ -45,6 +48,9 @@ pub fn establish(
     }
     crate::filesystem::install(base, overlay);
     crate::mount::mount_title(title_module);
+    for tree in mods {
+        crate::mount::layer(crate::mount::APP_MOUNT, tree.clone());
+    }
     if let Origin::Staged { id } = origin {
         crate::mount::stage_title(title_module, overlay, id);
     }
@@ -124,7 +130,7 @@ mod tests {
         establish(
             &base,
             &overlay,
-            &title.join("eboot.bin"),
+            (&title.join("eboot.bin"), &[]),
             &Origin::Image,
             Retention::Retain,
         );
@@ -133,7 +139,7 @@ mod tests {
         establish(
             &base,
             &overlay,
-            &title.join("eboot.bin"),
+            (&title.join("eboot.bin"), &[]),
             &Origin::Image,
             Retention::Ephemeral,
         );
@@ -163,7 +169,7 @@ mod tests {
         establish(
             &base,
             &overlay,
-            &title.join("eboot.bin"),
+            (&title.join("eboot.bin"), &[]),
             &Origin::Image,
             Retention::Retain,
         );
@@ -196,7 +202,7 @@ mod tests {
         establish(
             &root.join("base"),
             &root.join("overlay"),
-            &title.join("eboot.bin"),
+            (&title.join("eboot.bin"), &[]),
             &Origin::Image,
             Retention::Retain,
         );
@@ -207,7 +213,7 @@ mod tests {
         establish(
             &root.join("base"),
             &root.join("overlay"),
-            &title.join("eboot.bin"),
+            (&title.join("eboot.bin"), &[]),
             &Origin::Staged {
                 id: "NVRB00001".to_owned(),
             },
@@ -229,6 +235,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A mod's file answers before the title's, a later mod's before an earlier one's, and a staged
+    /// title's write lands in its overlay - never in a mod or the library (D836).
+    #[test]
+    fn mods_answer_before_the_title_and_take_no_writes() {
+        let _guard = crate::exclusively();
+        crate::mount::clear();
+        let (root, title) = staged_fixture("mods");
+        let tree = |name: &str, file: &str, bytes: &[u8]| {
+            let at = root.join("mods").join(name).join("app0");
+            let path = at.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            at
+        };
+        let first = tree("a", "data/shipped.txt", b"first mod");
+        let second = tree("b", "data/shipped.txt", b"second mod");
+        let added = tree("c", "data/added.txt", b"added by a mod");
+        establish(
+            &root.join("base"),
+            &root.join("overlay"),
+            (&title.join("eboot.bin"), &[first, second, added]),
+            &Origin::Staged {
+                id: "NVRB00001".to_owned(),
+            },
+            Retention::Retain,
+        );
+        let read = |path: &str| std::fs::read(crate::mount::resolve(path).expect(path)).unwrap();
+        assert_eq!(read("/app0/data/shipped.txt"), b"second mod");
+        assert_eq!(read("/app0/data/added.txt"), b"added by a mod");
+        assert_eq!(
+            read("/app0/eboot.bin"),
+            b"guest",
+            "the title's own where no mod has one"
+        );
+
+        let host = crate::mount::resolve_for_write("/app0/data/shipped.txt").expect("writable");
+        std::fs::write(&host, b"written").unwrap();
+        assert!(host.starts_with(root.join("overlay")), "{}", host.display());
+        assert_eq!(
+            std::fs::read(root.join("mods/b/app0/data/shipped.txt")).unwrap(),
+            b"second mod",
+            "the mod keeps its bytes"
+        );
+
+        crate::mount::clear();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Writing a shipped file copies it up, and the library keeps its bytes.
     #[test]
     fn a_staged_write_to_a_shipped_file_never_reaches_the_library() {
@@ -238,7 +292,7 @@ mod tests {
         establish(
             &root.join("base"),
             &root.join("overlay"),
-            &title.join("eboot.bin"),
+            (&title.join("eboot.bin"), &[]),
             &Origin::Staged {
                 id: "NVRB00001".to_owned(),
             },
@@ -288,7 +342,7 @@ mod tests {
         establish(
             &root.join("base"),
             &root.join("console"),
-            &launcher.join("eboot.bin"),
+            (&launcher.join("eboot.bin"), &[]),
             &Origin::Image,
             Retention::Retain,
         );
