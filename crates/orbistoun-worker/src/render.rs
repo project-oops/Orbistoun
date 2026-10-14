@@ -263,7 +263,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
             parts.join(", ")
         );
     }
-    let listening = LIVE_EVENTS.get().copied().zip(frames_dir());
+    let listening = LIVE_EVENTS.get().copied().zip(regions_dir());
     let due = listening.is_some()
         && LAST.lock().is_ok_and(|mut last| {
             let due = last.is_none_or(|at| at.elapsed() >= PRESENT_INTERVAL);
@@ -1322,14 +1322,12 @@ pub fn render_and_log_last_submission() -> Option<Event> {
         .last
         .is_some_and(|last| last.draws > 0);
     let executed = if ran { executed_frame() } else { None };
-    if let (true, Some((width, height, bytes)), Some(dir)) = (ran, executed, frames_dir()) {
+    if let (true, Some((width, height, bytes)), Some(dir)) = (ran, executed, regions_dir()) {
         let sequence = FRAME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         return match write_frame(dir, sequence, width, height, FrameFormat::Rgba8, &bytes) {
             Ok(event) => {
                 if let Event::Frame { region, .. } = &event {
-                    tracing::info!(
-                        "the last submission's frame, drawn at submit, is {region} in the traces directory"
-                    );
+                    tracing::info!("the last submission's frame, drawn at submit, is {region}");
                 }
                 Some(event)
             }
@@ -1339,7 +1337,7 @@ pub fn render_and_log_last_submission() -> Option<Event> {
             }
         };
     }
-    render_submission_to(&submission, frames_dir())
+    render_submission_to(&submission, regions_dir())
 }
 
 /// The sequence number of the next frame region written.
@@ -1359,6 +1357,22 @@ pub fn frames_to(dir: PathBuf) {
 
 fn frames_dir() -> Option<&'static Path> {
     frames_directory().get().map(PathBuf::as_path)
+}
+
+/// Where the run's frame regions go: a directory of the run's own under the traces directory, so
+/// another session's run cannot overwrite them (D865).
+static REGIONS: OnceLock<PathBuf> = OnceLock::new();
+
+/// Sets the directory the run's frame regions are written to, and drops the frames of the title's
+/// older runs. First set wins; a run has one.
+pub fn frame_regions_to(dir: PathBuf) {
+    crate::frame_region::prune_runs(&dir);
+    let _ = REGIONS.set(dir);
+}
+
+/// The run's frame-region directory, or else its frames directory.
+fn regions_dir() -> Option<&'static Path> {
+    REGIONS.get().map(PathBuf::as_path).or_else(frames_dir)
 }
 
 /// Drives `submission` to a backend, logs what happened, and writes the frame it produced into
@@ -1427,7 +1441,7 @@ fn log_outcome(outcome: &RenderOutcome, took: std::time::Duration, written: Opti
                 refusal_lines(&outcome.refusals)
             );
             if let Some(Event::Frame { region, .. }) = written {
-                tracing::info!("the rendered frame is {region} in the traces directory");
+                tracing::info!("the rendered frame is {region}");
             }
         }
     }

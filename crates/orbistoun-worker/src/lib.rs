@@ -1137,8 +1137,15 @@ fn prepare_diagnostics(
                 .join(orbistoun_report::trace::trace_file_name(module)),
         );
         report::describe_module(module.to_owned());
-        // A rendered frame's region goes beside the trace, where the shim reads it back (D695).
+        // A rendered frame's region goes under the traces directory, where the shim reads it back
+        // (D695), in a directory of this run's own, named by title and run (D865). The process id
+        // tells apart two runs started in the same millisecond.
         render::frames_to(paths.traces_dir());
+        render::frame_regions_to(frame_region::run_dir(
+            &paths.traces_dir(),
+            module,
+            &orbistoun_report::RunId::now(std::process::id()),
+        ));
     }
 
     // Names for every slot of the shared table, not the executable's alone, so a call trace says

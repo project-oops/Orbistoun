@@ -13,7 +13,7 @@ use std::path::Path;
 /// # Errors
 ///
 /// If the descriptor is not a frame, if the region cannot be read (a missing file, or a
-/// `region` that is not a bare name, see `orbistoun_worker::frame_region::read_frame`), or if
+/// `region` outside `dir`, see `orbistoun_worker::frame_region::read_frame`), or if
 /// its size does not match the dimensions and format; a mismatched region is corrupt.
 pub(crate) fn frame_image(dir: &Path, event: &Event) -> Result<egui::ColorImage, String> {
     let &Event::Frame {

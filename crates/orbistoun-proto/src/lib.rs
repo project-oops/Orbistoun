@@ -187,7 +187,8 @@ pub enum Event {
         format: FrameFormat,
         /// Which frame this is, so the shim can order arrivals and drop a stale one.
         sequence: u64,
-        /// The name of the region holding the bytes, resolved against the frames directory.
+        /// The full path of the region holding the bytes, in the run's own directory under the
+        /// traces directory (D865).
         region: String,
     },
     /// The guest asked the system to start another title, as a launcher does.
