@@ -21,7 +21,7 @@ took it, and `pos2` and `pos3` are refused.
 
 | Channel | Carries | Handling |
 |---|---|---|
-| X | point size | Written to the vertex's `PointSize` where `USE_VTX_POINT_SIZE` has the hardware read it. radeonsi sets that exactly when the shader writes one. A vertex that exports none is drawn at one. |
+| X | point size | Written to the vertex's `PointSize` where `USE_VTX_POINT_SIZE` has the hardware read it. radeonsi sets that exactly when the shader writes one. A vertex that exports none is drawn at the draw's size, below. |
 | Y | edge flag | Dropped. It selects the edges a polygon drawn as lines draws, and every polygon here is filled. The edge flags in a primitive export are dropped for the same reason. |
 | Z | layer | Handled as D859. |
 | W | shading rate | Dropped where `USE_VTX_VRS_RATE` is clear, refused where it is set. |
