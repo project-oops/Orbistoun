@@ -659,6 +659,42 @@ fn span_of(
 /// a bound on the work a dispatch can ask of the host, refused by name beyond it.
 const MOST_DISPATCH_WAVES: u64 = 4096;
 
+/// What a dispatch's lane run seeds each wave with (D883), as a refusal says it: the user data
+/// from `s0`, the group's enabled id components after it, and the thread id components from `v0`.
+fn wave_entry(user_data: usize, inputs: orbistoun_translate::wavefront::ComputeInputs) -> String {
+    let mut parts = Vec::new();
+    if user_data > 0 {
+        parts.push(format!("its user data in s0 to s{}", user_data - 1));
+    }
+    let mut next = user_data;
+    for (component, axis) in ["x", "y", "z"].iter().enumerate() {
+        if inputs.workgroup_ids[component] {
+            parts.push(format!("its group's {axis} id in s{next}"));
+            next += 1;
+        }
+    }
+    let components = inputs.thread_id_components.clamp(1, 3);
+    parts.push(format!(
+        "its thread ids in v0{} ({} component{})",
+        if components > 1 {
+            format!(" to v{}", components - 1)
+        } else {
+            String::new()
+        },
+        ["one", "two", "three"][components as usize - 1],
+        if components > 1 { "s" } else { "" }
+    ));
+    let last = parts.pop().unwrap_or_default();
+    if parts.is_empty() {
+        format!("a wave of this dispatch starts with {last}")
+    } else {
+        format!(
+            "a wave of this dispatch starts with {}, and {last}",
+            parts.join(", ")
+        )
+    }
+}
+
 /// The range a dispatch's global loads read (D883): the program run on the host over every wave of
 /// every group the dispatch runs, each from its entry state - the user data, the group's enabled id
 /// components, and each lane's thread id, x fastest, where the lane has a thread - and the span of
@@ -731,13 +767,15 @@ pub(crate) fn dispatch_global_range(
                         threads,
                         components: inputs.thread_id_components,
                     };
-                    found.extend(wave_lane_addresses(
+                    let addresses = wave_lane_addresses(
                         &prepared.program,
                         encodings,
                         user_data,
                         (width, &entry),
                         &mut word,
-                    )?);
+                    )
+                    .map_err(|why| format!("{why}; {}", wave_entry(user_data.len(), inputs)))?;
+                    found.extend(addresses);
                 }
             }
         }
@@ -1413,6 +1451,28 @@ mod tests {
             super::dispatch_global_range(&global, (&[0x1000, 7], inputs, [2, 1, 1], 64), &memory);
         // Group 1's thread 103 reads the last byte, 0x19d past the base.
         assert_eq!(range, Ok((0x7_0000_1000, 0x1a0)));
+        // A refusal says what the run seeded each wave with, so a register past it reads as one the
+        // dispatch's entry does not fill: here an address from `s5`, past the user data and the id.
+        let past = GlobalLoads {
+            prefix: vec![
+                short_form("v_mov_b32_e32", 1, 5, 0),
+                short_form("v_mov_b32_e32", 2, 5, 0),
+                0xdc20_0000,
+                0x037d_0001,
+            ],
+            loads: vec![(8, 1)],
+            ..global.clone()
+        };
+        let refused =
+            super::dispatch_global_range(&past, (&[0x1000, 7], inputs, [1, 1, 1], 64), &memory)
+                .expect_err("s5 is unknown");
+        assert!(
+            refused.contains(concat!(
+                "a wave of this dispatch starts with its user data in s0 to s1, its group's x id ",
+                "in s2, and its thread ids in v0 (one component)"
+            )),
+            "{refused}"
+        );
         // A wave of a larger streamout draw numbers its threads from its first (D861).
         let later = ComputeInputs {
             first_thread: 1000,

@@ -503,8 +503,8 @@ fn run_lanes(
     let mut at = 0usize;
     // A bound on the steps, since a known branch can go backwards.
     let mut steps = 0usize;
-    // The step that left each scalar unknown, where one did: what a refused branch names.
-    let mut left_by: Vec<Option<LeftBy<'_>>> = vec![None; SCALAR_CODES];
+    // Why each register is unknown, where a step made it so: what a refused branch names.
+    let mut causes = Causes::new();
     while let Some(instruction) = decode.instructions.get(at) {
         if instruction.offset > until || steps > 4 * decode.instructions.len() {
             break;
@@ -535,7 +535,7 @@ fn run_lanes(
                     _ => None,
                 };
                 let Some(taken) = taken else {
-                    return Err(unknown_branch((instruction.offset, name), &left_by));
+                    return Err(causes.branch((instruction.offset, name)));
                 };
                 if taken {
                     let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
@@ -575,22 +575,7 @@ fn run_lanes(
             // Any other access's destination is what memory held, unknown here.
             _ => model.forget_vector(instruction.operands.first(), 4),
         }
-        // A scalar a step leaves unknown is unknown because of it: one it made unknown, or one it
-        // wrote and could not know - a mask a compare wrote from what the run does not know.
-        let written = written_scalars(instruction, name);
-        for (code, (was, now)) in before.iter().zip(model.scalars).enumerate() {
-            match now {
-                Some(_) => left_by[code] = None,
-                None if was.is_some() || written.contains(&code) => {
-                    left_by[code] = Some((
-                        instruction.offset,
-                        name,
-                        unknown_sources(instruction, &before, &left_by),
-                    ));
-                }
-                None => {}
-            }
-        }
+        causes.record(model, (instruction, name), &before, lanes);
     }
     Ok(found)
 }
@@ -612,59 +597,188 @@ fn written_scalars(instruction: &Instruction, name: &str) -> Vec<usize> {
         .collect()
 }
 
-/// The step that left a scalar unknown in a lane run: its offset, its name, and which of its scalar
-/// sources were unknown when it ran, with what left each so.
+/// The step that left a register unknown in a lane run: its offset, its name, and what it read
+/// unknown, with the causes of those in turn.
 type LeftBy<'a> = (u32, &'a str, String);
 
-/// What made a step's result unknown, as far as its scalar sources say: each scalar or mask source
-/// unknown before it, with the step that left it so (`left_by`, by scalar code), or that nothing
-/// had set it. Empty where every scalar source was known: a vector source, or the operation itself.
-fn unknown_sources(
-    instruction: &Instruction,
-    before: &Scalars,
-    left_by: &[Option<LeftBy<'_>>],
-) -> String {
-    let reasons: Vec<String> = instruction
-        .operands
-        .iter()
-        .skip(1)
-        .filter_map(|operand| {
-            let (code, spelled) = match operand {
-                Operand::Scalar(register) => (usize::from(*register), format!("s{register}")),
-                Operand::Named(named) => (mask_code(named)?, named.clone()),
-                _ => return None,
-            };
-            // A pair's either half: a mask, or a 64-bit operation's register pair.
-            let unknown = (code..code + 2).find(|&c| before.get(c).copied().flatten().is_none())?;
-            Some(match &left_by[unknown] {
-                Some((at, by, _)) => format!("{spelled} unknown after `{by}` at {at:#x}"),
-                None => format!("{spelled} unknown before any step set it"),
-            })
-        })
-        .collect();
-    if reasons.is_empty() {
-        String::new()
-    } else {
-        format!(", which read {}", reasons.join(" and "))
-    }
+/// The longest cause a refusal quotes: a long chain is cut, its first steps kept.
+const MOST_CAUSE_BYTES: usize = 600;
+
+/// A word as the float nearest it, as SPIR-V's conversion rounds.
+fn unsigned_to_float(value: u32) -> f32 {
+    // f64 holds every u32 exactly; the narrowing rounds to nearest, even.
+    f64::from(value) as f32
 }
 
-/// A refusal for a branch at `at` on what a lane run cannot know, naming the step that left the
-/// execution mask or `vcc` unknown where one did (`left_by`, by scalar code), and why.
-fn unknown_branch((at, name): (u32, &str), left_by: &[Option<LeftBy<'_>>]) -> LaneRefusal {
-    let causes: Vec<String> = [(EXEC, "the execution mask"), (VCC, "vcc")]
-        .iter()
-        .filter_map(|&(code, mask)| {
-            let (step, by, why) = left_by[code].as_ref().or(left_by[code + 1].as_ref())?;
-            Some(format!("{mask} is unknown after `{by}` at {step:#x}{why}"))
-        })
-        .collect();
-    format!(
-        "the program branches at `{name}` at {at:#x} on what the host cannot know{}{} (D758)",
-        if causes.is_empty() { "" } else { ": " },
-        causes.join("; ")
-    )
-    .into()
+/// A signed word as the float nearest it.
+fn signed_to_float(value: i32) -> f32 {
+    f64::from(value) as f32
+}
+
+/// A float truncated to an unsigned word, where it is in range; `None` otherwise.
+fn float_to_unsigned(value: f32) -> Option<u32> {
+    let value = f64::from(value).trunc();
+    (0.0..=f64::from(u32::MAX))
+        .contains(&value)
+        .then_some(value as u32)
+}
+
+/// A float truncated to a signed word, where it is in range; `None` otherwise.
+fn float_to_signed(value: f32) -> Option<i32> {
+    let value = f64::from(value).trunc();
+    (f64::from(i32::MIN)..=f64::from(i32::MAX))
+        .contains(&value)
+        .then_some(value as i32)
+}
+
+/// An ordered or unordered float comparison by its SPIR-V opcode: an ordered one is false, an
+/// unordered one true, where either side is a NaN.
+fn spirv_float_compare(opcode: u16, a: f32, b: f32) -> Option<bool> {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let order = a.partial_cmp(&b);
+    let holds = |wanted: &[std::cmp::Ordering]| order.is_some_and(|o| wanted.contains(&o));
+    let unordered = order.is_none();
+    Some(match opcode {
+        op::FORD_EQUAL => holds(&[Equal]),
+        op::FORD_NOT_EQUAL => holds(&[Less, Greater]),
+        op::FORD_LESS_THAN => holds(&[Less]),
+        op::FORD_GREATER_THAN => holds(&[Greater]),
+        op::FORD_LESS_THAN_EQUAL => holds(&[Less, Equal]),
+        op::FORD_GREATER_THAN_EQUAL => holds(&[Greater, Equal]),
+        op::FUNORD_EQUAL => unordered || holds(&[Equal]),
+        op::FUNORD_NOT_EQUAL => unordered || holds(&[Less, Greater]),
+        op::FUNORD_LESS_THAN => unordered || holds(&[Less]),
+        op::FUNORD_GREATER_THAN => unordered || holds(&[Greater]),
+        op::FUNORD_LESS_THAN_EQUAL => unordered || holds(&[Less, Equal]),
+        op::FUNORD_GREATER_THAN_EQUAL => unordered || holds(&[Greater, Equal]),
+        _ => return None,
+    })
+}
+
+/// The code of a scalar source's half unknown before a step, a pair's either; `None` where both are
+/// known.
+fn unknown_half(code: usize, before: &Scalars) -> Option<usize> {
+    (code..code + 2).find(|&c| before.get(c).copied().flatten().is_none())
+}
+
+/// Why each register a lane run holds is unknown, where a step made it so: the scalars by code, and
+/// the vector registers unknown in a running lane.
+struct Causes<'a> {
+    scalars: Vec<Option<LeftBy<'a>>>,
+    vectors: Vec<Option<LeftBy<'a>>>,
+}
+
+impl<'a> Causes<'a> {
+    fn new() -> Self {
+        Self {
+            scalars: vec![None; SCALAR_CODES],
+            vectors: vec![None; 256],
+        }
+    }
+
+    /// Records what a step left unknown: a scalar it made unknown, or one it wrote and could not
+    /// know - a mask a compare wrote from what the run does not know - and a vector destination
+    /// unknown in a running lane; and forgets the cause of whatever it made known.
+    fn record(
+        &mut self,
+        model: &Concrete<'_>,
+        (instruction, name): (&Instruction, &'a str),
+        before: &Scalars,
+        lanes: u32,
+    ) {
+        let written = written_scalars(instruction, name);
+        for (code, (was, now)) in before.iter().zip(model.scalars).enumerate() {
+            let left = now.is_none() && (was.is_some() || written.contains(&code));
+            if now.is_some() {
+                self.scalars[code] = None;
+            } else if left {
+                let why = self.sources(instruction, before);
+                self.scalars[code] = Some((instruction.offset, name, why));
+            }
+        }
+        if let Some(Operand::Vector(register)) = instruction.operands.first() {
+            let unknown = (0..lanes.min(model.modelled)).any(|lane| {
+                model.lane_runs(lane) == Some(true)
+                    && model.vector(u32::from(*register), lane).is_none()
+            });
+            let cause =
+                unknown.then(|| (instruction.offset, name, self.sources(instruction, before)));
+            if let Some(slot) = self.vectors.get_mut(usize::from(*register)) {
+                *slot = cause;
+            }
+        }
+    }
+
+    /// What made a step's result unknown, as far as its sources say: each source unknown before
+    /// it, with the step that left it so and that step's own cause, or that nothing had set it.
+    /// Empty where every source was known: the operation itself is what the run does not carry
+    /// out.
+    fn sources(&self, instruction: &Instruction, before: &Scalars) -> String {
+        let reasons: Vec<String> = instruction
+            .operands
+            .iter()
+            .skip(1)
+            .filter_map(|operand| {
+                let (cause, spelled) = match operand {
+                    Operand::Scalar(register) => (
+                        self.scalars[unknown_half(usize::from(*register), before)?].as_ref(),
+                        format!("s{register}"),
+                    ),
+                    Operand::Named(named) => (
+                        self.scalars[unknown_half(mask_code(named)?, before)?].as_ref(),
+                        named.clone(),
+                    ),
+                    Operand::Vector(register) => (
+                        Some(self.vectors.get(usize::from(*register))?.as_ref()?),
+                        format!("v{register}"),
+                    ),
+                    _ => return None,
+                };
+                Some(match cause {
+                    Some((at, by, why)) => {
+                        format!("{spelled} unknown after `{by}` at {at:#x}{why}")
+                    }
+                    None => format!("{spelled} unknown before any step set it"),
+                })
+            })
+            .collect();
+        if reasons.is_empty() {
+            return String::new();
+        }
+        let why = format!(", which read {}", reasons.join(" and "));
+        if why.len() <= MOST_CAUSE_BYTES {
+            return why;
+        }
+        // The first steps and the last, where the chain reaches the step that began it.
+        let head = (0..=MOST_CAUSE_BYTES / 3)
+            .rev()
+            .find(|&at| why.is_char_boundary(at))
+            .unwrap_or(0);
+        let tail = (why.len() - MOST_CAUSE_BYTES / 2..why.len())
+            .find(|&at| why.is_char_boundary(at))
+            .unwrap_or(why.len());
+        format!("{} ... {}", &why[..head], &why[tail..])
+    }
+
+    /// A refusal for a branch at `at` on what the run cannot know, naming the step that left the
+    /// execution mask or `vcc` unknown where one did, and why.
+    fn branch(&self, (at, name): (u32, &str)) -> LaneRefusal {
+        let causes: Vec<String> = [(EXEC, "the execution mask"), (VCC, "vcc")]
+            .iter()
+            .filter_map(|&(code, mask)| {
+                let (step, by, why) = self.scalars[code]
+                    .as_ref()
+                    .or(self.scalars[code + 1].as_ref())?;
+                Some(format!("{mask} is unknown after `{by}` at {step:#x}{why}"))
+            })
+            .collect();
+        format!(
+            "the program branches at `{name}` at {at:#x} on what the host cannot know{}{} (D758)",
+            if causes.is_empty() { "" } else { ": " },
+            causes.join("; ")
+        )
+        .into()
+    }
 }
 
 /// A program prepared for lane runs (D758): decoded, with which instructions a run needs and
@@ -1264,7 +1378,40 @@ impl<'a> Concrete<'a> {
                     _ => return None,
                 }
             }
-            _ => return None,
+            _ => return self.compute_float(opcode, arguments),
+        })
+    }
+
+    /// The float operations [`Self::compute`] leaves: floats are held as their bits. The host's
+    /// float arithmetic is exact where a device's may round a division differently in the last
+    /// place; an integer division corrects for that, and an address formed otherwise is checked by
+    /// the run it feeds.
+    fn compute_float(&self, opcode: u16, arguments: &[u32]) -> Option<Value> {
+        let word = |at: usize| arguments.get(at).and_then(|id| self.number(*id));
+        let float = |at: usize| word(at).map(f32::from_bits);
+        Some(match opcode {
+            op::FADD | op::FSUB | op::FMUL | op::FDIV => {
+                let (a, b) = (float(0)?, float(1)?);
+                Value::Word(
+                    match opcode {
+                        op::FADD => a + b,
+                        op::FSUB => a - b,
+                        op::FMUL => a * b,
+                        _ => a / b,
+                    }
+                    .to_bits(),
+                )
+            }
+            op::CONVERT_U_TO_F => Value::Word(unsigned_to_float(word(0)?).to_bits()),
+            op::CONVERT_S_TO_F => {
+                Value::Word(signed_to_float(i32::from_ne_bytes(word(0)?.to_ne_bytes())).to_bits())
+            }
+            // Defined only in range (SPIR-V 3.42.11); the translation saturates before it.
+            op::CONVERT_F_TO_U => Value::Word(float_to_unsigned(float(0)?)?),
+            op::CONVERT_F_TO_S => Value::Word(u32::from_ne_bytes(
+                float_to_signed(float(0)?)?.to_ne_bytes(),
+            )),
+            _ => Value::Bool(spirv_float_compare(opcode, float(0)?, float(1)?)?),
         })
     }
 
@@ -2243,9 +2390,69 @@ mod tests {
         let refused = wave_lane_addresses(&program, &encodings, &[], (64, &wave), &mut |_| None)
             .expect_err("vcc is unknown");
         assert!(
-            refused.contains("vcc is unknown after `v_cmp_lt_u32_e32` at 0x8"),
+            refused.contains(concat!(
+                "vcc is unknown after `v_cmp_lt_u32_e32` at 0x8, which read v5 unknown after ",
+                "`global_load_dword` at 0x0"
+            )),
             "{refused}"
         );
+        // A step that read what an earlier step left unknown carries that step's cause too:
+        // `v_mov_b32 v6, v5` after the load, compared, names both.
+        let words = [
+            0xdc30_8000,
+            0x057d_0001,
+            short_form(&encodings, "v_mov_b32_e32", 6, 256 + 5, 0),
+            short_form(&encodings, "v_cmp_lt_u32_e32", 0, 256 + 6, 0),
+            0xbf86_0002,
+            0xdc30_8000,
+            0x037d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let loads = [decode.instructions[0].offset, decode.instructions[4].offset];
+        let program = super::LaneProgram::new(decode, &encodings, &loads);
+        let refused = wave_lane_addresses(&program, &encodings, &[], (64, &wave), &mut |_| None)
+            .expect_err("vcc is unknown");
+        assert!(
+            refused.contains(concat!(
+                "which read v6 unknown after `v_mov_b32_e32` at 0x8, which read v5 unknown after ",
+                "`global_load_dword` at 0x0"
+            )),
+            "{refused}"
+        );
+    }
+
+    /// The float operations an integer division goes through run on their bits: a conversion, a
+    /// reciprocal, products and the conversion back. `s0` is 8: 8.0, its reciprocal 0.125, 8.0
+    /// squared 64.0, times the reciprocal 8.0, and back to 8 - the address every lane forms.
+    #[test]
+    fn the_float_steps_of_a_division_are_run() {
+        use super::{WaveEntry, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            short_form(&encodings, "v_cvt_f32_u32_e32", 1, 0, 0),
+            short_form(&encodings, "v_rcp_iflag_f32_e32", 3, 256 + 1, 0),
+            short_form(&encodings, "v_mul_f32_e32", 1, 256 + 1, 1),
+            short_form(&encodings, "v_mul_f32_e32", 1, 256 + 3, 1),
+            short_form(&encodings, "v_cvt_u32_f32_e32", 1, 256 + 1, 0),
+            // global_load_dword v3, v[1:2], off.
+            0xdc30_8000,
+            0x037d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let load = decode.instructions[5].offset;
+        let program = super::LaneProgram::new(decode, &encodings, &[load]);
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0]), Some([1, 0, 0])],
+            components: 1,
+        };
+        let found = wave_lane_addresses(&program, &encodings, &[8], (64, &wave), &mut |_| None);
+        assert_eq!(found, Ok(vec![(load, vec![8, 8])]));
     }
 
     /// A lane read is run where its lane is known: `v_readfirstlane_b32 s4, v0` takes the first
