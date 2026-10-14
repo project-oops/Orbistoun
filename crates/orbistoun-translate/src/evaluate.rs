@@ -1278,8 +1278,20 @@ impl<'a> Concrete<'a> {
         {
             return;
         }
-        for operand in instruction.operands.iter().take(2) {
+        // The destination, a scalar where the instruction reads a lane into one; and a second, a
+        // carry-out or a pre-scale flag, only where the operand layout says the instruction has
+        // one - otherwise the second operand is a source, read and not written.
+        let written = if model::has_scalar_destination(self.encodings, instruction) {
+            2
+        } else {
+            1
+        };
+        for operand in instruction.operands.iter().take(written) {
             self.forget_operand(Some(operand));
+        }
+        // The short carry forms write their carry into the condition mask, which no operand names.
+        if name.contains("_co_") && name.ends_with("_e32") {
+            self.forget(VCC, 2);
         }
         // A compare's SDWA form writes the pair its modifier word names, not the condition mask.
         if instruction.word & 0x1ff == SDWA_SOURCE
@@ -1530,6 +1542,34 @@ mod tests {
     ) -> Result<Scalars, &'static str> {
         scalar_prefix(decode, encodings, (until, None), user_data, &[], read)
             .map(|scalars| scalars.expect("the access is reached"))
+    }
+
+    /// A vector instruction forgets only the scalars it writes: `v_mul_f32_e32 v6, s3, v6` reads
+    /// `s3` and writes `v6`, so a descriptor in `s[4:7]` after it is still the draw's. Taking every
+    /// scalar in its first two operands for a destination forgot `s[3:4]`, and Grand Theft Auto V's
+    /// pixel shader lost the descriptor it reads its constants through (the word below is its).
+    #[test]
+    fn a_vector_source_scalar_is_not_forgotten() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = [0x100c_0c03_u32, 0xf420_0002, 0xfa00_0000, 0xbf81_0000]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let access = decode.instructions[1].offset;
+        let scalars = reached(
+            &decode,
+            &encodings,
+            access,
+            (3, &[9, 1, 2, 3, 4]),
+            &mut |_| None,
+        )
+        .expect("evaluated");
+        assert_eq!(
+            [3, 4, 5, 6, 7].map(|register| scalars[register]),
+            [9, 1, 2, 3, 4].map(Some)
+        );
     }
 
     /// The prefix says which instruction left a register unknown at the access: a vector result

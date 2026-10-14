@@ -3710,7 +3710,7 @@ const SCALAR_DESTINATION: (u32, u32) = (0, 8);
 /// operand solver records where each opcode's operands are, and the sub-encodings differ exactly in
 /// whether an operand occupies those bits, so each opcode classifies itself. An instruction whose
 /// layout is unknown is refused before translation, so this is only asked about solved opcodes.
-fn has_scalar_destination(encodings: &EncodingTable, instruction: &Instruction) -> bool {
+pub(crate) fn has_scalar_destination(encodings: &EncodingTable, instruction: &Instruction) -> bool {
     let (word, shift) = SCALAR_DESTINATION;
     instruction
         .encoding
