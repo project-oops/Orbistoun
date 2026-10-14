@@ -294,7 +294,7 @@ pub fn trace(
         }
     }
     accesses.sort_by_key(|(offset, _)| *offset);
-    let mut buffers = slots(accesses, decode, (first_register, count));
+    let mut buffers = slots(accesses, (decode, encodings), (first_register, count));
     buffers.stored_only = stored_only(&buffers.served, &stores);
     buffers
 }
@@ -334,7 +334,7 @@ fn prefix_words(decode: &Decode, at: u32) -> Option<Vec<u32>> {
 /// every access's reach through it combined.
 fn slots(
     accesses: Vec<(u32, Access)>,
-    decode: &Decode,
+    (decode, encodings): (&Decode, &EncodingTable),
     (first_register, user_data): (u32, u32),
 ) -> DrawBuffers {
     let mut keys: Vec<Key> = Vec::new();
@@ -404,7 +404,18 @@ fn slots(
     // Every global load through one buffer, after the others: the run that finds their addresses
     // goes through the last of them.
     if let Some(&(last, _)) = globals.last()
-        && let Some(prefix) = prefix_words(decode, last + 1)
+        // Through the last load, and through any branch after it back to it: a loop's passes
+        // all run (D883).
+        && let Some(prefix) = prefix_words(
+            decode,
+            crate::evaluate::run_end(
+                decode,
+                encodings,
+                &globals.iter().map(|&(at, _)| at).collect::<Vec<_>>(),
+            )
+            .max(last)
+                + 1,
+        )
     {
         let slot = u32::try_from(sources.len()).unwrap_or(u32::MAX);
         for &(offset, _) in &globals {
@@ -1349,6 +1360,41 @@ mod tests {
         };
         assert_eq!(global.loads, vec![(0, 1)]);
         assert_eq!(traced.served.get(&0), Some(&0));
+    }
+
+    /// A global load in a loop whose branch back follows it carries the program through that branch,
+    /// so the lane run follows every pass: Grand Theft Auto V copies a byte buffer into an image a
+    /// pass at a time, its `s_branch` back after its `global_load_ubyte`.
+    #[test]
+    fn a_looped_global_loads_program_runs_through_its_branch_back() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings.find_by_name("v_mov_b32_e32").expect("v_mov");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        let words = [
+            // s_mov_b32 s0, 0; loop: v_mov_b32 v1, s0; global_load_dword v3, v[1:2], off;
+            // s_add_u32 s0, s0, 4; s_cmp_lt_u32 s0, 12; s_cbranch_scc1 loop; s_endpgm.
+            0xbe80_0380,
+            encoding.value | (opcode << encoding.opcode.shift) | (1 << 17),
+            0xdc30_8000,
+            0x037d_0001,
+            0x8000_8400,
+            0xbf0a_ff00,
+            12,
+            0xbf85_fff9,
+            END,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let traced = trace(&decoded, &encodings, (0, 0), (true, false));
+        let [BufferSource::Global(global)] = traced.sources.as_slice() else {
+            panic!("the global load: {:?}", traced.sources);
+        };
+        assert_eq!(global.prefix, words[..8], "through the branch back");
     }
 
     const END: u32 = 0xbf81_0000;
