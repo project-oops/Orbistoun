@@ -234,6 +234,25 @@ pub struct Wait {
     pub calls: u64,
     /// [`CALLEE_SAVED`]'s registers at the newest of them.
     pub registers: Vec<WaitRegister>,
+    /// The word the loop reads, when watching its objects found it while the run went on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub word: Option<WaitedWord>,
+}
+
+/// The word a waiting loop reads, found by watching its objects (D832).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WaitedWord {
+    /// Its address: an eight-byte word holding what the loop reads.
+    pub address: u64,
+    /// The register that pointed at its object.
+    pub register: String,
+    /// How far into that object it is.
+    pub offset: u64,
+    /// The instruction after the loop's read of it.
+    pub read_after: u64,
+    /// The instructions after each write to it while it was watched; empty when nothing wrote it.
+    #[serde(default)]
+    pub writers: Vec<u64>,
 }
 
 /// One callee-saved register at a waiting call.

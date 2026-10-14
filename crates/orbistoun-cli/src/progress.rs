@@ -417,6 +417,20 @@ fn print_waits(trace: &orbistoun_report::trace::CallTrace) {
                 register.name, register.value
             );
         }
+        if let Some(word) = &wait.word {
+            println!(
+                "           reads {:#x} ({}+{:#x}), the access before {:#x}",
+                word.address, word.register, word.offset, word.read_after
+            );
+            if word.writers.is_empty() {
+                println!(
+                    "           ! nothing wrote it while it was watched: a completion that never came"
+                );
+            } else {
+                let writers: Vec<String> = word.writers.iter().map(|w| format!("{w:#x}")).collect();
+                println!("           written before {}", writers.join(", "));
+            }
+        }
     }
 }
 

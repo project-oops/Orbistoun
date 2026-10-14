@@ -27,6 +27,7 @@ pub mod render;
 pub mod report;
 pub mod session;
 pub mod tls_backstop;
+pub mod waits;
 pub mod watch;
 pub mod watchpoint;
 
@@ -1715,6 +1716,10 @@ fn install_reporting(
     if !armed.is_empty() {
         tracing::info!("watching {armed}");
     }
+    // The entering thread is a guest thread too; then a thread found waiting is resolved to the
+    // word it waits on while the run goes on, unless the run is watching words of its own (D832).
+    watchpoint::register_this_thread();
+    waits::start();
     Ok(reporting)
 }
 
@@ -2513,8 +2518,10 @@ fn install_main_thread_tls(image: &Image, bytes: &[u8]) -> Result<Option<u64>, E
 /// setup stored. Silent when the image declared no thread-locals. A failure leaves a thread that
 /// faults on its first `fs:`-relative access, so it is logged.
 fn set_up_this_threads_tls() {
-    // The run's watchpoints go with every guest thread, not only the first.
+    // The run's watchpoints go with every guest thread, not only the first, and every guest
+    // thread can be watched later, when a thread is found waiting (D832).
     watchpoint::arm_this_thread();
+    watchpoint::register_this_thread();
     let Some(Some((layout, tdata))) = TLS_TEMPLATE.get() else {
         return;
     };

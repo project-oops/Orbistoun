@@ -329,12 +329,25 @@ fn record(slot: usize, after: u64) -> bool {
     false
 }
 
-/// Every site that touched a watched address, as lines a person reads.
-///
-/// Ordered by watchpoint and then by discovery, so the first line for an address is the first
-/// instruction that touched it.
-pub fn sites() -> Vec<String> {
-    let mut lines = Vec::new();
+/// One instruction that touched a watched address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    /// The watched address.
+    pub address: u64,
+    /// The instruction pointer after the access: the access was the instruction before it.
+    pub after: u64,
+    /// What the watched bytes held the first time this instruction touched them.
+    pub first: u64,
+    /// What they held most recently.
+    pub last: u64,
+    /// How many times this instruction touched them.
+    pub count: u64,
+}
+
+/// Every instruction that touched a watched data address, by watchpoint and then by discovery,
+/// so an address's first hit is the first instruction that touched it.
+pub fn hits() -> Vec<Hit> {
+    let mut out = Vec::new();
     for (slot, armed_at) in ARMED_ADDRESS.iter().enumerate() {
         let address = armed_at.load(Ordering::Relaxed);
         // Execute slots report through `execute_snapshot`, with their own counts.
@@ -342,29 +355,46 @@ pub fn sites() -> Vec<String> {
             continue;
         }
         let tag = slot as u64 + 1;
-        let mut any = false;
         for index in 0..MAX_SITES {
-            if SITE_SLOT[index].load(Ordering::Relaxed) != tag {
-                continue;
+            if SITE_SLOT[index].load(Ordering::Relaxed) == tag {
+                out.push(Hit {
+                    address,
+                    after: SITE_AFTER[index].load(Ordering::Relaxed),
+                    first: SITE_FIRST[index].load(Ordering::Relaxed),
+                    last: SITE_LAST[index].load(Ordering::Relaxed),
+                    count: SITE_COUNT[index].load(Ordering::Relaxed),
+                });
             }
+        }
+    }
+    out
+}
+
+/// Every site that touched a watched address, as lines a person reads, in [`hits`]'s order.
+pub fn sites() -> Vec<String> {
+    let mut lines = Vec::new();
+    let all = hits();
+    for (slot, armed_at) in ARMED_ADDRESS.iter().enumerate() {
+        let address = armed_at.load(Ordering::Relaxed);
+        if address == 0 || ARMED_EXECUTE[slot].load(Ordering::Relaxed) == 1 {
+            continue;
+        }
+        let mut any = false;
+        for hit in all.iter().filter(|hit| hit.address == address) {
             any = true;
-            let after = SITE_AFTER[index].load(Ordering::Relaxed);
-            let first = SITE_FIRST[index].load(Ordering::Relaxed);
-            let last = SITE_LAST[index].load(Ordering::Relaxed);
-            let count = SITE_COUNT[index].load(Ordering::Relaxed);
-            let saw = if first == last {
-                format!("saw {first:#x}")
+            let saw = if hit.first == hit.last {
+                format!("saw {:#x}", hit.first)
             } else {
-                format!("saw {first:#x} then {last:#x}")
+                format!("saw {:#x} then {:#x}", hit.first, hit.last)
             };
-            let times = if count > 1 {
-                format!(", {count} times")
+            let times = if hit.count > 1 {
+                format!(", {} times", hit.count)
             } else {
                 String::new()
             };
             lines.push(format!(
                 "  {address:#x}: after the access at {}, {saw}{times}",
-                located(after)
+                located(hit.after)
             ));
         }
         if !any {
@@ -510,6 +540,69 @@ pub fn arm_this_thread() {
     }
 }
 
+/// Every guest thread's handle, so watchpoints can be re-armed on all of them while the run goes
+/// on (D832). Kept as numbers: an operating-system handle, never dereferenced here.
+static THREADS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// Records the calling guest thread, so [`rearm`] reaches it. Called as each guest thread starts,
+/// and for the one that enters the guest.
+pub fn register_this_thread() {
+    if let Some(handle) = imp::this_thread() {
+        if let Ok(mut threads) = THREADS.lock() {
+            threads.push(handle);
+        }
+    }
+}
+
+/// Replaces whatever is armed with `requests` on every registered guest thread, forgetting the
+/// hits recorded so far, and answers how many threads now carry them.
+///
+/// Called from a thread that is not a guest thread, since arming suspends each target. A thread
+/// that has ended cannot be suspended and is dropped from the registry.
+pub fn rearm(requests: &[Request]) -> usize {
+    OWNED.store(true, Ordering::Relaxed);
+    for slot in &SITE_SLOT {
+        slot.store(0, Ordering::Relaxed);
+    }
+    for slot in 0..MAX_WATCHPOINTS {
+        ARMED_ADDRESS[slot].store(0, Ordering::Relaxed);
+        ARMED_LENGTH[slot].store(0, Ordering::Relaxed);
+        ARMED_EXECUTE[slot].store(0, Ordering::Relaxed);
+    }
+    remember(requests);
+    let control = imp::control(requests);
+    let mut addresses = [0_u64; MAX_WATCHPOINTS];
+    for (slot, request) in requests.iter().enumerate().take(MAX_WATCHPOINTS) {
+        addresses[slot] = request.address;
+    }
+    let Ok(mut threads) = THREADS.lock() else {
+        return 0;
+    };
+    let registered = threads.len();
+    let mut refused = None;
+    threads.retain(
+        |&handle| match imp::write_registers(handle, control, addresses) {
+            Ok(_) => true,
+            Err(why) => {
+                refused.get_or_insert(why);
+                false
+            }
+        },
+    );
+    // Again once every thread carries the new set: a trap the old set raised on a thread before it
+    // was re-armed lands meanwhile, and is not the new set's.
+    for slot in &SITE_SLOT {
+        slot.store(0, Ordering::Relaxed);
+    }
+    if let Some(why) = refused {
+        tracing::warn!(
+            "{} of {registered} guest thread(s) could not be armed and are no longer watched: {why}",
+            registered - threads.len()
+        );
+    }
+    threads.len()
+}
+
 /// What a debug exception was, and what the handler must do to resume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trap {
@@ -537,7 +630,7 @@ pub fn note(debug_status: u64, after: u64, registers: &Registers) -> Trap {
     /// The low four bits, one per watchpoint, saying which of them fired.
     const FIRED: u64 = 0b1111;
 
-    if !armed() {
+    if !armed() && !OWNED.load(Ordering::Relaxed) {
         // Not ours: debuggers and language runtimes raise debug exceptions routinely.
         return Trap::NotOurs;
     }
@@ -558,6 +651,10 @@ pub fn note(debug_status: u64, after: u64, registers: &Registers) -> Trap {
         Trap::Data
     }
 }
+
+/// Whether this run has armed debug registers itself, so every debug trap is its own: one raised by
+/// a set [`rearm`] has since replaced, landing as it is replaced, still is.
+static OWNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Whether the handler is already running, so its own reads do not re-enter it.
 ///
@@ -591,6 +688,11 @@ fn attribute(fired: u64, after: u64, registers: &Registers) -> (bool, u64) {
             continue;
         }
         if address.load(Ordering::Relaxed) == 0 {
+            // A slot armed by a set since replaced: ours, with nothing left to charge it to.
+            if OWNED.load(Ordering::Relaxed) {
+                ours = true;
+                UNATTRIBUTED.fetch_add(1, Ordering::Relaxed);
+            }
             continue;
         }
         ours = true;
@@ -713,8 +815,33 @@ mod imp {
         outcome
     }
 
+    /// A handle to the calling thread that stays valid on other threads, for [`super::rearm`].
+    pub(super) fn this_thread() -> Option<usize> {
+        use windows_sys::Win32::Foundation::DuplicateHandle;
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
+        // SAFETY: the pseudo-handle for the calling process, always valid.
+        let process = unsafe { GetCurrentProcess() };
+        // SAFETY: the pseudo-handle for the calling thread, valid in this thread.
+        let thread = unsafe { GetCurrentThread() };
+        let mut duplicated = std::ptr::null_mut();
+        // SAFETY: both source handles are valid, and the out-parameter is a live local of the
+        // right type.
+        let copied = unsafe {
+            DuplicateHandle(
+                process,
+                thread,
+                process,
+                &raw mut duplicated,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        };
+        (copied != 0 && !duplicated.is_null()).then(|| duplicated.expose_provenance())
+    }
+
     /// Suspends the target, writes its debug registers, and resumes it.
-    fn write_registers(
+    pub(super) fn write_registers(
         thread: usize,
         control: u64,
         addresses: [u64; MAX_WATCHPOINTS],
@@ -779,6 +906,25 @@ mod imp {
     /// Not implemented away from Windows, where it needs `ptrace(PTRACE_POKEUSER)` from a tracer
     /// process. It refuses rather than reporting success and arming nothing.
     pub(super) fn arm(_requests: &[Request]) -> Result<String, Error> {
+        Err(Error::WatchpointsUnsupported)
+    }
+
+    /// Nothing to register where nothing can be armed.
+    pub(super) const fn this_thread() -> Option<usize> {
+        None
+    }
+
+    /// Nothing is armed here.
+    pub(super) const fn control(_requests: &[Request]) -> u64 {
+        0
+    }
+
+    /// Refuses, as [`arm`] does.
+    pub(super) const fn write_registers(
+        _thread: usize,
+        _control: u64,
+        _addresses: [u64; super::MAX_WATCHPOINTS],
+    ) -> Result<String, Error> {
         Err(Error::WatchpointsUnsupported)
     }
 }

@@ -405,7 +405,7 @@ static REPORTING_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync:
 /// the process unreported, so the reporter asks first (D471). `VirtualQuery` allocates nothing and
 /// reads nothing at `address`, so it is safe on this path.
 #[cfg(windows)]
-fn readable(address: u64, len: usize) -> bool {
+pub(crate) fn readable(address: u64, len: usize) -> bool {
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
     };
@@ -2447,27 +2447,34 @@ fn called_from(rsp: u64) -> Option<u64> {
 /// How many bytes a waiting thread's register is shown pointing at.
 const WAIT_BYTES: usize = 32;
 
-/// The loop a thread is waiting in, from its calls in the recorded window, with the callee-saved
-/// registers at the newest of them and what each pointed at (D832).
-fn waiting(
-    own: &[&orbistoun_thunk::RecordedCall],
-    newest: &orbistoun_thunk::RecordedCall,
-) -> Option<orbistoun_report::trace::Wait> {
-    let calls: Vec<(u32, u64)> = own.iter().map(|call| (call.index, call.from)).collect();
-    orbistoun_report::trace::waiting_loop(&calls)?;
-    let registers = orbistoun_report::trace::CALLEE_SAVED
+/// The loop a thread is waiting in, with the callee-saved registers at its newest call, what each
+/// pointed at, and the word it reads if the run found it (D832). `calls` is how many of the
+/// thread's recorded calls it made.
+fn wait_note(waiting: &crate::waits::Waiting, calls: usize) -> orbistoun_report::trace::Wait {
+    let names = orbistoun_report::trace::CALLEE_SAVED;
+    let registers = names
         .iter()
-        .zip(newest.saved)
+        .zip(waiting.saved)
         .map(|(name, value)| orbistoun_report::trace::WaitRegister {
             name: (*name).to_owned(),
             value,
             bytes: pointed_at(value),
         })
         .collect();
-    Some(orbistoun_report::trace::Wait {
-        calls: calls.len() as u64,
+    let word = crate::waits::resolved(waiting.host, waiting.site)
+        .and_then(|resolved| resolved.word)
+        .map(|word| orbistoun_report::trace::WaitedWord {
+            address: word.address,
+            register: names.get(word.register).copied().unwrap_or("?").to_owned(),
+            offset: word.offset,
+            read_after: word.read_after,
+            writers: word.writers,
+        });
+    orbistoun_report::trace::Wait {
+        calls: calls as u64,
         registers,
-    })
+        word,
+    }
 }
 
 /// The first bytes `value` points at, when it points at readable memory.
@@ -2489,6 +2496,7 @@ fn pointed_at(_value: u64) -> Vec<u8> {
 fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
     let recorded = orbistoun_thunk::recorded_calls();
     let inside = orbistoun_thunk::threads_inside();
+    let waits = crate::waits::waiting(&recorded);
     orbistoun_kernel::thread::all()
         .into_iter()
         .map(|record| {
@@ -2508,7 +2516,10 @@ fn thread_notes() -> Vec<orbistoun_report::trace::ThreadNote> {
                     from => format!("{}, called from {from:#x}", labelled(call.index as usize)),
                 }),
                 last_sequence: newest.map(|call| call.sequence),
-                waits: newest.and_then(|call| waiting(&own, call)),
+                waits: waits
+                    .iter()
+                    .find(|waiting| record.host != 0 && waiting.host == record.host)
+                    .map(|waiting| wait_note(waiting, own.len())),
                 inside: inside
                     .iter()
                     .find(|&&(host, ..)| record.host != 0 && host == record.host)
