@@ -786,6 +786,12 @@ pub trait Model {
         None
     }
 
+    /// Writes one vertex's render-target layer, for the lane that is that vertex (D859); [`None`]
+    /// for a module that declares no layers.
+    fn write_mesh_layer(&mut self, _lane: u32, _layer: Id) -> Option<()> {
+        None
+    }
+
     /// Writes one primitive's vertex indices, for the lane that is that primitive: as many as
     /// [`Self::mesh_primitive`] carries, one for a point, two for a line, three for a triangle.
     fn write_mesh_indices(&mut self, _lane: u32, _indices: &[Id]) -> Option<()> {
@@ -1920,6 +1926,14 @@ fn parameter_move<M: Model + ?Sized>(
 /// `orbistoun-gen`'s symbolic-code solver assembles an export with each spelling and reads the bits
 /// that moved: colour attachments from 0, `pos0` at 12, `param0` at 32, the primitive export at 20.
 const EXPORT_POSITION: i64 = 12;
+/// `pos1`, the misc vector: point size, edge flag, the layer and viewport index, and the shading
+/// rate (Mesa `ac_nir_prerast_utils.c` 355-395).
+pub(crate) const EXPORT_MISC: i64 = EXPORT_POSITION + 1;
+/// The misc vector's third channel, in an export's `EN` field: the render-target layer in bits
+/// 10:0 and the viewport index in 19:16 on GFX9 and later (`ac_nir_prerast_utils.c` 381-392, D859).
+pub(crate) const EXPORT_LAYER_CHANNEL: u32 = 1 << 2;
+/// The layer's bits in the misc vector's third channel.
+const LAYER_BITS: u32 = 0x7FF;
 /// The first parameter target; `param<n>` is this plus n.
 const EXPORT_PARAMETER: i64 = 32;
 /// How many parameter targets there are, so a code past them is not read as one.
@@ -2032,6 +2046,35 @@ fn mesh_vertex_export<M: Model + ?Sized>(
     Ok(())
 }
 
+/// `exp pos1` with only its third channel: one vertex's render-target layer, bits 10:0 of the
+/// register (D859). The viewport index above it reaches nothing here; a draw that has the hardware
+/// read it is refused where the draw is prepared.
+fn mesh_layer_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    source: &Operand,
+) -> Result<(), TranslateError> {
+    if instruction.word & EXPORT_COMPRESSED != 0 {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a compressed misc-vector export is not translated",
+        });
+    }
+    for lane in running_lanes(model) {
+        let bits = model.read_source(instruction, source, lane)?;
+        let mask = model.constant(LAYER_BITS);
+        let layer = model.binary(op::BITWISE_AND, bits, mask);
+        if model.write_mesh_layer(lane, layer).is_none() {
+            return Err(TranslateError::Unsupported {
+                offset: instruction.offset,
+                detail: "a layer export needs the layers a mesh module declares, and this module \
+                         is not one - translate at the mesh stage (D688, D859)",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// `exp prim`: the triangle's three vertex indices, packed into one register.
 ///
 /// The SDK's vertex program writes `0x20280600` for vertices 0, 1, 2 with edge flags (oracle record
@@ -2113,19 +2156,24 @@ fn discard_inactive<M: Model + ?Sized>(model: &mut M, instruction: &Instruction)
 }
 
 /// The further position exports: `pos1`'s misc vector (point size, edge flag, layer, viewport
-/// index) and the clip and cull distances in `pos2` and `pos3`. None is translated; refused by what
-/// it is, rather than taken for a colour export with nowhere to go.
-fn refuse_further_position(instruction: &Instruction, target: i64) -> Result<(), TranslateError> {
-    if (EXPORT_POSITION + 1..=EXPORT_POSITION + 3).contains(&target) {
-        return Err(TranslateError::Unsupported {
-            offset: instruction.offset,
-            detail: concat!(
-                "a further position export (pos1's point size, edge flag, layer or viewport ",
-                "index, or pos2/pos3's clip and cull distances) is not translated"
-            ),
-        });
+/// index) and the clip and cull distances in `pos2` and `pos3`. Only `pos1`'s layer channel alone
+/// is translated ([`mesh_layer_export`]); the rest is refused by what it is, rather than taken for
+/// a colour export with nowhere to go.
+fn further_position<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    (target, layer): (i64, &Operand),
+) -> Result<(), TranslateError> {
+    if target == EXPORT_MISC && instruction.word & EXPORT_ENABLE_MASK == EXPORT_LAYER_CHANNEL {
+        return mesh_layer_export(model, instruction, layer);
     }
-    Ok(())
+    Err(TranslateError::Unsupported {
+        offset: instruction.offset,
+        detail: concat!(
+            "a further position export (pos1's point size, edge flag, layer or viewport ",
+            "index, or pos2/pos3's clip and cull distances) is not translated"
+        ),
+    })
 }
 
 /// `exp`: hands four registers to a render target.
@@ -2178,7 +2226,9 @@ fn export<M: Model + ?Sized>(
     if *target == EXPORT_PRIMITIVE {
         return mesh_primitive_export(model, instruction, a);
     }
-    refuse_further_position(instruction, *target)?;
+    if (EXPORT_MISC..=EXPORT_POSITION + 3).contains(target) {
+        return further_position(model, instruction, (*target, c));
+    }
 
     let Some((vec4, colour)) = model.colour_output(0) else {
         return Err(TranslateError::Unsupported {

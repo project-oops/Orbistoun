@@ -381,6 +381,9 @@ pub struct SubmissionReport {
     /// Draws a stage's shader was not prepared for, which would run whatever shader was bound
     /// before them.
     pub unshaded_draws: usize,
+    /// Draws whose primitives' layers or viewports are not drawn as the hardware draws them
+    /// (D859), and why the first was refused.
+    pub unmodelled_layers: (usize, Option<String>),
 }
 
 impl SubmissionReport {
@@ -828,6 +831,10 @@ const PROVOKING_VTX_LAST: u32 = 1 << 19;
 /// input primitives of three vertices each, the second radeonsi's blits.
 const DI_PT_TRILIST: u32 = 4;
 const DI_PT_RECTLIST: u32 = 17;
+/// `DI_PT_2D_RECTANGLE` (`gfx103.json`, enum `VGT_DI_PRIM_TYPE` 7): the topology AGC's prim state
+/// draws through output primitive 3, a rectangle (D755), three corners a rectangle as a
+/// rectangle list's - PPSA21564's three-vertex full-screen pass is one.
+const DI_PT_2D_RECTANGLE: u32 = 7;
 /// `VGT_SHADER_STAGES_EN` (`gfx103.json`, dword `0xA2D5`); its `PRIMGEN_PASSTHRU_EN`, bit 25, hands
 /// the primitive shader its primitive already packed in `v0` ([`GeometryInputs::passthrough`]).
 const VGT_SHADER_STAGES_EN: u32 = 0xA2D5;
@@ -866,7 +873,7 @@ fn draw_geometry(
     }
     let topology = latest(VGT_PRIMITIVE_TYPE).map(|value| value & 0x3F);
     let (assembly, primitives) = match topology {
-        Some(DI_PT_TRILIST | DI_PT_RECTLIST) => (Assembly::List, vertices / 3),
+        Some(DI_PT_TRILIST | DI_PT_RECTLIST | DI_PT_2D_RECTANGLE) => (Assembly::List, vertices / 3),
         Some(DI_PT_LINELIST) => (Assembly::LineList, vertices / 2),
         Some(DI_PT_LINESTRIP) => (Assembly::LineStrip, vertices.saturating_sub(1)),
         Some(DI_PT_TRISTRIP) => (
@@ -1878,10 +1885,7 @@ impl Pipeline {
                 (&walked, stream, &draws),
                 (&writes, &buffers),
                 (&per_draw, &chunks, depth_target.map(|(id, _, _)| id)),
-                (
-                    &mut submission.report.unmodelled_viewports,
-                    &mut submission.report.unmasked_one_byte_draws,
-                ),
+                &mut submission.report,
             );
         });
         span(Span::PrepareTextures, || {
@@ -4160,9 +4164,10 @@ fn push_geometry_commands(
     (walked, stream, draws): (&PacketWalk, &[u8], &[DrawCall]),
     (writes, buffers): (&[RegisterWrite], &[u32]),
     (shaders, chunks, depth_target): (&[DrawShaders], &[Vec<Chunk>], Option<ResourceId>),
-    (unmodelled_viewports, unmasked_one_byte_draws): (&mut usize, &mut usize),
+    report: &mut SubmissionReport,
 ) {
     let mut sent: [Option<[u32; USER_DATA_WORDS]>; 2] = [None, None];
+    let mut layer_sent = None;
     let mut colour_sent = ColourOutputSent::default();
     let mut line_sent = None;
     let mut depth_sent = crate::depth::DrawStateSent::default();
@@ -4194,8 +4199,10 @@ fn push_geometry_commands(
             commands,
             |register| sweep.latest(at, register),
             &mut colour_sent,
-            (unmasked_one_byte_draws, buffers),
+            (&mut report.unmasked_one_byte_draws, buffers),
         );
+        // The layer this draw renders, which its primitive shader keeps the primitives of (D859).
+        push_draw_layer(commands, &mut layer_sent, |r| sweep.latest(at, r), report);
         // The line width in force at this draw, when the stream set one and it changed.
         if let Some(width) = sweep
             .latest(at, crate::registers::PA_SU_LINE_CNTL)
@@ -4225,7 +4232,7 @@ fn push_geometry_commands(
                     depth: crate::registers::DepthMapping::IDENTITY,
                 }),
                 crate::registers::PositionSpace::Unmodelled(_) => {
-                    *unmodelled_viewports += 1;
+                    report.unmodelled_viewports += 1;
                     None
                 }
             };
@@ -4274,6 +4281,35 @@ fn push_geometry_commands(
             y: dispatch.groups[1],
             z: dispatch.groups[2],
         });
+    }
+}
+
+/// The layer a draw renders, as a `SetDrawLayer` where it changed since `sent` - the draw-data
+/// word last sent, `None` before any (D859). A draw whose layers are not drawn as the hardware
+/// draws them is counted in [`SubmissionReport::unmodelled_layers`], with the first reason. Every
+/// draw keeps every primitive until one reads the layer.
+fn push_draw_layer(
+    commands: &mut Vec<RenderCommand>,
+    sent: &mut Option<u32>,
+    mut latest: impl FnMut(u32) -> Option<u32>,
+    report: &mut SubmissionReport,
+) {
+    match crate::registers::draw_layer(
+        latest(crate::registers::PA_CL_VS_OUT_CNTL),
+        latest(crate::registers::CB_COLOR0_VIEW),
+    ) {
+        Ok(layer) => {
+            // The word the draw data carries for no layer, which no layer is.
+            let word = layer.unwrap_or(u32::MAX);
+            if *sent != Some(word) {
+                commands.push(RenderCommand::SetDrawLayer(layer));
+                *sent = Some(word);
+            }
+        }
+        Err(why) => {
+            report.unmodelled_layers.0 += 1;
+            report.unmodelled_layers.1.get_or_insert(why);
+        }
     }
 }
 

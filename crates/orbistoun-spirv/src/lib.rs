@@ -405,6 +405,8 @@ pub mod decoration {
     /// The result is computed by its own operation alone: a driver may not contract it with
     /// another into one rounding, such as a multiply and an add into a fused multiply-add.
     pub const NO_CONTRACTION: u32 = 42;
+    /// Marks a mesh shader output as one value per primitive rather than per vertex.
+    pub const PER_PRIMITIVE_EXT: u32 = 5271;
 }
 
 /// Capability values.
@@ -505,6 +507,8 @@ pub mod built_in {
     pub const PRIMITIVE_LINE_INDICES_EXT: u32 = 5295;
     /// A mesh shader's triangle index array: three vertex indices per primitive (a `uvec3`).
     pub const PRIMITIVE_TRIANGLE_INDICES_EXT: u32 = 5296;
+    /// A mesh shader's per-primitive flag that discards the primitive (a `bool`).
+    pub const CULL_PRIMITIVE_EXT: u32 = 5299;
     /// Which vertex of the draw this invocation is.
     ///
     /// Signed in Vulkan's environment: the variable is declared `int`, and an unsigned declaration
@@ -1946,6 +1950,14 @@ pub const DRAW_DATA_VERTICES_WORD: u32 = 32;
 /// Where in a draw's stride its first vertex id is (D761): the vertex a chunk of a draw too large
 /// for one wave starts at, which its vertex threads count up from in place of an index buffer.
 pub const DRAW_DATA_FIRST_VERTEX_WORD: u32 = 33;
+
+/// Where in a draw's stride the layer it draws is (D859): the slice of its view this pass of the
+/// draw renders, whose primitives alone it keeps, or `u32::MAX` for a draw that does not use the
+/// layer and keeps every primitive.
+pub const DRAW_DATA_LAYER_WORD: u32 = 34;
+
+/// [`DRAW_DATA_LAYER_WORD`]'s value for a draw that keeps every primitive whatever its layer.
+pub const DRAW_LAYER_UNUSED: u32 = u32::MAX;
 
 /// Where in a draw's stride its geometry buffers' places begin (D747): for each slot, three words -
 /// the arena at the geometry binding it is a range of, its first word there, and how many words it

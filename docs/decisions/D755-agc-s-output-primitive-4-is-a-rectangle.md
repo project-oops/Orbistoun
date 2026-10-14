@@ -16,6 +16,11 @@ The rows are a prediction, and the cull rule is re-asked as obSCEne `REQ-2026101
 reading of 3 and 4 as rectangles rests on `create-prim-state` and the radeonsi blits below, which
 are real.
 
+**Extension (2026-10-14):** a draw of input topology 7 (`DI_PT_2D_RECTANGLE`) gives its primitive
+shader three vertices a primitive, as a rectangle list does: PPSA21564's first draw is three
+vertices of topology 7 through output primitive 3, a full-screen pass its shader builds from the
+vertex ids. Assumed from that draw; nothing measured says how many vertices the topology takes.
+
 **Why:** `sceAgcCreatePrimState` writes the output primitive into its register list, and
 `166-agc/create-prim-state` measured it for eight input topologies: 2 for the triangle topologies,
 3 for a quad list (7), and 4 for a rectangle list (17, `DI_PT_RECTLIST`). That is gfx11's numbering

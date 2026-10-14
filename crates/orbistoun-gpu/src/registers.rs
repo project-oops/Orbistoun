@@ -1430,8 +1430,11 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
     // The extension's eight bits sit above the base's thirty-two, both in 256-byte units; an
     // unwritten extension reads as its reset value, zero.
     let high = u64::from(last(CB_COLOR0_BASE_EXT).unwrap_or(0) & 0xFF) << 32;
+    // The target is the slice `SLICE_START` names, each slice a whole chain (D859).
+    let (first_slice, _) = view_slices(last(CB_COLOR0_VIEW).unwrap_or(0));
+    let slice = u64::from(first_slice) * layout.chain_bytes(extent.width, extent.height, levels);
     chain_level(
-        ((u64::from(base) | high) << 8, pipe_bank_xor),
+        (((u64::from(base) | high) << 8) + slice, pipe_bank_xor),
         (extent.width, extent.height),
         (levels, level),
         layout,
@@ -1440,7 +1443,7 @@ pub fn colour_target_at(writes: &[RegisterWrite]) -> Option<ColourTarget> {
 
 /// `CB_COLOR0_VIEW` (`gfx103.json`, byte `167020`, dword `0xA31B`): `SLICE_START` 12:0,
 /// `SLICE_MAX` 25:13, `MIP_LEVEL` 29:26.
-const CB_COLOR0_VIEW: u32 = 0xA31B;
+pub(crate) const CB_COLOR0_VIEW: u32 = 0xA31B;
 /// `CB_COLOR0_VIEW`'s `SLICE_START` and `SLICE_MAX` together.
 const VIEW_SLICES: u32 = 0x03FF_FFFF;
 /// `CB_COLOR0_VIEW.MIP_LEVEL`'s shift; the field is four bits.
@@ -2127,6 +2130,53 @@ const PA_CL_VPORT_XSCALE: u32 = 0xA10F;
 /// `PA_CL_VTE_CNTL` (`gfx103.json`, byte `165912`, dword `0xA206`): bits 0-3 enable the x/y scale
 /// and offset.
 const PA_CL_VTE_CNTL: u32 = 0xA206;
+/// `PA_CL_VS_OUT_CNTL` (`gfx103.json`, byte `165916`, dword `0xA207`): which of the position
+/// exports' misc vector the hardware reads.
+pub(crate) const PA_CL_VS_OUT_CNTL: u32 = 0xA207;
+/// `PA_CL_VS_OUT_CNTL.USE_VTX_RENDER_TARGET_INDX`, bit 18: each primitive goes to the layer its
+/// vertices export (D859). radeonsi sets it exactly when the shader writes the layer
+/// (`si_state_shaders.cpp` 996).
+const USE_VTX_RENDER_TARGET_INDX: u32 = 1 << 18;
+/// `PA_CL_VS_OUT_CNTL.USE_VTX_VIEWPORT_INDX`, bit 19: each primitive goes through the viewport its
+/// vertices export.
+const USE_VTX_VIEWPORT_INDX: u32 = 1 << 19;
+
+/// The layer a draw renders (D859): `Ok(Some(0))` where `PA_CL_VS_OUT_CNTL` has the hardware read
+/// each primitive's layer, so the draw keeps those its first slice holds; `Ok(None)` where it does
+/// not, and every primitive goes to `SLICE_START`. Refused, naming why, where the draw selects a
+/// viewport per vertex, or reads layers over a view of more than one slice - each slice is a pass
+/// of its own, which is not yet drawn.
+///
+/// # Errors
+///
+/// The reason the draw cannot be drawn as the hardware draws it.
+pub fn draw_layer(out_cntl: Option<u32>, view: Option<u32>) -> Result<Option<u32>, String> {
+    let out_cntl = out_cntl.unwrap_or(0);
+    if out_cntl & USE_VTX_VIEWPORT_INDX != 0 {
+        return Err(
+            "a draw selects its viewport per vertex (PA_CL_VS_OUT_CNTL.USE_VTX_VIEWPORT_INDX), and one viewport is modelled"
+                .to_owned(),
+        );
+    }
+    if out_cntl & USE_VTX_RENDER_TARGET_INDX == 0 {
+        return Ok(None);
+    }
+    let (start, last) = view_slices(view.unwrap_or(0));
+    if last > start {
+        return Err(format!(
+            "a draw sends its primitives to the layers of a view of slices {start} to {last}, which are drawn one pass a slice, and those passes are not yet carried out"
+        ));
+    }
+    Ok(Some(0))
+}
+
+/// `CB_COLOR0_VIEW`'s first and last slices.
+const fn view_slices(view: u32) -> (u32, u32) {
+    (view & VIEW_SLICE_FIELD, (view >> 13) & VIEW_SLICE_FIELD)
+}
+
+/// One of `CB_COLOR0_VIEW`'s thirteen-bit slice fields.
+const VIEW_SLICE_FIELD: u32 = 0x1FFF;
 /// `VPORT_X_SCALE_ENA` through `VPORT_Y_OFFSET_ENA`.
 const VTE_XY_ENABLES: u32 = 0xF;
 /// `VPORT_Z_SCALE_ENA`, `PA_CL_VTE_CNTL` bit 4 (`gfx103.json:13363`).
@@ -4594,6 +4644,50 @@ mod tests {
             colour_target_at(&target).map(|t| t.base),
             Some(0x7400_02e8_0000)
         );
+    }
+
+    /// A target is the slice `CB_COLOR0_VIEW.SLICE_START` names, each slice a whole chain (D859):
+    /// a 256 x 256 four-byte `64KB_R_X` slice is four 64 KiB blocks, so slice two starts 512 KiB
+    /// past the surface.
+    #[test]
+    fn a_target_is_the_slice_its_view_starts_at() {
+        let write = |register, value| RegisterWrite {
+            packet_offset: 0,
+            register,
+            value,
+        };
+        let mut target = vec![
+            write(0xA318, 0x0002_e800),
+            write(0xA390, 0x74),
+            write(0xA3B0, 0x003f_c0ff),
+            write(0xA3B8, 0x4dc6_c000),
+        ];
+        target.push(write(super::CB_COLOR0_VIEW, 2 | 5 << 13));
+        assert_eq!(
+            colour_target_at(&target).map(|t| t.base),
+            Some(0x7400_02e8_0000 + 2 * 0x4_0000)
+        );
+    }
+
+    /// A draw keeps every primitive unless `PA_CL_VS_OUT_CNTL` has the layer read; then it keeps
+    /// those in its view's one slice. A view of several slices and a per-vertex viewport are
+    /// refused by name (D859).
+    #[test]
+    fn a_draw_reads_its_layer_where_the_misc_vector_is_used() {
+        assert_eq!(super::draw_layer(None, None), Ok(None));
+        assert_eq!(
+            super::draw_layer(Some(1 << 21), Some(7 | 7 << 13)),
+            Ok(None)
+        );
+        assert_eq!(
+            super::draw_layer(Some(1 << 18 | 1 << 21), Some(4 | 4 << 13)),
+            Ok(Some(0))
+        );
+        assert!(
+            super::draw_layer(Some(1 << 18), Some(5 << 13))
+                .is_err_and(|why| why.contains("slices 0 to 5"))
+        );
+        assert!(super::draw_layer(Some(1 << 19), None).is_err_and(|why| why.contains("VIEWPORT")));
     }
 
     /// A `COLOR_8` target - SuperTuxKart's 512 x 512 glyph page - lies by the 8-bpp `64KB_R_X`

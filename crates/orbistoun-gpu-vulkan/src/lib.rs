@@ -323,6 +323,9 @@ pub struct VulkanBackend {
     /// `PA_SU_LINE_CNTL`'s `WIDTH` for the next draw: the latest `SetLineWidth`; `None` draws
     /// lines one pixel wide.
     line_width: Option<u16>,
+    /// The layer the next draw renders (D859): the latest `SetDrawLayer`, its draw words'
+    /// [`orbistoun_spirv::DRAW_DATA_LAYER_WORD`]; `None` keeps every primitive.
+    draw_layer: Option<u32>,
     /// The channels colour target zero's next draw writes: the latest `SetWriteMask`; `None`
     /// writes every one.
     write_mask: Option<u8>,
@@ -414,6 +417,7 @@ impl VulkanBackend {
             clip_planes: [[0; 4]; 6],
             raster_op: None,
             line_width: None,
+            draw_layer: None,
             write_mask: None,
             current_depth: None,
             depth_stencil: None,
@@ -827,6 +831,8 @@ impl VulkanBackend {
             RenderCommand::SetRasterOp(rop) => self.raster_op = Some(*rop),
             // The line width.
             RenderCommand::SetLineWidth(width) => self.line_width = Some(*width),
+            // The layer the draws render.
+            RenderCommand::SetDrawLayer(layer) => self.draw_layer = *layer,
             // The channels written.
             RenderCommand::SetWriteMask(mask) => self.write_mask = Some(*mask),
             // The depth and stencil tests, applied when a depth target is bound.
@@ -835,6 +841,12 @@ impl VulkanBackend {
             RenderCommand::SetDepthBias(bias) => self.depth_bias = Some(*bias),
             _ => {}
         }
+    }
+
+    /// The layer word the next mesh draw's words carry (D859).
+    fn layer_word(&self) -> u32 {
+        self.draw_layer
+            .unwrap_or(orbistoun_spirv::DRAW_LAYER_UNUSED)
     }
 
     /// How many distinct colour render targets the backend currently holds.
@@ -1217,7 +1229,7 @@ impl VulkanBackend {
 
     /// Nothing but the geometry words changed since the last mesh draw was batched (D718), so this
     /// draw joins the batch if it is still open; `false` when it cannot.
-    fn join_unchanged_batch(&mut self, vertices: (u32, u32)) -> bool {
+    fn join_unchanged_batch(&mut self, (vertices, first): (u32, u32)) -> bool {
         let Some((generation, key, places)) = self.batched else {
             return false;
         };
@@ -1243,7 +1255,10 @@ impl VulkanBackend {
         } else {
             places
         };
-        let (words, _) = framebuffer::split_user_data(&self.user_data, (vertices, &places));
+        let (words, _) = framebuffer::split_user_data(
+            &self.user_data,
+            ((vertices, first, self.layer_word()), &places),
+        );
         if !framebuffer::join_open_batch(&key, &words) {
             return false;
         }
@@ -1503,6 +1518,7 @@ impl VulkanBackend {
             clear: CLEAR_COLOUR,
             mesh_vertices: draw.vertices,
             mesh_first_vertex: draw.first_vertex,
+            mesh_layer: self.layer_word(),
             initial: None,
             user_data: &block,
             textures: textures
@@ -1643,6 +1659,7 @@ const fn is_draw_state(command: &RenderCommand) -> bool {
             | RenderCommand::SetClipPlanes(_)
             | RenderCommand::SetRasterOp(_)
             | RenderCommand::SetLineWidth(_)
+            | RenderCommand::SetDrawLayer(_)
             | RenderCommand::SetWriteMask(_)
             | RenderCommand::SetDepthStencil(_)
             | RenderCommand::SetCull(_)
@@ -1670,6 +1687,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetClipPlanes(_) => "SetClipPlanes",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
+        RenderCommand::SetDrawLayer(_) => "SetDrawLayer",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",

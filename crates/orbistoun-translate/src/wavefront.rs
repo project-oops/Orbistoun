@@ -288,6 +288,54 @@ struct MeshOutputs {
     /// and the pointer to one of its `float`s - which a mesh module may use, since its user data
     /// arrives in the draw-data buffer, not the block (D718).
     plane_block: (Id, Id),
+    /// A layered module's layers (D859): `None` for one that exports none.
+    layers: Option<MeshLayers>,
+}
+
+/// What a module that exports a layer declares (D859): each primitive's cull flag, and a workgroup
+/// word per vertex slot holding the layer that vertex exported, zero until it does.
+#[derive(Debug, Clone, Copy)]
+struct MeshLayers {
+    /// The `CullPrimitiveEXT` array, one `bool` per primitive slot.
+    cull: Id,
+    /// Pointer to one `bool` of it.
+    cull_ptr: Id,
+    /// The layers, one word per vertex slot.
+    words: Id,
+}
+
+/// Declares a layered module's cull flags and layer words (D859), where [`MeshReserved`] reserved
+/// them.
+fn declare_mesh_layers(
+    b: &mut Builder,
+    (u32_type, bool_type): (Id, Id),
+    primitive: MeshPrimitive,
+    reserved: &MeshReserved,
+) -> Option<MeshLayers> {
+    let (cull, words) = reserved.layers?;
+    b.annotate(
+        op::DECORATE,
+        &[cull.0, decoration::BUILT_IN, built_in::CULL_PRIMITIVE_EXT],
+    );
+    b.annotate(op::DECORATE, &[cull.0, decoration::PER_PRIMITIVE_EXT]);
+    let slots = b.id();
+    b.declare(op::CONSTANT, &[u32_type.0, slots.0, primitive.slots()]);
+    let (flags, flags_ptr, cull_ptr) = (b.id(), b.id(), b.id());
+    b.declare(op::TYPE_ARRAY, &[flags.0, bool_type.0, slots.0]);
+    b.declare(op::TYPE_POINTER, &[flags_ptr.0, OUTPUT, flags.0]);
+    b.declare(op::TYPE_POINTER, &[cull_ptr.0, OUTPUT, bool_type.0]);
+    b.declare(op::VARIABLE, &[flags_ptr.0, cull.0, OUTPUT]);
+    let vertex_slots = b.id();
+    b.declare(op::CONSTANT, &[u32_type.0, vertex_slots.0, MESH_SLOTS]);
+    let (array, array_ptr) = (b.id(), b.id());
+    b.declare(op::TYPE_ARRAY, &[array.0, u32_type.0, vertex_slots.0]);
+    b.declare(op::TYPE_POINTER, &[array_ptr.0, WORKGROUP, array.0]);
+    b.declare(op::VARIABLE, &[array_ptr.0, words.0, WORKGROUP]);
+    Some(MeshLayers {
+        cull,
+        cull_ptr,
+        words,
+    })
 }
 
 /// The user clip planes a module carries, `PA_CL_UCP_0` to `_5`.
@@ -1401,6 +1449,7 @@ fn declare_mesh_outputs(
         float_ptr,
         planes: [[Id(0); 4]; CLIP_PLANES],
         plane_block,
+        layers: None,
     })
 }
 
@@ -1415,17 +1464,22 @@ struct MeshReserved {
     parameters: BTreeMap<u32, Id>,
     /// Where the program's exports are staged until it has run, declared once the mesh outputs are.
     staged: Option<StagedOutputs>,
+    /// For a module that exports a layer (D859): the per-primitive cull flags, and the workgroup
+    /// words each vertex's layer is kept in.
+    layers: Option<(Id, Id)>,
 }
 
 impl MeshReserved {
-    /// Reserves ids for a mesh module's outputs, or nothing at another stage.
-    fn new(b: &mut Builder, stage: Stage, locations: &[u32]) -> Self {
+    /// Reserves ids for a mesh module's outputs, or nothing at another stage; `layered` for one
+    /// that exports a layer.
+    fn new(b: &mut Builder, stage: Stage, locations: &[u32], layered: bool) -> Self {
         if stage != Stage::Mesh {
             return Self {
                 vertices: Id(0),
                 indices: Id(0),
                 parameters: BTreeMap::new(),
                 staged: None,
+                layers: None,
             };
         }
         Self {
@@ -1436,6 +1490,7 @@ impl MeshReserved {
                 .map(|location| (*location, b.id()))
                 .collect(),
             staged: Some(StagedOutputs::reserve(b, locations)),
+            layers: layered.then(|| (b.id(), b.id())),
         }
     }
 
@@ -1447,6 +1502,11 @@ impl MeshReserved {
         let mut ids = vec![self.vertices.0, self.indices.0];
         ids.extend(self.parameters.values().map(|id| id.0));
         ids.extend(self.staged.iter().flat_map(StagedOutputs::interface));
+        ids.extend(
+            self.layers
+                .iter()
+                .flat_map(|(cull, words)| [cull.0, words.0]),
+        );
         ids
     }
 
@@ -2381,13 +2441,14 @@ fn declare_user_data_source(
 }
 
 /// What a module is prepared against beside its stage: the guest-memory window, the user data,
-/// the draw buffers it reads, whether it exports depth ([`exports_depth`]), and whether it reads
-/// its quad's other lanes ([`reads_quad`]).
+/// the draw buffers it reads, whether it exports depth ([`exports_depth`]), whether it reads
+/// its quad's other lanes ([`reads_quad`]), the colour targets it exports to, and whether it
+/// exports a layer ([`exports_layer`]).
 type StageContext<'b> = (
     Window,
     UserData,
     &'b crate::draw_buffers::DrawBuffers,
-    (bool, bool, u8),
+    (bool, bool, u8, bool),
 );
 
 impl Wavefront<'_> {
@@ -2463,7 +2524,7 @@ impl<'a> Wavefront<'a> {
                 Window::default(),
                 UserData::default(),
                 &crate::draw_buffers::DrawBuffers::default(),
-                (false, false, 0),
+                (false, false, 0, false),
             ),
         )
     }
@@ -2480,7 +2541,9 @@ impl<'a> Wavefront<'a> {
         primitive: MeshPrimitive,
         attributes: &[(u32, Interpolation)],
         parameters: &[u32],
-        (window, user_data, buffers, (writes_depth, reads_quad, colour_targets)): StageContext<'_>,
+        (window, user_data, buffers, (writes_depth, reads_quad, colour_targets, layered)): StageContext<
+            '_,
+        >,
     ) -> Self {
         let mut b = Builder::new().with_version(module_version(stage));
 
@@ -2499,7 +2562,7 @@ impl<'a> Wavefront<'a> {
         let input_ids =
             reserve_attribute_inputs(&mut b, stage, attributes, user_data.input_controls);
         let mut system = pixel_inputs::SystemInputs::reserve(&mut b, stage, user_data.pixel_inputs);
-        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters);
+        let mesh_reserved = MeshReserved::new(&mut b, stage, parameters, layered);
         let (per_lane, modelled) = lanes_per_invocation(stage, width, &user_data);
         // A guest dispatch's group runs as one invocation per wave (D858).
         let waves = user_data
@@ -2521,12 +2584,16 @@ impl<'a> Wavefront<'a> {
         .with_more_colour(&mut b, output_ptr, more_colour);
         let inputs = declare_attribute_inputs(&mut b, (f32_type, vec4), &input_ids);
         system.declare(&mut b, vec4, bool_type);
-        let mesh = declare_mesh_outputs(
+        let mut mesh = declare_mesh_outputs(
             &mut b,
             (f32_type, u32_type, vec4),
             (stage, primitive),
             &mesh_reserved,
         );
+        if let Some(mesh) = mesh.as_mut() {
+            mesh.layers =
+                declare_mesh_layers(&mut b, (u32_type, bool_type), primitive, &mesh_reserved);
+        }
         let (files, observation, guest_memory) =
             declare_state(&mut b, &ids, (modelled, user_data.local_words), window);
         let lane_ids =
@@ -2546,7 +2613,8 @@ impl<'a> Wavefront<'a> {
         let indexed = user_data.geometry.is_some_and(|g| g.indices.is_some());
         let reads_buffers = !buffers.served.is_empty() || indexed;
         let user_data_source =
-            declare_user_data_source(&mut b, (stage, reads_buffers), u32_type, &user_data);
+            // A layered module reads the layer its draw's pass renders from the draw's words (D859).
+            declare_user_data_source(&mut b, (stage, reads_buffers || layered), u32_type, &user_data);
         let dispatch = compute_inputs::DispatchState::for_stage(
             &mut b,
             (&ids, width.lanes()),
@@ -2701,6 +2769,15 @@ impl<'a> Wavefront<'a> {
         // A primitive shader's geometry-engine inputs (D730).
         if let (Stage::Mesh, Some(geometry)) = (self.stage, user_data.geometry) {
             self.seed_geometry(geometry);
+        }
+        // A vertex that exports no layer is in layer zero (D859).
+        if let Some(layers) = self.mesh.as_ref().and_then(|mesh| mesh.layers) {
+            let zero = self.constant(0);
+            for lane in 0..self.modelled.min(MESH_SLOTS) {
+                let slot = self.lane_slot(lane);
+                let pointer = self.workgroup_word(layers.words, slot);
+                self.builder.function(op::STORE, &[pointer.0, zero.0]);
+            }
         }
     }
 
@@ -3690,6 +3767,15 @@ impl<'a> Wavefront<'a> {
         };
         self.builder
             .function(op::SET_MESH_OUTPUTS_EXT, &[declared[0].0, declared[1].0]);
+        // A layered module keeps only the primitives in its pass's layer (D859): every lane's layer
+        // written, and the layer this pass renders.
+        let culling = mesh.layers.map(|layers| {
+            self.workgroup_barrier();
+            let pass = self
+                .draw_word(orbistoun_spirv::DRAW_DATA_LAYER_WORD)
+                .unwrap_or_else(|| self.constant(orbistoun_spirv::DRAW_LAYER_UNUSED));
+            (layers, pass)
+        });
 
         let member = Self::constant(self, 0);
         // The lanes this invocation staged: the whole wave, or its own one lane (D760).
@@ -3738,9 +3824,60 @@ impl<'a> Wavefront<'a> {
                 &[mesh.index_ptr.0, target.0, mesh.indices.0, at.0],
             );
             self.builder.function(op::STORE, &[target.0, corners.0]);
+            if let Some((layers, pass)) = culling {
+                self.cull_outside_pass((layers, pass), (&mesh, corners), at);
+            }
             self.close_below(merge);
         }
         self.complete_rectangles();
+    }
+
+    /// Culls the primitive at `at` - and a rectangle's second triangle after it - unless it is in
+    /// the layer `pass` renders (D859): its layer is its first vertex's, and a pass of
+    /// [`orbistoun_spirv::DRAW_LAYER_UNUSED`] keeps every primitive.
+    fn cull_outside_pass(
+        &mut self,
+        (layers, pass): (MeshLayers, Id),
+        (mesh, corners): (&MeshOutputs, Id),
+        at: Id,
+    ) {
+        let u32_type = self.u32_type;
+        let first = if mesh.index_width == 1 {
+            corners
+        } else {
+            let first = self.builder.id();
+            self.builder
+                .function(op::COMPOSITE_EXTRACT, &[u32_type.0, first.0, corners.0, 0]);
+            first
+        };
+        // An index past the vertex slots is the guest's fault; reading past the words would be ours.
+        let last = Self::constant(self, MESH_SLOTS - 1);
+        let slot = self.binary(op::BITWISE_AND, first, last);
+        let pointer = self.workgroup_word(layers.words, slot);
+        let layer = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, layer.0, pointer.0]);
+        let unused = Self::constant(self, orbistoun_spirv::DRAW_LAYER_UNUSED);
+        let used = self.compare(op::INOT_EQUAL, pass, unused);
+        let elsewhere = self.compare(op::INOT_EQUAL, layer, pass);
+        let cull = self.builder.id();
+        self.builder.function(
+            op::LOGICAL_AND,
+            &[self.bool_type.0, cull.0, used.0, elsewhere.0],
+        );
+        let mut slots = vec![at];
+        if self.primitive == MeshPrimitive::Rectangles {
+            let one = Self::constant(self, 1);
+            slots.push(self.binary(op::IADD, at, one));
+        }
+        for slot in slots {
+            let target = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[layers.cull_ptr.0, target.0, layers.cull.0, slot.0],
+            );
+            self.builder.function(op::STORE, &[target.0, cull.0]);
+        }
     }
 
     /// Opens a block run only when `value < bound`, returning the merge [`Self::close_below`]
@@ -4066,6 +4203,14 @@ impl Model for Wavefront<'_> {
         let copy = *staged.parameters.get(&location)?;
         let value = self.composite_vec4(components);
         self.copy_element(copy, staged.vec4_ptr, lane, value);
+        Some(())
+    }
+
+    fn write_mesh_layer(&mut self, lane: u32, layer: Id) -> Option<()> {
+        let words = self.mesh.as_ref()?.layers?.words;
+        let slot = self.lane_slot(lane);
+        let pointer = self.workgroup_word(words, slot);
+        self.builder.function(op::STORE, &[pointer.0, layer.0]);
         Some(())
     }
 
@@ -5589,6 +5734,22 @@ pub fn exported_parameters(decode: &Decode, encodings: &EncodingTable) -> Vec<u3
     locations
 }
 
+/// Whether a primitive shader exports a layer: any `exp pos1` enabling its third channel, where the
+/// misc vector carries the render-target layer (D859). Such a module culls each primitive whose
+/// layer is not the one its draw's pass renders.
+#[must_use]
+pub fn exports_layer(decode: &Decode, encodings: &EncodingTable) -> bool {
+    decode.instructions.iter().any(|instruction| {
+        let named = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .and_then(|e| encodings.mnemonic_for(&e.name, instruction.opcode));
+        named == Some("exp")
+            && instruction.operands.first() == Some(&Operand::Immediate(model::EXPORT_MISC))
+            && instruction.word & model::EXPORT_LAYER_CHANNEL != 0
+    })
+}
+
 /// The local-data-share instructions a primitive shader run one invocation per lane may use (D760):
 /// each followed by a workgroup barrier that keeps the wave's program order, its byte writes and
 /// ors merged by atomics so lanes sharing a word keep each other's bits.
@@ -5915,6 +6076,7 @@ pub fn translate_with_user_data(
                 exports_depth(decode, encodings),
                 reads_quad(decode, encodings),
                 exported_colour_targets(decode, encodings),
+                stage == Stage::Mesh && exports_layer(decode, encodings),
             ),
         ),
     );

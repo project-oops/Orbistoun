@@ -27,6 +27,7 @@ const fn command_name(command: &RenderCommand) -> &'static str {
         RenderCommand::SetClipPlanes(_) => "SetClipPlanes",
         RenderCommand::SetRasterOp(_) => "SetRasterOp",
         RenderCommand::SetLineWidth(_) => "SetLineWidth",
+        RenderCommand::SetDrawLayer(_) => "SetDrawLayer",
         RenderCommand::SetWriteMask(_) => "SetWriteMask",
         RenderCommand::SetDepthStencil(_) => "SetDepthStencil",
         RenderCommand::SetCull(_) => "SetCull",

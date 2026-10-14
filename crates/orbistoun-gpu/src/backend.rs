@@ -150,6 +150,11 @@ pub enum RenderCommand {
     /// one pixel wide. Emitted before a draw whenever the register changed. Raw bits, so the
     /// command stays hashable: `WIDTH` as the register holds it.
     SetLineWidth(u16),
+    /// The layer the draws that follow render (D859): their primitive shaders keep only the
+    /// primitives whose exported layer is this one. `None` keeps every primitive whatever layer it
+    /// exports - a draw whose `PA_CL_VS_OUT_CNTL` does not use the layer, and every draw before
+    /// the command is first given.
+    SetDrawLayer(Option<u32>),
     /// Which channels of colour target zero the draws that follow write, red in bit 0 to alpha in
     /// bit 3: `CB_TARGET_MASK` as it stands at them, limited to the channels the target's format
     /// holds ([`crate::registers::colour_write_mask`]). Emitted before a draw whenever it changed;

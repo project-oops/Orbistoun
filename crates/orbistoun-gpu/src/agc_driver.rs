@@ -485,6 +485,14 @@ fn unmodelled_draws(submission: &Submission) -> Option<String> {
             report.unmodelled_viewports
         ));
     }
+    if let (count @ 1.., first) = &report.unmodelled_layers {
+        return Some(format!(
+            "{count} draw(s) are not drawn into the layers the hardware would draw them into{}",
+            first
+                .as_ref()
+                .map_or_else(String::new, |first| format!(": {first}"))
+        ));
+    }
     if report.unmasked_one_byte_draws > 0 {
         return Some(format!(
             concat!(
