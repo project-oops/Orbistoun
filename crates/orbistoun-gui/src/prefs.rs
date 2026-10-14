@@ -25,13 +25,15 @@ pub(crate) enum Pane {
     Pads,
     /// Background daemon payloads and autoload.
     Payloads,
+    /// How fast a run may go and how much of the host it takes (D835).
+    Performance,
     /// The overlay's finer spans, and the Tracy profiler (D831).
     Profiling,
 }
 
 impl Pane {
     /// Every pane, in the order they are listed.
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::General,
         Self::Payloads,
         Self::Entry,
@@ -39,6 +41,7 @@ impl Pane {
         Self::Memory,
         Self::Shell,
         Self::Pads,
+        Self::Performance,
         Self::Profiling,
     ];
 
@@ -52,6 +55,7 @@ impl Pane {
             Self::Memory => "memory",
             Self::Shell => "shell",
             Self::Pads => "controllers",
+            Self::Performance => "performance",
             Self::Profiling => "profiling",
         }
     }
@@ -210,8 +214,55 @@ pub(crate) fn pane_contents(
         Pane::Memory => memory(ui, &mut prefs.file),
         Pane::Shell => shell(ui, &mut prefs.shell),
         Pane::Pads => pads(ui, &mut prefs.file.pads, live),
+        Pane::Performance => performance(ui, &mut prefs.file.performance),
         Pane::Profiling => profiling(ui, prefs),
     }
+}
+
+/// The pane for how fast a run may go and how much of the host it takes (D835).
+fn performance(ui: &mut egui::Ui, settings: &mut orbistoun_service::PerformanceSettings) {
+    use orbistoun_kernel::thread::HostPriority;
+    ui.heading("performance");
+    ui.horizontal(|ui| {
+        ui.label("frame limit");
+        ui.add(egui::DragValue::new(&mut settings.frame_limit).range(0..=1000));
+        ui.label(if settings.frame_limit == 0 {
+            "none".to_owned()
+        } else {
+            "flips a second".to_owned()
+        });
+    });
+    let host = std::thread::available_parallelism().map_or(64, std::num::NonZeroUsize::get);
+    let host = u32::try_from(host).unwrap_or(u32::MAX);
+    ui.horizontal(|ui| {
+        ui.label("host cores");
+        ui.add(egui::DragValue::new(&mut settings.host_cores).range(0..=host));
+        ui.label(if settings.host_cores == 0 {
+            format!("all {host}")
+        } else {
+            format!("of {host}")
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label("host priority");
+        egui::ComboBox::from_id_salt("host-priority")
+            .selected_text(settings.host_priority.name())
+            .show_ui(ui, |ui| {
+                for priority in [
+                    HostPriority::Idle,
+                    HostPriority::BelowNormal,
+                    HostPriority::Normal,
+                    HostPriority::AboveNormal,
+                ] {
+                    ui.selectable_value(&mut settings.host_priority, priority, priority.name());
+                }
+            });
+    });
+    ui.small(concat!(
+        "The frame limit paces a title that flips freely as a display would; the host limits keep ",
+        "a run to some cores, or behind your other programs. A title's own frame_limit, host_cores ",
+        "and host_priority settings, in its overrides, take the place of these for its runs.",
+    ));
 }
 
 /// The pane for profiling a run (D831): the finer spans the overlay shows, and the Tracy

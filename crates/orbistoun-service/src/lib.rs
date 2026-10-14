@@ -279,6 +279,21 @@ pub struct FileConfig {
     pub policy: StubPolicy,
     /// Profiling a run with Tracy, for a front end to start its runs with (D831).
     pub profiling: ProfilingSettings,
+    /// How fast a run may go and how much of the host it takes (D835).
+    pub performance: PerformanceSettings,
+}
+
+/// How fast a run may go and how much of the host it takes (D835). A title's own `frame_limit`,
+/// `host_cores` and `host_priority` settings take the place of these for its runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct PerformanceSettings {
+    /// The most flips a second a run lets through; none when zero.
+    pub frame_limit: u32,
+    /// How many of the host's cores a run may use; all when zero.
+    pub host_cores: u32,
+    /// The run's priority among the host's programs.
+    pub host_priority: orbistoun_kernel::thread::HostPriority,
 }
 
 /// What a front end starts its runs with to profile them (D831): each is the variable a worker

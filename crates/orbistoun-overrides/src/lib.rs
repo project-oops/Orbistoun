@@ -1296,6 +1296,17 @@ pub const FILESYSTEM_VIEW: &str = "filesystem_view";
 /// [`FILESYSTEM_VIEW`]'s value for the system view.
 pub const FILESYSTEM_VIEW_SYSTEM: &str = "system";
 
+/// The most flips a second a title's runs let through, an integer; zero for none (D835). Over the
+/// `[performance]` frame limit in `config.toml`.
+pub const FRAME_LIMIT: &str = "frame_limit";
+
+/// How many of the host's cores a title's runs may use, an integer; zero for all (D835).
+pub const HOST_CORES: &str = "host_cores";
+
+/// A title's runs' priority among the host's programs: `idle`, `below-normal`, `normal` or
+/// `above-normal` (D835).
+pub const HOST_PRIORITY: &str = "host_priority";
+
 #[cfg(test)]
 mod tests {
     use super::{

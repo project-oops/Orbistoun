@@ -875,7 +875,13 @@ impl App {
                     "#\n",
                     "# A compatibility entry names the *behaviour*, never the title, and carries\n",
                     "# a mandatory reason - that is what lets a second title needing the same\n",
-                    "# thing add a line rather than a code path.\n"
+                    "# thing add a line rather than a code path.\n",
+                    "#\n",
+                    "# Performance, over the preferences' (D835):\n",
+                    "# [settings]\n",
+                    "# frame_limit = 60           # most flips a second; 0 for none\n",
+                    "# host_cores = 4             # host cores the run may use; 0 for all\n",
+                    "# host_priority = \"idle\"    # idle, below-normal, normal or above-normal\n"
                 ),
                 name
             )

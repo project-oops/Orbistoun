@@ -370,6 +370,49 @@ struct Limits {
     calls: Option<u64>,
 }
 
+/// The run's frame limit and host limits (D835): `config.toml`'s `[performance]`, each value the
+/// title's own `frame_limit`, `host_cores` or `host_priority` setting replaces where it names one.
+fn apply_performance(module: &str) {
+    let paths = orbistoun_paths::Paths::resolve();
+    let title = orbistoun_service::linkplan::title_of(Path::new(module));
+    let global = orbistoun_service::FileConfig::load(&paths.config_file())
+        .map(|file| file.performance)
+        .unwrap_or_default();
+    let own = orbistoun_overrides::Resolved::for_run(&title, &paths.overrides_dir());
+    let performance = effective_performance(global, &own);
+    orbistoun_video::limit_frames(performance.frame_limit);
+    if let Err(why) =
+        orbistoun_kernel::thread::limit_host(performance.host_cores, performance.host_priority)
+    {
+        tracing::warn!("the host limits were not all applied: {why}");
+    }
+    if performance != orbistoun_service::PerformanceSettings::default() {
+        tracing::info!(
+            "performance: frame limit {}, host cores {}, host priority {}",
+            performance.frame_limit,
+            performance.host_cores,
+            performance.host_priority.name()
+        );
+    }
+}
+
+/// `global`, with each value a title's own settings name in its place: a negative or unreadable
+/// one is ignored, as a setting the title does not have.
+fn effective_performance(
+    global: orbistoun_service::PerformanceSettings,
+    own: &orbistoun_overrides::Resolved,
+) -> orbistoun_service::PerformanceSettings {
+    let count = |key: &str| own.int(key).and_then(|n| u32::try_from(n).ok());
+    orbistoun_service::PerformanceSettings {
+        frame_limit: count(orbistoun_overrides::FRAME_LIMIT).unwrap_or(global.frame_limit),
+        host_cores: count(orbistoun_overrides::HOST_CORES).unwrap_or(global.host_cores),
+        host_priority: own
+            .text(orbistoun_overrides::HOST_PRIORITY)
+            .and_then(orbistoun_kernel::thread::HostPriority::named)
+            .unwrap_or(global.host_priority),
+    }
+}
+
 /// Puts the platform's tree under the guest, with this title's own files over it (D251).
 ///
 /// The title is named by the directory holding the module, which is what a person reading
@@ -2777,6 +2820,8 @@ fn enter<W: Write>(
     // overlays and the title over `/app0` are established together and in order by
     // `sandbox::establish` (D423).
     install_filesystem(module);
+    // How fast it may go and how much of the host it takes, before its first thread starts.
+    apply_performance(module);
 
     let mut stack = match GuestStack::reserve(GUEST_STACK_BASE, DEFAULT_STACK_SIZE) {
         Ok(s) => s,

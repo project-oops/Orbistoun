@@ -146,6 +146,78 @@ pub struct Settings {
     pub apply_priority: bool,
 }
 
+/// How eagerly the host schedules the whole process against everything else it runs (D835): a
+/// title left running in the background at `idle` takes only what nothing else wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HostPriority {
+    /// Only what nothing else on the host wants.
+    Idle,
+    /// Behind ordinary programs.
+    BelowNormal,
+    /// As any program.
+    #[default]
+    Normal,
+    /// Ahead of ordinary programs.
+    AboveNormal,
+}
+
+impl HostPriority {
+    /// The setting's name as written in a file: `idle`, `below-normal`, `normal`, `above-normal`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::BelowNormal => "below-normal",
+            Self::Normal => "normal",
+            Self::AboveNormal => "above-normal",
+        }
+    }
+
+    /// The priority a name gives, as [`Self::name`] writes it.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [
+            Self::Idle,
+            Self::BelowNormal,
+            Self::Normal,
+            Self::AboveNormal,
+        ]
+        .into_iter()
+        .find(|priority| priority.name() == name)
+    }
+}
+
+/// Holds the whole process to its host's first `cores` usable cores, none when zero, and sets its
+/// priority among the host's programs (D835). Called before any guest thread starts, so each one
+/// starts inside the limit. Every refusal is reported and nothing else stops: a run on more cores
+/// than asked is still a run.
+///
+/// # Errors
+///
+/// Naming what the host refused or has no call for.
+pub fn limit_host(cores: u32, priority: HostPriority) -> Result<(), String> {
+    let mut refused = Vec::new();
+    if cores > 0
+        && let Err(why) = crate::placement::limit_process_cores(cores)
+    {
+        refused.push(format!("holding the process to {cores} cores: {why}"));
+    }
+    if priority != HostPriority::Normal
+        && let Err(why) = crate::placement::set_process_priority(priority)
+    {
+        refused.push(format!(
+            "setting its priority to {}: {why}",
+            priority.name()
+        ));
+    }
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(refused.join("; "))
+    }
+}
+
 /// The settings in force.
 fn settings() -> &'static Mutex<Settings> {
     static SETTINGS: OnceLock<Mutex<Settings>> = OnceLock::new();

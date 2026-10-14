@@ -36,6 +36,103 @@ impl core::fmt::Display for PlacementError {
     }
 }
 
+/// The lowest `cores` set bits of `allowed`: the first that many cores a process may use.
+fn first_cores(allowed: u64, cores: u32) -> u64 {
+    let mut taken = 0u64;
+    let mut left = cores;
+    for bit in 0..64 {
+        if left == 0 {
+            break;
+        }
+        if allowed & (1 << bit) != 0 {
+            taken |= 1 << bit;
+            left -= 1;
+        }
+    }
+    taken
+}
+
+/// Holds the whole process to the first `cores` of the cores it may use now (D835).
+#[cfg(windows)]
+pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask,
+    };
+    // SAFETY: takes no arguments; the pseudo-handle needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    let (mut allowed, mut system) = (0usize, 0usize);
+    // SAFETY: the pseudo-handle is valid for the call, and both masks are live locals it writes.
+    if unsafe { GetProcessAffinityMask(process, &raw mut allowed, &raw mut system) } == 0 {
+        return Err(PlacementError::Refused(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    let mask = first_cores(allowed as u64, cores);
+    let mask = usize::try_from(mask)
+        .map_err(|_| PlacementError::Refused("the mask is wider than a pointer".to_owned()))?;
+    // SAFETY: the pseudo-handle is valid for the call, and the mask a plain integer naming a subset
+    // of the cores the process may use.
+    if unsafe { SetProcessAffinityMask(process, mask) } == 0 {
+        return Err(PlacementError::Refused(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Holds the calling thread, and every thread it starts from now, to the first `cores` of the
+/// cores it may use: a Linux process has no mask of its own, and threads inherit their creator's.
+#[cfg(target_os = "linux")]
+pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
+    let current = rustix::thread::sched_getaffinity(None)
+        .map_err(|e| PlacementError::Refused(e.to_string()))?;
+    let allowed = (0..64)
+        .filter(|&core| current.is_set(core))
+        .fold(0u64, |mask, core| mask | (1 << core));
+    pin(first_cores(allowed, cores))
+}
+
+/// No call holds a process to some cores on this host.
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) fn limit_process_cores(_cores: u32) -> Result<(), PlacementError> {
+    Err(PlacementError::Unsupported)
+}
+
+/// Sets the process's priority among the host's programs (D835).
+#[cfg(windows)]
+pub(crate) fn set_process_priority(
+    priority: crate::thread::HostPriority,
+) -> Result<(), PlacementError> {
+    use crate::thread::HostPriority;
+    use windows_sys::Win32::System::Threading::{
+        ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess,
+        IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, SetPriorityClass,
+    };
+    let class = match priority {
+        HostPriority::Idle => IDLE_PRIORITY_CLASS,
+        HostPriority::BelowNormal => BELOW_NORMAL_PRIORITY_CLASS,
+        HostPriority::Normal => NORMAL_PRIORITY_CLASS,
+        HostPriority::AboveNormal => ABOVE_NORMAL_PRIORITY_CLASS,
+    };
+    // SAFETY: takes no arguments; the pseudo-handle needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    // SAFETY: the pseudo-handle is valid for the call and the class one the call defines.
+    if unsafe { SetPriorityClass(process, class) } == 0 {
+        return Err(PlacementError::Refused(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// No priority class is set away from Windows yet.
+#[cfg(not(windows))]
+pub(crate) fn set_process_priority(
+    _priority: crate::thread::HostPriority,
+) -> Result<(), PlacementError> {
+    Err(PlacementError::Unsupported)
+}
+
 /// Restricts the calling host thread to the cores `mask` names, bit `n` for core `n`.
 ///
 /// A zero mask is no restriction and changes nothing.
@@ -74,6 +171,20 @@ fn pin(mask: u64) -> Result<(), PlacementError> {
     }
     rustix::thread::sched_setaffinity(None, &cores)
         .map_err(|e| PlacementError::Refused(e.to_string()))
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::first_cores;
+
+    /// The first cores a process may use, skipping the ones it may not.
+    #[test]
+    fn the_first_cores_are_the_lowest_allowed() {
+        assert_eq!(first_cores(0xff, 4), 0x0f);
+        assert_eq!(first_cores(0b1010_1010, 2), 0b0000_1010);
+        assert_eq!(first_cores(0b11, 8), 0b11, "no more than there are");
+        assert_eq!(first_cores(0xff, 0), 0);
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

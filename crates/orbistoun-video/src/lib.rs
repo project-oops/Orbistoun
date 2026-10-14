@@ -536,6 +536,7 @@ fn video_out_submit_flip(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// on the CPU and one carried out from a command buffer (D728) share. The port's answer: `0`, or
 /// the bad-handle code.
 pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
+    pace_flip();
     let Some(flips) = port::with(handle, |p| {
         p.flips += 1;
         p.last_flip = Some(buffer_index);
@@ -580,6 +581,47 @@ pub fn flip(handle: u64, buffer_index: u64, flip_arg: u64) -> u64 {
     // Routed by the port handle, which is what `sceVideoOutAddFlipEvent` registered.
     orbistoun_kernel::sync::post_event(handle, completion);
     OK
+}
+
+/// The shortest time between two flips the frame limiter lets through, in nanoseconds; none when
+/// zero (D835).
+static FLIP_INTERVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Holds flips to at most `per_second`, none when zero (D835): a title that flips freely runs as
+/// fast as the host allows, and this paces it as a display would. Set once a run, before the guest
+/// starts.
+pub fn limit_frames(per_second: u32) {
+    let interval = if per_second == 0 {
+        0
+    } else {
+        1_000_000_000 / u64::from(per_second)
+    };
+    FLIP_INTERVAL.store(interval, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Waits, on the flipping thread, until the frame limiter lets the next flip through. Each flip is
+/// due one interval after the last was due, not after it arrived, so a late flip does not push
+/// every later one back; one more than an interval late starts the count again.
+fn pace_flip() {
+    static DUE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    let interval = FLIP_INTERVAL.load(std::sync::atomic::Ordering::Relaxed);
+    if interval == 0 {
+        return;
+    }
+    let interval = std::time::Duration::from_nanos(interval);
+    let mut due = DUE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::Instant::now();
+    let next = match *due {
+        Some(at) if at > now => {
+            std::thread::sleep(at - now);
+            at
+        }
+        Some(at) if now - at < interval => at,
+        _ => now,
+    };
+    *due = Some(next + interval);
 }
 
 /// One display refresh at 60 Hz, in nanoseconds: what one flip stands for on the logical clock
