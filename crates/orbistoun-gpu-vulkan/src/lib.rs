@@ -179,8 +179,10 @@ struct BoundTexture {
 }
 
 /// What a texture whose border this device cannot sample is refused as (D837).
-const BORDER_UNSAMPLABLE: &str = "BindTexture whose sampler's border colour is a table entry not read, or one of its own on a \
-     device without VK_EXT_custom_border_color";
+const BORDER_UNSAMPLABLE: &str = concat!(
+    "BindTexture whose sampler's border colour is a table entry not read, or one of its own on a ",
+    "device without VK_EXT_custom_border_color"
+);
 
 /// Whether a sampler with this border colour can be made: a built-in one always, one read from the
 /// guest's table where the device takes a colour of a sampler's own, and an entry never read never
