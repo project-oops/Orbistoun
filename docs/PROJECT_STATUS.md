@@ -14,27 +14,27 @@ out of date.
 | PPSA99980 | presented | 215 | 416,694 | 100% | `ran to the time limit` | `39b92902843e00d5` new |
 | PPSA28061-app0 | presented | 165 | 20,457,365 | 100% | `ran to the time limit` | `376eae5b08b1225f` new |
 | STKT00001 | presented | 150 | 7,911,373 | 100% | `ran to the time limit` | `e9c3927fc3b26eb7` new |
-| CRFT00001 | presented | 106 | 345,461 | 100% | `ran to the time limit` | `5ec4c46ef3083591` match |
+| CRFT00001 | presented | 107 | 254,619 | 100% | `ran to the time limit` | `5ec4c46ef3083591` new |
 | MCUB00001 | presented | 81 | 166,350 | 100% | `ran to the time limit` | `92bb8ddfebee87c5` new |
 | GCTS00001 | presented | 79 | 1,069,857 | 100% | `the guest called abort` | `87f13d4bc0877671` match |
+| SOHK00001 | presented | 73 | 1,436,017 | 100% | `ran to the time limit` | `b1a48bbb026652be` match |
+| TSHP00001 | presented | 73 | 635,694 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` new |
 | DRIP00001 | presented | 72 | 53,337 | 100% | `ran to the time limit` | `d117f754b54f6b72` new |
-| TSHP00001 | presented | 72 | 3,421,974 | 100% | `ran to the time limit` | `3ef8c8d01946b36b` match |
-| SOHK00001 | presented | 72 | 4,303,539 | 100% | `ran to the time limit` | `b1a48bbb026652be` new |
 | OPSY00001 | presented | 65 | 23,006 | 100% | `ran to the time limit` | `2d9a8ee1b435c309` match |
+| BGII00001 | presented | 62 | 5,510,859 | 100% | `ran to the time limit` | `d21697e5f0d2fa2e` new |
 | NVRB00001 | presented | 60 | 14,801,432 | 100% | `ran to the time limit` | `5e07176c4b817acd` new |
-| BGII00001 | presented | 55 | 6,267,850 | 100% | `ran to the time limit` | `135e110d3e230943` new |
 | BUGD00001 | presented | 55 | 88,848,677 | 100% | `ran to the time limit` | `9f7f3056cdba0a6b` new |
 | NVPT00001 | presented | 53 | 72,190,754 | 100% | `ran to the time limit` | `f199db87cde691e2` new |
 | ETXR00001 | presented | 50 | 10,538,918 | 100% | `ran to the time limit` | `4a82e3e7b64097e7` new |
 | SCSH00001 | presented | 40 | 9,205 | 100% | `ran to the time limit` | `57ff1ceb38d5822b` new |
+| MDEM00001 | presented | 33 | 1,569 | 100% | `ran to the time limit` | `c9768bbd359ab941` new |
 | GLCB00001 | presented | 32 | 4,146,360 | 100% | `ran to the time limit` | `1ba0eae876769e17` new |
 | NETT00001 | presented | 31 | 32,473 | 100% | `ran to the time limit` | `6da852efb21237fa` new |
 | GALR00001 | presented | 27 | 24,999 | 100% | `ran to the time limit` | `7042df65ffd61c94` new |
 | GLTC00001 | presented | 24 | 38,809 | 100% | `ran to the time limit` | `1785f6a8b01771d2` match |
 | PADV00001 | presented | 21 | 33,982 | 100% | `ran to the time limit` | `b19941319c84eefd` new |
-| MDEM00001 | flipped | 94 | 236,798 | 100% | `ran to the time limit` | `c9768bbd359ab941` new |
-| GLPB00001 | flipped | 20 | 104,514 | 100% | `ran to the time limit` | `297884c655c12e41` new |
-| PPSA21564-app0 | entered | 285 | 20,017,021 | 100% | `spent its call budget` | `3bcd709f97eadd19` new |
+| GLPB00001 | presented | 20 | 104,611 | 100% | `ran to the time limit` | `297884c655c12e41` new |
+| PPSA21564-app0 | entered | 388 | 1,959,653,458 | 100% | `ran to the time limit` | `3bcd709f97eadd19` new |
 | PPSA04263-app0 | entered | 213 | 20,000,000 | 100% | `spent its call budget` | `5e4bff5a3efac2a2` new |
 | MESA00001 | entered | 33 | 362 | 100% | `ran to the time limit` | `a072d7cef4f013a8` new |
 | GLTP00001 | entered | 20 | 101,264 | 100% | `ran to the time limit` | `a86c33e902240eaa` new |
