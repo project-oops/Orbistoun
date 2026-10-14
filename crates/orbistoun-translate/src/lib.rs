@@ -237,6 +237,20 @@ pub enum TranslateError {
         store: String,
     },
 
+    /// An image access of a dimensionality not translated: every image translation reads two
+    /// coordinates, and reading two of another image's would reach a place the guest did not name.
+    #[error(
+        "instruction at {offset:#x} ({mnemonic}) reaches a {dimension} image; only a two-dimensional image, a cube or a sampled volume is translated, and reading two coordinates of another would reach a place the guest did not name"
+    )]
+    ImageDimension {
+        /// Byte offset within the shader.
+        offset: u32,
+        /// The access's name.
+        mnemonic: String,
+        /// The image's dimensionality, as its instruction encodes it.
+        dimension: &'static str,
+    },
+
     /// A primitive shader reads the geometry engine's inputs before writing them, and the
     /// translation was not given the draw's geometry to seed them with (D730).
     #[error(

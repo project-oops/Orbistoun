@@ -359,6 +359,18 @@ const IMAGE_DIMENSION_3D: u32 = 2;
 /// The dimensionality code for a cube, fourth in the same order (`dim:SQ_RSRC_IMG_CUBE`).
 const IMAGE_DIMENSION_CUBE: u32 = 3;
 
+/// Each dimensionality code's name, in the same order.
+const IMAGE_DIMENSION_NAMES: [&str; 8] = [
+    "1D",
+    "2D",
+    "3D",
+    "cube",
+    "1D array",
+    "2D array",
+    "2D multi-sampled",
+    "2D multi-sampled array",
+];
+
 /// What a translated texture sample needs from the model.
 ///
 /// Four identifiers declared together on first use: the variable, what loading it produces, the
@@ -9185,11 +9197,14 @@ fn image_access(instruction: &Instruction, name: &str) -> Result<ImageAccess, Tr
     };
     let (cube, volume, compare) = (shape.cube, shape.volume, shape.compare);
     if dimension != IMAGE_DIMENSION_2D && !cube && !volume {
-        return Err(refuse(concat!(
-            "only a two-dimensional image, a cube or a sampled volume is translated - this ",
-            "instruction's coordinate has another number of components, and reading two of them ",
-            "would sample a place the guest did not name"
-        )));
+        return Err(TranslateError::ImageDimension {
+            offset: instruction.offset,
+            mnemonic: name.to_owned(),
+            dimension: IMAGE_DIMENSION_NAMES
+                .get(dimension as usize)
+                .copied()
+                .unwrap_or("unknown"),
+        });
     }
 
     // A load reads a texel by integer coordinate and names no sampler; a sample takes a position

@@ -461,12 +461,22 @@ fn an_image_that_is_not_two_dimensional_is_refused() {
         )
         .expect_err("an image that is not two-dimensional must be refused");
 
-        let TranslateError::Unsupported { detail, .. } = error else {
+        let TranslateError::ImageDimension { dimension, .. } = error else {
             panic!("dimensionality {code} refused for the wrong reason: {error:?}");
         };
-        assert!(
-            detail.contains("two-dimensional"),
-            "dimensionality {code} refused, but not for the number of dimensions: {detail}"
+        let names = [
+            "1D",
+            "2D",
+            "3D",
+            "cube",
+            "1D array",
+            "2D array",
+            "2D multi-sampled",
+            "2D multi-sampled array",
+        ];
+        assert_eq!(
+            dimension, names[code as usize],
+            "dimensionality {code} refused under another name"
         );
     }
 }

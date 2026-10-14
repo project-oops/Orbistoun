@@ -6226,6 +6226,56 @@ mod exact_memory_tests {
             "{refused}"
         );
     }
+
+    /// An image access of a dimensionality not translated is refused naming it, so the report
+    /// says which image a program needs: Grand Theft Auto V's first sixteen-wave dispatch stores
+    /// through one.
+    #[test]
+    fn an_image_of_another_dimension_is_refused_by_its_name() {
+        use super::{
+            ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings.find_by_name("image_store").expect("image_store");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // image_store v[2:5], v[0:2], s[0:7] dmask:0xf dim:SQ_RSRC_IMG_3D; s_endpgm.
+        let words = [
+            encoding.value | (opcode << encoding.opcode.shift) | (0xf << 8) | (2 << 3),
+            2 << 8,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let refused = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::spanning_address(0x4_0000_0000, 1024).expect("a window"),
+            UserData {
+                count: 8,
+                compute: Some(ComputeInputs {
+                    threads: [64, 1, 1],
+                    thread_id_components: 1,
+                    ..ComputeInputs::default()
+                }),
+                ..UserData::default()
+            },
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refused.contains("(image_store) reaches a 3D image"),
+            "{refused}"
+        );
+    }
 }
 
 #[cfg(test)]
