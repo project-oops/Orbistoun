@@ -2091,6 +2091,22 @@ fn discard_inactive<M: Model + ?Sized>(model: &mut M, instruction: &Instruction)
     }
 }
 
+/// The further position exports: `pos1`'s misc vector (point size, edge flag, layer, viewport
+/// index) and the clip and cull distances in `pos2` and `pos3`. None is translated; refused by what
+/// it is, rather than taken for a colour export with nowhere to go.
+fn refuse_further_position(instruction: &Instruction, target: i64) -> Result<(), TranslateError> {
+    if (EXPORT_POSITION + 1..=EXPORT_POSITION + 3).contains(&target) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: concat!(
+                "a further position export (pos1's point size, edge flag, layer or viewport ",
+                "index, or pos2/pos3's clip and cull distances) is not translated"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `exp`: hands four registers to a render target.
 ///
 /// The sources are read for lane zero, reinterpreted as floats (not converted), assembled into a
@@ -2141,6 +2157,7 @@ fn export<M: Model + ?Sized>(
     if *target == EXPORT_PRIMITIVE {
         return mesh_primitive_export(model, instruction, a);
     }
+    refuse_further_position(instruction, *target)?;
 
     let Some((vec4, colour)) = model.colour_output(0) else {
         return Err(TranslateError::Unsupported {
