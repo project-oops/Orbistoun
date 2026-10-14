@@ -547,7 +547,7 @@ pub unsafe fn spawn(
             let exit = unsafe {
                 orbistoun_abi::enter::enter_guest_with_argument(start.entry, top, start.argument)
             };
-            run_thread_dtors();
+            run_thread_dtors(exit);
             set_exit_value(handle, exit);
             finish(handle);
         };
@@ -604,7 +604,7 @@ pub unsafe fn spawn(
                 start.argument,
             )
         };
-        run_thread_dtors();
+        run_thread_dtors(exit);
         set_exit_value(handle, exit);
         finish(handle);
     };
@@ -893,21 +893,22 @@ pub fn install_thread_start(hook: fn()) {
 }
 
 /// Runs the thread-local destructors libc registered with `_sceKernelSetThreadDtors`, on the
-/// ending thread, before its exit value is published to a joiner.
+/// ending thread, before its exit value is published to a joiner, handing it that exit value.
 ///
-/// FreeBSD's thread exit runs `__cxa_thread_call_dtors()`, which takes no arguments, and libc
-/// hands the kernel its runner for that at start-up. That the console calls it at thread exit is
-/// assumed (obSCEne `REQ-20261013T1716Z-td01` measures it). The thread's TLS is still in place;
-/// the runner gets a stack of its own, the thread's entry having returned. Nothing registered,
-/// nothing runs.
-pub fn run_thread_dtors() {
+/// Measured (obSCEne `060-module/libc-startup-hooks`, REQ-td01 and REQ-rf02, `report-20261014-
+/// batch1.log` 4421-4455): the runner is entered exactly once on the ending thread, before the join
+/// returns, whether the entry returns or calls `scePthreadExit`, and for a thread nobody joins; its
+/// first argument is the thread's exit value (0x55, 0x66 and 0x77 in the three arms). The thread's
+/// TLS is still in place; the runner gets a stack of its own, the thread's entry having returned.
+/// Nothing registered, nothing runs.
+pub fn run_thread_dtors(exit_value: u64) {
     let dtors = crate::thread_hooks().dtors;
     if dtors == 0 {
         return;
     }
     // SAFETY: `dtors` is the function pointer libc's own start-up handed
-    // `_sceKernelSetThreadDtors`, in its mapped, relocated code; it takes no arguments.
-    let _ = unsafe { call_guest(dtors, [0; 3]) };
+    // `_sceKernelSetThreadDtors`, in its mapped, relocated code; it takes the exit value.
+    let _ = unsafe { call_guest(dtors, [exit_value, 0, 0]) };
 }
 
 /// Gives the calling host thread a handle if it does not already have one.

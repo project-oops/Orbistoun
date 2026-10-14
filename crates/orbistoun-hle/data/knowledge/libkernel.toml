@@ -2661,13 +2661,15 @@ purpose = "(callback): one of the hooks libc registers at start-up for a thread'
 returns = "status"
 edge_cases = [
     "MEASURED: answered 0x0 for a null callback and for a valid one.",
-    "MEASURED: a spawned thread enters the registered callback exactly once, on its own thread, before scePthreadJoin returns - both when its entry returns (join value 0x55) and when it calls scePthreadExit (0x66) (orbistoun_kernel::thread::run_thread_dtors).",
+    "MEASURED: a spawned thread enters the registered callback exactly once, on its own thread, before scePthreadJoin returns - both when its entry returns (join value 0x55) and when it calls scePthreadExit (0x66), and for a thread nobody joins (0x77) (orbistoun_kernel::thread::run_thread_dtors).",
+    "MEASURED: the callback's first argument is the thread's exit value: 0x55, 0x66 and 0x77 in those three arms.",
+    "MEASURED: a second registration replaces the first - only the later callback is entered (first-runner-calls 0, second-runner-calls 1).",
     "The main thread's exit does not enter it here.",
 ]
-note = "Not measured: whether the main thread's exit enters the callback, what argument it is entered with (orbistoun passes none), and the order two thread-local destructors run in - the C++ thread_local arms of REQ-20261013T1716Z-td01 were not run; the probe registered its own runner and counted its calls."
+note = "Not measured: whether the main thread's exit enters the callback, and the order two C++ thread_local destructors run in - the probe registered its own runner and counted its calls."
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne 060-module/libc-startup-hooks: reports/hardware/20260927-084607-eboot.log lines 4561-4571 (the answer); reports/hardware/report-20261014-004800.log lines 4331-4357 (entered at a thread's end, REQ-20261013T1716Z-td01)."
+cites = "obSCEne 060-module/libc-startup-hooks: reports/hardware/20260927-084607-eboot.log lines 4561-4571 (the answer); reports/hardware/report-20261014-004800.log lines 4331-4357 (entered at a thread's end, REQ-20261013T1716Z-td01); reports/hardware/report-20261014-batch1.log lines 4421-4455 (the argument, an unjoined thread and a second registration, REQ-20261014T0130Z-rf02)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-11"
 

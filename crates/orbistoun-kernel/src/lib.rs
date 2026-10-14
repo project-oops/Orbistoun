@@ -6378,7 +6378,7 @@ fn pthread_exit(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if thread::current() == thread::adopt("main") {
         orbistoun_core::stop(orbistoun_core::StopReason::Exited, args[0])
     } else {
-        thread::run_thread_dtors();
+        thread::run_thread_dtors(args[0]);
         tracing::warn!(
             "a guest thread ended itself with pthread_exit - parked rather than unwound, because nothing here can unwind guest frames"
         );
@@ -6723,8 +6723,9 @@ fn set_application_heap_api(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// how many `atexit` handlers it holds, and where to report them.
 ///
 /// What the hooks are for is FreeBSD's `__cxa_thread_atexit` path: a spawned thread runs `dtors`
-/// when it ends, by returning or by `pthread_exit` ([`thread::run_thread_dtors`]). The two atexit
-/// callbacks are kept, not called.
+/// when it ends, by returning or by `pthread_exit`, with its exit value
+/// ([`thread::run_thread_dtors`]). A second registration replaces the first: only the later runner
+/// is entered (`arm4-second-runner`, REQ-rf02). The two atexit callbacks are kept, not called.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThreadHooks {
     /// `_sceKernelSetThreadDtors`'s callback.
