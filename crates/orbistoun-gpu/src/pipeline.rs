@@ -1999,6 +1999,8 @@ pub enum TexelFormat {
     R8,
     /// Four thirty-two-bit unsigned channels, a texel four words.
     Rgba32Uint,
+    /// One thirty-two-bit unsigned channel, a texel a word: the guest's `32_UINT`.
+    R32Uint,
     /// Three packed unsigned floats, eleven, eleven and ten bits, a texel a word (D774).
     Float11_11_10,
     /// Four eight-bit channels, the colour ones sRGB-encoded, a texel a word.
@@ -2013,7 +2015,9 @@ impl TexelFormat {
     #[must_use]
     pub const fn bytes(self) -> u32 {
         match self {
-            Self::Rgba8 | Self::Float11_11_10 | Self::Rgba8Srgb | Self::Rgb10A2 => 4,
+            Self::Rgba8 | Self::Float11_11_10 | Self::Rgba8Srgb | Self::Rgb10A2 | Self::R32Uint => {
+                4
+            }
             Self::R8 => 1,
             Self::Rgba32Uint => 16,
         }
@@ -2028,7 +2032,7 @@ impl TexelFormat {
     /// Whether the format's channels are unsigned integers, which a shader declares as such.
     #[must_use]
     pub const fn is_integer(self) -> bool {
-        matches!(self, Self::Rgba32Uint)
+        matches!(self, Self::Rgba32Uint | Self::R32Uint)
     }
 }
 
@@ -2610,6 +2614,14 @@ fn channel_order(format: TexelFormat, word3: u32) -> Option<[u8; 4]> {
     (seen == 0xF).then_some(order)
 }
 
+/// Whether a one-channel image's selects return what the host's one-channel view does: X, then
+/// zero, zero and one - spelt as the constants, or as the channels the image does not have, which
+/// read as those constants.
+fn one_channel_selects(word3: u32) -> bool {
+    let [x, y, z, w] = destination_selects(word3);
+    x == SELECT_X && matches!(y, 0 | 5) && matches!(z, 0 | 6) && matches!(w, 1 | 7)
+}
+
 /// `texel` as a shader sees it through `order`: channel `i` from byte `order[i]`.
 fn to_shader_channels(texel: u32, order: [u8; 4]) -> u32 {
     let bytes = texel.to_le_bytes();
@@ -2661,6 +2673,9 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         {
             Ok(TexelFormat::Rgba32Uint)
         }
+        // One channel, read with the constants a one-channel image answers for the others - which
+        // the host's one-channel view answers too - or written, where the selects say nothing.
+        FORMAT_32_UINT if one_channel_selects(words[3]) => Ok(TexelFormat::R32Uint),
         _ => Err(format!(
             "a dispatch image of format {}",
             describe_dispatch_image(descriptor, words)
@@ -4717,6 +4732,8 @@ const FORMAT_10_11_11_FLOAT: u32 = 36;
 const FORMAT_8_8_8_8_SRGB: u32 = 130;
 /// `GFX10_FORMAT_32_32_32_32_UINT` (`gfx10-rsrc.json:80`).
 const FORMAT_32_32_32_32_UINT: u32 = 75;
+/// `GFX10_FORMAT_32_UINT` (`gfx10-rsrc.json`, value 20): one thirty-two-bit unsigned channel.
+const FORMAT_32_UINT: u32 = 20;
 /// `GFX10_FORMAT_2_10_10_10_UNORM` (`gfx10-rsrc.json`): red, green and blue ten bits each from the
 /// low end, alpha two.
 const FORMAT_2_10_10_10_UNORM: u32 = 50;
@@ -5686,7 +5703,7 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
-        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint => {
+        TexelFormat::Rgba8 | TexelFormat::R8 | TexelFormat::Rgba32Uint | TexelFormat::R32Uint => {
             crate::backend::TextureEncoding::Rgba8
         }
     }
@@ -5790,6 +5807,7 @@ fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std
                 // format, so its arm is the four-byte one's.
                 TexelFormat::Rgba8
                 | TexelFormat::Rgba32Uint
+                | TexelFormat::R32Uint
                 | TexelFormat::Float11_11_10
                 | TexelFormat::Rgba8Srgb
                 | TexelFormat::Rgb10A2 => texel.to_le_bytes(),
@@ -6936,6 +6954,18 @@ fn stage_of(name: &str) -> Option<ShaderStage> {
 #[cfg(test)]
 mod tests {
     use super::{Cached, ResourceId};
+
+    /// A `32_UINT` image is bound one-channel only where its selects read X then zero, zero and one,
+    /// as constants or as the channels it lacks; any other order is a view the host does not give.
+    #[test]
+    fn a_one_channel_image_takes_only_its_natural_selects() {
+        let word3 = |[x, y, z, w]: [u32; 4]| x | y << 3 | z << 6 | w << 9;
+        assert!(super::one_channel_selects(word3([4, 0, 0, 1])));
+        assert!(super::one_channel_selects(word3([4, 5, 6, 7])));
+        assert!(!super::one_channel_selects(word3([4, 4, 4, 4])));
+        assert!(!super::one_channel_selects(word3([5, 0, 0, 1])));
+        assert!(!super::one_channel_selects(word3([4, 0, 0, 0])));
+    }
 
     /// A pitched texture's rows become its texels row by row, each the bytes read little-endian,
     /// the pitch's padding left out - as converting them a texel at a time gives.
