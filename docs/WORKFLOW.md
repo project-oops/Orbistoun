@@ -131,6 +131,21 @@ benchmark ranks each zone by the share of its title's run it took, every title w
 so an idle title's few milliseconds of presenting do not read as all of its time. See
 [profiling with Tracy](features/graphics.md#profiling-with-tracy) and D831.
 
+A round of making a title faster goes:
+
+1. `perf` the title, long enough to pass its start: a homebrew title may show a controls card for
+   ten seconds and build its fonts before it draws anything, so 30 seconds rather than 15.
+2. Take the largest *self* time that is work, not waiting: `execute hand-off` is a guest thread
+   waiting on the device thread, whose own zones say what it was doing.
+3. Where that zone has nothing finer, add a span inside it - one line in the span table of
+   `crates/orbistoun-gpu/src/perf.rs` and a `perf::span` around the work - and record again,
+   rather than timing it by hand. A span kept is the next round's answer.
+4. Where the spans run out, `ORBISTOUN_PROFILE=<n>` samples the guest's main thread and the device
+   thread, naming host functions; its report is in the run's log.
+5. Change one thing and record again, more than once: a run on the host clock varies by a few
+   frames a second between runs of one build, and other work on the machine moves it more. Judge
+   by the zone you changed as well as by the frame rate.
+
 ## Recording what a turn produced
 
 ```bash
