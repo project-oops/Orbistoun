@@ -223,6 +223,8 @@ struct GuestSemaphore {
     /// The latest logical time a thread signalling it had, which a thread that takes from it moves
     /// up to (D786).
     signalled_at: AtomicU64,
+    /// How many times it has been signalled, so a count at zero says whether anything ever gave.
+    signals: AtomicU64,
 }
 
 impl GuestSemaphore {
@@ -233,6 +235,7 @@ impl GuestSemaphore {
             ceiling,
             name,
             signalled_at: AtomicU64::new(0),
+            signals: AtomicU64::new(0),
         }
     }
 
@@ -296,6 +299,7 @@ impl GuestSemaphore {
             return false;
         }
         *count = raised;
+        self.signals.fetch_add(1, Ordering::Relaxed);
         self.signalled_at
             .fetch_max(orbistoun_hle::clocks::thread_time(), Ordering::AcqRel);
         self.available.notify_all();
@@ -359,9 +363,13 @@ pub fn semaphore_destroy(handle: SemaphoreHandle) -> bool {
         .is_ok_and(|mut t| t.remove(&handle).is_some())
 }
 
-/// How many a semaphore holds now, if it names one.
-pub fn semaphore_count(handle: SemaphoreHandle) -> Option<u32> {
-    with_semaphore(handle, |s| s.state.lock().ok().map(|count| *count)).flatten()
+/// How many a semaphore holds now, and how many times it has been signalled, if it names one.
+pub fn semaphore_state(handle: SemaphoreHandle) -> Option<(u32, u64)> {
+    with_semaphore(handle, |s| {
+        let count = *s.state.lock().ok()?;
+        Some((count, s.signals.load(Ordering::Relaxed)))
+    })
+    .flatten()
 }
 
 /// What a semaphore was called, if it names one.
@@ -1171,6 +1179,8 @@ struct GuestEventFlag {
     /// The latest logical time a thread setting it had, which a waiter it releases moves up to
     /// (D786).
     set_at: AtomicU64,
+    /// How many times it has been set, so bits at zero say whether anything ever set them.
+    sets: AtomicU64,
 }
 
 /// How an event-flag wait ended.
@@ -1202,6 +1212,7 @@ pub fn create_event_flag(initial: u64, name: &str) -> EventFlagHandle {
                 waiting: AtomicU64::new(0),
                 cancels: AtomicU64::new(0),
                 set_at: AtomicU64::new(0),
+                sets: AtomicU64::new(0),
             }),
         );
     }
@@ -1245,6 +1256,7 @@ pub fn event_flag_set(handle: EventFlagHandle, pattern: u64) -> Option<bool> {
             return false;
         };
         *bits |= pattern;
+        e.sets.fetch_add(1, Ordering::Relaxed);
         e.set_at
             .fetch_max(orbistoun_hle::clocks::thread_time(), Ordering::AcqRel);
         e.changed.notify_all();
@@ -1380,11 +1392,16 @@ pub fn event_flag_destroy(handle: EventFlagHandle) -> bool {
         .is_ok_and(|mut t| t.remove(&handle).is_some())
 }
 
-/// An event flag's bits now, and how many threads wait on it, if it names one.
-pub fn event_flag_state(handle: EventFlagHandle) -> Option<(u64, u64)> {
+/// An event flag's bits now, how many threads wait on it, and how many times it has been set, if it
+/// names one.
+pub fn event_flag_state(handle: EventFlagHandle) -> Option<(u64, u64, u64)> {
     with_event_flag(handle, |e| {
         let bits = *e.bits.lock().ok()?;
-        Some((bits, e.waiting.load(Ordering::SeqCst)))
+        Some((
+            bits,
+            e.waiting.load(Ordering::SeqCst),
+            e.sets.load(Ordering::Relaxed),
+        ))
     })
     .flatten()
 }
@@ -1797,11 +1814,19 @@ mod tests {
         let flag = super::create_event_flag(0x4, "dependency");
         assert_eq!(
             super::event_flag_state(flag),
-            Some((0x4, 0)),
-            "its bits, nobody waiting"
+            Some((0x4, 0, 0)),
+            "its bits, nobody waiting, never set"
         );
+        assert_eq!(super::event_flag_set(flag, 0x1), Some(true));
+        assert_eq!(super::event_flag_state(flag), Some((0x5, 0, 1)), "set once");
         let sema = super::create_semaphore(3, 8, "sema");
-        assert_eq!(super::semaphore_count(sema), Some(3));
+        assert_eq!(
+            super::semaphore_state(sema),
+            Some((3, 0)),
+            "never signalled"
+        );
+        assert_eq!(super::semaphore_signal(sema, 2), Some(true));
+        assert_eq!(super::semaphore_state(sema), Some((5, 1)), "signalled once");
         assert_eq!(super::event_flag_state(0xdead_0000), None, "names nothing");
     }
 
