@@ -6362,9 +6362,17 @@ fn kept_texels(texels: &TexelCache, key: (u64, u32, u32, u32), span: u64) -> Opt
 /// `rows` of four-byte texels as words, `count` of them, each row copied whole rather than a texel
 /// at a time: a guest's linear textures are read again whenever they are written, and converting
 /// them a word at a time was a tenth of a title's preparation.
+///
+/// Laid down in the shared slice itself: made as a vector and then shared, a texture was two fresh
+/// allocations and a copy between them, and an allocation of a mebibyte comes from the system a
+/// page at a time - half of re-reading a 512 x 512 texture (ETXR00001, 266 us of 470).
 fn row_words<'a>(rows: impl Iterator<Item = &'a [u8]>, count: usize) -> std::sync::Arc<[u32]> {
-    let mut words = vec![0_u32; count];
-    let bytes = zerocopy::IntoBytes::as_mut_bytes(words.as_mut_slice());
+    // Collected from an iterator of known length, the shared slice is allocated once, whole.
+    let mut shared: std::sync::Arc<[u32]> = std::iter::repeat_n(0_u32, count).collect();
+    let Some(words) = std::sync::Arc::get_mut(&mut shared) else {
+        return shared;
+    };
+    let bytes = zerocopy::IntoBytes::as_mut_bytes(&mut *words);
     let mut at = 0;
     for row in rows {
         let Some(into) = bytes.get_mut(at..at + row.len()) else {
@@ -6375,11 +6383,11 @@ fn row_words<'a>(rows: impl Iterator<Item = &'a [u8]>, count: usize) -> std::syn
     }
     // The words are the bytes read little-endian, as the guest stored them.
     if cfg!(target_endian = "big") {
-        for word in &mut words {
+        for word in words.iter_mut() {
             *word = u32::from_le(*word);
         }
     }
-    words.into()
+    shared
 }
 
 fn face_rows(
