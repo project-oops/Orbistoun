@@ -130,6 +130,21 @@ pub struct DescriptorReads {
     pub vector_reach: Option<u32>,
     /// Whether a vector access indexes records.
     pub indexed: bool,
+    /// What every indexed access indexes by, where the program shows it and they agree (D879):
+    /// the draw then reaches only the records its ids name. [`None`] where any may index any
+    /// record.
+    #[serde(default)]
+    pub index: Option<RecordIndex>,
+}
+
+/// What a vector access's record index is, as the program forms it (D879): a primitive shader's
+/// vertex or instance id as the module seeds it, with the word added to it, if one is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RecordIndex {
+    /// The vertex id (`v5`), plus the word.
+    Vertex(Option<DescriptorWord>),
+    /// The instance id (`v8`, D863), plus the word.
+    Instance(Option<DescriptorWord>),
 }
 
 impl DescriptorReads {
@@ -144,6 +159,12 @@ impl DescriptorReads {
                 .zip(other.vector_reach)
                 .map(|(a, b)| a.max(b)),
             indexed: self.indexed || other.indexed,
+            // Only indexed accesses say what they index by, and all of them must agree.
+            index: match (self.indexed, other.indexed) {
+                (false, _) => other.index,
+                (_, false) => self.index,
+                _ => self.index.filter(|_| self.index == other.index),
+            },
         }
     }
 }
@@ -155,6 +176,7 @@ impl Default for DescriptorReads {
             vector: false,
             vector_reach: Some(0),
             indexed: false,
+            index: None,
         }
     }
 }
@@ -181,7 +203,8 @@ pub struct DrawBuffers {
 /// not see - unless `stores` (a dispatch, whose buffers are written back, D746) and every write is
 /// a buffer store through a descriptor, which is traced like a load, or a store to an image the
 /// dispatch binds whole and writes back the same way. With `globals` (a primitive
-/// shader, D758), its global loads with no scalar base share one buffer after the others.
+/// shader, D758), its global loads with no scalar base share one buffer after the others, and an
+/// indexed access by its vertex or instance id says so (D879).
 #[must_use]
 pub fn trace(
     decode: &Decode,
@@ -228,15 +251,21 @@ pub fn trace(
     };
     let entry = entry_state(first_register, count);
     let reached = block_entries(decode, &named, &blocks, entry);
+    let indices = if globals {
+        lane_entries(decode, &named, &blocks, &reached)
+    } else {
+        vec![None; blocks.len()]
+    };
 
     // Every access, with the state it reads, in program order: the bases' reach is known only once
     // every load through them has been seen.
     let mut accesses: Vec<(u32, Access)> = Vec::new();
     let mut stores: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-    for (block, state) in blocks.iter().zip(reached) {
+    for ((block, state), lanes) in blocks.iter().zip(reached).zip(indices) {
         let Some(mut held) = state else {
             continue;
         };
+        let mut lanes = lanes.unwrap_or_default();
         for (instruction, named) in decode.instructions[block.first..block.end]
             .iter()
             .zip(&named[block.first..block.end])
@@ -247,12 +276,16 @@ pub fn trace(
                 if bound_buffer_store(name) {
                     stores.insert(instruction.offset);
                 }
+                let access = indexed_by(access, instruction, &lanes);
                 accesses.push((instruction.offset, access));
             } else if let Some(&(_, name)) = named.as_ref()
                 && globals
                 && let Some(bytes) = global_load(instruction, name)
             {
                 accesses.push((instruction.offset, Access::Global { bytes }));
+            }
+            if !lanes.is_empty() {
+                step_lanes(&mut lanes, &held, instruction, *named);
             }
             step(&mut held, instruction, *named);
         }
@@ -399,6 +432,14 @@ enum Key {
 /// hold more than one thing.
 type Held = Vec<Option<DescriptorWord>>;
 
+/// Which vector registers hold a record index the draw bounds (D879): [`None`] for any other.
+type Lanes = Vec<Option<RecordIndex>>;
+
+/// The vector registers a primitive shader's vertex thread finds its vertex and instance ids in
+/// (the module's seeding, `wavefront.rs`; D863).
+const VERTEX_ID: usize = 5;
+const INSTANCE_ID: usize = 8;
+
 /// One traced access, before its base's reach is known.
 #[derive(Debug, Clone, Copy)]
 enum Access {
@@ -447,7 +488,7 @@ fn block_entries(
     blocks: &[crate::blocks::Block],
     entry: Held,
 ) -> Vec<Option<Held>> {
-    use crate::blocks::{Terminator, block_at};
+    use crate::blocks::block_at;
     let mut entries: Vec<Option<Held>> = vec![None; blocks.len()];
     let Some(first) = entries.first_mut() else {
         return entries;
@@ -465,16 +506,10 @@ fn block_entries(
         {
             step(&mut held, instruction, *named);
         }
-        let next: Vec<u32> = match block.terminator {
-            Terminator::End => Vec::new(),
-            Terminator::Jump { target } => vec![target],
-            Terminator::Branch {
-                target,
-                fallthrough,
-            } => vec![target, fallthrough],
-            Terminator::Fallthrough { next } => vec![next],
-        };
-        for successor in next.into_iter().filter_map(|at| block_at(blocks, at)) {
+        for successor in successors(block)
+            .into_iter()
+            .filter_map(|at| block_at(blocks, at))
+        {
             let changed = match &mut entries[successor] {
                 slot @ None => {
                     *slot = Some(held.clone());
@@ -488,6 +523,210 @@ fn block_entries(
         }
     }
     entries
+}
+
+/// Where a block's control goes next.
+fn successors(block: &crate::blocks::Block) -> Vec<u32> {
+    use crate::blocks::Terminator;
+    match block.terminator {
+        Terminator::End => Vec::new(),
+        Terminator::Jump { target } => vec![target],
+        Terminator::Branch {
+            target,
+            fallthrough,
+        } => vec![target, fallthrough],
+        Terminator::Fallthrough { next } => vec![next],
+    }
+}
+
+/// Which vector registers each reachable block starts with an id in (D879), carried along every
+/// branch until they settle from a primitive shader's entry, where `v5` holds the vertex id and
+/// `v8` the instance id; a register two paths disagree on holds none. The scalar registers each
+/// block starts with, `scalars`, have settled already.
+fn lane_entries(
+    decode: &Decode,
+    named: &[Option<(&str, &str)>],
+    blocks: &[crate::blocks::Block],
+    scalars: &[Option<Held>],
+) -> Vec<Option<Lanes>> {
+    let mut entries: Vec<Option<Lanes>> = vec![None; blocks.len()];
+    let Some(first) = entries.first_mut() else {
+        return entries;
+    };
+    let mut entry: Lanes = vec![None; 256];
+    entry[VERTEX_ID] = Some(RecordIndex::Vertex(None));
+    entry[INSTANCE_ID] = Some(RecordIndex::Instance(None));
+    *first = Some(entry);
+    let mut pending = vec![0usize];
+    while let Some(index) = pending.pop() {
+        let (Some(block), Some(Some(start)), Some(Some(held))) =
+            (blocks.get(index), entries.get(index), scalars.get(index))
+        else {
+            continue;
+        };
+        let (mut lanes, mut held) = (start.clone(), held.clone());
+        for (instruction, named) in decode.instructions[block.first..block.end]
+            .iter()
+            .zip(&named[block.first..block.end])
+        {
+            step_lanes(&mut lanes, &held, instruction, *named);
+            step(&mut held, instruction, *named);
+        }
+        for successor in successors(block)
+            .into_iter()
+            .filter_map(|at| crate::blocks::block_at(blocks, at))
+        {
+            let changed = match &mut entries[successor] {
+                slot @ None => {
+                    *slot = Some(lanes.clone());
+                    true
+                }
+                Some(known) => meet_lanes(known, &lanes),
+            };
+            if changed {
+                pending.push(successor);
+            }
+        }
+    }
+    entries
+}
+
+/// Narrows `known` to what it shares with `other`, answering whether anything changed.
+fn meet_lanes(known: &mut Lanes, other: &Lanes) -> bool {
+    let mut changed = false;
+    for (index, theirs) in known.iter_mut().zip(other) {
+        if index.is_some() && *index != *theirs {
+            *index = None;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Carries `lanes` over one instruction (D879).
+///
+/// A `v_mov_b32` from a register copies what it holds, and a `v_add_nc_u32` of an id with nothing
+/// added and a traced scalar register or a constant holds the id plus that word. Any other write
+/// to a vector register leaves it holding none: the first operand of every vector-writing family
+/// is its destination, as wide as [`vector_destination_words`] says; a swap writes its second too;
+/// and an instruction with no name, or a relative move, leaves none holding anything.
+fn step_lanes(
+    lanes: &mut Lanes,
+    held: &Held,
+    instruction: &Instruction,
+    named: Option<(&str, &str)>,
+) {
+    let Some((_, name)) = named else {
+        lanes.fill(None);
+        return;
+    };
+    if name.starts_with("v_movrel") || name.starts_with("v_swaprel") {
+        lanes.fill(None);
+        return;
+    }
+    let operands = instruction.operands.as_slice();
+    let lane = |operand: &Operand| match operand {
+        Operand::Vector(register) => lanes.get(usize::from(*register)).copied().flatten(),
+        _ => None,
+    };
+    let word = |operand: &Operand| match operand {
+        Operand::Scalar(register) => held.get(usize::from(*register)).copied().flatten(),
+        Operand::Integer(value) => i32::try_from(*value)
+            .ok()
+            .map(|v| DescriptorWord::Constant(u32::from_ne_bytes(v.to_ne_bytes()))),
+        Operand::Literal(value) => Some(DescriptorWord::Constant(*value)),
+        _ => None,
+    };
+    let plus = |id: RecordIndex, added: Option<DescriptorWord>| match (id, added?) {
+        (RecordIndex::Vertex(None), added) => Some(RecordIndex::Vertex(Some(added))),
+        (RecordIndex::Instance(None), added) => Some(RecordIndex::Instance(Some(added))),
+        _ => None,
+    };
+    // The short and long encodings of one operation do the same.
+    let operation = name
+        .strip_suffix("_e32")
+        .or_else(|| name.strip_suffix("_e64"))
+        .unwrap_or(name);
+    let written = match (operation, operands) {
+        ("v_mov_b32", [Operand::Vector(destination), source]) => Some((*destination, lane(source))),
+        ("v_add_nc_u32", [Operand::Vector(destination), a, b]) => Some((
+            *destination,
+            lane(b)
+                .and_then(|id| plus(id, word(a)))
+                .or_else(|| lane(a).and_then(|id| plus(id, word(b)))),
+        )),
+        _ => None,
+    };
+    if let Some(Operand::Vector(first)) = operands.first() {
+        for index in lanes
+            .iter_mut()
+            .skip(usize::from(*first))
+            .take(vector_destination_words(name))
+        {
+            *index = None;
+        }
+    }
+    if name.starts_with("v_swap")
+        && let Some(Operand::Vector(second)) = operands.get(1)
+        && let Some(index) = lanes.get_mut(usize::from(*second))
+    {
+        *index = None;
+    }
+    if let Some((destination, value)) = written
+        && let Some(index) = lanes.get_mut(usize::from(destination))
+    {
+        *index = value;
+    }
+}
+
+/// How many vector registers an instruction's first operand may span as a destination, at least:
+/// one for a 32-bit vector ALU result, two for any naming a 64-bit type, four for the quad-SAD; a
+/// memory read's dwords or channels, one more for the status word `tfe` returns; five for an
+/// image's four channels and status. Where it is a source instead, forgetting it costs only a
+/// bound.
+fn vector_destination_words(name: &str) -> usize {
+    if let Some(alu) = name.strip_prefix("v_") {
+        return if alu.contains("mqsad_u32") {
+            4
+        } else if alu.contains("64") {
+            2
+        } else {
+            1
+        };
+    }
+    if name.starts_with("image_") {
+        return 5;
+    }
+    let has = |parts: &[&str]| parts.iter().any(|part| name.contains(part));
+    let data = if has(&["read2_b64", "read2st64_b64", "b128", "x4", "xyzw"]) {
+        4
+    } else if has(&["b96", "x3", "xyz"]) {
+        3
+    } else if has(&["b64", "x2", "xy", "read2"]) {
+        2
+    } else {
+        1
+    };
+    data + 1
+}
+
+/// `access` with what its record index is, where it indexes records by a register `lanes` holds an
+/// id in (D879). The index is the address operand's first register.
+fn indexed_by(mut access: Access, instruction: &Instruction, lanes: &Lanes) -> Access {
+    let index = match instruction.operands.get(1) {
+        Some(Operand::Vector(register)) => lanes.get(usize::from(*register)).copied().flatten(),
+        _ => None,
+    };
+    if let Access::Descriptor(_, reads)
+    | Access::Computed {
+        through: ComputedAccess::Descriptor { reads, .. },
+        ..
+    } = &mut access
+        && reads.indexed
+    {
+        reads.index = index;
+    }
+    access
 }
 
 /// Narrows `known` to what it shares with `other`, answering whether anything changed.
@@ -633,6 +872,7 @@ fn access(instruction: &Instruction, name: &str, held: &Held) -> Option<Access> 
             vector: true,
             vector_reach: reach,
             indexed: word & (1 << 13) != 0,
+            index: None,
         };
         let no_offset =
             matches!(soffset, Operand::Integer(0)) || *soffset == Operand::Named("null".into());
@@ -1420,8 +1660,132 @@ mod tests {
                     vector: true,
                     vector_reach: Some(12),
                     indexed: true,
+                    index: None,
                 },
             }]
+        );
+    }
+
+    /// Traces a primitive shader's program of words, its twenty user-data words from `s8`, as
+    /// MCUB00001's (D879).
+    fn traced_primitive(words: &[u32], globals: bool) -> super::DrawBuffers {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        assert!(decoded.is_trustworthy(), "the fixture decodes cleanly");
+        trace(&decoded, &encodings, (8, 20), (false, globals))
+    }
+
+    /// What each traced descriptor's indexed accesses index by, in slot order.
+    fn indices(buffers: &super::DrawBuffers) -> Vec<Option<super::RecordIndex>> {
+        buffers
+            .sources
+            .iter()
+            .map(|source| match source {
+                BufferSource::Descriptor { reads, .. } => reads.index,
+                other => panic!("a descriptor: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// `v_add_nc_u32 v5, s13, v5`: the vertex id plus the base vertex, user-data word 5.
+    const ADD_BASE_VERTEX: u32 = 0x4a0a_0a0d;
+    /// `buffer_load_format_xyzw v[0:3], v5, s[20:23], 0 idxen`.
+    const FETCH_POSITION: [u32; 2] = [0xe00c_2000, 0x8005_0005];
+    /// `buffer_load_format_xyzw v[4:7], v5, s[24:27], 0 idxen`.
+    const FETCH_COLOUR: [u32; 2] = [0xe00c_2000, 0x8006_0405];
+
+    /// MCUB00001's (Mesa Cube) vertex fetch: both attributes indexed by the vertex id plus the
+    /// base vertex in user data, so each draw reaches only the records its vertices name (D879).
+    /// The first fetch's four registers do not reach `v5`, which the second reads.
+    #[test]
+    fn a_fetch_by_the_vertex_id_plus_the_base_vertex_says_so() {
+        let mut program = vec![ADD_BASE_VERTEX];
+        program.extend(FETCH_POSITION);
+        program.extend(FETCH_COLOUR);
+        program.push(END);
+        let buffers = traced_primitive(&program, true);
+        let by = Some(super::RecordIndex::Vertex(Some(DescriptorWord::UserData(
+            5,
+        ))));
+        assert_eq!(indices(&buffers), [by, by]);
+        let BufferSource::Descriptor { words, .. } = buffers.sources[0] else {
+            unreachable!()
+        };
+        assert_eq!(words, [12, 13, 14, 15].map(DescriptorWord::UserData));
+    }
+
+    /// The ids as the module seeds them: `v5` the vertex, `v8` the instance, each followed through
+    /// a move. A fetch through `v0`, which holds the primitive's vertex indices, says nothing.
+    #[test]
+    fn the_seeded_ids_are_followed_through_a_move() {
+        let program = [
+            0x7e02_0305, // v_mov_b32 v1, v5
+            0xe00c_2000, // buffer_load_format_xyzw v[2:5], v1, s[20:23], 0 idxen
+            0x8005_0201,
+            0xe00c_2000, // buffer_load_format_xyzw v[0:3], v8, s[24:27], 0 idxen
+            0x8006_0008,
+            0xe00c_2000, // buffer_load_format_xyzw v[0:3], v0, s[16:19], 0 idxen
+            0x8004_0000,
+            END,
+        ];
+        let buffers = traced_primitive(&program, true);
+        assert_eq!(
+            indices(&buffers),
+            [
+                Some(super::RecordIndex::Vertex(None)),
+                Some(super::RecordIndex::Instance(None)),
+                None
+            ]
+        );
+    }
+
+    /// A write to the register holding an id leaves it holding none: here the colour fetch's own
+    /// destination, `v[4:7]`, covers `v5` before the next fetch reads it.
+    #[test]
+    fn an_id_overwritten_bounds_nothing() {
+        let mut program = vec![ADD_BASE_VERTEX];
+        program.extend(FETCH_COLOUR);
+        program.extend(FETCH_POSITION);
+        program.push(END);
+        let buffers = traced_primitive(&program, true);
+        let by = Some(super::RecordIndex::Vertex(Some(DescriptorWord::UserData(
+            5,
+        ))));
+        assert_eq!(indices(&buffers), [by, None]);
+    }
+
+    /// Only a primitive shader's `v5` and `v8` are ids: a fragment shader's or a dispatch's fetch
+    /// by them says nothing.
+    #[test]
+    fn only_a_primitive_shader_seeds_ids() {
+        let mut program = vec![ADD_BASE_VERTEX];
+        program.extend(FETCH_POSITION);
+        program.push(END);
+        assert_eq!(indices(&traced_primitive(&program, false)), [None]);
+    }
+
+    /// Two fetches through one descriptor bound it only when they index by the same thing: the
+    /// vertex id and the primitive's indices in `v0` do not agree.
+    #[test]
+    fn fetches_through_one_descriptor_must_agree() {
+        let mut program = vec![ADD_BASE_VERTEX];
+        program.extend(FETCH_POSITION);
+        // buffer_load_format_xyzw v[8:11], v0, s[20:23], 0 idxen
+        program.extend([0xe00c_2000, 0x8005_0800]);
+        program.push(END);
+        assert_eq!(indices(&traced_primitive(&program, true)), [None]);
+        // The same fetch twice agrees.
+        let mut program = vec![ADD_BASE_VERTEX];
+        program.extend(FETCH_POSITION);
+        program.extend([0xe00c_2000, 0x8005_0805]);
+        program.push(END);
+        assert_eq!(
+            indices(&traced_primitive(&program, true)),
+            [Some(super::RecordIndex::Vertex(Some(
+                DescriptorWord::UserData(5)
+            )))]
         );
     }
 

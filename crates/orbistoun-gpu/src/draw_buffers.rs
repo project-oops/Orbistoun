@@ -12,6 +12,7 @@ use crate::perf::{Span, span};
 
 use orbistoun_translate::draw_buffers::{
     BufferSource, Computed, ComputedAccess, DescriptorReads, DescriptorWord, GlobalLoads,
+    RecordIndex,
 };
 use orbistoun_translate::wavefront::{TableBase, TableWord};
 
@@ -31,6 +32,20 @@ type Refusal = std::borrow::Cow<'static, str>;
 ///
 /// A refusal naming what leaves the reads unbounded.
 pub fn descriptor_extent(words: [u32; 4], reads: DescriptorReads) -> Result<u64, &'static str> {
+    descriptor_extent_to(words, reads, None)
+}
+
+/// [`descriptor_extent`] for a draw whose indexed accesses reach no record past `last_index`
+/// (D879): the bytes through that record, or through the descriptor's last where it has fewer.
+///
+/// # Errors
+///
+/// A refusal naming what leaves the reads unbounded.
+pub fn descriptor_extent_to(
+    words: [u32; 4],
+    reads: DescriptorReads,
+    last_index: Option<u64>,
+) -> Result<u64, &'static str> {
     const UNBOUNDED: &str = concat!(
         "a buffer read at a register offset or record index its descriptor's out-of-bounds mode ",
         "does not limit, so no range holds every read (D733)"
@@ -53,10 +68,11 @@ pub fn descriptor_extent(words: [u32; 4], reads: DescriptorReads) -> Result<u64,
         return Ok(scalar);
     }
     let reach = reads.vector_reach.map(u64::from);
-    // Where the last record an access can index starts: every record's when it indexes, the
-    // first's when not.
+    // Where the last record an access can index starts: the last the draw's ids reach where they
+    // bound it (D879), else every record's when it indexes, and the first's when not.
     let last_record = if reads.indexed {
-        records.saturating_sub(1) * stride
+        let last = records.saturating_sub(1);
+        last_index.map_or(last, |index| index.min(last)) * stride
     } else {
         0
     };
@@ -680,17 +696,99 @@ pub(crate) fn resolve_range(
     draw: (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), Refusal> {
+    resolve_draw_range(source, draw, None, memory)
+}
+
+/// [`resolve_range`] for a draw whose vertex lanes hold the ids `ids` names (D879): an indexed
+/// access by them reaches only the records they index.
+fn resolve_draw_range(
+    source: &BufferSource,
+    draw: (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
+    ids: Option<DrawIds>,
+    memory: &impl GuestMemory,
+) -> Result<(u64, u64), Refusal> {
     span(Span::BufferResolve, || {
-        resolve_range_now(source, draw, memory)
+        resolve_range_now(source, draw, ids, memory)
     })
+}
+
+/// The last vertex id and instance id a non-indexed draw's vertex lanes hold (D879).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DrawIds {
+    vertex: u32,
+    instance: u32,
+}
+
+impl DrawIds {
+    /// A draw's: its vertex ids count up from its first vertex (D761), a split draw's through its
+    /// last chunk (D741, D787), and its instances from zero, one at least (D863). [`None`] for an
+    /// indexed draw, whose vertex ids are its indices, for a draw of no vertices, and where the ids
+    /// would wrap.
+    fn of(command: &RenderCommand) -> Option<Self> {
+        let (last, instances) = match *command {
+            RenderCommand::Draw {
+                vertices,
+                instances,
+                first_vertex,
+            } => (
+                u64::from(first_vertex) + u64::from(vertices.checked_sub(1)?),
+                instances,
+            ),
+            RenderCommand::DrawChunks {
+                chunks,
+                vertices,
+                last,
+                instances,
+                first_vertex,
+                stride,
+            } => {
+                let first_chunk = u64::from(first_vertex) + u64::from(vertices.checked_sub(1)?);
+                let last_chunk = u64::from(first_vertex)
+                    + u64::from(chunks.checked_sub(1)?) * u64::from(stride)
+                    + u64::from(last.checked_sub(1)?);
+                (first_chunk.max(last_chunk), instances)
+            }
+            _ => return None,
+        };
+        Some(Self {
+            vertex: u32::try_from(last).ok()?,
+            instance: instances.max(1) - 1,
+        })
+    }
+
+    /// The last record an access indexing by `index` reaches for a draw with these user-data
+    /// words: the id plus the word added to it. [`None`] where the word cannot be read or the sum
+    /// would wrap, as the hardware's 32-bit index does.
+    fn last_index(
+        self,
+        index: RecordIndex,
+        user_data: &[u32; USER_DATA_WORDS],
+        memory: &impl GuestMemory,
+    ) -> Option<u64> {
+        let (id, plus) = match index {
+            RecordIndex::Vertex(plus) => (self.vertex, plus),
+            RecordIndex::Instance(plus) => (self.instance, plus),
+        };
+        let plus = match plus {
+            Some(word) => resolve_word(word, user_data, memory).ok()?,
+            None => 0,
+        };
+        let last = u64::from(id) + u64::from(plus);
+        u32::try_from(last).is_ok().then_some(last)
+    }
 }
 
 /// [`resolve_range`], timed there.
 fn resolve_range_now(
     source: &BufferSource,
     (user_data, vertices, system): (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
+    ids: Option<DrawIds>,
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), Refusal> {
+    let last_index = |reads: DescriptorReads| {
+        ids.zip(reads.index)
+            .and_then(|(ids, index)| ids.last_index(index, user_data, memory))
+    };
     let (address, length) = match source {
         BufferSource::Global(global) => global_range(global, user_data, vertices, memory)?,
         BufferSource::Pointer { base, extent } => {
@@ -706,7 +804,7 @@ fn resolve_range_now(
             match computed.through {
                 ComputedAccess::Descriptor { reads, .. } => (
                     crate::pipeline::guest_address_of(decode_buffer_descriptor(values).base),
-                    u64::from(soffset) + descriptor_extent(values, reads)?,
+                    u64::from(soffset) + descriptor_extent_to(values, reads, last_index(reads))?,
                 ),
                 // A scalar load reads its words from the base plus the scalar offset, which the
                 // translated load does not add: the range starts there.
@@ -725,7 +823,7 @@ fn resolve_range_now(
             let base = decode_buffer_descriptor(values).base;
             (
                 crate::pipeline::guest_address_of(base),
-                descriptor_extent(values, reads)?,
+                descriptor_extent_to(values, reads, last_index(reads))?,
             )
         }
     };
@@ -781,6 +879,18 @@ fn system_scalars(
     })
 }
 
+/// The lanes a primitive shader's draw runs as vertices (D758): a split draw's chunks run as many
+/// as its full ones (D787).
+fn draw_lanes(command: &RenderCommand) -> u32 {
+    match command {
+        RenderCommand::Draw { vertices, .. } | RenderCommand::DrawChunks { vertices, .. } => {
+            *vertices
+        }
+        RenderCommand::DrawIndexed { indices, .. } => *indices,
+        _ => 0,
+    }
+}
+
 /// Inserts a [`RenderCommand::BindDrawBuffers`] before each draw whose shaders read through
 /// buffers, for each stage whose buffers differ from the ones last bound, so every draw reads the
 /// ranges its own user data names. A draw whose buffers cannot all be bound is counted in
@@ -820,14 +930,7 @@ pub fn bind_draw_buffers(
             RenderCommand::Draw { .. }
             | RenderCommand::DrawIndexed { .. }
             | RenderCommand::DrawChunks { .. } => {
-                // The lanes a primitive shader's draw runs as vertices (D758): a split draw's
-                // chunks run as many as its full ones (D787).
-                let vertices = match &command {
-                    RenderCommand::Draw { vertices, .. }
-                    | RenderCommand::DrawChunks { vertices, .. } => *vertices,
-                    RenderCommand::DrawIndexed { indices, .. } => *indices,
-                    _ => 0,
-                };
+                let (vertices, ids) = (draw_lanes(&command), DrawIds::of(&command));
                 for (at, stage) in STAGES.into_iter().enumerate() {
                     let empty = Vec::new();
                     let module = modules[at];
@@ -853,7 +956,8 @@ pub fn bind_draw_buffers(
                     let ranges = list
                         .iter()
                         .map(|source| {
-                            resolve_range(source, (&words[at], vertices, &system), memory).map(Some)
+                            resolve_draw_range(source, (&words[at], vertices, &system), ids, memory)
+                                .map(Some)
                         })
                         .chain(indices.map(|found| {
                             found
@@ -1023,6 +1127,7 @@ mod tests {
             vector: true,
             vector_reach: reach,
             indexed,
+            index: None,
         }
     }
 
@@ -1073,6 +1178,82 @@ mod tests {
             Ok(9 * 24 + 23 + 16)
         );
         assert!(descriptor_extent(words(STRUCTURED), vector(None, true)).is_err());
+    }
+
+    /// An indexed fetch the draw's ids bound reaches through their last record, and no further
+    /// than the descriptor's (D879).
+    #[test]
+    fn a_fetch_the_draw_s_ids_bound_reaches_their_last_record() {
+        use super::descriptor_extent_to;
+        let words = [0, 4 | 24 << 16, 10, STRUCTURED];
+        let reads = vector(Some(12), true);
+        assert_eq!(descriptor_extent_to(words, reads, Some(2)), Ok(2 * 24 + 12));
+        assert_eq!(descriptor_extent_to(words, reads, Some(0)), Ok(12));
+        assert_eq!(
+            descriptor_extent_to(words, reads, Some(500)),
+            Ok(9 * 24 + 12),
+            "capped at the last record"
+        );
+        assert_eq!(
+            descriptor_extent_to(words, vector(Some(12), false), Some(500)),
+            Ok(12),
+            "an access that does not index reads the first record"
+        );
+    }
+
+    /// MCUB00001's fetch (D879): a vertex buffer descriptor running from the draw's base to the end
+    /// of Mesa's upload ring binds only the vertices the draw names - its vertex ids plus the base
+    /// vertex in user data. An indexed draw, or one whose ids would wrap, binds the whole.
+    #[test]
+    fn a_draw_binds_the_vertices_its_ids_index() {
+        use super::{DrawIds, RenderCommand};
+        use orbistoun_translate::draw_buffers::{BufferSource, DescriptorWord, RecordIndex};
+        let source = BufferSource::Descriptor {
+            words: [0, 1, 2, 3].map(DescriptorWord::UserData),
+            reads: DescriptorReads {
+                index: Some(RecordIndex::Vertex(Some(DescriptorWord::UserData(5)))),
+                ..vector(Some(16), true)
+            },
+        };
+        let mut user_data = [0u32; super::USER_DATA_WORDS];
+        // Sixteen-byte records, a hundred thousand of them, and the base vertex 4.
+        user_data[..4].copy_from_slice(&[0x10_0000, 16 << 16, 100_000, STRUCTURED]);
+        user_data[5] = 4;
+        let memory = At(0, Vec::new());
+        let draw = |command: &RenderCommand| {
+            super::resolve_draw_range(&source, (&user_data, 0, &[]), DrawIds::of(command), &memory)
+                .map(|(_, length)| length)
+        };
+        let triangle = RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        };
+        assert_eq!(draw(&triangle), Ok((4 + 2) * 16 + 16));
+        let chunks = RenderCommand::DrawChunks {
+            chunks: 3,
+            vertices: 96,
+            last: 12,
+            instances: 1,
+            first_vertex: 0,
+            stride: 96,
+        };
+        assert_eq!(draw(&chunks), Ok((4 + 2 * 96 + 11) * 16 + 16));
+        let indexed = RenderCommand::DrawIndexed {
+            indices: 3,
+            instances: 1,
+            first_index: 0,
+            index_buffer: None,
+        };
+        assert_eq!(draw(&indexed), Ok(99_999 * 16 + 16));
+        user_data[5] = u32::MAX;
+        let wrapping = super::resolve_draw_range(
+            &source,
+            (&user_data, 0, &[]),
+            DrawIds::of(&triangle),
+            &memory,
+        );
+        assert_eq!(wrapping.map(|(_, length)| length), Ok(99_999 * 16 + 16));
     }
 
     /// A raw-checked buffer indexed by record has no bound on the index, and is refused.
