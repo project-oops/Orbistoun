@@ -6551,7 +6551,12 @@ pub const SDWA_FLOAT: &[(&str, &str)] = &[
 
 /// The one-source float short-form instructions translated in their SDWA form over whole registers:
 /// the word's source negate and absolute value apply to the one source (RDNA ISA, SDWA).
-pub const SDWA_FLOAT_UNARY: &[&str] = &["v_rcp_f32_e32", "v_log_f32_e32"];
+pub const SDWA_FLOAT_UNARY: &[&str] = &[
+    "v_rcp_f32_e32",
+    "v_log_f32_e32",
+    "v_rsq_f32_e32",
+    "v_rndne_f32_e32",
+];
 
 /// The short-form float compares translated in their SDWA form over whole registers.
 pub const SDWA_COMPARE: &[&str] = &[

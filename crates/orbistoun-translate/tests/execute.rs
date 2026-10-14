@@ -5949,6 +5949,34 @@ fn an_sdwa_logarithm_and_a_truncation() {
     assert_eq!(vector(&registers, 2), (-2.0f32).to_bits(), "trunc -2.75");
 }
 
+/// PPSA21564's pixel shaders take an inverse square root and a round-to-even of absolute values
+/// through SDWA (`v_rsq_f32_sdwa v0, |v0|`, words 0x7e005cf9 0x00260600; `v_rndne_f32_sdwa v5,
+/// |v5|`, 0x7e0a46f9 0x00260605): 1 / sqrt |-4.0| is 0.5, and |-2.5| rounds to the even 2.0.
+#[test]
+fn an_sdwa_inverse_square_root_and_round_take_absolute_values() {
+    const ABSOLUTE: u32 = 1 << 21;
+    const WHOLE: u32 = SEL_DWORD << 8 | SEL_DWORD << 16;
+    if !device_or_skip("an_sdwa_inverse_square_root_and_round_take_absolute_values") {
+        return;
+    }
+    let rsq = head("v_rsq_f32_e32") | SDWA_MARKER;
+    assert_eq!(rsq, 0x7e00_5cf9, "PPSA21564's first word");
+    let rndne = head("v_rndne_f32_e32") | (5 << 17) | SDWA_MARKER;
+    assert_eq!(rndne, 0x7e0a_46f9, "PPSA21564's round");
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(3, (-4.0f32).to_bits()));
+    program.extend(v_mov_literal(4, (-2.5f32).to_bits()));
+    program.extend([rsq | (1 << 17), 3 | WHOLE | ABSOLUTE]);
+    program.extend([
+        head("v_rndne_f32_e32") | (2 << 17) | SDWA_MARKER,
+        4 | WHOLE | ABSOLUTE,
+    ]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 1), 0.5f32.to_bits(), "1 / sqrt |-4.0|");
+    assert_eq!(vector(&registers, 2), 2.0f32.to_bits(), "round |-2.5|");
+}
+
 /// PPSA03416's shaders apply modifiers through SDWA over whole registers: a fraction scaled by the
 /// output multiplier (`v_fract_f32_sdwa v4, v4 mul:4`, words 0x7e0840f9 0x00068604) and a maximum of
 /// two absolute values (`v_max_f32_sdwa v4, |v1|, |v0|`, words 0x200800f9 0x26260601). fract 2.75 is
