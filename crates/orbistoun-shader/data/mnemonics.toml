@@ -939,6 +939,11 @@ name = "v_readlane_b32"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 877
+name = "v_add3_u32"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 879
 name = "v_lshl_or_b32"
 

@@ -108,6 +108,13 @@ pub fn scalar_prefix(
                     "s_cbranch_scc1" => model.condition.map(|scc| scc != 0),
                     "s_cbranch_vccz" => vcc_set(&model.scalars).map(|set| !set),
                     "s_cbranch_vccnz" => vcc_set(&model.scalars),
+                    // A branch on the execution mask that jumps past the access is never taken
+                    // where the access runs, so the access's scalars are those of the path that
+                    // falls through - a legacy streamout pass skipping its store for a wave with
+                    // no vertices to write (D861).
+                    "s_cbranch_execz" | "s_cbranch_execnz" if jumps_past(instruction, until) => {
+                        Some(false)
+                    }
                     _ => None,
                 };
                 let Some(taken) = taken else {
@@ -154,6 +161,14 @@ pub fn scalar_prefix(
         }
     }
     Ok(Some(model.scalars))
+}
+
+/// Whether a branch's target lies beyond the access at `until`.
+fn jumps_past(instruction: &Instruction, until: u32) -> bool {
+    matches!(
+        instruction.operands.first(),
+        Some(Operand::Immediate(jump)) if i64::from(instruction.offset) + 4 + 4 * jump > i64::from(until)
+    )
 }
 
 /// Whether the condition mask is non-zero, where the scalar registers say: a known non-zero low half
@@ -1396,6 +1411,69 @@ mod tests {
         0xe00c_2000,
         0x6b00_0000, // buffer_load_format_xyzw v0, v0, s[0:3], vcc_hi idxen
     ];
+
+    /// GCTS00001's legacy streamout vertex shader (radeonsi through ACO, gfx10 wave32): its store
+    /// sits behind `s_cbranch_execz` on the lanes past the wave's vertex count, a branch that jumps
+    /// past the store, and its descriptor is loaded from the internal table at `{s0, 4}` (D861).
+    const STREAMOUT_VS: [u32; 28] = [
+        0xbf8f_0003,
+        0x0201_00c1,
+        0x9389_ff09,
+        0x0007_0010,
+        0xbe81_037e,
+        0xbfa3_fffe,
+        0x7d28_0009,
+        0xbf88_000c,
+        0xbe82_0301,
+        0xbe81_0384,
+        0xf408_0100,
+        0xfa00_0000,
+        0xd76d_0000,
+        0x0400_140b,
+        0x7e02_0288,
+        0x3400_0082,
+        0xbf8c_c07f,
+        0xe070_1000,
+        0x8041_0100,
+        0xbe81_0302,
+        0xbfa3_ffe3,
+        0xbefe_0301,
+        0x7e00_02f2,
+        0x7e02_0280,
+        0xf800_18cf,
+        0x0001_0101,
+        0xbf81_0000,
+        0xbf81_0000,
+    ];
+
+    #[test]
+    fn a_streamout_store_past_an_execz_branch_is_evaluated() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = STREAMOUT_VS.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let store = decode.instructions[14].offset;
+        let table = 0x4_0000_1000_u64;
+        let memory = BTreeMap::from([
+            (table, 0x0300_0000),
+            (table + 4, 4),
+            (table + 8, 4),
+            (table + 12, 0x3102_7fac),
+        ]);
+        let user_data = [table as u32, 0, 0, 0, 0, 0, 0, 0, 0, 1 << 16, 0, 0];
+        let scalars = reached(
+            &decode,
+            &encodings,
+            store,
+            (0, &user_data),
+            &mut |address| memory.get(&address).copied(),
+        )
+        .expect("the store is reached");
+        assert_eq!(
+            scalars[4..8],
+            [Some(0x0300_0000), Some(4), Some(4), Some(0x3102_7fac)]
+        );
+    }
 
     #[test]
     fn a_computed_descriptor_is_evaluated_from_the_draws_memory() {

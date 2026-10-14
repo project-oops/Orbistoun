@@ -1546,6 +1546,7 @@ impl Pipeline {
             draw_buffers: true,
             buffer_formats: formats,
             flat_twins: None,
+            discard_vertex_exports: state.vertex_streamout,
             saturated: UNSATURATED,
             local_words: state.local_words,
             program_address: None,
@@ -1586,6 +1587,8 @@ impl Pipeline {
             ^ u64::from(inputs.partial.is_some()) << 9
             ^ u64::from(integer_images[0]) << 62
             ^ u64::from(integer_images[1]) << 63
+            // A streamout pass drops the exports a dispatch of the same program would refuse.
+            ^ u64::from(state.vertex_streamout) << 61
             ^ local_words_salt(state.local_words);
         Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()
@@ -6221,6 +6224,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
+            discard_vertex_exports: false,
             saturated: UNSATURATED,
             local_words,
             program_address: None,
@@ -6241,6 +6245,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             draw_buffers: false,
             buffer_formats: None,
             flat_twins: None,
+            discard_vertex_exports: false,
             saturated: UNSATURATED,
             local_words: None,
             program_address: None,
@@ -8587,6 +8592,7 @@ mod tests {
                 dx10_clamp: None,
                 local_words: None,
                 groups: [1, 1, 1],
+                vertex_streamout: false,
             }
         };
         let memory = Memory(vec![

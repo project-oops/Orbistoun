@@ -77,6 +77,9 @@ pub struct DispatchState {
     pub local_words: Option<u32>,
     /// How many groups run, in each dimension.
     pub groups: [u32; 3],
+    /// Whether the program is a legacy vertex shader's streamout pass, whose position and
+    /// parameter exports are dropped (D861).
+    pub vertex_streamout: bool,
 }
 
 /// Refuses an initiator asking for what is not modelled, and a start that is not zero; an
@@ -228,6 +231,7 @@ pub fn state_at(
         dx10_clamp: latest(PGM_RSRC1).map(|word| word & DX10_CLAMP != 0),
         local_words: crate::pipeline::local_words_of(Some(rsrc2_word), rsrc2::LDS_SIZE),
         groups,
+        vertex_streamout: false,
     })
 }
 

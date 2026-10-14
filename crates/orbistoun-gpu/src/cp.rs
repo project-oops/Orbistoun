@@ -156,6 +156,12 @@ pub trait CpMemory {
     fn samples_passed(&mut self) -> Option<u64> {
         None
     }
+    /// Runs `edit` over the streamout buffers' offsets the queue holds between draws (D861),
+    /// answering whether there are any. The default keeps none, which leaves a
+    /// `STRMOUT_BUFFER_UPDATE` as a stop.
+    fn with_streamout(&mut self, _edit: &mut dyn FnMut(&mut crate::streamout::Offsets)) -> bool {
+        false
+    }
 }
 
 /// A run of a stream's draws with no memory work between them, carried out together (D729).
@@ -212,6 +218,43 @@ fn dispatch_direct(
         return Err(Stop::NeedsGpu);
     }
     result.dispatches += 1;
+    Ok(())
+}
+
+/// `STRMOUT_BUFFER_UPDATE`: sets a streamout buffer's offset - from the packet or from a filled
+/// size in memory - or stores it, in bytes, where the end of a pass keeps it (D861).
+fn streamout_update(
+    body: &[u32],
+    memory: &mut dyn CpMemory,
+    result: &mut CpExecution,
+) -> Result<(), Stop> {
+    use crate::streamout::OffsetSource;
+    let update = crate::streamout::decode_update(body).map_err(|_| Stop::NeedsGpu)?;
+    let set = match update.source {
+        OffsetSource::Packet(bytes) => Some(bytes),
+        OffsetSource::Memory(address) => {
+            let bytes = memory.read(address, 4).ok_or(Stop::OutOfBounds(address))?;
+            Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
+        OffsetSource::Keep => None,
+    };
+    let mut held = None;
+    if !memory.with_streamout(&mut |offsets| {
+        if let Some(bytes) = set {
+            offsets.0[update.buffer] = Some(bytes);
+        }
+        held = offsets.0[update.buffer];
+    }) {
+        return Err(Stop::NeedsGpu);
+    }
+    if let Some(address) = update.store_to {
+        // A buffer no update set has no filled size to store.
+        let filled = held.ok_or(Stop::NeedsGpu)?;
+        if !memory.write(address, &filled.to_le_bytes()) {
+            return Err(Stop::OutOfBounds(address));
+        }
+        result.bytes_written += 4;
+    }
     Ok(())
 }
 
@@ -414,6 +457,7 @@ pub fn execute(stream: &[u8], memory: &mut dyn CpMemory) -> CpExecution {
                 write_data(&body, memory, &mut result)
             }),
             measured::EVENT_WRITE => event_write(&body, memory, &mut result),
+            crate::streamout::STRMOUT_BUFFER_UPDATE => streamout_update(&body, memory, &mut result),
             _ => Err(Stop::NeedsGpu),
         };
         if let Err(stop) = step {
@@ -949,6 +993,8 @@ mod tests {
         released: Vec<(u64, u32)>,
         /// What the samples-passed count answers; `None` counts nothing.
         samples: Option<u64>,
+        /// The streamout offsets held; `None` keeps none.
+        streamout: Option<crate::streamout::Offsets>,
     }
 
     impl Fake {
@@ -987,6 +1033,9 @@ mod tests {
         }
         fn samples_passed(&mut self) -> Option<u64> {
             self.samples
+        }
+        fn with_streamout(&mut self, edit: &mut dyn FnMut(&mut crate::streamout::Offsets)) -> bool {
+            self.streamout.as_mut().map(edit).is_some()
         }
     }
 
@@ -1057,6 +1106,41 @@ mod tests {
             }
         );
         assert_eq!(ran.stopped_body, [0x80, 0x11, 0x22, 0x33, 0x44, 0]);
+    }
+
+    /// radeonsi's streamout begin sets buffer 0's offset to zero; its end stores the offset, in
+    /// bytes, where the pass's filled size is kept; an append reads it back from there (D861).
+    #[test]
+    fn streamout_updates_set_store_and_reload_the_offset() {
+        const STRMOUT_BUFFER_UPDATE: u8 = crate::streamout::STRMOUT_BUFFER_UPDATE;
+        let update = |words: [u32; 5]| {
+            let mut packet = vec![command_header(STRMOUT_BUFFER_UPDATE, 5)];
+            packet.extend(words);
+            bytes(&packet)
+        };
+        let mut memory = Fake {
+            streamout: Some(crate::streamout::Offsets::default()),
+            ..Fake::default()
+        };
+        let begun = execute(&update([0x80, 0, 0, 0, 0]), &mut memory);
+        assert_eq!(begun.stopped, Stopped::Completed);
+        assert_eq!(memory.streamout.unwrap().0[0], Some(0));
+        // A draw wrote three dwords.
+        memory.streamout.as_mut().unwrap().0[0] = Some(12);
+        let ended = execute(&update([0x87, 0x2000, 0, 0, 0]), &mut memory);
+        assert_eq!(
+            (ended.stopped, ended.bytes_written),
+            (Stopped::Completed, 4)
+        );
+        assert_eq!(memory.word(0x2000), 12);
+        memory.streamout.as_mut().unwrap().0[1] = Some(0);
+        let appended = execute(&update([0x184, 0, 0, 0x2000, 0]), &mut memory);
+        assert_eq!(appended.stopped, Stopped::Completed);
+        assert_eq!(memory.streamout.unwrap().0[1], Some(12));
+
+        let mut keeps_none = Fake::default();
+        let ran = execute(&update([0x80, 0, 0, 0, 0]), &mut keeps_none);
+        assert!(matches!(ran.stopped, Stopped::NeedsGpu { .. }));
     }
 
     /// A release that lands reports its address and interrupt context id, which is how a flip

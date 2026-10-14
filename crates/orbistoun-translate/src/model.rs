@@ -238,6 +238,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_lshrrev_b32_e32",
     "v_ashrrev_i32_e32",
     "v_lshl_add_u32",
+    "v_add3_u32",
     "v_lshl_or_b32",
     "v_perm_b32",
     "v_add_nc_u16",
@@ -731,6 +732,12 @@ pub trait Model {
     /// The default knows nothing, so every lane may run.
     fn lane_may_run(&self, _lane: u32) -> bool {
         true
+    }
+
+    /// Whether position and parameter exports are dropped rather than written: a legacy vertex
+    /// shader's streamout pass, whose rasterizer is killed (D861). The default writes them.
+    fn discards_vertex_exports(&self) -> bool {
+        false
     }
 
     /// Control has reached the start of a guest block, which more than one place may branch to, so
@@ -1947,6 +1954,37 @@ const EXPORT_NULL: i64 = 9;
 /// `mrt0` alpha (Mesa `ac_get_spi_shader_z_format`).
 pub(crate) const EXPORT_MRTZ: i64 = 8;
 
+/// A geometry stage's export - a vertex's position or parameters, or the primitive that joins
+/// them, one lane a vertex (D688) - carried out; `None` for any other target.
+fn geometry_export<M: Model + ?Sized>(
+    model: &mut M,
+    instruction: &Instruction,
+    target: i64,
+    sources: [&Operand; 4],
+) -> Option<Result<(), TranslateError>> {
+    // A streamout pass keeps only what the program stores: with the rasterizer killed, a vertex's
+    // position and parameters reach nothing on the hardware either (D861).
+    if ((EXPORT_POSITION..EXPORT_POSITION + 4).contains(&target)
+        || export_parameter_location(target).is_some())
+        && model.discards_vertex_exports()
+    {
+        model.count();
+        return Some(Ok(()));
+    }
+    if target == EXPORT_POSITION {
+        return Some(mesh_vertex_export(model, instruction, sources, None));
+    }
+    if let Some(location) = export_parameter_location(target) {
+        return Some(mesh_vertex_export(
+            model,
+            instruction,
+            sources,
+            Some(location),
+        ));
+    }
+    (target == EXPORT_PRIMITIVE).then(|| mesh_primitive_export(model, instruction, sources[0]))
+}
+
 /// Which parameter location an export target names, if it names one.
 ///
 /// Public because the declaration pass needs it before any instruction is translated.
@@ -2217,16 +2255,8 @@ fn export<M: Model + ?Sized>(
         });
     };
 
-    // A geometry stage's exports: the vertices' positions and parameters, and the primitive that
-    // joins them. One lane is one vertex (D688).
-    if *target == EXPORT_POSITION {
-        return mesh_vertex_export(model, instruction, [a, b, c, d], None);
-    }
-    if let Some(location) = export_parameter_location(*target) {
-        return mesh_vertex_export(model, instruction, [a, b, c, d], Some(location));
-    }
-    if *target == EXPORT_PRIMITIVE {
-        return mesh_primitive_export(model, instruction, a);
+    if let Some(done) = geometry_export(model, instruction, *target, [a, b, c, d]) {
+        return done;
     }
     if (EXPORT_MISC..=EXPORT_POSITION + 3).contains(target) {
         return further_position(model, instruction, (*target, c));
@@ -2642,7 +2672,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_div_scale_f32" => division_scale(model, instruction),
 
         // Integer shifts in the long form: a shift-then-add, and a 64-bit shift of a register pair.
-        "v_lshl_add_u32" => shift_add(model, instruction),
+        "v_lshl_add_u32" | "v_add3_u32" => shift_add(model, instruction, name),
         "v_lshrrev_b64" => shift_right_64(model, instruction),
         "v_add_co_u32" | "v_sub_co_u32" | "v_add_co_ci_u32_e64" | "v_add_co_ci_u32_e32" => {
             carry_arithmetic(model, instruction, name)
@@ -2745,13 +2775,14 @@ fn memory_instruction<M: Model + ?Sized>(
     }
     // An image a dispatch fetches from or stores to is bound whole and written back exactly, so
     // its accesses need no window; the local data share is not guest memory; and a scalar load
-    // the buffer tracer gave a slot reads the buffer bound there (D746), not the window.
+    // the buffer tracer gave a slot - through a descriptor, or from a traced base such as a
+    // streamout pass's internal table (D861) - reads the buffer bound there (D746), not the window.
+    let scalar_load = name.starts_with("s_buffer_load_dword") || name.starts_with("s_load_dword");
     if model.exact_memory()
         && !name.starts_with("buffer_")
         && !name.starts_with("ds_")
         && !crate::draw_buffers::bound_image_access(name)
-        && (!name.starts_with("s_buffer_load_dword")
-            || model.draw_buffer_slot(instruction).is_none())
+        && (!scalar_load || model.draw_buffer_slot(instruction).is_none())
     {
         if let Some((at, store)) = model.untraced_by() {
             return Err(TranslateError::Untraced {
@@ -8886,23 +8917,25 @@ fn compare_long<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `v_lshl_add_u32 d, a, b, c`: `(a << b[4:0]) + c` per lane, wrapping (AMD's published RDNA
-/// instruction set, `V_LSHL_ADD_U32`).
+/// `v_lshl_add_u32 d, a, b, c`: `(a << b[4:0]) + c` per lane, and `v_add3_u32 d, a, b, c`:
+/// `a + b + c`, as a streamout pass forms its store address (D861); both wrap (AMD's published RDNA
+/// instruction set, `V_LSHL_ADD_U32`, `V_ADD3_U32`).
 fn shift_add<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
+    name: &str,
 ) -> Result<(), TranslateError> {
     no_integer_modifiers(instruction, 3)?;
     let [destination, value, amount, addend] = instruction.operands.as_slice() else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "v_lshl_add_u32 does not have four operands",
+            detail: "a three-source add does not have four operands",
         });
     };
     let Operand::Vector(register) = destination else {
         return Err(TranslateError::Unsupported {
             offset: instruction.offset,
-            detail: "v_lshl_add_u32 destination is not a vector register",
+            detail: "a three-source add's destination is not a vector register",
         });
     };
     let register = u32::from(*register);
@@ -8911,9 +8944,13 @@ fn shift_add<M: Model + ?Sized>(
         let value = model.read_source(instruction, value, lane)?;
         let amount = model.read_source(instruction, amount, lane)?;
         let addend = model.read_source(instruction, addend, lane)?;
-        let amount = model.binary(op::BITWISE_AND, amount, low_five);
-        let shifted = model.binary(op::SHIFT_LEFT_LOGICAL, value, amount);
-        let sum = model.add(shifted, addend);
+        let first = if name == "v_add3_u32" {
+            model.add(value, amount)
+        } else {
+            let amount = model.binary(op::BITWISE_AND, amount, low_five);
+            model.binary(op::SHIFT_LEFT_LOGICAL, value, amount)
+        };
+        let sum = model.add(first, addend);
         model.write_vector_lane(register, lane, sum);
     }
     model.count();

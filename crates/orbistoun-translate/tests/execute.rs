@@ -5628,6 +5628,25 @@ fn a_shift_then_add_uses_the_low_five_bits_and_wraps() {
     );
 }
 
+/// `v_add3_u32`: three sources summed, wrapping - an inline constant among them, as a streamout
+/// pass adds its offset, first vertex and lane (D861).
+#[test]
+fn a_three_source_add_wraps() {
+    if !device_or_skip("a_three_source_add_wraps") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, 0xffff_fff0));
+    program.extend(v_mov_literal(2, 0x20));
+    program.extend(v_mov_literal(3, 7));
+    program.extend(vop3("v_add3_u32", 0, [257, 258, 259], 0, 0));
+    program.extend(vop3("v_add3_u32", 4, [259, 128 + 5, 258], 0, 0));
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 0), 0x17);
+    assert_eq!(vector(&registers, 4), 7 + 5 + 0x20);
+}
+
 /// `v_lshrrev_b64`: a register pair shifted right by the low six bits of the first source,
 /// through all three ranges - zero, below thirty-two, and thirty-two and above.
 #[test]

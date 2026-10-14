@@ -24,6 +24,7 @@ mod pixel_inputs;
 pub mod register_defaults;
 pub mod registers;
 mod render;
+pub mod streamout;
 pub mod tiling;
 pub mod translations;
 #[cfg(test)]

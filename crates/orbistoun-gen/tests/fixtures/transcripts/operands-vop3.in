@@ -280,6 +280,16 @@ v_lshrrev_b64 v[100:101], v200, v[130:131]
 v_lshrrev_b64 v[254:255], s30, v[12:13]
 v_lshrrev_b64 v[8:9], 4, v[44:45]
 v_lshrrev_b64 v[40:41], v77, s[70:71]
+
+// ---- v_add3_u32: three addends -----------------------------------------------------
+//
+// A legacy vertex shader's streamout pass sums its buffer offset, the wave's first vertex and
+// the lane into its store address (GCTS00001, D861). Varied vector, scalar and inline sources.
+v_add3_u32 v0, s11, s10, v0
+v_add3_u32 v100, v200, v255, v190
+v_add3_u32 v255, v12, s30, v44
+v_add3_u32 v9, -1, v77, s101
+v_add3_u32 v130, v88, 4, v240
 // The legacy multiply-accumulate in its three-operand form, which PPSA28061's notice-screen
 // pixel shader uses (VOP3 opcode 287, beside its short form v_mac_f32_e32). The destination
 // is also the addend, so only the destination and two sources are encoded. Varied vector,

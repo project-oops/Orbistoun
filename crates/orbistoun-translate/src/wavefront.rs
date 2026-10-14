@@ -495,6 +495,11 @@ pub struct UserData {
     /// a pixel shader that reads an attribute both ways is refused.
     #[serde(default)]
     pub flat_twins: Option<FlatTwins>,
+    /// Whether a vertex program's position and parameter exports go nowhere: a legacy vertex
+    /// shader's streamout pass, run as a compute dispatch with the rasterizer killed
+    /// (`DX_RASTERIZATION_KILL`), which keeps only what it stores to the streamout buffers (D861).
+    #[serde(default)]
+    pub discard_vertex_exports: bool,
     /// For each texture slot a pixel shader samples, which coordinates, across then down, it
     /// saturates before sampling: those the draw's sampler clamps to half a border (D743).
     #[serde(default)]
@@ -1841,6 +1846,8 @@ pub struct Wavefront<'a> {
     /// Each attribute's second, flat location (D742): where a pixel shader's flat reads of an
     /// attribute it also interpolates go, and where a primitive shader exports the parameter again.
     flat_twins: Option<FlatTwins>,
+    /// Whether position and parameter exports are dropped ([`UserData::discard_vertex_exports`]).
+    discard_vertex_exports: bool,
     /// Whether a compute dispatch's fetched and stored images are unsigned integer ones.
     integer_images: [bool; 2],
     /// The coordinates each texture slot's samples saturate (D743).
@@ -2684,6 +2691,7 @@ impl<'a> Wavefront<'a> {
             output,
             inputs,
             flat_twins: user_data.flat_twins,
+            discard_vertex_exports: user_data.discard_vertex_exports,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
             saturated: user_data.saturated,
             uvec4: None,
@@ -4483,6 +4491,10 @@ impl Model for Wavefront<'_> {
             Some(invocation) => self.invocation_bit(invocation, (low, high)),
             None => model::constant_lane_test(self, (low, high), lane),
         }
+    }
+
+    fn discards_vertex_exports(&self) -> bool {
+        self.discard_vertex_exports
     }
 
     fn lane_may_run(&self, lane: u32) -> bool {

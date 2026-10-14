@@ -1592,38 +1592,125 @@ impl GuestCp<'_> {
         dispatch: &cp::Dispatch<'_>,
     ) -> Result<crate::pipeline::PreparedDispatch, String> {
         crate::perf::span(crate::perf::Span::DispatchPrepare, || {
-            let walked = crate::packet::walk(dispatch.stream);
-            let mut live = live_pipeline()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let pipeline = live.as_mut().ok_or("no pipeline is live")?;
-            // The registers in force: what earlier submissions left, then the stream's (D737) - as
-            // the submission was prepared, when it is one (D821).
-            let (writes, _) = match self.submission {
-                Some(whole) => pipeline.writes_as_submitted(
-                    whole,
-                    &walked,
-                    dispatch.stream,
-                    Some(&self.memory),
-                ),
-                None => pipeline.writes_in_force(&walked, dispatch.stream, Some(&self.memory)),
-            };
-            let state = crate::dispatch::state_at(
-                &writes,
-                dispatch.offset,
-                dispatch.groups,
-                dispatch.initiator,
-            )?;
-            pipeline.prepare_dispatch(&state, &self.memory)
+            let state = self.with_registers(dispatch.stream, |writes| {
+                crate::dispatch::state_at(
+                    writes,
+                    dispatch.offset,
+                    dispatch.groups,
+                    dispatch.initiator,
+                )
+                .map_err(str::to_owned)
+            })?;
+            self.prepare_state(&state)
         })
     }
 
+    /// Answers `read` over the registers in force through `stream`: what earlier submissions left,
+    /// then the stream's (D737) - as the submission was prepared, when it is one (D821).
+    fn with_registers<T>(
+        &self,
+        stream: &[u8],
+        read: impl FnOnce(&[crate::registers::RegisterWrite]) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let walked = crate::packet::walk(stream);
+        let live = live_pipeline()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pipeline = live.as_ref().ok_or("no pipeline is live")?;
+        let (writes, _) = match self.submission {
+            Some(whole) => pipeline.writes_as_submitted(whole, &walked, stream, Some(&self.memory)),
+            None => pipeline.writes_in_force(&walked, stream, Some(&self.memory)),
+        };
+        read(&writes)
+    }
+
+    /// The program `state` runs, translated, with its images read from guest memory as it holds
+    /// them now.
+    fn prepare_state(
+        &self,
+        state: &crate::dispatch::DispatchState,
+    ) -> Result<crate::pipeline::PreparedDispatch, String> {
+        let mut live = live_pipeline()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pipeline = live.as_mut().ok_or("no pipeline is live")?;
+        pipeline.prepare_dispatch(state, &self.memory)
+    }
+
+    /// Carries out a segment's streamout draws (D861): each `DRAW_INDEX_AUTO` as its legacy vertex
+    /// program run as one compute wave, the queue's offsets advanced by what it wrote. `None` for a
+    /// segment whose first draw has streamout off, which draws as any other.
+    fn streamout_segment(&mut self, segment: &cp::DrawSegment<'_>) -> Option<Result<(), String>> {
+        let streams_out = self.with_registers(segment.stream, |writes| {
+            Ok(crate::streamout::enabled_at(writes, segment.first))
+        });
+        if !matches!(streams_out, Ok(true)) {
+            return None;
+        }
+        let walked = crate::packet::walk(segment.stream);
+        let draws = walked.packets.iter().filter(|packet| {
+            matches!(packet.kind, crate::packet::PacketKind::Command { opcode } if cp::is_draw(opcode))
+                && (segment.first..segment.end).contains(&packet.offset)
+        });
+        for draw in draws {
+            if let Err(why) = self.streamout_draw(segment.stream, draw) {
+                return Some(Err(why));
+            }
+        }
+        Some(Ok(()))
+    }
+
+    /// One streamout draw ([`Self::streamout_segment`]).
+    fn streamout_draw(
+        &mut self,
+        stream: &[u8],
+        draw: &crate::packet::Packet,
+    ) -> Result<(), String> {
+        if draw.kind
+            != (crate::packet::PacketKind::Command {
+                opcode: crate::packet::build::measured::DRAW_INDEX_AUTO,
+            })
+        {
+            return Err("an indexed streamout draw is not modelled".to_owned());
+        }
+        let start = draw.body_offset() as usize;
+        let vertices = stream
+            .get(start..start + 4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .ok_or("a DRAW_INDEX_AUTO with no vertex count")?;
+        let offsets = *crate::streamout::offsets()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let plan = self.with_registers(stream, |writes| {
+            if !crate::streamout::enabled_at(writes, draw.offset) {
+                return Err("a run of draws turning streamout off between two of them".to_owned());
+            }
+            crate::streamout::plan(writes, draw.offset, vertices, offsets).map_err(str::to_owned)
+        })?;
+        if plan.vertices > 0 {
+            self.run_prepared(&|cp: &Self| cp.prepare_state(&plan.dispatch))?;
+        }
+        *crate::streamout::offsets()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plan.after;
+        Ok(())
+    }
+
     fn dispatch_into_memory(&mut self, dispatch: &cp::Dispatch<'_>) -> Result<(), String> {
+        self.run_prepared(&|cp: &Self| cp.prepare_dispatch(dispatch))
+    }
+
+    /// Runs the dispatch `prepare` makes over guest memory as it holds it now, and writes back
+    /// exactly the words it changed. Nothing is written unless the whole dispatch ran exactly.
+    fn run_prepared(
+        &mut self,
+        prepare: &dyn Fn(&Self) -> Result<crate::pipeline::PreparedDispatch, String>,
+    ) -> Result<(), String> {
         use crate::perf::{Span, span};
         let execute = dispatch_executor()
             .get()
             .ok_or("no device is installed to run it")?;
-        let mut prepared = self.prepare_dispatch(dispatch)?;
+        let mut prepared = prepare(self)?;
         // An image the dispatch reads or stores that lies in a target whose frame is still on the
         // device is read from memory that does not hold the draws yet (D714): the frame goes in
         // first and the images are read again, as radeonsi's copy of its colour target into a
@@ -1637,7 +1724,7 @@ impl GuestCp<'_> {
             if !write_back_pending(self) {
                 return Err("the frame on the target it reads could not be written back".to_owned());
             }
-            prepared = self.prepare_dispatch(dispatch)?;
+            prepared = prepare(self)?;
         }
         let ((base, before), buffers_before) = span(Span::DispatchRead, || {
             // A program with no buffer runs over one word nobody reads, and writes nothing back
@@ -3233,7 +3320,10 @@ impl cp::CpMemory for GuestCp<'_> {
 
     fn run_draws(&mut self, segment: &cp::DrawSegment<'_>) -> bool {
         crate::perf::span(crate::perf::Span::RunDraws, || {
-            match self.draw_segment(segment) {
+            let ran = self
+                .streamout_segment(segment)
+                .unwrap_or_else(|| self.draw_segment(segment));
+            match ran {
                 Ok(()) => true,
                 Err(why) => {
                     note_draw_refusal(format!(
@@ -3244,6 +3334,15 @@ impl cp::CpMemory for GuestCp<'_> {
                 }
             }
         })
+    }
+
+    fn with_streamout(&mut self, edit: &mut dyn FnMut(&mut crate::streamout::Offsets)) -> bool {
+        edit(
+            &mut crate::streamout::offsets()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        true
     }
 
     fn samples_passed(&mut self) -> Option<u64> {

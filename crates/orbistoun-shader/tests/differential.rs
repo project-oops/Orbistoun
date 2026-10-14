@@ -154,6 +154,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "scalar-compare",
         "the scalar unsigned orderings, which no compiled fixture produces",
     ),
+    (
+        "vector-add3",
+        "the three-source unsigned add a streamout pass addresses its store with",
+    ),
 ];
 
 /// Every fixture on disk is read by this suite.
