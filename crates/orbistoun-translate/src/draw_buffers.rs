@@ -169,6 +169,9 @@ pub struct DrawBuffers {
     /// The slots every access to which is a store (D809): a dispatch's buffer the program writes
     /// and never reads, whose words before the run nothing depends on but the ones it leaves.
     pub stored_only: std::collections::BTreeSet<u32>,
+    /// The offset and name of the first store that kept the program from being traced at all: one
+    /// a snapshot bound for a draw would not see, or a dispatch's that is not a buffer store.
+    pub untraced_by: Option<(u32, String)>,
 }
 
 /// Traces the buffers a program reads through, for a stage whose `count` user-data words land in
@@ -198,12 +201,20 @@ pub fn trace(
             ))
         })
         .collect();
-    if named
+    let untraced_by = decode
+        .instructions
         .iter()
-        .flatten()
-        .any(|&(_, name)| writes_memory(name) && !(stores && bound_buffer_store(name)))
-    {
-        return DrawBuffers::default();
+        .zip(&named)
+        .find_map(|(instruction, named)| {
+            let (_, name) = (*named)?;
+            (writes_memory(name) && !(stores && bound_buffer_store(name)))
+                .then(|| (instruction.offset, name.to_owned()))
+        });
+    if untraced_by.is_some() {
+        return DrawBuffers {
+            untraced_by,
+            ..DrawBuffers::default()
+        };
     }
     let Ok(blocks) = crate::blocks::split(decode, |instruction| {
         let family = encodings
@@ -876,11 +887,15 @@ mod tests {
         let mut global = COPY[..3].to_vec();
         // global_store_dword v[0:1], v2, off
         global.extend([0xdc70_8000, 0x007d_0200, END]);
+        let other = trace(&decode(&global), &encodings, (0, 16), (true, false));
         assert!(
-            trace(&decode(&global), &encodings, (0, 16), (true, false))
-                .sources
-                .is_empty(),
+            other.sources.is_empty(),
             "a dispatch that stores another way traces nothing"
+        );
+        assert_eq!(
+            other.untraced_by,
+            Some((12, "global_store_dword".to_owned())),
+            "and says which store kept it from tracing"
         );
     }
 

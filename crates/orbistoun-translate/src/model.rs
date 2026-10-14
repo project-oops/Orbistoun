@@ -950,6 +950,12 @@ pub trait Model {
         None
     }
 
+    /// The offset and name of the store that kept this program's buffers from being traced;
+    /// `None` when they were, or in a model that traces none.
+    fn untraced_by(&self) -> Option<&(u32, String)> {
+        None
+    }
+
     /// The low half of the guest address the draw buffer at `slot` starts at, which a global load's
     /// address is read against (D758); `None` in a model whose draw data carries no bases.
     fn draw_buffer_base(&mut self, slot: u32) -> Option<Id> {
@@ -2680,6 +2686,14 @@ fn memory_instruction<M: Model + ?Sized>(
         && (!name.starts_with("s_buffer_load_dword")
             || model.draw_buffer_slot(instruction).is_none())
     {
+        if let Some((at, store)) = model.untraced_by() {
+            return Err(TranslateError::Untraced {
+                offset: instruction.offset,
+                mnemonic: name.to_owned(),
+                at: *at,
+                store: store.clone(),
+            });
+        }
         return Err(TranslateError::NotTranslated {
             offset: instruction.offset,
             mnemonic: name.to_owned(),

@@ -1897,6 +1897,8 @@ pub struct Wavefront<'a> {
     write_mask: Option<buffer::DrawBufferArray>,
     /// The slots of the buffers the program only stores to, which [`Self::write_mask`] marks.
     unread_slots: std::collections::BTreeSet<u32>,
+    /// The store that kept the program's buffers from being traced, by offset and name.
+    untraced_by: Option<(u32, String)>,
     /// The global data share, declared on the first access to it (D789).
     global_share: Option<buffer::StorageBuffer>,
     /// Scalar registers the program filled with a plain copy of one still holding a user-data word,
@@ -2656,6 +2658,7 @@ impl<'a> Wavefront<'a> {
             draw_buffers,
             write_mask,
             unread_slots: buffers.stored_only.clone(),
+            untraced_by: buffers.untraced_by.clone(),
             global_share: None,
             scalar_copies: BTreeMap::new(),
         };
@@ -4824,6 +4827,10 @@ impl Model for Wavefront<'_> {
         served.get(&instruction.offset).copied()
     }
 
+    fn untraced_by(&self) -> Option<&(u32, String)> {
+        self.untraced_by.as_ref()
+    }
+
     fn draw_buffer_base(&mut self, slot: u32) -> Option<Id> {
         // A primitive shader's draw data carries each slot's base beside its place (D758).
         if self.stage != Stage::Mesh {
@@ -6159,6 +6166,63 @@ mod exact_memory_tests {
         .to_string();
         assert!(
             refused.contains("(global_load_dword)") && refused.contains("checked against"),
+            "{refused}"
+        );
+    }
+
+    /// A scalar buffer load that reads through no traced buffer, because the program also stores
+    /// some other way, is refused naming that store: the tracer traces nothing then, and the load
+    /// alone does not say why.
+    #[test]
+    fn an_untraced_load_names_the_store_that_stopped_the_trace() {
+        use super::{
+            ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let (family, opcode) = encodings
+            .find_by_name("s_buffer_load_dword")
+            .expect("s_buffer_load_dword");
+        let encoding = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .expect("its family");
+        // s_buffer_load_dword s4, s[0:3], 0 (no offset register); global_store_dword v[0:1], v2,
+        // off; s_endpgm.
+        let words = [
+            encoding.value | (opcode << encoding.opcode.shift) | (4 << 6),
+            125 << 25,
+            0xdc70_8000,
+            0x007d_0200,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let refused = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::spanning_address(0x4_0000_0000, 1024).expect("a window"),
+            UserData {
+                count: 4,
+                draw_buffers: true,
+                compute: Some(ComputeInputs {
+                    threads: [64, 1, 1],
+                    thread_id_components: 1,
+                    ..ComputeInputs::default()
+                }),
+                ..UserData::default()
+            },
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(
+            refused.contains("(s_buffer_load_dword)")
+                && refused.contains("global_store_dword at 0x8"),
             "{refused}"
         );
     }

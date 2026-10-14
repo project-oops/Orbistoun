@@ -221,6 +221,22 @@ pub enum TranslateError {
         detail: &'static str,
     },
 
+    /// A guest dispatch's access to memory reads through no traced buffer, because a store in the
+    /// program kept every buffer from being traced.
+    #[error(
+        "instruction at {offset:#x} ({mnemonic}) reads through no traced buffer: the program stores through {store} at {at:#x}, which is not a buffer store, so none of its buffers were traced"
+    )]
+    Untraced {
+        /// Byte offset within the shader.
+        offset: u32,
+        /// The access's name.
+        mnemonic: String,
+        /// The store's byte offset.
+        at: u32,
+        /// The store's name.
+        store: String,
+    },
+
     /// A primitive shader reads the geometry engine's inputs before writing them, and the
     /// translation was not given the draw's geometry to seed them with (D730).
     #[error(
