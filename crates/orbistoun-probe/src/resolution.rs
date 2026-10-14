@@ -139,8 +139,8 @@ fn cited_logs(block: &[&str]) -> Vec<String> {
 }
 
 /// The claims of `outcome` the rows of `log` do not back, in the order the outcome makes them,
-/// then each section it cites that measured after its own set-up failed ([`after_failed_set_up`]),
-/// then each row it quotes that the log does not hold ([`quoted_rows_absent`]).
+/// then each section it cites that measured after its own set-up failed (`after_failed_set_up`),
+/// then each row it quotes that the log does not hold (`quoted_rows_absent`).
 ///
 /// A claim is a status code (`0x8` and seven more hex digits) or a platform function (`sce`
 /// followed by a capital). A code is backed by any row holding it; a function by any row naming
