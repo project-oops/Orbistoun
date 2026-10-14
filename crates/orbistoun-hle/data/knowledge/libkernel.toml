@@ -2658,12 +2658,13 @@ purpose = "(callback): one of the hooks libc registers at start-up for a thread'
 returns = "status"
 edge_cases = [
     "MEASURED: answered 0x0 for a null callback and for a valid one.",
-    "A spawned thread enters the callback once on its own thread as it ends, whether its entry returns or it calls scePthreadExit, before a joiner sees its exit value (orbistoun_kernel::thread::run_thread_dtors). The main thread's exit does not.",
+    "MEASURED: a spawned thread enters the registered callback exactly once, on its own thread, before scePthreadJoin returns - both when its entry returns (join value 0x55) and when it calls scePthreadExit (0x66) (orbistoun_kernel::thread::run_thread_dtors).",
+    "The main thread's exit does not enter it here.",
 ]
-note = "Only the answer is measured. That a thread's end enters the callback, with no arguments, is FreeBSD's thread exit running __cxa_thread_call_dtors, not yet seen on the console; obSCEne REQ-20261013T1716Z-td01 measures it."
+note = "Not measured: whether the main thread's exit enters the callback, what argument it is entered with (orbistoun passes none), and the order two thread-local destructors run in - the C++ thread_local arms of REQ-20261013T1716Z-td01 were not run; the probe registered its own runner and counted its calls."
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne 060-module/libc-startup-hooks, reports/hardware/20260927-084607-eboot.log lines 4561-4571."
+cites = "obSCEne 060-module/libc-startup-hooks: reports/hardware/20260927-084607-eboot.log lines 4561-4571 (the answer); reports/hardware/report-20261014-004800.log lines 4331-4357 (entered at a thread's end, REQ-20261013T1716Z-td01)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-11"
 

@@ -31,6 +31,18 @@ guest_module! {
         "_ZN3sce4Json11InitializerC1Ev" => 6,
         "_ZN3sce4Json11Initializer9terminateEv" => 6,
         "_ZN3sce4Json12MemAllocatorC2Ev" => 6,
+        // (this)
+        "_ZN3sce4Json5ValueC1Ev" => 1,
+        // (this)
+        "_ZN3sce4Json5ValueD1Ev" => 1,
+        // (this, type)
+        "_ZN3sce4Json5Value3setENS0_9ValueTypeE" => 2,
+        // (this, value)
+        "_ZN3sce4Json5Value3setEb" => 2,
+        // (this, value)
+        "_ZN3sce4Json5Value3setEl" => 2,
+        // (this, value)
+        "_ZN3sce4Json5Value3setEm" => 2,
     }
 }
 
@@ -232,4 +244,189 @@ pub(crate) fn mem_allocator_construct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 
     // SAFETY: the guest's object, whose first word is its vtable pointer.
     unsafe { guest::write_u64(args[0], vtable) };
     OK
+}
+
+/// Where a `Value` keeps its payload: eight bytes, a scalar or a pointer to what it owns
+/// (`130-layout/json2-value-string`, every `set` writing from +16).
+const VALUE_PAYLOAD_AT: u64 = 16;
+
+/// Where a `Value` keeps its type, a 32-bit word (the same rows: `set(ValueType t)` writes `t`
+/// here, +28, and leaves +24 to +27 as they were).
+const VALUE_TYPE_AT: u64 = 28;
+
+/// The first `ValueType` whose payload points at memory the library allocated: string 5, array 6
+/// and object 7 (`set-type-5` to `-7` write a heap address at +16). How large those blocks are,
+/// and so what setting or destroying one allocates and frees, is not measured, and those paths
+/// answer the placeholder.
+const FIRST_OWNING_TYPE: u32 = 5;
+
+/// `Value::Value()`: a null value - sixteen zero bytes at +0 and type 0 at +28, the payload left
+/// as it was (`Value::Value()`, `val-0x80`, REQ-20261013T1735Z-js03). Returns nothing.
+pub(crate) fn value_construct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let this = args[0];
+    // SAFETY: the guest's object, the thirty-two bytes a Value occupies.
+    let head = unsafe { guest::write_bytes(this, &[0; 16]) };
+    // SAFETY: as above, its type word.
+    let typed = unsafe { guest::write_u32(this + VALUE_TYPE_AT, 0) };
+    if head && typed {
+        OK
+    } else {
+        u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
+/// Sets a `Value`'s payload and type. `payload` is the bytes written from +16: none for null, one
+/// for a boolean, eight for a number.
+fn value_set(this: u64, value_type: u32, payload: &[u8]) -> u64 {
+    // SAFETY: the guest's Value, its payload bytes.
+    let set = unsafe { guest::write_bytes(this + VALUE_PAYLOAD_AT, payload) };
+    // SAFETY: as above, its type word.
+    let typed = unsafe { guest::write_u32(this + VALUE_TYPE_AT, value_type) };
+    if set && typed {
+        OK
+    } else {
+        u64::from(GuestError::InvalidArgument.as_raw())
+    }
+}
+
+/// `Value::set(ValueType)`: the type at +28, and the payload that type starts from - nothing for
+/// null, one zero byte for a boolean, eight zero bytes for an integer, unsigned or real
+/// (`set-type-0` to `-4`). A string, array or object allocates its payload, which is not modelled.
+pub(crate) fn value_set_type(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let Ok(value_type) = u32::try_from(args[1]) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    match value_type {
+        0 => value_set(args[0], 0, &[]),
+        1 => value_set(args[0], 1, &[0]),
+        2..FIRST_OWNING_TYPE => value_set(args[0], value_type, &[0; 8]),
+        _ => u64::from(GuestError::Unimplemented.as_raw()),
+    }
+}
+
+/// `Value::set(bool)`: the boolean as one byte at +16, type 1 (`set-bool-1`).
+pub(crate) fn value_set_bool(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    value_set(args[0], 1, &[u8::from(args[1] & 0xff != 0)])
+}
+
+/// `Value::set(long)`: the integer's eight bytes at +16, type 2 (`set-long-neg2`).
+pub(crate) fn value_set_integer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    value_set(args[0], 2, &args[1].to_le_bytes())
+}
+
+/// `Value::set(unsigned long)`: its eight bytes at +16, type 3 (`set-ulong`).
+pub(crate) fn value_set_unsigned(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    value_set(args[0], 3, &args[1].to_le_bytes())
+}
+
+/// `Value::~Value()` on a value that owns nothing: its payload zeroed and its type null, as the
+/// destructor left a string-valued one (`Value::~Value()`, `val-after-dtor-0x80`). A value that
+/// owns memory - a string, array or object - is freed through the allocator by the library (three
+/// deallocations for a string), which is not modelled, so it answers the placeholder and is left
+/// as it was.
+pub(crate) fn value_destruct(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let this = args[0];
+    // SAFETY: the guest's Value, its type word.
+    let Some(value_type) = (unsafe { guest::read_u32(this + VALUE_TYPE_AT) }) else {
+        return u64::from(GuestError::InvalidArgument.as_raw());
+    };
+    if value_type >= FIRST_OWNING_TYPE {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    value_set(this, 0, &[0; 8])
+}
+
+#[cfg(test)]
+mod value_tests {
+    use orbistoun_core::GUEST_ARG_REGISTERS;
+
+    const CC: u8 = 0xcc;
+
+    /// A 0x80-byte object filled `0xcc`, as the probe passed one.
+    fn object() -> Vec<u8> {
+        vec![CC; 0x80]
+    }
+
+    fn call(f: fn(&[u64; GUEST_ARG_REGISTERS]) -> u64, object: &mut [u8], arg: u64) -> u64 {
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = object.as_mut_ptr() as u64;
+        args[1] = arg;
+        f(&args)
+    }
+
+    /// The bytes from +16 to +32, as the rows print them.
+    fn tail(object: &[u8]) -> [u8; 16] {
+        object[16..32].try_into().expect("sixteen bytes")
+    }
+
+    /// A tail of `0xcc` with these leading payload bytes and this type.
+    fn expect(payload: &[u8], value_type: u8) -> [u8; 16] {
+        let mut row = [CC; 16];
+        row[..payload.len()].copy_from_slice(payload);
+        row[12..].copy_from_slice(&[value_type, 0, 0, 0]);
+        row
+    }
+
+    /// `Value()` writes sixteen zero bytes and type 0, and nothing past +32
+    /// (`report-20261014-004800.log`, `Value::Value()`).
+    #[test]
+    fn a_constructed_value_is_null() {
+        let mut value = object();
+        assert_eq!(call(super::value_construct, &mut value, 0), 0);
+        assert_eq!(value[..16], [0; 16]);
+        assert_eq!(tail(&value), expect(&[], 0));
+        assert!(value[32..].iter().all(|&b| b == CC));
+    }
+
+    /// Each `set` writes its payload from +16 and its type at +28, as the rows show them on a
+    /// constructed value.
+    #[test]
+    fn each_set_writes_its_payload_and_type() {
+        type Setter = fn(&[u64; GUEST_ARG_REGISTERS]) -> u64;
+        let cases: [(Setter, u64, [u8; 16]); 6] = [
+            (super::value_set_type, 0, expect(&[], 0)),
+            (super::value_set_type, 1, expect(&[0], 1)),
+            (super::value_set_type, 4, expect(&[0; 8], 4)),
+            (super::value_set_bool, 1, expect(&[1], 1)),
+            (
+                super::value_set_integer,
+                (-2_i64).cast_unsigned(),
+                expect(&(-2_i64).to_le_bytes(), 2),
+            ),
+            (
+                super::value_set_unsigned,
+                0x1122_3344_5566_7788,
+                expect(&0x1122_3344_5566_7788_u64.to_le_bytes(), 3),
+            ),
+        ];
+        for (index, (set, arg, expected)) in cases.into_iter().enumerate() {
+            let mut value = object();
+            call(super::value_construct, &mut value, 0);
+            assert_eq!(call(set, &mut value, arg), 0, "case {index}");
+            assert_eq!(tail(&value), expected, "case {index}");
+        }
+        let mut owning = object();
+        call(super::value_construct, &mut owning, 0);
+        assert_ne!(
+            call(super::value_set_type, &mut owning, 5),
+            0,
+            "a string allocates, which is not modelled"
+        );
+    }
+
+    /// Destroying a value that owns nothing zeroes its payload and leaves it null; one that owns
+    /// memory is left as it was.
+    #[test]
+    fn destroying_a_value_leaves_it_null() {
+        let mut value = object();
+        call(super::value_construct, &mut value, 0);
+        call(super::value_set_integer, &mut value, 7);
+        assert_eq!(call(super::value_destruct, &mut value, 0), 0);
+        assert_eq!(tail(&value), expect(&[0; 8], 0));
+        let mut owning = object();
+        owning[28..32].copy_from_slice(&5_u32.to_le_bytes());
+        let before = owning.clone();
+        assert_ne!(call(super::value_destruct, &mut owning, 0), 0);
+        assert_eq!(owning, before);
+    }
 }

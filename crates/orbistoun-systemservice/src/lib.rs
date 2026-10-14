@@ -798,6 +798,15 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         "_ZN3sce4Json12MemAllocatorC2Ev",
         json2::mem_allocator_construct,
     ),
+    ("_ZN3sce4Json5ValueC1Ev", json2::value_construct),
+    ("_ZN3sce4Json5ValueD1Ev", json2::value_destruct),
+    (
+        "_ZN3sce4Json5Value3setENS0_9ValueTypeE",
+        json2::value_set_type,
+    ),
+    ("_ZN3sce4Json5Value3setEb", json2::value_set_bool),
+    ("_ZN3sce4Json5Value3setEl", json2::value_set_integer),
+    ("_ZN3sce4Json5Value3setEm", json2::value_set_unsigned),
     ("sceUserServiceInitialize", user_service_initialize),
     ("sceUserServiceTerminate", user_service_terminate),
     (

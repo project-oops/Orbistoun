@@ -107,3 +107,83 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T1745Z-np03, reports/hardware/report-1791758178.txt lines 223-266."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "_ZN3sce4Json5ValueC1Ev"
+purpose = "Constructs a null Value in place."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-js03, link-bound, after initialize): on a 0x80-byte 0xcc block, writes sixteen zero bytes at +0 and the type word at +28 as 0; +16 to +27 and everything past +32 untouched.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1735Z-js03, reports/hardware/report-20261014-004800.log lines 8100-8376 (130-layout/json2-value-string)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA28061-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "_ZN3sce4Json5ValueD1Ev"
+purpose = "Destroys a Value: frees what it owns and leaves it null."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-js03): on a string-valued Value, three calls to the allocator's deallocate, then the payload at +16 zeroed and the type at +28 set to 0; +0 to +15 and +24 to +27 as they were.",
+    "orbistoun zeroes the payload and the type of a value that owns nothing (types 0-4). A string, array or object (types 5-7) answers the placeholder and is left as it was: what the library allocated for it is not measured, so nothing is freed.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1735Z-js03, reports/hardware/report-20261014-004800.log lines 8100-8376 (130-layout/json2-value-string)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA28061-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "_ZN3sce4Json5Value3setENS0_9ValueTypeE"
+purpose = "Sets a Value's type, with that type's empty payload."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-js03), each on a fresh constructed Value: the type word at +28 takes the argument. Type 0 writes no payload; 1 one zero byte at +16; 2, 3 and 4 eight zero bytes at +16; 5, 6 and 7 a heap address at +16.",
+    "orbistoun answers types 0-4 as measured; 5-7 answer the placeholder, since what they allocate is not measured.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1735Z-js03, reports/hardware/report-20261014-004800.log lines 8100-8376 (130-layout/json2-value-string)."
+found_in = ["PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA28061-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "_ZN3sce4Json5Value3setEb"
+purpose = "Sets a Value to a boolean."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-js03): true is one byte 0x01 at +16, type 1 at +28; +17 to +27 untouched.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1735Z-js03, reports/hardware/report-20261014-004800.log lines 8100-8376 (130-layout/json2-value-string)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "_ZN3sce4Json5Value3setEl"
+purpose = "Sets a Value to a signed integer."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-js03): -2 is its eight bytes at +16 (fe ff ff ff ff ff ff ff), type 2 at +28.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1735Z-js03, reports/hardware/report-20261014-004800.log lines 8100-8376 (130-layout/json2-value-string)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "_ZN3sce4Json5Value3setEm"
+purpose = "Sets a Value to an unsigned integer."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-js03): 0x1122334455667788 is its eight bytes at +16, type 3 at +28.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1735Z-js03, reports/hardware/report-20261014-004800.log lines 8100-8376 (130-layout/json2-value-string)."
+found_in = ["PPSA21564-app0"]
+found_on = "2026-10-14"
