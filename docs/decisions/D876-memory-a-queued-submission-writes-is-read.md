@@ -21,8 +21,10 @@ A read inside a preparation no longer waits where it is. The preparation holds t
 and the command processor carries a dispatch or a run of draws out through that same pipeline, so
 the wait D874 put in the read could only time out, ten seconds later, and read what it would have
 read anyway. The read is noted instead; the preparation finishes, the pipeline is released, the
-queue drains, and the submission is prepared again (`command_processor::preparing`), up to three
-times, since another guest thread can queue in between. Preparing a stream again gives the same
+queued submissions up to the latest one that writes over a read are carried out - those queued
+after it are not waited for - and the submission is prepared again
+(`command_processor::preparing`), up to three times, since another guest thread can queue in
+between. Preparing a stream again gives the same
 submission: its registers come from the state carried in, which only `carry_registers` advances,
 after the preparation that is kept.
 

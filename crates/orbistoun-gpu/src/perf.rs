@@ -36,6 +36,9 @@ macro_rules! span_labels {
         match $span {
             Span::SubmitCall => $as!("submit call"),
             Span::QueueFull => $as!("queue full"),
+            Span::QueuedWrites => $as!("queued writes"),
+            Span::SettleOver => $as!("settle over"),
+            Span::PrepareAgain => $as!("prepare again"),
             Span::CommandProcessor => $as!("command processor"),
             Span::RunDraws => $as!("run draws"),
             Span::ExecuteHandOff => $as!("execute hand-off"),
@@ -326,6 +329,14 @@ pub enum Span {
     SubmitCall,
     /// A guest waiting at its submit for room in the command processor's queue (D821).
     QueueFull,
+    /// Working out what a submission writes as it is queued, besides its drawn targets (D876).
+    QueuedWrites,
+    /// A preparation read waiting for the queue to drain because a queued submission writes over
+    /// it (D874, D876).
+    SettleOver,
+    /// A preparation made again because the one before read what a queued submission writes,
+    /// with the drain before it (D876).
+    PrepareAgain,
     /// The command processor's walk of a submission, draws included.
     CommandProcessor,
     /// Carrying out a submission's draws into its target.
@@ -474,9 +485,12 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 74] = [
         Self::SubmitCall,
         Self::QueueFull,
+        Self::QueuedWrites,
+        Self::SettleOver,
+        Self::PrepareAgain,
         Self::CommandProcessor,
         Self::RunDraws,
         Self::ExecuteHandOff,

@@ -777,13 +777,8 @@ fn record_compute_work(
             let word = |at: usize| {
                 u32::from_le_bytes([body[at], body[at + 1], body[at + 2], body[at + 3]])
             };
-            crate::dispatch::state_at(
-                writes,
-                packet.offset,
-                [word(0), word(4), word(8)],
-                word(12),
-            )
-            .ok()
+            crate::dispatch::state_at(writes, packet.offset, [word(0), word(4), word(8)], word(12))
+                .ok()
         })
         .collect();
     let mut sweep = crate::registers::RegisterSweep::new(writes);

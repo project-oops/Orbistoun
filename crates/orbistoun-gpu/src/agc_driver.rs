@@ -4499,12 +4499,12 @@ fn prepare_live(bytes: &[u8], memory: &MappedRegions) -> (Submission, QueuedWrit
                 .feeding_user_data()
                 .carrying_register_state()
         })
-        .map(|pipeline| {
-            match TRANSLATIONS.lock().ok().and_then(|mut slot| slot.take()) {
+        .map(
+            |pipeline| match TRANSLATIONS.lock().ok().and_then(|mut slot| slot.take()) {
                 Some(store) => pipeline.with_translation_store(store),
                 None => pipeline,
-            }
-        });
+            },
+        );
     }
     live.as_mut().map_or_else(
         || (Submission::default(), Some(Vec::new())),
@@ -4514,7 +4514,9 @@ fn prepare_live(bytes: &[u8], memory: &MappedRegions) -> (Submission, QueuedWrit
             keep_new_translations(pipeline);
             note_made(&submission);
             let writes = if asynchronous() {
-                queued_writes(pipeline, bytes, &submission, &reads)
+                crate::perf::span(crate::perf::Span::QueuedWrites, || {
+                    queued_writes(pipeline, bytes, &submission, &reads)
+                })
             } else {
                 Some(Vec::new())
             };
@@ -4586,6 +4588,8 @@ mod command_processor {
     /// A queued submission as a preparation read waits on it: the colour targets it draws into
     /// ([`Submission::drawn_targets`], D874) and what else carrying it out writes (D876).
     struct Queued {
+        /// Its place in the order submissions were queued in.
+        order: u64,
         targets: Vec<ColourTarget>,
         writes: QueuedWrites,
     }
@@ -4610,6 +4614,9 @@ mod command_processor {
     static IN_FLIGHT: (Mutex<VecDeque<Queued>>, Condvar) =
         (Mutex::new(VecDeque::new()), Condvar::new());
 
+    /// The [`Queued::order`] the next queued submission takes.
+    static NEXT_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     /// How many times [`preparing`] makes a preparation before it keeps the last however it read:
     /// another guest thread can queue between a drain and the next preparation.
     const PREPARATIONS: usize = 3;
@@ -4623,9 +4630,10 @@ mod command_processor {
         /// submission ahead of the one it is carrying out, so it never waits on the queue.
         static ON_PROCESSOR: Cell<bool> = const { Cell::new(false) };
         /// Whether this thread is inside [`preparing`], which holds the live pipeline: a read over
-        /// what a queued submission writes is noted in `CROSSED` instead of waited on.
+        /// what a queued submission writes is noted in `CROSSED`, as the latest [`Queued::order`]
+        /// it waits for, instead of waited on.
         static NOTING: Cell<bool> = const { Cell::new(false) };
-        static CROSSED: Cell<bool> = const { Cell::new(false) };
+        static CROSSED: Cell<Option<u64>> = const { Cell::new(None) };
     }
 
     /// A prepared submission and its command stream, boxed so a refused send hands back a pointer.
@@ -4668,6 +4676,7 @@ mod command_processor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push_back(Queued {
+                order: NEXT_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 targets: submission.drawn_targets.clone(),
                 writes,
             });
@@ -4697,57 +4706,84 @@ mod command_processor {
             .is_ok_and(|(left, _)| left.is_empty())
     }
 
+    /// Waits, up to `limit`, for every submission queued up to [`Queued::order`] `last` to have
+    /// been carried out; the ones queued after it are not waited for.
+    fn settle_through(last: u64, limit: std::time::Duration) {
+        let (queued, fell) = &IN_FLIGHT;
+        let held = queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = fell.wait_timeout_while(held, limit, |queued| {
+            queued.front().is_some_and(|oldest| oldest.order <= last)
+        });
+    }
+
     /// Runs `prepare`, a preparation holding the live pipeline, with every read over what a queued
-    /// submission writes noted rather than waited on; when one was, the queue drains with the
-    /// pipeline free and `prepare` runs again (D876). The command processor carries a dispatch or
-    /// a run of draws out through that pipeline, so a read waiting while it was held waited out
-    /// [`SETTLE_LIMIT`] and then read what it would have read without the wait.
+    /// submission writes noted rather than waited on; when one was, the queue drains as far as the
+    /// latest submission read over, with the pipeline free, and `prepare` runs again (D876). The
+    /// command processor carries a dispatch or a run of draws out through that pipeline, so a read
+    /// waiting while it was held waited out [`SETTLE_LIMIT`] and then read what it would have read
+    /// without the wait.
     pub(super) fn preparing<T>(mut prepare: impl FnMut() -> T) -> T {
         let was = NOTING.replace(true);
+        CROSSED.set(None);
+        let mut prepared = prepare();
         let mut made = 1;
-        let prepared = loop {
-            CROSSED.set(false);
-            let prepared = prepare();
-            if !CROSSED.get() || made == PREPARATIONS {
-                break prepared;
-            }
+        while let Some(last) = CROSSED.get()
+            && made < PREPARATIONS
+        {
             made += 1;
-            let _ = settle(SETTLE_LIMIT);
-        };
+            prepared = crate::perf::span(crate::perf::Span::PrepareAgain, || {
+                settle_through(last, SETTLE_LIMIT);
+                CROSSED.set(None);
+                prepare()
+            });
+        }
         NOTING.set(was);
-        CROSSED.set(false);
+        CROSSED.set(None);
         prepared
     }
 
-    /// Carries out every queued submission before a preparation reads `[address, address +
-    /// length)`, when one of them writes over it - draws over it (D874), or writes it through its
-    /// own packets or a dispatch (D876) - or could write back the frame pending over it in the
-    /// middle of the read. The hardware ran them before this submission read; preparing it here,
-    /// ahead of them, read the memory from before they wrote it. A read overlapping nothing queued
-    /// keeps the guest running on while the command processor works. Inside [`preparing`] the read
-    /// is only noted, and the preparation made again once they have run.
+    /// Carries out the queued submissions up to the latest that writes over `[address, address +
+    /// length)` before a preparation reads it - one that draws over it (D874), or writes it
+    /// through its own packets or a dispatch (D876) - or all of them, when the frame pending over
+    /// it could be written back in the middle of the read. The hardware ran them before this
+    /// submission read; preparing it here, ahead of them, read the memory from before they wrote
+    /// it. Submissions queued after the latest one are not waited for, and a read overlapping
+    /// nothing queued keeps the guest running on while the command processor works. Inside
+    /// [`preparing`] the read is only noted, and the preparation made again once they have run.
     pub(super) fn settle_over(address: u64, length: u64) {
         if ON_PROCESSOR.get() {
             return;
         }
         let over_pending =
             pending_target().is_some_and(|(target, _)| overlaps_target(target, address, length));
-        let over_queued = {
+        // The latest queued submission that writes over the read: every one, over the pending
+        // frame, since any of them can write it back.
+        let last = {
             let queued = IN_FLIGHT
                 .0
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            !queued.is_empty()
-                && (over_pending
-                    || queued
-                        .iter()
-                        .any(|submission| submission.writes_over(address, length)))
-        };
-        if over_queued {
-            if NOTING.get() {
-                CROSSED.set(true);
+            if over_pending {
+                queued.back()
             } else {
-                let _ = settle(SETTLE_LIMIT);
+                queued
+                    .iter()
+                    .rev()
+                    .find(|submission| submission.writes_over(address, length))
+            }
+            .map(|submission| submission.order)
+        };
+        if let Some(last) = last {
+            if NOTING.get() {
+                CROSSED.set(Some(
+                    CROSSED.get().map_or(last, |crossed| crossed.max(last)),
+                ));
+            } else {
+                crate::perf::span(crate::perf::Span::SettleOver, || {
+                    settle_through(last, SETTLE_LIMIT);
+                });
             }
         }
     }
@@ -7420,8 +7456,7 @@ mod tests {
                 .unwrap_or_else(PoisonError::into_inner);
             super::command_processor::queue(Vec::new(), Submission::default(), writes);
             std::thread::scope(|scope| {
-                let reader =
-                    scope.spawn(|| (preparations(address), super::settle(Duration::ZERO)));
+                let reader = scope.spawn(|| (preparations(address), super::settle(Duration::ZERO)));
                 std::thread::sleep(Duration::from_millis(100));
                 let early = reader.is_finished();
                 drop(held);
@@ -7450,7 +7485,10 @@ mod tests {
         let unbounded = read_while_queued(None, base + 0x1000);
         let carried_out = super::settle(Duration::from_secs(5));
         super::set_asynchronous(false);
-        assert!(past_drained && carried_out, "the queue drains once the processor can run");
+        assert!(
+            past_drained && carried_out,
+            "the queue drains once the processor can run"
+        );
         assert_eq!(
             past,
             (1, true),
