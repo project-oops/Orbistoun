@@ -873,8 +873,10 @@ fn draw_geometry(
     };
     let passthrough =
         latest(VGT_SHADER_STAGES_EN).is_some_and(|value| value & PRIMGEN_PASSTHRU_EN != 0);
-    if latest(GE_INDX_OFFSET).is_some_and(|value| value != 0) {
-        return Err("a draw with an index offset's vertex ids are not seeded".to_owned());
+    if let Some(offset) = latest(GE_INDX_OFFSET).filter(|&value| value != 0) {
+        return Err(format!(
+            "a draw with an index offset (GE_INDX_OFFSET {offset:#x})'s vertex ids are not seeded"
+        ));
     }
     Ok(GeometryInputs {
         first_vertex: 0,
@@ -9525,6 +9527,30 @@ mod tests {
                 "{vertices} vertices"
             );
         }
+    }
+
+    /// A draw refused for its index offset says the offset, so a request about it can quote it.
+    #[test]
+    fn an_index_offset_refusal_names_the_offset() {
+        use super::{DI_PT_RECTLIST, GE_INDX_OFFSET, VGT_PRIMITIVE_TYPE, draw_geometry};
+        use crate::registers::{DrawCall, DrawKind};
+        let draw = DrawCall {
+            packet_offset: 0,
+            instances: 1,
+            kind: DrawKind::Auto { vertices: 3 },
+        };
+        let registers = |register| match register {
+            VGT_PRIMITIVE_TYPE => Some(DI_PT_RECTLIST),
+            GE_INDX_OFFSET => Some(5),
+            _ => None,
+        };
+        assert_eq!(
+            draw_geometry(&draw, registers),
+            Err(
+                "a draw with an index offset (GE_INDX_OFFSET 0x5)'s vertex ids are not seeded"
+                    .to_owned()
+            )
+        );
     }
 
     /// A draw's geometry-engine inputs are seeded for a non-indexed, single-instance list or strip
