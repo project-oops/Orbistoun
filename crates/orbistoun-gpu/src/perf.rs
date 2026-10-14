@@ -48,6 +48,9 @@ macro_rules! span_labels {
             Span::OtherMemory => $as!("other memory work"),
             Span::FlipWriteBack => $as!("flip write-back"),
             Span::CarryOut => $as!("carry out"),
+            Span::CarryOutTake => $as!("carry out: take"),
+            Span::CarryOutTile => $as!("carry out: tile"),
+            Span::CarryOutWrite => $as!("carry out: write"),
             Span::Drive => $as!("drive"),
             Span::SubmitDraws => $as!("submit draws"),
             Span::ExecutorLog => $as!("executor log"),
@@ -342,6 +345,12 @@ pub enum Span {
     FlipWriteBack,
     /// Carrying out a deferred copy (D717).
     CarryOut,
+    /// A deferred copy's frame taken off the device snapshot it was kept in.
+    CarryOutTake,
+    /// That frame laid out in the target's tiling over what memory held.
+    CarryOutTile,
+    /// The laid-out bytes written to the copy's destination.
+    CarryOutWrite,
     /// Driving a submission's commands into the backend, on the device thread.
     Drive,
     /// Sending the recorded draws to the device.
@@ -462,7 +471,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 67] = [
+    pub const ALL: [Self; 70] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::CommandProcessor,
@@ -475,6 +484,9 @@ impl Span {
         Self::OtherMemory,
         Self::FlipWriteBack,
         Self::CarryOut,
+        Self::CarryOutTake,
+        Self::CarryOutTile,
+        Self::CarryOutWrite,
         Self::Drive,
         Self::SubmitDraws,
         Self::ExecutorLog,

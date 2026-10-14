@@ -3355,7 +3355,8 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
             memory_then,
         } => (*snapshot, *target, *swap, memory_then),
     };
-    let Some(frame) = (hooks.take)(snapshot) else {
+    let Some(frame) = crate::perf::span(crate::perf::Span::CarryOutTake, || (hooks.take)(snapshot))
+    else {
         tracing::warn!(
             "a deferred copy's frame could not be read - {:#x} keeps what it held",
             copy.destination
@@ -3363,21 +3364,24 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         return false;
     };
     let (width, height) = (target.width, target.height);
-    let mut tiled = memory_then.words();
-    if target
-        .layout
-        .tile_mapped(
-            &frame,
-            width,
-            height,
-            target.pipe_bank_xor,
-            &mut tiled,
-            |w| stored(w, target, swap),
-        )
-        .is_err()
-    {
+    let tiled = crate::perf::span(crate::perf::Span::CarryOutTile, || {
+        let mut tiled = memory_then.words();
+        target
+            .layout
+            .tile_mapped(
+                &frame,
+                width,
+                height,
+                target.pipe_bank_xor,
+                &mut tiled,
+                |w| stored(w, target, swap),
+            )
+            .is_ok()
+            .then_some(tiled)
+    });
+    let Some(tiled) = tiled else {
         return false;
-    }
+    };
     let bytes = zerocopy::IntoBytes::as_bytes(tiled.as_slice());
     let Some(bytes) = usize::try_from(copy.length)
         .ok()
@@ -3385,7 +3389,9 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     else {
         return false;
     };
-    write_guest(copy.destination, bytes)
+    crate::perf::span(crate::perf::Span::CarryOutWrite, || {
+        write_guest(copy.destination, bytes)
+    })
 }
 
 /// Carries out every deferred copy whose destination pages touch `[address, address + length)` -
