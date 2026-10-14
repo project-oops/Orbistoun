@@ -257,7 +257,7 @@ pub(crate) fn cmd_ab(
     path: &Path,
     baseline: &Path,
     (seconds, rounds, top): (u64, usize, usize),
-    input: Option<&Path>,
+    (input, warm_up): (Option<&Path>, bool),
 ) -> Result<()> {
     anyhow::ensure!(
         baseline.is_file(),
@@ -268,6 +268,20 @@ pub(crate) fn cmd_ab(
     let title = crate::common::title_id(path).unwrap_or_default();
     let recorded_input = pad_script(&title);
     let input = input.or(recorded_input.as_deref());
+    // A build's first run after it was built fills the shader and pipeline caches its later runs
+    // take from, and whichever went first would pay for it alone (NVRB00001: 4.3 fps cold, 7.2 and
+    // 7.6 warm). Each runs once uncounted.
+    if warm_up {
+        for exe in [Some(baseline), None] {
+            let which = if exe.is_some() {
+                "baseline"
+            } else {
+                "this build"
+            };
+            println!("warming up: {which}, {} s", seconds.min(WARM_UP_SECONDS));
+            record(&tools, path, seconds.min(WARM_UP_SECONDS), input, exe)?;
+        }
+    }
     let (mut before, mut after) = (Vec::new(), Vec::new());
     for round in 0..rounds {
         let order = if round % 2 == 0 {
@@ -310,6 +324,10 @@ pub(crate) fn cmd_ab(
     println!("kept as {}", file.display());
     Ok(())
 }
+
+/// The longest a warm-up run of [`cmd_ab`] lasts: long enough to pass a title's start, where most
+/// of its shaders and pipelines are first made.
+const WARM_UP_SECONDS: u64 = 20;
 
 /// An A/B comparison as text: every run's frame rate for each build, their means, then the zones
 /// whose share of the run moved most between the builds.

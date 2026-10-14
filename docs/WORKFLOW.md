@@ -147,7 +147,8 @@ A round of making a title faster goes:
    thread, naming host functions; its report is in the run's log.
 5. Change one thing and compare it with `ab` against a `tracy` build of the commit before: a run
    on the host clock varies by a few frames a second between runs of one build, and other work on
-   the machine moves it more, so `ab` runs the two builds alternately for several rounds. Judge by
+   the machine moves it more, so `ab` runs the two builds alternately for several rounds, after an
+   uncounted warm-up run of each, since a fresh build's first run fills its caches. Judge by
    the zone you changed as well as by the frame rate.
 
 ## Recording what a turn produced

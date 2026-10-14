@@ -375,6 +375,9 @@ enum Command {
         /// Play this pad script on player 1 rather than the compat record's.
         #[arg(long)]
         input: Option<std::path::PathBuf>,
+        /// Count from the first run: no uncounted warm-up run of each build first.
+        #[arg(long)]
+        no_warm_up: bool,
     },
     /// Record every title in the library in turn and rank the costs across them, beside the last
     /// benchmark (D831).
@@ -1049,7 +1052,13 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             rounds,
             top,
             input,
-        } => perf::cmd_ab(&path, &baseline, (seconds, rounds, top), input.as_deref())?,
+            no_warm_up,
+        } => perf::cmd_ab(
+            &path,
+            &baseline,
+            (seconds, rounds, top),
+            (input.as_deref(), !no_warm_up),
+        )?,
         Command::Turn { .. }
         | Command::Run { .. }
         | Command::Link { .. }
