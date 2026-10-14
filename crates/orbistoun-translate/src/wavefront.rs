@@ -768,6 +768,10 @@ pub enum Assembly {
         /// Whether the last vertex is the provoking one.
         provoking_last: bool,
     },
+    /// A list of points: primitive `i` is vertex `i`, its one index packed in the first input
+    /// register as a triangle's first is; the others are not read (`ac_nir_lower_ngg.c:130`, one
+    /// vertex per primitive).
+    Points,
 }
 
 impl Assembly {
@@ -787,6 +791,7 @@ impl Assembly {
             // A line has two vertices; the third index is not read.
             Self::LineList => [2 * i, 2 * i + 1, 0],
             Self::LineStrip => [i, i + 1, 0],
+            Self::Points => [i, 0, 0],
             Self::Quads { provoking_last } => {
                 let base = i / 2 * 4;
                 match (i % 2 == 0, provoking_last) {
@@ -809,6 +814,7 @@ impl Assembly {
             Self::LineList => primitives * 2,
             Self::LineStrip => primitives + 1,
             Self::Quads { .. } => primitives.div_ceil(2) * 4,
+            Self::Points => primitives,
         }
     }
 
@@ -823,6 +829,7 @@ impl Assembly {
             Self::Strip { .. } => vertices.saturating_sub(2),
             Self::LineStrip => vertices.saturating_sub(1),
             Self::Quads { .. } => vertices / 4 * 2,
+            Self::Points => vertices,
         }
     }
 }
@@ -2990,6 +2997,7 @@ impl<'a> Wavefront<'a> {
                 [start, second, zero]
             }
             Assembly::LineStrip => [at, next, zero],
+            Assembly::Points => [at, zero, zero],
             // A quad's two triangles, as `vertices_of` splits them (D798).
             Assembly::Quads { provoking_last } => {
                 let quad = self.binary(op::SHIFT_RIGHT_LOGICAL, at, one);
@@ -3123,6 +3131,7 @@ impl<'a> Wavefront<'a> {
             }
             Assembly::Strip { .. } => saturating_less(self, 2),
             Assembly::LineStrip => saturating_less(self, 1),
+            Assembly::Points => vertices,
             // Whole quads, two triangles each.
             Assembly::Quads { .. } => {
                 let two = self.constant(2);
@@ -6608,6 +6617,9 @@ mod assembly_tests {
         // A line takes two vertices; the third index is not read.
         assert_eq!(Assembly::LineList.vertices_of(2), [4, 5, 0]);
         assert_eq!(Assembly::LineStrip.vertices_of(2), [2, 3, 0]);
+        assert_eq!(Assembly::Points.vertices_of(5), [5, 0, 0]);
+        assert_eq!(Assembly::Points.vertices_for(4), 4);
+        assert_eq!(Assembly::Points.primitives_from(4), 4);
         assert_eq!(Assembly::LineList.vertices_for(3), 6);
         assert_eq!(Assembly::LineStrip.vertices_for(3), 4);
         assert_eq!(last.vertices_of(0), [0, 1, 2]);

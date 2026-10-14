@@ -121,6 +121,7 @@ fn for_draw_salt(for_draw: ForDraw) -> u64 {
                 Assembly::List => 0,
                 Assembly::LineList => 0x4c4c_0000_0000_0000,
                 Assembly::LineStrip => 0x4c53_0000_0000_0000,
+                Assembly::Points => 0x5054_0000_0000_0000,
                 Assembly::Strip { provoking_last } => {
                     0x5354_0000_0000_0000 ^ u64::from(provoking_last)
                 }
@@ -810,6 +811,8 @@ fn index_width(value: Option<u32>) -> Option<orbistoun_translate::wavefront::Ind
     }
 }
 
+/// `DI_PT_POINTLIST` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json`): a point a vertex.
+const DI_PT_POINTLIST: u32 = 1;
 /// `DI_PT_LINELIST` and `DI_PT_LINESTRIP` (enum `VGT_DI_PRIM_TYPE`, `gfx103.json:689-690`): lines
 /// of two vertices each, and lines sharing vertices in a strip.
 const DI_PT_LINELIST: u32 = 2;
@@ -870,6 +873,7 @@ fn draw_geometry(
         Some(DI_PT_TRILIST | DI_PT_RECTLIST | DI_PT_2D_RECTANGLE) => (Assembly::List, vertices / 3),
         Some(DI_PT_LINELIST) => (Assembly::LineList, vertices / 2),
         Some(DI_PT_LINESTRIP) => (Assembly::LineStrip, vertices.saturating_sub(1)),
+        Some(DI_PT_POINTLIST) => (Assembly::Points, vertices),
         Some(DI_PT_TRISTRIP) => (
             Assembly::Strip {
                 provoking_last: latest(PA_SU_SC_MODE_CNTL)
@@ -939,6 +943,7 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
         Assembly::Strip { .. } => lanes.saturating_sub(2) & !1,
         Assembly::LineList => lanes / 2,
         Assembly::LineStrip => lanes.saturating_sub(1),
+        Assembly::Points => lanes,
         // Whole quads: four vertices, two triangles each.
         Assembly::Quads { .. } => lanes / 4 * 2,
     };
@@ -956,7 +961,7 @@ fn chunk_plans(whole: GeometryInputs, index_address: Option<u64>, lanes: u32) ->
                 Assembly::List => start * 3,
                 // A line's two vertices, and a quad's four for its two triangles.
                 Assembly::LineList | Assembly::Quads { .. } => start * 2,
-                Assembly::Strip { .. } | Assembly::LineStrip => start,
+                Assembly::Strip { .. } | Assembly::LineStrip | Assembly::Points => start,
             };
             let index_buffer = match (whole.indices, index_address) {
                 (Some(width), Some(address)) => IndexBuffer::Guest {
@@ -10141,14 +10146,19 @@ mod tests {
     }
 
     /// Lines are seeded as triangles are, two vertices each (`ac_nir_lower_ngg.c:130`): a line list
-    /// of six vertices is three lines, a line strip of four three too.
+    /// of six vertices is three lines, a line strip of four three too. A point list of three is
+    /// three points, a vertex each.
     #[test]
     fn a_line_list_and_strip_are_seeded() {
-        use super::{Assembly, DI_PT_LINELIST, DI_PT_LINESTRIP, VGT_PRIMITIVE_TYPE, draw_geometry};
+        use super::{
+            Assembly, DI_PT_LINELIST, DI_PT_LINESTRIP, DI_PT_POINTLIST, VGT_PRIMITIVE_TYPE,
+            draw_geometry,
+        };
         use crate::registers::{DrawCall, DrawKind};
         for (topology, vertices, assembly) in [
             (DI_PT_LINELIST, 6, Assembly::LineList),
             (DI_PT_LINESTRIP, 4, Assembly::LineStrip),
+            (DI_PT_POINTLIST, 3, Assembly::Points),
         ] {
             let draw = DrawCall {
                 packet_offset: 0,
