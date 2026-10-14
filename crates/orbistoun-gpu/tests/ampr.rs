@@ -99,10 +99,9 @@ fn set_buffer_binds_a_large_buffer_and_refuses_a_small_one() {
     assert_eq!(obj[..], expected[..], "a reset keeps the binding");
 }
 
-/// A reset rewinds a buffer with commands in it (D877, guest-observed): two write-address commands
-/// take 24 bytes and count 2, and after the reset both are zero, the binding kept, and the next
-/// command lands at the buffer's start again. Grand Theft Auto V resets a command buffer it filled
-/// and writes to it again; one never rewound overflowed and its write was refused.
+/// A reset rewinds a buffer with commands in it (D877, measured by REQ-20261014T1710Z-ar01): two
+/// write-address commands take 24 bytes and count 2, and after the reset both are zero, the binding
+/// kept, and the next command lands at the buffer's start again.
 #[test]
 fn a_reset_rewinds_the_commands_in_its_buffer() {
     let mut obj = object();
@@ -145,6 +144,38 @@ fn a_reset_rewinds_the_commands_in_its_buffer() {
         0
     );
     assert_eq!(counters(&obj[..]), (12, 1), "written from the start again");
+}
+
+/// A command that does not fit the bound buffer is refused with `0x80020010`, the object and the
+/// buffer left as they were (REQ-20261014T1710Z-ar01, `ar01-overflow-*`): a 0x20-byte buffer takes
+/// two twelve-byte write-address commands, and the third would end at 0x24.
+#[test]
+fn a_command_that_does_not_fit_is_refused() {
+    let mut obj = object();
+    let at = obj.as_mut_ptr() as u64;
+    call("sceAmprCommandBufferConstructor", [at, at, 0, 0, 0, 0x47d]);
+    let buffer = object();
+    let address = buffer.as_ptr() as u64;
+    let slot = object();
+    let slot = slot.as_ptr() as u64 & !7;
+    assert_eq!(
+        call(
+            "sceAmprCommandBufferSetBuffer",
+            [at, address, 0x20, 0, 0, 0]
+        ),
+        0
+    );
+    let append = || {
+        call(
+            "sceAmprCommandBufferWriteAddress_04_00",
+            [at, slot, 0x1234_5678, 0, 0, 0],
+        )
+    };
+    assert_eq!(append(), 0);
+    assert_eq!(append(), 0);
+    let before = (obj.clone(), buffer.clone());
+    assert_eq!(append(), 0x8002_0010, "the third would end past 0x20");
+    assert_eq!((obj, buffer), before, "nothing changed");
 }
 
 /// `ampr-sb40-*` (obSCEne `reports/report-1791286625.txt` 8770-9240, REQ sb40): every size from

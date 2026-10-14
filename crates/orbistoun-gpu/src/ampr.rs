@@ -48,6 +48,9 @@ const BOUND_ALIGNMENT: u64 = 0x20;
 const REFUSED_SIZE: u64 = 0x10;
 /// What a buffer too small answers (`ampr-cb-set-buffer-10`).
 const TOO_SMALL: u64 = 0x8002_0010;
+/// What a command that does not fit the bound buffer answers, the object and buffer unchanged
+/// (REQ-20261014T1710Z-ar01, `ar01-overflow-append-3`).
+const DOES_NOT_FIT: u64 = 0x8002_0010;
 /// What an odd size answers (`ampr-sb40-size-0x401`): the kernel's `EINVAL`.
 const UNALIGNED: u64 = 0x8002_0016;
 
@@ -176,7 +179,8 @@ use orbistoun_kernel::apr::{BUFFER_AT, COUNT_AT, SIZE_AT, USED_AT, write_address
 /// writes `value` to `address` when the buffer runs - nothing is written to `address` now - and
 /// answers 0, the object's used bytes (+4) and command count (+8) moved on; an `address` not
 /// 8-aligned is refused with `0x80020016`, nothing appended (REQ-aw01, REQ-aw02). A command that
-/// would not fit the bound buffer is unmeasured and answers the placeholder.
+/// would not fit the bound buffer is refused with `0x80020010`, nothing appended
+/// (REQ-20261014T1710Z-ar01); no buffer bound answers the placeholder.
 fn command_buffer_write_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let (object, address, value) = (args[0], args[1], args[2] as u32);
     if address % 8 != 0 {
@@ -201,8 +205,11 @@ fn command_buffer_write_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Ok(length) = u32::try_from(bytes.len()) else {
         return placeholder;
     };
-    if buffer == 0 || used.saturating_add(length) > size {
+    if buffer == 0 {
         return placeholder;
+    }
+    if used.saturating_add(length) > size {
+        return DOES_NOT_FIT;
     }
     // SAFETY: the bound buffer, `size` bytes, of which the command takes the next `length`.
     let appended = unsafe { guest::write_bytes(buffer + u64::from(used), &bytes) };
@@ -227,9 +234,9 @@ fn command_buffer_get_current_offset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// `sceAmprCommandBufferReset(obj)`: answers 0 and, measured after a binding, leaves the object as
 /// it was - the bound buffer and its size kept. With commands in the buffer it rewinds it: the
-/// bytes used (+4) and the command count (+8) to zero, so the next command is written from the
-/// buffer's start (D877, guest-observed: PPSA04263 resets a buffer it filled and writes again,
-/// where an unrewound one overflows). An object that cannot be written answers the placeholder.
+/// bytes used (+4) and the command count (+8) to zero, the buffer's bytes untouched, so the next
+/// command is written from the buffer's start (D877, measured by REQ-20261014T1710Z-ar01). An
+/// object that cannot be written answers the placeholder.
 fn command_buffer_reset(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let object = args[0];
     // SAFETY: the guest's own constructed object, at its measured fields.

@@ -34,11 +34,11 @@ purpose = "Resets a command-buffer object for reuse."
 returns = "status"
 edge_cases = [
     "MEASURED after a 0x1000-byte SetBuffer: answers 0 and changes no byte of the object - the bound buffer and its size are kept.",
-    "GUEST-OBSERVED (D877): with commands in the buffer it rewinds it - the bytes used (+4) and the command count (+8) to zero, the binding kept. PPSA04263 resets a command buffer it filled and appends again; unrewound, the append overflowed and the title trapped. Unmeasured on hardware: obSCEne REQ-20261014T1710Z-ar01 asks.",
+    "MEASURED (D877, REQ-20261014T1710Z-ar01 `ar01-reset-after-2`): after two WriteAddress_04_00 commands (+4 0x18, +8 2) it answers 0 and rewinds - +4 and +8 to zero, +12 the size and +16 the buffer kept, the buffer's bytes untouched. The append after it (`ar01-append-after-reset`) lands at the buffer's start: +4 0xc, +8 1.",
 ]
 found_by = "generated"
-known_by = "guest-observed"
-cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arm ampr-cb-reset-after-2 (REQ a5b1)."
+known_by = "measured"
+cites = "obSCEne reports/report-1791275954.txt lines 8674-8876, check 166-agc/ampr-apr-file-read, arm ampr-cb-reset-after-2 (REQ a5b1); obSCEne REQ-20261014T1710Z-ar01, reports/hardware/report-20261014-batch9.log (000-boot/ampr-write-address), arms ar01-reset-after-2 and ar01-append-after-reset."
 found_in = ["PPSA21564-app0"]
 found_on = "2026-10-06"
 
@@ -107,9 +107,10 @@ edge_cases = [
     "MEASURED (REQ-aw01, report-1791826929.txt 661-681): (obj, slot, 0x12345678, 0) answered 0 and appended 12 bytes at the buffer's current end - 05420000, the slot's low word, 0x12345678 >> 2 - the object's +4 moving from 0 to 12 (bytes used) and +8 from 0 to 1 (commands); the slot itself was not written. A second call appended the same 12 bytes after the first. The measure call answered 12 with and without arguments.",
     "MEASURED (REQ-aw02, report-1791833977.txt 680-693): a slot at 0x7eeff95b0 and 0x87654321 appended 05520700 b095ffee c850d921 - the address's bits 47:32 in the header's high half, the value's low two bits at flag bits 5:4; value 3 appended 8 bytes, 05310700 b095ffee, no value word where value >> 2 is zero; 0xfffffffd's value word was 0x3fffffff. A 4-aligned slot (0x7eeff954c) was refused with 0x80020016 and nothing appended.",
     "The header's flags read as bit 6 for the value word, 5:4 the value's low bits, 3:0 the words after the header - the reading every measured packet fits. A command past the bound buffer's size is unmeasured; orbistoun answers it the placeholder.",
+    "MEASURED (REQ-20261014T1710Z-ar01 `ar01-overflow-*`): on a 0x20-byte buffer two commands of 0x12345678 answered 0 (+4 0xc then 0x18, +8 1 then 2); the third, which would end at 0x24, answered 0x80020010 and changed neither the object nor the buffer.",
 ]
 found_by = "static"
 known_by = "measured"
-cites = "obSCEne REQ-20261012T1552Z-aw01 and REQ-20261012T1900Z-aw02, check 000-boot/ampr-write-address."
+cites = "obSCEne REQ-20261012T1552Z-aw01 and REQ-20261012T1900Z-aw02, check 000-boot/ampr-write-address; obSCEne REQ-20261014T1710Z-ar01, reports/hardware/report-20261014-batch9.log (000-boot/ampr-write-address), arms ar01-overflow-append-1 to -3."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-12"
