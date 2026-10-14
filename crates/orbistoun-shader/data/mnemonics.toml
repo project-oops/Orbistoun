@@ -864,8 +864,33 @@ name = "v_cmp_neq_f32_e64"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 129
+name = "v_cmp_lt_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 130
+name = "v_cmp_eq_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 131
+name = "v_cmp_le_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 132
+name = "v_cmp_gt_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 133
 name = "v_cmp_ne_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 134
+name = "v_cmp_ge_i32_e64"
 
 [[mnemonic]]
 family = "VOP3"
@@ -981,6 +1006,11 @@ name = "v_lshlrev_b16"
 family = "VOP3"
 opcode = 836
 name = "v_perm_b32"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 839
+name = "v_add_lshl_u32"
 
 [[mnemonic]]
 family = "VOP3"
@@ -1114,13 +1144,33 @@ name = "v_cmpx_neq_f32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 129
+name = "v_cmp_lt_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 130
 name = "v_cmp_eq_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"
+opcode = 131
+name = "v_cmp_le_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 132
+name = "v_cmp_gt_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
 opcode = 133
 name = "v_cmp_ne_i32_e32"
+
+[[mnemonic]]
+family = "VOPC"
+opcode = 134
+name = "v_cmp_ge_i32_e32"
 
 [[mnemonic]]
 family = "VOPC"

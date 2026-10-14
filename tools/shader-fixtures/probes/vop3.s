@@ -368,3 +368,38 @@ v_cvt_i32_f32_e64 v200, s7
 v_cvt_i32_f32_e64 v255, v130
 v_cvt_i32_f32_e64 v9, -1.0
 v_cvt_i32_f32_e64 v130, s101
+// ---- the signed integer compares in their long form, and the add-then-shift ----------
+//
+// Transform feedback's vertex shaders compare into a register pair and form addresses with an add
+// then a shift (GCTS00001). Destination pairs spread across the file; vector, scalar and inline
+// sources.
+v_cmp_lt_i32_e64 s[2:3], 0, v0
+v_cmp_lt_i32_e64 s[40:41], v5, s7
+v_cmp_lt_i32_e64 s[90:91], v200, -1
+v_cmp_lt_i32_e64 s[100:101], s8, v255
+v_cmp_lt_i32_e64 vcc, v130, v9
+v_cmp_eq_i32_e64 s[2:3], 0, v0
+v_cmp_eq_i32_e64 s[40:41], v5, s7
+v_cmp_eq_i32_e64 s[90:91], v200, -1
+v_cmp_eq_i32_e64 s[100:101], s8, v255
+v_cmp_eq_i32_e64 vcc, v130, v9
+v_cmp_le_i32_e64 s[2:3], 0, v0
+v_cmp_le_i32_e64 s[40:41], v5, s7
+v_cmp_le_i32_e64 s[90:91], v200, -1
+v_cmp_le_i32_e64 s[100:101], s8, v255
+v_cmp_le_i32_e64 vcc, v130, v9
+v_cmp_gt_i32_e64 s[2:3], 0, v0
+v_cmp_gt_i32_e64 s[40:41], v5, s7
+v_cmp_gt_i32_e64 s[90:91], v200, -1
+v_cmp_gt_i32_e64 s[100:101], s8, v255
+v_cmp_gt_i32_e64 vcc, v130, v9
+v_cmp_ge_i32_e64 s[2:3], 0, v0
+v_cmp_ge_i32_e64 s[40:41], v5, s7
+v_cmp_ge_i32_e64 s[90:91], v200, -1
+v_cmp_ge_i32_e64 s[100:101], s8, v255
+v_cmp_ge_i32_e64 vcc, v130, v9
+v_add_lshl_u32 v2, v0, v1, 2
+v_add_lshl_u32 v200, s7, v9, v130
+v_add_lshl_u32 v255, v12, s30, v44
+v_add_lshl_u32 v9, -1, v77, s101
+v_add_lshl_u32 v130, v88, 4, v240

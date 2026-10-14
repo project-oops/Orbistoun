@@ -162,6 +162,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "vector-convert",
         "the integer and float conversions in their long form",
     ),
+    (
+        "vector-compare-long",
+        "the signed integer compares in their long and short forms, and the add-then-shift",
+    ),
 ];
 
 /// Every fixture on disk is read by this suite.

@@ -81,6 +81,30 @@ v_cmp_ne_i32_e32 vcc, s30, v255
 v_cmp_ne_i32_e32 vcc, -1, v77
 v_cmp_ne_i32_e32 vcc, v190, v12
 
+// ---- v_cmp_lt/le/gt/ge_i32_e32: the signed orderings, as transform feedback compares -----
+//
+// As v_cmp_ne_i32_e32 above.
+v_cmp_lt_i32_e32 vcc, 1, v5
+v_cmp_lt_i32_e32 vcc, v100, v200
+v_cmp_lt_i32_e32 vcc, s30, v255
+v_cmp_lt_i32_e32 vcc, -1, v77
+v_cmp_lt_i32_e32 vcc, v190, v12
+v_cmp_le_i32_e32 vcc, 1, v5
+v_cmp_le_i32_e32 vcc, v100, v200
+v_cmp_le_i32_e32 vcc, s30, v255
+v_cmp_le_i32_e32 vcc, -1, v77
+v_cmp_le_i32_e32 vcc, v190, v12
+v_cmp_gt_i32_e32 vcc, 1, v5
+v_cmp_gt_i32_e32 vcc, v100, v200
+v_cmp_gt_i32_e32 vcc, s30, v255
+v_cmp_gt_i32_e32 vcc, -1, v77
+v_cmp_gt_i32_e32 vcc, v190, v12
+v_cmp_ge_i32_e32 vcc, 1, v5
+v_cmp_ge_i32_e32 vcc, v100, v200
+v_cmp_ge_i32_e32 vcc, s30, v255
+v_cmp_ge_i32_e32 vcc, -1, v77
+v_cmp_ge_i32_e32 vcc, v190, v12
+
 // ---- s_buffer_load_dword*: a destination, a descriptor quad and a byte offset -------
 //
 // As `memory.s`'s s_load samples, with a four-register descriptor in place of the address

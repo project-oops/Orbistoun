@@ -196,6 +196,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ngt_f32_e32",
     "v_cmp_eq_i32_e32",
     "v_cmp_ne_i32_e32",
+    "v_cmp_lt_i32_e32",
+    "v_cmp_le_i32_e32",
+    "v_cmp_gt_i32_e32",
+    "v_cmp_ge_i32_e32",
     "v_cmp_lt_u32_e32",
     "v_cmp_le_u32_e32",
     "v_cmp_eq_u32_e32",
@@ -208,6 +212,11 @@ pub const SUPPORTED: &[&str] = &[
     "v_cmp_ge_f32_e64",
     "v_cmp_neq_f32_e64",
     "v_cmp_ne_i32_e64",
+    "v_cmp_lt_i32_e64",
+    "v_cmp_eq_i32_e64",
+    "v_cmp_le_i32_e64",
+    "v_cmp_gt_i32_e64",
+    "v_cmp_ge_i32_e64",
     "v_bfi_b32",
     "v_cmpx_le_i16_e32",
     "v_cmpx_le_i32_e32",
@@ -259,6 +268,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_ashrrev_i32_e32",
     "v_lshl_add_u32",
     "v_add3_u32",
+    "v_add_lshl_u32",
     "v_lshl_or_b32",
     "v_perm_b32",
     "v_add_nc_u16",
@@ -2922,7 +2932,7 @@ fn vector_instruction<M: Model + ?Sized>(
         "v_div_scale_f32" => division_scale(model, instruction),
 
         // Integer shifts in the long form: a shift-then-add, and a 64-bit shift of a register pair.
-        "v_lshl_add_u32" | "v_add3_u32" => shift_add(model, instruction, name),
+        "v_lshl_add_u32" | "v_add3_u32" | "v_add_lshl_u32" => shift_add(model, instruction, name),
         "v_lshrrev_b64" => shift_right_64(model, instruction),
         "v_add_co_u32" | "v_sub_co_u32" | "v_add_co_ci_u32_e64" | "v_add_co_ci_u32_e32" => {
             carry_arithmetic(model, instruction, name)
@@ -9520,9 +9530,10 @@ fn compare_long<M: Model + ?Sized>(
     Ok(())
 }
 
-/// `v_lshl_add_u32 d, a, b, c`: `(a << b[4:0]) + c` per lane, and `v_add3_u32 d, a, b, c`:
-/// `a + b + c`, as a streamout pass forms its store address (D861); both wrap (AMD's published RDNA
-/// instruction set, `V_LSHL_ADD_U32`, `V_ADD3_U32`).
+/// `v_lshl_add_u32 d, a, b, c`: `(a << b[4:0]) + c` per lane; `v_add3_u32 d, a, b, c`: `a + b + c`,
+/// as a streamout pass forms its store address (D861); and `v_add_lshl_u32 d, a, b, c`:
+/// `(a + b) << c[4:0]`. All wrap (AMD's published RDNA instruction set, `V_LSHL_ADD_U32`,
+/// `V_ADD3_U32`, `V_ADD_LSHL_U32`).
 fn shift_add<M: Model + ?Sized>(
     model: &mut M,
     instruction: &Instruction,
@@ -9547,13 +9558,23 @@ fn shift_add<M: Model + ?Sized>(
         let value = model.read_source(instruction, value, lane)?;
         let amount = model.read_source(instruction, amount, lane)?;
         let addend = model.read_source(instruction, addend, lane)?;
-        let first = if name == "v_add3_u32" {
-            model.add(value, amount)
-        } else {
-            let amount = model.binary(op::BITWISE_AND, amount, low_five);
-            model.binary(op::SHIFT_LEFT_LOGICAL, value, amount)
+        let sum = match name {
+            "v_add3_u32" => {
+                let partial = model.add(value, amount);
+                model.add(partial, addend)
+            }
+            // `(a + b) << c[4:0]`: the third source is the shift.
+            "v_add_lshl_u32" => {
+                let partial = model.add(value, amount);
+                let shift = model.binary(op::BITWISE_AND, addend, low_five);
+                model.binary(op::SHIFT_LEFT_LOGICAL, partial, shift)
+            }
+            _ => {
+                let amount = model.binary(op::BITWISE_AND, amount, low_five);
+                let shifted = model.binary(op::SHIFT_LEFT_LOGICAL, value, amount);
+                model.add(shifted, addend)
+            }
         };
-        let sum = model.add(first, addend);
         model.write_vector_lane(register, lane, sum);
     }
     model.count();
