@@ -1432,6 +1432,11 @@ impl Pipeline {
                     orbistoun_translate::wavefront::USER_DATA_BLOCK_WORDS as usize,
                     0,
                 );
+                // A partial group's shape, where the module reads it (D855).
+                if let Some(partial) = state.inputs.partial {
+                    let at = orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize;
+                    block[at..at + 6].copy_from_slice(&partial.push_words());
+                }
                 block
             },
             groups: state.groups,
@@ -1568,11 +1573,9 @@ impl Pipeline {
                 Width::Wave32 => 1 << 10,
                 Width::Wave64 => 0,
             }
-            // A partial group's mask is compiled in, so its shape is part of the module's name.
-            ^ inputs.partial.map_or(0, |partial| {
-                let shape = [partial.last, partial.threads];
-                content_hash(zerocopy::IntoBytes::as_bytes(shape.as_flattened())) | 1
-            })
+            // A partial group's shape is read from the push block, so only whether it has one is
+            // part of the module's name: every grid a program runs over shares one module (D855).
+            ^ u64::from(inputs.partial.is_some()) << 9
             ^ u64::from(integer_images[0]) << 62
             ^ u64::from(integer_images[1]) << 63
             ^ local_words_salt(state.local_words);

@@ -44,6 +44,26 @@ pub struct ComputeInputs {
     pub integer_images: [bool; 2],
 }
 
+/// Where a dispatch's partial-group shape sits in the push-constant block (D855): the last group's
+/// index along x, y and z, then the threads it runs along each - after the thirty-two words a
+/// stage's user data may take.
+pub const PARTIAL_PUSH_WORD: u32 = super::USER_DATA_STAGE_WORDS;
+
+impl PartialGroups {
+    /// The six words a module reads at [`PARTIAL_PUSH_WORD`].
+    #[must_use]
+    pub const fn push_words(self) -> [u32; 6] {
+        [
+            self.last[0],
+            self.last[1],
+            self.last[2],
+            self.threads[0],
+            self.threads[1],
+            self.threads[2],
+        ]
+    }
+}
+
 /// The last group along each dimension of a dispatch with partial groups, and how many threads it
 /// runs along that dimension (`COMPUTE_NUM_THREAD_X/Y/Z.NUM_THREAD_PARTIAL`): radv and radeonsi write
 /// the remainder there, a whole group when the grid divides evenly (`radv_cmd_buffer.c:14777-14808`).
@@ -180,7 +200,7 @@ impl DispatchState {
             _ => 0,
         };
         let (low, high) = match inputs.partial {
-            Some(partial) => Self::partial_mask(module, (id, inputs.threads), partial, threads),
+            Some(_) => Self::partial_mask(module, (id, inputs.threads), threads),
             None => (Model::constant(module, low), Model::constant(module, high)),
         };
         module.store_scalar(EXEC_LO, low);
@@ -188,54 +208,67 @@ impl DispatchState {
     }
 
     /// The execution mask of a group that may be a partial one: each thread runs unless, along a
-    /// dimension where it lies past the partial count, this group is the last.
+    /// dimension where it lies at or past the last group's thread count, this group is the last.
+    /// The last group and its counts are read from the push-constant block at
+    /// [`PARTIAL_PUSH_WORD`] (D855), so one module serves every grid a program is dispatched over;
+    /// a shape compiled in made each new grid size another module and another pipeline to build.
     fn partial_mask(
         module: &mut Wavefront<'_>,
         (id, shape): (Id, [u32; 3]),
-        partial: PartialGroups,
         threads: u32,
     ) -> (Id, Id) {
         let (u32_type, bool_type) = (module.u32_type, module.bool_type);
-        // Whether this group is the last along each dimension.
+        // Per dimension a group is wider than one thread along: whether this group is the last,
+        // and the last group's thread count.
         let mut last = [None; 3];
         for (dimension, slot) in last.iter_mut().enumerate() {
-            if partial.threads[dimension] >= shape[dimension] {
+            if shape[dimension] <= 1 {
                 continue;
             }
             let index = u32::try_from(dimension).unwrap_or(0);
+            let (Some(wanted), Some(count)) = (
+                module.push_word(PARTIAL_PUSH_WORD + index),
+                module.push_word(PARTIAL_PUSH_WORD + 3 + index),
+            ) else {
+                continue;
+            };
             let value = module.builder.id();
             module
                 .builder
                 .function(op::COMPOSITE_EXTRACT, &[u32_type.0, value.0, id.0, index]);
-            let wanted = Model::constant(module, partial.last[dimension]);
             let is_last = module.builder.id();
             module
                 .builder
                 .function(op::IEQUAL, &[bool_type.0, is_last.0, value.0, wanted.0]);
-            *slot = Some(is_last);
+            *slot = Some((is_last, count));
         }
         let [x, y, _] = shape;
         let zero = Model::constant(module, 0);
         let mut halves = [zero, zero];
         for lane in 0..module.lanes.min(threads) {
             let ids = [lane % x, (lane / x) % y, lane / (x * y)];
-            // The dimensions along which this thread lies past a last group's count.
+            // Whether this thread lies past a last group's count along some dimension.
             let mut off: Option<Id> = None;
             for dimension in 0..3 {
-                let Some(is_last) = last[dimension] else {
+                let Some((is_last, count)) = last[dimension] else {
                     continue;
                 };
-                if ids[dimension] < partial.threads[dimension] {
-                    continue;
-                }
+                let id = Model::constant(module, ids[dimension]);
+                let past = module.builder.id();
+                module
+                    .builder
+                    .function(op::ULESS_THAN_EQUAL, &[bool_type.0, past.0, count.0, id.0]);
+                let here = module.builder.id();
+                module
+                    .builder
+                    .function(op::LOGICAL_AND, &[bool_type.0, here.0, is_last.0, past.0]);
                 off = Some(match off {
-                    None => is_last,
+                    None => here,
                     Some(before) => {
                         let either = module.builder.id();
-                        module.builder.function(
-                            op::LOGICAL_OR,
-                            &[bool_type.0, either.0, before.0, is_last.0],
-                        );
+                        module
+                            .builder
+                            .function(op::LOGICAL_OR, &[bool_type.0, either.0, before.0, here.0]);
                         either
                     }
                 });

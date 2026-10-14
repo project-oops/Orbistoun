@@ -24,7 +24,7 @@ use crate::{TranslateError, Width};
 mod compute_inputs;
 mod input_controls;
 mod pixel_inputs;
-pub use compute_inputs::{ComputeInputs, PartialGroups};
+pub use compute_inputs::{ComputeInputs, PARTIAL_PUSH_WORD, PartialGroups};
 pub use input_controls::{INPUT_CONTROLS, InputControls};
 pub use orbistoun_spirv::MAX_TEXTURES;
 pub use pixel_inputs::{PixelInputs, Seeded, SystemValue};
@@ -1873,6 +1873,9 @@ pub struct Wavefront<'a> {
     /// A mesh module's draw-data buffer and the first word of this workgroup's stride in it (D718),
     /// where its draw's vertex count is read from (D745).
     draw_data: Option<(buffer::StorageBuffer, Id)>,
+    /// The push-constant block user data arrives in, where the module reads one: a dispatch's
+    /// partial-group shape follows its user data there (D855).
+    push_block: Option<buffer::StorageBuffer>,
     /// The draw's bound buffers, and the slot each traced access reads, by the access's offset
     /// (D733). `None` for a module that reads through none.
     draw_buffers: Option<(buffer::DrawBufferArray, BTreeMap<u32, u32>)>,
@@ -2334,7 +2337,12 @@ fn declare_user_data_source(
     // data or none.
     // One that reads buffers finds them there too (D747).
     let seeded = stage == Stage::Mesh && (user_data.geometry.is_some() || reads_buffers);
-    (user_data.count > 0 || seeded).then(|| {
+    // A dispatch with partial groups reads their shape from the block, user data or none (D855).
+    let partial = stage == Stage::Compute
+        && user_data
+            .compute
+            .is_some_and(|compute| compute.partial.is_some());
+    (user_data.count > 0 || seeded || partial).then(|| {
         if stage == Stage::Mesh {
             let words = b.id();
             b.declare(
@@ -2612,6 +2620,7 @@ impl<'a> Wavefront<'a> {
             written: (0, [0; 4]),
             reads_geometry_input: false,
             draw_data: None,
+            push_block: None,
             draw_buffers,
             write_mask,
             unread_slots: buffers.stored_only.clone(),
@@ -3011,7 +3020,10 @@ impl<'a> Wavefront<'a> {
         // Where this stage's words begin: its share of the push-constant block, or this workgroup's
         // stride of the draw-data buffer (D718).
         let (block, first_word) = match source {
-            UserDataSource::Push(block) => (block, None),
+            UserDataSource::Push(block) => {
+                self.push_block = Some(block);
+                (block, None)
+            }
             UserDataSource::Draws { buffer, workgroup } => {
                 let (uvec3, input) = workgroup;
                 let id = self.builder.id();
@@ -3054,6 +3066,28 @@ impl<'a> Wavefront<'a> {
                 .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
             self.store_scalar(user_data.first_register + i, value);
         }
+    }
+
+    /// Word `index` of the push-constant block, loaded where it is read; `None` for a module that
+    /// declares no block.
+    fn push_word(&mut self, index: u32) -> Option<Id> {
+        let block = self.push_block?;
+        let (u32_type, member, at) = (self.u32_type, self.constant(0), self.constant(index));
+        let pointer = self.builder.id();
+        self.builder.function(
+            op::ACCESS_CHAIN,
+            &[
+                block.element_ptr.0,
+                pointer.0,
+                block.buffer.0,
+                member.0,
+                at.0,
+            ],
+        );
+        let value = self.builder.id();
+        self.builder
+            .function(op::LOAD, &[u32_type.0, value.0, pointer.0]);
+        Some(value)
     }
 
     fn constant(&mut self, value: u32) -> Id {

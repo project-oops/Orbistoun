@@ -157,20 +157,20 @@ fn an_inactive_thread_stores_nothing() {
     }
     let source: Vec<u32> = (0..SIDE * SIDE).map(|i| 0xff00_0000 | (i + 1)).collect();
     let kept = 0xdead_beef_u32;
+    let partial = PartialGroups {
+        last: [0, 0, 0],
+        threads: [RUN, SIDE, 1],
+    };
+    // The user data, then the partial shape where the module reads it (D855).
+    let mut push = vec![0_u32; orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize];
+    push.extend(partial.push_words());
     for (form, program) in [("whole", &COPY[..]), ("a16 d16", &COPY_A16_D16[..])] {
         let destination = vec![kept; (SIDE * SIDE) as usize];
-        let module = translated_with(
-            program,
-            [false; 2],
-            Some(PartialGroups {
-                last: [0, 0, 0],
-                threads: [RUN, SIDE, 1],
-            }),
-        );
+        let module = translated_with(program, [false; 2], Some(partial));
         let done = dispatch_guest(
             &module,
             &[0],
-            (&[0; 16], [1, 1, 1]),
+            (&push, [1, 1, 1]),
             &DispatchImages {
                 fetched: Some(DispatchImage {
                     texels: &source,

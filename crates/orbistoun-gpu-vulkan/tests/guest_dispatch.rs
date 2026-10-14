@@ -152,6 +152,8 @@ fn a_dispatch_clears_the_buffer_its_descriptor_names() {
 
 /// A partial last group runs only its partial count of threads (`PARTIAL_TG_EN`): of two groups
 /// of 64, the second runs ten, so the clear reaches 64 + 10 slots and the rest keep what they held.
+/// The count is the dispatch's, read where the module finds it (D855): one module, translated once,
+/// runs a last group of ten and one of thirty-seven, each as its dispatch says.
 #[test]
 fn a_partial_last_group_runs_only_its_partial_threads() {
     if !device_or_skip("guest clear, partial last group") {
@@ -165,22 +167,36 @@ fn a_partial_last_group_runs_only_its_partial_threads() {
         }),
     )
     .expect("the clear translates");
-    let before = vec![BEFORE; WINDOW_WORDS as usize];
-    let done = dispatch_guest(
-        &module,
-        &before,
-        (&user_data(WINDOW + 0x100, 2 * 64 * 16), [2, 1, 1]),
-        &DispatchImages::default(),
-    )
-    .expect("dispatched");
-    assert!(!done.escaped);
-    for (index, &word) in done.memory.iter().enumerate() {
-        let expected = if (0x40..0x40 + (64 + 10) * 4).contains(&index) {
-            VALUE[index % 4]
-        } else {
-            BEFORE
+    for partial_threads in [10, 37] {
+        let partial = PartialGroups {
+            last: [1, 0, 0],
+            threads: [partial_threads, 1, 1],
         };
-        assert_eq!(word, expected, "word {index}");
+        let before = vec![BEFORE; WINDOW_WORDS as usize];
+        // The user data, then the partial shape where the module reads it.
+        let mut push = user_data(WINDOW + 0x100, 2 * 64 * 16);
+        push.resize(
+            orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize,
+            0,
+        );
+        push.extend(partial.push_words());
+        let done = dispatch_guest(
+            &module,
+            &before,
+            (&push, [2, 1, 1]),
+            &DispatchImages::default(),
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        let end = 0x40 + (64 + partial_threads as usize) * 4;
+        for (index, &word) in done.memory.iter().enumerate() {
+            let expected = if (0x40..end).contains(&index) {
+                VALUE[index % 4]
+            } else {
+                BEFORE
+            };
+            assert_eq!(word, expected, "{partial_threads} threads, word {index}");
+        }
     }
 }
 
