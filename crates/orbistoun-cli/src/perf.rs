@@ -116,15 +116,20 @@ fn run_worker(path: &Path, seconds: u64, input: Option<&Path>) -> Result<()> {
             relink: false,
         })
         .context("driving the worker")?;
+    let mut failed = None;
     for event in &events {
         match event {
             orbistoun_proto::Event::Terminated { outcome, .. } => println!("  outcome {outcome:?}"),
-            orbistoun_proto::Event::Failed { error } => println!("  failed {error}"),
+            orbistoun_proto::Event::Failed { error } => failed = Some(error.clone()),
             _ => {}
         }
     }
     worker.shutdown().context("shutting the worker down")?;
-    Ok(())
+    // A run that never started has nothing to record, and its capture would wait for a client.
+    match failed {
+        Some(error) => Err(anyhow::anyhow!("the run failed: {error}")),
+        None => Ok(()),
+    }
 }
 
 /// `perf` - record a run of one title and rank where its time went.

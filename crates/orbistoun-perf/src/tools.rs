@@ -241,6 +241,10 @@ impl CaptureSummary {
     }
 }
 
+/// How long a capture may take to finish once its run has ended: saving a long recording takes a
+/// few seconds, and a client that never connected would take for ever.
+const CAPTURE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl Capture {
     /// Starts recording whatever client listens on `127.0.0.1:port` into `output`, for `seconds`
     /// from when it connects; it waits for the client to start.
@@ -273,12 +277,62 @@ impl Capture {
     ///
     /// When the tool fails or writes no file - a client that never connected.
     pub fn finish(self) -> io::Result<(PathBuf, CaptureSummary)> {
-        let out = self.child.wait_with_output()?;
-        let text = String::from_utf8_lossy(&out.stdout);
+        self.finish_within(CAPTURE_GRACE)
+    }
+
+    /// [`Self::finish`], giving up after `grace`: the tool's time limit counts from when a client
+    /// connects, so a run whose client never connected would leave it waiting for ever.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::finish`], and when the tool is still waiting after `grace`.
+    pub fn finish_within(
+        mut self,
+        grace: std::time::Duration,
+    ) -> io::Result<(PathBuf, CaptureSummary)> {
+        // Read as it runs: the tool's progress lines would fill a pipe nobody empties.
+        let drain = |pipe: Option<Box<dyn io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_string(&mut text);
+                }
+                text
+            })
+        };
+        let stdout = drain(
+            self.child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn io::Read + Send>),
+        );
+        let stderr = drain(
+            self.child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn io::Read + Send>),
+        );
+        let deadline = std::time::Instant::now() + grace;
+        while self.child.try_wait()?.is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err(io::Error::other(format!(
+                    concat!(
+                        "the capture was still waiting {}s after the run ended - the run's Tracy ",
+                        "client never connected, or never let go"
+                    ),
+                    grace.as_secs()
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let text = stdout.join().unwrap_or_default();
+        let errors = stderr.join().unwrap_or_default();
         if !self.output.is_file() {
             return Err(io::Error::other(format!(
                 "the capture wrote nothing - did the run start its Tracy client? {}",
-                String::from_utf8_lossy(&out.stderr).trim()
+                errors.trim()
             )));
         }
         Ok((self.output, CaptureSummary::parse(&text)))
