@@ -365,24 +365,49 @@ fn writable_more_target(
 /// a single base, a single resident target of the same extent, a modelled layout for its tiling at
 /// its element's size, and either an `8_8_8_8` `UNORM` element in an order `CB_COLOR0_INFO` names
 /// or an `8` `UNORM` one holding red. Anything else is `None`, and the draws stay unexecuted.
-fn writable_target(submission: &Submission) -> Option<(ColourTarget, ComponentSwap)> {
-    let target = submission.colour_target?;
-    let format = submission.colour_target_format?;
+fn writable_target(submission: &Submission) -> Result<(ColourTarget, ComponentSwap), String> {
+    let target = submission
+        .colour_target
+        .ok_or("no colour target is placed")?;
+    let format = submission
+        .colour_target_format
+        .ok_or("its format was never written")?;
     let one_target = submission.colour_target_bases == 1
         && submission.targets.len() == 1
         && submission
             .targets
             .values()
             .all(|extent| (extent.width, extent.height) == (target.width, target.height));
-    let bytes_per_texel = format.written_back_bytes()?;
-    (one_target
-        && submission
-            .colour_target_tiling
-            .and_then(tiling::SurfaceLayout::of)
-            .and_then(|layout| layout.at_bytes_per_texel(bytes_per_texel))
-            == Some(target.layout)
-        && target.layout.models(target.pipe_bank_xor))
-    .then_some((target, format.swap))
+    if !one_target {
+        return Err(format!(
+            "it draws into {} base(s) and {} extent(s), and one target is written back",
+            submission.colour_target_bases,
+            submission.targets.len()
+        ));
+    }
+    let bytes_per_texel = format.written_back_bytes().ok_or_else(|| {
+        format!(
+            "its format, COLOR code {} with number type {} and {:?} swap, is not one a frame is written back into",
+            format.format, format.number_type, format.swap
+        )
+    })?;
+    let tiled = submission
+        .colour_target_tiling
+        .and_then(tiling::SurfaceLayout::of)
+        .and_then(|layout| layout.at_bytes_per_texel(bytes_per_texel));
+    if tiled != Some(target.layout) {
+        return Err(format!(
+            "its tiling {:?} at {bytes_per_texel} bytes a texel is not its placed layout {:?}",
+            submission.colour_target_tiling, target.layout
+        ));
+    }
+    if !target.layout.models(target.pipe_bank_xor) {
+        return Err(format!(
+            "its pipe-bank XOR {} is not modelled in its layout {:?}",
+            target.pipe_bank_xor, target.layout
+        ));
+    }
+    Ok((target, format.swap))
 }
 
 /// A texel as `target` holds it in memory - a word in its byte order, or a byte - as the linear
@@ -786,18 +811,8 @@ impl GuestCp<'_> {
         if draws_depth_only(submission) {
             return self.draw_depth_only(submission, *execute);
         }
-        let (target, swap) = writable_target(submission).ok_or_else(|| {
-            format!(
-                concat!(
-                    "its colour target is not one a frame can be written back to exactly: ",
-                    "{:?}, {:?}, {:?}, {} base(s), {} extent(s)",
-                ),
-                submission.colour_target,
-                submission.colour_target_tiling,
-                submission.colour_target_format,
-                submission.colour_target_bases,
-                submission.targets.len()
-            )
+        let (target, swap) = writable_target(submission).map_err(|why| {
+            format!("its colour target is not one a frame can be written back to exactly: {why}")
         })?;
         if let Some(why) = unmodelled_draws(submission) {
             return Err(why);
@@ -4194,7 +4209,7 @@ mod tests {
         assert!(!super::draws_depth_only(
             &crate::pipeline::Submission::default()
         ));
-        assert!(super::writable_target(&with(0x0001_8000)).is_none());
+        assert!(super::writable_target(&with(0x0001_8000)).is_err());
     }
 
     /// A dispatch's buffer it changed and left holding one word throughout is written back as a
@@ -4849,7 +4864,9 @@ mod tests {
     }
 
     /// Only a target a frame can be written into exactly qualifies: single-base, single-target,
-    /// `64KB_R_X`, `8_8_8_8` `UNORM`; a second base, linear tiling or no format each refuses.
+    /// `64KB_R_X`, `8_8_8_8` `UNORM`; a second base, linear tiling, a signed-normalised format or
+    /// no format each refuses, saying which: Grand Theft Auto V's second submission draws into an
+    /// `8_8_8_8` `SNORM` target, and the refusal named every field but the one that refused.
     #[test]
     fn a_writable_target_needs_one_tiled_rgba8_surface() {
         use super::writable_target;
@@ -4878,17 +4895,26 @@ mod tests {
                 height: 1080,
             },
         );
-        assert!(writable_target(&submission).is_some());
+        assert!(writable_target(&submission).is_ok());
         let refused = |change: fn(&mut Submission)| {
             let mut changed = submission.clone();
             change(&mut changed);
-            writable_target(&changed).is_none()
+            writable_target(&changed).expect_err("refused")
         };
-        assert!(refused(|s| s.colour_target_bases = 2));
-        assert!(refused(
-            |s| s.colour_target_tiling = Some(SwizzleMode::Linear)
-        ));
-        assert!(refused(|s| s.colour_target_format = None));
+        assert!(refused(|s| s.colour_target_bases = 2).contains("2 base(s)"));
+        assert!(
+            refused(|s| s.colour_target_tiling = Some(SwizzleMode::Linear))
+                .contains("tiling Some(Linear)")
+        );
+        assert!(refused(|s| s.colour_target_format = None).contains("never written"));
+        assert!(
+            refused(|s| {
+                s.colour_target_format = Some(decode_colour_target_format(
+                    0x0001_80a8 | (1 << 11) | (1 << 8),
+                ));
+            })
+            .contains("COLOR code 10 with number type 1")
+        );
     }
 
     /// SetTFRing answers 0 and writes nothing in PPSA04263's shape, as `166-agc/driver-set-tf-ring`
