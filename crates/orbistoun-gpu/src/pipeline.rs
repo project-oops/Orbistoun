@@ -565,6 +565,9 @@ pub struct SubmissionReport {
     /// descriptor table, whose first eight words are the image descriptor (the GL context's
     /// textured shader loads them with `s_load_dwordx8 s[4:11], s[0:1], 0x00`).
     pub textures: Vec<ImageDescriptor>,
+    /// Each texture the draws bind, by its descriptor, once: where it lies in guest memory, its
+    /// format and layout - what a texture that reads as one value is traced to.
+    pub bound_textures: Vec<ImageDescriptor>,
     /// Draws' sampled texture slots nothing could be bound to - an unreadable descriptor, or one
     /// this does not read - so the backend would sample its placeholder.
     pub unbound_textures: usize,
@@ -3897,7 +3900,7 @@ impl Pipeline {
             return;
         }
         span(Span::TextureBind, || {
-            bind_textures(
+            submission.report.bound_textures = bind_textures(
                 &mut submission.commands,
                 (&self.texture_sources, &mut self.texels),
                 memory,
@@ -5456,13 +5459,15 @@ const FORMAT_2_10_10_10_UNORM: u32 = 50;
 type TexturesRead = BTreeMap<(u64, u32, Option<u64>, [bool; 2]), Option<RenderCommand>>;
 
 /// Inserts a [`RenderCommand::BindTexture`] after each fragment `SetUserData` whose descriptor
-/// table names a texture read exactly, so the draws that follow sample the guest's own texels.
+/// table names a texture read exactly, so the draws that follow sample the guest's own texels; and
+/// answers each texture bound, by its descriptor, once.
 fn bind_textures(
     commands: &mut Vec<RenderCommand>,
     (sources, texels): (&BTreeMap<ResourceId, Vec<TextureSource>>, &mut TexelCache),
     memory: &impl GuestMemory,
     (unbound, first_unbound): (&mut usize, &mut Option<String>),
-) {
+) -> Vec<ImageDescriptor> {
+    let mut named = NamedTextures::default();
     // Each draw's textures, where its pixel shader says they are: for every slot the bound fragment
     // module samples, the descriptor at that slot's table offset (zero for a module whose texture
     // did not come from the table). Re-emitted before a draw whenever the table or the module
@@ -5528,6 +5533,7 @@ fn bind_textures(
                             })
                             .clone()
                             .filter(|bound| shaped_for(bound, source));
+                        named.note(bound.as_ref(), || user_words(user, first));
                         if bound.is_none() {
                             *unbound += 1;
                             first_unbound.get_or_insert_with(|| {
@@ -5550,11 +5556,15 @@ fn bind_textures(
                     let sampler_at = source
                         .sampler_offset
                         .map(|offset| table + u64::from(offset));
+                    // Named once a submission, as it is first read: not again for each draw.
+                    let fresh =
+                        !read.contains_key(&(at, source.slot, sampler_at, source.saturated));
                     let bound = read
                         .entry((at, source.slot, sampler_at, source.saturated))
                         .or_insert_with(|| table_texture(source, (at, sampler_at), memory, texels))
                         .clone();
                     let bound = bound.filter(|bound| shaped_for(bound, source));
+                    named.note_at(bound.as_ref().filter(|_| fresh), at, memory);
                     // A texture the module samples and nothing binds draws the backend's
                     // placeholder, which is not the guest's picture: counted, so the draw is
                     // refused rather than drawn wrong.
@@ -5573,6 +5583,29 @@ fn bind_textures(
         out.push(command);
     }
     *commands = out;
+    named.0
+}
+
+/// The textures [`bind_textures`] bound, each by its descriptor, once.
+#[derive(Default)]
+struct NamedTextures(Vec<ImageDescriptor>);
+
+impl NamedTextures {
+    /// Names the texture the descriptor `words` reads describes, where it was bound; `words` is
+    /// read only then.
+    fn note(&mut self, bound: Option<&RenderCommand>, words: impl FnOnce() -> Option<[u32; 8]>) {
+        if let Some(words) = bound.and_then(|_| words()) {
+            let descriptor = decode_image_descriptor(words);
+            if !self.0.contains(&descriptor) {
+                self.0.push(descriptor);
+            }
+        }
+    }
+
+    /// Names the texture whose descriptor is at `at`, where it was bound.
+    fn note_at(&mut self, bound: Option<&RenderCommand>, at: u64, memory: &impl GuestMemory) {
+        self.note(bound, || read_descriptor(at, memory));
+    }
 }
 
 /// Everything [`user_data_texture`] reads for a source: the source's slot, shape and saturation, the
@@ -8024,7 +8057,7 @@ mod tests {
             },
         ];
         let mut unbound = 0;
-        bind_textures(
+        let named = bind_textures(
             &mut commands,
             (&sources, &mut super::TexelCache::new()),
             &memory,
@@ -8041,6 +8074,14 @@ mod tests {
             } => Some((*slot, texels.to_vec(), *width, *height)),
             _ => None,
         });
+        // The texture bound is named by its descriptor, where it lies included.
+        assert_eq!(
+            named
+                .iter()
+                .map(|t| (t.width, t.height))
+                .collect::<Vec<_>>(),
+            bound.iter().map(|b| (b.2, b.3)).collect::<Vec<_>>()
+        );
         assert_eq!(
             bound,
             Some((1, vec![0], 1, 1)),

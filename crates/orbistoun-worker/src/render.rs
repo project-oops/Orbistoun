@@ -1319,6 +1319,14 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
         "primitive topology {:?}",
         submission.report.primitive_topology
     );
+    // Each texture the draws bind, and where it lies: what a texture of one value is traced by.
+    for texture in &submission.report.bound_textures {
+        let _ = writeln!(
+            text,
+            "bound texture {}x{}, format {}, tiling {:?}, at {:#x}",
+            texture.width, texture.height, texture.format, texture.tiling, texture.base
+        );
+    }
     let listing = dir.join(format!("{name}-submission.txt"));
     let window: Vec<u8> = submission
         .guest_memory
