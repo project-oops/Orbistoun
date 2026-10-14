@@ -366,6 +366,7 @@ mod tests {
         let kept = std::fs::read(root.join("savedata/sce_sdmemory/memory.bin"))
             .expect("the memory is in the title's storage");
         assert_eq!(&kept[0x40..0x40 + written.len()], &written);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -374,6 +375,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::INITIALISED.store(false, std::sync::atomic::Ordering::Release);
+        super::MEMORY_SET_UP.store(false, std::sync::atomic::Ordering::Release);
         let mut param = [0u8; 64];
         param[4..8].copy_from_slice(&0x1ea2_f4d9_u32.to_le_bytes());
         param[8..16].copy_from_slice(&0x20_0000_u64.to_le_bytes());
