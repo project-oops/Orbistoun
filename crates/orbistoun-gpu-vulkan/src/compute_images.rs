@@ -26,6 +26,8 @@ pub enum DispatchFormat {
     /// Ten normalised bits each of red, green and blue from the low end and two of alpha, the
     /// guest's `2_10_10_10_UNORM` in the same bit order.
     Rgb10A2,
+    /// Four sixteen-bit floats, the guest's `16_16_16_16_FLOAT`: two words a texel.
+    Rgba16Float,
 }
 
 impl DispatchFormat {
@@ -37,6 +39,7 @@ impl DispatchFormat {
             Self::R32Uint => vk::Format::R32_UINT,
             Self::R32Float => vk::Format::R32_SFLOAT,
             Self::Rgb10A2 => vk::Format::A2B10G10R10_UNORM_PACK32,
+            Self::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
         }
     }
 
@@ -45,6 +48,7 @@ impl DispatchFormat {
         match self {
             Self::Rgba8 | Self::Rgb10A2 | Self::R32Uint | Self::R32Float => 4,
             Self::R8 => 1,
+            Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,
         }
     }

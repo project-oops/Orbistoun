@@ -2068,6 +2068,8 @@ pub enum TexelFormat {
     /// Red, green and blue in ten normalised bits each from the low end, alpha in the top two, a
     /// texel a word: the guest's `2_10_10_10_UNORM`.
     Rgb10A2,
+    /// Four sixteen-bit floats, a texel two words: the guest's `16_16_16_16_FLOAT`.
+    Rgba16Float,
 }
 
 impl TexelFormat {
@@ -2082,6 +2084,7 @@ impl TexelFormat {
             | Self::R32Uint
             | Self::R32Float => 4,
             Self::R8 => 1,
+            Self::Rgba16Float => 8,
             Self::Rgba32Uint => 16,
         }
     }
@@ -2623,9 +2626,11 @@ fn dispatch_image_surface(
     }
     // A ten-bit texel's channels are read in their own order: selects that move them are refused
     // rather than read as they are.
-    if format == TexelFormat::Rgb10A2 && destination_selects(words[3]) != IDENTITY_SELECTS {
+    if matches!(format, TexelFormat::Rgb10A2 | TexelFormat::Rgba16Float)
+        && destination_selects(words[3]) != IDENTITY_SELECTS
+    {
         return Err(format!(
-            "a dispatch image whose selects reorder its ten-bit channels: format {}",
+            "a dispatch image whose selects reorder its channels: format {}",
             describe_dispatch_image(&descriptor, words)
         ));
     }
@@ -2766,6 +2771,7 @@ fn dispatch_format(descriptor: &ImageDescriptor, words: [u32; 8]) -> Result<Texe
         FORMAT_8_8_8_8_UNORM => Ok(TexelFormat::Rgba8),
         FORMAT_8_UNORM => Ok(TexelFormat::R8),
         FORMAT_2_10_10_10_UNORM => Ok(TexelFormat::Rgb10A2),
+        FORMAT_16_16_16_16_FLOAT => Ok(TexelFormat::Rgba16Float),
         // A sixteen-byte texel is placed linearly, or in `64KB_D_X`; its other layouts are not
         // modelled.
         FORMAT_32_32_32_32_UINT
@@ -5312,6 +5318,8 @@ fn read_descriptor(at: u64, memory: &impl GuestMemory) -> Option<[u32; 8]> {
 
 /// `32_FLOAT`, the image format of a depth texture a GL guest uploads as texels (`gfx10-rsrc.json`).
 const FORMAT_32_FLOAT: u32 = 22;
+/// `16_16_16_16_FLOAT`, four sixteen-bit floats (`gfx10-rsrc.json`, enum `GFX10_FORMAT` 71).
+const FORMAT_16_16_16_16_FLOAT: u32 = 71;
 
 /// What a compare source samples when its descriptor is a linear `32_FLOAT` image of one level in
 /// guest memory rather than a depth target: its depths, read as they lie, compared through the
@@ -5809,11 +5817,14 @@ const fn texture_encoding(format: TexelFormat) -> crate::backend::TextureEncodin
         TexelFormat::Float11_11_10 => crate::backend::TextureEncoding::Float11_11_10,
         TexelFormat::Rgba8Srgb => crate::backend::TextureEncoding::Rgba8Srgb,
         TexelFormat::Rgb10A2 => crate::backend::TextureEncoding::Rgb10A2,
+        // A draw's texture is never a dispatch's eight-byte float one: `sampled_format` reads no
+        // such format.
         TexelFormat::Rgba8
         | TexelFormat::R8
         | TexelFormat::Rgba32Uint
         | TexelFormat::R32Uint
-        | TexelFormat::R32Float => crate::backend::TextureEncoding::Rgba8,
+        | TexelFormat::R32Float
+        | TexelFormat::Rgba16Float => crate::backend::TextureEncoding::Rgba8,
     }
 }
 
@@ -5911,10 +5922,11 @@ fn swizzle_texels(texels: &[u32], format: TexelFormat, selects: [u32; 4]) -> std
         .iter()
         .map(|&texel| {
             let channels = match format {
-                // A draw's texture is never a sixteen-byte one: `sampled_format` reads no such
-                // format, so its arm is the four-byte one's.
+                // A draw's texture is never a sixteen- or eight-byte one: `sampled_format` reads no
+                // such format, so its arm is the four-byte one's.
                 TexelFormat::Rgba8
                 | TexelFormat::Rgba32Uint
+                | TexelFormat::Rgba16Float
                 | TexelFormat::R32Uint
                 | TexelFormat::R32Float
                 | TexelFormat::Float11_11_10

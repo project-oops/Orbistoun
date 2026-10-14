@@ -818,6 +818,9 @@ fn dispatch_image(
             orbistoun_gpu::pipeline::TexelFormat::R32Uint => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::R32Uint
             }
+            orbistoun_gpu::pipeline::TexelFormat::Rgba16Float => {
+                orbistoun_gpu_vulkan::compute_images::DispatchFormat::Rgba16Float
+            }
             orbistoun_gpu::pipeline::TexelFormat::R32Float => {
                 orbistoun_gpu_vulkan::compute_images::DispatchFormat::R32Float
             }

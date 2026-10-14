@@ -644,3 +644,39 @@ fn a_dispatch_fetches_from_two_images() {
     assert!(!done.escaped);
     assert_eq!(done.stored.as_deref(), Some(second.as_slice()));
 }
+
+/// A `16_16_16_16_FLOAT` image, two words a texel, is fetched and stored as the four halves it
+/// holds: a copy between two moves every texel exactly, each channel a value a half holds.
+/// PPSA21564's compute program at `0x50053c700` reads a 1024 x 1024 one.
+#[test]
+fn a_dispatch_copies_a_half_float_image() {
+    if !device_or_skip("half-float image copy") {
+        return;
+    }
+    // Halves 1.0, 2.0, -0.5 and 0.25 at each texel, the first moved by its index in steps of
+    // 1/1024, exact in a half.
+    let source: Vec<u32> = (0..SIDE * SIDE)
+        .flat_map(|i| [(0x3c00 + i) | (0x4000 << 16), 0xb800 | (0x3400 << 16)])
+        .collect();
+    let destination = vec![0_u32; source.len()];
+    let image = |texels| DispatchImage {
+        texels,
+        format: DispatchFormat::Rgba16Float,
+        width: SIDE,
+        height: SIDE,
+        depth: None,
+    };
+    let done = dispatch_guest(
+        &translated(&COPY),
+        &[0],
+        (&[0; 16], [1, 1, 1]),
+        &DispatchImages {
+            fetched: Some(image(&source)),
+            more_fetched: &[],
+            stored: Some(image(&destination)),
+        },
+    )
+    .expect("dispatched");
+    assert!(!done.escaped);
+    assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+}
