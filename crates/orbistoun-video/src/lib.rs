@@ -881,6 +881,10 @@ pub fn install_flip_observer(observer: FlipObserver) {
 /// be read and checked against the declarations.
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
     &[
+        ("sceAvPlayerInitEx", av_player::init_ex),
+        ("sceAvPlayerClose", av_player::close),
+        ("sceAvPlayerIsActive", av_player::is_active),
+        ("sceAvPlayerStreamCount", av_player::stream_count),
         ("scePngDecQueryMemorySize", png_dec::query_memory_size),
         ("scePngDecCreate", png_dec::create),
         ("scePngDecParseHeader", png_dec::parse_header),

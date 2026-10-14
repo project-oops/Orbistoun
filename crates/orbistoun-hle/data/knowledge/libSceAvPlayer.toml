@@ -1,0 +1,60 @@
+library = "libSceAvPlayer"
+
+[[function]]
+name = "sceAvPlayerInitEx"
+purpose = "Opens a media player: takes its memory through the init block's allocate callback and writes the handle."
+returns = "status"
+edge_cases = [
+    "MEASURED (link-bound, a 0x230-byte block: size word 0x230 at +0, object word at +0x08, callbacks at +0x10, +0x18, +0x20, +0x28): answered 0, called the allocate callback at +0x10 once with the object word first and 0x20 second, and wrote as the handle exactly the pointer the callback answered (equals-alloc-ptr 1, offset-from-alloc 0).",
+    "MEASURED: a block whose size word is 0x100 answers 0x806a0001, and so does a null allocate slot.",
+    "Not measured: a null block or handle pointer, a size word above 0x230, and an allocation that fails; orbistoun answers its placeholder there.",
+]
+note = "The allocate callback's third argument was not rowed - the probe's callback logged it, the check did not (re-filed as obSCEne REQ-20261014T1300Z-rf03 item 4) - so orbistoun passes 0x1000 there, a page, valid whether the third argument is a size or an alignment."
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA25872-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceAvPlayerClose"
+purpose = "Closes a player and frees its memory through the deallocate callback."
+returns = "status"
+edge_cases = [
+    "MEASURED: answered 0 and made one callback, for each of two players opened in turn.",
+    "orbistoun calls the deallocate slot at +0x18 with the object word and the handle; which slot Close called, and with what, was not rowed.",
+    "A handle InitEx did not open answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, Close-first, Close-second)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceAvPlayerIsActive"
+purpose = "Whether a player is active."
+returns = "status"
+edge_cases = [
+    "MEASURED: a player with no source answered 0x15aa801 with the handle 0x15aa800, before and after a refused AddSourceEx - true in the low byte, the rest of rax left over. orbistoun answers 1.",
+    "A handle InitEx did not open answers 0.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, IsActive-before-source, IsActive-after-source)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceAvPlayerStreamCount"
+purpose = "How many streams a player's source holds."
+returns = "count"
+edge_cases = [
+    "MEASURED: 0 for a player with no source.",
+    "A handle InitEx did not open answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, StreamCount-before-source)."
+found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
+found_on = "2026-10-14"
