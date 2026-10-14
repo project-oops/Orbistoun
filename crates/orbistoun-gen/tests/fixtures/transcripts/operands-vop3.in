@@ -313,3 +313,13 @@ v_cubema_f32 v100, v200, v130, v12
 v_cubema_f32 v255, s30, v12, v77
 v_cubema_f32 v9, 1.0, v77, s101
 v_cubema_f32 v130, v88, s101, -2.0
+// The reciprocal of the major axis's magnitude that follows v_cubema_f32 in ACO's cube
+// coordinate (aco_select_nir_alu.cpp: v_rcp_f32 of |ma|), which oops-gl's cube-map pixel
+// shader runs (VOP3 opcode 426, VOP1's v_rcp_f32 at 0x180 + 0x2a): the absolute value
+// needs the three-operand encoding. Varied vector, scalar and inline sources, and registers
+// spread across the file; the modifiers are VOP3's own bits, read for every opcode alike.
+v_rcp_f32_e64 v2, v4
+v_rcp_f32_e64 v100, v200
+v_rcp_f32_e64 v255, s30
+v_rcp_f32_e64 v9, 1.0
+v_rcp_f32_e64 v130, v88

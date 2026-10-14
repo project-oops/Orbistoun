@@ -255,6 +255,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_and_b32_e32",
     "v_xor_b32_e32",
     "v_rcp_f32_e32",
+    "v_rcp_f32_e64",
     "v_rsq_f32_e32",
     "v_sin_f32_e32",
     "v_sqrt_f32_e32",
@@ -2501,7 +2502,7 @@ fn vector_instruction<M: Model + ?Sized>(
         // separately and refused where not implemented.
         "v_cndmask_b32_e64" | "v_add_f32_e64" | "v_sub_f32_e64" | "v_subrev_f32_e64"
         | "v_mul_f32_e64" | "v_mac_f32_e64" | "v_fma_f32" | "v_mad_f32" | "v_div_fixup_f32"
-        | "v_div_fmas_f32" => long_form_arithmetic(model, instruction, name),
+        | "v_div_fmas_f32" | "v_rcp_f32_e64" => long_form_arithmetic(model, instruction, name),
 
         // The division pre-scale, and the carry-producing arithmetic that writes a per-lane carry
         // mask as a second destination; 64-bit address arithmetic is built from these.
@@ -3937,6 +3938,12 @@ fn combine<M: Model + ?Sized>(
         ("v_cvt_pkrtz_f16_f32_e64", [low, high]) => Ok(pack_two_halves(model, *low, *high)),
         ("v_max_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMAX, *first, *second)),
         ("v_min_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMIN, *first, *second)),
+        // The reciprocal ACO takes of a cube coordinate's major axis, `|ma|` through the long
+        // form's absolute value: an exact division, as the short form's.
+        ("v_rcp_f32_e64", [value]) => {
+            let one = model.constant(ONE_F32);
+            Ok(model.f32_binary(op::FDIV, one, *value))
+        }
         // `x - floor(x)`, as the short form computes it.
         ("v_fract_f32_e64", [value]) => {
             let floor = model.f32_ext_unary(GLSL_FLOOR, *value);
