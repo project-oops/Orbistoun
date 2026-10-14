@@ -21,6 +21,9 @@ guest_module! {
         // (queue): refused as measured.
         "sceAgcDriverDestroyQueue" => 1,
         "sceAgcDriverGetDefaultOwner" => 6,
+        // (event): a kevent `sceKernelWaitEqueue` delivered.
+        "sceAgcDriverGetEqContextId" => 1,
+        "sceAgcDriverGetEqEventType" => 1,
         "sceAgcDriverGetResourceRegistrationMaxNameLength" => 6,
         "sceAgcDriverInitResourceRegistration" => 6,
         "sceAgcDriverQueryResourceRegistrationUserMemoryRequirements" => 6,
@@ -140,6 +143,40 @@ fn add_eq_event(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         Some(_) => BAD_QUEUE,
         None => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
+}
+
+/// Where a delivered kevent keeps its `data`: after `ident` (8 bytes), `filter`, `flags` and
+/// `fflags` (8 together).
+const KEVENT_DATA: u64 = 0x10;
+
+/// A delivered kevent's `data`, or `None` for an event the guest cannot hand over.
+fn kevent_data(event: u64) -> Option<u64> {
+    if event == 0 {
+        return None;
+    }
+    // SAFETY: the guest's kevent, read through the checked accessor.
+    unsafe { orbistoun_mem::guest::read_u64(event + KEVENT_DATA) }
+}
+
+/// `sceAgcDriverGetEqEventType(event)`: the kevent's `data`, all 64 bits (obSCEne
+/// REQ-20261013T1000Z-eq01, `166-agc/driver-add-eq-event`, `report-20261014-004800.log` 9119-9180:
+/// `0xff00` for a release under context 0, `0x101ff00` under `0x101`, and every synthetic `data`
+/// as it was). A null event is unmeasured and answers the placeholder.
+fn get_eq_event_type(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    kevent_data(args[0])
+        .unwrap_or_else(|| u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()))
+}
+
+/// `sceAgcDriverGetEqContextId(event)`: the kevent's `data` above its low sixteen bits, the
+/// release's context id as `post_end_of_pipe` writes it (`-eq01`: `0x101` for `0x101ff00`,
+/// `0x8000101` for `0x8000101ff00`, `0xdead` for `0xdeadbeef`, 0 for 0). PPSA25872's end-of-pipe
+/// thread indexes a table with its low three bits. A null event is unmeasured and answers the
+/// placeholder.
+fn get_eq_context_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    kevent_data(args[0]).map_or_else(
+        || u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
+        |data| data >> 16,
+    )
 }
 
 /// `sceAgcDriverSetHsOffchipParam(...)`: sets the hull-shader off-chip parameter, the driver's
@@ -3865,6 +3902,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAgcDriverSetHsOffchipParam", set_hs_offchip_param),
         ("sceAgcDriverSetTFRing", set_tf_ring),
         ("sceAgcDriverAddEqEvent", add_eq_event),
+        ("sceAgcDriverGetEqContextId", get_eq_context_id),
+        ("sceAgcDriverGetEqEventType", get_eq_event_type),
         (
             "sceAgcDriverInitResourceRegistration",
             init_resource_registration,
@@ -5470,6 +5509,31 @@ mod tests {
         assert_eq!(served(&[0x5e2d_0000_ee40, 0, 0, 0, 0, 0]), 0);
         assert_eq!(served(&[0x5e2d_0000_ee40, 1, 0, 0, 0, 0]), 0);
         assert_eq!(served(&[0xdead, 0, 0, 0, 0, 0]), 0x8002_0009);
+    }
+
+    /// `sceAgcDriverGetEqEventType` answers a kevent's `data` and `sceAgcDriverGetEqContextId` the
+    /// part above its low sixteen bits, for the kevents obSCEne -eq01 handed them.
+    #[test]
+    fn eq_accessors_answer_as_measured() {
+        let mut kevent: [u8; 32] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0xf2, 0xff, 0x20, 0, 0, 0, 0, 0, //
+            0, 0xff, 0x01, 0x01, 0, 0, 0, 0, 0x44, 0x33, 0x22, 0x11, 0, 0, 0, 0,
+        ];
+        let call = |kevent: &mut [u8; 32], f: fn(&[u64; GUEST_ARG_REGISTERS]) -> u64| {
+            f(&[kevent.as_mut_ptr() as u64, 0, 0, 0, 0, 0])
+        };
+        assert_eq!(call(&mut kevent, super::get_eq_event_type), 0x101_ff00);
+        assert_eq!(call(&mut kevent, super::get_eq_context_id), 0x101);
+        for (data, context) in [
+            (0x0800_0101_ff00_u64, 0x0800_0101),
+            (0xdead_beef, 0xdead),
+            (0xff00, 0),
+            (0, 0),
+        ] {
+            kevent[16..24].copy_from_slice(&data.to_le_bytes());
+            assert_eq!(call(&mut kevent, super::get_eq_event_type), data);
+            assert_eq!(call(&mut kevent, super::get_eq_context_id), context);
+        }
     }
 
     /// `sceAgcDriverSetHsOffchipParam` is served and answers the measured `0` for PPSA02664's

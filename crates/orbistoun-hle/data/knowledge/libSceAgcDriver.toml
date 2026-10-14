@@ -16,6 +16,32 @@ cites = "obSCEne REQ-20260928T1338Z-5b78 (sweep 20260928-153434, check 166-agc/d
 found_on = "2026-09-08"
 
 [[function]]
+name = "sceAgcDriverGetEqContextId"
+arity = 1
+purpose = "(event): the context id of an end-of-pipe kevent sceKernelWaitEqueue delivered."
+edge_cases = [
+    "MEASURED (REQ-eq01, by name and by NID 0xbc95ee5351ee0e67 alike): the kevent's data (+0x10) shifted right sixteen - 0x0 for data 0xff00, 0x101 for 0x101ff00, 0x8000101 for 0x8000101ff00, 0xdead for 0xdeadbeef, 0x0 for 0.",
+    "PPSA25872's end-of-pipe thread calls it twice per submission and indexes a table with the low three bits of the answer.",
+    "A null event is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1000Z-eq01, reports/hardware/report-20261014-004800.log lines 9119-9180 (166-agc/driver-add-eq-event)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceAgcDriverGetEqEventType"
+arity = 1
+purpose = "(event): the type of an end-of-pipe kevent sceKernelWaitEqueue delivered."
+edge_cases = [
+    "MEASURED (REQ-eq01, by name): the kevent's data (+0x10), all 64 bits - 0xff00, 0x101ff00, 0x8000101ff00, 0xdeadbeef and 0 as each was written; not masked to the low sixteen.",
+    "A null event is unmeasured and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261013T1000Z-eq01, reports/hardware/report-20261014-004800.log lines 9119-9180 (166-agc/driver-add-eq-event)."
+found_on = "2026-10-14"
+
+[[function]]
 name = "sceAgcDriverCreateQueue"
 purpose = "Creates a submission queue (compute type 3 or the Universal Graphics Queue type 0) for handing command buffers to the driver."
 edge_cases = [
