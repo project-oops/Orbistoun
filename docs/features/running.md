@@ -181,6 +181,7 @@ A title's mods sit beside it, in its directory's `mods`, one directory each (D83
     mod.toml   optional - enabled = false turns it off; description says what it is
     app0/      files laid over the title's own, as its /app0 sees them
     patches.toml  bytes replaced in the title's executable once it is linked
+    cheats.toml   values written into the running title, once or at every flip
 ```
 
 A patch names its place by its offset from the executable's base, as a disassembler shows it, the
@@ -196,6 +197,22 @@ description = "skip the intro"
 
 A mod's patches apply all or none: one finding other bytes than it expects - a mod made for another
 build of the title - leaves every patch of that mod unwritten, and the log says what it found.
+
+A cheat writes a value into the running title, at every flip by default - a frozen value - or once.
+Its address starts at an offset from the executable's base and follows a pointer chain where it
+names one, each step reading the eight bytes there as an address and adding the step:
+
+```toml
+[[cheat]]
+offset = 0xcc5000
+pointers = [0x18, 0x40]     # optional
+value = "e7 03 00 00"
+every = "flip"              # or "once"
+description = "999 lives"
+```
+
+A step that lands on unmapped memory, or a null pointer - a structure the title has not made yet - is
+tried again at the next flip; a value is only written where the title itself may write.
 
 Every mod not turned off applies, in the order of the directories' names, so where two replace the
 same file the later name's wins. A mod's files are never written: a staged title's writes land in its

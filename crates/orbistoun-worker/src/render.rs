@@ -248,6 +248,8 @@ pub fn any_frame_drawn() -> bool {
 pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     perf::count(perf::Count::Flips);
+    // The user's mods' cheats, written at each flip (D836).
+    crate::cheats::at_flip();
     if let Some(first) = perf::close_first_frame() {
         let ms = |phase| std::time::Duration::from_nanos(first.spent(phase)).as_secs_f64() * 1000.0;
         let parts: Vec<String> = perf::Phase::ALL

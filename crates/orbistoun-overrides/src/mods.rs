@@ -7,6 +7,7 @@
 //!     mod.toml      optional: `enabled = false` turns it off, `description` says what it is
 //!     app0/         optional: files laid over the title's own, as its /app0 sees them
 //!     patches.toml  optional: bytes replaced in the title's executable once it is linked
+//!     cheats.toml   optional: values written into the running title, once or at every flip
 //! ```
 //!
 //! A patch names where it applies by its offset from the module's base, the bytes it expects
@@ -228,6 +229,106 @@ pub fn plan_patches(
         .collect()
 }
 
+/// When a cheat writes its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CheatTiming {
+    /// At every guest flip, so the value stays whatever the title does: a frozen value.
+    #[default]
+    Flip,
+    /// Once, at the first flip.
+    Once,
+}
+
+/// One cheat from a mod's `cheats.toml`, as written there.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct CheatEntry {
+    /// Where the chain starts, from the executable's base.
+    offset: u64,
+    /// Each pointer followed from there: the eight bytes at the address so far are read as an
+    /// address, and this added to it.
+    #[serde(default)]
+    pointers: Vec<i64>,
+    /// The bytes written, as hexadecimal pairs.
+    value: String,
+    /// When.
+    #[serde(default)]
+    every: CheatTiming,
+    /// What it does.
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// A `cheats.toml`: its cheats, in order.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+struct CheatFile {
+    #[serde(default, rename = "cheat")]
+    cheats: Vec<CheatEntry>,
+}
+
+/// One cheat, read: where its chain starts, the pointers it follows, what it writes and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cheat {
+    /// Where the chain starts, from the executable's base.
+    pub offset: u64,
+    /// Each pointer followed from there, as an offset added to the address read.
+    pub pointers: Vec<i64>,
+    /// The bytes written.
+    pub value: Vec<u8>,
+    /// When.
+    pub every: CheatTiming,
+    /// What it does.
+    pub description: Option<String>,
+}
+
+/// The file a mod's cheats are in.
+pub const CHEAT_FILE: &str = "cheats.toml";
+
+impl Mod {
+    /// Its cheats, from its `cheats.toml`; none where it has none.
+    ///
+    /// # Errors
+    ///
+    /// A `cheats.toml` that does not parse, or a cheat whose value is not hexadecimal bytes.
+    pub fn cheats(&self) -> Result<Vec<Cheat>, String> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join(CHEAT_FILE)) else {
+            return Ok(Vec::new());
+        };
+        let file: CheatFile = toml::from_str(&text).map_err(|e| e.to_string())?;
+        file.cheats
+            .into_iter()
+            .map(|entry| {
+                let value = hex_bytes(&entry.value)?;
+                if value.is_empty() {
+                    return Err(format!("the cheat at {:#x} writes nothing", entry.offset));
+                }
+                Ok(Cheat {
+                    offset: entry.offset,
+                    pointers: entry.pointers,
+                    value,
+                    every: entry.every,
+                    description: entry.description,
+                })
+            })
+            .collect()
+    }
+}
+
+impl Cheat {
+    /// The address it writes at in an executable placed at `base`: its offset from there, then each
+    /// pointer followed - the eight bytes at the address so far read as an address, its offset
+    /// added. `None` where a pointer cannot be read or is null, as a structure not yet made is.
+    pub fn address(&self, base: u64, read_u64: impl Fn(u64) -> Option<u64>) -> Option<u64> {
+        let mut at = base.checked_add(self.offset)?;
+        for &step in &self.pointers {
+            let pointed = read_u64(at).filter(|&pointer| pointer != 0)?;
+            at = pointed.checked_add_signed(step)?;
+        }
+        Some(at)
+    }
+}
+
 /// Bytes as spaced hexadecimal pairs.
 fn hex(bytes: &[u8]) -> String {
     bytes
@@ -276,7 +377,61 @@ pub fn found(mods_dir: &Path) -> Vec<Mod> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Patch, found, hex_bytes, plan_patches};
+    use super::{Cheat, CheatTiming, Patch, found, hex_bytes, plan_patches};
+
+    /// A cheat's address is its offset from the base, then each pointer read and offset; a null
+    /// or unreadable pointer leaves it nowhere.
+    #[test]
+    fn a_cheat_follows_its_pointer_chain() {
+        let cheat = |pointers: Vec<i64>| Cheat {
+            offset: 0x100,
+            pointers,
+            value: vec![1],
+            every: CheatTiming::Flip,
+            description: None,
+        };
+        let memory = |at: u64| match at {
+            0x1100 => Some(0x9000),
+            0x9010 => Some(0x7000),
+            0x2100 => Some(0),
+            _ => None,
+        };
+        assert_eq!(cheat(vec![]).address(0x1000, memory), Some(0x1100));
+        assert_eq!(cheat(vec![0x10]).address(0x1000, memory), Some(0x9010));
+        assert_eq!(cheat(vec![0x10, -8]).address(0x1000, memory), Some(0x6ff8));
+        assert_eq!(cheat(vec![0x10]).address(0x2000, memory), None, "null");
+        assert_eq!(
+            cheat(vec![0x10]).address(0x3000, memory),
+            None,
+            "unreadable"
+        );
+    }
+
+    /// A mod's `cheats.toml` reads, frozen at every flip unless it says once.
+    #[test]
+    fn a_cheat_file_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(super::CHEAT_FILE),
+            concat!(
+                "[[cheat]]\noffset = 0x10\npointers = [0x8]\nvalue = \"e8 03 00 00\"\n",
+                "[[cheat]]\noffset = 0x20\nvalue = \"01\"\nevery = \"once\"\n",
+            ),
+        )
+        .unwrap();
+        let module = super::Mod {
+            name: "m".to_owned(),
+            dir: dir.path().to_path_buf(),
+            file: super::ModFile::default(),
+            unreadable: None,
+        };
+        let cheats = module.cheats().unwrap();
+        assert_eq!(cheats.len(), 2);
+        assert_eq!(cheats[0].value, [0xe8, 0x03, 0, 0]);
+        assert_eq!(cheats[0].pointers, [8]);
+        assert_eq!(cheats[0].every, CheatTiming::Flip);
+        assert_eq!(cheats[1].every, CheatTiming::Once);
+    }
 
     fn patch(offset: u64, original: &[u8], bytes: &[u8]) -> Patch {
         Patch {

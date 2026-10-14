@@ -16,6 +16,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use orbistoun_proto::codec::{read_message, write_message};
 use orbistoun_proto::{Event, Outcome, PROTOCOL_VERSION, Phase, Request, check_version};
+mod cheats;
 pub mod device_thread;
 mod error;
 pub mod experiment;
@@ -984,6 +985,15 @@ fn apply_mod_patches(module: &Path, image: &Image) {
         .iter()
         .filter(|m| m.applies())
     {
+        // Its cheats, written at the title's flips from now.
+        match applying.cheats() {
+            Ok(cheats) if !cheats.is_empty() => {
+                tracing::info!("the mod {} arms {} cheat(s)", applying.name, cheats.len());
+                cheats::arm(&applying.name, image, cheats);
+            }
+            Ok(_) => {}
+            Err(why) => tracing::warn!("the mod {}'s cheats were not armed: {why}", applying.name),
+        }
         let planned = applying.patches().and_then(|patches| {
             if let Some(other) = patches.iter().find_map(|p| {
                 p.module

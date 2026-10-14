@@ -21,6 +21,12 @@ naming another of the title's modules leaves every one of that mod's patches unw
 log says which and what it found. Only the executable is patched; the title's other modules are
 linked and protected inside the link (D724), and patching them is a further step.
 
+A mod's `cheats.toml` writes values into the running title at its flips: each from an offset from
+the executable's base, through a pointer chain where it names one, written at every flip (a frozen
+value) or once. Every step is checked against the executable's segments and the guest's own
+mappings before it is touched, and a value is written only where the title may write; a chain that
+does not reach yet is tried again at the next flip.
+
 **Why:** a player changing a title - a fan translation, replaced textures, a fix the publisher never
 shipped - wants the title's own files left alone and the change undone by turning it off, and the
 layered filesystem already answers each path from the first layer holding it (D251). A mod is the
