@@ -53,6 +53,51 @@ pub(crate) fn kept(traces: &std::path::Path) -> Result<Vec<Kept>> {
     Ok(kept)
 }
 
+/// The most distinct colours [`light`] counts: past it, a frame is plainly a picture.
+pub(crate) const MOST_COLOURS: usize = 4096;
+
+/// How much of a kept frame shows anything: its pixels, those whose colour is not black - the
+/// alpha aside, since a flipped frame's is often zero - and its distinct colours, counted as far as
+/// [`MOST_COLOURS`]; the one colour, where the frame has only one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Light {
+    pub(crate) pixels: u64,
+    pub(crate) lit: u64,
+    pub(crate) colours: usize,
+    pub(crate) only: Option<[u8; 3]>,
+}
+
+/// Whether a frame shows next to nothing: one colour, or under one pixel in a thousand lit - a black
+/// screen with a few stray pixels.
+pub(crate) const fn dark(light: &Light) -> bool {
+    light.colours <= 1 || light.lit * 1000 < light.pixels
+}
+
+/// The [`Light`] of a frame's `Rgba8` bytes.
+pub(crate) fn light(bytes: &[u8]) -> Light {
+    let mut colours: std::collections::HashSet<[u8; 3]> = std::collections::HashSet::new();
+    let (mut pixels, mut lit) = (0, 0);
+    for pixel in bytes.chunks_exact(4) {
+        let colour = [pixel[0], pixel[1], pixel[2]];
+        pixels += 1;
+        if colour != [0; 3] {
+            lit += 1;
+        }
+        if colours.len() < MOST_COLOURS {
+            colours.insert(colour);
+        }
+    }
+    let only = (colours.len() == 1)
+        .then(|| colours.iter().copied().next())
+        .flatten();
+    Light {
+        pixels,
+        lit,
+        colours: colours.len(),
+        only,
+    }
+}
+
 /// `count` of `kept`, spaced evenly from the first to the last: the whole run at a glance
 /// whatever its length. All of them when there are no more than `count`.
 pub(crate) fn spread(kept: &[Kept], count: usize) -> Vec<Kept> {
@@ -359,6 +404,45 @@ mod tests {
             super::compare(&kept[..7], &reference[..7], 0).is_none(),
             "not whole pixels"
         );
+    }
+
+    /// A frame's light counts the pixels whose colour is not black, its alpha aside - a flipped
+    /// frame's alpha is often zero - and the distinct colours, as far as the cap; a frame of one
+    /// colour says so, black or not.
+    #[test]
+    fn a_frames_light_counts_lit_pixels_and_colours() {
+        use super::{Light, light};
+        let pixel = |rgba: [u8; 4]| rgba.to_vec();
+        let mut bytes = Vec::new();
+        bytes.extend(pixel([0, 0, 0, 0]));
+        bytes.extend(pixel([0, 0, 0, 0xff]));
+        bytes.extend(pixel([0xff, 0xff, 0, 0]));
+        bytes.extend(pixel([0xff, 0xff, 0, 0xff]));
+        assert_eq!(
+            light(&bytes),
+            Light {
+                pixels: 4,
+                lit: 2,
+                colours: 2,
+                only: None,
+            }
+        );
+        let grey: Vec<u8> = [0x40, 0x40, 0x40, 0x12].repeat(16);
+        assert_eq!(light(&grey).only, Some([0x40, 0x40, 0x40]));
+        assert_eq!(light(&grey).colours, 1);
+        let many: Vec<u8> = (0..=u16::MAX)
+            .flat_map(|i| {
+                let [low, high] = i.to_le_bytes();
+                [low, high, 1, 0]
+            })
+            .collect();
+        assert_eq!(light(&many).colours, super::MOST_COLOURS);
+        // Dark: one colour, or under one pixel in a thousand lit.
+        assert!(super::dark(&light(&grey)));
+        assert!(!super::dark(&light(&bytes)));
+        let mut sliver = [0, 0, 0, 0xff].repeat(2000);
+        sliver[0] = 0xff;
+        assert!(super::dark(&light(&sliver)));
     }
 
     /// The difference picture is black where the frames agree and holds the per-channel distance

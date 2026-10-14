@@ -21,6 +21,7 @@ pub mod device_thread;
 mod error;
 pub mod experiment;
 pub mod fault;
+pub mod flip_origins;
 pub mod frame_region;
 pub mod page_guard;
 pub mod profile;

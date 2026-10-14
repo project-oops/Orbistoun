@@ -832,6 +832,54 @@ fn note_reproduction(
     Ok(())
 }
 
+/// How many of the last kept frames [`report_light`] reads.
+const LIGHT_FRAMES: usize = 4;
+
+/// Says how much of each of the last kept frames shows anything, and finds a run whose last frames
+/// are each one colour: what a title that presents yet draws nothing visible looks like.
+fn report_light(paths: &orbistoun_paths::Paths) -> Result<()> {
+    let kept = crate::frames::kept(&crate::frames::kept_dir(&paths.traces_dir()))?;
+    let last = &kept[kept.len().saturating_sub(LIGHT_FRAMES)..];
+    let mut lights = Vec::new();
+    for frame in last {
+        let bytes = std::fs::read(&frame.path)
+            .with_context(|| format!("reading {}", frame.path.display()))?;
+        let light = crate::frames::light(&bytes);
+        println!(
+            "  light: flip {} ({}x{}) - {} of {} pixel(s) lit, {}{} colour(s)",
+            frame.flip,
+            frame.width,
+            frame.height,
+            light.lit,
+            light.pixels,
+            light.colours,
+            if light.colours >= crate::frames::MOST_COLOURS {
+                " or more"
+            } else {
+                ""
+            }
+        );
+        lights.push(light);
+    }
+    if !lights.is_empty() && lights.iter().all(crate::frames::dark) {
+        let colours: std::collections::BTreeSet<String> = lights
+            .iter()
+            .filter_map(|light| light.only)
+            .map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"))
+            .collect();
+        println!(
+            "  ! the last {} kept frame(s) are dark - one colour{}, or under one pixel in a thousand lit: the title presents, but next to nothing it draws shows",
+            lights.len(),
+            if colours.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", colours.into_iter().collect::<Vec<_>>().join(", "))
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Whether a run replayed the input `title`'s record replays: none for a record with no
 /// `inputs.toml`, the same bytes for one with it.
 fn replays_the_same_input(
@@ -1160,6 +1208,11 @@ pub(crate) fn record_compat(
             println!();
             println!("  could not record {title}: {e:#}");
         }
+    }
+
+    // What the run's last frames show, whatever its record keeps of them.
+    if let Err(e) = report_light(&orbistoun_paths::Paths::resolve()) {
+        println!("  could not read the kept frames: {e:#}");
     }
 
     // A run that faulted gets the attribution framed by the hardware ground truth, so the default

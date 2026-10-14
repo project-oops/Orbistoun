@@ -277,6 +277,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // comes with a device copy of its own. One the guest read before flipping was written back
     // then, and is still the frame drawn into this buffer.
     let drawn_into = orbistoun_gpu::agc_driver::frame_drawn_into(address);
+    crate::flip_origins::note_flip(address, drawn_into);
     if drawn_into.is_some() {
         keep_frame_at_this_flip();
     }
@@ -1623,6 +1624,10 @@ fn log_execution() {
     };
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
+    }
+    // Where the presented frames came from: a frame orbistoun drew, or another writer's.
+    if let Some(line) = crate::flip_origins::flip_origins().describe() {
+        tracing::info!("{line}");
     }
     // What each program's dispatches wrote: one that writes only zeros produces nothing.
     for (module, writes) in orbistoun_gpu::agc_driver::dispatch_writes_by_module() {
