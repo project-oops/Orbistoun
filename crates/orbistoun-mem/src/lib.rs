@@ -46,6 +46,12 @@ static FAIL_KIND: AtomicU8 = AtomicU8::new(0);
 /// failure.
 static FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// The region already reserved where the last failure conflicted, base and length; zero when the
+/// last failure was not a conflict with one of this process's reservations.
+static HOLDER_BASE: AtomicU64 = AtomicU64::new(0);
+/// Its length, beside [`HOLDER_BASE`].
+static HOLDER_LEN: AtomicU64 = AtomicU64::new(0);
+
 /// The base of the first failure. Many failures at one address are a caller retrying; at
 /// different addresses, a walk running out of room.
 static FIRST_FAIL_BASE: AtomicU64 = AtomicU64::new(0);
@@ -59,10 +65,15 @@ pub struct ReserveFailure {
     pub len: u64,
     /// Why it failed, in words a report can print.
     pub reason: &'static str,
+    /// The reservation in the way, base and length, when it conflicted with one this process
+    /// made; [`None`] for any other failure, or a conflict the host reported.
+    pub holder: Option<(u64, u64)>,
 }
 
 /// Records a reservation failure for the run report. Allocation-free and lock-free (D381).
-fn note_reserve_failure(base: u64, len: u64, error: &MemError) {
+fn note_reserve_failure(base: u64, len: u64, error: &MemError, holder: Option<&Region>) {
+    HOLDER_BASE.store(holder.map_or(0, |r| r.base), Ordering::Relaxed);
+    HOLDER_LEN.store(holder.map_or(0, |r| r.len), Ordering::Relaxed);
     FAIL_BASE.store(base, Ordering::Relaxed);
     FAIL_LEN.store(len, Ordering::Relaxed);
     let kind = match error {
@@ -103,10 +114,12 @@ pub fn last_reserve_failure() -> Option<ReserveFailure> {
         3 => "host refused - out of memory, or an address the host would not give",
         _ => return None,
     };
+    let holder_len = HOLDER_LEN.load(Ordering::Relaxed);
     Some(ReserveFailure {
         base: FAIL_BASE.load(Ordering::Relaxed),
         len: FAIL_LEN.load(Ordering::Relaxed),
         reason,
+        holder: (holder_len != 0).then(|| (HOLDER_BASE.load(Ordering::Relaxed), holder_len)),
     })
 }
 
@@ -249,6 +262,18 @@ impl AddressSpace {
             .filter(|r| address < r.base.saturating_add(r.len))
     }
 
+    /// The reserved region `[base, base + len)` shares a page with, if one does: what a reservation
+    /// there would conflict with.
+    #[must_use]
+    pub fn holder_of(&self, base: u64, len: u64) -> Option<&Region> {
+        let end = base.saturating_add(len);
+        self.regions
+            .range(..end)
+            .next_back()
+            .map(|(_, r)| r)
+            .filter(|r| base < r.base.saturating_add(r.len))
+    }
+
     /// Checks a request against the ABI rules and existing reservations.
     ///
     /// Separate from the mapping so the rules are testable without touching the host address
@@ -273,10 +298,7 @@ impl AddressSpace {
                 value: base,
             });
         }
-        let end = base.saturating_add(len);
-        if let Some((_, r)) = self.regions.range(..end).next_back()
-            && base < r.base.saturating_add(r.len)
-        {
+        if self.holder_of(base, len).is_some() {
             return Err(MemError::Conflict { base, len });
         }
         Ok(())
@@ -295,13 +317,13 @@ impl AddressSpace {
         // Both the validate conflict and the host refusal pass through here, so the failure is
         // recorded with its base and reason.
         if let Err(e) = self.validate(base, len, false) {
-            note_reserve_failure(base, len, &e);
+            note_reserve_failure(base, len, &e, self.holder_of(base, len));
             return Err(e);
         }
         let held = match platform::reserve(base, len, protection) {
             Ok(held) => held,
             Err(e) => {
-                note_reserve_failure(base, len, &e);
+                note_reserve_failure(base, len, &e, None);
                 return Err(e);
             }
         };
@@ -404,12 +426,12 @@ impl AddressSpace {
             let error = MemError::HostRefused(format!(
                 "{base:#x}..{end:#x} is not inside any region this address space owns"
             ));
-            note_reserve_failure(base, len, &error);
+            note_reserve_failure(base, len, &error, self.holder_of(base, len));
             return Err(error);
         }
         // Recorded for the same reason as in `reserve`: the guest otherwise sees only `NoMemory`.
         if let Err(e) = platform::protect(base, len, protection) {
-            note_reserve_failure(base, len, &e);
+            note_reserve_failure(base, len, &e, None);
             return Err(e);
         }
         Ok(())
@@ -537,6 +559,23 @@ mod tests {
         assert!(
             !AddressSpace::new().owns(0x7200_0000_0000, GUEST_PAGE_SIZE),
             "an empty space owns nothing"
+        );
+    }
+
+    /// The region a conflicting range overlaps is the one named as holding it, and a range in a gap
+    /// is held by none: what a failed reservation reports, so the run says what is in the way (D832).
+    #[test]
+    fn the_region_holding_a_conflicting_range_is_named() {
+        let page = GUEST_PAGE_SIZE;
+        let s = space_with(0x10 * page, 4 * page);
+        assert_eq!(
+            s.holder_of(0x12 * page, 4 * page).map(|r| (r.base, r.len)),
+            Some((0x10 * page, 4 * page))
+        );
+        assert_eq!(
+            s.holder_of(0x14 * page, 4 * page),
+            None,
+            "starts where it ends"
         );
     }
 

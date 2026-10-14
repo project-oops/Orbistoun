@@ -2587,8 +2587,16 @@ pub fn persist(trace: &CallTrace) {
     if let Some(failure) = orbistoun_mem::last_reserve_failure() {
         // The count as well as the last one: two runs can share a last failure and still have
         // failed a different number of reservations.
+        // With the reservation in the way, when it is one of this run's: a request overlapping
+        // what the run already holds reads apart from one the host refused (D832).
+        let holder = failure.holder.map_or_else(String::new, |(base, len)| {
+            format!(
+                ", held by the reservation {base:#x}..{:#x}",
+                base.saturating_add(len)
+            )
+        });
         tracing::warn!(
-            "{} reservation(s) failed, first at {:#x}, last: base={:#x} len={:#x} - {}",
+            "{} reservation(s) failed, first at {:#x}, last: base={:#x} len={:#x} - {}{holder}",
             orbistoun_mem::reserve_failures(),
             orbistoun_mem::first_reserve_failure_base().unwrap_or(0),
             failure.base,
