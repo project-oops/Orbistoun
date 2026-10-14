@@ -1625,9 +1625,9 @@ pub fn recent_calls_on(host: u64) -> Vec<(u32, u64, u64)> {
     let claimed = PUBLISHED_CLAIMED
         .load(Ordering::Relaxed)
         .min(PUBLISHED_THREADS);
-    let Some(slot) =
-        (0..claimed).find(|&slot| PUBLISHED_HOST[slot].load(Ordering::Relaxed) == host)
-    else {
+    let Some(slot) = newest_slot_of(host, claimed, |slot| {
+        PUBLISHED_HOST[slot].load(Ordering::Relaxed)
+    }) else {
         return Vec::new();
     };
     let count = PUBLISHED_RECENT_COUNT[slot].load(Ordering::Relaxed) as usize;
@@ -1643,6 +1643,13 @@ pub fn recent_calls_on(host: u64) -> Vec<(u32, u64, u64)> {
             ))
         })
         .collect()
+}
+
+/// The slot `host` published to, among the first `claimed`: the one claimed last. A host thread's
+/// id is its thread-local's address, which a thread started after another exits can be given
+/// again, and the earlier slot holds the exited thread's calls.
+fn newest_slot_of(host: u64, claimed: usize, host_at: impl Fn(usize) -> u64) -> Option<usize> {
+    (0..claimed).rev().find(|&slot| host_at(slot) == host)
 }
 
 /// The last call the host thread `host` made, as `(import, returned to, answer)`, if it made one.
@@ -1988,6 +1995,22 @@ mod tests {
         assert_eq!(recent.len(), super::RECENT_CALLS, "the ring's worth");
         assert_eq!(recent[0], (9, 0x4000_0000_0009, 18), "newest first");
         assert_eq!(recent[super::RECENT_CALLS - 1], (2, 0x4000_0000_0002, 4));
+    }
+
+    /// A host thread's id is its thread-local's address, which a thread started after another
+    /// exits can be given again: the slot it claimed last is its own, not the exited thread's.
+    #[test]
+    fn a_reused_host_id_finds_its_newest_slot() {
+        let hosts = [5, 7, 5, 9];
+        let at = |slot: usize| hosts[slot];
+        assert_eq!(super::newest_slot_of(5, hosts.len(), at), Some(2));
+        assert_eq!(super::newest_slot_of(7, hosts.len(), at), Some(1));
+        assert_eq!(
+            super::newest_slot_of(5, 2, at),
+            Some(0),
+            "only those claimed"
+        );
+        assert_eq!(super::newest_slot_of(4, hosts.len(), at), None);
     }
 
     /// The last call alone, as a fault names it first.
