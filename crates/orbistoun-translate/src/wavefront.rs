@@ -1001,8 +1001,10 @@ fn emit_header(
     b.header(op::MEMORY_MODEL, &[addressing::LOGICAL, memory::GLSL450]);
 
     match stage {
+        // An invocation a wave (D858), or a lane of each wave where it runs one per lane (D880).
         Stage::Compute => {
-            b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, waves, 1, 1]);
+            let size = waves * per_lane.map_or(1, |(lanes, _)| lanes);
+            b.header(op::EXECUTION_MODE, &[main.0, mode::LOCAL_SIZE, size, 1, 1]);
         }
         // Required of every fragment entry point: Vulkan's framebuffer origin is the top left.
         Stage::Fragment => {
@@ -1875,16 +1877,18 @@ fn declare_workgroup_id(b: &mut Builder, u32_type: Id) -> (Id, Id) {
 
 /// Whether a module for `stage` runs one invocation per lane (D760) - the wave's width, and whether
 /// its lanes exchange through workgroup memory because the host's subgroup is narrower - and how
-/// many lanes the per-lane loops run: one then, else the lanes one invocation simulates.
+/// many lanes the per-lane loops run: one then, else the lanes one invocation simulates. A guest
+/// dispatch run per lane exchanges nothing (D880).
 fn lanes_per_invocation(
     stage: Stage,
     width: Width,
     user_data: &UserData,
 ) -> (Option<(u32, bool)>, u32) {
+    let dispatch = stage == Stage::Compute && user_data.compute.is_some();
     let per_lane = user_data
         .per_invocation
-        .filter(|_| stage == Stage::Mesh)
-        .map(|subgroup| (width.lanes(), subgroup < width.lanes()));
+        .filter(|_| stage == Stage::Mesh || dispatch)
+        .map(|subgroup| (width.lanes(), !dispatch && subgroup < width.lanes()));
     let modelled = if per_lane.is_some() {
         1
     } else {
@@ -1906,14 +1910,17 @@ struct PerLane {
 
 impl PerLane {
     /// Declares them for a wave of `lanes`, exchanging where `exchanges`; `element` is the workgroup
-    /// word pointer type the local data share declared.
+    /// word pointer type the local data share declared. `by_index` takes the lane from the
+    /// invocation's place in its workgroup though nothing is exchanged: a guest dispatch's, whose
+    /// workgroup may be several waves (D880).
     fn declare(
         b: &mut Builder,
         (u32_type, element): (Id, Id),
         (lanes, exchanges): (u32, bool),
+        by_index: bool,
     ) -> Self {
         Self {
-            input: declare_lane_input(b, u32_type, exchanges),
+            input: declare_lane_input(b, u32_type, exchanges || by_index),
             exchange: exchanges.then(|| declare_exchange(b, (u32_type, element), lanes)),
         }
     }
@@ -1952,6 +1959,31 @@ fn declare_lane_input(b: &mut Builder, u32_type: Id, exchange: bool) -> Id {
     b.declare(op::TYPE_POINTER, &[pointer.0, INPUT, u32_type.0]);
     b.declare(op::VARIABLE, &[pointer.0, variable.0, INPUT]);
     variable
+}
+
+/// This invocation's lane when each invocation is one lane, and - for a guest dispatch whose group
+/// is several waves of `width` run one invocation per lane (D880) - the first lane of its wave as a
+/// place in its group: the invocation's place is the input, its lane that place's low bits, and its
+/// wave's start the place less the lane.
+fn lane_and_wave(
+    b: &mut Builder,
+    u32_type: Id,
+    lane: Option<PerLane>,
+    width: Option<u32>,
+) -> (Option<Id>, Option<Id>) {
+    let Some(index) = lane.map(|lane| lane.load(b, u32_type)) else {
+        return (None, None);
+    };
+    let Some(width) = width else {
+        return (Some(index), None);
+    };
+    let low_bits = b.id();
+    b.declare(op::CONSTANT, &[u32_type.0, low_bits.0, width - 1]);
+    let lane = b.id();
+    b.function(op::BITWISE_AND, &[u32_type.0, lane.0, index.0, low_bits.0]);
+    let base = b.id();
+    b.function(op::ISUB, &[u32_type.0, base.0, index.0, lane.0]);
+    (Some(lane), Some(base))
 }
 
 /// Declares the workgroup memory a wave's lanes exchange through when it is wider than the host's
@@ -2032,6 +2064,9 @@ pub struct Wavefront<'a> {
     /// This invocation's lane when each invocation is one lane (D760); `None` where one invocation
     /// simulates the wave.
     invocation: Option<Id>,
+    /// The first lane of this invocation's wave, as a place in its group, where a guest dispatch's
+    /// group of several waves runs one invocation per lane (D880).
+    wave_base: Option<Id>,
     /// A fragment module that reads its quad's other lanes: this invocation's index in its
     /// subgroup, whose low two bits are its place in its quad. `None` everywhere else.
     quad_invocation: Option<Id>,
@@ -2764,8 +2799,14 @@ impl<'a> Wavefront<'a> {
         }
         let (files, observation, guest_memory) =
             declare_state(&mut b, &ids, (modelled, user_data.local_words), window);
-        let lane_ids =
-            per_lane.map(|shape| PerLane::declare(&mut b, (u32_type, ids.local_ptr), shape));
+        let lane_ids = per_lane.map(|shape| {
+            PerLane::declare(
+                &mut b,
+                (u32_type, ids.local_ptr),
+                shape,
+                stage == Stage::Compute,
+            )
+        });
         // A fragment module that reads its quad's other lanes reads them as the host's quad
         // neighbours, and finds its own place in the quad from its subgroup index.
         let quad_input = (stage == Stage::Fragment && reads_quad).then(|| {
@@ -2814,6 +2855,10 @@ impl<'a> Wavefront<'a> {
                 .flat_map(compute_inputs::DispatchState::interface),
         );
         interface.extend(quad_input.map(|input| input.0));
+        // A guest dispatch run one invocation per lane reads its lane (D880).
+        if stage == Stage::Compute {
+            interface.extend(lane_ids.iter().flat_map(PerLane::interface));
+        }
         // The block the user clip planes arrive in (D857).
         interface.extend(mesh.as_ref().map(|mesh| mesh.plane_block.0.0));
         if stage == Stage::Mesh {
@@ -2827,8 +2872,15 @@ impl<'a> Wavefront<'a> {
 
         b.function(op::FUNCTION, &[void.0, main.0, 0, fn_type.0]);
         b.function(op::LABEL, &[ids.entry_block.0]);
+        let (invocation, wave_base) = lane_and_wave(
+            &mut b,
+            u32_type,
+            lane_ids,
+            (stage == Stage::Compute && waves > 1).then(|| width.lanes()),
+        );
         let mut this = Self {
-            invocation: lane_ids.map(|lane| lane.load(&mut b, u32_type)),
+            invocation,
+            wave_base,
             quad_invocation: quad_input.map(|input| {
                 let loaded = b.id();
                 b.function(op::LOAD, &[u32_type.0, loaded.0, input.0]);
@@ -3751,6 +3803,62 @@ impl<'a> Wavefront<'a> {
         self.builder
             .function(op::LOAD, &[self.u32_type.0, value.0, read.0]);
         value
+    }
+
+    /// `halves` with this invocation's bit set where `condition` holds, for a guest dispatch run one
+    /// invocation per lane (D880): its own bit and no other lane's, since its program reads a mask
+    /// only a lane's own bit at a time.
+    fn own_lane_bit(&mut self, (low, high): (Id, Id), invocation: Id, condition: Id) -> (Id, Id) {
+        let (u32_type, bool_type) = (self.u32_type, self.bool_type);
+        let (zero, one, thirty_one, thirty_two) = (
+            Self::constant(self, 0),
+            Self::constant(self, 1),
+            Self::constant(self, 31),
+            Self::constant(self, 32),
+        );
+        let within = self.binary(op::BITWISE_AND, invocation, thirty_one);
+        let bit = self.binary(op::SHIFT_LEFT_LOGICAL, one, within);
+        let b = &mut self.builder;
+        let set = b.id();
+        b.function(op::SELECT, &[u32_type.0, set.0, condition.0, bit.0, zero.0]);
+        let in_high = b.id();
+        b.function(
+            op::UGREATER_THAN_EQUAL,
+            &[bool_type.0, in_high.0, invocation.0, thirty_two.0],
+        );
+        let (to_low, to_high) = (b.id(), b.id());
+        b.function(
+            op::SELECT,
+            &[u32_type.0, to_low.0, in_high.0, zero.0, set.0],
+        );
+        b.function(
+            op::SELECT,
+            &[u32_type.0, to_high.0, in_high.0, set.0, zero.0],
+        );
+        let low = self.binary(op::BITWISE_OR, low, to_low);
+        let high = self.binary(op::BITWISE_OR, high, to_high);
+        (low, high)
+    }
+
+    /// Whether other invocations may store guest memory while this one does: each invocation one
+    /// lane (D760, D880), or a guest dispatch, whose waves (D858) and groups run as invocations
+    /// side by side. A lane that does not run then must not write back a word it read: a thread
+    /// past a group's end has ids that wrap onto another's, and its old value would race that
+    /// thread's store.
+    const fn stores_beside_others(&self) -> bool {
+        self.invocation.is_some() || self.dispatch.is_some()
+    }
+
+    /// Stores `value` through `pointer` where `condition` holds, and nothing otherwise.
+    fn store_if(&mut self, condition: Id, pointer: Id, value: Id) {
+        let b = &mut self.builder;
+        let (store, merge) = (b.id(), b.id());
+        b.function(op::SELECTION_MERGE, &[merge.0, 0]);
+        b.function(op::BRANCH_CONDITIONAL, &[condition.0, store.0, merge.0]);
+        b.function(op::LABEL, &[store.0]);
+        b.function(op::STORE, &[pointer.0, value.0]);
+        b.function(op::BRANCH, &[merge.0]);
+        b.function(op::LABEL, &[merge.0]);
     }
 
     /// Whether this invocation's bit of a mask held as two halves is set, when each invocation is
@@ -4788,6 +4896,11 @@ impl Model for Wavefront<'_> {
         let Some(invocation) = self.invocation else {
             return model::constant_lane_bit(self, halves, lane, condition);
         };
+        // A guest dispatch run per lane holds only its own lane's bits: its program reads no mask
+        // whole, only each lane its own bit (D880).
+        if self.stage == Stage::Compute {
+            return self.own_lane_bit(halves, invocation, condition);
+        }
         if let Some((mask, _)) = self.exchange {
             let (low, high) = self.exchange_mask(mask, invocation, condition);
             let low = self.binary(op::BITWISE_OR, halves.0, low);
@@ -5430,6 +5543,7 @@ impl Model for Wavefront<'_> {
             Some(true) => None,
             _ => Some(self.lane_active(lane)),
         };
+        let beside_others = self.stores_beside_others();
         let b = &mut self.builder;
         let block = b.id();
         b.function(
@@ -5462,19 +5576,33 @@ impl Model for Wavefront<'_> {
                 index.0,
             ],
         );
-        let old = b.id();
-        b.function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
-        let kept = b.id();
-        b.function(op::SELECT, &[u32_type.0, kept.0, inside.0, value.0, old.0]);
-        let chosen = match active {
-            None => kept,
-            Some(active) => {
-                let chosen = b.id();
-                b.function(op::SELECT, &[u32_type.0, chosen.0, active.0, kept.0, old.0]);
-                chosen
-            }
-        };
-        b.function(op::STORE, &[pointer.0, chosen.0]);
+        if beside_others {
+            // Another invocation may store this word at the same time, so a store that does not
+            // land writes nothing rather than what it read (D858, D880).
+            let landed = match active {
+                None => inside,
+                Some(active) => {
+                    let both = b.id();
+                    b.function(op::LOGICAL_AND, &[bool_type.0, both.0, inside.0, active.0]);
+                    both
+                }
+            };
+            self.store_if(landed, pointer, value);
+        } else {
+            let old = b.id();
+            b.function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
+            let kept = b.id();
+            b.function(op::SELECT, &[u32_type.0, kept.0, inside.0, value.0, old.0]);
+            let chosen = match active {
+                None => kept,
+                Some(active) => {
+                    let chosen = b.id();
+                    b.function(op::SELECT, &[u32_type.0, chosen.0, active.0, kept.0, old.0]);
+                    chosen
+                }
+            };
+            b.function(op::STORE, &[pointer.0, chosen.0]);
+        }
         if let Some(mask) = self.write_mask
             && self.unread_slots.contains(&slot)
         {
@@ -5580,6 +5708,13 @@ impl Model for Wavefront<'_> {
             return;
         }
         let active = self.lane_active(lane);
+        // Another invocation may store this word at the same time - another lane run as its own
+        // (D880), or another wave or group of a guest dispatch (D858) - so a lane that does not run
+        // stores nothing rather than writing back what it read.
+        if self.stores_beside_others() {
+            self.store_if(active, pointer, value);
+            return;
+        }
         let old = self.builder.id();
         self.builder
             .function(op::LOAD, &[u32_type.0, old.0, pointer.0]);
@@ -6526,6 +6661,18 @@ pub fn translate_with_user_data(
     }
     if let (Stage::Compute, Some(inputs)) = (stage, user_data.compute) {
         inputs.check(width.lanes(), group_program(decode, encodings))?;
+        // One invocation per lane is exact only for a program that never meets its wave (D880).
+        if user_data.per_invocation.is_some()
+            && let Some(&(need, offset, _)) =
+                crate::lane_exact::lane_needs(decode, encodings, width.lanes())
+                    .needs
+                    .first()
+        {
+            return Err(TranslateError::Unsupported {
+                offset,
+                detail: crate::lane_exact::refusal(need),
+            });
+        }
     }
     // A primitive shader that exports its entry `v0` was compiled for passthrough, whatever the
     // stream wrote (D759).

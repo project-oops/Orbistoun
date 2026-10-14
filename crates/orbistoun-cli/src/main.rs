@@ -10,6 +10,7 @@ mod common;
 mod compat;
 mod corpus;
 mod frames;
+mod lanes;
 mod learn;
 mod module;
 mod names;
@@ -35,6 +36,7 @@ use crate::compat::{
     cmd_compat_reproduce,
 };
 use crate::corpus::{cmd_corpus_list, cmd_corpus_run, cmd_corpus_sync};
+use crate::lanes::cmd_lanes;
 use crate::learn::{cmd_knows, cmd_learn};
 use crate::module::{
     cmd_exports, cmd_imports, cmd_inspect, cmd_load, cmd_module_tables, cmd_report, cmd_symbols,
@@ -733,6 +735,10 @@ enum Command {
         #[arg(long)]
         top: Option<usize>,
     },
+    /// Count the library's guest compute programs by what keeps one invocation per lane from
+    /// running them exactly: a whole lane mask, another lane's value, the local data share, a
+    /// barrier, a scalar store. Reads every title's kept translations; needs no GPU.
+    Lanes,
     /// Show how the firmware skeleton lays out libkernel.
     ///
     /// Prints the stub each export address gets, which exports are unimplemented, and where a stub
@@ -1015,6 +1021,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Imports { .. }
         | Command::Exports { .. }
         | Command::Shaders { .. }
+        | Command::Lanes
         | Command::Verify { .. }
         | Command::Report { .. }
         | Command::Load { .. } => dispatch_module(cli.command, service)?,
@@ -1125,6 +1132,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
             cmd_exports(service, &path, matching.as_deref())?;
         }
         Command::Shaders { path, top } => cmd_shaders(&path, top)?,
+        Command::Lanes => cmd_lanes()?,
         Command::Verify { path } => cmd_verify(service, &path)?,
         Command::Report { path } => cmd_report(service, &path)?,
         Command::Load { path, base } => cmd_load(service, &path, base)?,

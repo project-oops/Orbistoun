@@ -52,6 +52,9 @@ pub struct Kept {
     pub module: Vec<u32>,
     /// Which texture the module samples at which binding.
     pub textures: Vec<TextureSource>,
+    /// Where a guest dispatch's stored image's descriptor came from, when it stores to one.
+    #[serde(default)]
+    pub storage: Option<TextureSource>,
     /// What the translation wanted the caller told.
     pub warnings: Vec<String>,
 }
@@ -122,6 +125,11 @@ impl TranslationStore {
         self.changed = true;
     }
 
+    /// Every kept translation, by cache key.
+    pub fn entries(&self) -> impl Iterator<Item = &Kept> {
+        self.entries.values()
+    }
+
     /// How many translations are kept.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -190,6 +198,7 @@ fn translate(
         context: *context,
         module: translated.module,
         textures: translated.textures,
+        storage: translated.storage,
         warnings: translated
             .warnings
             .iter()

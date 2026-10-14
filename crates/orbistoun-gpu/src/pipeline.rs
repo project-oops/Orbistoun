@@ -2060,26 +2060,71 @@ impl Pipeline {
         Ok(if let Some(cached) = self.dispatch_modules.get(&key) {
             cached.clone()
         } else {
+            // The cheapest model the program runs exactly in: one invocation per lane where it
+            // never meets its wave, else the whole wave in one (D880).
             let strategy = Strategy::Predicated {
-                fidelity: orbistoun_translate::Fidelity::Wavefront,
+                fidelity: orbistoun_translate::Fidelity::Auto,
                 width: state.width,
             };
-            let translated = translate_with_user_data(
-                decoded,
-                &self.encodings,
+            let context = crate::translations::Context {
                 strategy,
-                (Stage::Compute, MeshPrimitive::default()),
-                placed,
+                stage: Stage::Compute,
+                primitive: MeshPrimitive::default(),
+                window: placed,
                 user_data,
-            )
-            .map_err(|e| compute_refusal(&e, (decoded, &self.encodings), (address, program)))?;
-            let sources = (translated.textures.clone(), translated.storage);
-            let hash = crate::content_hash(&translated.module);
-            let module = (std::sync::Arc::from(translated.module), hash);
+            };
+            let kept = self.kept_dispatch(key, (decoded, program, address), &context)?;
+            let sources = (kept.textures, kept.storage);
+            let hash = crate::content_hash(&kept.module);
+            let module = (std::sync::Arc::from(kept.module), hash);
             self.dispatch_modules
                 .insert(key, (module.clone(), sources.clone()));
             (module, sources)
         })
+    }
+
+    /// A dispatch's program translated against `context`, from the store where an earlier run kept
+    /// the module this one would make (D113): one made against the same context, since one asked
+    /// for another fidelity is another module (D880). A new translation is kept.
+    fn kept_dispatch(
+        &mut self,
+        key: u64,
+        (decoded, program, address): (&orbistoun_shader::Decode, &[u8], u64),
+        context: &crate::translations::Context,
+    ) -> Result<crate::translations::Kept, String> {
+        if let Some(kept) = self
+            .store
+            .as_ref()
+            .and_then(|store| store.get(key, program))
+            .filter(|kept| kept.context == *context)
+        {
+            return Ok(kept.clone());
+        }
+        let translated = translate_with_user_data(
+            decoded,
+            &self.encodings,
+            context.strategy,
+            (context.stage, context.primitive),
+            context.window,
+            context.user_data,
+        )
+        .map_err(|e| compute_refusal(&e, (decoded, &self.encodings), (address, program)))?;
+        let kept = crate::translations::Kept {
+            bytes: program.to_vec(),
+            context: *context,
+            module: translated.module,
+            textures: translated.textures,
+            storage: translated.storage,
+            warnings: translated
+                .warnings
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        };
+        if let Some(store) = self.store.as_mut() {
+            store.insert(key, kept.clone());
+        }
+        Ok(kept)
     }
 
     /// Serves translations from `store` and keeps new ones in it (D113).
@@ -4705,6 +4750,7 @@ impl Pipeline {
             context: *context,
             module: translated.module,
             textures: translated.textures,
+            storage: translated.storage,
             warnings: translated
                 .warnings
                 .iter()

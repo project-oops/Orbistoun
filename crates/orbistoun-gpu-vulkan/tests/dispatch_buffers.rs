@@ -20,6 +20,26 @@ use orbistoun_translate::wavefront::{
     ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
 };
 
+thread_local! {
+    /// Whether the test running on this thread translates one invocation per lane (D880).
+    static PER_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` twice: the whole wave in one invocation, then one invocation per lane (D880). Each
+/// run is held to the same expectations, so the two models are checked against each other.
+fn both_models(test: impl Fn()) {
+    for per_lane in [false, true] {
+        println!("[{}]", if per_lane { "per lane" } else { "whole wave" });
+        PER_LANE.with(|cell| cell.set(per_lane));
+        test();
+    }
+}
+
+/// What a module translated now asks of `UserData::per_invocation`.
+fn per_invocation() -> Option<u32> {
+    PER_LANE.with(std::cell::Cell::get).then_some(64)
+}
+
 const COPY: [u32; 8] = [
     0x3400_0082,
     0xe030_1000,
@@ -71,6 +91,7 @@ fn copy_module() -> Vec<u32> {
                 ..ComputeInputs::default()
             }),
             draw_buffers: true,
+            per_invocation: per_invocation(),
             ..UserData::default()
         },
     )
@@ -96,48 +117,52 @@ fn device_present() -> bool {
 /// window: both accesses are traced to a slot, the store included.
 #[test]
 fn a_dispatch_copies_between_its_own_buffers() {
-    if !device_present() {
-        return;
-    }
-    let source: Vec<u32> = (0..64).map(|i| 0x5000_0000 | i).collect();
-    let destination = vec![0xdead_beef_u32; 64];
-    let done = dispatch_guest_with_buffers(
-        &copy_module(),
-        &[0],
-        (&user_data(), [1, 1, 1]),
-        &DispatchImages::default(),
-        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
-    )
-    .expect("dispatched");
-    assert!(!done.escaped, "nothing left the bound buffers");
-    assert_eq!(done.buffers.len(), 2);
-    assert_eq!(done.buffers[0].words, source, "the source is unchanged");
-    assert_eq!(
-        done.buffers[1].words, source,
-        "the destination holds the copy"
-    );
+    both_models(|| {
+        if !device_present() {
+            return;
+        }
+        let source: Vec<u32> = (0..64).map(|i| 0x5000_0000 | i).collect();
+        let destination = vec![0xdead_beef_u32; 64];
+        let done = dispatch_guest_with_buffers(
+            &copy_module(),
+            &[0],
+            (&user_data(), [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&source), BufferIn::Words(&destination)],
+        )
+        .expect("dispatched");
+        assert!(!done.escaped, "nothing left the bound buffers");
+        assert_eq!(done.buffers.len(), 2);
+        assert_eq!(done.buffers[0].words, source, "the source is unchanged");
+        assert_eq!(
+            done.buffers[1].words, source,
+            "the destination holds the copy"
+        );
+    });
 }
 
 /// A buffer the program only stores to is handed over unread (D809): the device starts it at zero,
 /// and its write mask says which words the dispatch stored - the 64 copied, not the 32 past them.
 #[test]
 fn an_unread_buffer_comes_back_with_the_words_stored_marked() {
-    if !device_present() {
-        return;
-    }
-    let source: Vec<u32> = (0..64).map(|i| 0x5000_0000 | i).collect();
-    let done = dispatch_guest_with_buffers(
-        &copy_module(),
-        &[0],
-        (&user_data(), [1, 1, 1]),
-        &DispatchImages::default(),
-        &[BufferIn::Words(&source), BufferIn::Unread(96)],
-    )
-    .expect("dispatched");
-    let destination = &done.buffers[1];
-    assert_eq!(destination.words[..64], source[..], "the copy");
-    assert_eq!(destination.words[64..], [0; 32], "started at zero");
-    let stored: Vec<bool> = destination.written.iter().map(|&mark| mark != 0).collect();
-    assert_eq!(stored[..64], [true; 64], "the words stored");
-    assert_eq!(stored[64..], [false; 32], "and none past them");
+    both_models(|| {
+        if !device_present() {
+            return;
+        }
+        let source: Vec<u32> = (0..64).map(|i| 0x5000_0000 | i).collect();
+        let done = dispatch_guest_with_buffers(
+            &copy_module(),
+            &[0],
+            (&user_data(), [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&source), BufferIn::Unread(96)],
+        )
+        .expect("dispatched");
+        let destination = &done.buffers[1];
+        assert_eq!(destination.words[..64], source[..], "the copy");
+        assert_eq!(destination.words[64..], [0; 32], "started at zero");
+        let stored: Vec<bool> = destination.written.iter().map(|&mark| mark != 0).collect();
+        assert_eq!(stored[..64], [true; 64], "the words stored");
+        assert_eq!(stored[64..], [false; 32], "and none past them");
+    });
 }

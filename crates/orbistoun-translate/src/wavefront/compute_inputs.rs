@@ -8,6 +8,8 @@
 //! declares these arguments in; `src/amd/registers/gfx10.json`, `COMPUTE_PGM_RSRC2`). One
 //! translated invocation is one wave, and a group of several waves is a workgroup of that many
 //! invocations (D858), so a lane's thread id is its wave's first thread plus its lane, x fastest.
+//! A program that never meets its wave runs one invocation per lane instead (D880), each seeded
+//! with its own lane's ids and its own bit of the execution mask.
 //!
 //! A module built for a guest dispatch writes guest memory for real, so an access it cannot place
 //! exactly - outside its window, or through a descriptor whose addressing is not modelled - is
@@ -174,7 +176,8 @@ impl DispatchState {
     }
 
     /// Declares the state when the module is a guest dispatch's: a compute stage given its entry
-    /// state, run in waves of `lanes`.
+    /// state, run in waves of `lanes`. Run one invocation per lane (D880), an invocation finds its
+    /// wave from its lane input, so no wave index is declared.
     pub(super) fn for_stage(
         b: &mut Builder,
         (ids, lanes): (&super::Reserved, u32),
@@ -184,9 +187,14 @@ impl DispatchState {
         let inputs = user_data
             .compute
             .filter(|_| stage == super::Stage::Compute)?;
+        let waves = if user_data.per_invocation.is_some() {
+            1
+        } else {
+            inputs.waves(lanes)
+        };
         Some(Self::declare(
             b,
-            (ids.u32_type, inputs.waves(lanes)),
+            (ids.u32_type, waves),
             (ids.counter_ptr, ids.counter_zero),
         ))
     }
@@ -223,6 +231,12 @@ impl DispatchState {
             register += 1;
         }
 
+        // One invocation per lane (D880): this lane's ids, and its bit of the mask.
+        if let Some(lane) = module.invocation {
+            Self::seed_lane(module, (id, inputs), lane);
+            return;
+        }
+
         // The first thread of this invocation's wave, when the group is several (D858).
         let base = self.wave.map(|input| {
             let u32_type = module.u32_type;
@@ -255,16 +269,8 @@ impl DispatchState {
             lanes.push((ids, place));
         }
 
-        let low = match threads {
-            32.. => u32::MAX,
-            n => (1_u32 << n) - 1,
-        };
-        let high = match threads {
-            64.. => u32::MAX,
-            n @ 33.. => (1_u32 << (n - 32)) - 1,
-            _ => 0,
-        };
         let (low, high) = if base.is_none() && inputs.partial.is_none() {
+            let (low, high) = first_threads(threads);
             (Model::constant(module, low), Model::constant(module, high))
         } else {
             Self::group_mask(module, (id, inputs), &lanes)
@@ -273,22 +279,71 @@ impl DispatchState {
         module.store_scalar(EXEC_HI, high);
     }
 
-    /// The execution mask of a wave that may lie past its group's end or in a partial group: each
-    /// of `lanes` runs unless its place in the group is past the group's threads (the last wave of
-    /// a group the wave width does not divide, D858), or, along a dimension where it lies at or
-    /// past the last group's thread count, this group is the last. The last group and its counts
-    /// are read from the push-constant block at [`PARTIAL_PUSH_WORD`] (D855), so one module serves
-    /// every grid a program is dispatched over; a shape compiled in made each new grid size another
-    /// module and another pipeline to build.
-    fn group_mask(
-        module: &mut Wavefront<'_>,
-        (id, inputs): (Id, ComputeInputs),
-        lanes: &[([Id; 3], Option<Id>)],
-    ) -> (Id, Id) {
+    /// Seeds `lane` of a dispatch run one invocation per lane (D880): its thread ids in its own
+    /// registers, and the execution mask - every lane's bits where they are known at translation, a
+    /// group of one wave with no partial groups, and otherwise this lane's bit alone. Its program
+    /// reads no mask whole, so no other lane's bit is ever wanted.
+    fn seed_lane(module: &mut Wavefront<'_>, (id, inputs): (Id, ComputeInputs), lane: Id) {
+        let place = match module.wave_base {
+            Some(base) => binary(module, op::IADD, base, lane),
+            None => lane,
+        };
+        let ids = split_place(module, place, inputs.threads);
+        for (register, value) in ids
+            .into_iter()
+            .take(inputs.thread_id_components as usize)
+            .enumerate()
+        {
+            let pointer = module.lane_pointer(u32::try_from(register).unwrap_or(0), 0);
+            module.builder.function(op::STORE, &[pointer.0, value.0]);
+        }
+
+        let threads = inputs.group_threads();
+        let (low, high) = if module.wave_base.is_none() && inputs.partial.is_none() {
+            let (low, high) = first_threads(threads);
+            (Model::constant(module, low), Model::constant(module, high))
+        } else {
+            let last = Self::last_groups(module, (id, inputs));
+            let end = (threads % module.lanes != 0).then(|| Model::constant(module, threads));
+            let off = thread_off(module, (&last, end), (ids, Some(place)));
+            let (u32_type, bool_type) = (module.u32_type, module.bool_type);
+            let (zero, one) = (Model::constant(module, 0), Model::constant(module, 1));
+            let (thirty_one, thirty_two) =
+                (Model::constant(module, 31), Model::constant(module, 32));
+            let within = binary(module, op::BITWISE_AND, lane, thirty_one);
+            let mut bit = binary(module, op::SHIFT_LEFT_LOGICAL, one, within);
+            if let Some(off) = off {
+                let chosen = module.builder.id();
+                module
+                    .builder
+                    .function(op::SELECT, &[u32_type.0, chosen.0, off.0, zero.0, bit.0]);
+                bit = chosen;
+            }
+            let high_half = module.builder.id();
+            module.builder.function(
+                op::UGREATER_THAN_EQUAL,
+                &[bool_type.0, high_half.0, lane.0, thirty_two.0],
+            );
+            let (low, high) = (module.builder.id(), module.builder.id());
+            module
+                .builder
+                .function(op::SELECT, &[u32_type.0, low.0, high_half.0, zero.0, bit.0]);
+            module.builder.function(
+                op::SELECT,
+                &[u32_type.0, high.0, high_half.0, bit.0, zero.0],
+            );
+            (low, high)
+        };
+        module.store_scalar(EXEC_LO, low);
+        module.store_scalar(EXEC_HI, high);
+    }
+
+    /// Per dimension a group is wider than one thread along, in a dispatch with partial groups:
+    /// whether this group is the last, and the last group's thread count, both read from the
+    /// push-constant block at [`PARTIAL_PUSH_WORD`] (D855).
+    fn last_groups(module: &mut Wavefront<'_>, (id, inputs): (Id, ComputeInputs)) -> LastGroups {
         let (u32_type, bool_type) = (module.u32_type, module.bool_type);
         let shape = inputs.threads;
-        // Per dimension a group is wider than one thread along: whether this group is the last,
-        // and the last group's thread count.
         let mut last = [None; 3];
         for (dimension, slot) in last.iter_mut().enumerate() {
             if shape[dimension] <= 1 || inputs.partial.is_none() {
@@ -311,49 +366,30 @@ impl DispatchState {
                 .function(op::IEQUAL, &[bool_type.0, is_last.0, value.0, wanted.0]);
             *slot = Some((is_last, count));
         }
+        last
+    }
+
+    /// The execution mask of a wave that may lie past its group's end or in a partial group: each
+    /// of `lanes` runs unless its place in the group is past the group's threads (the last wave of
+    /// a group the wave width does not divide, D858), or, along a dimension where it lies at or
+    /// past the last group's thread count, this group is the last. The last group and its counts
+    /// are read from the push-constant block at [`PARTIAL_PUSH_WORD`] (D855), so one module serves
+    /// every grid a program is dispatched over; a shape compiled in made each new grid size another
+    /// module and another pipeline to build.
+    fn group_mask(
+        module: &mut Wavefront<'_>,
+        (id, inputs): (Id, ComputeInputs),
+        lanes: &[([Id; 3], Option<Id>)],
+    ) -> (Id, Id) {
+        let u32_type = module.u32_type;
+        let last = Self::last_groups(module, (id, inputs));
         // A group the wave width divides has no thread past its end.
         let threads = inputs.group_threads();
         let end = (threads % module.lanes != 0).then(|| Model::constant(module, threads));
         let zero = Model::constant(module, 0);
         let mut halves = [zero, zero];
         for (lane, &(ids, place)) in (0_u32..).zip(lanes) {
-            // Whether this thread lies past its group's end, or past a last group's count along
-            // some dimension.
-            let mut off: Option<Id> = None;
-            let mut either = |module: &mut Wavefront<'_>, here: Id| {
-                off = Some(match off {
-                    None => here,
-                    Some(before) => {
-                        let both = module.builder.id();
-                        module
-                            .builder
-                            .function(op::LOGICAL_OR, &[bool_type.0, both.0, before.0, here.0]);
-                        both
-                    }
-                });
-            };
-            if let (Some(end), Some(place)) = (end, place) {
-                let past = module.builder.id();
-                module
-                    .builder
-                    .function(op::ULESS_THAN_EQUAL, &[bool_type.0, past.0, end.0, place.0]);
-                either(module, past);
-            }
-            for dimension in 0..3 {
-                let Some((is_last, count)) = last[dimension] else {
-                    continue;
-                };
-                let past = module.builder.id();
-                module.builder.function(
-                    op::ULESS_THAN_EQUAL,
-                    &[bool_type.0, past.0, count.0, ids[dimension].0],
-                );
-                let here = module.builder.id();
-                module
-                    .builder
-                    .function(op::LOGICAL_AND, &[bool_type.0, here.0, is_last.0, past.0]);
-                either(module, here);
-            }
+            let off = thread_off(module, (&last, end), (ids, place));
             let bit = Model::constant(module, 1 << (lane % 32));
             let contribution = match off {
                 None => bit,
@@ -438,6 +474,71 @@ impl DispatchState {
     }
 }
 
+/// Per dimension of a dispatch with partial groups, whether this group is the last along it and
+/// that group's thread count ([`DispatchState::last_groups`]).
+type LastGroups = [Option<(Id, Id)>; 3];
+
+/// The execution mask of a wave whose first `threads` lanes run, as its two halves.
+const fn first_threads(threads: u32) -> (u32, u32) {
+    let low = match threads {
+        32.. => u32::MAX,
+        n => (1_u32 << n) - 1,
+    };
+    let high = match threads {
+        64.. => u32::MAX,
+        n @ 33.. => (1_u32 << (n - 32)) - 1,
+        _ => 0,
+    };
+    (low, high)
+}
+
+/// Whether a thread of thread ids `ids`, at `place` in its group, does not run: it lies at or past
+/// `end`, the group's threads, or along some dimension the group is the last of (`last`, from
+/// [`DispatchState::last_groups`]) at or past that group's count. `None` where nothing can stop it.
+fn thread_off(
+    module: &mut Wavefront<'_>,
+    (last, end): (&LastGroups, Option<Id>),
+    (ids, place): ([Id; 3], Option<Id>),
+) -> Option<Id> {
+    let bool_type = module.bool_type;
+    let mut off: Option<Id> = None;
+    let mut either = |module: &mut Wavefront<'_>, here: Id| {
+        off = Some(match off {
+            None => here,
+            Some(before) => {
+                let both = module.builder.id();
+                module
+                    .builder
+                    .function(op::LOGICAL_OR, &[bool_type.0, both.0, before.0, here.0]);
+                both
+            }
+        });
+    };
+    if let (Some(end), Some(place)) = (end, place) {
+        let past = module.builder.id();
+        module
+            .builder
+            .function(op::ULESS_THAN_EQUAL, &[bool_type.0, past.0, end.0, place.0]);
+        either(module, past);
+    }
+    for dimension in 0..3 {
+        let Some((is_last, count)) = last[dimension] else {
+            continue;
+        };
+        let past = module.builder.id();
+        module.builder.function(
+            op::ULESS_THAN_EQUAL,
+            &[bool_type.0, past.0, count.0, ids[dimension].0],
+        );
+        let here = module.builder.id();
+        module
+            .builder
+            .function(op::LOGICAL_AND, &[bool_type.0, here.0, is_last.0, past.0]);
+        either(module, here);
+    }
+    off
+}
+
 /// `left operation right` on words.
 /// A thread's id in `register` as the module stores it: the x id moved by `first_thread`
 /// ([`ComputeInputs::first_thread`]), every other as it is.
@@ -473,6 +574,11 @@ fn thread_ids(
     };
     let lane = Model::constant(module, lane);
     let place = binary(module, op::IADD, base, lane);
+    (split_place(module, place, [x, y, 1]), Some(place))
+}
+
+/// The thread id components of the thread at `place` in a group of `shape`, x fastest.
+fn split_place(module: &mut Wavefront<'_>, place: Id, [x, y, _]: [u32; 3]) -> [Id; 3] {
     // `n % d` as `n - (n / d) * d`.
     let divide = |module: &mut Wavefront<'_>, value: Id, by: u32| {
         let by = Model::constant(module, by);
@@ -482,7 +588,7 @@ fn thread_ids(
     };
     let (row, x) = divide(module, place, x);
     let (z, y) = divide(module, row, y);
-    ([x, y, z], Some(place))
+    [x, y, z]
 }
 
 #[cfg(test)]

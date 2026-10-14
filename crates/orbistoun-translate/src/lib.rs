@@ -14,6 +14,7 @@ mod buffer;
 pub mod control;
 pub mod draw_buffers;
 pub mod evaluate;
+pub mod lane_exact;
 pub mod model;
 pub mod modifiers;
 pub mod predicated;
@@ -368,7 +369,9 @@ pub struct Translated {
     /// device.
     pub required_subgroup: Option<u32>,
     /// The textures the module samples, in binding order, and where each one's descriptor
-    /// came from. Empty for a module that samples nothing and for every model but the wavefront.
+    /// came from. Empty for a module that samples nothing, and for the predicated lane and
+    /// subgroup models; a guest dispatch run one invocation per lane is built by the wavefront
+    /// model's emitter and has them (D880).
     pub textures: Vec<wavefront::TextureSource>,
     /// Where a compute module's stored image's descriptor came from. `None` for a module that
     /// stores to no image, and for a pixel shader, whose storage image is the harness's.
@@ -614,9 +617,10 @@ fn modifier_of(
 }
 
 /// Why a module was built at the slowest fidelity, when that was not what was asked for: a
-/// graphics stage, a guest dispatch, or a shader that touches a lane mask.
+/// graphics stage, a guest dispatch whose program meets its wave (D880), or a shader that touches
+/// a lane mask. `dispatch` is why a guest dispatch kept the whole wave in one invocation.
 fn fidelity_warnings(
-    (staged, dispatch): (bool, bool),
+    (staged, dispatch): (bool, Option<&'static str>),
     asked_for: Fidelity,
     fidelity: Fidelity,
     width: Width,
@@ -631,12 +635,9 @@ fn fidelity_warnings(
             ),
             subgroup_would_need: width.lanes(),
         }]
-    } else if dispatch && asked_for != Fidelity::Wavefront {
+    } else if let Some(because) = dispatch.filter(|_| asked_for != Fidelity::Wavefront) {
         vec![Warning::SlowestFidelity {
-            because: concat!(
-                "the module is a guest dispatch, and the wavefront model is the only one with ",
-                "its entry state and exact memory"
-            ),
+            because,
             subgroup_would_need: width.lanes(),
         }]
     } else if asked_for == Fidelity::Auto && fidelity == Fidelity::Wavefront {
@@ -650,6 +651,35 @@ fn fidelity_warnings(
     } else {
         Vec::new()
     }
+}
+
+/// Whether a guest dispatch runs one invocation per lane (D880): asked for the lane model or left to
+/// choose, and its program never meets its wave. When it does not, why the whole wave stays in one
+/// invocation. Neither for a module that is not a guest dispatch.
+fn dispatch_per_lane(
+    decode: &Decode,
+    encodings: &EncodingTable,
+    (asked_for, width): (Fidelity, Width),
+    dispatch: bool,
+) -> (bool, Option<&'static str>) {
+    if !dispatch {
+        return (false, None);
+    }
+    let meets = lane_exact::lane_needs(decode, encodings, width.lanes())
+        .needs
+        .first()
+        .map(|&(need, _, _)| need);
+    if matches!(asked_for, Fidelity::Auto | Fidelity::Lane) && meets.is_none() {
+        return (true, None);
+    }
+    let because = meets.map_or(
+        concat!(
+            "the module is a guest dispatch, and the subgroup model has none of its entry state ",
+            "or exact memory"
+        ),
+        lane_exact::refusal,
+    );
+    (false, Some(because))
 }
 
 /// As [`translate_windowed_primitive`], for a module that reads its stage's user data at entry
@@ -677,16 +707,23 @@ pub fn translate_with_user_data(
     // whether it reads or writes a lane mask.
     let needed = fidelity;
     let staged = stage != wavefront::Stage::Compute;
-    // A guest dispatch's entry state and exact memory exist only in the wavefront model.
+    // A guest dispatch's entry state and exact memory are the wavefront model's. Its emitter runs
+    // one invocation per lane for a program that never meets its wave, which is the lane model a
+    // dispatch has (D880); any other keeps the whole wave in one invocation.
     let dispatch = !staged && user_data.compute.is_some();
-    if staged || dispatch {
+    let (per_lane, kept_whole) = dispatch_per_lane(decode, encodings, (asked_for, width), dispatch);
+    let mut user_data = user_data;
+    if per_lane {
+        fidelity = Fidelity::Lane;
+        user_data.per_invocation = Some(width.lanes());
+    } else if staged || dispatch {
         fidelity = Fidelity::Wavefront;
     }
 
     // A fragment module simulates one lane, its pixel, so only a mesh module pays for the whole
     // wavefront in one invocation.
     let simulates_wavefront = staged && stage != wavefront::Stage::Fragment;
-    let warnings = fidelity_warnings((simulates_wavefront, dispatch), asked_for, needed, width);
+    let warnings = fidelity_warnings((simulates_wavefront, kept_whole), asked_for, needed, width);
 
     if decode.desynchronised {
         return Err(TranslateError::UntrustworthyDecode {
@@ -720,20 +757,9 @@ pub fn translate_with_user_data(
     }
 
     match fidelity {
-        Fidelity::Lane => {
-            let (module, instructions) = predicated::translate(decode, encodings, window)?;
-            Ok(Translated {
-                module,
-                strategy,
-                fidelity,
-                instructions,
-                warnings,
-                required_subgroup: None,
-                textures: Vec::new(),
-                storage: None,
-            })
-        }
-        Fidelity::Wavefront => {
+        // The wavefront model's emitter, which also builds a guest dispatch run one invocation per
+        // lane (D880).
+        _ if per_lane || fidelity == Fidelity::Wavefront => {
             let (module, instructions, (textures, storage)) = wavefront::translate_with_user_data(
                 decode,
                 encodings,
@@ -753,6 +779,19 @@ pub fn translate_with_user_data(
                 storage,
             })
         }
+        Fidelity::Lane => {
+            let (module, instructions) = predicated::translate(decode, encodings, window)?;
+            Ok(Translated {
+                module,
+                strategy,
+                fidelity,
+                instructions,
+                warnings,
+                required_subgroup: None,
+                textures: Vec::new(),
+                storage: None,
+            })
+        }
         Fidelity::Subgroup => {
             let (module, instructions, required_subgroup) =
                 predicated::translate_subgroup(decode, encodings, width, window)?;
@@ -767,8 +806,9 @@ pub fn translate_with_user_data(
                 storage: None,
             })
         }
-        // `resolve` turns Auto into a concrete level, so this is unreachable.
-        Fidelity::Auto => Err(TranslateError::FidelityNotImplemented {
+        // The wavefront model is built above, and `resolve` turns Auto into a concrete level, so
+        // this is unreachable.
+        Fidelity::Wavefront | Fidelity::Auto => Err(TranslateError::FidelityNotImplemented {
             level: fidelity,
             would: "have been resolved to a concrete level before dispatch",
         }),

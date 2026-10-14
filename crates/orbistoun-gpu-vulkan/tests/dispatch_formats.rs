@@ -22,6 +22,26 @@ use orbistoun_translate::wavefront::{
     BufferFormats, ComputeInputs, MeshPrimitive, Stage, UserData, Window, translate_with_user_data,
 };
 
+thread_local! {
+    /// Whether the test running on this thread translates one invocation per lane (D880).
+    static PER_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` twice: the whole wave in one invocation, then one invocation per lane (D880). Each
+/// run is held to the same expectations, so the two models are checked against each other.
+fn both_models(test: impl Fn()) {
+    for per_lane in [false, true] {
+        println!("[{}]", if per_lane { "per lane" } else { "whole wave" });
+        PER_LANE.with(|cell| cell.set(per_lane));
+        test();
+    }
+}
+
+/// What a module translated now asks of `UserData::per_invocation`.
+fn per_invocation() -> Option<u32> {
+    PER_LANE.with(std::cell::Cell::get).then_some(64)
+}
+
 const COPY: [u32; 7] = [
     0xe00c_2000,
     0x8000_0100,
@@ -85,6 +105,7 @@ fn translated(source: u32, destination: u32) -> Result<Vec<u32>, String> {
             }),
             draw_buffers: true,
             buffer_formats: Some(formats),
+            per_invocation: per_invocation(),
             ..UserData::default()
         },
     )
@@ -96,32 +117,34 @@ fn translated(source: u32, destination: u32) -> Result<Vec<u32>, String> {
 /// whole-word formats move their words unconverted, so the destination holds the source's bits.
 #[test]
 fn a_formatted_copy_moves_whole_word_elements() {
-    match probe() {
-        Availability::Available { properties } => println!("device: {}", properties.device),
-        Availability::Unavailable { reason } => {
-            println!("SKIPPED - no device: {reason}");
-            return;
+    both_models(|| {
+        match probe() {
+            Availability::Available { properties } => println!("device: {}", properties.device),
+            Availability::Unavailable { reason } => {
+                println!("SKIPPED - no device: {reason}");
+                return;
+            }
         }
-    }
-    let module = translated(word3(FLOAT_32X4), word3(UINT_32X4))
-        .expect("the copy translates through its descriptors' formats");
-    let source: Vec<u32> = (0..ELEMENTS * 4)
-        .map(|i| (f32::from(u16::try_from(i).expect("small")) * 0.25).to_bits())
-        .collect();
-    let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
-    let done = dispatch_guest_with_buffers(
-        &module,
-        &[0],
-        (&user_data(word3(FLOAT_32X4), word3(UINT_32X4)), [1, 1, 1]),
-        &DispatchImages::default(),
-        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
-    )
-    .expect("dispatched");
-    assert!(!done.escaped, "nothing left the bound buffers");
-    assert_eq!(
-        done.buffers[1].words, source,
-        "the destination holds the copy"
-    );
+        let module = translated(word3(FLOAT_32X4), word3(UINT_32X4))
+            .expect("the copy translates through its descriptors' formats");
+        let source: Vec<u32> = (0..ELEMENTS * 4)
+            .map(|i| (f32::from(u16::try_from(i).expect("small")) * 0.25).to_bits())
+            .collect();
+        let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
+        let done = dispatch_guest_with_buffers(
+            &module,
+            &[0],
+            (&user_data(word3(FLOAT_32X4), word3(UINT_32X4)), [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&source), BufferIn::Words(&destination)],
+        )
+        .expect("dispatched");
+        assert!(!done.escaped, "nothing left the bound buffers");
+        assert_eq!(
+            done.buffers[1].words, source,
+            "the destination holds the copy"
+        );
+    });
 }
 
 /// A four-channel store through a one-component whole-word format writes the format's one component
@@ -130,33 +153,35 @@ fn a_formatted_copy_moves_whole_word_elements() {
 /// fill program stores `xyzw` through a `32_UINT` descriptor whose selects are `X, 0, 0, 0`.
 #[test]
 fn a_store_writes_only_its_formats_components() {
-    match probe() {
-        Availability::Available { properties } => println!("device: {}", properties.device),
-        Availability::Unavailable { reason } => {
-            println!("SKIPPED - no device: {reason}");
-            return;
+    both_models(|| {
+        match probe() {
+            Availability::Available { properties } => println!("device: {}", properties.device),
+            Availability::Unavailable { reason } => {
+                println!("SKIPPED - no device: {reason}");
+                return;
+            }
         }
-    }
-    let module = translated(word3(UINT_32X4), ONE_UINT)
-        .expect("a store with more channels than its format has components translates");
-    let source: Vec<u32> = (0..ELEMENTS * 4).collect();
-    let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
-    let done = dispatch_guest_with_buffers(
-        &module,
-        &[0],
-        (&user_data(word3(UINT_32X4), ONE_UINT), [1, 1, 1]),
-        &DispatchImages::default(),
-        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
-    )
-    .expect("dispatched");
-    for (element, words) in done.buffers[1].words.chunks(4).enumerate() {
-        let first = u32::try_from(element * 4).expect("small");
-        assert_eq!(
-            words,
-            [first, 0xdead_beef, 0xdead_beef, 0xdead_beef],
-            "element {element}: x written, the rest untouched"
-        );
-    }
+        let module = translated(word3(UINT_32X4), ONE_UINT)
+            .expect("a store with more channels than its format has components translates");
+        let source: Vec<u32> = (0..ELEMENTS * 4).collect();
+        let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
+        let done = dispatch_guest_with_buffers(
+            &module,
+            &[0],
+            (&user_data(word3(UINT_32X4), ONE_UINT), [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&source), BufferIn::Words(&destination)],
+        )
+        .expect("dispatched");
+        for (element, words) in done.buffers[1].words.chunks(4).enumerate() {
+            let first = u32::try_from(element * 4).expect("small");
+            assert_eq!(
+                words,
+                [first, 0xdead_beef, 0xdead_beef, 0xdead_beef],
+                "element {element}: x written, the rest untouched"
+            );
+        }
+    });
 }
 
 /// A load through a null descriptor - a fourth word of zero, as radv writes for a null vertex buffer
@@ -164,29 +189,31 @@ fn a_store_writes_only_its_formats_components() {
 /// are all `SQ_SEL_0`, so no format is consulted, and the copy stores zeros.
 #[test]
 fn a_load_through_a_null_descriptor_reads_zero() {
-    match probe() {
-        Availability::Available { properties } => println!("device: {}", properties.device),
-        Availability::Unavailable { reason } => {
-            println!("SKIPPED - no device: {reason}");
-            return;
+    both_models(|| {
+        match probe() {
+            Availability::Available { properties } => println!("device: {}", properties.device),
+            Availability::Unavailable { reason } => {
+                println!("SKIPPED - no device: {reason}");
+                return;
+            }
         }
-    }
-    let module = translated(0, word3(UINT_32X4)).expect("a null source translates");
-    let source = vec![0x1234_5678_u32; (ELEMENTS * 4) as usize];
-    let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
-    let done = dispatch_guest_with_buffers(
-        &module,
-        &[0],
-        (&user_data(0, word3(UINT_32X4)), [1, 1, 1]),
-        &DispatchImages::default(),
-        &[BufferIn::Words(&source), BufferIn::Words(&destination)],
-    )
-    .expect("dispatched");
-    assert_eq!(
-        done.buffers[1].words,
-        vec![0; (ELEMENTS * 4) as usize],
-        "zeros stored"
-    );
+        let module = translated(0, word3(UINT_32X4)).expect("a null source translates");
+        let source = vec![0x1234_5678_u32; (ELEMENTS * 4) as usize];
+        let destination = vec![0xdead_beef_u32; (ELEMENTS * 4) as usize];
+        let done = dispatch_guest_with_buffers(
+            &module,
+            &[0],
+            (&user_data(0, word3(UINT_32X4)), [1, 1, 1]),
+            &DispatchImages::default(),
+            &[BufferIn::Words(&source), BufferIn::Words(&destination)],
+        )
+        .expect("dispatched");
+        assert_eq!(
+            done.buffers[1].words,
+            vec![0; (ELEMENTS * 4) as usize],
+            "zeros stored"
+        );
+    });
 }
 
 /// PPSA03416's and PPSA02664's first dispatch, word for word: the thread's index is the group's
@@ -225,6 +252,8 @@ const CONSTANTS: u64 = 0x4_1a60_0000;
 
 #[test]
 fn the_titles_formatted_fill_runs_as_its_program_says() {
+    // The fill reads `vcc_lo` as a value - a lane mask whole - so it keeps the whole wave in one
+    // invocation (D880).
     match probe() {
         Availability::Available { properties } => println!("device: {}", properties.device),
         Availability::Unavailable { reason } => {
@@ -259,6 +288,7 @@ fn the_titles_formatted_fill_runs_as_its_program_says() {
             }),
             draw_buffers: true,
             buffer_formats: Some(formats),
+            per_invocation: per_invocation(),
             ..UserData::default()
         },
     )
@@ -304,8 +334,10 @@ fn the_titles_formatted_fill_runs_as_its_program_says() {
 /// component it writes.
 #[test]
 fn a_formatted_store_needing_an_unmeasured_conversion_is_refused() {
-    let refused = translated(word3(FLOAT_32X4), word3(UNORM_8X4)).expect_err("refused");
-    assert!(refused.contains("conversion"), "{refused}");
-    let refused = translated(word3(FLOAT_32X4), word3(64)).expect_err("refused");
-    assert!(refused.contains("component"), "{refused}");
+    both_models(|| {
+        let refused = translated(word3(FLOAT_32X4), word3(UNORM_8X4)).expect_err("refused");
+        assert!(refused.contains("conversion"), "{refused}");
+        let refused = translated(word3(FLOAT_32X4), word3(64)).expect_err("refused");
+        assert!(refused.contains("component"), "{refused}");
+    });
 }

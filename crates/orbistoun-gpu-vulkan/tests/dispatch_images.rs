@@ -21,6 +21,26 @@ use orbistoun_translate::wavefront::{
     ComputeInputs, MeshPrimitive, PartialGroups, Stage, UserData, Window, translate_with_user_data,
 };
 
+thread_local! {
+    /// Whether the test running on this thread translates one invocation per lane (D880).
+    static PER_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` twice: the whole wave in one invocation, then one invocation per lane (D880). Each
+/// run is held to the same expectations, so the two models are checked against each other.
+fn both_models(test: impl Fn()) {
+    for per_lane in [false, true] {
+        println!("[{}]", if per_lane { "per lane" } else { "whole wave" });
+        PER_LANE.with(|cell| cell.set(per_lane));
+        test();
+    }
+}
+
+/// What a module translated now asks of `UserData::per_invocation`.
+fn per_invocation() -> Option<u32> {
+    PER_LANE.with(std::cell::Cell::get).then_some(64)
+}
+
 fn device_or_skip(what: &str) -> bool {
     match probe() {
         Availability::Available { properties } => {
@@ -98,6 +118,7 @@ fn translated_with(
                 integer_images,
                 first_thread: 0,
             }),
+            per_invocation: per_invocation(),
             ..UserData::default()
         },
     )
@@ -111,40 +132,42 @@ fn translated_with(
 /// copy. The texels are eight-bit channels, which a sixteen-bit half carries exactly.
 #[test]
 fn a_dispatch_copies_one_image_into_another() {
-    if !device_or_skip("image copy") {
-        return;
-    }
-    let source: Vec<u32> = (0..SIDE * SIDE)
-        .map(|i| 0x0102_0304_u32.wrapping_mul(i + 1) ^ (i << 24))
-        .collect();
-    for (form, program) in [("whole", &COPY[..]), ("a16 d16", &COPY_A16_D16[..])] {
-        let destination = vec![0xdead_beef_u32; (SIDE * SIDE) as usize];
-        let done = dispatch_guest(
-            &translated(program),
-            &[0],
-            (&[0; 16], [1, 1, 1]),
-            &DispatchImages {
-                more_fetched: &[],
-                fetched: Some(DispatchImage {
-                    texels: &source,
-                    format: DispatchFormat::Rgba8,
-                    width: SIDE,
-                    height: SIDE,
-                    depth: None,
-                }),
-                stored: Some(DispatchImage {
-                    texels: &destination,
-                    format: DispatchFormat::Rgba8,
-                    width: SIDE,
-                    height: SIDE,
-                    depth: None,
-                }),
-            },
-        )
-        .expect("dispatched");
-        assert!(!done.escaped, "{form}");
-        assert_eq!(done.stored.as_deref(), Some(source.as_slice()), "{form}");
-    }
+    both_models(|| {
+        if !device_or_skip("image copy") {
+            return;
+        }
+        let source: Vec<u32> = (0..SIDE * SIDE)
+            .map(|i| 0x0102_0304_u32.wrapping_mul(i + 1) ^ (i << 24))
+            .collect();
+        for (form, program) in [("whole", &COPY[..]), ("a16 d16", &COPY_A16_D16[..])] {
+            let destination = vec![0xdead_beef_u32; (SIDE * SIDE) as usize];
+            let done = dispatch_guest(
+                &translated(program),
+                &[0],
+                (&[0; 16], [1, 1, 1]),
+                &DispatchImages {
+                    more_fetched: &[],
+                    fetched: Some(DispatchImage {
+                        texels: &source,
+                        format: DispatchFormat::Rgba8,
+                        width: SIDE,
+                        height: SIDE,
+                        depth: None,
+                    }),
+                    stored: Some(DispatchImage {
+                        texels: &destination,
+                        format: DispatchFormat::Rgba8,
+                        width: SIDE,
+                        height: SIDE,
+                        depth: None,
+                    }),
+                },
+            )
+            .expect("dispatched");
+            assert!(!done.escaped, "{form}");
+            assert_eq!(done.stored.as_deref(), Some(source.as_slice()), "{form}");
+        }
+    });
 }
 
 /// Threads a partial last group runs along x.
@@ -156,55 +179,57 @@ const RUN: u32 = 3;
 /// store from each would put zero over the one texel the copy is for.
 #[test]
 fn an_inactive_thread_stores_nothing() {
-    if !device_or_skip("partial-group image copy") {
-        return;
-    }
-    let source: Vec<u32> = (0..SIDE * SIDE).map(|i| 0xff00_0000 | (i + 1)).collect();
-    let kept = 0xdead_beef_u32;
-    let partial = PartialGroups {
-        last: [0, 0, 0],
-        threads: [RUN, SIDE, 1],
-    };
-    // The user data, then the partial shape where the module reads it (D855).
-    let mut push = vec![0_u32; orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize];
-    push.extend(partial.push_words());
-    for (form, program) in [("whole", &COPY[..]), ("a16 d16", &COPY_A16_D16[..])] {
-        let destination = vec![kept; (SIDE * SIDE) as usize];
-        let module = translated_with(program, [false; 2], Some(partial));
-        let done = dispatch_guest(
-            &module,
-            &[0],
-            (&push, [1, 1, 1]),
-            &DispatchImages {
-                more_fetched: &[],
-                fetched: Some(DispatchImage {
-                    texels: &source,
-                    format: DispatchFormat::Rgba8,
-                    width: SIDE,
-                    height: SIDE,
-                    depth: None,
-                }),
-                stored: Some(DispatchImage {
-                    texels: &destination,
-                    format: DispatchFormat::Rgba8,
-                    width: SIDE,
-                    height: SIDE,
-                    depth: None,
-                }),
-            },
-        )
-        .expect("dispatched");
-        let expected: Vec<u32> = (0..SIDE * SIDE)
-            .map(|i| {
-                if i % SIDE < RUN {
-                    source[i as usize]
-                } else {
-                    kept
-                }
-            })
-            .collect();
-        assert_eq!(done.stored.as_deref(), Some(expected.as_slice()), "{form}");
-    }
+    both_models(|| {
+        if !device_or_skip("partial-group image copy") {
+            return;
+        }
+        let source: Vec<u32> = (0..SIDE * SIDE).map(|i| 0xff00_0000 | (i + 1)).collect();
+        let kept = 0xdead_beef_u32;
+        let partial = PartialGroups {
+            last: [0, 0, 0],
+            threads: [RUN, SIDE, 1],
+        };
+        // The user data, then the partial shape where the module reads it (D855).
+        let mut push = vec![0_u32; orbistoun_translate::wavefront::PARTIAL_PUSH_WORD as usize];
+        push.extend(partial.push_words());
+        for (form, program) in [("whole", &COPY[..]), ("a16 d16", &COPY_A16_D16[..])] {
+            let destination = vec![kept; (SIDE * SIDE) as usize];
+            let module = translated_with(program, [false; 2], Some(partial));
+            let done = dispatch_guest(
+                &module,
+                &[0],
+                (&push, [1, 1, 1]),
+                &DispatchImages {
+                    more_fetched: &[],
+                    fetched: Some(DispatchImage {
+                        texels: &source,
+                        format: DispatchFormat::Rgba8,
+                        width: SIDE,
+                        height: SIDE,
+                        depth: None,
+                    }),
+                    stored: Some(DispatchImage {
+                        texels: &destination,
+                        format: DispatchFormat::Rgba8,
+                        width: SIDE,
+                        height: SIDE,
+                        depth: None,
+                    }),
+                },
+            )
+            .expect("dispatched");
+            let expected: Vec<u32> = (0..SIDE * SIDE)
+                .map(|i| {
+                    if i % SIDE < RUN {
+                        source[i as usize]
+                    } else {
+                        kept
+                    }
+                })
+                .collect();
+            assert_eq!(done.stored.as_deref(), Some(expected.as_slice()), "{form}");
+        }
+    });
 }
 
 /// A copy between `32_32_32_32_UINT` images - radeonsi's view of a block-compressed image's
@@ -212,58 +237,60 @@ fn an_inactive_thread_stores_nothing() {
 /// unsigned, as their views are, so nothing passes through a float.
 #[test]
 fn a_dispatch_copies_an_unsigned_image_word_for_word() {
-    if !device_or_skip("unsigned image copy") {
-        return;
-    }
-    let source: Vec<u32> = (0..SIDE * SIDE * 4)
-        .map(|i| match i % 4 {
-            0 => 0x7fc0_1234,
-            1 => 0xffff_ffff,
-            _ => 0x0102_0304_u32.wrapping_mul(i + 1),
-        })
-        .collect();
-    let destination = vec![0_u32; (SIDE * SIDE * 4) as usize];
-    let image = |texels| DispatchImage {
-        texels,
-        format: DispatchFormat::Rgba32Uint,
-        width: SIDE,
-        height: SIDE,
-        depth: None,
-    };
-    // Both images are declared with the unsigned 32-bit element: `OpTypeImage` (25) whose sampled
-    // type is the `OpTypeInt 32 0` (21). A driver may move a float image's bits unchanged too, so
-    // the declaration, which Vulkan requires to match the view, is checked itself.
-    let module = translated_for(&COPY, [true, true]);
-    let mut unsigned = None;
-    let mut images = Vec::new();
-    let mut at = 5;
-    while at < module.len() {
-        let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
-        match opcode {
-            21 if module[at + 2..at + 4] == [32, 0] => unsigned = Some(module[at + 1]),
-            25 => images.push(module[at + 2]),
-            _ => {}
+    both_models(|| {
+        if !device_or_skip("unsigned image copy") {
+            return;
         }
-        at += count.max(1);
-    }
-    assert_eq!(images.len(), 2, "a fetched and a stored image");
-    assert!(
-        images.iter().all(|element| Some(*element) == unsigned),
-        "{images:?} against {unsigned:?}"
-    );
-    let done = dispatch_guest(
-        &module,
-        &[0],
-        (&[0; 16], [1, 1, 1]),
-        &DispatchImages {
-            more_fetched: &[],
-            fetched: Some(image(&source)),
-            stored: Some(image(&destination)),
-        },
-    )
-    .expect("dispatched");
-    assert!(!done.escaped);
-    assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+        let source: Vec<u32> = (0..SIDE * SIDE * 4)
+            .map(|i| match i % 4 {
+                0 => 0x7fc0_1234,
+                1 => 0xffff_ffff,
+                _ => 0x0102_0304_u32.wrapping_mul(i + 1),
+            })
+            .collect();
+        let destination = vec![0_u32; (SIDE * SIDE * 4) as usize];
+        let image = |texels| DispatchImage {
+            texels,
+            format: DispatchFormat::Rgba32Uint,
+            width: SIDE,
+            height: SIDE,
+            depth: None,
+        };
+        // Both images are declared with the unsigned 32-bit element: `OpTypeImage` (25) whose sampled
+        // type is the `OpTypeInt 32 0` (21). A driver may move a float image's bits unchanged too, so
+        // the declaration, which Vulkan requires to match the view, is checked itself.
+        let module = translated_for(&COPY, [true, true]);
+        let mut unsigned = None;
+        let mut images = Vec::new();
+        let mut at = 5;
+        while at < module.len() {
+            let (count, opcode) = ((module[at] >> 16) as usize, module[at] & 0xffff);
+            match opcode {
+                21 if module[at + 2..at + 4] == [32, 0] => unsigned = Some(module[at + 1]),
+                25 => images.push(module[at + 2]),
+                _ => {}
+            }
+            at += count.max(1);
+        }
+        assert_eq!(images.len(), 2, "a fetched and a stored image");
+        assert!(
+            images.iter().all(|element| Some(*element) == unsigned),
+            "{images:?} against {unsigned:?}"
+        );
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(image(&source)),
+                stored: Some(image(&destination)),
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+    });
 }
 
 /// Each thread of a 4 x 4 x 4 group stores its own id and a seven, `[x, y, z, 7]`, at its own
@@ -282,59 +309,62 @@ const STORE_IDS_3D: [u32; 5] = [
 /// read back in order. Grand Theft Auto V's first sixteen-wave dispatch stores to a volume.
 #[test]
 fn a_dispatch_stores_to_a_volume() {
-    const EDGE: u32 = 4;
-    if !device_or_skip("volume store") {
-        return;
-    }
-    let encodings = EncodingTable::builtin().expect("encodings");
-    let operands = OperandTable::builtin().expect("operands");
-    let bytes: Vec<u8> = STORE_IDS_3D.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let decoded = decode(&bytes, &encodings, &operands);
-    let (module, _, (_, storage)) = translate_with_user_data(
-        &decoded,
-        &encodings,
-        Width::Wave64,
-        (Stage::Compute, MeshPrimitive::default()),
-        Window::default(),
-        UserData {
-            count: 8,
-            compute: Some(ComputeInputs {
-                workgroup_ids: [false, false, false],
-                thread_id_components: 3,
-                threads: [EDGE, EDGE, EDGE],
-                unwritten_user_data: 0,
-                partial: None,
-                integer_images: [false, true],
-                first_thread: 0,
-            }),
-            ..UserData::default()
-        },
-    )
-    .expect("the store translates");
-    assert!(storage.is_some_and(|source| source.volume));
-    let texels = (EDGE * EDGE * EDGE) as usize;
-    let destination = vec![0xdead_beef_u32; texels * 4];
-    let done = dispatch_guest(
-        &module,
-        &[0],
-        (&[0; 8], [1, 1, 1]),
-        &DispatchImages {
-            more_fetched: &[],
-            fetched: None,
-            stored: Some(DispatchImage {
-                texels: &destination,
-                format: DispatchFormat::Rgba32Uint,
-                width: EDGE,
-                height: EDGE,
-                depth: Some(EDGE),
-            }),
-        },
-    )
-    .expect("dispatched");
-    let expected: Vec<u32> = (0..EDGE * EDGE * EDGE)
-        .flat_map(|i| [i % EDGE, (i / EDGE) % EDGE, i / (EDGE * EDGE), 7])
-        .collect();
-    assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+    both_models(|| {
+        const EDGE: u32 = 4;
+        if !device_or_skip("volume store") {
+            return;
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = STORE_IDS_3D.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, (_, storage)) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 8,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false, false, false],
+                    thread_id_components: 3,
+                    threads: [EDGE, EDGE, EDGE],
+                    unwritten_user_data: 0,
+                    partial: None,
+                    integer_images: [false, true],
+                    first_thread: 0,
+                }),
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the store translates");
+        assert!(storage.is_some_and(|source| source.volume));
+        let texels = (EDGE * EDGE * EDGE) as usize;
+        let destination = vec![0xdead_beef_u32; texels * 4];
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 8], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: None,
+                stored: Some(DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgba32Uint,
+                    width: EDGE,
+                    height: EDGE,
+                    depth: Some(EDGE),
+                }),
+            },
+        )
+        .expect("dispatched");
+        let expected: Vec<u32> = (0..EDGE * EDGE * EDGE)
+            .flat_map(|i| [i % EDGE, (i / EDGE) % EDGE, i / (EDGE * EDGE), 7])
+            .collect();
+        assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+    });
 }
 
 /// Each thread stores opaque red at its own place: `v_mov_b32 v4, 1.0`, `v5, 0`, `v6, 0`, `v7,
@@ -355,55 +385,58 @@ const STORE_RED_3D: [u32; 8] = [
 /// of red at the low end and two of alpha at the top, `0xc00003ff`, in every texel.
 #[test]
 fn a_dispatch_stores_to_a_ten_bit_volume() {
-    const EDGE: u32 = 4;
-    if !device_or_skip("ten-bit volume store") {
-        return;
-    }
-    let encodings = EncodingTable::builtin().expect("encodings");
-    let operands = OperandTable::builtin().expect("operands");
-    let bytes: Vec<u8> = STORE_RED_3D.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let decoded = decode(&bytes, &encodings, &operands);
-    let (module, _, _) = translate_with_user_data(
-        &decoded,
-        &encodings,
-        Width::Wave64,
-        (Stage::Compute, MeshPrimitive::default()),
-        Window::default(),
-        UserData {
-            count: 8,
-            compute: Some(ComputeInputs {
-                workgroup_ids: [false, false, false],
-                thread_id_components: 3,
-                threads: [EDGE, EDGE, EDGE],
-                unwritten_user_data: 0,
-                partial: None,
-                integer_images: [false, false],
-                first_thread: 0,
-            }),
-            ..UserData::default()
-        },
-    )
-    .expect("the store translates");
-    let destination = vec![0_u32; (EDGE * EDGE * EDGE) as usize];
-    let done = dispatch_guest(
-        &module,
-        &[0],
-        (&[0; 8], [1, 1, 1]),
-        &DispatchImages {
-            more_fetched: &[],
-            fetched: None,
-            stored: Some(DispatchImage {
-                texels: &destination,
-                format: DispatchFormat::Rgb10A2,
-                width: EDGE,
-                height: EDGE,
-                depth: Some(EDGE),
-            }),
-        },
-    )
-    .expect("dispatched");
-    let expected = vec![0xc000_03ff_u32; destination.len()];
-    assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+    both_models(|| {
+        const EDGE: u32 = 4;
+        if !device_or_skip("ten-bit volume store") {
+            return;
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = STORE_RED_3D.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, _) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 8,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false, false, false],
+                    thread_id_components: 3,
+                    threads: [EDGE, EDGE, EDGE],
+                    unwritten_user_data: 0,
+                    partial: None,
+                    integer_images: [false, false],
+                    first_thread: 0,
+                }),
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the store translates");
+        let destination = vec![0_u32; (EDGE * EDGE * EDGE) as usize];
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 8], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: None,
+                stored: Some(DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgb10A2,
+                    width: EDGE,
+                    height: EDGE,
+                    depth: Some(EDGE),
+                }),
+            },
+        )
+        .expect("dispatched");
+        let expected = vec![0xc000_03ff_u32; destination.len()];
+        assert_eq!(done.stored.as_deref(), Some(expected.as_slice()));
+    });
 }
 
 /// One component a texel, `dmask:0x1`: `image_load v2, v[0:1], s[0:7]` then the same store.
@@ -421,30 +454,32 @@ const COPY_R8: [u32; 7] = [
 /// destination, bound as `R8_UNORM` on both sides.
 #[test]
 fn a_dispatch_copies_a_single_channel_image() {
-    if !device_or_skip("single-channel image copy") {
-        return;
-    }
-    let source: Vec<u32> = (0..SIDE * SIDE).map(|i| (i * 4 + 3) & 0xff).collect();
-    let destination = vec![0_u32; (SIDE * SIDE) as usize];
-    let image = |texels| DispatchImage {
-        texels,
-        format: DispatchFormat::R8,
-        width: SIDE,
-        height: SIDE,
-        depth: None,
-    };
-    let done = dispatch_guest(
-        &translated(&COPY_R8),
-        &[0],
-        (&[0; 16], [1, 1, 1]),
-        &DispatchImages {
-            more_fetched: &[],
-            fetched: Some(image(&source)),
-            stored: Some(image(&destination)),
-        },
-    )
-    .expect("dispatched");
-    assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+    both_models(|| {
+        if !device_or_skip("single-channel image copy") {
+            return;
+        }
+        let source: Vec<u32> = (0..SIDE * SIDE).map(|i| (i * 4 + 3) & 0xff).collect();
+        let destination = vec![0_u32; (SIDE * SIDE) as usize];
+        let image = |texels| DispatchImage {
+            texels,
+            format: DispatchFormat::R8,
+            width: SIDE,
+            height: SIDE,
+            depth: None,
+        };
+        let done = dispatch_guest(
+            &translated(&COPY_R8),
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(image(&source)),
+                stored: Some(image(&destination)),
+            },
+        )
+        .expect("dispatched");
+        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+    });
 }
 
 /// Both descriptors loaded from the table at `s[0:1]` by one `s_load_dwordx16 s[16:31], s[0:1], 0`
@@ -467,42 +502,45 @@ const COPY_FROM_TABLE: [u32; 10] = [
 /// byte and the stored one thirty-two bytes on, as a compiler merges two adjacent eight-word loads.
 #[test]
 fn a_sixteen_word_load_names_two_images_of_its_table() {
-    use orbistoun_translate::wavefront::TableWord;
-    let encodings = EncodingTable::builtin().expect("encodings");
-    let operands = OperandTable::builtin().expect("operands");
-    let bytes: Vec<u8> = COPY_FROM_TABLE
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    let decoded = decode(&bytes, &encodings, &operands);
-    let (_, _, (textures, storage)) = translate_with_user_data(
-        &decoded,
-        &encodings,
-        Width::Wave64,
-        (Stage::Compute, MeshPrimitive::default()),
-        Window::default(),
-        UserData {
-            count: 2,
-            compute: Some(ComputeInputs {
-                workgroup_ids: [false, false, false],
-                thread_id_components: 2,
-                threads: [SIDE, SIDE, 1],
-                unwritten_user_data: 0,
-                partial: None,
-                integer_images: [false; 2],
-                first_thread: 0,
-            }),
-            ..UserData::default()
-        },
-    )
-    .expect("the copy translates");
-    let fetched = textures.first().expect("a fetched image");
-    let stored = storage.expect("a stored image");
-    for (source, offset) in [(fetched, 0), (&stored, 32)] {
-        assert_eq!(source.table_offset, Some(offset));
-        assert_eq!(source.table.low, TableWord::UserData(0));
-        assert_eq!(source.table.high, TableWord::UserData(1));
-    }
+    both_models(|| {
+        use orbistoun_translate::wavefront::TableWord;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = COPY_FROM_TABLE
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (_, _, (textures, storage)) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 2,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false, false, false],
+                    thread_id_components: 2,
+                    threads: [SIDE, SIDE, 1],
+                    unwritten_user_data: 0,
+                    partial: None,
+                    integer_images: [false; 2],
+                    first_thread: 0,
+                }),
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the copy translates");
+        let fetched = textures.first().expect("a fetched image");
+        let stored = storage.expect("a stored image");
+        for (source, offset) in [(fetched, 0), (&stored, 32)] {
+            assert_eq!(source.table_offset, Some(offset));
+            assert_eq!(source.table.low, TableWord::UserData(0));
+            assert_eq!(source.table.high, TableWord::UserData(1));
+        }
+    });
 }
 
 /// Each thread asks the fetched image's level-zero size and stores it with a seven and a nine at
@@ -526,41 +564,43 @@ const SIZE_QUERY: [u32; 10] = [
 /// thread. PPSA21564's compute program at `0x50053c700` asks one before it reads.
 #[test]
 fn a_dispatch_asks_an_image_s_size() {
-    if !device_or_skip("image size query") {
-        return;
-    }
-    let source = vec![0_u32; 6 * 4];
-    let destination = vec![0_u32; (SIDE * SIDE * 4) as usize];
-    let done = dispatch_guest(
-        &translated_for(&SIZE_QUERY, [false, true]),
-        &[0],
-        (&[0; 16], [1, 1, 1]),
-        &DispatchImages {
-            more_fetched: &[],
-            fetched: Some(DispatchImage {
-                texels: &source,
-                format: DispatchFormat::Rgba8,
-                width: 6,
-                height: 4,
-                depth: None,
-            }),
-            stored: Some(DispatchImage {
-                texels: &destination,
-                format: DispatchFormat::Rgba32Uint,
-                width: SIDE,
-                height: SIDE,
-                depth: None,
-            }),
-        },
-    )
-    .expect("dispatched");
-    assert!(!done.escaped);
-    let stored = done.stored.expect("stored");
-    assert!(
-        stored.chunks(4).all(|texel| texel == [6, 4, 7, 9]),
-        "{:?}",
-        &stored[..8]
-    );
+    both_models(|| {
+        if !device_or_skip("image size query") {
+            return;
+        }
+        let source = vec![0_u32; 6 * 4];
+        let destination = vec![0_u32; (SIDE * SIDE * 4) as usize];
+        let done = dispatch_guest(
+            &translated_for(&SIZE_QUERY, [false, true]),
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                more_fetched: &[],
+                fetched: Some(DispatchImage {
+                    texels: &source,
+                    format: DispatchFormat::Rgba8,
+                    width: 6,
+                    height: 4,
+                    depth: None,
+                }),
+                stored: Some(DispatchImage {
+                    texels: &destination,
+                    format: DispatchFormat::Rgba32Uint,
+                    width: SIDE,
+                    height: SIDE,
+                    depth: None,
+                }),
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        let stored = done.stored.expect("stored");
+        assert!(
+            stored.chunks(4).all(|texel| texel == [6, 4, 7, 9]),
+            "{:?}",
+            &stored[..8]
+        );
+    });
 }
 
 /// Three descriptors from the table at `s[0:1]` - `s_load_dwordx16 s[16:31], s[0:1], null` and
@@ -588,66 +628,69 @@ const SECOND_IMAGE_COPY: [u32; 14] = [
 /// program at `0x50053c700` reads two images and asks the size of a third.
 #[test]
 fn a_dispatch_fetches_from_two_images() {
-    if !device_or_skip("two fetched images") {
-        return;
-    }
-    let encodings = EncodingTable::builtin().expect("encodings");
-    let operands = OperandTable::builtin().expect("operands");
-    let bytes: Vec<u8> = SECOND_IMAGE_COPY
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .collect();
-    let decoded = decode(&bytes, &encodings, &operands);
-    let (module, _, (textures, storage)) = translate_with_user_data(
-        &decoded,
-        &encodings,
-        Width::Wave64,
-        (Stage::Compute, MeshPrimitive::default()),
-        Window::default(),
-        UserData {
-            count: 2,
-            compute: Some(ComputeInputs {
-                workgroup_ids: [false, false, false],
-                thread_id_components: 2,
-                threads: [SIDE, SIDE, 1],
-                unwritten_user_data: 0,
-                partial: None,
-                integer_images: [false; 2],
-                first_thread: 0,
-            }),
-            ..UserData::default()
-        },
-    )
-    .expect("the copy translates");
-    assert_eq!(
-        textures.iter().map(|t| t.table_offset).collect::<Vec<_>>(),
-        [Some(0), Some(0x40)],
-        "two fetched images, in slot order"
-    );
-    assert_eq!(storage.and_then(|t| t.table_offset), Some(32));
-    let image = |texels| DispatchImage {
-        texels,
-        format: DispatchFormat::Rgba8,
-        width: SIDE,
-        height: SIDE,
-        depth: None,
-    };
-    let first = vec![0x1111_1111_u32; (SIDE * SIDE) as usize];
-    let second: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0a0b_0c00 | i).collect();
-    let destination = vec![0_u32; (SIDE * SIDE) as usize];
-    let done = dispatch_guest(
-        &module,
-        &[0],
-        (&[0; 16], [1, 1, 1]),
-        &DispatchImages {
-            fetched: Some(image(&first)),
-            more_fetched: &[image(&second)],
-            stored: Some(image(&destination)),
-        },
-    )
-    .expect("dispatched");
-    assert!(!done.escaped);
-    assert_eq!(done.stored.as_deref(), Some(second.as_slice()));
+    both_models(|| {
+        if !device_or_skip("two fetched images") {
+            return;
+        }
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let bytes: Vec<u8> = SECOND_IMAGE_COPY
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let (module, _, (textures, storage)) = translate_with_user_data(
+            &decoded,
+            &encodings,
+            Width::Wave64,
+            (Stage::Compute, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 2,
+                compute: Some(ComputeInputs {
+                    workgroup_ids: [false, false, false],
+                    thread_id_components: 2,
+                    threads: [SIDE, SIDE, 1],
+                    unwritten_user_data: 0,
+                    partial: None,
+                    integer_images: [false; 2],
+                    first_thread: 0,
+                }),
+                per_invocation: per_invocation(),
+                ..UserData::default()
+            },
+        )
+        .expect("the copy translates");
+        assert_eq!(
+            textures.iter().map(|t| t.table_offset).collect::<Vec<_>>(),
+            [Some(0), Some(0x40)],
+            "two fetched images, in slot order"
+        );
+        assert_eq!(storage.and_then(|t| t.table_offset), Some(32));
+        let image = |texels| DispatchImage {
+            texels,
+            format: DispatchFormat::Rgba8,
+            width: SIDE,
+            height: SIDE,
+            depth: None,
+        };
+        let first = vec![0x1111_1111_u32; (SIDE * SIDE) as usize];
+        let second: Vec<u32> = (0..SIDE * SIDE).map(|i| 0x0a0b_0c00 | i).collect();
+        let destination = vec![0_u32; (SIDE * SIDE) as usize];
+        let done = dispatch_guest(
+            &module,
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                fetched: Some(image(&first)),
+                more_fetched: &[image(&second)],
+                stored: Some(image(&destination)),
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        assert_eq!(done.stored.as_deref(), Some(second.as_slice()));
+    });
 }
 
 /// A `16_16_16_16_FLOAT` image, two words a texel, is fetched and stored as the four halves it
@@ -655,33 +698,35 @@ fn a_dispatch_fetches_from_two_images() {
 /// PPSA21564's compute program at `0x50053c700` reads a 1024 x 1024 one.
 #[test]
 fn a_dispatch_copies_a_half_float_image() {
-    if !device_or_skip("half-float image copy") {
-        return;
-    }
-    // Halves 1.0, 2.0, -0.5 and 0.25 at each texel, the first moved by its index in steps of
-    // 1/1024, exact in a half.
-    let source: Vec<u32> = (0..SIDE * SIDE)
-        .flat_map(|i| [(0x3c00 + i) | (0x4000 << 16), 0xb800 | (0x3400 << 16)])
-        .collect();
-    let destination = vec![0_u32; source.len()];
-    let image = |texels| DispatchImage {
-        texels,
-        format: DispatchFormat::Rgba16Float,
-        width: SIDE,
-        height: SIDE,
-        depth: None,
-    };
-    let done = dispatch_guest(
-        &translated(&COPY),
-        &[0],
-        (&[0; 16], [1, 1, 1]),
-        &DispatchImages {
-            fetched: Some(image(&source)),
-            more_fetched: &[],
-            stored: Some(image(&destination)),
-        },
-    )
-    .expect("dispatched");
-    assert!(!done.escaped);
-    assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+    both_models(|| {
+        if !device_or_skip("half-float image copy") {
+            return;
+        }
+        // Halves 1.0, 2.0, -0.5 and 0.25 at each texel, the first moved by its index in steps of
+        // 1/1024, exact in a half.
+        let source: Vec<u32> = (0..SIDE * SIDE)
+            .flat_map(|i| [(0x3c00 + i) | (0x4000 << 16), 0xb800 | (0x3400 << 16)])
+            .collect();
+        let destination = vec![0_u32; source.len()];
+        let image = |texels| DispatchImage {
+            texels,
+            format: DispatchFormat::Rgba16Float,
+            width: SIDE,
+            height: SIDE,
+            depth: None,
+        };
+        let done = dispatch_guest(
+            &translated(&COPY),
+            &[0],
+            (&[0; 16], [1, 1, 1]),
+            &DispatchImages {
+                fetched: Some(image(&source)),
+                more_fetched: &[],
+                stored: Some(image(&destination)),
+            },
+        )
+        .expect("dispatched");
+        assert!(!done.escaped);
+        assert_eq!(done.stored.as_deref(), Some(source.as_slice()));
+    });
 }
