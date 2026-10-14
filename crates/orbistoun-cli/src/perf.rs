@@ -255,10 +255,26 @@ impl BenchEntry {
 /// first each round, puts both builds through the same drift.
 pub(crate) fn cmd_ab(
     path: &Path,
-    baseline: &Path,
+    (baseline, against): (Option<&Path>, Option<&str>),
     (seconds, rounds, top): (u64, usize, usize),
     (input, warm_up): (Option<&Path>, bool),
 ) -> Result<()> {
+    let built;
+    let baseline = match (baseline, against) {
+        (Some(baseline), _) => baseline,
+        (None, Some(revision)) => {
+            let dir = orbistoun_paths::Paths::resolve().data_root().join("ab");
+            println!("building {revision} into {}", dir.display());
+            built = orbistoun_perf::baseline::build_at(
+                &std::env::current_dir().context("finding the repository")?,
+                revision,
+                &dir,
+            )
+            .map_err(anyhow::Error::msg)?;
+            built.as_path()
+        }
+        (None, None) => anyhow::bail!("name a baseline build or a revision to build one from"),
+    };
     anyhow::ensure!(
         baseline.is_file(),
         "no baseline build at {}",

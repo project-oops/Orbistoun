@@ -7,6 +7,7 @@
 //! ranked by where the time went ([`Report`]). The command line, the window and the bulk benchmark
 //! share it, so each says the same thing about the same capture.
 
+pub mod baseline;
 mod report;
 mod tools;
 

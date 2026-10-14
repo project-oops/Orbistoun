@@ -122,6 +122,7 @@ orbistoun-cli perf <module> [--seconds N]    # record a run with Tracy; frame ti
 orbistoun-cli perf <module> --open           # ... and open the recording in the Tracy viewer
 orbistoun-cli bench [title...] [--seconds N] # every title in turn, costs ranked across them, against the last bench
 orbistoun-cli ab <module> --baseline <exe>   # another build and this one, alternately; fps and the zones that moved
+orbistoun-cli ab <module> --against HEAD     # ... against a revision, built with Tracy from a clean export and kept
 ```
 
 A recording and its report go in the title's `perf` directory, with the run's log and the guest's
@@ -145,7 +146,7 @@ A round of making a title faster goes:
    rather than timing it by hand. A span kept is the next round's answer.
 4. Where the spans run out, `ORBISTOUN_PROFILE=<n>` samples the guest's main thread and the device
    thread, naming host functions; its report is in the run's log.
-5. Change one thing and compare it with `ab` against a `tracy` build of the commit before: a run
+5. Change one thing and compare it with `ab --against HEAD` - the commit before, built cleanly: a run
    on the host clock varies by a few frames a second between runs of one build, and other work on
    the machine moves it more, so `ab` runs the two builds alternately for several rounds, after an
    uncounted warm-up run of each, since a fresh build's first run fills its caches. Judge by

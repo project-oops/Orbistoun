@@ -361,8 +361,12 @@ enum Command {
         /// Path to a guest executable.
         path: std::path::PathBuf,
         /// The other build to measure against.
+        #[arg(long, required_unless_present = "against", conflicts_with = "against")]
+        baseline: Option<std::path::PathBuf>,
+        /// Measure against this revision instead - `HEAD`, a commit, a tag - built with Tracy into
+        /// the data root's `ab` directory from a clean export, and kept for the next comparison.
         #[arg(long)]
-        baseline: std::path::PathBuf,
+        against: Option<String>,
         /// Seconds of each run to record.
         #[arg(long, default_value_t = 30)]
         seconds: u64,
@@ -1048,6 +1052,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         Command::Ab {
             path,
             baseline,
+            against,
             seconds,
             rounds,
             top,
@@ -1055,7 +1060,7 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             no_warm_up,
         } => perf::cmd_ab(
             &path,
-            &baseline,
+            (baseline.as_deref(), against.as_deref()),
             (seconds, rounds, top),
             (input.as_deref(), !no_warm_up),
         )?,
