@@ -10,6 +10,8 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use orbistoun_mem::guest;
+
 /// Reads a guest path into guest memory, installed by a layer that can reach the filesystem.
 ///
 /// `(guest_path, offset, address, most)` to how many bytes arrived: `most` bytes from `offset`
@@ -56,6 +58,109 @@ pub(crate) fn deliver(path: &str, offset: u64, address: u64, most: u64) -> Optio
     READER
         .get()
         .and_then(|read| read(path, offset, address, most))
+}
+
+/// Where an AMPR command-buffer object counts the bytes its commands take, a 32-bit word
+/// (REQ-aw01).
+pub const USED_AT: u64 = 4;
+/// Where it counts the commands appended, a 32-bit word (REQ-aw01).
+pub const COUNT_AT: u64 = 8;
+/// Where `sceAmprCommandBufferSetBuffer` writes the bound buffer's size, a 32-bit word.
+pub const SIZE_AT: u64 = 12;
+/// Where it writes the bound buffer's address.
+pub const BUFFER_AT: u64 = 16;
+/// The write-address command's opcode, the header word's low byte (REQ-aw01, REQ-aw02).
+pub const WRITE_ADDRESS: u32 = 0x05;
+
+/// The write-address command for `value` written to `address`, as a console appended it (REQ-aw01,
+/// REQ-aw02, `report-1791833977.txt` 658-693): a header - the opcode, a flags byte, the address's bits
+/// 47:32 - then the address's low word, then the value shifted down two where that is not zero. The
+/// flags carry the value's low two bits at 5:4 and the words after the header at 3:0, with bit 6 set
+/// where the value word is there.
+#[must_use]
+pub fn write_address_command(address: u64, value: u32) -> Vec<u32> {
+    let shifted = value >> 2;
+    let words = if shifted == 0 { 1 } else { 2 };
+    let flags = (u32::from(shifted != 0) << 6) | ((value & 0x3) << 4) | words;
+    let high = ((address >> 32) & 0xffff) as u32;
+    let mut command = vec![WRITE_ADDRESS | (flags << 8) | (high << 16), address as u32];
+    if shifted != 0 {
+        command.push(shifted);
+    }
+    command
+}
+
+/// One write-address command: where, and what.
+pub type WriteAddress = (u64, u32);
+
+/// What a walk of a command buffer's words found: the write-addresses before a command that is
+/// not one, and that command's word index.
+pub type Stopped = (Vec<WriteAddress>, usize);
+
+/// The write-address commands in a command buffer's words, in order, as `(address, value)`: the
+/// inverse of [`write_address_command`]. A command that is not one, or is cut short, ends the walk:
+/// [`Err`] carries the commands before it and the index of its header word.
+pub fn write_addresses(words: &[u32]) -> Result<Vec<WriteAddress>, Stopped> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < words.len() {
+        let header = words[at];
+        let flags = (header >> 8) & 0xff;
+        let after = (flags & 0xf) as usize;
+        if header & 0xff != WRITE_ADDRESS || !(1..=2).contains(&after) || at + after >= words.len()
+        {
+            return Err((out, at));
+        }
+        let address = (u64::from(header >> 16) << 32) | u64::from(words[at + 1]);
+        let shifted = if after == 2 { words[at + 2] } else { 0 };
+        out.push((address, (shifted << 2) | ((flags >> 4) & 0x3)));
+        at += 1 + after;
+    }
+    Ok(out)
+}
+
+/// Carries out the write-address commands in the buffer the AMPR command-buffer object at `object`
+/// has bound, in order: each writes its value, zero-extended, as the eight-byte word at its address
+/// (D834, assumed). Answers how many were carried out; a command that is not a write-address is
+/// reported, and it and everything after it are not.
+pub(crate) fn run_bound_commands(object: u64) -> usize {
+    // SAFETY: the guest's own command-buffer object, at its measured fields.
+    let used = unsafe { guest::read_u32(object + USED_AT) };
+    // SAFETY: as above.
+    let buffer = unsafe { guest::read_u64(object + BUFFER_AT) };
+    let (Some(used), Some(buffer)) = (used, buffer) else {
+        return 0;
+    };
+    if used == 0 || buffer == 0 {
+        return 0;
+    }
+    let mut bytes = vec![0_u8; used as usize];
+    // SAFETY: the bound buffer, of which the commands take its first `used` bytes.
+    if !unsafe { guest::read_into(buffer, &mut bytes) } {
+        return 0;
+    }
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        .collect();
+    let writes = match write_addresses(&words) {
+        Ok(writes) => writes,
+        Err((writes, at)) => {
+            tracing::warn!(
+                "command buffer {object:#x}: command {:#010x} at word {at} is not carried out, nor anything after it",
+                words[at]
+            );
+            writes
+        }
+    };
+    let mut done = 0;
+    for (address, value) in writes {
+        // SAFETY: an address the guest's own command named, written through the checked accessor.
+        if unsafe { guest::write_u64(address, u64::from(value)) } {
+            done += 1;
+        }
+    }
+    done
 }
 
 /// One read a command buffer holds, as `sceAmprAprCommandBufferReadFile` was asked for it.
@@ -331,5 +436,44 @@ mod tests {
         args[0] = 0x4000_0fff;
         assert_ne!(super::get_file_stat(&args), 0);
         assert_eq!(stat[0], 0, "nothing written");
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::{WRITE_ADDRESS, write_address_command, write_addresses};
+
+    /// A write-address command decodes back to the address and value it was built from, whether or
+    /// not its value needs the third word (D834).
+    #[test]
+    fn a_write_address_decodes_to_what_it_was_built_from() {
+        for (address, value) in [
+            (0x7400_001f_1430, 0),
+            (0x7400_001f_1430, 3),
+            (0x7400_001f_1438, 0x1234_5678),
+        ] {
+            let words = write_address_command(address, value);
+            assert_eq!(write_addresses(&words), Ok(vec![(address, value)]));
+        }
+        let two: Vec<u32> = [
+            write_address_command(0x1000, 1),
+            write_address_command(0x2000, 0),
+        ]
+        .concat();
+        assert_eq!(
+            write_addresses(&two),
+            Ok(vec![(0x1000, 1), (0x2000, 0)]),
+            "in order"
+        );
+    }
+
+    /// A command that is not a write-address stops the walk at its word, so nothing after it is
+    /// carried out on a guess.
+    #[test]
+    fn an_unknown_command_stops_the_walk() {
+        let mut words = write_address_command(0x1000, 1);
+        words.push(0x0000_0007);
+        assert_eq!(write_addresses(&words), Err((vec![(0x1000, 1)], 2)));
+        assert_ne!(0x07, WRITE_ADDRESS);
     }
 }

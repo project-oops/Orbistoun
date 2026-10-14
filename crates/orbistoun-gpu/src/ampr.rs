@@ -41,10 +41,6 @@ fn census_invalid(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// How many leading bytes of the object the constructor zeroes (`ctor-obj`, `extent 24`).
 const OBJECT_HEAD: usize = 24;
-/// Where `sceAmprCommandBufferSetBuffer` writes the bound buffer's size, a 32-bit word.
-const SIZE_AT: u64 = 12;
-/// Where it writes the bound buffer's address.
-const BUFFER_AT: u64 = 16;
 /// The alignment every bound size measured has: 0x20 to 0x1000, each a multiple of it
 /// (`ampr-sb40-size-*`, `ampr-cb-set-buffer-1000`).
 const BOUND_ALIGNMENT: u64 = 0x20;
@@ -172,29 +168,9 @@ fn command_buffer_set_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     0
 }
 
-/// Where the bytes the bound buffer's commands take are counted, a 32-bit word (REQ-aw01).
-const USED_AT: u64 = 4;
-/// Where the commands appended are counted, a 32-bit word (REQ-aw01).
-const COUNT_AT: u64 = 8;
-/// The write-address command's opcode, the header word's low byte (REQ-aw01, REQ-aw02).
-const WRITE_ADDRESS: u32 = 0x05;
-
-/// The write-address command for `value` written to `address`, as a console appended it (REQ-aw01,
-/// REQ-aw02, `report-1791833977.txt` 658-693): a header - the opcode, a flags byte, the address's bits
-/// 47:32 - then the address's low word, then the value shifted down two where that is not zero. The
-/// flags carry the value's low two bits at 5:4 and the words after the header at 3:0, with bit 6 set
-/// where the value word is there.
-fn write_address_command(address: u64, value: u32) -> Vec<u32> {
-    let shifted = value >> 2;
-    let words = if shifted == 0 { 1 } else { 2 };
-    let flags = (u32::from(shifted != 0) << 6) | ((value & 0x3) << 4) | words;
-    let high = ((address >> 32) & 0xffff) as u32;
-    let mut command = vec![WRITE_ADDRESS | (flags << 8) | (high << 16), address as u32];
-    if shifted != 0 {
-        command.push(shifted);
-    }
-    command
-}
+// The command format and the object's counters are the kernel's, which carries the commands out
+// on submit (D834).
+use orbistoun_kernel::apr::{BUFFER_AT, COUNT_AT, SIZE_AT, USED_AT, write_address_command};
 
 /// `sceAmprCommandBufferWriteAddress_04_00(obj, address, value, ..)`: appends the command that
 /// writes `value` to `address` when the buffer runs - nothing is written to `address` now - and

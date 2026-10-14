@@ -7279,8 +7279,15 @@ const MOST_PATHS_REPORTED: u64 = 16;
 /// offset in an unknown order; they are printed unlabelled.
 fn apr_submit_command_buffer(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let buffer = args[0];
-    if let Some(reads) = apr::carry_out(buffer) {
-        tracing::debug!("carried out the {reads} read(s) command buffer {buffer:#x} held");
+    let reads = apr::carry_out(buffer);
+    // After the reads, so a write-address that says they are done is written once they are
+    // (D834).
+    let writes = apr::run_bound_commands(buffer);
+    if reads.is_some() || writes > 0 {
+        tracing::debug!(
+            "carried out the {} read(s) and {writes} write-address(es) command buffer {buffer:#x} held",
+            reads.unwrap_or(0)
+        );
         return OK;
     }
     let words: Vec<String> = (0..8)
