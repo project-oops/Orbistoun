@@ -67,6 +67,10 @@ macro_rules! span_labels {
             Span::TextureCensus => $as!("textures: census"),
             Span::TextureBind => $as!("textures: bind"),
             Span::BufferBind => $as!("textures: buffers"),
+            Span::BufferResolve => $as!("buffers: resolve"),
+            Span::BufferWatch => $as!("buffers: watch"),
+            Span::BufferCompare => $as!("buffers: compare"),
+            Span::BufferRead => $as!("buffers: read"),
             Span::TextureKept => $as!("textures: kept"),
             Span::TextureUnwatched => $as!("textures: unwatched"),
             Span::TextureSwizzle => $as!("textures: swizzle"),
@@ -371,6 +375,14 @@ pub enum Span {
     TextureBind,
     /// Within [`Self::PrepareTextures`]: the buffers each draw reads, read and bound.
     BufferBind,
+    /// Within [`Self::BufferBind`]: a draw buffer's range resolved from its descriptor.
+    BufferResolve,
+    /// Within [`Self::BufferBind`]: the host asked whether a kept large range was written.
+    BufferWatch,
+    /// Within [`Self::BufferBind`]: a small range read and compared with what was kept.
+    BufferCompare,
+    /// Within [`Self::BufferBind`]: a range read and hashed afresh.
+    BufferRead,
     /// A texture's texels kept from an earlier read, nothing having written them since. Counted.
     TextureKept,
     /// A texture read whose memory the host does not write-watch, so the next binding reads it
@@ -420,7 +432,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 53] = [
+    pub const ALL: [Self; 57] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::CommandProcessor,
@@ -454,6 +466,10 @@ impl Span {
         Self::TextureCensus,
         Self::TextureBind,
         Self::BufferBind,
+        Self::BufferResolve,
+        Self::BufferWatch,
+        Self::BufferCompare,
+        Self::BufferRead,
         Self::TextureKept,
         Self::TextureUnwatched,
         Self::TextureSwizzle,

@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::perf::{Span, span};
+
 use orbistoun_translate::draw_buffers::{
     BufferSource, Computed, ComputedAccess, DescriptorReads, DescriptorWord, GlobalLoads,
 };
@@ -168,25 +170,30 @@ impl BufferCache {
                 base: address,
             });
         }
-        let span = length as u64;
+        let span_of = length as u64;
         // A small range is compared rather than watched: asking the host whether it was written is
         // a system call or two, some microseconds, where reading and comparing a constant buffer's
         // few hundred bytes takes a fraction of one - and a guest rewrites those every frame.
         if length <= COMPARED_BYTES {
-            return self.read_compared(address, length, memory);
+            return span(Span::BufferCompare, || {
+                self.read_compared(address, length, memory)
+            });
         }
         if let Some((since, buffer, _)) = self.entries.get(&(address, length))
-            && since.and_then(|since| orbistoun_mem::watch::written_since(address, span, since))
-                == Some(false)
+            && span(Span::BufferWatch, || {
+                since.and_then(|since| orbistoun_mem::watch::written_since(address, span_of, since))
+            }) == Some(false)
         {
             return Ok(buffer.clone());
         }
-        // Marked before the bytes are hashed, so a write racing the hash is seen next time.
-        let since = orbistoun_mem::watch::mark(address, span);
-        let bytes = mapped_prefix(memory, address, length).ok_or(UNMAPPED)?;
-        let buffer = padded_buffer(address, bytes);
-        self.keep((address, length), since, buffer.clone());
-        Ok(buffer)
+        span(Span::BufferRead, || {
+            // Marked before the bytes are hashed, so a write racing the hash is seen next time.
+            let since = orbistoun_mem::watch::mark(address, span_of);
+            let bytes = mapped_prefix(memory, address, length).ok_or(UNMAPPED)?;
+            let buffer = padded_buffer(address, bytes);
+            self.keep((address, length), since, buffer.clone());
+            Ok(buffer)
+        })
     }
 
     /// A small range's bytes, read now and kept as the same buffer, hash and all, while they are
@@ -562,6 +569,17 @@ fn table_address(table: TableBase, user_data: &[u32; USER_DATA_WORDS]) -> u64 {
 ///
 /// A refusal naming why the range cannot be bound exactly.
 pub(crate) fn resolve_range(
+    source: &BufferSource,
+    draw: (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
+    memory: &impl GuestMemory,
+) -> Result<(u64, u64), &'static str> {
+    span(Span::BufferResolve, || {
+        resolve_range_now(source, draw, memory)
+    })
+}
+
+/// [`resolve_range`], timed there.
+fn resolve_range_now(
     source: &BufferSource,
     (user_data, vertices, system): (&[u32; USER_DATA_WORDS], u32, &[(u32, u32)]),
     memory: &impl GuestMemory,
