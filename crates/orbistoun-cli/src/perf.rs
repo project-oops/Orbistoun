@@ -244,8 +244,29 @@ const GPU_BUSY_MOST: f64 = 35.0;
 /// `bench` - record every title in turn and rank the costs across them, against the last benchmark.
 pub(crate) fn cmd_bench(only: &[String], seconds: u64, top: usize) -> Result<()> {
     let tools = tools(false)?;
+    let library = library();
+    // A name matching no title would bench nothing and say nothing: an option after `--` is read
+    // as a title's name.
+    let unknown: Vec<&String> = only
+        .iter()
+        .filter(|name| {
+            !library
+                .iter()
+                .any(|(module, _)| crate::common::title_id(module).as_ref() == Some(*name))
+        })
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "no title in the library is named {}",
+            unknown
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let mut entries = Vec::new();
-    for (module, homebrew) in library() {
+    for (module, homebrew) in library {
         let title = crate::common::title_id(&module).unwrap_or_default();
         if !only.is_empty() && !only.contains(&title) {
             continue;

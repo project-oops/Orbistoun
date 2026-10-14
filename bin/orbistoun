@@ -1276,7 +1276,10 @@ bench() {
     preflight
     step "cargo build --release -p orbistoun-cli"
     cargo build --release -p orbistoun-cli
-    ./target/release/orbistoun-cli bench "$@"
+    # A `--` before the options, as `perf` takes one, would make each option a title's name.
+    local args=()
+    for arg in "$@"; do [ "$arg" = "--" ] || args+=("$arg"); done
+    ./target/release/orbistoun-cli bench "${args[@]}"
 }
 
 
