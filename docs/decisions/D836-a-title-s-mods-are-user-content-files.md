@@ -13,13 +13,15 @@ writable layer (D722), so a guest's write is copied up into its overlay and neve
 the library. The `mods` directory, like the rest of what orbistoun keeps beside a title, is hidden
 from the guest (D756).
 
-A mod's `patches.toml` replaces bytes in the title's executable once it is linked and before its
-segments take their protection: each patch an offset from the executable's base, the bytes it
-expects there and as many bytes it writes. A mod's patches apply all or none - one outside the
-executable's segments, finding other bytes than it expects (a mod made for another build), or
-naming another of the title's modules leaves every one of that mod's patches unwritten, and the
-log says which and what it found. Only the executable is patched; the title's other modules are
-linked and protected inside the link (D724), and patching them is a further step.
+A mod's `patches.toml` replaces bytes in the title's executable, or in one of its own modules a
+patch names by file name, once that is relocated and before its segments take their protection:
+each patch an offset from the module's base, the bytes it expects there and as many bytes it
+writes. The service's link offers each title module to a patcher the worker supplies between its
+relocation and its protection, after the link plan is taken, so a patch is never part of the
+title's link (D724). A mod's patches to one module apply all or none - one outside the module's
+segments or finding other bytes than it expects (a mod made for another build) leaves every one of
+that mod's patches to that module unwritten, and the log says which and what it found. A patch
+naming a module the title does not load is refused by name.
 
 A mod's `cheats.toml` writes values into the running title at its flips: each from an offset from
 the executable's base, through a pointer chain where it names one, written at every flip (a frozen

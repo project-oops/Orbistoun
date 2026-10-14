@@ -550,7 +550,14 @@ pub struct ServiceConfig {
     /// input source a run with no window can drive itself, sampled as a function of run time
     /// (D707). Live sources reach a run through the GUI streaming them in.
     pub pads: orbistoun_input::Pads,
+    /// What writes into each of the title's own modules once it is relocated and before it is
+    /// protected - the user's mods' patches (D836) - where anything does.
+    pub before_protect: Option<ModulePatcher>,
 }
+
+/// Writes into a title module between its relocation and its protection: given the title's
+/// executable, the module's file name and the placed module.
+pub type ModulePatcher = fn(&Path, &str, &orbistoun_loader::Image);
 
 impl Default for ServiceConfig {
     fn default() -> Self {
@@ -563,6 +570,7 @@ impl Default for ServiceConfig {
             paths: None,
             symbol_db: None,
             pads: orbistoun_input::Pads::default(),
+            before_protect: None,
         }
     }
 }
@@ -578,6 +586,7 @@ pub struct Service {
     paths: Option<orbistoun_paths::Paths>,
     entry_settings: orbistoun_loader::process::EntrySettings,
     pads: orbistoun_input::Pads,
+    before_protect: Option<ModulePatcher>,
 }
 
 /// Where regions handed to a guest by policy start.
@@ -916,6 +925,7 @@ impl Service {
             symbols,
             paths: config.paths,
             pads: config.pads,
+            before_protect: config.before_protect,
         }
     }
 
@@ -1995,6 +2005,36 @@ impl Service {
         Ok(container.raw_imports(bytes, &self.hasher)?)
     }
 
+    /// Patches the title's relocated modules, then protects them.
+    ///
+    /// Patched once relocated and while still writable, so a patch is not undone by a relocation
+    /// and needs no protection lifted (D836); after the link plan is taken, since a patch is the
+    /// user's, not part of the title's link. Protected only then: relocation writes into text, so
+    /// protecting earlier would fault those writes, and an unprotected module faults on
+    /// instruction fetch (D489).
+    fn patch_and_protect_modules(
+        &self,
+        executable: &Path,
+        found: &[titlemodules::TitleModule],
+        placed: &mut titleplacement::PlacedTitleModules,
+    ) -> Result<(), ServiceError> {
+        if let Some(patch) = self.before_protect {
+            for (library, image) in placed.images() {
+                if let Some(file) = found
+                    .iter()
+                    .find(|module| &module.library == library)
+                    .and_then(|module| module.path.file_name())
+                {
+                    patch(executable, &file.to_string_lossy(), image);
+                }
+            }
+        }
+        for (_, image) in placed.images_mut() {
+            self.protect_image(image)?;
+        }
+        Ok(())
+    }
+
     /// Places the title's own modules and relocates them against one shared stub table.
     ///
     /// Every module is placed and every export collected before any is relocated (D482), because a
@@ -2089,11 +2129,7 @@ impl Service {
             )?);
             tallies.push((library.clone(), applied.tally));
         }
-        // Protected only now: relocation writes into text, so protecting earlier would fault those
-        // writes, and an unprotected module faults on instruction fetch (D489).
-        for (_, image) in placed.images_mut() {
-            self.protect_image(image)?;
-        }
+        self.patch_and_protect_modules(executable, &found, &mut placed)?;
         // Tell the kernel where the modules are. Their pages are in this loader's own address
         // space, which the kernel's runtime map never sees (D446); without this a fault inside one
         // reads as outside every placed region, and `sceKernelVirtualQuery` refuses an address the

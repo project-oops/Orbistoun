@@ -180,7 +180,7 @@ A title's mods sit beside it, in its directory's `mods`, one directory each (D83
 <title directory>/mods/<name>/
     mod.toml   optional - enabled = false turns it off; description says what it is
     app0/      files laid over the title's own, as its /app0 sees them
-    patches.toml  bytes replaced in the title's executable once it is linked
+    patches.toml  bytes replaced in the title's executable or its modules once linked
     cheats.toml   values written into the running title, once or at every flip
 ```
 
@@ -189,7 +189,8 @@ what each changes and a switch that sets `enabled` in its `mod.toml`, and opens 
 install one.
 
 A patch names its place by its offset from the executable's base, as a disassembler shows it, the
-bytes that must be there and the bytes written instead, as many:
+bytes that must be there and the bytes written instead, as many. `module` names one of the title's
+own modules by file name instead, and the offset is then from that module's base:
 
 ```toml
 [[patch]]
@@ -197,10 +198,18 @@ offset = 0x1a2b3c
 original = "74 0e"
 bytes = "eb 0e"
 description = "skip the intro"
+
+[[patch]]
+module = "libSomething.prx"  # optional: one of the title's own modules
+offset = 0x4410
+original = "75 08"
+bytes = "90 90"
 ```
 
-A mod's patches apply all or none: one finding other bytes than it expects - a mod made for another
-build of the title - leaves every patch of that mod unwritten, and the log says what it found.
+A mod's patches to one module apply all or none: one finding other bytes than it expects - a mod
+made for another build of the title - leaves every patch of that mod to that module unwritten, and
+the log says what it found. A patch naming a module the title does not load is refused by name; a
+system library orbistoun provides itself, such as `libc.prx`, is not one of the title's modules.
 
 A cheat writes a value into the running title, at every flip by default - a frozen value - or once.
 Its address starts at an offset from the executable's base and follows a pointer chain where it

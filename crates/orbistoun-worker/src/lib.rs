@@ -957,19 +957,35 @@ fn patched_and_protected(
     image: &mut Image,
     module: &Path,
 ) -> Result<orbistoun_loader::protect::ProtectionTally, orbistoun_service::ServiceError> {
-    apply_mod_patches(module, image);
+    let file = module
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    apply_mod_patches(module, &file, image, true);
     service.protect_image(image)
 }
 
-/// Writes each applying mod's patches into the linked executable at `image` (D836): a mod's patches
-/// all, or - where one lies outside the executable, finds other bytes than it expects, or names
-/// another of the title's modules - none of them, with the reason logged.
-fn apply_mod_patches(module: &Path, image: &Image) {
+/// The title modules the mods' patches were offered, by file name, so a patch naming none of them
+/// is reported rather than silently never applied.
+static PATCHED_MODULES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Writes the applying mods' patches into one of the title's own modules, relocated and not yet
+/// protected (D836): the service's [`orbistoun_service::ModulePatcher`].
+fn patch_title_module(executable: &Path, file: &str, image: &Image) {
+    if let Ok(mut seen) = PATCHED_MODULES.lock() {
+        seen.push(file.to_owned());
+    }
+    apply_mod_patches(executable, file, image, false);
+}
+
+/// Writes each applying mod's patches for the module `file` into it at `image` (D836): those of a
+/// mod's patches naming it - the executable where a patch names none - all, or where one lies
+/// outside the module or finds other bytes than it expects, none of them, with the reason logged.
+/// The executable also arms the mods' cheats and reports a patch naming a module the title does not
+/// load, the title's modules being patched before it.
+fn apply_mod_patches(executable_path: &Path, file: &str, image: &Image, executable: bool) {
     let paths = orbistoun_paths::Paths::resolve();
-    let title = orbistoun_service::linkplan::title_of(module);
-    let executable = module
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned());
+    let title = orbistoun_service::linkplan::title_of(executable_path);
     let segments: Vec<(u64, u64)> = image
         .segments()
         .iter()
@@ -985,26 +1001,28 @@ fn apply_mod_patches(module: &Path, image: &Image) {
         .iter()
         .filter(|m| m.applies())
     {
-        // Its cheats, written at the title's flips from now.
-        match applying.cheats() {
-            Ok(cheats) if !cheats.is_empty() => {
-                tracing::info!("the mod {} arms {} cheat(s)", applying.name, cheats.len());
-                cheats::arm(&applying.name, image, cheats);
-            }
-            Ok(_) => {}
-            Err(why) => tracing::warn!("the mod {}'s cheats were not armed: {why}", applying.name),
+        if executable {
+            arm_cheats(applying, image);
         }
         let planned = applying.patches().and_then(|patches| {
-            if let Some(other) = patches.iter().find_map(|p| {
-                p.module
-                    .as_ref()
-                    .filter(|m| Some(*m) != executable.as_ref())
-            }) {
+            // This module's: those naming it, the executable's where a patch names none, and at
+            // the executable those naming a module no patch was offered, to be refused by name.
+            let mine: Vec<_> = patches
+                .into_iter()
+                .filter(|patch| match patch.module.as_deref() {
+                    None => executable,
+                    Some(named) => named == file || (executable && !module_seen(named)),
+                })
+                .collect();
+            if let Some(missing) = mine
+                .iter()
+                .find_map(|patch| patch.module.as_deref().filter(|named| *named != file))
+            {
                 return Err(format!(
-                    "it patches {other}, and only the title's executable is patched"
+                    "it patches {missing}, which the title does not load"
                 ));
             }
-            orbistoun_overrides::mods::plan_patches(&patches, (image.base(), &segments), read)
+            orbistoun_overrides::mods::plan_patches(&mine, (image.base(), &segments), read)
         });
         match planned {
             Ok(writes) if writes.is_empty() => {}
@@ -1015,7 +1033,7 @@ fn apply_mod_patches(module: &Path, image: &Image) {
                     unsafe { orbistoun_mem::guest::write_bytes(*at, bytes) };
                 }
                 tracing::info!(
-                    "the mod {} patched the executable in {} place(s)",
+                    "the mod {} patched {file} in {} place(s)",
                     applying.name,
                     writes.len()
                 );
@@ -1025,6 +1043,25 @@ fn apply_mod_patches(module: &Path, image: &Image) {
                 applying.name
             ),
         }
+    }
+}
+
+/// Whether the title module `named` was offered the mods' patches.
+fn module_seen(named: &str) -> bool {
+    PATCHED_MODULES
+        .lock()
+        .is_ok_and(|seen| seen.iter().any(|one| one == named))
+}
+
+/// Arms a mod's cheats against the executable at `image`, written at the title's flips from now.
+fn arm_cheats(applying: &orbistoun_overrides::mods::Mod, image: &Image) {
+    match applying.cheats() {
+        Ok(cheats) if !cheats.is_empty() => {
+            tracing::info!("the mod {} arms {} cheat(s)", applying.name, cheats.len());
+            cheats::arm(&applying.name, image, cheats);
+        }
+        Ok(_) => {}
+        Err(why) => tracing::warn!("the mod {}'s cheats were not armed: {why}", applying.name),
     }
 }
 
@@ -1548,6 +1585,7 @@ fn standing_service() -> Result<Service, Error> {
         memory_settings: with_shape_diagnostic(file.memory),
         stub_policy: policy,
         pads: file.pads,
+        before_protect: Some(patch_title_module),
         ..orbistoun_service::ServiceConfig::default()
     }))
 }
