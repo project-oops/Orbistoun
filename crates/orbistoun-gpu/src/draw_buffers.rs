@@ -460,10 +460,10 @@ fn global_range(
     user_data: &[u32; USER_DATA_WORDS],
     vertices: u32,
     memory: &impl GuestMemory,
-) -> Result<(u64, u64), &'static str> {
+) -> Result<(u64, u64), Refusal> {
     /// A run's answer, and every word it read with the value it read: the answer holds while they
     /// all still read the same.
-    type Run = (Vec<(u64, Option<u32>)>, Result<(u64, u64), &'static str>);
+    type Run = (Vec<(u64, Option<u32>)>, Result<(u64, u64), Refusal>);
     /// Runs kept, by program, user data and vertices; a bound, since a guest streaming new tables
     /// every frame adds a run a draw.
     const RUNS_KEPT: usize = 4096;
@@ -473,7 +473,8 @@ fn global_range(
         return Err(concat!(
             "a draw of more vertices than one wave holds, whose global loads' lanes are not all ",
             "run by one (D758)"
-        ));
+        )
+        .into());
     }
     let count = usize::try_from(global.user_data)
         .unwrap_or(USER_DATA_WORDS)
@@ -508,7 +509,7 @@ fn global_range(
         && let Some((reads, answer)) = runs.get(&key)
         && reads.iter().all(|&(address, value)| word(address) == value)
     {
-        return *answer;
+        return answer.clone();
     }
     let mut reads = Vec::new();
     let answer = prepared
@@ -522,7 +523,7 @@ fn global_range(
         if runs.len() >= RUNS_KEPT {
             runs.clear();
         }
-        runs.insert(key, (reads, answer));
+        runs.insert(key, (reads, answer.clone()));
     }
     answer
 }
@@ -566,7 +567,7 @@ impl Prepared {
         &self,
         (user_data, lanes): Draw<'_>,
         read: &mut dyn FnMut(u64) -> Option<u32>,
-    ) -> Result<orbistoun_translate::evaluate::LaneAddresses, &'static str> {
+    ) -> Result<orbistoun_translate::evaluate::LaneAddresses, Refusal> {
         use orbistoun_translate::evaluate::{lane_addresses, quick_lane_addresses};
         use std::sync::atomic::Ordering::Relaxed;
         let (encodings, _) = tables()?;
@@ -676,7 +677,7 @@ pub(crate) fn dispatch_global_range(
         u32,
     ),
     memory: &impl GuestMemory,
-) -> Result<(u64, u64), &'static str> {
+) -> Result<(u64, u64), Refusal> {
     use orbistoun_translate::evaluate::{WaveEntry, wave_lane_addresses};
     let waves = inputs.waves(width);
     let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(waves);
@@ -684,7 +685,8 @@ pub(crate) fn dispatch_global_range(
         return Err(concat!(
             "a dispatch of more waves than one preparation runs on the host to find where its ",
             "global loads read (D883)"
-        ));
+        )
+        .into());
     }
     let (encodings, _) = tables()?;
     let prepared = prepared_program(global, crate::content_hash(&global.prefix))?;
