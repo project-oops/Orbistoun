@@ -171,12 +171,27 @@ fn dispatch_refusal(
     let Some(which) = orbistoun_translate::evaluate::first_unnamed(decoded, encodings) else {
         return why;
     };
+    with_unnamed_census(
+        format!("{why}: the program at {address:#x}, {which}"),
+        (decoded, encodings),
+    )
+}
+
+/// `why`, followed by every opcode of the program the tables give no name, where there is one:
+/// what one request to record them lists.
+fn with_unnamed_census(
+    why: String,
+    (decoded, encodings): (&orbistoun_shader::Decode, &EncodingTable),
+) -> String {
     let every: Vec<String> = orbistoun_translate::evaluate::unnamed_opcodes(decoded, encodings)
         .iter()
         .map(ToString::to_string)
         .collect();
+    if every.is_empty() {
+        return why;
+    }
     format!(
-        "{why}: the program at {address:#x}, {which}; every opcode it holds that no table names: {}",
+        "{why}; every opcode the program holds that no table names: {}",
         every.join(", ")
     )
 }
@@ -203,6 +218,28 @@ mod refusal_tests {
         assert!(
             why.ends_with("VOP1 opcode 0xff at 0x0 (2 times), VOP1 opcode 0xfe at 0x4"),
             "{why}"
+        );
+    }
+
+    /// A refusal is followed by the program's unnamed opcodes where it has any, and left as it is
+    /// where every instruction is named.
+    #[test]
+    fn a_refusal_carries_the_census_only_where_there_is_one() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let program =
+            |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        let unnamed = program(&[0x7e01_fc80, 0xbf81_0000]);
+        let decoded = decode_program(&unnamed, &encodings, &operands);
+        assert_eq!(
+            super::with_unnamed_census("refused".to_owned(), (&decoded, &encodings)),
+            "refused; every opcode the program holds that no table names: VOP1 opcode 0xfe at 0x0"
+        );
+        let named = program(&[0x7e00_0280, 0xbf81_0000]);
+        let decoded = decode_program(&named, &encodings, &operands);
+        assert_eq!(
+            super::with_unnamed_census("refused".to_owned(), (&decoded, &encodings)),
+            "refused"
         );
     }
 }
@@ -1859,7 +1896,10 @@ impl Pipeline {
                 user_data,
             )
             .map_err(|e| {
-                format!("the compute program at {address:#x} could not be translated: {e}")
+                with_unnamed_census(
+                    format!("the compute program at {address:#x} could not be translated: {e}"),
+                    (decoded, &self.encodings),
+                )
             })?;
             let sources = (translated.textures.clone(), translated.storage);
             let hash = crate::content_hash(&translated.module);
