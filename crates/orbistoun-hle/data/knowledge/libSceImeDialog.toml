@@ -28,6 +28,7 @@ purpose = "Opens the text-entry dialog."
 edge_cases = [
     "MEASURED (obSCEne REQ-20261012T1816Z-b874, 000-boot/system-dialogs, report-20261013-150600.log, FW 12.40): answers 0x80bc0015 and leaves the status at 0, in a process that had likely not initialised the common dialog.",
     "MODELLED (D826): once the common dialog is initialised, opens the dialog over the UTF-16 buffer at param+0x28, taking at most the u32 at param+0x24 characters, and answers 0. A null block, or a dialog already open, answers the placeholder.",
+    "obSCEne REQ-md01 measured 0x80bc0015 after sceCommonDialogInitialize answered 0 (report-20261014-004800.log 252-308), but with maxTextLength at +0x18 and the buffer at +0x20, and no display open; SuperTuxKart's block (+0x24, +0x28) opens the keyboard on the same firmware. REQ-20261014T0110Z-md02 asks again.",
 ]
 known_by = "assumed"
 assumptions = ["The parameter block's layout, as oops-sdk's system/dialog.c builds it for the console (D826)."]
