@@ -158,6 +158,10 @@ const FIXTURES: &[(&str, &str)] = &[
         "vector-add3",
         "the three-source unsigned add a streamout pass addresses its store with",
     ),
+    (
+        "vector-convert",
+        "the integer and float conversions in their long form",
+    ),
 ];
 
 /// Every fixture on disk is read by this suite.

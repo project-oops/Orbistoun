@@ -909,6 +909,26 @@ name = "v_msad_u8"
 
 [[mnemonic]]
 family = "VOP3"
+opcode = 389
+name = "v_cvt_f32_i32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 390
+name = "v_cvt_f32_u32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 391
+name = "v_cvt_u32_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
+opcode = 392
+name = "v_cvt_i32_f32_e64"
+
+[[mnemonic]]
+family = "VOP3"
 opcode = 771
 name = "v_add_nc_u16"
 

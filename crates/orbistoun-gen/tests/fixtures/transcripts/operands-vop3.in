@@ -333,3 +333,27 @@ v_rcp_f32_e64 v100, v200
 v_rcp_f32_e64 v255, s30
 v_rcp_f32_e64 v9, 1.0
 v_rcp_f32_e64 v130, v88
+// ---- the integer and float conversions in their long form --------------------------
+//
+// A vertex shader converting a fetched integer attribute emits v_cvt_f32_i32 in its VOP3 form
+// (GCTS00001, D867's clip-distance shaders). Varied vector, scalar and inline sources.
+v_cvt_f32_i32_e64 v5, v2
+v_cvt_f32_i32_e64 v200, s7
+v_cvt_f32_i32_e64 v255, v130
+v_cvt_f32_i32_e64 v9, -1
+v_cvt_f32_i32_e64 v130, s101
+v_cvt_f32_u32_e64 v5, v2
+v_cvt_f32_u32_e64 v200, s7
+v_cvt_f32_u32_e64 v255, v130
+v_cvt_f32_u32_e64 v9, 4
+v_cvt_f32_u32_e64 v130, s101
+v_cvt_u32_f32_e64 v5, v2
+v_cvt_u32_f32_e64 v200, s7
+v_cvt_u32_f32_e64 v255, v130
+v_cvt_u32_f32_e64 v9, 1.0
+v_cvt_u32_f32_e64 v130, s101
+v_cvt_i32_f32_e64 v5, v2
+v_cvt_i32_f32_e64 v200, s7
+v_cvt_i32_f32_e64 v255, v130
+v_cvt_i32_f32_e64 v9, -1.0
+v_cvt_i32_f32_e64 v130, s101

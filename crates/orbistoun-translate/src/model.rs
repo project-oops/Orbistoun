@@ -211,6 +211,10 @@ pub const SUPPORTED: &[&str] = &[
     "v_cvt_pkrtz_f16_f32_e32",
     "v_cvt_f32_u32_e32",
     "v_cvt_f32_i32_e32",
+    "v_cvt_f32_u32_e64",
+    "v_cvt_f32_i32_e64",
+    "v_cvt_u32_f32_e64",
+    "v_cvt_i32_f32_e64",
     "v_cvt_i32_f32_e32",
     "v_cvt_u32_f32_e32",
     "v_div_fixup_f32",
@@ -3485,7 +3489,7 @@ fn pack_halves<M: Model + ?Sized>(
 /// The long-form vector ALU instructions [`long_form_arithmetic`] translates: the short forms'
 /// arithmetic under per-source negate and absolute flags, and the 16-bit packs a pixel shader
 /// prepares a compressed export for a 16-bit target with.
-const LONG_FORM: [&str; 15] = [
+const LONG_FORM: [&str; 19] = [
     "v_cndmask_b32_e64",
     "v_add_f32_e64",
     "v_sub_f32_e64",
@@ -3501,6 +3505,10 @@ const LONG_FORM: [&str; 15] = [
     "v_cvt_pknorm_i16_f32",
     "v_cvt_pk_u16_u32",
     "v_cvt_pk_i16_i32",
+    "v_cvt_f32_u32_e64",
+    "v_cvt_f32_i32_e64",
+    "v_cvt_i32_f32_e64",
+    "v_cvt_u32_f32_e64",
 ];
 
 /// A float's bits as a normalised 16-bit value in the low half (AMD's published RDNA instruction
@@ -3854,6 +3862,13 @@ fn long_form_arithmetic<M: Model + ?Sized>(
             detail: "a long-form vector destination is not a vector register",
         });
     };
+    // A conversion from an integer has no float source for negate or absolute value to act on.
+    if matches!(name, "v_cvt_f32_u32_e64" | "v_cvt_f32_i32_e64") && modifiers.touches(0) {
+        return Err(TranslateError::Unsupported {
+            offset: instruction.offset,
+            detail: "a source modifier on an integer source, which is a float operation",
+        });
+    }
     let destination = *register;
     let register = u32::from(destination);
     let mut sources: Vec<Operand> = instruction.operands[1..].to_vec();
@@ -3968,11 +3983,11 @@ const fn output_scale(field: u32) -> Option<u32> {
 /// `f32`. `v_cvt_i32_f32` produces an integer and `v_cvt_pkrtz_f16_f32` packs halves.
 fn result_is_f32(name: &str) -> bool {
     let base = name.strip_suffix("_e64").unwrap_or(name);
-    if base.starts_with("v_cmp") || !base.ends_with("_f32") {
-        return false;
+    // A conversion names its result first: `v_cvt_f32_i32` makes a float of an integer.
+    if let Some(conversion) = base.strip_prefix("v_cvt_") {
+        return conversion.starts_with("f32_");
     }
-    base.strip_prefix("v_cvt_")
-        .is_none_or(|conversion| conversion.starts_with("f32_"))
+    !base.starts_with("v_cmp") && base.ends_with("_f32")
 }
 
 /// The output clamp on a 32-bit float result: `[0, 1]`, with a NaN either zero (`DX10_CLAMP` set)
@@ -4542,6 +4557,11 @@ fn combine<M: Model + ?Sized>(
         }
         ("v_max_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMAX, *first, *second)),
         ("v_min_f32_e64", [first, second]) => Ok(model.f32_ext_binary(GLSL_FMIN, *first, *second)),
+        // The conversions, as their short forms convert (D867's clip-distance shaders).
+        ("v_cvt_f32_i32_e64", [value]) => Ok(integer_to_float(model, *value, true)),
+        ("v_cvt_f32_u32_e64", [value]) => Ok(integer_to_float(model, *value, false)),
+        ("v_cvt_i32_f32_e64", [value]) => Ok(float_to_signed_saturated(model, *value)),
+        ("v_cvt_u32_f32_e64", [value]) => Ok(float_to_unsigned_saturated(model, *value)),
         // The reciprocal ACO takes of a cube coordinate's major axis, `|ma|` through the long
         // form's absolute value: an exact division, as the short form's.
         ("v_rcp_f32_e64", [value]) => {
@@ -9126,19 +9146,7 @@ fn integer_conversion<M: Model + ?Sized>(
     for lane in running_lanes(model) {
         let bits = model.read_source(instruction, source, lane)?;
         let value = if name == "v_cvt_f32_u32_e32" || name == "v_cvt_f32_i32_e32" {
-            let conversion = if name == "v_cvt_f32_u32_e32" {
-                op::CONVERT_U_TO_F
-            } else {
-                op::CONVERT_S_TO_F
-            };
-            let f32_type = model.f32_type();
-            let u32_type = model.u32_type();
-            let b = model.builder();
-            let float = b.id();
-            b.function(conversion, &[f32_type.0, float.0, bits.0]);
-            let out = b.id();
-            b.function(op::BITCAST, &[u32_type.0, out.0, float.0]);
-            out
+            integer_to_float(model, bits, name == "v_cvt_f32_i32_e32")
         } else if name == "v_cvt_u32_f32_e32" {
             float_to_unsigned_saturated(model, bits)
         } else {
@@ -9148,6 +9156,23 @@ fn integer_conversion<M: Model + ?Sized>(
     }
     model.count();
     Ok(())
+}
+
+/// An integer to a float's bits, signed or unsigned, rounding to nearest as SPIR-V's conversion does.
+fn integer_to_float<M: Model + ?Sized>(model: &mut M, bits: Id, signed: bool) -> Id {
+    let conversion = if signed {
+        op::CONVERT_S_TO_F
+    } else {
+        op::CONVERT_U_TO_F
+    };
+    let f32_type = model.f32_type();
+    let u32_type = model.u32_type();
+    let b = model.builder();
+    let float = b.id();
+    b.function(conversion, &[f32_type.0, float.0, bits.0]);
+    let out = b.id();
+    b.function(op::BITCAST, &[u32_type.0, out.0, float.0]);
+    out
 }
 
 /// A float's bits to an unsigned integer, truncated, saturated and NaN to zero.

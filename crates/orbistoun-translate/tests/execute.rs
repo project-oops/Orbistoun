@@ -6945,6 +6945,36 @@ fn a_bitfield_insert_and_a_signed_conversion() {
     assert_eq!(vector(&registers, 7), 2_147_483_648.0f32.to_bits());
 }
 
+/// The conversions' long forms convert as their short forms do: signed and unsigned to float
+/// rounding to nearest, float to signed and unsigned truncating and saturating - and a float result
+/// takes the long form's output multiplier.
+#[test]
+fn the_long_form_conversions_convert_as_the_short_forms() {
+    if !device_or_skip("the_long_form_conversions_convert_as_the_short_forms") {
+        return;
+    }
+    let mut program = Vec::new();
+    program.extend(v_mov_literal(1, (-3i32).cast_unsigned()));
+    program.extend(v_mov_literal(2, 0xffff_ffff));
+    program.extend(v_mov_literal(3, (-2.75f32).to_bits()));
+    program.extend(v_mov_literal(7, 1.0e10_f32.to_bits()));
+    program.extend(vop3("v_cvt_f32_i32_e64", 4, [VGPR_0 + 1, 0, 0], 0, 0));
+    program.extend(vop3("v_cvt_f32_u32_e64", 5, [VGPR_0 + 2, 0, 0], 0, 0));
+    program.extend(vop3("v_cvt_i32_f32_e64", 6, [VGPR_0 + 3, 0, 0], 0, 0));
+    program.extend(vop3("v_cvt_u32_f32_e64", 7, [VGPR_0 + 7, 0, 0], 0, 0));
+    // With the output multiplier halving it (`OMOD` 3, the second word's bits 28:27), as GCTS00001's
+    // clip-distance vertex shader converts.
+    let [first, second] = vop3("v_cvt_f32_i32_e64", 0, [VGPR_0 + 1, 0, 0], 0, 0);
+    program.extend([first, second | 3 << 27]);
+    program.push(s_endpgm());
+    let registers = run(&program);
+    assert_eq!(vector(&registers, 4), (-3.0f32).to_bits());
+    assert_eq!(vector(&registers, 5), 4_294_967_296.0f32.to_bits());
+    assert_eq!(vector(&registers, 6), (-2i32).cast_unsigned());
+    assert_eq!(vector(&registers, 7), 0xffff_ffff);
+    assert_eq!(vector(&registers, 0), (-1.5f32).to_bits());
+}
+
 /// `v_madak_f32` adds its literal constant to the product, `v_madmk_f32` multiplies by it; the
 /// constant is a word of the instruction, so what follows decodes as the next one. Craft's constant
 /// read as an instruction when the length was not known.
