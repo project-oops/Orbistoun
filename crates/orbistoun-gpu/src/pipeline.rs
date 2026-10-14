@@ -4624,7 +4624,11 @@ fn bind_textures(
                         if bound.is_none() {
                             *unbound += 1;
                             first_unbound.get_or_insert_with(|| {
-                                unbound_in_user_data(source.slot, first, user)
+                                let why = unbound_reason(user_words(user, first), memory, texels);
+                                format!(
+                                    "{} - {why}",
+                                    unbound_in_user_data(source.slot, first, user)
+                                )
                             });
                         }
                         out.extend(bound);
@@ -4649,8 +4653,10 @@ fn bind_textures(
                     // refused rather than drawn wrong.
                     if bound.is_none() {
                         *unbound += 1;
-                        first_unbound
-                            .get_or_insert_with(|| unbound_in_table(source.slot, at, memory));
+                        first_unbound.get_or_insert_with(|| {
+                            let why = unbound_reason(read_descriptor(at, memory), memory, texels);
+                            format!("{} - {why}", unbound_in_table(source.slot, at, memory))
+                        });
                     }
                     out.extend(bound);
                 }
@@ -4766,6 +4772,26 @@ fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
     }
 }
 
+/// Why the image descriptor `words` binds no texture, as its reader says. One it reads binds as
+/// another shape than the module samples, or with a sampler that could not be read.
+fn unbound_reason(
+    words: Option<[u32; 8]>,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> String {
+    let Some(words) = words else {
+        return "its descriptor is not readable".to_owned();
+    };
+    match texture_from_words(words, 0, memory, texels) {
+        Err(why) => why.to_owned(),
+        Ok(_) => concat!(
+            "it reads as another shape than the module samples, or with a sampler that ",
+            "could not be read"
+        )
+        .to_owned(),
+    }
+}
+
 /// An unbound slot whose descriptor is in the user data from word `first`, described.
 fn unbound_in_user_data(slot: u32, first: u32, user: &[u32]) -> String {
     let at = usize::try_from(first).unwrap_or(usize::MAX);
@@ -4830,7 +4856,7 @@ fn user_data_texture(
     if source.compare {
         return linear_depth_compare(descriptor, source, named.flatten(), memory);
     }
-    let mut bound = texture_from_words(descriptor, source.slot, memory, texels)?;
+    let mut bound = texture_from_words(descriptor, source.slot, memory, texels).ok()?;
     if let Some(decoded) = named {
         let decoded = decoded?;
         // A half-border clamp is honoured only by a module that saturates the coordinates it names
@@ -4936,7 +4962,7 @@ fn read_texture(
     for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
         *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
-    texture_from_words(words, slot, memory, texels)
+    texture_from_words(words, slot, memory, texels).ok()
 }
 
 /// The swizzle modes a texture is read in through [`read_tiled_texture`], as their layouts place a
@@ -5076,17 +5102,31 @@ fn depth_texture_from(
     })
 }
 
-/// [`read_texture`] for a descriptor's eight words already in hand.
+/// [`read_texture`] for a descriptor's eight words already in hand, or why it is not bound: a
+/// block-compressed image by the check its blocks failed, any other by the one reason.
 fn texture_from_words(
     words: [u32; 8],
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
-) -> Option<RenderCommand> {
+) -> Result<RenderCommand, &'static str> {
     let descriptor = decode_image_descriptor(words);
     if let Some(block) = block_format(descriptor.format) {
         return read_block_texture(&descriptor, &words, block, slot, memory, texels);
     }
+    texel_texture(&descriptor, words, slot, memory, texels)
+        .ok_or("its format, selects, tiling or shape is not one sampled exactly")
+}
+
+/// [`texture_from_words`] for an image read as texels rather than blocks.
+fn texel_texture(
+    descriptor: &ImageDescriptor,
+    words: [u32; 8],
+    slot: u32,
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> Option<RenderCommand> {
+    let descriptor = *descriptor;
     let (format, selects) = sampled_format(&descriptor, words[3])?;
     let shape = (
         words[3] >> 28 == IMAGE_TYPE_CUBE,
@@ -5761,23 +5801,27 @@ fn read_block_texture(
     slot: u32,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
-) -> Option<RenderCommand> {
+) -> Result<RenderCommand, &'static str> {
     let faces = match word3 >> 28 {
         IMAGE_TYPE_2D => 1,
         IMAGE_TYPE_CUBE if word4 & DEPTH_FIELD == ONE_CUBE_LAST_LAYER => CUBE_FACES,
-        _ => return None,
+        _ => return Err("it is a block-compressed image that is neither 2D nor one cube"),
     };
-    if !block.read_exactly(destination_selects(word3))
-        || !matches!(
-            descriptor.tiling,
-            SwizzleMode::Tiled64KbS | SwizzleMode::Tiled4KbS
-        )
-        || descriptor.compression.is_some()
-    {
-        return None;
+    if !block.read_exactly(destination_selects(word3)) {
+        return Err("its selects move channels its blocks are not read with");
     }
-    let layout =
-        crate::tiling::SurfaceLayout::of(descriptor.tiling)?.at_bytes_per_texel(block.bytes)?;
+    if !matches!(
+        descriptor.tiling,
+        SwizzleMode::Tiled64KbS | SwizzleMode::Tiled4KbS
+    ) {
+        return Err("its blocks are in a tiling block-compressed textures are not read in");
+    }
+    if descriptor.compression.is_some() {
+        return Err("its blocks are compressed further (DCC), which is not read");
+    }
+    let layout = crate::tiling::SurfaceLayout::of(descriptor.tiling)
+        .and_then(|layout| layout.at_bytes_per_texel(block.bytes))
+        .ok_or("its blocks' size has no layout in its tiling")?;
     // The chain is laid out in blocks, four texels a side (addrlib counts a compressed surface's
     // elements, `pIn->width / 4`); the level's texels are level 0's halved.
     let level = if descriptor.levels <= 1 {
@@ -5794,11 +5838,12 @@ fn read_block_texture(
         (descriptor.width.div_ceil(4), descriptor.height.div_ceil(4)),
         (descriptor.levels, level),
         layout,
-    )?;
+    )
+    .ok_or("the level it samples is not placed in its mip chain")?;
     // A level whose blocks are not the chain's halved elements (an odd extent's rounding) is not
     // read from a place it does not have.
     if (surface.width, surface.height) != (width.div_ceil(4), height.div_ceil(4)) {
-        return None;
+        return Err("the level it samples is not its chain's halved blocks (an odd extent)");
     }
     let span = surface.words() * 4;
     // Each face's chain, one after another; the last face ends its level's span past its start.
@@ -5823,7 +5868,7 @@ fn read_block_texture(
             == Some(false)
     {
         crate::perf::span(crate::perf::Span::TextureKept, || ());
-        return Some(block_bind(
+        return Ok(block_bind(
             slot,
             cached.hash,
             cached.texels.clone(),
@@ -5835,7 +5880,8 @@ fn read_block_texture(
     let mut blocks = Vec::new();
     for face in 0..u64::from(faces) {
         let tiled: Vec<u32> = memory
-            .read(surface.base + face * stride, span)?
+            .read(surface.base + face * stride, span)
+            .ok_or("its blocks are not in guest memory it can read")?
             .chunks_exact(4)
             .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
             .collect();
@@ -5854,7 +5900,7 @@ fn read_block_texture(
             texels: std::sync::Arc::clone(&shared),
         },
     );
-    Some(block_bind(
+    Ok(block_bind(
         slot,
         hash,
         shared,
@@ -6859,9 +6905,10 @@ mod tests {
         assert_eq!(unbound, 1);
         assert_eq!(
             first.as_deref(),
-            Some(
-                "slot 0, from user data 0: [0x11e9df14, 0x107400, 0x1, 0x4dfac, 0x0, 0x7000b0, 0x0, 0x0]"
-            )
+            Some(concat!(
+                "slot 0, from user data 0: [0x11e9df14, 0x107400, 0x1, 0x4dfac, 0x0, 0x7000b0, 0x0, ",
+                "0x0] - its format, selects, tiling or shape is not one sampled exactly"
+            ))
         );
     }
 
@@ -7318,6 +7365,35 @@ mod tests {
         }
     }
 
+    /// A texture that is not bound says why, so the refusal names the check that failed rather than
+    /// leaving it to be worked out from the descriptor's words: a block-compressed image in a tiling
+    /// its blocks are not read in, and one of a type that is neither 2D nor a cube.
+    #[test]
+    fn an_unbound_texture_says_why() {
+        use super::texture_from_words;
+        struct Nothing;
+        impl super::GuestMemory for Nothing {
+            fn read(&self, _address: u64, _length: usize) -> Option<&[u8]> {
+                None
+            }
+        }
+        let bc3 = |word3: u32| [0x100, 173 << 20 | 3 << 30, 1 | 7 << 14, word3, 0, 0, 0, 0];
+        // 2D, `ADDR_SW_64KB_R_X` (27): rendered, not a standard swizzle.
+        let refused =
+            texture_from_words(bc3(0x91B0_0FAC), 0, &Nothing, &mut super::TexelCache::new());
+        assert_eq!(
+            refused.err(),
+            Some("its blocks are in a tiling block-compressed textures are not read in")
+        );
+        // A 3D image (type 10) in `64KB_S`.
+        let refused =
+            texture_from_words(bc3(0xA090_0FAC), 0, &Nothing, &mut super::TexelCache::new());
+        assert_eq!(
+            refused.err(),
+            Some("it is a block-compressed image that is neither 2D nor one cube")
+        );
+    }
+
     /// A `BC3_UNORM` texture in `64KB_S` is bound as its blocks, detiled row-major, for the host to
     /// sample natively: an 8 x 8 image is two blocks across and two down, each read from where
     /// addrlib's equation puts it.
@@ -7352,7 +7428,7 @@ mod tests {
             0,
         ];
         let memory = Memory(bytes);
-        let bound = texture_from_words(words, 0, &memory, &mut super::TexelCache::new());
+        let bound = texture_from_words(words, 0, &memory, &mut super::TexelCache::new()).ok();
         let Some(RenderCommand::BindTexture {
             texels,
             width: 8,
@@ -7370,7 +7446,7 @@ mod tests {
         // `BC3_SRGB` (174): the same blocks, sampled with their colours decoded from sRGB.
         let mut srgb = words;
         srgb[1] = (174 << 20) | (((width - 1) & 3) << 30);
-        let bound = texture_from_words(srgb, 0, &memory, &mut super::TexelCache::new());
+        let bound = texture_from_words(srgb, 0, &memory, &mut super::TexelCache::new()).ok();
         assert!(
             matches!(
                 bound,
@@ -7417,7 +7493,8 @@ mod tests {
             0,
             0,
         ];
-        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
         let Some(RenderCommand::BindTexture {
             texels,
             width: 8,
@@ -7524,7 +7601,8 @@ mod tests {
             0,
             0,
         ];
-        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
         let Some(RenderCommand::BindTexture {
             texels,
             width: 8,
@@ -7574,7 +7652,8 @@ mod tests {
             0,
             0,
         ];
-        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
         let Some(RenderCommand::BindTexture {
             texels,
             width: 4,
@@ -7632,7 +7711,8 @@ mod tests {
             0,
             &memory,
             &mut super::TexelCache::new(),
-        );
+        )
+        .ok();
         let Some(RenderCommand::BindTexture {
             texels,
             width: 2,
@@ -7657,7 +7737,7 @@ mod tests {
                 &memory,
                 &mut super::TexelCache::new()
             )
-            .is_none()
+            .is_err()
         );
     }
 
@@ -7762,7 +7842,8 @@ mod tests {
             0,
             0,
         ];
-        let bound = texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new());
+        let bound =
+            texture_from_words(words, 0, &Memory(bytes), &mut super::TexelCache::new()).ok();
         let Some(
             ref command @ RenderCommand::BindVolumeTexture {
                 ref texels,
@@ -7842,7 +7923,8 @@ mod tests {
         };
         for (base_level, side) in [(1, 32), (0, 64)] {
             let bound =
-                texture_from_words(words(base_level), 0, &memory, &mut super::TexelCache::new());
+                texture_from_words(words(base_level), 0, &memory, &mut super::TexelCache::new())
+                    .ok();
             let Some(RenderCommand::BindTexture {
                 texels,
                 width: bound_width,
@@ -7912,7 +7994,7 @@ mod tests {
                 0,
             ]
         };
-        let bound = texture_from_words(words(5), 0, &memory, &mut super::TexelCache::new());
+        let bound = texture_from_words(words(5), 0, &memory, &mut super::TexelCache::new()).ok();
         let Some(
             ref command @ RenderCommand::BindTexture {
                 ref texels,
@@ -7964,7 +8046,7 @@ mod tests {
             "nor to a volume, which binds its slices (D823)"
         );
         assert!(
-            texture_from_words(words(11), 0, &memory, &mut super::TexelCache::new()).is_none(),
+            texture_from_words(words(11), 0, &memory, &mut super::TexelCache::new()).is_err(),
             "two cubes are an array, not read"
         );
     }
