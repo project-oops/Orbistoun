@@ -706,6 +706,64 @@ pub fn first_unnamed(decode: &Decode, encodings: &EncodingTable) -> Option<Strin
     ))
 }
 
+/// An opcode the tables give no name, as a program holds it: its family (`no encoding family`
+/// where none matched), where it first stands, and how many instructions use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unnamed {
+    /// The encoding family.
+    pub family: String,
+    /// The opcode within it.
+    pub opcode: u32,
+    /// The byte of its first instruction.
+    pub first: u32,
+    /// How many instructions use it.
+    pub count: usize,
+}
+
+impl std::fmt::Display for Unnamed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} opcode {:#x} at {:#x}",
+            self.family, self.opcode, self.first
+        )?;
+        if self.count > 1 {
+            write!(f, " ({} times)", self.count)?;
+        }
+        Ok(())
+    }
+}
+
+/// Every opcode of `decode` the tables give no name, once each, in the order they first stand:
+/// what a request to record them lists, so one round trip records them all.
+#[must_use]
+pub fn unnamed_opcodes(decode: &Decode, encodings: &EncodingTable) -> Vec<Unnamed> {
+    let mut listed: Vec<Unnamed> = Vec::new();
+    for instruction in &decode.instructions {
+        if named(encodings, instruction).is_some() {
+            continue;
+        }
+        let family = instruction
+            .encoding
+            .and_then(|i| encodings.encodings().get(usize::from(i)))
+            .map_or("no encoding family", |family| family.name.as_str());
+        let opcode = instruction.opcode;
+        match listed
+            .iter_mut()
+            .find(|seen| seen.family == family && seen.opcode == opcode)
+        {
+            Some(seen) => seen.count += 1,
+            None => listed.push(Unnamed {
+                family: family.to_owned(),
+                opcode,
+                first: instruction.offset,
+                count: 1,
+            }),
+        }
+    }
+    listed
+}
+
 fn named<'a>(
     encodings: &'a EncodingTable,
     instruction: &Instruction,
@@ -1616,6 +1674,46 @@ mod tests {
         assert_eq!(unknowns[5], Some(Unknown::LeftBy(0)));
         assert_eq!(unknowns[6], None);
         assert_eq!(unknowns[9], None, "never set, by nothing");
+    }
+
+    /// Every opcode a program holds that the tables give no name, once each with where it first
+    /// stands and how often: what one recording round trip needs, where the first alone took one
+    /// round trip an opcode. VOP1 opcodes 0xff and 0xfe are assigned to nothing.
+    #[test]
+    fn every_unnamed_opcode_is_listed_once() {
+        use super::{Unnamed, unnamed_opcodes};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // ?? v0, 0 (0xff); ?? v0, 0 (0xfe); v_mov_b32 v0, 0; ?? v0, 0 (0xff); s_endpgm.
+        let words = [
+            0x7e01_fe80_u32,
+            0x7e01_fc80,
+            0x7e00_0280,
+            0x7e01_fe80,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let listed = unnamed_opcodes(&decode, &encodings);
+        assert_eq!(
+            listed,
+            [
+                Unnamed {
+                    family: "VOP1".to_owned(),
+                    opcode: 0xff,
+                    first: 0,
+                    count: 2,
+                },
+                Unnamed {
+                    family: "VOP1".to_owned(),
+                    opcode: 0xfe,
+                    first: 4,
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(listed[0].to_string(), "VOP1 opcode 0xff at 0x0 (2 times)");
+        assert_eq!(listed[1].to_string(), "VOP1 opcode 0xfe at 0x4");
     }
 
     /// A wave whose execution mask the module seeds from merged_wave_info skips an access it

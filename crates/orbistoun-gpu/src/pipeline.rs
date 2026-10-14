@@ -155,8 +155,8 @@ pub fn last_refused_program() -> Option<(u64, Vec<u8>)> {
 }
 
 /// A dispatch refused while its buffers were traced: its program kept ([`last_refused_program`]),
-/// and a refusal for an instruction with no name naming the program at `address` and the
-/// instruction, so a report quotes what the opcode tables lack.
+/// and a refusal for an instruction with no name naming the program at `address`, the instruction,
+/// and every opcode in the program the tables lack, so one request records them all.
 fn dispatch_refusal(
     why: String,
     (decoded, encodings): (&orbistoun_shader::Decode, &EncodingTable),
@@ -168,9 +168,42 @@ fn dispatch_refusal(
     if !why.contains("has no name") {
         return why;
     }
-    match orbistoun_translate::evaluate::first_unnamed(decoded, encodings) {
-        Some(which) => format!("{why}: the program at {address:#x}, {which}"),
-        None => why,
+    let Some(which) = orbistoun_translate::evaluate::first_unnamed(decoded, encodings) else {
+        return why;
+    };
+    let every: Vec<String> = orbistoun_translate::evaluate::unnamed_opcodes(decoded, encodings)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    format!(
+        "{why}: the program at {address:#x}, {which}; every opcode it holds that no table names: {}",
+        every.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+
+    /// A dispatch refused for an instruction with no name lists every opcode of its program the
+    /// tables lack, not the first alone: VOP1 opcodes 0xff and 0xfe are assigned to nothing.
+    #[test]
+    fn a_refusal_for_no_name_lists_every_unnamed_opcode() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [0x7e01_fe80_u32, 0x7e01_fc80, 0x7e01_fe80, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode_program(&bytes, &encodings, &operands);
+        let why = super::dispatch_refusal(
+            "an instruction has no name".to_owned(),
+            (&decoded, &encodings),
+            (0x7400_0000, &bytes),
+        );
+        assert!(why.contains("the program at 0x74000000"), "{why}");
+        assert!(
+            why.ends_with("VOP1 opcode 0xff at 0x0 (2 times), VOP1 opcode 0xfe at 0x4"),
+            "{why}"
+        );
     }
 }
 
