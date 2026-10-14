@@ -297,7 +297,7 @@ fn step_prefix(
                     let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
                         return Err("a branch with no target (D753)");
                     };
-                    let target = i64::from(instruction.offset) + 4 + 4 * jump;
+                    let target = i64::from(instruction.offset) + 4 + 4 * simm16(*jump);
                     // The prefix ends at the access: a jump beyond it skips it (D800).
                     if target > i64::from(until) {
                         return Ok(Step::Ended(Path::Skipped));
@@ -339,7 +339,7 @@ fn step_prefix(
 fn jumps_past(instruction: &Instruction, until: u32) -> bool {
     matches!(
         instruction.operands.first(),
-        Some(Operand::Immediate(jump)) if i64::from(instruction.offset) + 4 + 4 * jump > i64::from(until)
+        Some(Operand::Immediate(jump)) if i64::from(instruction.offset) + 4 + 4 * simm16(*jump) > i64::from(until)
     )
 }
 
@@ -506,8 +506,15 @@ fn run_lanes(
     // Why each register is unknown, where a step made it so: what a refused branch names.
     let mut causes = Causes::new();
     while let Some(instruction) = decode.instructions.get(at) {
-        if instruction.offset > until || steps > 4 * decode.instructions.len() {
+        if instruction.offset > until {
             break;
+        }
+        if steps > 4 * decode.instructions.len() {
+            return Err(concat!(
+                "the program loops more steps than a lane run follows before its last global ",
+                "load, whose later passes would read past the addresses reached (D758)"
+            )
+            .into());
         }
         steps += 1;
         let Some((family, name)) = named(encodings, instruction) else {
@@ -541,7 +548,7 @@ fn run_lanes(
                     let Some(Operand::Immediate(jump)) = instruction.operands.first() else {
                         return Err("a branch with no target (D758)".into());
                     };
-                    let target = i64::from(instruction.offset) + 4 + 4 * jump;
+                    let target = i64::from(instruction.offset) + 4 + 4 * simm16(*jump);
                     at = decode
                         .instructions
                         .iter()
@@ -781,6 +788,44 @@ impl<'a> Causes<'a> {
     }
 }
 
+/// A branch's word count, as its sixteen-bit signed `SIMM16` field holds it: the decoder reads an
+/// immediate field unsigned, so a branch back reads as a large jump forward until it is
+/// sign-extended (AMD's published RDNA instruction set, `S_BRANCH`).
+pub(crate) fn simm16(field: i64) -> i64 {
+    i64::from(i16::from_le_bytes((field as u16).to_le_bytes()))
+}
+
+/// Where a lane run over `loads` may stop: past the last load, and past every branch after it
+/// that jumps back to it or before it, found to a fixed point - a loop whose branch back follows
+/// its loads runs them again, so the run follows it.
+pub(crate) fn run_end(decode: &Decode, encodings: &EncodingTable, loads: &[u32]) -> u32 {
+    let mut end = loads.iter().copied().max().unwrap_or(0);
+    loop {
+        let further = decode
+            .instructions
+            .iter()
+            .filter(|instruction| instruction.offset > end)
+            .filter(|instruction| {
+                named(encodings, instruction).is_some_and(|(family, name)| {
+                    family == "SOPP" && (name == "s_branch" || name.starts_with("s_cbranch"))
+                })
+            })
+            .filter(|instruction| {
+                matches!(
+                    instruction.operands.first(),
+                    Some(Operand::Immediate(jump))
+                        if i64::from(instruction.offset) + 4 + 4 * simm16(*jump) <= i64::from(end)
+                )
+            })
+            .map(|instruction| instruction.offset)
+            .max();
+        match further {
+            Some(offset) => end = offset,
+            None => return end,
+        }
+    }
+}
+
 /// A program prepared for lane runs (D758): decoded, with which instructions a run needs and
 /// whether any of them reads one lane from another. All of it is fixed by the program, so it is found
 /// once and serves every draw.
@@ -810,7 +855,7 @@ impl LaneProgram {
             .then(|| crate::quick_lanes::compile(&decode, encodings, loads, &kept))
             .flatten();
         Self {
-            until: loads.iter().copied().max().unwrap_or(0),
+            until: run_end(&decode, encodings, loads),
             loads: loads.to_vec(),
             decode,
             kept,
@@ -2453,6 +2498,71 @@ mod tests {
         };
         let found = wave_lane_addresses(&program, &encodings, &[8], (64, &wave), &mut |_| None);
         assert_eq!(found, Ok(vec![(load, vec![8, 8])]));
+    }
+
+    /// A loop whose branch back comes after its last load is followed through every pass: three
+    /// passes form three addresses. One that runs past the step bound is refused by name, not
+    /// answered with the addresses it reached, which its later passes read past.
+    #[test]
+    fn a_loop_past_the_step_bound_is_refused() {
+        use super::{WaveEntry, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let looped = |bytes_read: u32| {
+            [
+                // s_mov_b32 s0, 0.
+                0xbe80_0380,
+                // loop: v_mov_b32 v1, s0; global_load_dword v3, v[1:2], off.
+                short_form(&encodings, "v_mov_b32_e32", 1, 0, 0),
+                0xdc30_8000,
+                0x037d_0001,
+                // s_add_u32 s0, s0, 4; s_cmp_lt_u32 s0, 400; s_cbranch_scc1 loop.
+                0x8000_8400,
+                0xbf0a_ff00,
+                bytes_read,
+                0xbf85_fff9,
+                0xbf81_0000,
+            ]
+        };
+        let decode_of = |words: [u32; 9]| {
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            decode_program(&bytes, &encodings, &operands)
+        };
+        let decode = decode_of(looped(400));
+        let names: Vec<&str> = decode
+            .instructions
+            .iter()
+            .filter_map(|i| super::named(&encodings, i).map(|(_, name)| name))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "s_mov_b32",
+                "v_mov_b32_e32",
+                "global_load_dword",
+                "s_add_u32",
+                "s_cmp_lt_u32",
+                "s_cbranch_scc1",
+                "s_endpgm"
+            ],
+            "the fixture"
+        );
+        let load = decode.instructions[2].offset;
+        let program = super::LaneProgram::new(decode, &encodings, &[load]);
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        let refused = wave_lane_addresses(&program, &encodings, &[], (64, &wave), &mut |_| None)
+            .expect_err("a hundred passes is past the bound");
+        assert!(refused.contains("loops"), "{refused}");
+        let short = super::LaneProgram::new(decode_of(looped(12)), &encodings, &[load]);
+        assert_eq!(
+            wave_lane_addresses(&short, &encodings, &[], (64, &wave), &mut |_| None),
+            Ok(vec![(load, vec![0]), (load, vec![4]), (load, vec![8])]),
+            "every pass"
+        );
     }
 
     /// A lane read is run where its lane is known: `v_readfirstlane_b32 s4, v0` takes the first

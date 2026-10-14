@@ -187,7 +187,8 @@ pub fn compile(
     loads: &[u32],
     kept: &[bool],
 ) -> Option<Program> {
-    let until = loads.iter().copied().max()?;
+    loads.iter().copied().max()?;
+    let until = crate::evaluate::run_end(decode, encodings, loads);
     let mut steps = Vec::new();
     let mut offsets = Vec::new();
     for (index, instruction) in decode.instructions.iter().enumerate() {
@@ -259,7 +260,7 @@ fn scalar_step(
             };
             // A branch past the words kept - over the last load - has no step to go to; a run
             // taking it declines, where the model refuses it.
-            let to = i64::from(instruction.offset) + 4 + 4 * jump;
+            let to = i64::from(instruction.offset) + 4 + 4 * crate::evaluate::simm16(*jump);
             let target = decode
                 .instructions
                 .iter()
@@ -483,8 +484,12 @@ pub fn run(
     let mut at = 0usize;
     let mut steps = 0usize;
     while let Some(&step) = program.steps.get(at) {
-        if program.offsets[at] > program.until || steps > 4 * program.steps.len() {
+        if program.offsets[at] > program.until {
             break;
+        }
+        // A run its bound cuts short is declined: the model refuses it by name.
+        if steps > 4 * program.steps.len() {
+            return None;
         }
         steps += 1;
         at += 1;
