@@ -3,8 +3,10 @@
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
 //! full capture, not a claim about the argument count. `sceNpUniversalDataSystemInitialize` and
 //! `sceNpUniversalDataSystemCreateContext`, `sceNpUniversalDataSystemCreateHandle` and
-//! `sceNpUniversalDataSystemCreateEventPropertyObject`, `sceNpUniversalDataSystemCreateEvent` and
-//! `sceNpUniversalDataSystemRegisterContext` are implemented, as measured.
+//! `sceNpUniversalDataSystemCreateEventPropertyObject`, `sceNpUniversalDataSystemCreateEvent`,
+//! `sceNpUniversalDataSystemRegisterContext`, `sceNpUniversalDataSystemPostEvent`,
+//! `sceNpUniversalDataSystemDestroyEvent` and `sceNpUniversalDataSystemDestroyEventPropertyObject`
+//! are implemented, as measured.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
 use orbistoun_hle::guest_module;
@@ -23,6 +25,12 @@ guest_module! {
         "sceNpUniversalDataSystemCreateEvent" => 4,
         // (ctx, handle, 0)
         "sceNpUniversalDataSystemRegisterContext" => 3,
+        // (ctx, handle, event, 0)
+        "sceNpUniversalDataSystemPostEvent" => 4,
+        // (event)
+        "sceNpUniversalDataSystemDestroyEvent" => 1,
+        // (object)
+        "sceNpUniversalDataSystemDestroyEventPropertyObject" => 1,
     }
 }
 
@@ -39,6 +47,12 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ),
         ("sceNpUniversalDataSystemCreateEvent", create_event),
         ("sceNpUniversalDataSystemRegisterContext", register_context),
+        ("sceNpUniversalDataSystemPostEvent", post_event),
+        ("sceNpUniversalDataSystemDestroyEvent", destroy_event),
+        (
+            "sceNpUniversalDataSystemDestroyEventPropertyObject",
+            destroy_event_property_object,
+        ),
     ]
 }
 
@@ -157,6 +171,26 @@ const fn register_context(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     REGISTER_CONTEXT_ANSWER
 }
 
+/// `sceNpUniversalDataSystemPostEvent(ctx, handle, event, 0)`: answers `0x80553104` for an event
+/// `CreateEvent` made, as the console did - the answer `RegisterContext` gives on the same console
+/// (REQ-20261014T1110Z-rf05, `000-boot/uds-create-event`, `report-20261014-batch6.log` 2181).
+/// PPSA02664 posts an event every frame.
+const fn post_event(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    REGISTER_CONTEXT_ANSWER
+}
+
+/// `sceNpUniversalDataSystemDestroyEvent(event)`: answers 0 (REQ-rf05, batch6 2182). The event's
+/// block is not freed: [`new_object`] leaked it, as the console's object is its own.
+const fn destroy_event(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
+/// `sceNpUniversalDataSystemDestroyEventPropertyObject(object)`: answers 0 (REQ-rf05, batch6
+/// 2183), its block kept as [`destroy_event`] keeps an event's.
+const fn destroy_event_property_object(_args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use orbistoun_core::GUEST_ARG_REGISTERS;
@@ -218,6 +252,20 @@ mod tests {
         assert_ne!(u64::from_le_bytes(event[..8].try_into().unwrap()), first);
         args[2] = 0;
         assert_eq!(super::create_event(&args), 0x8055_3102);
+    }
+
+    /// An event made by `CreateEvent` is posted with `0x80553104`, as `RegisterContext` answers on
+    /// the same console, and destroyed with 0, as is its property object (REQ-rf05).
+    #[test]
+    fn events_are_posted_and_destroyed_as_measured() {
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 0x4_007b;
+        args[1] = 0x2_0098;
+        args[2] = 0x1000;
+        assert_eq!(super::post_event(&args), 0x8055_3104);
+        args[0] = 0x1000;
+        assert_eq!(super::destroy_event(&args), 0);
+        assert_eq!(super::destroy_event_property_object(&args), 0);
     }
 
     /// `RegisterContext(ctx, handle, 0)` answers `0x80553104` on the console, a second time too

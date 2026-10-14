@@ -91,3 +91,47 @@ known_by = "measured"
 cites = "obSCEne REQ-20261014T0430Z-ue01, reports/hardware/report-20261014-batch4.log lines 2851-2852 (000-boot/uds-create-event)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0", "PPSA28061-app0"]
 found_on = "2026-10-14"
+
+[[function]]
+name = "sceNpUniversalDataSystemPostEvent"
+arity = 4
+purpose = "(ctx, handle, event, 0): posts an event CreateEvent made."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261014T1110Z-rf05, ue01's set-up and an event CreateEvent made, signed out): 0x80553104, the answer RegisterContext gives on the same console.",
+    "PPSA02664 posts an event every frame.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261014T1110Z-rf05, reports/hardware/report-20261014-batch6.log line 2181 (000-boot/uds-create-event)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceNpUniversalDataSystemDestroyEvent"
+arity = 1
+purpose = "(event): destroys an event CreateEvent made."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261014T1110Z-rf05, after PostEvent): 0x0.",
+    "orbistoun keeps the event's block; nothing reads it after.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261014T1110Z-rf05, reports/hardware/report-20261014-batch6.log line 2182 (000-boot/uds-create-event)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-14"
+
+[[function]]
+name = "sceNpUniversalDataSystemDestroyEventPropertyObject"
+arity = 1
+purpose = "(object): destroys a property object CreateEventPropertyObject made."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261014T1110Z-rf05, after DestroyEvent): 0x0.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261014T1110Z-rf05, reports/hardware/report-20261014-batch6.log line 2183 (000-boot/uds-create-event)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-14"
