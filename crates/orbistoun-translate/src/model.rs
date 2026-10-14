@@ -282,6 +282,7 @@ pub const SUPPORTED: &[&str] = &[
     "v_and_b32_e32",
     "v_xor_b32_e32",
     "v_rcp_f32_e32",
+    "v_rcp_iflag_f32_e32",
     "v_rcp_f32_e64",
     "v_rsq_f32_e32",
     "v_sin_f32_e32",
@@ -2912,11 +2913,13 @@ fn vector_instruction<M: Model + ?Sized>(
             carry_arithmetic(model, instruction, name)
         }
 
-        // v_rcp_f32: a reciprocal, per lane.
+        // v_rcp_f32: a reciprocal, per lane. v_rcp_iflag_f32 is the same reciprocal that also
+        // raises the integer divide-by-zero flag (AMD's published RDNA instruction set), which
+        // nothing here reads.
         //
         // The guest's is an approximation accurate to roughly one part in a million; this emits an
         // exact division. Bit-exact framebuffer comparisons can differ in the last bit.
-        "v_rcp_f32_e32" => {
+        "v_rcp_f32_e32" | "v_rcp_iflag_f32_e32" => {
             let (destination, source) = two_operands(instruction)?;
             let Operand::Vector(register) = destination else {
                 return Err(TranslateError::Unsupported {

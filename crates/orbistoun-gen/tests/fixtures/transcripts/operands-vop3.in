@@ -262,6 +262,12 @@ v_mul_f32_e32 v12, 0, v88
 v_rcp_f32_e32 v0, v1
 v_rcp_f32_e32 v255, s101
 v_rcp_f32_e32 v130, -1
+// The reciprocal with the integer divide-by-zero flag, which compilers use in integer division
+// (ACO `aco_opcodes.py` 1064); Grand Theft Auto V's compute program has one.
+v_rcp_iflag_f32_e32 v0, v1
+v_rcp_iflag_f32_e32 v255, s101
+v_rcp_iflag_f32_e32 v130, -1
+v_rcp_iflag_f32_e32 v7, v200
 
 // ---- v_lshl_add_u32 and v_lshrrev_b64 --------------------------------------------
 //

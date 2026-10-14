@@ -80,6 +80,8 @@ global_load_ubyte v18, v1, s[2:3]
 global_load_sbyte v18, v1, s[2:3]
 global_load_ushort v18, v1, s[2:3]
 global_load_sshort v18, v1, s[2:3]
+// And a reciprocal with the integer divide-by-zero flag.
+v_rcp_iflag_f32_e32 v18, v1
 v_cvt_pknorm_i16_f32 v18, v1, v2
 v_cvt_pk_u16_u32 v18, v1, v2
 v_cvt_pk_i16_i32 v18, v1, v2

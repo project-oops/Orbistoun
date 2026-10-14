@@ -679,6 +679,11 @@ name = "v_rcp_f32_e32"
 
 [[mnemonic]]
 family = "VOP1"
+opcode = 43
+name = "v_rcp_iflag_f32_e32"
+
+[[mnemonic]]
+family = "VOP1"
 opcode = 46
 name = "v_rsq_f32_e32"
 

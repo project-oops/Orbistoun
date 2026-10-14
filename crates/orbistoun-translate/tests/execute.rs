@@ -866,6 +866,22 @@ fn global_load_named(name: &str, vdst: u32, vaddr: u32) -> [u32; 2] {
     [head(name), vaddr | (FLAT_NO_BASE_CODE << 16) | (vdst << 24)]
 }
 
+/// `v_rcp_iflag_f32` is the reciprocal `v_rcp_f32` is, raising an integer divide-by-zero flag
+/// besides (AMD's published RDNA instruction set): the reciprocal of 4.0 is 0.25. Grand Theft Auto
+/// V's compute program divides integers through it.
+#[test]
+fn the_flagged_reciprocal_is_the_reciprocal() {
+    if !device_or_skip("the_flagged_reciprocal_is_the_reciprocal") {
+        return;
+    }
+    let registers = run(&[
+        v_mov_code(1, F_4),
+        vop1_vv("v_rcp_iflag_f32_e32", 0, 1),
+        s_endpgm(),
+    ]);
+    assert_eq!(vector(&registers, 0), 0.25f32.to_bits());
+}
+
 /// The sub-word loads read the byte or half at their address and widen it - zero-extended
 /// unsigned, sign-extended signed (AMD's published RDNA instruction set): from a word holding
 /// `0x80ff7f81` at 16, the bytes at 16, 17 and 19 and the half at 18. Grand Theft Auto V's compute
