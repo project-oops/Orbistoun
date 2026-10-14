@@ -2395,13 +2395,13 @@ impl ColourTargetFormat {
 
 /// The channels of colour target zero a draw writes, as a `Rgba8` drawer's red-green-blue-alpha
 /// mask (bit 0 red): `CB_TARGET_MASK`'s `TARGET0_ENABLE`, limited to the channels the target's
-/// format holds. A one-channel `8` target holds red under `SWAP_STD` and alpha under
-/// `SWAP_ALT_REV` (`ac_formats.c` `ac_translate_colorswap`); a drawer standing in a four-channel
-/// frame for it must leave the others alone. Any other format keeps the mask as it is.
+/// format holds. A one-channel target, `8` or `32` (`ac_formats.c` 830), holds red under
+/// `SWAP_STD` and alpha under `SWAP_ALT_REV` (`ac_translate_colorswap`); a drawer standing in a
+/// four-channel frame for it must leave the others alone. Any other format keeps the mask as it is.
 #[must_use]
 pub const fn colour_write_mask(target_mask: u32, info: u32) -> u8 {
     let format = decode_colour_target_format(info);
-    let held = if format.format == COLOR_8 {
+    let held = if format.format == COLOR_8 || format.format == COLOR_32 {
         match format.swap {
             ComponentSwap::Standard => 0x1,
             ComponentSwap::Other(3) => 0x8,
@@ -4472,6 +4472,11 @@ mod tests {
             "red masked off writes nothing"
         );
         assert_eq!(colour_write_mask(0xF, a8), 0x8);
+        // A one-channel 32-bit target holds one channel as an 8 does (`ac_formats.c` 830): red
+        // under `SWAP_STD`, alpha under `SWAP_ALT_REV` (D844).
+        let r32 = 4 << 2 | 7 << 8;
+        assert_eq!(colour_write_mask(0xF, r32), 0x1);
+        assert_eq!(colour_write_mask(0xF, r32 | 3 << 11), 0x8);
         assert_eq!(colour_write_mask(0xF, rgba8), 0xF);
         assert_eq!(colour_write_mask(0x7, rgba8), 0x7);
         assert_eq!(
