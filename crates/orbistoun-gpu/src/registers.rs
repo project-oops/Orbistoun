@@ -1528,13 +1528,6 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
 /// `TARGET0_ENABLE`..`TARGET7_ENABLE` at bits `[0,3]`..`[28,31]`.
 pub(crate) const CB_TARGET_MASK: u32 = 0xA08E;
 
-/// `CB_SHADER_MASK` (`gfx103.json`, context dword `0x8F`): the channels each colour target's pixel
-/// shader export carries, four bits a target as `CB_TARGET_MASK`'s. A channel is written only where
-/// both enable it; radeonsi sets this from the export format (`si_get_cb_shader_mask`: `32_R` 0x1,
-/// `32_GR` 0x3, `32_AR` 0x9, a four-component format 0xF), so a channel the export does not carry
-/// keeps what the target held.
-pub(crate) const CB_SHADER_MASK: u32 = 0xA08F;
-
 /// Which of the eight colour targets a submission writes, and on which channels.
 ///
 /// One four-bit channel mask per MRT (bit 0 red, 1 green, 2 blue, 3 alpha), so `0xF` writes all
@@ -2288,6 +2281,9 @@ pub const COLOR_10_11_11: u32 = 6;
 /// `ColorFormat` `COLOR_32` (`gfx103.json`): what Mesa targets a one-channel 32-bit format at
 /// (`ac_formats.c` 489).
 pub const COLOR_32: u32 = 4;
+/// `ColorFormat` `COLOR_2_10_10_10` (`gfx103.json`): what Mesa targets a 10-10-10-2 format at,
+/// red in the low bits (`ac_formats.c` 536).
+pub const COLOR_2_10_10_10: u32 = 9;
 /// `ColorFormat` `COLOR_16_16` (`gfx103.json`): what Mesa targets a two-channel 16-bit format at
 /// (`ac_formats.c` 500).
 pub const COLOR_16_16: u32 = 5;
@@ -2381,6 +2377,16 @@ impl ColourTargetFormat {
             && matches!(self.swap, ComponentSwap::Standard)
     }
 
+    /// Whether this is a four-byte `2_10_10_10` `UNORM` target in its standard order: red, green
+    /// and blue in ten bits each from the low end, alpha in the top two (`ac_formats.c` 612), drawn
+    /// and written back as it is held (D848).
+    #[must_use]
+    pub const fn is_unorm_2_10_10_10(&self) -> bool {
+        self.format == COLOR_2_10_10_10
+            && self.number_type == NUMBER_UNORM
+            && matches!(self.swap, ComponentSwap::Standard)
+    }
+
     /// Whether this is a four-byte `16_16` `FLOAT` target in its standard order, red then green
     /// (`ac_formats.c` 592): two half floats a texel, drawn and written back as it is held (D847).
     #[must_use]
@@ -2410,6 +2416,8 @@ impl ColourTargetFormat {
             crate::TargetEncoding::Float16x4
         } else if self.is_float_16_16() {
             crate::TargetEncoding::Float16x2
+        } else if self.is_unorm_2_10_10_10() {
+            crate::TargetEncoding::Unorm10x3A2
         } else if self.is_srgb() {
             crate::TargetEncoding::Srgb8
         } else {
@@ -2418,8 +2426,8 @@ impl ColourTargetFormat {
     }
 
     /// Bytes one texel of it takes, where it is a class a frame is written back into: four for
-    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`], [`Self::is_float_32`] and
-    /// [`Self::is_float_16_16`], eight for
+    /// [`Self::is_rgba8_class`], [`Self::is_float_11_11_10`], [`Self::is_float_32`],
+    /// [`Self::is_float_16_16`] and [`Self::is_unorm_2_10_10_10`], eight for
     /// [`Self::is_float_16_16_16_16`], one for [`Self::is_r8_class`].
     #[must_use]
     pub const fn written_back_bytes(&self) -> Option<u32> {
@@ -2427,6 +2435,7 @@ impl ColourTargetFormat {
             || self.is_float_11_11_10()
             || self.is_float_32()
             || self.is_float_16_16()
+            || self.is_unorm_2_10_10_10()
         {
             Some(4)
         } else if self.is_float_16_16_16_16() {
@@ -3509,6 +3518,15 @@ mod tests {
         // half floats a texel, red first, written back eight bytes a texel (D845).
         // PPSA04263's full-resolution two-channel target: `16_16`, `NUMBER_FLOAT`, `SWAP_STD` - two
         // half floats a texel, red then green (`ac_formats.c` 500, 592), four bytes (D847).
+        // PPSA04263's 32 x 32 target: `2_10_10_10`, `NUMBER_UNORM`, `SWAP_STD` - red, green and
+        // blue in ten bits each from the low end, alpha in the top two (`ac_formats.c` 536, 612),
+        // four bytes (D848).
+        let ten = decode_colour_target_format(0x0001_8024);
+        assert!(ten.is_unorm_2_10_10_10());
+        assert_eq!(ten.encoding(), crate::TargetEncoding::Unorm10x3A2);
+        assert_eq!(ten.written_back_bytes(), Some(4));
+        assert!(!decode_colour_target_format(0x0001_8024 | (1 << 11)).is_unorm_2_10_10_10());
+        assert!(!decode_colour_target_format(0x0001_8024 | (7 << 8)).is_unorm_2_10_10_10());
         let pair = decode_colour_target_format(0x0001_8014 | (7 << 8));
         assert!(pair.is_float_16_16());
         assert_eq!(pair.encoding(), crate::TargetEncoding::Float16x2);
