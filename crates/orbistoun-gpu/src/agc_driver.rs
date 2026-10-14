@@ -3641,9 +3641,12 @@ impl GuestCp<'_> {
         let length = count as u64;
         // A level within a larger surface - a mip tail's block, or a padded level - shares its
         // words with what is not the frame, so a copy of them is more than the frame on the device.
+        // A copy of the surface's first bytes is the frame laid out and cut short: a GL context
+        // copies its tiled colour target by the size it would have linear, 0x7e9000 of 0x870000
+        // bytes at 1920 by 1080, and each was a whole-frame write-back (TSHP00001).
         if target.place != crate::registers::Place::Whole
             || source != target.base
-            || length != span
+            || length > span
             || overlaps_target(target, destination, length)
         {
             return false;
@@ -7108,6 +7111,71 @@ mod tests {
         assert!(
             memory[..span].iter().all(|&b| b == 0xAA),
             "the target's fill still deferred"
+        );
+        super::set_pending(None);
+        assert!(super::carry_out_before_reading(base, span as u64));
+        super::forget_written();
+    }
+
+    /// A copy of the frame's first bytes - a GL context copying its tiled target by the size it
+    /// would have linear - is deferred as a whole copy is, and its destination later reads as the
+    /// tiled frame cut short, with nothing past the copy written.
+    #[test]
+    fn a_copy_of_the_frame_s_first_bytes_is_deferred() {
+        use super::{
+            ColourTarget, ComponentSwap, GuestCp, MappedRegions, TargetRead, cp::CpMemory,
+        };
+        use fake::frame;
+        let _guard = serial();
+        let span = crate::tiling::surface_words_64kb_rx_bpp4(16, 8) * 4;
+        let short = span - 0x1000;
+        let page = super::HOST_PAGE as usize;
+        let gap = span + page;
+        let memory: &'static mut [u8] =
+            Box::leak(vec![0xAAu8; gap + span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + gap + span];
+        let base = memory.as_ptr() as usize as u64;
+        let readback = base + gap as u64;
+        let target = ColourTarget {
+            base,
+            width: 16,
+            height: 8,
+            pipe_bank_xor: 0,
+            layout: crate::tiling::SurfaceLayout::Rx64Kb,
+            place: crate::registers::Place::Whole,
+        };
+        allow_writes_to(base, memory.len() as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        assert!(cp.fill(base, 0x1234_5678, span));
+        assert!(matches!(
+            super::read_target(cp, target, ComponentSwap::Standard),
+            Some(TargetRead::Uniform(_))
+        ));
+        super::set_pending(Some((target, ComponentSwap::Standard)));
+
+        assert!(cp.copy(base, readback, short));
+        assert!(
+            memory[gap..].iter().all(|&b| b == 0xAA),
+            "the copy deferred, not written"
+        );
+        assert!(super::carry_out_before_reading(readback, 4));
+        let mut expected = vec![0x1234_5678u32; span / 4];
+        crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
+            .expect("tiles");
+        assert_eq!(
+            &memory[gap..gap + short],
+            &zerocopy::IntoBytes::as_bytes(expected.as_slice())[..short]
+        );
+        assert!(
+            memory[gap + short..].iter().all(|&b| b == 0xAA),
+            "nothing past the copy written"
         );
         super::set_pending(None);
         assert!(super::carry_out_before_reading(base, span as u64));
