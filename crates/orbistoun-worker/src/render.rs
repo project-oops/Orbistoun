@@ -773,13 +773,15 @@ pub fn execute_dispatch(
         })
         .collect();
     on_device(|| {
-        orbistoun_gpu_vulkan::dispatch_guest_hashed(
-            module,
-            memory,
-            (push, groups),
-            &bound,
-            &buffers,
-        )
+        perf::span(perf::Span::DispatchOnDevice, || {
+            orbistoun_gpu_vulkan::dispatch_guest_hashed(
+                module,
+                memory,
+                (push, groups),
+                &bound,
+                &buffers,
+            )
+        })
         .map(|done| {
             let buffers = done
                 .buffers

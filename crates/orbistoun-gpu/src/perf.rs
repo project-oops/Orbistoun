@@ -92,6 +92,7 @@ macro_rules! span_labels {
             Span::DispatchPrepare => $as!("dispatch: prepare"),
             Span::DispatchRead => $as!("dispatch: read"),
             Span::DispatchExecute => $as!("dispatch: execute"),
+            Span::DispatchOnDevice => $as!("dispatch on device"),
             Span::DispatchWriteBack => $as!("dispatch: write back"),
             Span::DeviceSetup => $as!("device: setup"),
             Span::DevicePipeline => $as!("device: pipeline"),
@@ -440,6 +441,8 @@ pub enum Span {
     DispatchRead,
     /// Within [`Self::CpDispatch`]: the device's part, handed over and answered.
     DispatchExecute,
+    /// A dispatch on the device thread, which [`Span::DispatchExecute`] waits on.
+    DispatchOnDevice,
     /// Within [`Self::CpDispatch`]: what it changed written back into guest memory.
     DispatchWriteBack,
     /// Within [`Self::DispatchExecute`]: its buffers and images made and filled.
@@ -471,7 +474,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 70] = [
+    pub const ALL: [Self; 71] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::CommandProcessor,
@@ -530,6 +533,7 @@ impl Span {
         Self::DispatchPrepare,
         Self::DispatchRead,
         Self::DispatchExecute,
+        Self::DispatchOnDevice,
         Self::DispatchWriteBack,
         Self::DeviceSetup,
         Self::DevicePipeline,
@@ -559,7 +563,10 @@ impl Span {
 /// Spans a thread spends waiting on another thread's span, each with the one it waits on: the
 /// profiler counts the wait as the waiting span's own time, since what it waits on runs on another
 /// thread, and a report subtracts it (D831).
-pub const WAITS_ON: [(Span, Span); 1] = [(Span::ExecuteHandOff, Span::ExecuteOnDevice)];
+pub const WAITS_ON: [(Span, Span); 2] = [
+    (Span::ExecuteHandOff, Span::ExecuteOnDevice),
+    (Span::DispatchExecute, Span::DispatchOnDevice),
+];
 
 const SPANS: usize = Span::ALL.len();
 static DETAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
