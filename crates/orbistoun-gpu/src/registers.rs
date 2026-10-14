@@ -1528,6 +1528,13 @@ pub fn colour_target_dcc_at(writes: &[RegisterWrite]) -> Option<ColourTargetDcc>
 /// `TARGET0_ENABLE`..`TARGET7_ENABLE` at bits `[0,3]`..`[28,31]`.
 pub(crate) const CB_TARGET_MASK: u32 = 0xA08E;
 
+/// `CB_SHADER_MASK` (`gfx103.json`, context dword `0x8F`): the channels each colour target's pixel
+/// shader export carries, four bits a target as `CB_TARGET_MASK`'s. A channel is written only where
+/// both enable it; radeonsi sets this from the export format (`si_get_cb_shader_mask`: `32_R` 0x1,
+/// `32_GR` 0x3, `32_AR` 0x9, a four-component format 0xF), so a channel the export does not carry
+/// keeps what the target held.
+pub(crate) const CB_SHADER_MASK: u32 = 0xA08F;
+
 /// Which of the eight colour targets a submission writes, and on which channels.
 ///
 /// One four-bit channel mask per MRT (bit 0 red, 1 green, 2 blue, 3 alpha), so `0xF` writes all
