@@ -10,10 +10,16 @@ named as its trace is, the run by a `RunId` minted when the worker prepares the 
 the worker's process id. The `region` an `Event::Frame` carries is the region's full path, so a
 log line names the file that holds the picture and the directory names the run that drew it.
 
+The run's other dumps go to the same directory: the `last-`, `refused-`, `failed-` and `drawn-NN-`
+submission listings with their guest memory windows and SPIR-V modules, the drawn-frame snapshots,
+`latest-drawn-frame.rgba`, `refused-dispatch-program.bin`, and the kept `flip-*.rgba` frames when
+`ORBISTOUN_FRAME_DIR` names no directory of its own. Each log line that names a dump names the
+directory.
+
 The shim reads a region only within the traces directory it was given: a path outside it, or one
 with a parent component, is refused as a bare name with a separator was before.
 
-A title keeps the frames of its last four runs. When a run starts, the title's older run
+A title keeps the frames and dumps of its last four runs. When a run starts, the title's older run
 directories are removed; a run whose directory goes while it still writes makes it again.
 
 **Why:** every run on the machine shares the traces directory, and runs in several sessions draw

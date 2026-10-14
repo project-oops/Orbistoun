@@ -11,8 +11,9 @@ use orbistoun_proto::{Event, FrameFormat};
 use orbistoun_report::RunId;
 use std::path::{Component, Path, PathBuf};
 
-/// The runs of one title whose frames are kept; an older run's directory goes when a run starts.
-/// A run leaves up to a ring of frames, 8 MB each at 1080p and 32 MB at 2160p.
+/// The runs of one title whose frames and dumps are kept; an older run's directory goes when a run
+/// starts. A run leaves up to a ring of frames, 8 MB each at 1080p and 32 MB at 2160p, beside its
+/// submission dumps.
 pub const KEPT_RUNS: usize = 4;
 
 /// The name of the region file a frame's bytes are written to, within its run's directory.

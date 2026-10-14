@@ -263,7 +263,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
             parts.join(", ")
         );
     }
-    let listening = LIVE_EVENTS.get().copied().zip(regions_dir());
+    let listening = LIVE_EVENTS.get().copied().zip(frames_dir());
     let due = listening.is_some()
         && LAST.lock().is_ok_and(|mut last| {
             let due = last.is_none_or(|at| at.elapsed() >= PRESENT_INTERVAL);
@@ -638,7 +638,7 @@ fn read_scanout(address: u64, width: u32, height: u32) -> Option<Vec<u32>> {
 /// How many drawn submissions a run dumps, in order.
 const DUMPED_SUBMISSIONS: u64 = 64;
 
-/// The file in the traces directory holding the latest frame drawn at submit.
+/// The file in the run's frames directory holding the latest frame drawn at submit.
 const LATEST_DRAWN_FRAME: &str = "latest-drawn-frame.rgba";
 
 /// A frame drawn at submit: width, height, and its `Rgba8` bytes.
@@ -1108,8 +1108,8 @@ impl KeptFlips {
 /// kept frame can be compared with the console's frame of that index.
 fn keep_frame_at_this_flip() {
     static ASKED: OnceLock<KeptFlips> = OnceLock::new();
-    // `ORBISTOUN_FRAME_DIR` gives this run a directory of its own, since the traces directory is
-    // shared with every other run.
+    // `ORBISTOUN_FRAME_DIR` names a directory for the kept frames, such as the CLI's sheet
+    // directory; without it they go to the run's own frames directory (D865).
     static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
     let asked = ASKED.get_or_init(|| {
         KeptFlips::parse(
@@ -1274,9 +1274,13 @@ fn draw_buffers_line(
 }
 
 fn write_submission(submission: &Submission, name: &str) {
-    let Some(dir) = frames_dir() else {
-        return;
-    };
+    if let Some(dir) = frames_dir() {
+        write_submission_to(dir, submission, name);
+    }
+}
+
+/// Writes `submission` as `name`'s listing, guest memory window and shader modules into `dir`.
+fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
     let mut text = String::new();
     for (index, command) in submission.commands.iter().enumerate() {
         let _ = writeln!(text, "{index:5}  {}", command_line(command));
@@ -1310,7 +1314,9 @@ fn write_submission(submission: &Submission, name: &str) {
         .iter()
         .flat_map(|w| w.to_le_bytes())
         .collect();
-    let written = std::fs::write(&listing, text).and_then(|()| {
+    // Made here too, so a run whose directory another run pruned keeps its dumps.
+    let written = std::fs::create_dir_all(dir).and_then(|()| {
+        std::fs::write(&listing, text)?;
         std::fs::write(dir.join(format!("{name}-window.bin")), &window)?;
         for (id, words) in &submission.modules {
             let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -1320,8 +1326,9 @@ fn write_submission(submission: &Submission, name: &str) {
     });
     match written {
         Ok(()) => tracing::info!(
-            "the {name} submission's commands and {} module(s) are in {name}-submission.txt and {name}-module-*.spv in the traces directory",
-            submission.modules.len()
+            "the {name} submission's commands and {} module(s) are in {name}-submission.txt and {name}-module-*.spv in {}",
+            submission.modules.len(),
+            dir.display()
         ),
         Err(e) => tracing::warn!("the {name} submission could not be written: {e}"),
     }
@@ -1358,7 +1365,7 @@ pub fn render_and_log_last_submission() -> Option<Event> {
         .last
         .is_some_and(|last| last.draws > 0);
     let executed = if ran { executed_frame() } else { None };
-    if let (true, Some((width, height, bytes)), Some(dir)) = (ran, executed, regions_dir()) {
+    if let (true, Some((width, height, bytes)), Some(dir)) = (ran, executed, frames_dir()) {
         let sequence = FRAME_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         return match write_frame(dir, sequence, width, height, FrameFormat::Rgba8, &bytes) {
             Ok(event) => {
@@ -1373,42 +1380,35 @@ pub fn render_and_log_last_submission() -> Option<Event> {
             }
         };
     }
-    render_submission_to(&submission, regions_dir())
+    render_submission_to(&submission, frames_dir())
 }
 
 /// The sequence number of the next frame region written.
 static FRAME_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-/// Where the run's frames go: the traces directory, where the shim reads a frame region from
-/// (D695). Unset in a run with no paths, which writes no frame.
+/// Where the run's frames and dumps go: a directory of the run's own under the traces directory,
+/// where the shim reads a frame region from (D695), so another session's run cannot overwrite them
+/// (D865). Unset in a run with no paths, which writes no frame.
 fn frames_directory() -> &'static OnceLock<PathBuf> {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     &DIR
 }
 
-/// Sets the run's frames directory. First set wins; a run has one.
+/// Sets the run's frames directory, and drops the frames and dumps of the title's older runs. First
+/// set wins; a run has one.
 pub fn frames_to(dir: PathBuf) {
+    crate::frame_region::prune_runs(&dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            "the run's frames directory {} was not made: {e}",
+            dir.display()
+        );
+    }
     let _ = frames_directory().set(dir);
 }
 
 fn frames_dir() -> Option<&'static Path> {
     frames_directory().get().map(PathBuf::as_path)
-}
-
-/// Where the run's frame regions go: a directory of the run's own under the traces directory, so
-/// another session's run cannot overwrite them (D865).
-static REGIONS: OnceLock<PathBuf> = OnceLock::new();
-
-/// Sets the directory the run's frame regions are written to, and drops the frames of the title's
-/// older runs. First set wins; a run has one.
-pub fn frame_regions_to(dir: PathBuf) {
-    crate::frame_region::prune_runs(&dir);
-    let _ = REGIONS.set(dir);
-}
-
-/// The run's frame-region directory, or else its frames directory.
-fn regions_dir() -> Option<&'static Path> {
-    REGIONS.get().map(PathBuf::as_path).or_else(frames_dir)
 }
 
 /// Drives `submission` to a backend, logs what happened, and writes the frame it produced into
@@ -1630,6 +1630,45 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// Two runs dumping a submission under the same name keep their own: each run's dumps go to
+    /// its own directory, since every session's runs share the traces directory (D865).
+    #[test]
+    fn two_runs_submission_dumps_do_not_collide() {
+        use orbistoun_report::RunId;
+        let traces = tempfile::tempdir().expect("tempdir");
+        let module = "/titles/PPSA04263/eboot.bin";
+        let runs = [
+            (RunId::new(1_760_000_000_000, 0x10), 0x1000_u64),
+            (RunId::new(1_760_000_000_000, 0x20), 0x2000_u64),
+        ];
+        for (run, base) in &runs {
+            let dir = crate::frame_region::run_dir(traces.path(), module, run);
+            let submission = orbistoun_gpu::pipeline::Submission {
+                guest_memory_base: *base,
+                guest_memory: vec![0xdead_beef],
+                ..Default::default()
+            };
+            super::write_submission_to(&dir, &submission, "last");
+        }
+        for (run, base) in &runs {
+            let dir = crate::frame_region::run_dir(traces.path(), module, run);
+            let listing = std::fs::read_to_string(dir.join("last-submission.txt"))
+                .expect("the run's own listing");
+            assert!(
+                listing.contains(&format!("window {base:#x}")),
+                "{run}'s listing is its own: {listing}"
+            );
+            assert_eq!(
+                std::fs::read(dir.join("last-window.bin")).expect("the run's own window"),
+                0xdead_beef_u32.to_le_bytes()
+            );
+        }
+        assert!(
+            !traces.path().join("last-submission.txt").exists(),
+            "nothing is dumped into the shared traces directory itself"
+        );
+    }
 
     /// A drawn frame cleared to zero is no picture, whatever its size; one non-zero byte anywhere
     /// in it, alpha included, is.
