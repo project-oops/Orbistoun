@@ -58,6 +58,10 @@ pub struct CallTrace {
     /// Submissions those refusals kept from being written back.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub gpu_refused_submissions: u64,
+    /// Where the GPU queue stopped, when it did: nothing after it retired (D710), so it is how far
+    /// the title's GPU work got (D849).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_stopped_at: Option<GpuStop>,
     /// Every import called, most-used first.
     pub calls: Vec<CalledImport>,
     /// Every system call the guest made directly, not through a stub.
@@ -610,6 +614,18 @@ pub struct SubmissionSummary {
     /// Says why a draw has nothing bound, so a translation gap is not read as a backend gap.
     #[serde(default)]
     pub shader_failures: Vec<String>,
+}
+
+/// Where a GPU queue stopped: the submission, counted from the first the run carried out, and the
+/// byte of its command buffer the command processor stopped at. Later is further (D849).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct GpuStop {
+    /// The submission, from 1.
+    pub submission: u64,
+    /// The byte of its command buffer.
+    pub byte: u32,
 }
 
 /// What a run was subject to, as opposed to what it found.
@@ -1187,6 +1203,10 @@ pub struct Progress {
     pub gained: Vec<String>,
     /// The imports the run before reached and this one did not, by label, in label order.
     pub lost: Vec<String>,
+    /// Where this run's GPU queue stopped, if it did.
+    pub gpu_stop: Option<GpuStop>,
+    /// Where the run before's stopped, if it did.
+    pub previous_gpu_stop: Option<GpuStop>,
     /// Where this run died, described.
     pub fault: String,
     /// Where the previous run died, if it differed.
@@ -1277,6 +1297,8 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
             calls_delta: 0,
             gained: Vec::new(),
             lost: Vec::new(),
+            gpu_stop: after.gpu_stopped_at,
+            previous_gpu_stop: None,
             fault,
             previous_fault: None,
             verdict: Verdict::FirstRun,
@@ -1293,6 +1315,12 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
     // pointer on a different code path is not comparable.
     let position = match (&after.fault, &before.fault) {
         (Some(a), Some(b)) if a.region == b.region => Some(a.offset.cmp(&b.offset)),
+        // With neither run faulting, where the GPU queue stopped is the position: its work got
+        // further or it did not (D849).
+        (None, None) => match (after.gpu_stopped_at, before.gpu_stopped_at) {
+            (Some(a), Some(b)) => Some(a.cmp(&b)),
+            _ => None,
+        },
         // A missing fault is not a position in either direction; the surface count alone
         // decides the verdict (D301).
         _ => None,
@@ -1313,6 +1341,8 @@ pub fn compare(before: Option<&CallTrace>, after: &CallTrace) -> Progress {
         calls_delta: i128::from(after.total_calls) - i128::from(before.total_calls),
         gained: only_in(after, before),
         lost: only_in(before, after),
+        gpu_stop: after.gpu_stopped_at,
+        previous_gpu_stop: before.gpu_stopped_at,
         fault,
         previous_fault: (previous != describe_end(after)).then_some(previous),
         verdict,
@@ -1801,6 +1831,7 @@ mod tests {
             flipped_buffer: String::new(),
             gpu_refusals: Vec::new(),
             gpu_refused_submissions: 0,
+            gpu_stopped_at: None,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -1879,6 +1910,27 @@ mod tests {
         assert_eq!(seen.verdict, Verdict::Further);
         assert_eq!(seen.distinct_delta, 2);
         assert_eq!(seen.calls_delta, 10);
+    }
+
+    /// With no fault on either side, the GPU queue stopping later in its stream is the position
+    /// that moved: Grand Theft Auto V's draws got further at the same imports (D849).
+    #[test]
+    fn a_gpu_queue_stopping_later_is_progress() {
+        let stopped = |byte| {
+            let mut run = trace(3, 10, None, None);
+            run.gpu_stopped_at = Some(super::GpuStop {
+                submission: 1,
+                byte,
+            });
+            run
+        };
+        let (before, after) = (stopped(0xbb0), stopped(0x1600));
+        let seen = compare(Some(&before), &after);
+        assert_eq!(seen.verdict, Verdict::Further);
+        assert_eq!(seen.gpu_stop, after.gpu_stopped_at);
+        assert_eq!(seen.previous_gpu_stop, before.gpu_stopped_at);
+        assert_eq!(compare(Some(&after), &before).verdict, Verdict::Back);
+        assert_eq!(compare(Some(&after), &after).verdict, Verdict::Same);
     }
 
     #[test]

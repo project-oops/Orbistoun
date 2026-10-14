@@ -2295,6 +2295,7 @@ pub fn collect_with_fault(module: &str, reached: &str, fault: Option<FaultSite>)
             .unwrap_or_default(),
         gpu_refusals,
         gpu_refused_submissions,
+        gpu_stopped_at: crate::render::gpu_stop(),
         // The last command buffer a guest submitted, summarised.
         submission: submission_summary(),
         // Recorded, not just printed, so a guest that talks to the kernel by number leaves

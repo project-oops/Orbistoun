@@ -244,7 +244,8 @@ what to do about it
 
 - `verdict` - `FURTHER` means the guest executed code it could not reach before; it is the
   measure of progress. `BACK` means a regression. `same` on an unchanged tree is expected, and
-  that stability is what makes any movement attributable.
+  that stability is what makes any movement attributable. A run with no fault is placed by
+  where its GPU queue stopped, which the `gpu` line prints beside the run before's (D849).
 - `standing` - the share of calls answered by a real implementation. A raw call count rises
   when stubs answer wrongly, so it rewards the wrong thing (D181).
 - `faulted` - the operation, address, registers and call path of the fault.

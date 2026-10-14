@@ -41,6 +41,20 @@ pub(crate) fn report_progress(
             println!("           {sign} {}", labels.join(", "));
         }
     }
+    // Where the GPU queue stopped, against the run before (D849).
+    let stop = |at: Option<orbistoun_report::trace::GpuStop>| {
+        at.map_or_else(
+            || "nowhere".to_owned(),
+            |at| format!("submission {}, byte {:#x}", at.submission, at.byte),
+        )
+    };
+    if progress.gpu_stop.is_some() || progress.previous_gpu_stop.is_some() {
+        println!(
+            "  gpu      stopped at {} (was {})",
+            stop(progress.gpu_stop),
+            stop(progress.previous_gpu_stop)
+        );
+    }
     print_standing(after);
     print_quiet(after);
     print_threads(after);

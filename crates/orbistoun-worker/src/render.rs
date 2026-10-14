@@ -1489,6 +1489,17 @@ pub fn refusals() -> (Vec<(String, u64)>, u64) {
     (by_reason, run.1)
 }
 
+/// Where the GPU queue stopped, if it did: the submission that stopped it, counted from the first
+/// carried out, and the byte it stopped at (D849). Nothing after it retired (D710).
+pub fn gpu_stop() -> Option<orbistoun_report::trace::GpuStop> {
+    let record = orbistoun_gpu::agc_driver::execution();
+    let byte = record.last?.stopped.offset()?;
+    Some(orbistoun_report::trace::GpuStop {
+        submission: record.submissions,
+        byte,
+    })
+}
+
 /// Each refusal reason and its count, one indented line apiece, for the end of an outcome line.
 fn refusal_lines(refusals: &[(&'static str, usize)]) -> String {
     let mut lines = String::new();

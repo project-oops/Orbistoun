@@ -1730,6 +1730,7 @@ mod tests {
             flipped_buffer: String::new(),
             gpu_refusals: Vec::new(),
             gpu_refused_submissions: 0,
+            gpu_stopped_at: None,
             submission: None,
             calls: Vec::new(),
             syscalls: Vec::new(),
@@ -2558,6 +2559,7 @@ mod tests {
             flipped_buffer: String::new(),
             gpu_refusals: Vec::new(),
             gpu_refused_submissions: 0,
+            gpu_stopped_at: None,
             submission: None,
             calls: vec![
                 CalledImport {
