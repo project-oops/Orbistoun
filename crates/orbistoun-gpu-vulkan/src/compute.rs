@@ -251,7 +251,9 @@ fn take_host_buffer(
         Some(spares.swap_remove(at))
     });
     let Some((_, _, _, buffer, memory)) = spare else {
-        return create_host_buffer(instance, physical, device, size, words);
+        return orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DispatchNewHostBuffer, || {
+            create_host_buffer(instance, physical, device, size, words)
+        });
     };
     if zeroed == Zeroed::Yes {
         // SAFETY: the memory is host-visible, holds `size` bytes, and is not mapped: a spare is

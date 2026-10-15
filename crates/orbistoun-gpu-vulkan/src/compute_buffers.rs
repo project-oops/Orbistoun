@@ -204,7 +204,9 @@ fn buffer_in(
         let spare = spares.swap_remove(at);
         return Ok((spare.buffer, spare.memory, spare.flags));
     }
-    new_buffer_in(context, size, usage, preferred)
+    orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DispatchNewBuffer, || {
+        new_buffer_in(context, size, usage, preferred)
+    })
 }
 
 /// [`buffer_in`]'s new buffer.

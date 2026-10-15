@@ -166,7 +166,11 @@ impl BoundImages {
             };
             let created = match take_spare(device, key, image) {
                 Some(reused) => reused,
-                None => create_image((instance, physical, device), image, stored),
+                None => {
+                    orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::DispatchNewImage, || {
+                        create_image((instance, physical, device), image, stored)
+                    })
+                }
             };
             match created {
                 Ok((image_handle, memory, view, staging, staging_memory)) => {

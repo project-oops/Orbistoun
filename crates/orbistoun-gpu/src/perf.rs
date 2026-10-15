@@ -58,6 +58,9 @@ macro_rules! span_labels {
             Span::ClosePass => $as!("device: close pass"),
             Span::SnapshotBuffer => $as!("keep snapshot: new buffer"),
             Span::SnapshotCopy => $as!("keep snapshot: copy"),
+            Span::DispatchNewBuffer => $as!("dispatch: new buffer"),
+            Span::DispatchNewHostBuffer => $as!("dispatch: new host buffer"),
+            Span::DispatchNewImage => $as!("dispatch: new image"),
             Span::ReadBand => $as!("read band"),
             Span::FoldBand => $as!("fold band"),
             Span::DiscardSnapshot => $as!("discard snapshot"),
@@ -411,6 +414,13 @@ pub enum Span {
     SnapshotBuffer,
     /// Within [`Self::SnapshotOnDevice`]: the copy into the snapshot recorded and submitted.
     SnapshotCopy,
+    /// A dispatch's device buffer made afresh, no spare of its size and use kept (D805).
+    DispatchNewBuffer,
+    /// A dispatch's host buffer - its observation or window - made afresh, no spare of its size
+    /// kept.
+    DispatchNewHostBuffer,
+    /// A dispatch's image made afresh, no spare of its format and extent kept.
+    DispatchNewImage,
     /// Releasing a superseded snapshot.
     DiscardSnapshot,
     /// Every other command-processor memory step: fills, fences, waits.
@@ -574,7 +584,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 97] = [
+    pub const ALL: [Self; 100] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -599,6 +609,9 @@ impl Span {
         Self::ClosePass,
         Self::SnapshotBuffer,
         Self::SnapshotCopy,
+        Self::DispatchNewBuffer,
+        Self::DispatchNewHostBuffer,
+        Self::DispatchNewImage,
         Self::DiscardSnapshot,
         Self::OtherMemory,
         Self::FlipWriteBack,
