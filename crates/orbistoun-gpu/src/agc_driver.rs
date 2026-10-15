@@ -3579,6 +3579,33 @@ pub fn install_lazy_copies(hooks: LazyCopies) {
     let _ = lazy_copies().set(hooks);
 }
 
+/// Installs what is told, once per thread and with a name for it, that a thread does this module's
+/// work: the guest thread that submits command buffers ("submitting") and the command processor's
+/// own ("command processor"). A profiler watches them, since in a title drawing from a thread of its
+/// own neither is the thread that started it. First install wins.
+pub fn install_working_thread(hook: fn(&'static str)) {
+    let _ = working_thread().set(hook);
+}
+
+fn working_thread() -> &'static OnceLock<fn(&'static str)> {
+    static HOOK: OnceLock<fn(&'static str)> = OnceLock::new();
+    &HOOK
+}
+
+/// Tells the installed hook, the first time this thread asks, that it does this module's work as
+/// `name`.
+fn note_working_thread(name: &'static str) {
+    thread_local! {
+        static NOTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if NOTED.with(|noted| noted.replace(true)) {
+        return;
+    }
+    if let Some(hook) = working_thread().get() {
+        hook(name);
+    }
+}
+
 /// A copy of a colour target, or a fill, into guest memory that has not been carried out yet.
 struct Deferred {
     /// The destination and length.
@@ -4820,6 +4847,7 @@ fn carry_registers(bytes: &[u8], submission: &Submission) {
 
 /// [`submit_described`]'s body, timed whole as [`crate::perf::Phase::Submit`].
 fn submit_described_timed(descriptor: u64) -> u64 {
+    note_working_thread("submitting");
     let Some((gpu_addr, length)) = submit_descriptor(descriptor) else {
         return SUBMIT_OK;
     };
@@ -5041,6 +5069,7 @@ mod command_processor {
                     .name("orbistoun-command-processor".to_owned())
                     .spawn(move || {
                         ON_PROCESSOR.set(true);
+                        super::note_working_thread("command processor");
                         for work in receive {
                             let (bytes, submission) = *work;
                             run_submission(&bytes, submission);

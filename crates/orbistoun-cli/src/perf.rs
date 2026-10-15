@@ -205,6 +205,9 @@ pub(crate) fn cmd_perf(
 /// How many host functions a sampled report names per thread.
 const SAMPLED_BUCKETS: usize = 20;
 
+/// The share of a thread's samples in one place from which a sampled report shows only that place.
+const IDLE_SHARE: f64 = 90.0;
+
 /// The last sample report of each thread in a run's log (`ORBISTOUN_PROFILE`): a heading and its
 /// indented lines, the guest's thread and the device thread each once, as the run last printed them.
 /// Empty when the log holds none.
@@ -235,8 +238,18 @@ fn last_samples(log: &str) -> String {
     }
     let mut out = String::new();
     for (heading, body) in blocks {
+        // A thread spending nearly all of its samples in one place - a job worker parked on its
+        // wait - is that one line: a title's many workers would bury the thread doing the work.
+        let top = body
+            .first()
+            .and_then(|line| line.trim().split('%').next()?.trim().parse::<f64>().ok());
+        let shown = if top.is_some_and(|share| share >= IDLE_SHARE) {
+            1
+        } else {
+            body.len()
+        };
         let _ = writeln!(out, "\nsampled: {heading}");
-        for line in body {
+        for line in body.iter().take(shown) {
             out.push_str(line);
             out.push('\n');
         }
@@ -922,9 +935,16 @@ mod tests {
             "2026 INFO profile of the guest main thread, 12 samples, 2% in the guest's image:\n",
             "   80.0% new main\n",
             "    1.0% more\n",
+            "2026 INFO profile of the guest 3 thread, 12 samples, 0% in the guest's image:\n",
+            "   94.0% parked in its wait\n",
+            "    3.0% waking\n",
             "2026 INFO the guest was still running\n",
         );
         let kept = super::last_samples(log);
+        assert!(
+            kept.contains("parked in its wait") && !kept.contains("waking"),
+            "a parked thread is its one line: {kept}"
+        );
         assert!(
             kept.contains("new main") && kept.contains("    1.0% more"),
             "{kept}"

@@ -638,6 +638,9 @@ fn install_presentation() {
     }
     // A copy out of a colour target still on the device, carried out when its destination is first
     // touched (D717); the fault handler that notices the touch is `report`'s.
+    // The threads that submit and carry out command buffers are sampled beside the one that
+    // started the guest.
+    orbistoun_gpu::agc_driver::install_working_thread(profile::watch_this_thread);
     orbistoun_gpu::agc_driver::install_lazy_copies(orbistoun_gpu::agc_driver::LazyCopies {
         snapshot: render::keep_frame_on_device,
         show: render::keep_frame_shown,
