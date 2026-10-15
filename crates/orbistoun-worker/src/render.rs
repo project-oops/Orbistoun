@@ -277,6 +277,9 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // comes with a device copy of its own. One the guest read before flipping was written back
     // then, and is still the frame drawn into this buffer.
     let drawn_into = orbistoun_gpu::agc_driver::frame_drawn_into(address);
+    if let Ok(mut seen) = TOUCHES.lock() {
+        note_touches(&mut seen, orbistoun_gpu::agc_driver::take_early_touches());
+    }
     crate::flip_origins::note_flip(address, drawn_into);
     ask_for_unfilled_texture(address);
     if drawn_into.is_some() {
@@ -1257,6 +1260,10 @@ fn log_flip_origins() {
         let lead = format!("  it sampled {base:#x}, drawn into as");
         tracing::info!("{}", drawn_by_line(&lead, &target, &frame_into));
     }
+    // What the guest read or wrote of drawn frames before their flips.
+    if let Some(line) = TOUCHES.lock().ok().and_then(|seen| touches_line(&seen)) {
+        tracing::info!("{line}");
+    }
     // Who wrote the texture a frame sampled that nothing tracked filled, where one was watched.
     if let Some((address, writers)) = crate::waits::texture_writers() {
         tracing::info!("{}", texture_writers_line(address, &writers));
@@ -1326,6 +1333,51 @@ fn ask_for_unfilled_texture(shown: u64) {
     if let Some(base) = unfilled {
         crate::waits::watch_texture(base);
     }
+}
+
+/// The guest accesses that brought drawn frames back before their flips, this run, each kind once.
+static TOUCHES: Mutex<Vec<(u64, orbistoun_gpu::agc_driver::GuestTouch)>> = Mutex::new(Vec::new());
+
+/// How many kinds of guest access to drawn frames a run keeps.
+const MOST_TOUCHES: usize = 8;
+
+/// Adds `touches` to `seen`, each target, instruction and kind of access once, up to
+/// [`MOST_TOUCHES`].
+fn note_touches(
+    seen: &mut Vec<(u64, orbistoun_gpu::agc_driver::GuestTouch)>,
+    touches: Vec<(u64, orbistoun_gpu::agc_driver::GuestTouch)>,
+) {
+    for (target, touch) in touches {
+        let known = seen.iter().any(|(base, kept)| {
+            *base == target && kept.rip == touch.rip && kept.write == touch.write
+        });
+        if !known && seen.len() < MOST_TOUCHES {
+            seen.push((target, touch));
+        }
+    }
+}
+
+/// The run's line for the guest accesses that brought drawn frames back before their flips, where
+/// there were any.
+fn touches_line(seen: &[(u64, orbistoun_gpu::agc_driver::GuestTouch)]) -> Option<String> {
+    if seen.is_empty() {
+        return None;
+    }
+    let said: Vec<String> = seen
+        .iter()
+        .map(|(target, touch)| {
+            format!(
+                "a {} of {:#x} in {target:#x} from {:#x}",
+                if touch.write { "write" } else { "read" },
+                touch.address,
+                touch.rip
+            )
+        })
+        .collect();
+    Some(format!(
+        "the guest touched drawn frames before their flips: {}",
+        said.join("; ")
+    ))
 }
 
 /// How many distinct writers [`texture_writers_line`] names.
@@ -2017,6 +2069,43 @@ mod tests {
             super::undrawn_line(0x1000),
             "the last flip showed 0x1000, which no frame orbistoun drew went into"
         );
+    }
+
+    /// The guest accesses that brought drawn frames back before their flips are named, each kind
+    /// once: what the guest read or wrote of which target, from where. A guest that reads back an
+    /// earlier render target says so.
+    #[test]
+    fn the_guest_accesses_to_drawn_frames_are_named() {
+        let touch = |rip, address, write| orbistoun_gpu::agc_driver::GuestTouch {
+            rip,
+            address,
+            write,
+        };
+        let mut seen = Vec::new();
+        super::note_touches(
+            &mut seen,
+            vec![
+                (
+                    0x7400_0000_0000,
+                    touch(0x4000_1000, 0x7400_0000_0040, false),
+                ),
+                (
+                    0x7400_0000_0000,
+                    touch(0x4000_1000, 0x7400_0000_0080, false),
+                ),
+                (0x7400_1000_0000, touch(0x4000_2000, 0x7400_1000_0000, true)),
+            ],
+        );
+        assert_eq!(seen.len(), 2, "one per target, instruction and kind");
+        assert_eq!(
+            super::touches_line(&seen).as_deref(),
+            Some(concat!(
+                "the guest touched drawn frames before their flips: a read of 0x740000000040 in ",
+                "0x740000000000 from 0x40001000; a write of 0x740010000000 in 0x740010000000 from ",
+                "0x40002000"
+            ))
+        );
+        assert_eq!(super::touches_line(&[]), None);
     }
 
     /// The texture a frame sampled that nothing tracked filled is the first of its sampled ones no

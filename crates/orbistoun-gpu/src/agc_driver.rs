@@ -2563,6 +2563,17 @@ pub fn take_early_touch(address: u64) -> Option<GuestTouch> {
         .find_map(|(base, touch)| (base == address).then_some(touch))
 }
 
+/// Every guest access that brought a drawn frame back before its flip since this last asked, by the
+/// target's base; every access noted is forgotten, as [`take_early_touch`] forgets them.
+#[must_use]
+pub fn take_early_touches() -> Vec<(u64, GuestTouch)> {
+    std::mem::take(
+        &mut *early_touches()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
 /// The bases of the targets whose drawn frames were written back since a flip last asked
 /// ([`frame_drawn_into`]). A frame something reads before its flip is written back then (D714) -
 /// oops-gl reads its own target after each frame's draws - and is still the frame that flip shows.
