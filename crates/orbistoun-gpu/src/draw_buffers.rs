@@ -325,7 +325,10 @@ pub(crate) fn evaluate_computed(
                 kept.computed == *computed
                     && kept.user_data == user_data
                     && kept.system == system
-                    && kept.reads.iter().all(|&(at, held)| read(at) == Some(held))
+                    && kept
+                        .reads
+                        .iter()
+                        .all(|(at, held)| memory.read(*at, held.len()) == Some(held.as_slice()))
             })
             .map(|kept| kept.answer.clone())
     });
@@ -348,7 +351,7 @@ pub(crate) fn evaluate_computed(
             computed: computed.clone(),
             user_data: user_data.to_vec(),
             system: system.to_vec(),
-            reads,
+            reads: runs_of(&reads),
             answer: answer.clone(),
         });
     }
@@ -367,8 +370,31 @@ struct Evaluated {
     computed: Computed,
     user_data: Vec<u32>,
     system: Vec<(u32, u32)>,
-    reads: Vec<(u64, u32)>,
+    /// The words the replay read, as runs of consecutive bytes, each checked again with one read.
+    reads: Vec<(u64, Vec<u8>)>,
     answer: Evaluation,
+}
+
+/// The words a replay read, as runs of consecutive bytes from each run's first address: a
+/// descriptor's four words are one run, checked again with one read rather than four - each read
+/// asks where guest memory lies and whether anything is deferred over it (PPSA25872, a tenth of
+/// its command processor's time). A word read again inside a run is not added twice.
+fn runs_of(reads: &[(u64, u32)]) -> Vec<(u64, Vec<u8>)> {
+    let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
+    for &(address, word) in reads {
+        if runs.iter().any(|(at, bytes)| {
+            address >= *at && address.saturating_add(4) <= at.saturating_add(bytes.len() as u64)
+        }) {
+            continue;
+        }
+        match runs.last_mut() {
+            Some((at, bytes)) if at.saturating_add(bytes.len() as u64) == address => {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            _ => runs.push((address, word.to_le_bytes().to_vec())),
+        }
+    }
+    runs
 }
 
 /// The answers [`evaluate_computed`] keeps, by a hash of what each was asked.
@@ -1816,6 +1842,30 @@ mod tests {
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
         assert!(super::resolve_range(&source, (&user_data, 0, &[]), &memory).is_err());
+    }
+
+    /// The words a replay read are kept as runs: a descriptor's four are one, a word elsewhere
+    /// another, and a word read again adds nothing.
+    #[test]
+    fn the_words_a_replay_read_are_kept_as_runs() {
+        let runs = super::runs_of(&[
+            (0x10, 1),
+            (0x14, 2),
+            (0x18, 3),
+            (0x1c, 4),
+            (0x40, 5),
+            (0x14, 2),
+        ]);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].0, 0x10);
+        assert_eq!(
+            runs[0].1,
+            [1u32, 2, 3, 4]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(runs[1], (0x40, 5u32.to_le_bytes().to_vec()));
     }
 
     /// A computed descriptor asked for again is answered as kept only while the guest words its
