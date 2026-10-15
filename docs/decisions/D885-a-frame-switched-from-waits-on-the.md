@@ -33,8 +33,9 @@ that its first read finds it in the target's byte order, and that the next switc
 **Rejected:**
 - Keeping every switched-from frame: exact, but SuperTuxKart paid for a snapshot and a guard on
   every frame and then carried each out, 12% slower.
-- Keeping only a target a texture has bound whole: PPSA02664 never samples its targets, so nothing
-  was kept and the gain was lost.
+- Keeping only a target a texture has bound whole: the bind was noted only when it found the
+  target pending, kept or last written, and in PPSA02664 none did, so nothing was kept and the gain
+  was lost. Most of its switched-from frames are never read, sampled or not.
 - Reading a texture that is exactly a kept frame off the device, without carrying the copy out:
   exact, but neither PPSA02664, GLTC00001 nor SuperTuxKart binds one (its sampled targets are mip
   levels sharing 64 KiB blocks), and it cost two locks on every texture bind. Played with its pad
