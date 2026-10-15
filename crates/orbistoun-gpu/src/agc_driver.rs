@@ -2901,13 +2901,14 @@ fn write_target(
         // again.
         let words = target.words();
         let mut tiled_ok = false;
-        let mut written = Vec::new();
+        let mut written = spare_written();
         let edited = memory.edit_words(target.base, words, &mut |tiled| {
             tiled_ok = target
                 .tile_mapped(after, tiled, |w| stored(w, target, swap))
                 .is_ok();
             // What memory holds now, for the next submission's unchanged check.
-            written = zerocopy::IntoBytes::as_bytes(&*tiled).to_vec();
+            written.clear();
+            written.extend_from_slice(zerocopy::IntoBytes::as_bytes(&*tiled));
         });
         let wrote = edited && tiled_ok;
         // Marked after this write, so the next check does not see this write as someone else's.
@@ -2955,15 +2956,51 @@ fn replace_written(next: Option<Written>) {
     let Ok(mut earlier) = earlier_written().lock() else {
         return;
     };
-    earlier.retain(|kept| Some(kept.target) != current);
-    if let Some(old) = replaced
-        && Some(old.target) != current
-        && matches!(old.contents, Contents::Bytes(_))
-    {
-        earlier.retain(|kept| kept.target != old.target);
-        earlier.insert(0, old);
-        earlier.truncate(EARLIER_KEPT);
+    // The current target's older bytes go - a display buffer's, written again two frames on - and
+    // their storage holds the next.
+    let (gone, kept): (Vec<Written>, Vec<Written>) = std::mem::take(&mut *earlier)
+        .into_iter()
+        .partition(|kept| Some(kept.target) == current);
+    *earlier = kept;
+    for old in gone {
+        keep_spare(old.contents);
     }
+    match replaced {
+        Some(old) if Some(old.target) != current && matches!(old.contents, Contents::Bytes(_)) => {
+            earlier.retain(|kept| kept.target != old.target);
+            earlier.insert(0, old);
+            earlier.truncate(EARLIER_KEPT);
+        }
+        // The same target written again: its old bytes go, and their storage holds the next.
+        Some(old) => keep_spare(old.contents),
+        None => {}
+    }
+}
+
+/// Storage for the bytes [`write_target`] keeps of a target, from bytes kept before and let go:
+/// a target is megabytes, and a fresh allocation of that comes from the system a page at a time,
+/// every write-back (GLTC00001, one a frame).
+fn spare_written() -> Vec<u8> {
+    spare()
+        .lock()
+        .ok()
+        .and_then(|mut spare| spare.take())
+        .unwrap_or_default()
+}
+
+/// Keeps `contents`' bytes as [`spare_written`]'s next storage, where nothing else holds them.
+fn keep_spare(contents: Contents) {
+    if let Contents::Bytes(bytes) = contents
+        && let Ok(bytes) = Arc::try_unwrap(bytes)
+        && let Ok(mut spare) = spare().lock()
+    {
+        *spare = Some(bytes);
+    }
+}
+
+fn spare() -> &'static Mutex<Option<Vec<u8>>> {
+    static SPARE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+    &SPARE
 }
 
 /// What this recorded of `target`'s memory when it last wrote or read it, from the last target or
