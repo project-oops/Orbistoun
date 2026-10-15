@@ -1203,21 +1203,32 @@ fn write_failed_submission(submission: &Submission) {
     write_submission(submission, "failed");
 }
 
-/// What a bound texture holds, at a glance: its first texel and how many distinct texels it has, a
-/// texture of one value - nothing written to it - reading as `1 distinct`. Counted over at most
-/// 4096 texels spread evenly over the whole texture, so a large texture costs no more to list than
-/// a small one and a picture below its first rows still counts.
+/// What a bound texture holds, at a glance: its first texel, how many distinct texels it has - a
+/// texture of one value, nothing written to it, reading as `1 distinct` - and how many are lit, a
+/// colour channel set whatever the alpha: a mostly black picture reads as few lit. Counted over at
+/// most 4096 texels spread evenly over the whole texture, so a large texture costs no more to list
+/// than a small one and a picture below its first rows still counts.
 fn texel_summary(texels: &[u32]) -> String {
     const COUNTED: usize = 4096;
     let step = texels.len().div_ceil(COUNTED).max(1);
-    let distinct: std::collections::BTreeSet<u32> = texels.iter().step_by(step).copied().collect();
+    let counted: Vec<u32> = texels.iter().step_by(step).copied().collect();
+    let distinct: std::collections::BTreeSet<u32> = counted.iter().copied().collect();
+    // The low three bytes in memory order are the colour channels; the top one is the alpha.
+    let lit = counted
+        .iter()
+        .filter(|&&texel| texel & 0x00ff_ffff != 0)
+        .count();
     let first = texels.first().copied().unwrap_or(0);
     let bound = if step > 1 {
         " among 4096 spread over it"
     } else {
         ""
     };
-    format!("first {first:#010x}, {} distinct{bound}", distinct.len())
+    format!(
+        "first {first:#010x}, {} distinct, {lit} of {} lit{bound}",
+        distinct.len(),
+        counted.len()
+    )
 }
 
 /// Where the presented frames came from - a frame orbistoun drew, or another writer's - and what
@@ -1873,7 +1884,7 @@ mod tests {
             super::drawn_by_line("the last flip showed 0x1000, drawn into as", &by, &drawn),
             concat!(
                 "the last flip showed 0x1000, drawn into as frame 12 by 3 draw(s), binding ",
-                "slot 0 2x1 (first 0x00000005, 1 distinct); sampling 0x2000 (2x1, drawn into as ",
+                "slot 0 2x1 (first 0x00000005, 1 distinct, 2 of 2 lit); sampling 0x2000 (2x1, drawn into as ",
                 "frame 9), 0x3000 (4x4)"
             )
         );
@@ -1930,9 +1941,12 @@ mod tests {
         texels[16384..].fill(0xff40_4040);
         let said = super::texel_summary(&texels);
         assert!(said.starts_with("first 0xff000000, 2 distinct"), "{said}");
+        // Half of it grey below black: half the texels counted are lit.
+        assert!(said.contains("2048 of 4096 lit"), "{said}");
+        // Lit is any colour channel set, the alpha aside (the low three bytes in memory order).
         assert_eq!(
-            super::texel_summary(&[7, 7, 9]),
-            "first 0x00000007, 2 distinct"
+            super::texel_summary(&[7, 7, 0xff00_0000]),
+            "first 0x00000007, 2 distinct, 2 of 3 lit"
         );
     }
 
