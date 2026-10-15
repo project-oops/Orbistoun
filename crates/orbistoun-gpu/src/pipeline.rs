@@ -5610,11 +5610,7 @@ fn bind_textures(
                         if bound.is_none() {
                             *unbound += 1;
                             first_unbound.get_or_insert_with(|| {
-                                let why = unbound_reason(user_words(user, first), memory, texels);
-                                format!(
-                                    "{} - {why}",
-                                    unbound_in_user_data(source.slot, first, user)
-                                )
+                                unbound_in_user_data(source, (first, user), memory, texels)
                             });
                         }
                         out.extend(bound);
@@ -5644,8 +5640,7 @@ fn bind_textures(
                     if bound.is_none() {
                         *unbound += 1;
                         first_unbound.get_or_insert_with(|| {
-                            let why = unbound_reason(read_descriptor(at, memory), memory, texels);
-                            format!("{} - {why}", unbound_in_table(source.slot, at, memory))
+                            unbound_in_table(source, (at, sampler_at), memory, texels)
                         });
                     }
                     out.extend(bound);
@@ -5785,42 +5780,134 @@ fn shaped_for(bound: &RenderCommand, source: &TextureSource) -> bool {
     }
 }
 
-/// Why the image descriptor `words` binds no texture, as its reader says. One it reads binds as
-/// another shape than the module samples, or with a sampler that could not be read.
+/// The sampler a module named, as read: none named, one that could not be read, or its sampling.
+#[derive(Debug, Clone, Copy)]
+enum NamedSampler {
+    NoneNamed,
+    Unreadable,
+    Read(crate::registers::TextureSampling),
+}
+
+impl NamedSampler {
+    /// What a sampler named at a known place reads as.
+    fn read(decoded: Option<crate::registers::TextureSampling>) -> Self {
+        decoded.map_or(Self::Unreadable, Self::Read)
+    }
+
+    /// Its sampling, where it was read.
+    const fn sampling(self) -> Option<crate::registers::TextureSampling> {
+        match self {
+            Self::Read(sampling) => Some(sampling),
+            Self::NoneNamed | Self::Unreadable => None,
+        }
+    }
+}
+
+/// Why the image descriptor `words` binds no texture for `source`, under the sampler its module
+/// named: as its reader says, or the
+/// check that refused what it read - its shape against the one the module samples ([`shaped_for`]),
+/// its sampler, or a half-border clamp the module does not honour (D743).
 fn unbound_reason(
     words: Option<[u32; 8]>,
+    source: &TextureSource,
+    sampler: NamedSampler,
     memory: &impl GuestMemory,
     texels: &mut TexelCache,
 ) -> String {
     let Some(words) = words else {
         return "its descriptor is not readable".to_owned();
     };
-    match texture_from_words(words, 0, memory, texels) {
-        Err(why) => why.to_owned(),
-        Ok(_) => concat!(
-            "it reads as another shape than the module samples, or with a sampler that ",
-            "could not be read"
+    let bound = match texture_from_words(words, source.slot, memory, texels) {
+        Err(why) => return why.to_owned(),
+        Ok(bound) => bound,
+    };
+    if !shaped_for(&bound, source) {
+        return format!(
+            "it reads as {}, where the module samples {}",
+            shape_read(&bound),
+            shape_sampled(source)
+        );
+    }
+    match sampler {
+        NamedSampler::Unreadable => "its sampler could not be read".to_owned(),
+        NamedSampler::Read(decoded) if decoded.saturated() != source.saturated => concat!(
+            "its sampler clamps to a half border, which only a module that saturates its ",
+            "coordinates honours (D743)"
         )
         .to_owned(),
+        _ => "it reads, and neither its shape, its sampler nor its clamp refuses it".to_owned(),
     }
 }
 
-/// An unbound slot whose descriptor is in the user data from word `first`, described.
-fn unbound_in_user_data(slot: u32, first: u32, user: &[u32]) -> String {
-    let at = usize::try_from(first).unwrap_or(usize::MAX);
-    let words = user.get(at..).map_or(&[][..], |w| &w[..w.len().min(8)]);
-    format!("slot {slot}, from user data {first}: {}", hex_words(words))
+/// The shape a texture read binds as, as [`unbound_reason`] names it.
+fn shape_read(bound: &RenderCommand) -> &'static str {
+    match bound {
+        RenderCommand::BindTexture {
+            encoding: crate::backend::TextureEncoding::DepthCompare,
+            ..
+        } => "a compared depth texture",
+        RenderCommand::BindTexture { faces, .. } if *faces == CUBE_FACES => "a cube",
+        RenderCommand::BindVolumeTexture { .. } => "a volume",
+        RenderCommand::BindDepthTexture { .. } => "a depth target",
+        _ => "a flat image",
+    }
 }
 
-/// An unbound slot whose descriptor is at `at` in guest memory, described.
-fn unbound_in_table(slot: u32, at: u64, memory: &impl GuestMemory) -> String {
+/// The shape `source`'s module samples, as [`unbound_reason`] names it.
+const fn shape_sampled(source: &TextureSource) -> &'static str {
+    if source.volume {
+        "a volume"
+    } else if source.cube {
+        "a cube"
+    } else if source.compare {
+        "a compared depth texture"
+    } else {
+        "a flat image"
+    }
+}
+
+/// An unbound slot whose descriptor is in the user data from word `first`, described with why it
+/// binds nothing.
+fn unbound_in_user_data(
+    source: &TextureSource,
+    (first, user): (u32, &[u32]),
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> String {
+    let at = usize::try_from(first).unwrap_or(usize::MAX);
+    let words = user.get(at..).map_or(&[][..], |w| &w[..w.len().min(8)]);
+    let sampler = user_data_sampler(source, user, memory);
+    let why = unbound_reason(user_words(user, first), source, sampler, memory, texels);
+    format!(
+        "slot {}, from user data {first}: {} - {why}",
+        source.slot,
+        hex_words(words)
+    )
+}
+
+/// An unbound slot whose descriptor is at `at` in guest memory, its sampler at `sampler_at`,
+/// described with why it binds nothing.
+fn unbound_in_table(
+    source: &TextureSource,
+    (at, sampler_at): (u64, Option<u64>),
+    memory: &impl GuestMemory,
+    texels: &mut TexelCache,
+) -> String {
     let words: Vec<u32> = memory.read(at, 32).map_or_else(Vec::new, |bytes| {
         bytes
             .chunks_exact(4)
             .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
             .collect()
     });
-    format!("slot {slot}, from {at:#x}: {}", hex_words(&words))
+    let sampler = sampler_at.map_or(NamedSampler::NoneNamed, |at| {
+        NamedSampler::read(read_sampler(at, memory))
+    });
+    let why = unbound_reason(read_descriptor(at, memory), source, sampler, memory, texels);
+    format!(
+        "slot {}, from {at:#x}: {} - {why}",
+        source.slot,
+        hex_words(&words)
+    )
 }
 
 /// Words as a report quotes them: `[0x1, 0x2]`.
@@ -5844,46 +5931,59 @@ fn user_data_texture(
     if is_null_image(&descriptor) {
         return Some(null_texture(source.slot, source.cube));
     }
-    // The sampler the module named, read: beside the image in the user data, or loaded from the
-    // table the source names. [`None`] where it named none, and `Some(None)` where it cannot be read.
-    let named = if let Some(sampler) = source.sampler_user_data {
-        Some(
-            user_words(user, sampler)
-                .and_then(|words| crate::registers::decode_sampler_descriptor(words).ok()),
-        )
-    } else {
-        source.sampler_offset.map(|offset| {
-            read_sampler(
-                table_address(source.table, user) + u64::from(offset),
-                memory,
-            )
-        })
-    };
+    let named = user_data_sampler(source, user, memory);
     // A depth surface is a depth target, which is not in guest memory to read (D817): a sampler
     // named and unreadable binds nothing.
-    if !matches!(named, Some(None))
-        && let Some(depth) = depth_texture_from(descriptor, source, named.flatten())
+    if !matches!(named, NamedSampler::Unreadable)
+        && let Some(depth) = depth_texture_from(descriptor, source, named.sampling())
     {
         return Some(depth);
     }
     if source.compare {
-        return linear_depth_compare(descriptor, source, named.flatten(), memory);
+        return linear_depth_compare(descriptor, source, named.sampling(), memory);
     }
     let mut bound = texture_from_words(descriptor, source.slot, memory, texels).ok()?;
-    if let Some(decoded) = named {
-        let decoded = decoded?;
-        // A half-border clamp is honoured only by a module that saturates the coordinates it names
-        // (D743).
-        if decoded.saturated() != source.saturated {
-            return None;
+    match named {
+        NamedSampler::Unreadable => return None,
+        NamedSampler::Read(decoded) => {
+            // A half-border clamp is honoured only by a module that saturates the coordinates it
+            // names (D743).
+            if decoded.saturated() != source.saturated {
+                return None;
+            }
+            if let RenderCommand::BindTexture { sampling, .. }
+            | RenderCommand::BindVolumeTexture { sampling, .. } = &mut bound
+            {
+                *sampling = decoded;
+            }
         }
-        if let RenderCommand::BindTexture { sampling, .. }
-        | RenderCommand::BindVolumeTexture { sampling, .. } = &mut bound
-        {
-            *sampling = decoded;
-        }
+        NamedSampler::NoneNamed => {}
     }
     Some(bound)
+}
+
+/// The sampler `source`'s module named, read: beside the image in the user data, or loaded from the
+/// table the source names.
+fn user_data_sampler(
+    source: &TextureSource,
+    user: &[u32],
+    memory: &impl GuestMemory,
+) -> NamedSampler {
+    if let Some(sampler) = source.sampler_user_data {
+        NamedSampler::read(
+            user_words(user, sampler)
+                .and_then(|words| crate::registers::decode_sampler_descriptor(words).ok()),
+        )
+    } else {
+        source
+            .sampler_offset
+            .map_or(NamedSampler::NoneNamed, |offset| {
+                NamedSampler::read(read_sampler(
+                    table_address(source.table, user) + u64::from(offset),
+                    memory,
+                ))
+            })
+    }
 }
 
 /// Gives each texture whose sampler takes its border colour from the table that entry's colour, as
@@ -10200,6 +10300,68 @@ mod tests {
             texels.as_ref(),
             expected.as_slice(),
             "row-major after detiling"
+        );
+    }
+
+    /// A slot left unbound says which check refused a descriptor that reads: the shape it reads as
+    /// against the one its module samples, or the sampler it could not read - what PPSA03416's
+    /// refused draw needed to say.
+    #[test]
+    fn an_unbound_slot_names_the_check_that_refused_it() {
+        use super::{NamedSampler, TextureSource, unbound_reason};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x1000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let (texels, width, height) = (0x1_0000_u64, 8u32, 4u32);
+        let memory = Memory(vec![0u8; 0xF000 + 0x1_0000]);
+        // A flat 8_8_8_8_UNORM image.
+        let descriptor = [
+            (texels >> 8) as u32,
+            ((texels >> 40) as u32 & 0xff) | (56 << 20) | (((width - 1) & 3) << 30),
+            ((width - 1) >> 2) | ((height - 1) << 14) | (1 << 31),
+            (9_u32 << 28) | (27 << 20) | 0xfac,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let flat = TextureSource {
+            slot: 2,
+            table_offset: None,
+            table: super::TableBase::default(),
+            sampler_offset: None,
+            user_data: None,
+            sampler_user_data: None,
+            cube: false,
+            volume: false,
+            compare: false,
+            saturated: [false; 2],
+        };
+        let cube = TextureSource { cube: true, ..flat };
+        let mut cache = super::TexelCache::new();
+        assert_eq!(
+            unbound_reason(
+                Some(descriptor),
+                &cube,
+                NamedSampler::NoneNamed,
+                &memory,
+                &mut cache
+            ),
+            "it reads as a flat image, where the module samples a cube"
+        );
+        assert_eq!(
+            unbound_reason(
+                Some(descriptor),
+                &flat,
+                NamedSampler::Unreadable,
+                &memory,
+                &mut cache
+            ),
+            "its sampler could not be read"
         );
     }
 
