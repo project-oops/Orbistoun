@@ -1186,6 +1186,165 @@ pub(crate) struct DispatchBuffer {
     pub offset: vk::DeviceSize,
 }
 
+/// A timestamp pair a guest dispatch stamps its command buffer with, on the device it was made for,
+/// and the device's nanoseconds a tick: a dispatch's own time on the device joins the render passes'
+/// in the `gpu busy` phase, so a report's "device's own work" counts compute as well as draws.
+#[derive(Clone, Copy)]
+struct DispatchClock {
+    device: u64,
+    pool: vk::QueryPool,
+    period: f64,
+}
+
+fn dispatch_clock() -> &'static std::sync::Mutex<Option<DispatchClock>> {
+    static CLOCK: std::sync::Mutex<Option<DispatchClock>> = std::sync::Mutex::new(None);
+    &CLOCK
+}
+
+/// Makes `session`'s dispatch clock where its queue takes timestamps and it has none yet.
+fn ensure_dispatch_clock(session: &Session) {
+    let raw = vk::Handle::as_raw(session.device.handle());
+    let mut clock = dispatch_clock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if clock.is_some_and(|clock| clock.device == raw) {
+        return;
+    }
+    // SAFETY: the physical device belongs to the live instance.
+    let families = unsafe {
+        session
+            .instance
+            .get_physical_device_queue_family_properties(session.physical)
+    };
+    if families
+        .get(session.family as usize)
+        .is_none_or(|family| family.timestamp_valid_bits == 0)
+    {
+        return;
+    }
+    // SAFETY: as above.
+    let period = unsafe {
+        session
+            .instance
+            .get_physical_device_properties(session.physical)
+    }
+    .limits
+    .timestamp_period;
+    let info = vk::QueryPoolCreateInfo::default()
+        .query_type(vk::QueryType::TIMESTAMP)
+        .query_count(2);
+    // SAFETY: the device is live and the create info outlives the call.
+    if let Ok(pool) = unsafe { session.device.create_query_pool(&info, None) } {
+        *clock = Some(DispatchClock {
+            device: raw,
+            pool,
+            period: f64::from(period),
+        });
+    }
+}
+
+/// The dispatch clock for `device`, if it has one.
+fn clock_for(device: &ash::Device) -> Option<DispatchClock> {
+    let raw = vk::Handle::as_raw(device.handle());
+    dispatch_clock()
+        .lock()
+        .ok()
+        .and_then(|clock| *clock)
+        .filter(|clock| clock.device == raw)
+}
+
+/// Adds the time between `clock`'s two stamps, which a finished dispatch wrote, to the `gpu busy`
+/// phase.
+fn read_dispatch_clock(device: &ash::Device, clock: DispatchClock) {
+    let mut stamps = [0u64; 2];
+    // SAFETY: both queries were written by a submission whose fence has signalled; the output holds
+    // exactly two 64-bit results.
+    let read = unsafe {
+        device.get_query_pool_results(clock.pool, 0, &mut stamps, vk::QueryResultFlags::TYPE_64)
+    };
+    if read.is_ok() {
+        // Nanoseconds as a float product, then whole: a tick period is a fraction on some devices.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let nanos = (stamps[1].saturating_sub(stamps[0]) as f64 * clock.period) as u64;
+        orbistoun_gpu::perf::add(
+            orbistoun_gpu::perf::Phase::Gpu,
+            std::time::Duration::from_nanos(nanos),
+        );
+    }
+}
+
+/// Stamps `command` with `clock`'s query `at`: the first, at the top of the pipe, resets the pair
+/// first; the second is at the bottom. Nothing without a clock.
+fn stamp(device: &ash::Device, command: vk::CommandBuffer, clock: Option<DispatchClock>, at: u32) {
+    let Some(clock) = clock else {
+        return;
+    };
+    let stage = if at == 0 {
+        // SAFETY: recording is open and outside any render pass; dispatches are made one at a
+        // time under the session, so the pair is this dispatch's alone.
+        unsafe { device.cmd_reset_query_pool(command, clock.pool, 0, 2) };
+        vk::PipelineStageFlags::TOP_OF_PIPE
+    } else {
+        vk::PipelineStageFlags::BOTTOM_OF_PIPE
+    };
+    // SAFETY: recording is open and the query was reset with its pair at the first stamp.
+    unsafe { device.cmd_write_timestamp(command, stage, clock.pool, at) };
+}
+
+/// Binds a dispatch's pipeline, its descriptor sets - the buffers' set as set 1 where there are
+/// buffers - and its push constants into `command`.
+fn bind_dispatch(
+    device: &ash::Device,
+    command: vk::CommandBuffer,
+    (pipeline, pipeline_layout, set): (vk::Pipeline, vk::PipelineLayout, vk::DescriptorSet),
+    buffers: Option<&crate::compute_buffers::BoundBuffers>,
+    push: &[u32],
+) {
+    let sets = [set];
+    // SAFETY: recording is open and the pipeline is live.
+    unsafe { device.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, pipeline) };
+    // SAFETY: recording is open; the layout and set match the pipeline.
+    unsafe {
+        device.cmd_bind_descriptor_sets(
+            command,
+            vk::PipelineBindPoint::COMPUTE,
+            pipeline_layout,
+            0,
+            &sets,
+            &[],
+        );
+    }
+    if let Some(buffers) = buffers {
+        // SAFETY: recording is open; set 1 of the layout is this set's layout.
+        unsafe {
+            device.cmd_bind_descriptor_sets(
+                command,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout,
+                1,
+                &[buffers.set],
+                &[],
+            );
+        }
+    }
+    if !push.is_empty() {
+        // SAFETY: recording is open, and the range is the one the pipeline layout declares.
+        unsafe {
+            device.cmd_push_constants(
+                command,
+                pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                zerocopy::IntoBytes::as_bytes(push),
+            );
+        }
+    }
+}
+
 /// Records and runs one compute dispatch against two caller-owned buffers, and reads both back.
 ///
 /// Releases everything it created except the buffers, which belong to the caller. On an error
@@ -1242,55 +1401,27 @@ fn dispatch_core(
     // SAFETY: the command buffer is freshly allocated and not recording.
     unsafe { device.begin_command_buffer(command, &begin) }
         .map_err(|e| DispatchError::Vulkan("begin_command_buffer", e))?;
+    let clock = clock_for(device);
+    stamp(device, command, clock, 0);
     // The images' texels reach the device before anything runs over them.
     images.record_upload(device, command);
     if let Some(buffers) = buffers {
         buffers.record_upload(device, command);
     }
-    // SAFETY: recording is open and the pipeline is live.
-    unsafe { device.cmd_bind_pipeline(command, vk::PipelineBindPoint::COMPUTE, pipeline) };
-    // SAFETY: recording is open; the layout and set match the pipeline.
-    unsafe {
-        device.cmd_bind_descriptor_sets(
-            command,
-            vk::PipelineBindPoint::COMPUTE,
-            pipeline_layout,
-            0,
-            &sets,
-            &[],
-        );
-    }
-    if let Some(buffers) = buffers {
-        // SAFETY: recording is open; set 1 of the layout is this set's layout.
-        unsafe {
-            device.cmd_bind_descriptor_sets(
-                command,
-                vk::PipelineBindPoint::COMPUTE,
-                pipeline_layout,
-                1,
-                &[buffers.set],
-                &[],
-            );
-        }
-    }
-    if !push.is_empty() {
-        // SAFETY: recording is open, and the range is the one the pipeline layout declares.
-        unsafe {
-            device.cmd_push_constants(
-                command,
-                pipeline_layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                zerocopy::IntoBytes::as_bytes(push),
-            );
-        }
-    }
+    bind_dispatch(
+        device,
+        command,
+        (pipeline, pipeline_layout, sets[0]),
+        buffers,
+        push,
+    );
     // SAFETY: recording is open and a pipeline is bound.
     unsafe { device.cmd_dispatch(command, groups[0], groups[1], groups[2]) };
     images.record_readback(device, command);
     if let Some(buffers) = buffers {
         buffers.record_readback(device, command);
     }
+    stamp(device, command, clock, 1);
     // SAFETY: recording is open.
     unsafe { device.end_command_buffer(command) }
         .map_err(|e| DispatchError::Vulkan("end_command_buffer", e))?;
@@ -1314,6 +1445,9 @@ fn dispatch_core(
     // SAFETY: the submission it fenced has completed, or was never made.
     unsafe { device.destroy_fence(fence, None) };
     waited?;
+    if let Some(clock) = clock {
+        read_dispatch_clock(device, clock);
+    }
     drop(running);
     let _reading = SpanGuard::start(Span::DeviceReadBack);
 
@@ -1589,6 +1723,7 @@ pub fn dispatch_guest_hashed(
     let session = session
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ensure_dispatch_clock(&session);
     let Session {
         ref instance,
         physical,

@@ -70,7 +70,8 @@ pub struct Report {
     /// did; empty until it is given them.
     #[serde(default)]
     pub emptied: Vec<(String, u64)>,
-    /// Milliseconds the device spent on the run's render passes, from its own timestamps: the
+    /// Milliseconds the device spent on the run's render passes and dispatches, from its own
+    /// timestamps: the
     /// `gpu ms` plot summed. `None` where the run plotted none.
     #[serde(default)]
     pub device_ms: Option<f64>,
@@ -90,7 +91,7 @@ const FRAME_PLOT: &str = "frame ms";
 /// What a listed zone that is a wait is marked with: what it waits on is the cost, not the wait.
 pub const WAIT_MARK: &str = "  (a wait)";
 
-/// The plot the device's own time on render passes is added to, as each settle reads it.
+/// The plot the device's own time on render passes and dispatches is added to, as it is read.
 const GPU_PLOT: &str = "gpu ms";
 
 impl Report {
@@ -242,8 +243,8 @@ impl Report {
             let _ = writeln!(
                 out,
                 concat!(
-                    "the device's own work: {:.1}% of the run, {:.2} ms a frame, on render passes ",
-                    "by its timestamps - near 100% is a title bound by the device's work, not by ",
+                    "the device's own work: {:.1}% of the run, {:.2} ms a frame, on render passes and ",
+                    "dispatches by its timestamps - near 100% is a title bound by the device's work, not by ",
                     "the host's waiting"
                 ),
                 device_ms * 100.0 / run_ms,
