@@ -3455,8 +3455,8 @@ pub struct LazyCopies {
     /// guest memory.
     pub show: fn() -> Option<u64>,
     /// The kept frame's pixels as linear `Rgba8` words, releasing it: read into the storage of the
-    /// vector given, whatever it held, which the caller hands back for the next frame (see
-    /// [`spare_frame`]).
+    /// vector given, whatever it held: the storage of the frame carried out before, so a frame of
+    /// megabytes is not allocated afresh every time.
     pub take: fn(u64, Vec<u32>) -> Option<Vec<u32>>,
     /// Releases a kept frame unread.
     pub discard: fn(u64),
