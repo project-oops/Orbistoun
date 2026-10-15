@@ -37,4 +37,9 @@ that its first read finds it in the target's byte order, and that the next switc
   was kept and the gain was lost.
 - Reading a texture that is exactly a kept frame off the device, without carrying the copy out:
   exact, but neither PPSA02664, GLTC00001 nor SuperTuxKart binds one (its sampled targets are mip
-  levels sharing 64 KiB blocks), and it cost two locks on every texture bind.
+  levels sharing 64 KiB blocks), and it cost two locks on every texture bind. Played with its pad
+  script, PPSA02664 does sample its kept 1920x1080 targets whole, at the same base, about twice a
+  frame. Read off the device that way, every carry-out went and every frame matched, but the frame
+  rate did not move (83.3 against 84.0, three rounds of 30 s): the read waits for the device to
+  finish the frame and reads it back to the host, which is what the carry-out cost too. Only a
+  texture bound from the kept frame on the device itself would take that wait away.
