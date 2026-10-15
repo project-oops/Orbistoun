@@ -65,6 +65,9 @@ pub(crate) struct Light {
     pub(crate) lit: u64,
     pub(crate) colours: usize,
     pub(crate) only: Option<[u8; 3]>,
+    /// A hash of every pixel's colour channels, the alpha aside: two frames that light alike are
+    /// the same picture only where this agrees.
+    pub(crate) content: u64,
 }
 
 /// Whether a frame shows next to nothing: one colour, or under one pixel in a thousand lit - a black
@@ -73,14 +76,14 @@ pub(crate) const fn dark(light: &Light) -> bool {
     light.colours <= 1 || light.lit * 1000 < light.pixels
 }
 
-/// The flip from which every one of `lights` shows what the last does - as many pixels lit, as many
-/// colours: since when a run's picture has stood still. `None` for no frames.
+/// The flip from which every one of `lights` shows what the last does - the same picture, by its
+/// [`Light::content`]: since when a run's picture has stood still. `None` for no frames.
 pub(crate) fn same_since(lights: &[(u64, Light)]) -> Option<u64> {
     let (_, last) = lights.last()?;
     lights
         .iter()
         .rev()
-        .take_while(|(_, light)| light.lit == last.lit && light.colours == last.colours)
+        .take_while(|(_, light)| light.content == last.content)
         .last()
         .map(|&(flip, _)| flip)
 }
@@ -89,8 +92,13 @@ pub(crate) fn same_since(lights: &[(u64, Light)]) -> Option<u64> {
 pub(crate) fn light(bytes: &[u8]) -> Light {
     let mut colours: std::collections::HashSet<[u8; 3]> = std::collections::HashSet::new();
     let (mut pixels, mut lit) = (0, 0);
+    // FNV-1a over the colour channels.
+    let mut content: u64 = 0xcbf2_9ce4_8422_2325;
     for pixel in bytes.chunks_exact(4) {
         let colour = [pixel[0], pixel[1], pixel[2]];
+        for byte in colour {
+            content = (content ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
         pixels += 1;
         if colour != [0; 3] {
             lit += 1;
@@ -107,6 +115,7 @@ pub(crate) fn light(bytes: &[u8]) -> Light {
         lit,
         colours: colours.len(),
         only,
+        content,
     }
 }
 
@@ -430,15 +439,20 @@ mod tests {
         bytes.extend(pixel([0, 0, 0, 0xff]));
         bytes.extend(pixel([0xff, 0xff, 0, 0]));
         bytes.extend(pixel([0xff, 0xff, 0, 0xff]));
+        let counted = light(&bytes);
         assert_eq!(
-            light(&bytes),
-            Light {
-                pixels: 4,
-                lit: 2,
-                colours: 2,
-                only: None,
-            }
+            (counted.pixels, counted.lit, counted.colours, counted.only),
+            (4, 2, 2, None)
         );
+        // The same colours elsewhere in the frame are another picture.
+        let mut moved = bytes.clone();
+        moved.rotate_left(8);
+        assert_ne!(light(&moved).content, counted.content);
+        // The alpha aside, as a flipped frame's is often zero.
+        let mut opaque = bytes.clone();
+        opaque[3] = 0xff;
+        assert_eq!(light(&opaque).content, counted.content);
+        let _: Light = counted;
         let grey: Vec<u8> = [0x40, 0x40, 0x40, 0x12].repeat(16);
         assert_eq!(light(&grey).only, Some([0x40, 0x40, 0x40]));
         assert_eq!(light(&grey).colours, 1);
@@ -462,21 +476,25 @@ mod tests {
     /// says its first frame.
     #[test]
     fn a_run_says_since_when_its_picture_is_unchanged() {
-        let shows = |lit, colours| super::Light {
+        let shows = |lit, colours, content| super::Light {
             pixels: 100,
             lit,
             colours,
             only: None,
+            content,
         };
         let moving = [
-            (1, shows(0, 1)),
-            (40, shows(5, 3)),
-            (80, shows(9, 7)),
-            (120, shows(9, 7)),
+            (1, shows(0, 1, 1)),
+            (40, shows(5, 3, 2)),
+            (80, shows(9, 7, 3)),
+            (120, shows(9, 7, 3)),
         ];
         assert_eq!(super::same_since(&moving), Some(80));
-        let still = [(1, shows(0, 1)), (40, shows(0, 1))];
+        let still = [(1, shows(0, 1, 1)), (40, shows(0, 1, 1))];
         assert_eq!(super::same_since(&still), Some(1));
+        // As many pixels lit and colours counted, but another picture: a scene that moves.
+        let animated = [(1, shows(9, 4096, 5)), (40, shows(9, 4096, 6))];
+        assert_eq!(super::same_since(&animated), Some(40));
         assert_eq!(super::same_since(&[]), None);
     }
 
