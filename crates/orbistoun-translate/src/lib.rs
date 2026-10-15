@@ -19,6 +19,7 @@ pub mod model;
 pub mod modifiers;
 pub mod predicated;
 pub mod quick_lanes;
+pub mod user_data_reads;
 pub mod wavefront;
 
 pub use predicated::{OBSERVED_REGISTERS, REGISTER_COUNT};
