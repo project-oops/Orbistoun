@@ -144,7 +144,9 @@ so an idle title's few milliseconds of presenting do not read as all of its time
 A round of making a title faster goes:
 
 1. `perf` the title, long enough to pass its start: a homebrew title may show a controls card for
-   ten seconds and build its fonts before it draws anything, so 30 seconds rather than 15.
+   ten seconds and build its fonts before it draws anything, so 30 seconds rather than 15. Read
+   the run log's "its threads asked to sleep" first: a title that sleeps a fixed time a frame is
+   paced by itself, and its frame rate is the hardware's too.
 2. Take the largest *self* time. A span that waits on another thread's - `execute hand-off`, a
    guest thread waiting on the device thread - keeps only the hand-off as its own time; the work
    is ranked under the device thread's zones. A new such pair goes in `WAITS_ON` beside the span
