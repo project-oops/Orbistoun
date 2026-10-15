@@ -5299,7 +5299,11 @@ mod command_processor {
         {
             made += 1;
             prepared = crate::perf::span(crate::perf::Span::PrepareAgain, || {
-                settle_through(last, SETTLE_LIMIT);
+                // A wait on the command processor, whose work is counted where it runs: kept out of
+                // the preparation's own time.
+                crate::perf::span(crate::perf::Span::SettleOver, || {
+                    settle_through(last, SETTLE_LIMIT);
+                });
                 CROSSED.set(None);
                 AHEAD.set(false);
                 prepare()
