@@ -959,26 +959,30 @@ fn a_sleep_of_nothing_returns_at_once() {
 
 /// A short sleep lasts about what it asked, as on the console, not the host timer's granularity:
 /// a host timer sleep of ten microseconds takes about half a millisecond, and a driver polling a
-/// fence with ten-microsecond sleeps then waits that long a poll. The median of a run is used, so
-/// one preempted sleep on a busy machine does not decide it.
+/// fence with ten-microsecond sleeps then waits that long a poll.
+///
+/// The best sleep of a run decides it, and the run lasts until one is short or a second has gone.
+/// A busy machine lengthens every sleep in a stretch, since each yield of the wait hands the core
+/// to another thread - a median of 21 came to 1.2ms on a shared runner - but cannot shorten one,
+/// and a sleep that rounds up to the host timer is never short at all.
 #[test]
 fn a_ten_microsecond_sleep_is_not_half_a_millisecond() {
-    let mut taken: Vec<std::time::Duration> = (0..21)
-        .map(|_| {
-            let started = std::time::Instant::now();
-            assert_eq!(call("sceKernelUsleep", &[10]), OK);
-            started.elapsed()
-        })
-        .collect();
-    taken.sort();
-    let median = taken[taken.len() / 2];
+    let asked = std::time::Duration::from_micros(10);
+    let short = std::time::Duration::from_micros(100);
+    let give_up = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut best = std::time::Duration::MAX;
+    let mut tries = 0_u32;
+    while best >= short && std::time::Instant::now() < give_up {
+        let started = std::time::Instant::now();
+        assert_eq!(call("sceKernelUsleep", &[10]), OK);
+        let taken = started.elapsed();
+        assert!(taken >= asked, "slept less than asked: {taken:?}");
+        best = best.min(taken);
+        tries += 1;
+    }
     assert!(
-        median >= std::time::Duration::from_micros(10),
-        "slept less than asked: {median:?}"
-    );
-    assert!(
-        median < std::time::Duration::from_micros(200),
-        "slept {median:?} for ten microseconds"
+        best < short,
+        "the best of {tries} sleeps of ten microseconds took {best:?}"
     );
 }
 
