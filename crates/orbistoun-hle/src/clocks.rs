@@ -96,6 +96,10 @@ const SLEEP_OVERSHOOT: std::time::Duration = std::time::Duration::from_millis(2)
 /// millisecond a poll. The host sleeps for all but the span it may overshoot by, and yields the
 /// rest away until the deadline.
 pub fn sleep_for(how_long: std::time::Duration) {
+    SLEPT_NANOS.fetch_add(
+        u64::try_from(how_long.as_nanos()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let deadline = Instant::now() + how_long;
     if let Some(coarse) = how_long.checked_sub(SLEEP_OVERSHOOT) {
         std::thread::sleep(coarse);
@@ -104,6 +108,20 @@ pub fn sleep_for(how_long: std::time::Duration) {
         wait_a_moment();
     }
 }
+
+/// How long the guest's threads together have asked to sleep, through [`sleep_for`], since the
+/// process started.
+///
+/// What a run's frame time owes to the title's own pacing rather than to anything orbistoun does:
+/// a title that sleeps a fixed 16 ms a frame after 15 ms of work runs at 31 ms a frame on the
+/// hardware too (ETXR00001), and nothing a profile of orbistoun ranks would show it.
+#[must_use]
+pub fn slept() -> std::time::Duration {
+    std::time::Duration::from_nanos(SLEPT_NANOS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// [`slept`]'s nanoseconds.
+static SLEPT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One turn of [`sleep_for`]'s final wait. A yield, so other threads run meanwhile - except on
 /// macOS, whose yield lowers the thread's priority and can keep it off the core for far longer than
@@ -202,6 +220,15 @@ pub fn reading(asked: i64) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    /// A sleep a guest asks for counts toward what its threads have slept, whatever else other
+    /// threads add meanwhile.
+    #[test]
+    fn a_sleep_counts_toward_what_the_guest_slept() {
+        let before = super::slept();
+        super::sleep_for(std::time::Duration::from_micros(300));
+        assert!(super::slept().saturating_sub(before) >= std::time::Duration::from_micros(300));
+    }
+
     /// Each family answers from its own source, and an unanswerable clock answers `None`.
     ///
     /// Values are not reproducible, so the check is which source answered: the monotonic reading

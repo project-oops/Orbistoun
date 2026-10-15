@@ -2977,6 +2977,12 @@ fn summarise_calls(stopped: &str, trace: &CallTrace) {
     if let Some(quiet) = trace.quiet {
         let _ = write!(said, "\nit {}", quiet.describe());
     }
+    // A title's frame time owes this much to its own pacing, which orbistoun only honours.
+    let _ = write!(
+        said,
+        "\nits threads asked to sleep {:.1} s in all",
+        orbistoun_hle::clocks::slept().as_secs_f64()
+    );
     for call in trace.calls.iter().take(MOST_CALLED_REPORTED) {
         // Integer tenths of a percent rather than floating point: the counts run past what an `f64`
         // holds exactly.
