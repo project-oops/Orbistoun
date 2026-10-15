@@ -160,9 +160,13 @@ pub(crate) fn cmd_perf(
     path: Option<&Path>,
     (seconds, top): (Option<u64>, usize),
     input: Option<&Path>,
-    (open, install): (bool, bool),
+    (open, install, sample): (bool, bool, bool),
 ) -> Result<()> {
     let tools = tools(install)?;
+    if sample {
+        // SAFETY: single-threaded here; the spawned worker inherits the variable at startup.
+        unsafe { std::env::set_var(orbistoun_env::PROFILE.name, SAMPLED_BUCKETS.to_string()) };
+    }
     let Some(path) = path else {
         println!("Tracy tools ready in {}", tools.dir().display());
         return Ok(());
@@ -174,7 +178,7 @@ pub(crate) fn cmd_perf(
     let seconds = run_seconds(&title, seconds);
     let beside = before_measuring();
     let recorded = record(&tools, path, seconds, input, None)?;
-    let text = format!(
+    let mut text = format!(
         "{}{}  {} zones, {:.1} s recorded, {:.1} fps by the capture's own count\n\n{}",
         beside.map(|line| format!("{line}\n")).unwrap_or_default(),
         recorded.trace.display(),
@@ -183,6 +187,10 @@ pub(crate) fn cmd_perf(
         recorded.summary.fps(),
         recorded.report.render(top)
     );
+    if sample {
+        let log = std::fs::read_to_string(recorded.trace.with_extension("log")).unwrap_or_default();
+        text.push_str(&last_samples(&log));
+    }
     println!("{text}");
     let beside = recorded.trace.with_extension("txt");
     std::fs::write(&beside, &text).with_context(|| format!("writing {}", beside.display()))?;
@@ -192,6 +200,48 @@ pub(crate) fn cmd_perf(
             .context("opening the Tracy viewer")?;
     }
     Ok(())
+}
+
+/// How many host functions a sampled report names per thread.
+const SAMPLED_BUCKETS: usize = 20;
+
+/// The last sample report of each thread in a run's log (`ORBISTOUN_PROFILE`): a heading and its
+/// indented lines, the guest's thread and the device thread each once, as the run last printed them.
+/// Empty when the log holds none.
+fn last_samples(log: &str) -> String {
+    use std::fmt::Write as _;
+    let mut blocks: Vec<(String, Vec<&str>)> = Vec::new();
+    let mut lines = log.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(at) = line.find("profile of the ") else {
+            continue;
+        };
+        let heading = line[at..].trim_end_matches(':').to_owned();
+        let thread = heading
+            .split(" thread")
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        let mut body = Vec::new();
+        while let Some(next) = lines.peek() {
+            if !next.starts_with("   ") {
+                break;
+            }
+            body.push(*next);
+            lines.next();
+        }
+        blocks.retain(|(kept, _)| kept.split(" thread").next() != Some(thread.as_str()));
+        blocks.push((heading, body));
+    }
+    let mut out = String::new();
+    for (heading, body) in blocks {
+        let _ = writeln!(out, "\nsampled: {heading}");
+        for line in body {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// How long a measured run of `title` records: `given`, else the title's own `perf_seconds`
@@ -857,6 +907,32 @@ mod tests {
                 .is_some_and(|l| l.contains("(beside 33% of the CPU in use)")),
             "{text}"
         );
+    }
+
+    /// A sampled report keeps each thread's last block from the log, heading and indented lines,
+    /// and nothing of the log around them.
+    #[test]
+    fn the_last_sample_of_each_thread_is_kept() {
+        let log = concat!(
+            "2026 INFO profile of the guest main thread, 10 samples, 1% in the guest's image:\n",
+            "   90.0% old main\n",
+            "2026 INFO profile of the device thread, 10 samples, 0% in the guest's image:\n",
+            "   50.0% device work\n",
+            "[TITLE] a line of the guest's\n",
+            "2026 INFO profile of the guest main thread, 12 samples, 2% in the guest's image:\n",
+            "   80.0% new main\n",
+            "    1.0% more\n",
+            "2026 INFO the guest was still running\n",
+        );
+        let kept = super::last_samples(log);
+        assert!(
+            kept.contains("new main") && kept.contains("    1.0% more"),
+            "{kept}"
+        );
+        assert!(kept.contains("device work"), "{kept}");
+        assert!(!kept.contains("old main"), "{kept}");
+        assert!(!kept.contains("still running"), "{kept}");
+        assert!(super::last_samples("nothing sampled").is_empty());
     }
 
     /// An A/B report gives each build's mean rate, and ranks zones by how far their share of the

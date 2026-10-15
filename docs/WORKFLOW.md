@@ -159,8 +159,8 @@ A round of making a title faster goes:
    A span that builds a frame-sized buffer and costs about a quarter of a microsecond per 4 KB
    page of it is paying for a fresh allocation, which a host gives a megabyte at a time page by
    page: keep the storage from one frame to the next rather than making it again.
-4. Where the spans run out, `ORBISTOUN_PROFILE=<n>` samples the guest's main thread and the device
-   thread, naming host functions; its report is in the run's log.
+4. Where the spans run out, `perf --sample` samples the guest's main thread and the device thread
+   (`ORBISTOUN_PROFILE`), naming host functions, and adds each thread's last sample to the report.
 5. Change one thing and compare it with `ab --against HEAD` - the commit before, built cleanly: a run
    on the host clock varies by a few frames a second between runs of one build, and other work on
    the machine moves it more, so `ab` runs the two builds alternately for several rounds, after an

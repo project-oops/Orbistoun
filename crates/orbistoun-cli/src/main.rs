@@ -352,6 +352,11 @@ enum Command {
         /// Fetch the Tracy tools this build's client speaks into the data root first.
         #[arg(long)]
         install_tracy: bool,
+        /// Also sample where the guest's thread and the device thread are (`ORBISTOUN_PROFILE`), and
+        /// add the last sample of each to the report: the host functions inside a zone that has
+        /// nothing finer.
+        #[arg(long)]
+        sample: bool,
     },
     /// Compare a baseline build with this one on one title: each recorded for a few rounds,
     /// alternately, then each build's frame rate and the zones whose share of the run moved.
@@ -1054,11 +1059,12 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             input,
             open,
             install_tracy,
+            sample,
         } => perf::cmd_perf(
             path.as_deref(),
             (seconds, top),
             input.as_deref(),
-            (open, install_tracy),
+            (open, install_tracy, sample),
         )?,
         Command::Bench {
             titles,
