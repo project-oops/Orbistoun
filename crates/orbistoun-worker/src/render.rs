@@ -278,6 +278,7 @@ pub fn present_flip(address: u64, shape: orbistoun_video::BufferShape) {
     // then, and is still the frame drawn into this buffer.
     let drawn_into = orbistoun_gpu::agc_driver::frame_drawn_into(address);
     crate::flip_origins::note_flip(address, drawn_into);
+    ask_for_unfilled_texture(address);
     if drawn_into.is_some() {
         keep_frame_at_this_flip();
     }
@@ -1242,15 +1243,8 @@ fn log_flip_origins() {
         return;
     };
     let into = orbistoun_gpu::agc_driver::last_drawn_into;
-    // How a texture's memory was filled: a frame orbistoun drew into it, a file read, or a compute
-    // program's stores.
     let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();
-    let frame_into = |base: u64| {
-        into(base)
-            .map(|by| format!("drawn into as frame {}", by.frame))
-            .or_else(|| orbistoun_kernel::apr::read_landed_at(base))
-            .or_else(|| stored_by(base, &census))
-    };
+    let frame_into = |base: u64| filled_by(base, &census);
     let Some(by) = into(shown) else {
         tracing::info!("{}", undrawn_line(shown));
         return;
@@ -1263,6 +1257,10 @@ fn log_flip_origins() {
         let lead = format!("  it sampled {base:#x}, drawn into as");
         tracing::info!("{}", drawn_by_line(&lead, &target, &frame_into));
     }
+    // Who wrote the texture a frame sampled that nothing tracked filled, where one was watched.
+    if let Some((address, writers)) = crate::waits::texture_writers() {
+        tracing::info!("{}", texture_writers_line(address, &writers));
+    }
 }
 
 /// The most textures [`drawn_by_line`] lists.
@@ -1271,6 +1269,72 @@ const MOST_DRAWN_TEXTURES: usize = 8;
 /// The last flip's line where no frame orbistoun drew went into the buffer it showed.
 fn undrawn_line(shown: u64) -> String {
     format!("the last flip showed {shown:#x}, which no frame orbistoun drew went into")
+}
+
+/// How the memory at `base` was filled, where something orbistoun tracks filled it: a frame it
+/// drew into it, a file read, or a compute program's stores (`census`).
+fn filled_by(
+    base: u64,
+    census: &[(u64, orbistoun_gpu::agc_driver::DispatchWrites)],
+) -> Option<String> {
+    orbistoun_gpu::agc_driver::last_drawn_into(base)
+        .map(|by| format!("drawn into as frame {}", by.frame))
+        .or_else(|| orbistoun_kernel::apr::read_landed_at(base))
+        .or_else(|| stored_by(base, census))
+}
+
+/// The first texture `by`'s draws sampled that `filled` names no filler for.
+fn first_unfilled(
+    by: &orbistoun_gpu::agc_driver::DrawnBy,
+    filled: &dyn Fn(u64) -> Option<String>,
+) -> Option<u64> {
+    by.sampled
+        .iter()
+        .map(|&(base, _, _)| base)
+        .find(|&base| filled(base).is_none())
+}
+
+/// Asks the wait sub-loop to watch the first texture the frame flipped at `shown` sampled that
+/// nothing tracked filled, while no texture has been asked for yet.
+fn ask_for_unfilled_texture(shown: u64) {
+    if !crate::waits::texture_wanted() {
+        return;
+    }
+    let Some(by) = orbistoun_gpu::agc_driver::last_drawn_into(shown) else {
+        return;
+    };
+    let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();
+    if let Some(base) = first_unfilled(&by, &|base| filled_by(base, &census)) {
+        crate::waits::watch_texture(base);
+    }
+}
+
+/// How many distinct writers [`texture_writers_line`] names.
+const MOST_TEXTURE_WRITERS: usize = 4;
+
+/// What the watch of a texture nothing tracked filled found: how many writes, from where.
+fn texture_writers_line(address: u64, writers: &[u64]) -> String {
+    if writers.is_empty() {
+        return format!(
+            "the texture at {address:#x}, which nothing tracked filled, was not written while watched"
+        );
+    }
+    let mut distinct: Vec<u64> = Vec::new();
+    for &writer in writers {
+        if !distinct.contains(&writer) {
+            distinct.push(writer);
+        }
+    }
+    let from: Vec<String> = distinct
+        .iter()
+        .take(MOST_TEXTURE_WRITERS)
+        .map(|writer| format!("{writer:#x}"))
+        .collect();
+    format!(
+        "the texture at {address:#x}, which nothing tracked filled, was written {} time(s) while watched, from {}",
+        writers.len(),
+        from.join(", ")
+    )
 }
 
 /// The compute program whose dispatches stored over `address`, from the run's census: an image
@@ -1933,6 +1997,32 @@ mod tests {
         assert_eq!(
             super::undrawn_line(0x1000),
             "the last flip showed 0x1000, which no frame orbistoun drew went into"
+        );
+    }
+
+    /// The texture a frame sampled that nothing tracked filled is the first of its sampled ones no
+    /// filler names, and its watch says who wrote it or that nothing did while watched.
+    #[test]
+    fn an_unfilled_texture_is_picked_and_its_writers_named() {
+        let by = orbistoun_gpu::agc_driver::DrawnBy {
+            frame: 3,
+            draws: 1,
+            textures: Vec::new(),
+            sampled: vec![(0x2000, 4, 4), (0x3000, 4, 4), (0x4000, 4, 4)],
+        };
+        let filled = |base: u64| (base == 0x2000).then(|| "drawn into as frame 1".to_owned());
+        assert_eq!(super::first_unfilled(&by, &filled), Some(0x3000));
+        assert_eq!(super::first_unfilled(&by, &|_| Some(String::new())), None);
+        assert_eq!(
+            super::texture_writers_line(0x3000, &[0x4000_1234, 0x4000_1234, 0x4000_5678]),
+            concat!(
+                "the texture at 0x3000, which nothing tracked filled, was written 3 time(s) while ",
+                "watched, from 0x40001234, 0x40005678"
+            )
+        );
+        assert_eq!(
+            super::texture_writers_line(0x3000, &[]),
+            "the texture at 0x3000, which nothing tracked filled, was not written while watched"
         );
     }
 

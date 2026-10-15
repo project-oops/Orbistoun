@@ -71,6 +71,72 @@ pub struct Word {
     pub writers: Vec<u64>,
 }
 
+/// A texture a presented frame sampled that nothing tracked filled, watched for writes once no
+/// thread waits: the address asked for, whether its watch has begun, and the instructions after
+/// each write while it was watched.
+struct TextureWatch {
+    asked: Option<u64>,
+    taken: bool,
+    writers: Option<Vec<u64>>,
+}
+
+/// The run's one texture watch.
+static TEXTURE: Mutex<TextureWatch> = Mutex::new(TextureWatch {
+    asked: None,
+    taken: false,
+    writers: None,
+});
+
+/// Whether a texture is still wanted: none has been asked for yet.
+pub fn texture_wanted() -> bool {
+    TEXTURE.lock().is_ok_and(|texture| texture.asked.is_none())
+}
+
+/// Asks for `address` to be watched for writes: the first texture asked for only.
+pub fn watch_texture(address: u64) {
+    if let Ok(mut texture) = TEXTURE.lock()
+        && texture.asked.is_none()
+    {
+        texture.asked = Some(address);
+    }
+}
+
+/// The texture to watch now, once.
+fn take_texture() -> Option<u64> {
+    let mut texture = TEXTURE.lock().ok()?;
+    if texture.taken {
+        return None;
+    }
+    let asked = texture.asked?;
+    texture.taken = true;
+    Some(asked)
+}
+
+/// Records who wrote the watched texture.
+fn note_texture_writers(writers: Vec<u64>) {
+    if let Ok(mut texture) = TEXTURE.lock() {
+        texture.writers = Some(writers);
+    }
+}
+
+/// The texture watched, and the instruction after each write while it was watched.
+pub fn texture_writers() -> Option<(u64, Vec<u64>)> {
+    let texture = TEXTURE.lock().ok()?;
+    Some((texture.asked?, texture.writers.clone()?))
+}
+
+/// Watches the eight bytes at `address` for writes for [`WRITE_TICKS`] ticks, on every guest
+/// thread, and answers the instruction after each write.
+fn writes_to(address: u64) -> Vec<u64> {
+    watchpoint::rearm(&[Request {
+        address,
+        length: 8,
+        kind: Kind::Write,
+    }]);
+    std::thread::sleep(TICK * WRITE_TICKS);
+    watchpoint::hits().iter().map(|hit| hit.after).collect()
+}
+
 /// What every waiting thread resolved to, in the order they were resolved.
 static RESOLVED: Mutex<Vec<Resolved>> = Mutex::new(Vec::new());
 
@@ -218,6 +284,11 @@ pub fn start() {
                     if let Ok(mut all) = RESOLVED.lock() {
                         all.push(outcome);
                     }
+                } else if let Some(address) = take_texture() {
+                    // No thread waits: the texture nothing tracked filled is watched instead.
+                    let writers = writes_to(address);
+                    watchpoint::rearm(&[]);
+                    note_texture_writers(writers);
                 }
             }
         });
@@ -289,17 +360,10 @@ fn resolve(target: Waiting) -> Resolved {
         }
     }
     let word = found.map(|(origin, address, read_after)| {
-        watchpoint::rearm(&[Request {
-            address,
-            length: 8,
-            kind: Kind::Write,
-        }]);
-        std::thread::sleep(TICK * WRITE_TICKS);
         // The loop's own read is never a writer, whatever a trap still in flight from the read
         // watch recorded.
-        let writers = watchpoint::hits()
-            .iter()
-            .map(|hit| hit.after)
+        let writers = writes_to(address)
+            .into_iter()
             .filter(|&after| after != read_after)
             .collect();
         Word {
@@ -327,6 +391,23 @@ fn resolve(target: Waiting) -> Resolved {
         host: target.host,
         site: target.site,
         word,
+    }
+}
+
+#[cfg(test)]
+mod texture_tests {
+    /// Only the first texture asked for is watched: a second ask while one is pending or watched
+    /// changes nothing, so one run watches one texture.
+    #[test]
+    fn only_the_first_texture_asked_for_is_watched() {
+        assert!(super::texture_wanted());
+        super::watch_texture(0x5000);
+        assert!(!super::texture_wanted());
+        super::watch_texture(0x6000);
+        assert_eq!(super::take_texture(), Some(0x5000));
+        assert_eq!(super::take_texture(), None, "taken once");
+        super::note_texture_writers(vec![0x4000_0010]);
+        assert_eq!(super::texture_writers(), Some((0x5000, vec![0x4000_0010])));
     }
 }
 

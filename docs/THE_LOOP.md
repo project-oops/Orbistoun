@@ -298,6 +298,11 @@ flowchart LR
 A wait that moves under `ORBISTOUN_CLOCK=host` and not under the logical clock is a clock
 finding, whatever it waits on: the thread's logical time does not advance.
 
+The writer step also serves a frame that samples a texture nothing tracked filled - no frame
+drawn into it, no file read landed on it, no compute program stored over it. While no thread
+waits, the first such texture's first word is write-watched the same way, and the run names the
+instructions that wrote it, or says nothing did while it was watched.
+
 ## Staging what the loop proves
 
 A policy patch (D296) is data, and one that has earned its place does not wait for a person:
