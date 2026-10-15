@@ -92,6 +92,25 @@ pub fn texture_wanted() -> bool {
     TEXTURE.lock().is_ok_and(|texture| texture.asked.is_none())
 }
 
+/// The texture asked for, where one was.
+pub fn asked_texture() -> Option<u64> {
+    TEXTURE.lock().ok()?.asked
+}
+
+/// Forgets the texture asked for, so another can be: one later found filled was not the one
+/// nothing filled. A watch under way is left to finish.
+pub fn forget_texture() {
+    if let Ok(mut texture) = TEXTURE.lock()
+        && (!texture.taken || texture.writers.is_some())
+    {
+        *texture = TextureWatch {
+            asked: None,
+            taken: false,
+            writers: None,
+        };
+    }
+}
+
 /// Asks for `address` to be watched for writes: the first texture asked for only.
 pub fn watch_texture(address: u64) {
     if let Ok(mut texture) = TEXTURE.lock()
@@ -408,6 +427,17 @@ mod texture_tests {
         assert_eq!(super::take_texture(), None, "taken once");
         super::note_texture_writers(vec![0x4000_0010]);
         assert_eq!(super::texture_writers(), Some((0x5000, vec![0x4000_0010])));
+        // A texture later found filled is forgotten once its watch is done, and the next asked for
+        // is watched in its place.
+        assert_eq!(super::asked_texture(), Some(0x5000));
+        super::forget_texture();
+        assert!(super::texture_wanted());
+        assert_eq!(super::texture_writers(), None);
+        super::watch_texture(0x6000);
+        assert_eq!(super::take_texture(), Some(0x6000));
+        // One whose watch is under way is not forgotten.
+        super::forget_texture();
+        assert_eq!(super::asked_texture(), Some(0x6000));
     }
 }
 

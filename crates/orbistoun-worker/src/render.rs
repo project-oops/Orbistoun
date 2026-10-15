@@ -1297,6 +1297,13 @@ fn first_unfilled(
 /// Asks the wait sub-loop to watch the first texture the frame flipped at `shown` sampled that
 /// nothing tracked filled, while no texture has been asked for yet.
 fn ask_for_unfilled_texture(shown: u64) {
+    // A texture asked for that a frame was since drawn into was a render target not yet drawn when
+    // it was asked for: another is looked for.
+    if crate::waits::asked_texture()
+        .is_some_and(|asked| orbistoun_gpu::agc_driver::last_drawn_into(asked).is_some())
+    {
+        crate::waits::forget_texture();
+    }
     if !crate::waits::texture_wanted() {
         return;
     }
@@ -1304,7 +1311,17 @@ fn ask_for_unfilled_texture(shown: u64) {
         return;
     };
     let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();
-    if let Some(base) = first_unfilled(&by, &|base| filled_by(base, &census)) {
+    // The frame's own textures, then those of the render targets it sampled, as the summary follows
+    // them: a texture behind a target is as much the frame's as one it samples itself.
+    let behind = sampled_targets(
+        &by,
+        MOST_TRACED_TARGETS,
+        &orbistoun_gpu::agc_driver::last_drawn_into,
+    );
+    let unfilled = std::iter::once(&by)
+        .chain(behind.iter().map(|(_, target)| target))
+        .find_map(|frame| first_unfilled(frame, &|base| filled_by(base, &census)));
+    if let Some(base) = unfilled {
         crate::waits::watch_texture(base);
     }
 }
