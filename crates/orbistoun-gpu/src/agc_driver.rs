@@ -969,7 +969,7 @@ impl GuestCp<'_> {
                     shader_failures(submission)
                 )
             })?;
-            note_drawn(target.base, submission);
+            note_drawn(&drawn_bases(target, &more), submission);
             return self.write_back_more_targets(&more);
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
@@ -999,7 +999,7 @@ impl GuestCp<'_> {
             ));
         }
         set_pending(Some((target, swap)));
-        note_drawn(target.base, submission);
+        note_drawn(&drawn_bases(target, &more), submission);
         // The frame now pending was drawn over the one the deferred write-back holds, and writes
         // every byte it would: it is superseded, unread (D801).
         if matches!(before, TargetRead::HeldOverDeferred) {
@@ -2521,10 +2521,10 @@ fn drawn_by() -> &'static Mutex<(u64, std::collections::BTreeMap<u64, DrawnBy>)>
 }
 
 /// Notes a frame of `draws` draws, binding the textures `commands` bind and sampling those at
-/// `sampled`, drawn into the colour target at `target`. The texels are held, not copied, so nothing
-/// frame-sized is made per frame.
+/// `sampled`, drawn into the colour attachments at `targets`: one frame, kept by each. The texels
+/// are held, not copied, so nothing frame-sized is made per frame.
 pub fn note_drawn_by(
-    target: u64,
+    targets: &[u64],
     draws: usize,
     commands: &[crate::RenderCommand],
     sampled: &[(u64, u32, u32)],
@@ -2550,19 +2550,20 @@ pub fn note_drawn_by(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     store.0 += 1;
     let frame = store.0;
-    store.1.insert(
-        target,
-        DrawnBy {
-            frame,
-            draws,
-            textures,
-            sampled: sampled.to_vec(),
-        },
-    );
+    let by = DrawnBy {
+        frame,
+        draws,
+        textures,
+        sampled: sampled.to_vec(),
+    };
+    for &target in targets {
+        store.1.insert(target, by.clone());
+    }
 }
 
-/// [`note_drawn_by`] for `submission`, drawn into the colour target at `target`.
-fn note_drawn(target: u64, submission: &Submission) {
+/// [`note_drawn_by`] for `submission`, drawn into the colour attachments at `targets`: one frame,
+/// kept by each.
+fn note_drawn(targets: &[u64], submission: &Submission) {
     let sampled: Vec<(u64, u32, u32)> = submission
         .report
         .bound_textures
@@ -2570,11 +2571,21 @@ fn note_drawn(target: u64, submission: &Submission) {
         .map(|texture| (texture.base, texture.width, texture.height))
         .collect();
     note_drawn_by(
-        target,
+        targets,
         submission.report.draws,
         &submission.commands,
         &sampled,
     );
+}
+
+/// The bases of every colour attachment a frame drew into: the first, then each one more.
+fn drawn_bases(
+    first: ColourTarget,
+    more: &[(ColourTarget, ComponentSwap, crate::ResourceId)],
+) -> Vec<u64> {
+    std::iter::once(first.base)
+        .chain(more.iter().map(|(target, _, _)| target.base))
+        .collect()
 }
 
 /// The frame last drawn into the colour target at `target`, where one was.
@@ -5332,6 +5343,22 @@ mod tests {
         submit_command_buffer, submit_dcb,
     };
 
+    /// A frame drawn into more than one colour attachment is kept by each of them: a texture a
+    /// later frame samples that was drawn as a second attachment is as drawn as the first.
+    #[test]
+    fn a_frame_is_kept_by_every_attachment_it_drew_into() {
+        let (first, second) = (0x7fed_0000_0000_u64, 0x7fed_0001_0000_u64);
+        let mut submission = crate::pipeline::Submission::default();
+        submission.report.draws = 2;
+        super::note_drawn(&[first, second], &submission);
+        let kept = super::last_drawn_into(second).expect("the second attachment");
+        assert_eq!(kept.draws, 2);
+        assert_eq!(
+            super::last_drawn_into(first).map(|by| by.frame),
+            Some(kept.frame)
+        );
+    }
+
     /// The frame last drawn into a target is kept by the target: its draws and each texture they
     /// bound, once however many draws bound it, its texels held rather than copied. A later frame
     /// into another target leaves it as it was. Addresses far from any a guest run uses, as other
@@ -5352,7 +5379,7 @@ mod tests {
             levels: 1,
         };
         let (target, other) = (0x7fee_0000_0000_u64, 0x7fef_0000_0000_u64);
-        super::note_drawn_by(target, 3, &[bind.clone(), bind], &[(0x5000, 2, 2)]);
+        super::note_drawn_by(&[target], 3, &[bind.clone(), bind], &[(0x5000, 2, 2)]);
         let first = super::last_drawn_into(target).expect("kept");
         assert_eq!(first.draws, 3);
         assert_eq!(
@@ -5363,7 +5390,7 @@ mod tests {
         assert_eq!(first.textures.len(), 1, "bound by two draws, kept once");
         assert_eq!((first.textures[0].0, first.textures[0].1), (1, 2));
         assert!(std::sync::Arc::ptr_eq(&first.textures[0].3, &texels));
-        super::note_drawn_by(other, 1, &[], &[]);
+        super::note_drawn_by(&[other], 1, &[], &[]);
         assert_eq!(super::last_drawn_into(target), Some(first.clone()));
         assert!(super::last_drawn_into(other).is_some_and(|by| by.frame > first.frame));
         assert_eq!(super::last_drawn_into(0x7ff0_0000_0000), None);
