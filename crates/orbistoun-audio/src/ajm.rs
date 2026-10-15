@@ -12,7 +12,9 @@ guest_module! {
     "libSceAjm" {
         "sceAjmBatchCancel" => 6,
         "sceAjmBatchErrorDump" => 6,
-        "sceAjmBatchInitialize" => 6,
+        // (buffer, size, &batch), as measured.
+        "sceAjmBatchInitialize" => 3,
+        // (&batch, instance, input, input size, output, output size), as measured.
         "sceAjmBatchJobDecode" => 6,
         "sceAjmBatchJobInitialize" => 6,
         "sceAjmBatchJobSetGaplessDecode" => 6,
@@ -78,7 +80,26 @@ struct Registry {
     issued: std::collections::BTreeMap<u32, u32>,
     /// `(context, instance id)` pairs created and not destroyed.
     instances: std::collections::BTreeSet<(u32, u32)>,
+    /// Batches by the buffer `sceAjmBatchInitialize` was given, with the jobs each holds.
+    batches: std::collections::BTreeMap<u64, Vec<Job>>,
 }
+
+/// A decode job a batch holds, by the instance it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Job {
+    /// The instance identifier the job was given.
+    instance: u32,
+}
+
+/// The smallest batch buffer measured: PPSA04263's 0x40 bytes, which holds one job (REQ-ai02).
+const SMALLEST_BATCH: u64 = 0x40;
+
+/// The largest batch buffer measured, 0x1000 bytes (REQ-ai02).
+const LARGEST_BATCH: u64 = 0x1000;
+
+/// The bytes `sceAjmBatchInitialize` wrote at the start of the buffer: zero but for the size at
+/// +8, and nothing past them (`buffer-80b`, REQ-ai02).
+const BATCH_HEADER_BYTES: usize = 0x20;
 
 /// What `sceAjmInstanceCreate` answered for a codec the context had not registered, the slot left
 /// as it was (REQ-ai01).
@@ -151,6 +172,31 @@ impl Registry {
         Some(Ok(id))
     }
 
+    /// `sceAjmBatchInitialize`'s answer for a buffer of the sizes measured, which starts the batch
+    /// at that buffer afresh; `None` for any other size.
+    fn batch_initialize(&mut self, buffer: u64, size: u64) -> Option<u64> {
+        if !(SMALLEST_BATCH..=LARGEST_BATCH).contains(&size) {
+            return None;
+        }
+        self.batches.insert(buffer, Vec::new());
+        Some(0)
+    }
+
+    /// `sceAjmBatchJobDecode`'s answer: 0 for the first job on a batch, naming an instance some
+    /// context holds; `None` for a batch never initialised, an instance not held, or a second
+    /// job, none of which is measured.
+    fn job_decode(&mut self, buffer: u64, instance: u32) -> Option<u64> {
+        if !self.instances.iter().any(|&(_, id)| id == instance) {
+            return None;
+        }
+        let jobs = self.batches.get_mut(&buffer)?;
+        if !jobs.is_empty() {
+            return None;
+        }
+        jobs.push(Job { instance });
+        Some(0)
+    }
+
     /// `sceAjmInstanceDestroy`'s answer on a live context: 0 for an instance it holds, which it
     /// ends, and the refusal for one it does not, such as one already destroyed.
     fn destroy(&mut self, ctx: u32, id: u32, issued_below: u32) -> Option<u64> {
@@ -213,6 +259,54 @@ pub(crate) fn ajm_instance_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     })
 }
 
+/// `sceAjmBatchInitialize(buffer, size, &batch)`: writes the 32-byte header - zero but for `size`
+/// at +8 - over the start of `buffer`, nothing past it, and the batch's identity to `batch`, and
+/// answers 0, for the 0x40- and 0x1000-byte buffers measured (REQ-ai02,
+/// `20261015-164000-eboot.log` 11333-11342).
+///
+/// The identity written is the buffer's own address. Assumed: the console's value is an address
+/// that sat, in both arms, exactly where its buffer did - past the 960-byte input on the stack,
+/// and at the end of the 9216-byte output on the heap - but no row names the buffer's address.
+/// A null pointer and any other size are unmeasured and answer the placeholder.
+pub(crate) fn ajm_batch_initialize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (buffer, size, batch) = (args[0], args[1], args[2]);
+    let placeholder = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    if buffer == 0 || batch == 0 || !(SMALLEST_BATCH..=LARGEST_BATCH).contains(&size) {
+        return placeholder;
+    }
+    let mut header = [0_u8; BATCH_HEADER_BYTES];
+    header[8..16].copy_from_slice(&size.to_le_bytes());
+    // SAFETY: the guest's batch buffer, at least `size` bytes by the call's contract and so at
+    // least the header; written through the checked accessor.
+    if !unsafe { orbistoun_mem::guest::write_bytes(buffer, &header) } {
+        return placeholder;
+    }
+    // SAFETY: the guest's batch slot, eight bytes by the call's contract; written through the
+    // checked accessor.
+    if !unsafe { orbistoun_mem::guest::write_u64(batch, buffer) } {
+        return placeholder;
+    }
+    with_registry(|r, _| r.batch_initialize(buffer, size))
+}
+
+/// `sceAjmBatchJobDecode(&batch, instance, input, input_size, output, output_size)`: answers 0 for
+/// the first job on a batch `sceAjmBatchInitialize` made, naming an instance that exists, as it did
+/// for PPSA04263's shape - an MPEG audio frame of 960 bytes into 9216 (REQ-ai02, lines 11337-11344),
+/// the output left as it was.
+///
+/// The console also writes a 56-byte job into the batch buffer; its fields are not all named by
+/// the rows, so it is not written here, and nothing a title was seen to do reads it back. A batch
+/// never made, an instance not held and a second job on one batch are unmeasured - the console
+/// faulted on the second in a 0x40-byte batch - and answer the placeholder.
+pub(crate) fn ajm_batch_job_decode(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's batch slot, which `sceAjmBatchInitialize` wrote; read through the
+    // checked accessor.
+    let Some(buffer) = (unsafe { orbistoun_mem::guest::read_u64(args[0]) }) else {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    };
+    with_registry(|r, _| r.job_decode(buffer, args[1] as u32))
+}
+
 /// `sceAjmInstanceDestroy(ctx, id)`: 0 for an instance the context holds, `0x80930003` once it is
 /// gone (REQ-ai01).
 pub(crate) fn ajm_instance_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -250,6 +344,33 @@ mod tests {
         );
         assert_eq!(registry.destroy(0x15, 1, 0x16), Some(0));
         assert_eq!(registry.destroy(0x15, 1, 0x16), Some(INVALID_INSTANCE));
+    }
+
+    /// A batch takes one decode job for an instance that exists and answers 0; a job for an
+    /// instance never created, on a batch never initialised, or a second job on a batch, is
+    /// unmeasured - the console faulted on the second - and answers nothing here (REQ-ai02,
+    /// `20261015-164000-eboot.log` 11333-11355).
+    #[test]
+    fn a_batch_takes_one_decode_job_as_measured() {
+        let mut registry = Registry::default();
+        assert_eq!(registry.register(0x15, 0, 0x16), Some(0));
+        assert_eq!(registry.create(0x15, 0, 1, 0x16), Some(Ok(1)));
+        assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));
+        assert_eq!(registry.job_decode(0x9000, 2), None, "no such instance");
+        assert_eq!(registry.job_decode(0x9000, 1), Some(0));
+        assert_eq!(registry.job_decode(0x9000, 1), None, "a second job");
+        assert_eq!(registry.job_decode(0xa000, 1), None, "no such batch");
+        assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));
+        assert_eq!(
+            registry.job_decode(0x9000, 1),
+            Some(0),
+            "initialised afresh"
+        );
+        assert_eq!(
+            registry.batch_initialize(0x9000, 0x20),
+            None,
+            "smaller than measured"
+        );
     }
 
     /// `sceAjmModuleRegister(ctx, codec, 0)` answers 0 for codecs 0 to 3 and `0x80930009` when the

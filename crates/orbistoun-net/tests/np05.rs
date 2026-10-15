@@ -28,3 +28,26 @@ fn the_np_state_is_signed_out() {
     );
     assert_eq!(out, [1, 0, 0, 0]);
 }
+
+/// `sceNpSetNpTitleId(&id, &secret)` answers 0 for PPSA04263's shape, a title id and a non-zero
+/// secret, twice (REQ-gt01, `20261015-164000-eboot.log` 4841-4846), and `0x8055001e` for zeroed
+/// blocks (REQ-np05, `report-20261014-batch4.log` 2885).
+#[test]
+fn a_title_id_is_set_as_measured() {
+    let table = orbistoun_net::npmanager::implementations();
+    let mut id = [0_u8; 0x10];
+    id[..12].copy_from_slice(b"PPSA01721_00");
+    let secret = [0x5a_u8; 0x80];
+    let shape = [id.as_ptr() as u64, secret.as_ptr() as u64];
+    assert_eq!(call(table, "sceNpSetNpTitleId", &shape), 0);
+    assert_eq!(call(table, "sceNpSetNpTitleId", &shape), 0);
+    let (zero_id, zero_secret) = ([0_u8; 0x10], [0_u8; 0x80]);
+    assert_eq!(
+        call(
+            table,
+            "sceNpSetNpTitleId",
+            &[zero_id.as_ptr() as u64, zero_secret.as_ptr() as u64]
+        ),
+        0x8055_001e
+    );
+}

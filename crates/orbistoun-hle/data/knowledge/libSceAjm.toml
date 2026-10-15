@@ -70,3 +70,32 @@ known_by = "measured"
 cites = "obSCEne REQ-20261015T0017Z-ai01, reports/hardware/report-20261015-batch1.log lines 6585-6586."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"
+
+[[function]]
+name = "sceAjmBatchInitialize"
+arity = 3
+purpose = "Starts a batch of codec jobs in a caller buffer: (buffer, size, &batch)."
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls, a 0x80-byte buffer filled 0xcc, size 0x40 - PPSA04263's size): 0x0, the first 32 bytes became zero but for the size at +8, nothing past them changed, and the batch slot received an address. With size 0x1000, 0x0 likewise.",
+    "orbistoun writes the buffer's own address to the batch slot. Assumed: in both arms the console's value sat exactly where the buffer did (just past the 960-byte input on the stack, and at the end of the 9216-byte output on the heap), but no row names the buffer's address.",
+    "Sizes outside 0x40 to 0x1000 and null pointers are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261015T1522Z-ai02, reports/hardware/20261015-164000-eboot.log lines 11333-11342."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
+
+[[function]]
+name = "sceAjmBatchJobDecode"
+arity = 6
+purpose = "Adds a decode job to a batch: (&batch, instance, input, input size, output, output size)."
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls, PPSA04263's shape: one 960-byte MPEG audio frame into a 9216-byte output on a 0x40-byte batch, and on a 0x1000-byte one): 0x0, a 56-byte job written into the batch buffer, the output untouched until the batch runs. A second job on the 0x40-byte batch faulted the process.",
+    "orbistoun answers 0x0 for the first job on a batch it initialised, naming an instance some context holds, and does not write the job: not every field of it is named by the rows, and no title was seen to read it. A second job, a batch never initialised and an instance not held are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261015T1522Z-ai02, reports/hardware/20261015-164000-eboot.log lines 11337-11355."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"

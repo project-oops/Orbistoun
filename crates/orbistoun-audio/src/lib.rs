@@ -304,6 +304,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAjmFinalize", ajm::ajm_finalize),
         ("sceAjmInstanceCreate", ajm::ajm_instance_create),
         ("sceAjmInstanceDestroy", ajm::ajm_instance_destroy),
+        ("sceAjmBatchInitialize", ajm::ajm_batch_initialize),
+        ("sceAjmBatchJobDecode", ajm::ajm_batch_job_decode),
         ("sceAudioOut2Initialize", audio_out2::initialize),
         ("sceAudioOut2UserCreate", audio_out2::user_create),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
@@ -624,6 +626,37 @@ mod tests {
         assert_eq!(
             call("sceAjmInstanceDestroy", [ctx, 1, 0, 0, 0, 0]),
             0x8093_0003
+        );
+
+        // PPSA04263's batch: `sceAjmBatchInitialize(buffer, 0x40, &batch)` over 0x80 bytes of
+        // `0xcc` writes 32 bytes - zero but the size at +8 - and nothing past them, then one
+        // `sceAjmBatchJobDecode(&batch, id, ...)` on it answers 0 (REQ-ai02).
+        assert_eq!(call("sceAjmInstanceCreate", [ctx, 0, 1, at, 0, 0]), 0);
+        let id = u64::from(slot[0]);
+        let mut buffer = [0xcc_u8; 0x80];
+        let mut batch = 0_u64;
+        let (buffer_at, batch_at) = (
+            buffer.as_mut_ptr() as u64,
+            std::ptr::from_mut(&mut batch).expose_provenance() as u64,
+        );
+        assert_eq!(
+            call(
+                "sceAjmBatchInitialize",
+                [buffer_at, 0x40, batch_at, 0, 0, 0]
+            ),
+            0
+        );
+        let mut header = [0_u8; 0x20];
+        header[8] = 0x40;
+        assert_eq!(buffer[..0x20], header);
+        assert!(
+            buffer[0x20..].iter().all(|&b| b == 0xcc),
+            "32 bytes and no more"
+        );
+        assert_eq!(batch, buffer_at);
+        assert_eq!(
+            call("sceAjmBatchJobDecode", [batch_at, id, 0, 960, 0, 9216]),
+            0
         );
     }
 

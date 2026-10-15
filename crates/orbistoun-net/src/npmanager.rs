@@ -2,7 +2,8 @@
 //!
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
 //! full capture, not a claim about the argument count. `sceNpGetAccountCountryA`,
-//! `sceNpGetAccountIdA`, `sceNpGetState` and `sceNpCheckCallback` are implemented, as measured.
+//! `sceNpGetAccountIdA`, `sceNpGetState`, `sceNpSetNpTitleId` and `sceNpCheckCallback` are
+//! implemented, as measured.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 use orbistoun_hle::guest_module;
@@ -17,6 +18,8 @@ guest_module! {
         "sceNpGetNpReachabilityState" => 6,
         // (user, out)
         "sceNpGetState" => 2,
+        // (&id, &secret)
+        "sceNpSetNpTitleId" => 2,
     }
 }
 
@@ -28,6 +31,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNpGetAccountCountryA", get_account_country_a),
         ("sceNpGetAccountIdA", get_account_id_a),
         ("sceNpGetState", get_state),
+        ("sceNpSetNpTitleId", set_np_title_id),
     ]
 }
 
@@ -74,5 +78,38 @@ fn get_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         0
     } else {
         u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// The NP title id block `sceNpSetNpTitleId` is handed: twelve characters and padding.
+const TITLE_ID_BYTES: usize = 0x10;
+
+/// The secret block handed beside it.
+const TITLE_SECRET_BYTES: usize = 0x80;
+
+/// What `sceNpSetNpTitleId` answered for zeroed blocks, on a console signed in to no account
+/// (REQ-np05, `report-20261014-batch4.log` 2885).
+const ZEROED_TITLE_ID: u64 = 0x8055_001e;
+
+/// `sceNpSetNpTitleId(&id, &secret)`: 0 for a title id and a non-zero secret - PPSA04263's shape,
+/// alike twice (REQ-gt01, `000-boot/gt01-npmanager`, `20261015-164000-eboot.log` 4841-4846) - and
+/// `0x8055001e` when both blocks are zero (REQ-np05). Any other shape - one block zero and not the
+/// other, or a null pointer - is unmeasured and answers the placeholder.
+fn set_np_title_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (mut id, mut secret) = ([0_u8; TITLE_ID_BYTES], [0_u8; TITLE_SECRET_BYTES]);
+    // SAFETY: the guest's title id block, by the call's contract; read through the checked
+    // accessor.
+    let read_id = args[0] != 0 && unsafe { orbistoun_mem::guest::read_into(args[0], &mut id) };
+    // SAFETY: the guest's secret block, likewise.
+    let read_secret =
+        args[1] != 0 && unsafe { orbistoun_mem::guest::read_into(args[1], &mut secret) };
+    if !(read_id && read_secret) {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    let zero = |block: &[u8]| block.iter().all(|&b| b == 0);
+    match (zero(&id), zero(&secret)) {
+        (false, false) => 0,
+        (true, true) => ZEROED_TITLE_ID,
+        _ => u64::from(orbistoun_core::GuestError::Unimplemented.as_raw()),
     }
 }

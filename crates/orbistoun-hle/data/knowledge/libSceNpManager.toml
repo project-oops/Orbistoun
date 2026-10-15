@@ -55,3 +55,19 @@ known_by = "measured"
 cites = "obSCEne REQ-20261014T0745Z-np05, reports/hardware/report-20261014-batch4.log lines 2880-2884."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"
+
+[[function]]
+name = "sceNpSetNpTitleId"
+arity = 2
+purpose = "(&id, &secret): sets the NP title id and its secret for the process."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt01, bound by link after sysmodule 0x009d): with PPSA04263's shape - id block \"PPSA01721_00\" and a non-zero secret - 0x0, and 0x0 again on a second call.",
+    "MEASURED (REQ-np05): with both blocks zeroed, 0x8055001e.",
+    "Any other shape - one block zero and not the other, or a null pointer - is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T1234Z-gt01, reports/hardware/20261015-164000-eboot.log lines 4841-4846; REQ-20261014T0745Z-np05, reports/hardware/report-20261014-batch4.log line 2885."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
