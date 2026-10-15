@@ -5,7 +5,7 @@
 //! checks measure on hardware: with a host [`Sink`] installed a port's samples play on a device
 //! and the device paces it (D819); with none, a port paces itself by its sample rate.
 //! `audio_out2` serves its contexts and ports, and `ajm` its context set-up (initialise,
-//! register a codec, finalise); `ajm`'s instances and batches, `audio3d` and `audio_in` are
+//! register a codec, finalise) and instances; `ajm`'s batches, `audio3d` and `audio_in` are
 //! declarations only.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn, HandleAllocator};
@@ -287,7 +287,8 @@ fn audio_out_set_volume(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 
 /// The audio implementations this crate provides.
 ///
-/// The `ajm` module contributes `sceAjmInitialize` and `audio_out2` its user create and destroy;
+/// The `ajm` module contributes its context set-up and instances, and `audio_out2` its user create
+/// and destroy;
 /// `audio3d` and `audio_in` none.
 #[must_use]
 pub fn implementations() -> &'static [(&'static str, GuestFn)] {
@@ -301,6 +302,8 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceAjmInitialize", ajm::ajm_initialize),
         ("sceAjmModuleRegister", ajm::ajm_module_register),
         ("sceAjmFinalize", ajm::ajm_finalize),
+        ("sceAjmInstanceCreate", ajm::ajm_instance_create),
+        ("sceAjmInstanceDestroy", ajm::ajm_instance_destroy),
         ("sceAudioOut2Initialize", audio_out2::initialize),
         ("sceAudioOut2UserCreate", audio_out2::user_create),
         ("sceAudioOut2UserDestroy", audio_out2::user_destroy),
@@ -601,6 +604,27 @@ mod tests {
         assert_eq!(ctx[..4], [0x16, 0, 0, 0]);
         assert_eq!(call("sceAjmInitialize", [1, at, 0, 0, 0, 0]), 0x8093_0005);
         assert_eq!(call("sceAjmInitialize", [0, 0, 0, 0, 0, 0]), 0x8093_0005);
+
+        // On the first context, in this test because contexts are numbered for the whole process:
+        // `sceAjmInstanceCreate(ctx, 0, 1, &out)` - PPSA04263's call - writes the first instance
+        // identifier as four bytes over a slot filled `0xff`, the other four left, once codec 0 is
+        // registered, and refuses before (REQ-ai01, `report-20261015-batch1.log`).
+        let ctx = 0x15;
+        let mut slot = [0xff_u8; 8];
+        let at = slot.as_mut_ptr() as u64;
+        assert_eq!(
+            call("sceAjmInstanceCreate", [ctx, 0, 1, at, 0, 0]),
+            0x8093_000a
+        );
+        assert_eq!(slot, [0xff; 8]);
+        assert_eq!(call("sceAjmModuleRegister", [ctx, 0, 0, 0, 0, 0]), 0);
+        assert_eq!(call("sceAjmInstanceCreate", [ctx, 0, 1, at, 0, 0]), 0);
+        assert_eq!(slot, [1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(call("sceAjmInstanceDestroy", [ctx, 1, 0, 0, 0, 0]), 0);
+        assert_eq!(
+            call("sceAjmInstanceDestroy", [ctx, 1, 0, 0, 0, 0]),
+            0x8093_0003
+        );
     }
 
     /// PPSA21564's context block, as the console answered it (REQ-ac01, `report-1791826929.txt`

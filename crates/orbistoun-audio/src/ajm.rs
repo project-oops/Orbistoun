@@ -1,8 +1,8 @@
 //! `libSceAjm` - the platform's audio codec job manager: decode and encode work submitted as jobs.
 //!
 //! The names come from real import tables (D504); every arity is `6`, the trampoline's full
-//! capture, not a claim about the argument count. Only `sceAjmInitialize` is implemented, as
-//! measured; the codec jobs themselves are not.
+//! capture, not a claim about the argument count. Context set-up and instances are implemented,
+//! as measured; the codec jobs themselves are not.
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_hle::guest_module;
@@ -22,8 +22,10 @@ guest_module! {
         "sceAjmFinalize" => 1,
         // (0, &ctx), as measured.
         "sceAjmInitialize" => 2,
-        "sceAjmInstanceCreate" => 6,
-        "sceAjmInstanceDestroy" => 6,
+        // (ctx, codec, flags, &out), as measured.
+        "sceAjmInstanceCreate" => 4,
+        // (ctx, id).
+        "sceAjmInstanceDestroy" => 2,
         // (ctx, codec, 0).
         "sceAjmModuleRegister" => 3,
         "sceAjmModuleUnregister" => 6,
@@ -72,7 +74,25 @@ struct Registry {
     registered: std::collections::BTreeSet<(u32, u32)>,
     /// Contexts finalised.
     finalised: std::collections::BTreeSet<u32>,
+    /// The last instance number each context issued.
+    issued: std::collections::BTreeMap<u32, u32>,
+    /// `(context, instance id)` pairs created and not destroyed.
+    instances: std::collections::BTreeSet<(u32, u32)>,
 }
+
+/// What `sceAjmInstanceCreate` answered for a codec the context had not registered, the slot left
+/// as it was (REQ-ai01).
+const NOT_REGISTERED: u64 = 0x8093_000a;
+
+/// What a second `sceAjmInstanceDestroy` of one instance answered (REQ-ai01).
+const INVALID_INSTANCE: u64 = 0x8093_0003;
+
+/// The flags `sceAjmInstanceCreate` was measured accepting: 0, 1 and 2 (REQ-ai01).
+const MEASURED_FLAGS: u64 = 3;
+
+/// Where an instance identifier carries its codec: bits 22 and up, as codecs 1 to 3 measured
+/// (`0x00400003`, `0x00800004`, `0x00c00005`, REQ-ai01).
+const CODEC_SHIFT: u32 = 22;
 
 impl Registry {
     /// Whether `ctx` was issued below `issued_below` and is not finalised.
@@ -99,8 +119,49 @@ impl Registry {
             return None;
         }
         self.registered.retain(|&(c, _)| c != ctx);
+        self.instances.retain(|&(c, _)| c != ctx);
         self.finalised.insert(ctx);
         Some(0)
+    }
+
+    /// `sceAjmInstanceCreate`'s answer: the identifier to write, or the refusal for a codec `ctx`
+    /// has not registered; `None` where nothing measured it - a context that is not live, a codec
+    /// past those measured, or flags other than 0 to 2.
+    ///
+    /// Numbered from 1 per context, one more for each instance whatever its codec, with the codec
+    /// in bits 22 and up. Measured on a single context; that a second context counts from 1 again
+    /// is assumed.
+    fn create(
+        &mut self,
+        ctx: u32,
+        codec: u32,
+        flags: u64,
+        issued_below: u32,
+    ) -> Option<Result<u32, u64>> {
+        if !self.live(ctx, issued_below) || codec >= MEASURED_CODECS || flags >= MEASURED_FLAGS {
+            return None;
+        }
+        if !self.registered.contains(&(ctx, codec)) {
+            return Some(Err(NOT_REGISTERED));
+        }
+        let number = self.issued.entry(ctx).or_insert(0);
+        *number += 1;
+        let id = *number | codec << CODEC_SHIFT;
+        self.instances.insert((ctx, id));
+        Some(Ok(id))
+    }
+
+    /// `sceAjmInstanceDestroy`'s answer on a live context: 0 for an instance it holds, which it
+    /// ends, and the refusal for one it does not, such as one already destroyed.
+    fn destroy(&mut self, ctx: u32, id: u32, issued_below: u32) -> Option<u64> {
+        if !self.live(ctx, issued_below) {
+            return None;
+        }
+        Some(if self.instances.remove(&(ctx, id)) {
+            0
+        } else {
+            INVALID_INSTANCE
+        })
     }
 }
 
@@ -129,9 +190,67 @@ pub(crate) fn ajm_finalize(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     with_registry(|r, below| r.finalize(args[0] as u32, below))
 }
 
+/// `sceAjmInstanceCreate(ctx, codec, flags, &out)`: writes the instance identifier as four bytes
+/// and answers 0, the four after it left as they were; a codec the context has not registered
+/// answers `0x8093000a` with the slot untouched (REQ-ai01,
+/// `report-20261015-batch1.log`, `070-user/oneshot-setup-calls`). A null slot is unmeasured and
+/// answers the placeholder.
+pub(crate) fn ajm_instance_create(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let out = args[3];
+    if out == 0 {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    with_registry(|r, below| {
+        Some(
+            match r.create(args[0] as u32, args[1] as u32, args[2], below)? {
+                // SAFETY: the guest's out-parameter, by the call's contract; four bytes written, as
+                // measured, through the checked accessor.
+                Ok(id) if unsafe { orbistoun_mem::guest::write_u32(out, id) } => 0,
+                Ok(_) => return None,
+                Err(refusal) => refusal,
+            },
+        )
+    })
+}
+
+/// `sceAjmInstanceDestroy(ctx, id)`: 0 for an instance the context holds, `0x80930003` once it is
+/// gone (REQ-ai01).
+pub(crate) fn ajm_instance_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    with_registry(|r, below| r.destroy(args[0] as u32, args[1] as u32, below))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ALREADY_REGISTERED, Registry};
+    use super::{ALREADY_REGISTERED, INVALID_INSTANCE, NOT_REGISTERED, Registry};
+
+    /// `sceAjmInstanceCreate(ctx, codec, flags, &out)` refuses a codec the context has not
+    /// registered, and otherwise numbers instances from 1 with the codec in bits 22 and up; a
+    /// second destroy of one is refused (REQ-ai01, `report-20261015-batch1.log`,
+    /// `070-user/oneshot-setup-calls`).
+    #[test]
+    fn instances_are_numbered_as_measured() {
+        let mut registry = Registry::default();
+        assert_eq!(registry.create(0x15, 0, 1, 0x16), Some(Err(NOT_REGISTERED)));
+        assert_eq!(registry.register(0x15, 0, 0x16), Some(0));
+        assert_eq!(registry.create(0x15, 0, 1, 0x16), Some(Ok(1)));
+        assert_eq!(registry.create(0x15, 0, 1, 0x16), Some(Ok(2)));
+        for codec in 1..4 {
+            assert_eq!(registry.register(0x15, codec, 0x16), Some(0));
+        }
+        assert_eq!(registry.create(0x15, 1, 1, 0x16), Some(Ok(0x0040_0003)));
+        assert_eq!(registry.create(0x15, 2, 1, 0x16), Some(Ok(0x0080_0004)));
+        assert_eq!(registry.create(0x15, 3, 1, 0x16), Some(Ok(0x00c0_0005)));
+        assert_eq!(registry.create(0x15, 0, 0, 0x16), Some(Ok(6)));
+        assert_eq!(registry.create(0x15, 0, 2, 0x16), Some(Ok(7)));
+        assert_eq!(registry.create(0x15, 0, 4, 0x16), None, "unmeasured flags");
+        assert_eq!(
+            registry.create(0x99, 0, 1, 0x16),
+            None,
+            "a context never issued"
+        );
+        assert_eq!(registry.destroy(0x15, 1, 0x16), Some(0));
+        assert_eq!(registry.destroy(0x15, 1, 0x16), Some(INVALID_INSTANCE));
+    }
 
     /// `sceAjmModuleRegister(ctx, codec, 0)` answers 0 for codecs 0 to 3 and `0x80930009` when the
     /// codec is already registered; `sceAjmFinalize(ctx)` answers 0 (REQ-aj01,

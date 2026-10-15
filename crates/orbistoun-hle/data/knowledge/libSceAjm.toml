@@ -43,8 +43,30 @@ found_on = "2026-10-09"
 
 [[function]]
 name = "sceAjmInstanceCreate"
+arity = 4
 purpose = "Creates a codec instance on an audio codec job manager context: (ctx, codec, flags, &instance)."
-edge_cases = ["GUEST-OBSERVED (D832 trial, 2026-10-15): PPSA04263 calls it on context 0x15 with codec 0 and flags 1, retrying about 14 times a second while it answers the placeholder. Answered 0 under ORBISTOUN_RETURN, it stops after two calls and goes on to sceAjmBatchInitialize and sceAjmBatchJobDecode (37910 calls each in 150 s): the run is FURTHER. What the console writes to the instance slot is not observed; REQ-20261015T0017Z-ai01 asks for it."]
-known_by = "guest-observed"
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls, one context): before its codec is registered it answered 0x8093000a, the 8-byte slot left 0xff. After registering, 0x0 with a 32-bit identifier written to the slot's low four bytes, the high four left: codec 0 gave 1 then 2, codecs 1, 2 and 3 gave 0x00400003, 0x00800004 and 0x00c00005, flags 0 and 2 on codec 0 gave 6 and 7.",
+    "The identifier is one more than the context's last, whatever the codec, with the codec in bits 22 and up. That a second context counts from 1 again is assumed: one context was measured.",
+    "GUEST-OBSERVED (D832 trial): PPSA04263 calls it on context 0x15 with codec 0 and flags 1, retrying about 14 times a second while it answers the placeholder; answered 0 it goes on to sceAjmBatchInitialize and sceAjmBatchJobDecode.",
+    "A null slot, flags past 2, codecs past 3 and a context not live are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261015T0017Z-ai01, reports/hardware/report-20261015-batch1.log lines 6559-6586."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
+
+[[function]]
+name = "sceAjmInstanceDestroy"
+arity = 2
+purpose = "Ends a codec instance on an audio codec job manager context: (ctx, instance)."
+returns = "status"
+edge_cases = [
+    "MEASURED (070-user/oneshot-setup-calls): 0x0 for an instance the context created, 0x80930003 when the same instance is destroyed again.",
+    "orbistoun answers 0x80930003 for any instance the live context does not hold; one never created is unmeasured.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261015T0017Z-ai01, reports/hardware/report-20261015-batch1.log lines 6585-6586."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"
