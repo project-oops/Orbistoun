@@ -489,6 +489,38 @@ fn print_said(trace: &orbistoun_report::trace::CallTrace) {
         };
         println!("  {trimmed}{cut}");
     }
+    // The lines it marked as errors itself, wherever in what is kept they were said.
+    let errors = guest_errors(&trace.said);
+    if !errors.is_empty() {
+        println!(
+            "\nwhat the guest called an error  ({} distinct line(s))",
+            errors.len()
+        );
+        for (line, times) in errors.iter().take(SAID_ERRORS) {
+            let trimmed: String = line.chars().take(SAID_WIDTH).collect();
+            println!("  {times}x {trimmed}");
+        }
+    }
+}
+
+/// How many of the lines a guest called errors a report lists.
+const SAID_ERRORS: usize = 8;
+
+/// The lines of `said` the guest marked as errors itself - the word "error", in any case - each
+/// once with how many times it was said, in the order first said. Selected by the guest's own word,
+/// not ranked: nothing here says which caused what.
+fn guest_errors(said: &[String]) -> Vec<(String, usize)> {
+    let mut errors: Vec<(String, usize)> = Vec::new();
+    for line in said
+        .iter()
+        .filter(|line| line.to_ascii_lowercase().contains("error"))
+    {
+        match errors.iter_mut().find(|(seen, _)| seen == line) {
+            Some((_, times)) => *times += 1,
+            None => errors.push((line.clone(), 1)),
+        }
+    }
+    errors
 }
 
 /// How many of the guest's own lines a report ends with.
@@ -642,6 +674,30 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
 
 #[cfg(test)]
 mod tests {
+    /// The lines a guest marked as errors itself are listed apart, each once with how often it was
+    /// said, in the order first said: a guest's own error buried mid-log is not lost to the tail.
+    #[test]
+    fn the_guest_s_own_errors_are_listed_once_each() {
+        let said: Vec<String> = [
+            "boot",
+            "[Video] ERROR: PostInit failed",
+            "frame",
+            "[Video] ERROR: PostInit failed",
+            "load error: missing.bin",
+        ]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect();
+        assert_eq!(
+            super::guest_errors(&said),
+            vec![
+                ("[Video] ERROR: PostInit failed".to_owned(), 2),
+                ("load error: missing.bin".to_owned(), 1),
+            ]
+        );
+        assert!(super::guest_errors(&said[..1]).is_empty());
+    }
+
     /// A mistyped setting prints the default, not nothing; an explicit zero is honoured.
     #[test]
     fn a_mistyped_findings_setting_falls_back_rather_than_printing_none() {
