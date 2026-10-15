@@ -42,6 +42,13 @@ macro_rules! span_labels {
             Span::CommandProcessor => $as!("command processor"),
             Span::RunDraws => $as!("run draws"),
             Span::ReadTargetBefore => $as!("run draws: read target"),
+            Span::ReadTargetCompare => $as!("read target: compare"),
+            Span::ReadTargetEarlier => $as!("read target: earlier"),
+            Span::ProtectUnderCopy => $as!("protect target: under a copy"),
+            Span::ProtectRefused => $as!("protect target: refused"),
+            Span::ProtectGuestWrote => $as!("protect target: guest wrote"),
+            Span::ProtectHostWrote => $as!("protect target: host wrote"),
+            Span::ReadTargetRead => $as!("read target: read"),
             Span::ExecuteHandOff => $as!("execute hand-off"),
             Span::ExecuteOnDevice => $as!("execute on device"),
             Span::Copy => $as!("dma copy"),
@@ -357,6 +364,27 @@ pub enum Span {
     /// Within [`Self::RunDraws`]: what the colour target holds before a run of draws, read or
     /// found unchanged.
     ReadTargetBefore,
+    /// Within [`Self::ReadTargetBefore`]: the target's memory compared with the bytes it held when
+    /// last written or read, where it is the last target and was not kept read-only (D720).
+    ReadTargetCompare,
+    /// Within [`Self::ReadTargetBefore`]: the target's memory compared with what it held as one of
+    /// the earlier targets kept (D801).
+    ReadTargetEarlier,
+    /// A target not made read-only (D720) because a deferred copy guards its pages, so the next
+    /// "unchanged" is answered by comparing. Counted.
+    ProtectUnderCopy,
+    /// A target not made read-only (D720) because the host refused it - its pages differ in
+    /// protection, or the change failed - so the next "unchanged" is answered by comparing.
+    /// Counted.
+    ProtectRefused,
+    /// A read-only target (D720) given back because the guest wrote it. Counted.
+    ProtectGuestWrote,
+    /// A read-only target (D720) given back because this process wrote or guarded its pages.
+    /// Counted.
+    ProtectHostWrote,
+    /// Within [`Self::ReadTargetBefore`]: the target read and detiled afresh, something else having
+    /// written it.
+    ReadTargetRead,
     /// Handing the draws to the device thread and getting its answer.
     ExecuteHandOff,
     /// The draws on the device thread.
@@ -535,7 +563,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 87] = [
+    pub const ALL: [Self; 94] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -544,6 +572,13 @@ impl Span {
         Self::CommandProcessor,
         Self::RunDraws,
         Self::ReadTargetBefore,
+        Self::ReadTargetCompare,
+        Self::ReadTargetEarlier,
+        Self::ProtectUnderCopy,
+        Self::ProtectRefused,
+        Self::ProtectGuestWrote,
+        Self::ProtectHostWrote,
+        Self::ReadTargetRead,
         Self::ExecuteHandOff,
         Self::ExecuteOnDevice,
         Self::Copy,

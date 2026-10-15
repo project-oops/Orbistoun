@@ -3006,21 +3006,26 @@ fn read_target(
     }
     let was_protected = protected_unwritten(target);
     protect_target(target);
-    let unchanged = last_written().lock().is_ok_and(|last| {
-        last.as_ref().is_some_and(|written| {
-            written.target == target
-                && written.contents.len() == length
-                && (was_protected
-                    || written.since.and_then(|since| {
-                        orbistoun_mem::watch::written_since(target.base, length as u64, since)
-                    }) == Some(false)
-                    || memory.holds(target.base, &written.contents.bytes()))
+    let unchanged = crate::perf::span(crate::perf::Span::ReadTargetCompare, || {
+        last_written().lock().is_ok_and(|last| {
+            last.as_ref().is_some_and(|written| {
+                written.target == target
+                    && written.contents.len() == length
+                    && (was_protected
+                        || written.since.and_then(|since| {
+                            orbistoun_mem::watch::written_since(target.base, length as u64, since)
+                        }) == Some(false)
+                        || memory.holds(target.base, &written.contents.bytes()))
+            })
         })
+    }) || crate::perf::span(crate::perf::Span::ReadTargetEarlier, || {
+        held_earlier(memory, target, length)
     });
-    if unchanged || held_earlier(memory, target, length) {
+    if unchanged {
         crate::perf::add(crate::perf::Phase::ReadTarget, read_started.elapsed());
         return Some(TargetRead::Unchanged);
     }
+    let _read = crate::perf::SpanGuard::start(crate::perf::Span::ReadTargetRead);
     // Marked before it is read, so a write that races the read is seen next time rather than lost.
     let since = orbistoun_mem::watch::mark(target.base, length as u64);
     let bytes = memory.read(target.base, length)?;
@@ -3380,6 +3385,7 @@ fn protect_target(target: ColourTarget) {
         .iter()
         .any(|copy| ranges_overlap((copy.pages.0, copy.pages.1), pages))
     {
+        crate::perf::span(crate::perf::Span::ProtectUnderCopy, || ());
         return;
     }
     let Ok(mut protected) = write_protected().lock() else {
@@ -3397,6 +3403,8 @@ fn protect_target(target: ColourTarget) {
             pages,
             protection,
         });
+    } else {
+        crate::perf::span(crate::perf::Span::ProtectRefused, || ());
     }
 }
 
@@ -3424,6 +3432,9 @@ fn unprotect_overlapping(address: u64, length: u64) {
     if let Some(p) = *protected
         && ranges_overlap(p.pages, (address, length))
     {
+        if length != u64::MAX {
+            crate::perf::span(crate::perf::Span::ProtectHostWrote, || ());
+        }
         release_protection(p, hooks);
         *protected = None;
     }
@@ -3467,6 +3478,7 @@ pub fn written_at(address: u64) -> bool {
                 {
                     return true;
                 }
+                crate::perf::span(crate::perf::Span::ProtectGuestWrote, || ());
                 release_protection(p, hooks);
                 *protected = None;
             }
