@@ -954,8 +954,17 @@ impl VulkanBackend {
     /// [`Self::take_snapshot`]'s pixels as words, read straight out of the snapshot's mapping rather
     /// than as bytes made into words after: a whole frame copied once, not twice.
     pub fn take_snapshot_words(&mut self, id: u64) -> Option<((u32, u32), Vec<u32>)> {
+        self.take_snapshot_words_into(id, Vec::new())
+    }
+
+    /// [`Self::take_snapshot_words`] into `into`'s storage, whatever it held.
+    pub fn take_snapshot_words_into(
+        &mut self,
+        id: u64,
+        into: Vec<u32>,
+    ) -> Option<((u32, u32), Vec<u32>)> {
         let snapshot = self.snapshots.remove(&id)?;
-        let words = snapshot.read_words();
+        let words = snapshot.read_words_into(into);
         self.release_snapshot(snapshot);
         match words {
             Ok(words) => Some(words),

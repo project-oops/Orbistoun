@@ -3454,8 +3454,10 @@ pub struct LazyCopies {
     /// a render scale makes larger than the target's (D862). Taken by the display, never written to
     /// guest memory.
     pub show: fn() -> Option<u64>,
-    /// The kept frame's pixels as linear `Rgba8` words, releasing it.
-    pub take: fn(u64) -> Option<Vec<u32>>,
+    /// The kept frame's pixels as linear `Rgba8` words, releasing it: read into the storage of the
+    /// vector given, whatever it held, which the caller hands back for the next frame (see
+    /// [`spare_frame`]).
+    pub take: fn(u64, Vec<u32>) -> Option<Vec<u32>>,
     /// Releases a kept frame unread.
     pub discard: fn(u64),
     /// Releases kept frame `old` unread and keeps the frame as it stands now, as one step - what a
@@ -3591,14 +3593,26 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         } => (*snapshot, *target, *swap, memory_then),
     };
     note_carried_out(target);
-    let Some(frame) = crate::perf::span(crate::perf::Span::CarryOutTake, || (hooks.take)(snapshot))
-    else {
+    let Some(frame) = crate::perf::span(crate::perf::Span::CarryOutTake, || {
+        (hooks.take)(snapshot, spare_frame())
+    }) else {
         tracing::warn!(
             "a deferred copy's frame could not be read - {:#x} keeps what it held",
             copy.destination
         );
         return false;
     };
+    let laid = lay_out_frame(copy, (target, swap, memory_then), &frame);
+    keep_spare_frame(frame);
+    laid
+}
+
+/// Writes a carried-out copy's bytes where it lands: `frame` tiled over memory as the copy saw it.
+fn lay_out_frame(
+    copy: &Deferred,
+    (target, swap, memory_then): (ColourTarget, ComponentSwap, &Contents),
+    frame: &[u32],
+) -> bool {
     let (width, height) = (target.width, target.height);
     let Ok(length) = usize::try_from(copy.length) else {
         return false;
@@ -3631,13 +3645,13 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
                 if whole {
                     target
                         .layout
-                        .tile_mapped(&frame, width, height, target.pipe_bank_xor, words, map)
+                        .tile_mapped(frame, width, height, target.pipe_bank_xor, words, map)
                         .is_ok()
                 } else {
                     target
                         .layout
                         .tile_prefix_mapped(
-                            &frame,
+                            frame,
                             (width, height),
                             target.pipe_bank_xor,
                             words,
@@ -3653,7 +3667,7 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         target
             .layout
             .tile_mapped(
-                &frame,
+                frame,
                 width,
                 height,
                 target.pipe_bank_xor,
@@ -3676,6 +3690,29 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     crate::perf::span(crate::perf::Span::CarryOutWrite, || {
         write_guest(copy.destination, bytes)
     })
+}
+
+/// Storage for the next carried-out frame's words, from the last one's: a frame is megabytes, and
+/// a fresh allocation of that comes from the system a page at a time, every frame a GL context
+/// reads back (GLCB00001).
+fn spare_frame() -> Vec<u32> {
+    spare_frame_slot()
+        .lock()
+        .ok()
+        .and_then(|mut spare| spare.take())
+        .unwrap_or_default()
+}
+
+/// Keeps a carried-out frame's storage for [`spare_frame`].
+fn keep_spare_frame(frame: Vec<u32>) {
+    if let Ok(mut spare) = spare_frame_slot().lock() {
+        *spare = Some(frame);
+    }
+}
+
+fn spare_frame_slot() -> &'static Mutex<Option<Vec<u32>>> {
+    static SPARE: Mutex<Option<Vec<u32>>> = Mutex::new(None);
+    &SPARE
 }
 
 /// Carries out every deferred copy whose destination pages touch `[address, address + length)` -
@@ -6769,7 +6806,7 @@ mod tests {
             super::super::install_lazy_copies(super::super::LazyCopies {
                 snapshot: || Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst)),
                 show: || Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst)),
-                take: |_| {
+                take: |_, _| {
                     TAKEN.fetch_add(1, Ordering::SeqCst);
                     Some(frame())
                 },

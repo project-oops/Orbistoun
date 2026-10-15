@@ -1919,8 +1919,13 @@ impl FrameSnapshot {
     }
 
     /// Its extent and its pixels as words, read straight out of its mapping: [`Self::read`]
-    /// without the bytes a caller would make into words again.
-    pub(crate) fn read_words(&self) -> Result<((u32, u32), Vec<u32>), DispatchError> {
+    /// without the bytes a caller would make into words again. Read into `out`'s storage, whatever
+    /// it held: a frame is megabytes, and a fresh allocation of that comes from the system a page at
+    /// a time, every frame carried out.
+    pub(crate) fn read_words_into(
+        &self,
+        mut out: Vec<u32>,
+    ) -> Result<((u32, u32), Vec<u32>), DispatchError> {
         let session = crate::compute::session()?;
         let session = session
             .lock()
@@ -1938,7 +1943,8 @@ impl FrameSnapshot {
                 .map_memory(self.memory, 0, size, vk::MemoryMapFlags::empty())
         }
         .map_err(|e| DispatchError::Vulkan("map_memory", e))?;
-        let mut out = Vec::<u32>::with_capacity(words);
+        out.clear();
+        out.reserve(words);
         // SAFETY: the mapping covers `size` bytes, `words * 4` of them, and `out` has room for
         // exactly that many words; the two cannot overlap. The bytes are the texels little-endian,
         // as this host reads words.
@@ -7320,7 +7326,9 @@ mod tests {
         target.snapshot_into(&shown).expect("snapshot taken");
         let pixels = shown.read().expect("snapshot read");
         assert_eq!((pixels.width, pixels.height), (4, 4));
-        let (extent, words) = shown.read_words().expect("snapshot read as words");
+        let (extent, words) = shown
+            .read_words_into(Vec::new())
+            .expect("snapshot read as words");
         assert_eq!(extent, (4, 4));
         assert_eq!(
             zerocopy::IntoBytes::as_bytes(words.as_slice()),

@@ -1047,9 +1047,18 @@ pub fn replace_snapshot(old: u64) -> Option<u64> {
     .flatten()
 }
 
-/// A kept frame's pixels as linear `Rgba8` words, releasing it.
-pub fn take_snapshot(id: u64) -> Option<Vec<u32>> {
-    take_sized_snapshot(id).map(|(_, words)| words)
+/// A kept frame's pixels as linear `Rgba8` words, releasing it: read into `into`'s storage,
+/// whatever it held.
+pub fn take_snapshot(id: u64, into: Vec<u32>) -> Option<Vec<u32>> {
+    on_device(move || {
+        live_backend()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()?
+            .take_snapshot_words_into(id, into)
+    })
+    .flatten()
+    .map(|(_, words)| words)
 }
 
 /// [`take_snapshot`], with the extent the frame was kept at: a display copy's is the drawn extent
