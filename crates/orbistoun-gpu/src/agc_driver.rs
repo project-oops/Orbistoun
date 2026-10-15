@@ -978,7 +978,9 @@ impl GuestCp<'_> {
         let before = if folded_here {
             Some(TargetRead::Unchanged)
         } else {
-            read_target(self, target, swap)
+            crate::perf::span(crate::perf::Span::ReadTargetBefore, || {
+                read_target(self, target, swap)
+            })
         }
         .ok_or_else(|| {
             format!(
@@ -3897,7 +3899,11 @@ impl GuestCp<'_> {
             }
             return false;
         };
-        let Some(protection) = guard.or_else(|| (hooks.guard)(pages.0, pages.1)) else {
+        let Some(protection) = guard.or_else(|| {
+            crate::perf::span(crate::perf::Span::CopyGuard, || {
+                (hooks.guard)(pages.0, pages.1)
+            })
+        }) else {
             (hooks.discard)(snapshot);
             return false;
         };

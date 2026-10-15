@@ -41,9 +41,11 @@ macro_rules! span_labels {
             Span::PrepareAgain => $as!("prepare again"),
             Span::CommandProcessor => $as!("command processor"),
             Span::RunDraws => $as!("run draws"),
+            Span::ReadTargetBefore => $as!("run draws: read target"),
             Span::ExecuteHandOff => $as!("execute hand-off"),
             Span::ExecuteOnDevice => $as!("execute on device"),
             Span::Copy => $as!("dma copy"),
+            Span::CopyGuard => $as!("dma copy: guard"),
             Span::KeepSnapshot => $as!("keep snapshot"),
             Span::ReadBand => $as!("read band"),
             Span::FoldBand => $as!("fold band"),
@@ -52,6 +54,7 @@ macro_rules! span_labels {
             Span::FlipWriteBack => $as!("flip write-back"),
             Span::CarryOut => $as!("carry out"),
             Span::CarryOutTake => $as!("carry out: take"),
+            Span::CarryOutSettle => $as!("carry out: settle"),
             Span::CarryOutTile => $as!("carry out: tile"),
             Span::CarryOutWrite => $as!("carry out: write"),
             Span::Drive => $as!("drive"),
@@ -346,12 +349,18 @@ pub enum Span {
     CommandProcessor,
     /// Carrying out a submission's draws into its target.
     RunDraws,
+    /// Within [`Self::RunDraws`]: what the colour target holds before a run of draws, read or
+    /// found unchanged.
+    ReadTargetBefore,
     /// Handing the draws to the device thread and getting its answer.
     ExecuteHandOff,
     /// The draws on the device thread.
     ExecuteOnDevice,
     /// A `DMA_DATA` copy, deferred or carried out.
     Copy,
+    /// Within [`Self::Copy`]: making a deferred copy's destination inaccessible, so the first
+    /// touch carries it out - a change of protection over every page of it.
+    CopyGuard,
     /// Keeping a frame snapshot for a deferred copy.
     KeepSnapshot,
     /// Releasing a superseded snapshot.
@@ -364,6 +373,9 @@ pub enum Span {
     CarryOut,
     /// A deferred copy's frame taken off the device snapshot it was kept in.
     CarryOutTake,
+    /// Within [`Self::CarryOutTake`]: waiting for the device to finish the copy into the kept
+    /// frame, before its words are read.
+    CarryOutSettle,
     /// That frame laid out in the target's tiling over what memory held.
     CarryOutTile,
     /// The laid-out bytes written to the copy's destination.
@@ -502,7 +514,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 79] = [
+    pub const ALL: [Self; 82] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -510,15 +522,18 @@ impl Span {
         Self::PrepareAgain,
         Self::CommandProcessor,
         Self::RunDraws,
+        Self::ReadTargetBefore,
         Self::ExecuteHandOff,
         Self::ExecuteOnDevice,
         Self::Copy,
+        Self::CopyGuard,
         Self::KeepSnapshot,
         Self::DiscardSnapshot,
         Self::OtherMemory,
         Self::FlipWriteBack,
         Self::CarryOut,
         Self::CarryOutTake,
+        Self::CarryOutSettle,
         Self::CarryOutTile,
         Self::CarryOutWrite,
         Self::Drive,

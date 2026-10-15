@@ -1931,7 +1931,9 @@ impl FrameSnapshot {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The copy into it was submitted unwaited; this is where it is waited for.
-        settle(&session)?;
+        orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::CarryOutSettle, || {
+            settle(&session)
+        })?;
         let size =
             vk::DeviceSize::from(self.width) * vk::DeviceSize::from(self.height) * self.texel_bytes;
         let words = usize::try_from(size / 4).unwrap_or(0);
