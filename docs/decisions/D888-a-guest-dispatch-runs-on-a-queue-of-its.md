@@ -26,5 +26,10 @@ MCUB00001 67.6 against 67.4; `device: setup: settle` went to nothing in each, an
 baselines repeated was drawn alike. A second queue of the graphics family alone moved the wait into
 the dispatch's fence (CRFT00001 `device: run: wait` 1.8% -> 12.2%, its rate unmoved).
 
-**Known limits:** not yet measured on an idle GPU; the gain beside a busy one is the dispatches no
-longer queuing behind draws the other program slows.
+On an idle GPU, against 0271b972, three rounds of 30 s: CRFT00001 31.6 -> 34.4 fps, MCUB00001
+137.5 -> 141.3, STKT00001 98.9 -> 90.7 with its median frame time unmoved (7.2 -> 7.1 ms; two of its
+runs read 84 and 86); `device: setup: settle` went to nothing in each and the dispatch's own wait
+grew by a tenth of it, every repeated flip drawn alike.
+
+**Known limits:** the gain is largest beside other GPU work, where dispatches no longer queue behind
+draws it slows; on an idle GPU it is the settle alone, a few percent of a dispatch-heavy title.
