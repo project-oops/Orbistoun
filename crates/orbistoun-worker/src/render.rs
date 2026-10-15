@@ -1227,19 +1227,35 @@ fn log_flip_origins() {
     if let Some(line) = origins.describe() {
         tracing::info!("{line}");
     }
-    if let Some(shown) = origins.last
-        && let Some(by) = orbistoun_gpu::agc_driver::last_drawn_into(shown)
-    {
-        tracing::info!("{}", drawn_by_line(shown, &by));
+    if let Some(shown) = origins.last {
+        let line = orbistoun_gpu::agc_driver::last_drawn_into(shown).map_or_else(
+            || undrawn_line(shown),
+            |by| {
+                drawn_by_line(shown, &by, &|base| {
+                    orbistoun_gpu::agc_driver::last_drawn_into(base).map(|into| into.frame)
+                })
+            },
+        );
+        tracing::info!("{line}");
     }
 }
 
 /// The most textures [`drawn_by_line`] lists.
 const MOST_DRAWN_TEXTURES: usize = 8;
 
-/// What drew the frame a flip of `shown` showed: which frame drawn it was, its draws, and each
-/// texture they bound with what it holds ([`texel_summary`]).
-fn drawn_by_line(shown: u64, by: &orbistoun_gpu::agc_driver::DrawnBy) -> String {
+/// The last flip's line where no frame orbistoun drew went into the buffer it showed.
+fn undrawn_line(shown: u64) -> String {
+    format!("the last flip showed {shown:#x}, which no frame orbistoun drew went into")
+}
+
+/// What drew the frame a flip of `shown` showed: which frame drawn it was, its draws, each texture
+/// they bound with what it holds ([`texel_summary`]), and where each texture they sampled lies,
+/// with the frame `drawn` says orbistoun drew into it, where it drew one.
+fn drawn_by_line(
+    shown: u64,
+    by: &orbistoun_gpu::agc_driver::DrawnBy,
+    drawn: &dyn Fn(u64) -> Option<u64>,
+) -> String {
     let mut textures: Vec<String> = by
         .textures
         .iter()
@@ -1259,8 +1275,22 @@ fn drawn_by_line(shown: u64, by: &orbistoun_gpu::agc_driver::DrawnBy) -> String 
     } else {
         textures.join("; ")
     };
+    let sampled: Vec<String> = by
+        .sampled
+        .iter()
+        .take(MOST_DRAWN_TEXTURES)
+        .map(|&(base, width, height)| match drawn(base) {
+            Some(frame) => format!("{base:#x} ({width}x{height}, drawn into as frame {frame})"),
+            None => format!("{base:#x} ({width}x{height})"),
+        })
+        .collect();
+    let sampling = if sampled.is_empty() {
+        String::new()
+    } else {
+        format!("; sampling {}", sampled.join(", "))
+    };
     format!(
-        "the last flip showed {shown:#x}, drawn into as frame {} by {} draw(s), binding {binding}",
+        "the last flip showed {shown:#x}, drawn into as frame {} by {} draw(s), binding {binding}{sampling}",
         by.frame, by.draws
     )
 }
@@ -1783,27 +1813,38 @@ fn log_execution() {
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
 
-    /// The frame a flip showed is named by what drew it: which frame drawn it was, its draws, and
-    /// each texture they bound with what it holds - a texture of one value reads as one distinct.
+    /// The frame a flip showed is named by what drew it: which frame drawn it was, its draws, each
+    /// texture they bound with what it holds - a texture of one value reads as one distinct - and
+    /// where each lies, with the frame orbistoun drew into it where it drew one: a render target
+    /// sampled is traced to the frame that filled it.
     #[test]
     fn the_last_flip_names_what_drew_it() {
         let by = orbistoun_gpu::agc_driver::DrawnBy {
             frame: 12,
             draws: 3,
             textures: vec![(0, 2, 1, std::sync::Arc::from(vec![5_u32, 5]))],
+            sampled: vec![(0x2000, 2, 1), (0x3000, 4, 4)],
         };
+        let drawn = |base: u64| (base == 0x2000).then_some(9);
         assert_eq!(
-            super::drawn_by_line(0x1000, &by),
+            super::drawn_by_line(0x1000, &by, &drawn),
             concat!(
                 "the last flip showed 0x1000, drawn into as frame 12 by 3 draw(s), binding ",
-                "slot 0 2x1 (first 0x00000005, 1 distinct)"
+                "slot 0 2x1 (first 0x00000005, 1 distinct); sampling 0x2000 (2x1, drawn into as ",
+                "frame 9), 0x3000 (4x4)"
             )
         );
         let bare = orbistoun_gpu::agc_driver::DrawnBy {
             textures: Vec::new(),
+            sampled: Vec::new(),
             ..by
         };
-        assert!(super::drawn_by_line(0x1000, &bare).ends_with("binding no texture"));
+        assert!(super::drawn_by_line(0x1000, &bare, &drawn).ends_with("binding no texture"));
+        // A flip of a buffer no drawn frame went into says so.
+        assert_eq!(
+            super::undrawn_line(0x1000),
+            "the last flip showed 0x1000, which no frame orbistoun drew went into"
+        );
     }
 
     /// A large texture's summary samples all of it, not its first row: one black above and grey

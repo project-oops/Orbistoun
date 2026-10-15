@@ -969,7 +969,7 @@ impl GuestCp<'_> {
                     shader_failures(submission)
                 )
             })?;
-            note_drawn_by(target.base, submission.report.draws, &submission.commands);
+            note_drawn(target.base, submission);
             return self.write_back_more_targets(&more);
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
@@ -999,7 +999,7 @@ impl GuestCp<'_> {
             ));
         }
         set_pending(Some((target, swap)));
-        note_drawn_by(target.base, submission.report.draws, &submission.commands);
+        note_drawn(target.base, submission);
         // The frame now pending was drawn over the one the deferred write-back holds, and writes
         // every byte it would: it is superseded, unread (D801).
         if matches!(before, TargetRead::HeldOverDeferred) {
@@ -2508,6 +2508,9 @@ pub struct DrawnBy {
     pub draws: usize,
     /// Each texture those draws bound, once: its slot, width, height and texels.
     pub textures: Vec<(u32, u32, u32, Arc<[u32]>)>,
+    /// Where each texture they sampled lies, with its width and height: what traces a sampled
+    /// render target to the frame drawn into it.
+    pub sampled: Vec<(u64, u32, u32)>,
 }
 
 /// The frames drawn so far and the last drawn into each target, by the target's base.
@@ -2517,9 +2520,15 @@ fn drawn_by() -> &'static Mutex<(u64, std::collections::BTreeMap<u64, DrawnBy>)>
     &DRAWN_BY
 }
 
-/// Notes a frame of `draws` draws, binding the textures `commands` bind, drawn into the colour
-/// target at `target`. The texels are held, not copied, so nothing frame-sized is made per frame.
-pub fn note_drawn_by(target: u64, draws: usize, commands: &[crate::RenderCommand]) {
+/// Notes a frame of `draws` draws, binding the textures `commands` bind and sampling those at
+/// `sampled`, drawn into the colour target at `target`. The texels are held, not copied, so nothing
+/// frame-sized is made per frame.
+pub fn note_drawn_by(
+    target: u64,
+    draws: usize,
+    commands: &[crate::RenderCommand],
+    sampled: &[(u64, u32, u32)],
+) {
     let mut textures: Vec<(u32, u32, u32, Arc<[u32]>)> = Vec::new();
     for command in commands {
         if let crate::RenderCommand::BindTexture {
@@ -2547,7 +2556,24 @@ pub fn note_drawn_by(target: u64, draws: usize, commands: &[crate::RenderCommand
             frame,
             draws,
             textures,
+            sampled: sampled.to_vec(),
         },
+    );
+}
+
+/// [`note_drawn_by`] for `submission`, drawn into the colour target at `target`.
+fn note_drawn(target: u64, submission: &Submission) {
+    let sampled: Vec<(u64, u32, u32)> = submission
+        .report
+        .bound_textures
+        .iter()
+        .map(|texture| (texture.base, texture.width, texture.height))
+        .collect();
+    note_drawn_by(
+        target,
+        submission.report.draws,
+        &submission.commands,
+        &sampled,
     );
 }
 
@@ -5293,13 +5319,18 @@ mod tests {
             levels: 1,
         };
         let (target, other) = (0x7fee_0000_0000_u64, 0x7fef_0000_0000_u64);
-        super::note_drawn_by(target, 3, &[bind.clone(), bind]);
+        super::note_drawn_by(target, 3, &[bind.clone(), bind], &[(0x5000, 2, 2)]);
         let first = super::last_drawn_into(target).expect("kept");
         assert_eq!(first.draws, 3);
+        assert_eq!(
+            first.sampled,
+            vec![(0x5000, 2, 2)],
+            "where what it sampled lies"
+        );
         assert_eq!(first.textures.len(), 1, "bound by two draws, kept once");
         assert_eq!((first.textures[0].0, first.textures[0].1), (1, 2));
         assert!(std::sync::Arc::ptr_eq(&first.textures[0].3, &texels));
-        super::note_drawn_by(other, 1, &[]);
+        super::note_drawn_by(other, 1, &[], &[]);
         assert_eq!(super::last_drawn_into(target), Some(first.clone()));
         assert!(super::last_drawn_into(other).is_some_and(|by| by.frame > first.frame));
         assert_eq!(super::last_drawn_into(0x7ff0_0000_0000), None);
