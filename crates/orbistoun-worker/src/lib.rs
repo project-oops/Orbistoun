@@ -1270,6 +1270,8 @@ fn record_run_conditions(
         overrides,
         propping,
         experiments: experiments.describe(),
+        // Merged in once the input is installed (`report::note_input`).
+        input: String::new(),
         intervened: experiments.intervenes(),
         // Read from the map that was actually built, not the setting that asked for it: a shape
         // that fell back because its regions did not fit is recorded as what the guest got (D357).
@@ -2859,6 +2861,15 @@ fn install_scripted_input(service: &Service) -> Result<(), Error> {
         return Ok(());
     };
     let steps = script.len();
+    // Described by its steps and its file's hash, so a run that replayed another script, or none,
+    // is not compared as the same run.
+    let hash = std::fs::read(&path)
+        .map(|bytes| orbistoun_service::content_hash(&bytes))
+        .unwrap_or_default();
+    report::note_input(format!(
+        "a pad script of {steps} step(s), {}",
+        hash.get(..12).unwrap_or(&hash)
+    ));
     orbistoun_input::script::install(script);
     tracing::info!(
         "playing input script {} ({steps} step(s)) on player 1",

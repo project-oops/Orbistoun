@@ -677,6 +677,12 @@ pub struct Conditions {
     /// one cannot go unrecorded.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub experiments: String,
+    /// The pad script the run replayed, by its steps and the hash of its file, or empty for none.
+    ///
+    /// The imports a pad reaches come and go with it, so a run with another script, or none, is
+    /// not compared as the same run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub input: String,
     /// The physical memory map the guest was shown, region by region.
     ///
     /// The offsets a guest queries mean something only against the boundaries it was
@@ -793,6 +799,20 @@ impl Conditions {
             changed.push(format!(
                 "explicit stub answers went from {} to {}",
                 before.overrides, self.overrides
+            ));
+        }
+        if self.input != before.input {
+            let said = |input: &str| {
+                if input.is_empty() {
+                    "no pad script".to_owned()
+                } else {
+                    input.to_owned()
+                }
+            };
+            changed.push(format!(
+                "the input changed from {} to {}",
+                said(&before.input),
+                said(&self.input)
             ));
         }
         if self.experiments != before.experiments {
@@ -1528,6 +1548,25 @@ mod tail_return_tests {
 mod tests {
     use super::{CallTrace, CalledImport, Conditions, FaultSite, Verdict, compare};
 
+    /// A run that replayed another pad script than the last, or none where the last had one,
+    /// measures a settings change: the imports a pad reaches come and go with it.
+    #[test]
+    fn a_change_of_input_is_a_settings_change() {
+        let none = Conditions::default();
+        let scripted = Conditions {
+            input: "a pad script of 183 step(s), 0123456789ab".to_owned(),
+            ..Conditions::default()
+        };
+        assert_eq!(
+            none.differences_from(&scripted),
+            vec![
+                "the input changed from a pad script of 183 step(s), 0123456789ab to no pad script"
+                    .to_owned()
+            ]
+        );
+        assert!(scripted.differences_from(&scripted).is_empty());
+    }
+
     /// A thread whose recorded calls are all one import from one site is waiting in a loop
     /// around it (D832); a second site, a second import or too few calls is not one.
     #[test]
@@ -2160,6 +2199,7 @@ mod tests {
         // Identical conditions produce no caveat.
         let conditions = Conditions {
             experiments: String::new(),
+            input: String::new(),
             intervened: false,
             memory_map: Vec::new(),
             limit_seconds: Some(20),

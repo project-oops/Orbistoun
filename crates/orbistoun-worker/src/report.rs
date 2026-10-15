@@ -2832,9 +2832,20 @@ pub fn note_link_plan(summary: orbistoun_proto::LinkSummary) {
     let _ = LINK_PLAN.set(summary);
 }
 
-/// The recorded conditions, with the link plan merged in.
+/// The pad script the run replayed, described, once the input is installed.
+static INPUT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records the pad script the run replays, for the run conditions.
+pub fn note_input(described: String) {
+    let _ = INPUT.set(described);
+}
+
+/// The recorded conditions, with the link plan and the replayed input merged in.
 fn linked_conditions() -> Conditions {
     let mut conditions = CONDITIONS.get().cloned().unwrap_or_default();
+    if let Some(input) = INPUT.get() {
+        conditions.input.clone_from(input);
+    }
     if let Some(summary) = LINK_PLAN.get() {
         conditions.link_plan.clone_from(&summary.digest);
         conditions.link_plan_stored.clone_from(&summary.stored);
