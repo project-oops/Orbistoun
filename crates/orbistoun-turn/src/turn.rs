@@ -857,6 +857,39 @@ pub fn promote(
     ))
 }
 
+/// What a trial that got further staged: the guest went further with `target` answering zero,
+/// recorded as `guest-observed` (D832), or nothing for a trial that did not get further. The
+/// console's answer stays unmeasured, and the entry says so.
+#[must_use]
+pub fn promote_answer(
+    target: &str,
+    reached: usize,
+    was: usize,
+) -> Option<(Option<String>, orbistoun_hle::knowledge::Record)> {
+    if reached <= was {
+        return None;
+    }
+    let (library, function) = match target.rsplit_once("::") {
+        Some((library, function)) => (Some(library.to_owned()), function.to_owned()),
+        None => (None, target.to_owned()),
+    };
+    Some((
+        library,
+        orbistoun_hle::knowledge::Record {
+            function,
+            edge_cases: vec![format!(
+                "GUEST-OBSERVED (D832 trial): answered zero, the guest reached {reached} distinct imports against {was} - its answer is what holds the guest back"
+            )],
+            assumptions: vec![
+                "what the console answers, and what it writes, is not measured - zero is the trial's answer, not the console's"
+                    .to_owned(),
+            ],
+            known_by: Some(orbistoun_hle::knowledge::Oracle::GuestObserved),
+            ..orbistoun_hle::knowledge::Record::default()
+        },
+    ))
+}
+
 /// What a function whose answer the guest dereferenced should hand back instead.
 ///
 /// Zero is what a caller may test; a region is what one may use. The guest dereferencing an answer
@@ -1354,6 +1387,24 @@ mod tests {
                 .any(|t| matches!(t, Taken::Answered { reached: 12, .. })),
             "{all:?}"
         );
+    }
+
+    /// A trial that got further is staged as what the guest showed, never as the console's answer
+    /// (D832): the entry says the guest went further answered zero and that the answer is
+    /// unmeasured. One that did not get further stages nothing.
+    #[test]
+    fn a_trial_that_got_further_is_staged_as_guest_observed() {
+        let (library, record) =
+            promote_answer("libSceX::sceRetried", 12, 10).expect("it got further");
+        assert_eq!(library.as_deref(), Some("libSceX"));
+        assert_eq!(record.function, "sceRetried");
+        assert_eq!(
+            record.known_by,
+            Some(orbistoun_hle::knowledge::Oracle::GuestObserved)
+        );
+        assert!(record.edge_cases[0].contains("12 distinct imports against 10"));
+        assert!(record.assumptions.iter().any(|a| a.contains("console")));
+        assert!(promote_answer("libSceX::sceRetried", 10, 10).is_none());
     }
 
     /// A dereferenced placeholder is traced to whichever call answered with it.

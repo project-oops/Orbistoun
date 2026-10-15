@@ -109,6 +109,18 @@ pub(crate) fn cmd_turn(
                 println!("  nothing to record: the sweep established no contract");
             }
         }
+        // A trial that got further, staged as what the guest showed (D832).
+        for result in &taken {
+            if let turn::Taken::Answered {
+                function,
+                reached,
+                was,
+            } = result
+                && let Some((library, learned)) = turn::promote_answer(function, *reached, *was)
+            {
+                print_learn_command(library.as_deref(), &learned);
+            }
+        }
     }
     Ok(())
 }
