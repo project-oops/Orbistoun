@@ -1242,11 +1242,14 @@ fn log_flip_origins() {
         return;
     };
     let into = orbistoun_gpu::agc_driver::last_drawn_into;
-    // How a texture's memory was filled: a frame orbistoun drew into it, or a file read.
+    // How a texture's memory was filled: a frame orbistoun drew into it, a file read, or a compute
+    // program's stores.
+    let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();
     let frame_into = |base: u64| {
         into(base)
             .map(|by| format!("drawn into as frame {}", by.frame))
             .or_else(|| orbistoun_kernel::apr::read_landed_at(base))
+            .or_else(|| stored_by(base, &census))
     };
     let Some(by) = into(shown) else {
         tracing::info!("{}", undrawn_line(shown));
@@ -1268,6 +1271,35 @@ const MOST_DRAWN_TEXTURES: usize = 8;
 /// The last flip's line where no frame orbistoun drew went into the buffer it showed.
 fn undrawn_line(shown: u64) -> String {
     format!("the last flip showed {shown:#x}, which no frame orbistoun drew went into")
+}
+
+/// The compute program whose dispatches stored over `address`, from the run's census: an image
+/// the last of them stored, or a buffer they only stored to. Named by where the program lies, how
+/// many dispatches ran it and whether what they wrote was all zero.
+fn stored_by(
+    address: u64,
+    census: &[(u64, orbistoun_gpu::agc_driver::DispatchWrites)],
+) -> Option<String> {
+    let covers = |(at, bytes): (u64, u64)| (at..at.saturating_add(bytes)).contains(&address);
+    let (_, writes) = census.iter().find(|(_, writes)| {
+        writes.stored.is_some_and(covers)
+            || writes
+                .buffers
+                .iter()
+                .any(|&(at, bytes, read)| read.is_none() && covers((at, bytes)))
+    })?;
+    let program = writes
+        .program
+        .map_or_else(|| "an unknown address".to_owned(), |at| format!("{at:#x}"));
+    Some(format!(
+        "stored by the dispatch program at {program} ({} dispatch(es), {})",
+        writes.dispatches,
+        if writes.lit {
+            "not all zero"
+        } else {
+            "all zero"
+        }
+    ))
 }
 
 /// How many sampled render targets [`log_flip_origins`] follows from the last flip's frame.
@@ -1902,6 +1934,33 @@ mod tests {
             super::undrawn_line(0x1000),
             "the last flip showed 0x1000, which no frame orbistoun drew went into"
         );
+    }
+
+    /// A sampled texture a compute program stored over is named by that program: where it lies,
+    /// how many dispatches ran it, and whether what they wrote was all zero. An image it stored or
+    /// a buffer it only stored to counts; one it read does not.
+    #[test]
+    fn a_texture_a_dispatch_stored_names_its_program() {
+        let writes = orbistoun_gpu::agc_driver::DispatchWrites {
+            dispatches: 7,
+            lit: true,
+            program: Some(0x7400_4314_7600),
+            stored: Some((0x5000, 0x1000)),
+            buffers: vec![(0x9000, 0x100, None), (0xa000, 0x100, Some(true))],
+            ..Default::default()
+        };
+        let census = [(1, writes)];
+        let named = super::stored_by(0x5800, &census);
+        assert_eq!(
+            named.as_deref(),
+            Some("stored by the dispatch program at 0x740043147600 (7 dispatch(es), not all zero)")
+        );
+        assert!(
+            super::stored_by(0x9010, &census).is_some(),
+            "a buffer only stored to"
+        );
+        assert_eq!(super::stored_by(0xa010, &census), None, "a buffer it read");
+        assert_eq!(super::stored_by(0x6000, &census), None, "past the image");
     }
 
     /// The render targets a frame sampled are followed to the frames drawn into them, and theirs
