@@ -45,7 +45,7 @@ macro_rules! span_labels {
             Span::ExecuteHandOff => $as!("execute hand-off"),
             Span::ExecuteOnDevice => $as!("execute on device"),
             Span::Copy => $as!("dma copy"),
-            Span::CopyGuard => $as!("dma copy: guard"),
+            Span::CopyGuard => $as!("guard: deferred copy"),
             Span::KeepSnapshot => $as!("keep snapshot"),
             Span::ReadBand => $as!("read band"),
             Span::FoldBand => $as!("fold band"),
@@ -359,8 +359,9 @@ pub enum Span {
     ExecuteOnDevice,
     /// A `DMA_DATA` copy, deferred or carried out.
     Copy,
-    /// Within [`Self::Copy`]: making a deferred copy's destination inaccessible, so the first
-    /// touch carries it out - a change of protection over every page of it.
+    /// Making a deferred copy's destination inaccessible, so the first touch carries it out - a
+    /// change of protection over every page of it: a DMA copy's destination, or a flipped frame's
+    /// own target (D719), guarded again each flip after the next frame drawn over it let it go.
     CopyGuard,
     /// Keeping a frame snapshot for a deferred copy.
     KeepSnapshot,

@@ -2719,7 +2719,11 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
         }
         return Err(CannotWait);
     };
-    let Some(protection) = guard.or_else(|| (hooks.guard)(pages.0, pages.1)) else {
+    let Some(protection) = guard.or_else(|| {
+        crate::perf::span(crate::perf::Span::CopyGuard, || {
+            (hooks.guard)(pages.0, pages.1)
+        })
+    }) else {
         (hooks.discard)(snapshot);
         return Err(CannotWait);
     };
