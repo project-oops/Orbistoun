@@ -3573,12 +3573,17 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     // eight-megabyte allocation and a copy every frame (GLCB00001, 2 ms of a 12 ms frame).
     let whole = length / 4 >= target.words();
     if copy.destination % 4 == 0 && length % 4 == 0 && (whole || target.layout.tiles_prefixes()) {
+        // Only where the frame leaves memory as it was: the words the tile writes every one of are
+        // not laid down first only to be written over (GLCB00001: 8 MB a frame, 16% of its run).
+        let skip = (target.layout.words_tiled_whole(width, height) * 4).min(length);
+        let (at, rest) = (copy.destination + skip as u64, (length - skip) as u64);
         // A clear's word filled as words, not spelt out byte by byte first.
         let laid = crate::perf::span(crate::perf::Span::CarryOutWrite, || match memory_then {
-            Contents::Uniform { word, .. } => fill_guest(copy.destination, copy.length, *word),
+            _ if rest == 0 => true,
+            Contents::Uniform { word, .. } => fill_guest(at, rest, *word),
             Contents::Bytes(then) => then
-                .get(..length)
-                .is_some_and(|then| write_guest(copy.destination, then)),
+                .get(skip..length)
+                .is_some_and(|then| write_guest(at, then)),
         });
         if !laid {
             return false;

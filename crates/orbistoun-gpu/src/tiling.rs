@@ -1560,6 +1560,19 @@ impl SurfaceLayout {
         })
     }
 
+    /// How many of a `width` x `height` surface's first words a tile of a whole image writes every
+    /// one of, so that what memory held there need not be laid down first: for `64KB_R_X` the full
+    /// block rows of a surface whole blocks wide - a 1920 x 1080 frame's first 1024 rows, nearly
+    /// all of it. Zero for anything else, whose padding words may lie anywhere.
+    #[must_use]
+    pub fn words_tiled_whole(self, width: u32, height: u32) -> usize {
+        if self != Self::Rx64Kb || width % SINGLE_BLOCK_EXTENT != 0 {
+            return 0;
+        }
+        let rows = (height / SINGLE_BLOCK_EXTENT) as usize;
+        rows * (width / SINGLE_BLOCK_EXTENT) as usize * BLOCK_WORDS
+    }
+
     /// Whether [`Self::tile_prefix_mapped`] tiles into a prefix of this layout's surface.
     #[must_use]
     pub const fn tiles_prefixes(self) -> bool {
@@ -1731,6 +1744,32 @@ mod tests {
                 .tile_prefix_mapped(&linear, (width, height), 0, &mut [0; 4], |w| w)
                 .is_none()
         );
+    }
+
+    /// Every word a whole image's tile is said to write is written, at any pipe-bank XOR, and the
+    /// words after them hold padding it leaves: what memory held need not be laid down under them.
+    #[test]
+    fn the_words_tiled_whole_are_every_one_written() {
+        for (width, height, xor) in [(256, 200, 0), (384, 300, 5), (128, 128, 7)] {
+            let linear = vec![0u32; (width * height) as usize];
+            let mut tiled = vec![u32::MAX; surface_words_64kb_rx_bpp4(width, height)];
+            super::tile_surface_64kb_rx_bpp4_mapped(&linear, width, height, xor, &mut tiled, |w| w)
+                .expect("tiles");
+            let whole = super::SurfaceLayout::Rx64Kb.words_tiled_whole(width, height);
+            assert!(whole > 0, "{width} x {height}");
+            assert!(
+                tiled[..whole].iter().all(|&w| w == 0),
+                "{width} x {height}: every word written"
+            );
+            if height % 128 != 0 {
+                assert!(
+                    tiled[whole..].contains(&u32::MAX),
+                    "{width} x {height}: padding after them"
+                );
+            }
+        }
+        assert_eq!(super::SurfaceLayout::Rx64Kb.words_tiled_whole(300, 200), 0);
+        assert_eq!(super::SurfaceLayout::S64Kb.words_tiled_whole(256, 256), 0);
     }
 
     /// A 32-bpp `64KB_R_X` volume's slice XOR is the XOR of the terms addrlib gives for each bit
