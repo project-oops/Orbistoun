@@ -82,6 +82,9 @@ pub enum Step {
         length: u64,
         /// Which import was handed it, so the report says whose structure this is.
         subject: String,
+        /// The finding's argument lines: what the call was handed at the call, which the read-back
+        /// cannot say for a block the guest cleared afterwards.
+        handed: Vec<String>,
     },
     /// Trial an unimplemented function answering zero, against a run with nothing applied.
     ///
@@ -115,6 +118,7 @@ fn unimplemented_step(finding: &Finding) -> Step {
             address,
             length: STRUCTURE_BYTES,
             subject: subject.unwrap_or_default(),
+            handed: handed_arguments(finding),
         },
         (None, Some(target)) => Step::TrialAnswer { target },
         (None, None) => Step::Person {
@@ -369,6 +373,8 @@ pub enum Taken {
         subject: String,
         /// Whether the run still reached the guest at all.
         reached: usize,
+        /// What the call was handed at the call, from the finding's argument lines.
+        handed: Vec<String>,
     },
     /// Automatic in principle, and not runnable from here.
     ///
@@ -459,13 +465,23 @@ impl Taken {
                     .0
                     .map_or_else(|| "no fault".to_owned(), |f| format!("{f:#x}"))
             ),
+            // What it held when the guest stopped is not what the call was given, for a block the
+            // guest cleared after it: both are said.
             Self::Read {
                 address,
                 subject,
                 reached,
-            } => format!(
-                "read {subject}'s structure at {address:#x} - the bytes are above, {reached} imports reached"
-            ),
+                handed,
+            } => {
+                let mut said = format!(
+                    "read {subject}'s structure at {address:#x} - the bytes above are as it stood when the guest stopped, {reached} imports reached"
+                );
+                for line in handed {
+                    said.push_str("\n    handed at the call: ");
+                    said.push_str(line);
+                }
+                said
+            }
             // Marked when it got further: that is the census question to file, not an answer to ship.
             Self::Answered {
                 function,
@@ -636,7 +652,8 @@ pub fn take(trial: &mut impl crate::experiment::Trial, step: &Step) -> Result<Ta
             address,
             length,
             subject,
-        } => read_structure(trial, *address, *length, subject),
+            handed,
+        } => read_structure(trial, (*address, *length), subject, handed),
         Step::TrialAnswer { target } => trial_answer(trial, target),
         Step::NameAHash { .. } => Ok(Taken::Elsewhere(
             "naming needs a model and a local runtime, which a sweep does not start",
@@ -726,15 +743,16 @@ fn trial_answer(
 /// If the run could not be made at all.
 fn read_structure(
     trial: &mut impl crate::experiment::Trial,
-    address: u64,
-    length: u64,
+    (address, length): (u64, u64),
     subject: &str,
+    handed: &[String],
 ) -> Result<Taken, crate::Error> {
     let outcome = trial.spawn_axes(&[crate::axis::Axis::Read { address, length }])?;
     Ok(Taken::Read {
         address,
         subject: subject.to_owned(),
         reached: outcome.reached,
+        handed: handed.to_vec(),
     })
 }
 
@@ -962,6 +980,17 @@ fn handed_structure(finding: &Finding) -> Option<u64> {
         let address = u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()?;
         (address >= SMALLEST_POINTER).then_some(address & !7)
     })
+}
+
+/// The finding's argument lines, each a pointer and the bytes the dump read there at the call, in
+/// the shape [`handed_structure`] parses.
+fn handed_arguments(finding: &Finding) -> Vec<String> {
+    finding
+        .evidence
+        .iter()
+        .filter(|line| line.starts_with("arg") && line.contains(" -> "))
+        .cloned()
+        .collect()
 }
 
 /// The structure a faulting instruction was working on, from the fault's own registers.
@@ -1380,6 +1409,7 @@ mod tests {
             address: 0x1000,
             length: 0x40,
             subject: "libSceX::sceRetried".to_owned(),
+            handed: Vec::new(),
         }];
         let all = turn(&mut Retries, &plan).expect("the turn runs");
         assert!(
@@ -1387,6 +1417,30 @@ mod tests {
                 .any(|t| matches!(t, Taken::Answered { reached: 12, .. })),
             "{all:?}"
         );
+    }
+
+    /// A structure read back says what the call was handed as well as what the region held when
+    /// the guest stopped: a title may clear a block after the call - PPSA04263's NP title id read
+    /// back as zeros - and the census question is about what the call was given.
+    #[test]
+    fn a_structure_read_back_carries_what_the_call_was_handed() {
+        let argument = "arg0 = 0x400005cd3f50 -> image+0x5cd3f50 = 50 50 53 41 30 31";
+        let mut handed = finding(Gap::Unimplemented, Some("libSceX::sceSetId"));
+        handed.evidence = vec![argument.to_owned(), "called once".to_owned()];
+        let planned = step(&handed);
+        assert!(
+            matches!(&planned, Step::ReadStructure { handed, .. } if handed == &[argument]),
+            "{planned:?}"
+        );
+        let said = Taken::Read {
+            address: 0x4000_05cd_3f50,
+            subject: "libSceX::sceSetId".to_owned(),
+            reached: 10,
+            handed: vec![argument.to_owned()],
+        }
+        .say();
+        assert!(said.contains(argument), "{said}");
+        assert!(said.contains("when the guest stopped"), "{said}");
     }
 
     /// A trial that got further is staged as what the guest showed, never as the console's answer
