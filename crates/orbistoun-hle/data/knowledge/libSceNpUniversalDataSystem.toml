@@ -135,3 +135,33 @@ known_by = "measured"
 cites = "obSCEne REQ-20261014T1110Z-rf05, reports/hardware/report-20261014-batch6.log line 2183 (000-boot/uds-create-event)."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-10-14"
+
+[[function]]
+name = "sceNpUniversalDataSystemDestroyHandle"
+arity = 1
+purpose = "(handle): ends a handle CreateHandle made."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261015T0653Z-ud01, bound by link, after Initialize, CreateContext and CreateHandle): 0x0 the first time, 0x80553106 for the same handle again.",
+    "A handle never given is unmeasured and answers the placeholder.",
+]
+found_by = "generated"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T0653Z-ud01, reports/hardware/report-20261015-batch1.log lines 2025-2032 (000-boot/ux01-calls)."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-15"
+
+[[function]]
+name = "sceNpUniversalDataSystemEventPropertyObjectSetString"
+arity = 3
+purpose = "(object, key, value): sets a string property on a property object."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261015T0653Z-ud01, bound by link, on an object from CreateEventPropertyObject): key \"activityId\" set to \"a1\" answers 0x0, set again to \"a2\" 0x0, and a null value 0x80553115.",
+    "orbistoun does not keep the property; a null object or key is unmeasured and answers the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T0653Z-ud01, reports/hardware/report-20261015-batch1.log lines 2023-2030 (000-boot/ux01-calls)."
+found_in = ["PPSA28061-app0"]
+found_on = "2026-10-15"

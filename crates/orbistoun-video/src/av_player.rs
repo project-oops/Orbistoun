@@ -3,8 +3,8 @@
 //! The player's lifecycle is served as obSCEne measured it (`000-boot/avplayer-lifecycle`,
 //! REQ-20261012T2011Z-625e, `reports/hardware/report-20261014-batch2.log` 1427-1452): `InitEx`
 //! takes the player's memory through the caller's allocate callback and hands back the pointer it
-//! answered as the handle, `IsActive`, `StreamCount` and `PostInit` answer for a player with no
-//! source, and `Close` frees through the deallocate callback. Adding a source and everything that
+//! answered as the handle, `IsActive`, `StreamCount`, `PostInit` and `Stop` (REQ-av01) answer for
+//! a player with no source, and `Close` frees through the deallocate callback. Adding a source and everything that
 //! decodes are declared only: no media stream is measured yet.
 //!
 //! Every arity is `6`, the trampoline's full capture, not a claim about how many arguments a
@@ -171,6 +171,22 @@ pub(crate) fn post_init(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// What `Stop` answered on a player with nothing playing (`stop-after-failed-postinit-rc`,
+/// `stop-twice-rc`).
+const NOT_PLAYING: u64 = 0x806a_0002;
+
+/// `sceAvPlayerStop(handle)`: a player with no source has nothing to stop, and answers
+/// [`NOT_PLAYING`], on every call, staying open; a handle `InitEx` did not open is refused with
+/// [`INVALID_ARGUMENT`] (REQ-av01, `report-20261015-batch1.log` 889-894). PPSA02664 stops its
+/// player after `PostInit` fails.
+pub(crate) fn stop(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if players().contains_key(&args[0]) {
+        NOT_PLAYING
+    } else {
+        INVALID_ARGUMENT
+    }
+}
+
 /// `sceAvPlayerStreamCount(handle)`: no source, no streams (`StreamCount-before-source 0`). A handle
 /// `InitEx` did not open answers the placeholder.
 pub(crate) fn stream_count(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
@@ -211,6 +227,28 @@ mod tests {
         assert_eq!(init(&block(0x100, 0x1234, 0), &mut handle), 0x806a_0001);
         assert_eq!(init(&block(0x230, 0, 0), &mut handle), 0x806a_0001);
         assert_eq!(handle, 0xcc);
+    }
+
+    /// `Stop` on a player with no source - PPSA02664's, after its `PostInit` failed - answers
+    /// `0x806a0002`, again on a second call, and the player stays open; on a handle `InitEx` did not
+    /// open it answers `0x806a0001` (REQ-av01, `report-20261015-batch1.log`,
+    /// `000-boot/sd02-savedata-avplayer`).
+    #[test]
+    fn stop_on_a_player_with_no_source_answers_as_measured() {
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 0x5157_0000;
+        super::players().insert(
+            args[0],
+            super::Player {
+                object: 0,
+                deallocate: 0,
+            },
+        );
+        assert_eq!(super::stop(&args), 0x806a_0002);
+        assert_eq!(super::stop(&args), 0x806a_0002);
+        assert_eq!(super::is_active(&args), 1);
+        args[0] = 0x5157_1000;
+        assert_eq!(super::stop(&args), 0x806a_0001);
     }
 
     /// A handle `InitEx` never opened is not active, has no stream count and does not close.

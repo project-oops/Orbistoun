@@ -72,3 +72,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261012T2011Z-625e, reports/hardware/report-20261014-batch2.log lines 1427-1452 (000-boot/avplayer-lifecycle, StreamCount-before-source)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0", "PPSA04263-app0", "PPSA21564-app0", "PPSA25872-app0"]
 found_on = "2026-10-14"
+
+[[function]]
+name = "sceAvPlayerStop"
+purpose = "Stops a player's playback."
+returns = "status"
+edge_cases = [
+    "MEASURED: on a player whose PostInit failed (the block PPSA02664 passes), 0x806a0002, and 0x806a0002 again on a second Stop; IsActive afterwards still answers the handle with its low bit set. On a handle InitEx did not give, 0x806a0001.",
+    "orbistoun answers 0x806a0002 for any player it opened, since every player here has no source, and 0x806a0001 for any other handle.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T0503Z-av01, reports/hardware/report-20261015-batch1.log lines 887-894 (000-boot/sd02-savedata-avplayer, avplayer-stop)."
+found_in = ["PPSA02664-app0"]
+found_on = "2026-10-15"

@@ -420,3 +420,18 @@ known_by = "measured"
 cites = "obSCEne REQ-20261012T1232Z-ux01, reports/hardware/report-1791818993.txt lines 574-603 (000-boot/ux01-calls)."
 found_in = ["PPSA02664-app0", "PPSA03416-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "scePadDeviceClassParseData"
+arity = 3
+purpose = "(handle, data, out): parses a pad read into its device class's fields."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-20261015T0210Z-pd01, link-bound, after scePadOpen and scePadRead on a standard controller): rc 0, 24 bytes written, all zero, nothing past them in a 0x100-byte block, alike for two reads; a null out answered 0x80920001.",
+    "orbistoun writes the 24 zero bytes for a handle it issued; a handle never issued and a null data are unmeasured and answer the placeholder.",
+]
+found_by = "static"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T0210Z-pd01, reports/hardware/report-20261015-batch1.log lines 1975-1981 (000-boot/ux01-calls)."
+found_in = ["PPSA25872-app0"]
+found_on = "2026-10-15"

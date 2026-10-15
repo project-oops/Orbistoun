@@ -51,6 +51,8 @@ guest_module! {
         "scePadGetControllerInformation" => 2,
         // (handle, info)
         "scePadDeviceClassGetExtendedInformation" => 2,
+        // (handle, data, out)
+        "scePadDeviceClassParseData" => 3,
         "scePadResetOrientation" => 1,
         // The reading functions; `scePadReadExt` is declared and not implemented.
         "scePadReadState" => 2,
@@ -272,6 +274,32 @@ fn pad_get_extended_information(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// What `scePadDeviceClassParseData` wrote for the console's standard controller: twenty-four zero
+/// bytes, and nothing past them in a 0x100-byte block, alike for two reads (REQ-pd01,
+/// `000-boot/ux01-calls`, `report-20261015-batch1.log` 1975-1980).
+const PARSED_DEVICE_CLASS_BYTES: usize = 24;
+
+/// `scePadDeviceClassParseData(handle, data, out)`: for an open handle 0, with
+/// [`PARSED_DEVICE_CLASS_BYTES`] zero bytes written, as the console parsed a standard controller's
+/// read; a null `out` is refused with `0x80920001` (REQ-pd01, line 1981). A handle never issued and
+/// a null `data` are unmeasured and answer the placeholder. PPSA25872 parses once a frame.
+fn pad_device_class_parse_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let (handle, data, out) = (args[0], args[1], args[2]);
+    if ours(handle).is_none() || data == 0 {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    if out == 0 {
+        return PAD_INVALID_ARGUMENT;
+    }
+    // SAFETY: the guest's parsed block, by the call's contract; written through the checked
+    // accessor.
+    if unsafe { orbistoun_mem::guest::write_bytes(out, &[0; PARSED_DEVICE_CLASS_BYTES]) } {
+        OK
+    } else {
+        u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
 /// `scePadReadState(handle, into)` - what the pad is doing now.
 ///
 /// Writes the whole 120-byte extent every call, as measured (`changed 120`), so no stale bytes
@@ -393,6 +421,7 @@ const OWN: &[(&str, GuestFn)] = &[
         "scePadDeviceClassGetExtendedInformation",
         pad_get_extended_information,
     ),
+    ("scePadDeviceClassParseData", pad_device_class_parse_data),
     ("sceImeKeyboardGetResourceId", ime::keyboard_get_resource_id),
     ("scePadGetHandle", pad_refused_to_this_process),
     ("scePadSetProcessPrivilege", pad_refused_to_this_process),
@@ -656,6 +685,24 @@ mod tests {
             call("scePadDeviceClassGetExtendedInformation", &argv),
             0x8092_0003
         );
+    }
+
+    /// Parsing a read on an open handle writes twenty-four zero bytes, a standard controller's,
+    /// and nothing past them; a null `out` is refused with `0x80920001` (REQ-pd01,
+    /// `report-20261015-batch1.log` 1975-1981).
+    #[test]
+    fn device_class_data_parses_to_twenty_four_zero_bytes() {
+        let handle = super::pad_open(&args(0));
+        let data = [0_u8; 0x80];
+        let mut out = [0xcc_u8; 0x100];
+        let mut argv = args(handle);
+        argv[1] = data.as_ptr() as u64;
+        argv[2] = out.as_mut_ptr() as u64;
+        assert_eq!(call("scePadDeviceClassParseData", &argv), 0);
+        assert!(out[..24].iter().all(|&b| b == 0));
+        assert!(out[24..].iter().all(|&b| b == 0xcc), "24 bytes and no more");
+        argv[2] = 0;
+        assert_eq!(call("scePadDeviceClassParseData", &argv), 0x8092_0001);
     }
 
     /// With no keyboard open, the resource id is refused with `0x80bc0002` and nothing written

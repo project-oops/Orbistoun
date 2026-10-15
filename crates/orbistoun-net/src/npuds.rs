@@ -5,7 +5,8 @@
 //! `sceNpUniversalDataSystemCreateContext`, `sceNpUniversalDataSystemCreateHandle` and
 //! `sceNpUniversalDataSystemCreateEventPropertyObject`, `sceNpUniversalDataSystemCreateEvent`,
 //! `sceNpUniversalDataSystemRegisterContext`, `sceNpUniversalDataSystemPostEvent`,
-//! `sceNpUniversalDataSystemDestroyEvent` and `sceNpUniversalDataSystemDestroyEventPropertyObject`
+//! `sceNpUniversalDataSystemDestroyEvent`, `sceNpUniversalDataSystemDestroyEventPropertyObject`,
+//! `sceNpUniversalDataSystemDestroyHandle` and `sceNpUniversalDataSystemEventPropertyObjectSetString`
 //! are implemented, as measured.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestError, GuestFn};
@@ -31,6 +32,10 @@ guest_module! {
         "sceNpUniversalDataSystemDestroyEvent" => 1,
         // (object)
         "sceNpUniversalDataSystemDestroyEventPropertyObject" => 1,
+        // (handle)
+        "sceNpUniversalDataSystemDestroyHandle" => 1,
+        // (object, key, value)
+        "sceNpUniversalDataSystemEventPropertyObjectSetString" => 3,
     }
 }
 
@@ -52,6 +57,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         (
             "sceNpUniversalDataSystemDestroyEventPropertyObject",
             destroy_event_property_object,
+        ),
+        ("sceNpUniversalDataSystemDestroyHandle", destroy_handle),
+        (
+            "sceNpUniversalDataSystemEventPropertyObjectSetString",
+            set_string,
         ),
     ]
 }
@@ -109,6 +119,50 @@ fn create_handle(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
         0
     } else {
         u64::from(GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// Handles `sceNpUniversalDataSystemDestroyHandle` has ended.
+static DESTROYED_HANDLES: std::sync::Mutex<std::collections::BTreeSet<u32>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// What a second `sceNpUniversalDataSystemDestroyHandle` of one handle answered (REQ-ud01).
+const INVALID_HANDLE: u64 = 0x8055_3106;
+
+/// `sceNpUniversalDataSystemDestroyHandle(handle)`: 0 for a handle `CreateHandle` gave, then
+/// [`INVALID_HANDLE`] once it is gone (REQ-ud01, `000-boot/ux01-calls`,
+/// `report-20261015-batch1.log` 2031-2032). A handle never given is unmeasured and answers the
+/// placeholder. PPSA28061 destroys three.
+fn destroy_handle(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let handle = args[0] as u32;
+    let issued = 0x0002_0176..NEXT_HANDLE.load(std::sync::atomic::Ordering::Relaxed);
+    if !issued.contains(&handle) {
+        return u64::from(GuestError::Unimplemented.as_raw());
+    }
+    let mut destroyed = DESTROYED_HANDLES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if destroyed.insert(handle) {
+        0
+    } else {
+        INVALID_HANDLE
+    }
+}
+
+/// What `sceNpUniversalDataSystemEventPropertyObjectSetString` answered for a null value
+/// (REQ-ud01).
+const INVALID_VALUE: u64 = 0x8055_3115;
+
+/// `sceNpUniversalDataSystemEventPropertyObjectSetString(object, key, value)`: 0 for a key and a
+/// value, again when the key is set over, and [`INVALID_VALUE`] for a null value (REQ-ud01,
+/// `000-boot/ux01-calls`, `report-20261015-batch1.log` 2028-2030). The property is not kept: the
+/// object is the console's own, and nothing a title was seen to read it back. A null object or key
+/// is unmeasured and answers the placeholder. PPSA28061 sets three.
+fn set_string(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    match args {
+        [0, ..] | [_, 0, ..] => u64::from(GuestError::Unimplemented.as_raw()),
+        [_, _, 0, ..] => INVALID_VALUE,
+        _ => 0,
     }
 }
 
@@ -266,6 +320,31 @@ mod tests {
         args[0] = 0x1000;
         assert_eq!(super::destroy_event(&args), 0);
         assert_eq!(super::destroy_event_property_object(&args), 0);
+    }
+
+    /// `EventPropertyObjectSetString(object, key, value)` answers 0, again over the same key, and
+    /// `0x80553115` for a null value; `DestroyHandle(handle)` answers 0, then `0x80553106` for the
+    /// same handle (REQ-ud01, `report-20261015-batch1.log` 2027-2032).
+    #[test]
+    fn strings_are_set_and_handles_destroyed_as_measured() {
+        let key = c"activityId";
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 0x1000;
+        args[1] = key.as_ptr() as u64;
+        args[2] = c"a1".as_ptr() as u64;
+        assert_eq!(super::set_string(&args), 0);
+        args[2] = c"a2".as_ptr() as u64;
+        assert_eq!(super::set_string(&args), 0);
+        args[2] = 0;
+        assert_eq!(super::set_string(&args), 0x8055_3115);
+
+        let mut handle = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = std::ptr::from_mut(&mut handle).expose_provenance() as u64;
+        assert_eq!(super::create_handle(&args), 0);
+        args[0] = handle & 0xffff_ffff;
+        assert_eq!(super::destroy_handle(&args), 0);
+        assert_eq!(super::destroy_handle(&args), 0x8055_3106);
     }
 
     /// `RegisterContext(ctx, handle, 0)` answers `0x80553104` on the console, a second time too
