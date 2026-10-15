@@ -1227,16 +1227,22 @@ fn log_flip_origins() {
     if let Some(line) = origins.describe() {
         tracing::info!("{line}");
     }
-    if let Some(shown) = origins.last {
-        let line = orbistoun_gpu::agc_driver::last_drawn_into(shown).map_or_else(
-            || undrawn_line(shown),
-            |by| {
-                drawn_by_line(shown, &by, &|base| {
-                    orbistoun_gpu::agc_driver::last_drawn_into(base).map(|into| into.frame)
-                })
-            },
-        );
-        tracing::info!("{line}");
+    let Some(shown) = origins.last else {
+        return;
+    };
+    let into = orbistoun_gpu::agc_driver::last_drawn_into;
+    let frame_into = |base: u64| into(base).map(|by| by.frame);
+    let Some(by) = into(shown) else {
+        tracing::info!("{}", undrawn_line(shown));
+        return;
+    };
+    let lead = format!("the last flip showed {shown:#x}, drawn into as");
+    tracing::info!("{}", drawn_by_line(&lead, &by, &frame_into));
+    // Each render target it sampled, followed to the frame that drew it: what a black frame
+    // composited from black targets is traced through.
+    for (base, target) in sampled_targets(&by, MOST_TRACED_TARGETS, &into) {
+        let lead = format!("  it sampled {base:#x}, drawn into as");
+        tracing::info!("{}", drawn_by_line(&lead, &target, &frame_into));
     }
 }
 
@@ -1248,11 +1254,39 @@ fn undrawn_line(shown: u64) -> String {
     format!("the last flip showed {shown:#x}, which no frame orbistoun drew went into")
 }
 
-/// What drew the frame a flip of `shown` showed: which frame drawn it was, its draws, each texture
-/// they bound with what it holds ([`texel_summary`]), and where each texture they sampled lies,
-/// with the frame `drawn` says orbistoun drew into it, where it drew one.
+/// How many sampled render targets [`log_flip_origins`] follows from the last flip's frame.
+const MOST_TRACED_TARGETS: usize = 4;
+
+/// The render targets `by` sampled, followed breadth first to the frames `into` says were drawn
+/// into them and on to the targets those sampled, each once, at most `most`.
+fn sampled_targets(
+    by: &orbistoun_gpu::agc_driver::DrawnBy,
+    most: usize,
+    into: &dyn Fn(u64) -> Option<orbistoun_gpu::agc_driver::DrawnBy>,
+) -> Vec<(u64, orbistoun_gpu::agc_driver::DrawnBy)> {
+    let mut followed: Vec<(u64, orbistoun_gpu::agc_driver::DrawnBy)> = Vec::new();
+    let mut queue: std::collections::VecDeque<u64> =
+        by.sampled.iter().map(|&(base, _, _)| base).collect();
+    while let Some(base) = queue.pop_front() {
+        if followed.len() >= most {
+            break;
+        }
+        if followed.iter().any(|(seen, _)| *seen == base) {
+            continue;
+        }
+        if let Some(target) = into(base) {
+            queue.extend(target.sampled.iter().map(|&(next, _, _)| next));
+            followed.push((base, target));
+        }
+    }
+    followed
+}
+
+/// What drew a frame, after `lead`: which frame drawn it was, its draws, each texture they bound
+/// with what it holds ([`texel_summary`]), and where each texture they sampled lies, with the frame
+/// `drawn` says orbistoun drew into it, where it drew one.
 fn drawn_by_line(
-    shown: u64,
+    lead: &str,
     by: &orbistoun_gpu::agc_driver::DrawnBy,
     drawn: &dyn Fn(u64) -> Option<u64>,
 ) -> String {
@@ -1290,7 +1324,7 @@ fn drawn_by_line(
         format!("; sampling {}", sampled.join(", "))
     };
     format!(
-        "the last flip showed {shown:#x}, drawn into as frame {} by {} draw(s), binding {binding}{sampling}",
+        "{lead} frame {} by {} draw(s), binding {binding}{sampling}",
         by.frame, by.draws
     )
 }
@@ -1827,7 +1861,7 @@ mod tests {
         };
         let drawn = |base: u64| (base == 0x2000).then_some(9);
         assert_eq!(
-            super::drawn_by_line(0x1000, &by, &drawn),
+            super::drawn_by_line("the last flip showed 0x1000, drawn into as", &by, &drawn),
             concat!(
                 "the last flip showed 0x1000, drawn into as frame 12 by 3 draw(s), binding ",
                 "slot 0 2x1 (first 0x00000005, 1 distinct); sampling 0x2000 (2x1, drawn into as ",
@@ -1839,11 +1873,43 @@ mod tests {
             sampled: Vec::new(),
             ..by
         };
-        assert!(super::drawn_by_line(0x1000, &bare, &drawn).ends_with("binding no texture"));
+        assert!(
+            super::drawn_by_line("the last flip showed 0x1000, drawn into as", &bare, &drawn)
+                .ends_with("binding no texture")
+        );
         // A flip of a buffer no drawn frame went into says so.
         assert_eq!(
             super::undrawn_line(0x1000),
             "the last flip showed 0x1000, which no frame orbistoun drew went into"
+        );
+    }
+
+    /// The render targets a frame sampled are followed to the frames drawn into them, and theirs
+    /// in turn, each once and no deeper than the bound: a target drawn from itself does not loop.
+    #[test]
+    fn the_sampled_targets_are_followed_to_their_frames() {
+        let frame =
+            |frame: u64, sampled: Vec<(u64, u32, u32)>| orbistoun_gpu::agc_driver::DrawnBy {
+                frame,
+                draws: 1,
+                textures: Vec::new(),
+                sampled,
+            };
+        let shown = frame(9, vec![(0x2000, 4, 4), (0x3000, 4, 4)]);
+        let into = |base: u64| match base {
+            0x2000 => Some(frame(5, vec![(0x4000, 4, 4), (0x2000, 4, 4)])),
+            0x4000 => Some(frame(2, Vec::new())),
+            _ => None,
+        };
+        let followed: Vec<(u64, u64)> = super::sampled_targets(&shown, 4, &into)
+            .iter()
+            .map(|(base, by)| (*base, by.frame))
+            .collect();
+        assert_eq!(followed, vec![(0x2000, 5), (0x4000, 2)]);
+        assert_eq!(
+            super::sampled_targets(&shown, 1, &into).len(),
+            1,
+            "no deeper than asked"
         );
     }
 
