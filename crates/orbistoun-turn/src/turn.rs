@@ -83,6 +83,14 @@ pub enum Step {
         /// Which import was handed it, so the report says whose structure this is.
         subject: String,
     },
+    /// Trial an unimplemented function answering zero, against a run with nothing applied.
+    ///
+    /// Writing the function stays a person's job; whether its answer is what holds the guest back
+    /// is a measurement, and the answer the trial forced is the census question (D832).
+    TrialAnswer {
+        /// The function, as the finding names it.
+        target: String,
+    },
     /// Nothing here is mechanical.
     Person {
         /// Why not: a statement, never a shrug.
@@ -95,6 +103,26 @@ impl Step {
     #[must_use]
     pub const fn is_automatic(&self) -> bool {
         !matches!(self, Self::Person { .. })
+    }
+}
+
+/// The step an unimplemented function's finding calls for: read the structure it was handed,
+/// which [`turn`] follows with a trial of its answer, or trial its answer outright. Writing it stays
+/// a person's job.
+fn unimplemented_step(finding: &Finding) -> Step {
+    match (handed_structure(finding), finding.subject.clone()) {
+        (Some(address), subject) => Step::ReadStructure {
+            address,
+            length: STRUCTURE_BYTES,
+            subject: subject.unwrap_or_default(),
+        },
+        (None, Some(target)) => Step::TrialAnswer { target },
+        (None, None) => Step::Person {
+            why: concat!(
+                "implementing a function is a person writing code - the loop finds the ",
+                "wall, it does not build what goes behind it"
+            ),
+        },
     }
 }
 
@@ -138,19 +166,7 @@ pub fn step(finding: &Finding) -> Step {
         },
         // Writing the function stays a person's job and is not automated. Reading the structure it
         // was handed is not implementing it, and informs whoever does.
-        Gap::Unimplemented => handed_structure(finding).map_or(
-            Step::Person {
-                why: concat!(
-                    "implementing a function is a person writing code - the loop finds the ",
-                    "wall, it does not build what goes behind it"
-                ),
-            },
-            |address| Step::ReadStructure {
-                address,
-                length: STRUCTURE_BYTES,
-                subject: finding.subject.clone().unwrap_or_default(),
-            },
-        ),
+        Gap::Unimplemented => unimplemented_step(finding),
         // Looking is a sweep: every candidate is already in the trace, at a fraction of a second
         // each (D299).
         Gap::ErrorUsedAsPointer => {
@@ -331,6 +347,18 @@ pub enum Taken {
         /// The second run's.
         second: (Option<u64>, usize),
     },
+    /// An unimplemented function was trialled answering zero.
+    ///
+    /// A measurement of the guest, not of the console: getting further says the answer is what held
+    /// it back, never that zero is the console's answer.
+    Answered {
+        /// The function trialled.
+        function: String,
+        /// Distinct imports reached with it answering zero.
+        reached: usize,
+        /// And without it.
+        was: usize,
+    },
     /// A structure a call was handed was read back, and its bytes are on the error stream.
     ///
     /// It carries no verdict, because it is an observation, not a comparison.
@@ -437,6 +465,20 @@ impl Taken {
                 reached,
             } => format!(
                 "read {subject}'s structure at {address:#x} - the bytes are above, {reached} imports reached"
+            ),
+            // Marked when it got further: that is the census question to file, not an answer to ship.
+            Self::Answered {
+                function,
+                reached,
+                was,
+            } => format!(
+                "{}trialled {function} answering zero: reached {reached} against {was}{}",
+                if reached > was { "*** " } else { "" },
+                if reached > was {
+                    "; its answer holds the guest back - ask the console for it"
+                } else {
+                    ""
+                }
             ),
             Self::Elsewhere(why) => format!("not from here: {why}"),
             Self::Declined(why) => format!("stopped: {why}"),
@@ -595,6 +637,7 @@ pub fn take(trial: &mut impl crate::experiment::Trial, step: &Step) -> Result<Ta
             length,
             subject,
         } => read_structure(trial, *address, *length, subject),
+        Step::TrialAnswer { target } => trial_answer(trial, target),
         Step::NameAHash { .. } => Ok(Taken::Elsewhere(
             "naming needs a model and a local runtime, which a sweep does not start",
         )),
@@ -632,9 +675,45 @@ pub fn turn(
             out.push(follow);
             continue;
         }
+        // The structure an unimplemented call was handed is read, then whether its answer is what
+        // holds the guest back is asked of the same function.
+        if let Step::ReadStructure { subject, .. } = step
+            && !subject.is_empty()
+        {
+            let follow = take(
+                trial,
+                &Step::TrialAnswer {
+                    target: subject.clone(),
+                },
+            )?;
+            out.push(taken);
+            out.push(follow);
+            continue;
+        }
         out.push(taken);
     }
     Ok(out)
+}
+
+/// Runs once with nothing applied and once with `target` answering zero, and reports both reaches.
+///
+/// # Errors
+///
+/// If a run could not be made at all.
+fn trial_answer(
+    trial: &mut impl crate::experiment::Trial,
+    target: &str,
+) -> Result<Taken, crate::Error> {
+    let was = trial.run(None)?.reached;
+    let answered = trial.spawn_axes(&[crate::axis::Axis::Return {
+        target: bare(target).to_owned(),
+        value: 0,
+    }])?;
+    Ok(Taken::Answered {
+        function: target.to_owned(),
+        reached: answered.reached,
+        was,
+    })
 }
 
 /// Reads a structure back and reports where it looked.
@@ -1022,10 +1101,18 @@ mod tests {
         );
     }
 
-    /// Writing the implementation is not automated, by policy.
+    /// Writing the implementation is not automated, by policy: an unimplemented function is
+    /// trialled answering zero, which measures the guest and ships nothing, and with no function
+    /// named there is nothing even to trial.
     #[test]
     fn implementing_a_function_stays_with_a_person() {
-        assert!(!step(&finding(Gap::Unimplemented, Some("libkernel::sceFoo"))).is_automatic());
+        assert_eq!(
+            step(&finding(Gap::Unimplemented, Some("libkernel::sceFoo"))),
+            Step::TrialAnswer {
+                target: "libkernel::sceFoo".to_owned()
+            }
+        );
+        assert!(!step(&finding(Gap::Unimplemented, None)).is_automatic());
     }
 
     /// The model appears in exactly one branch, where the hash checks the guess.
@@ -1217,6 +1304,56 @@ mod tests {
 
         let declined = take(&mut guest, &Step::Person { why: "because" }).expect("no run");
         assert!(matches!(declined, Taken::Declined("because")));
+    }
+
+    /// An unimplemented function is trialled answering zero against a run with nothing applied,
+    /// and the turn says whether the guest got further: a title retrying a call it is refused is
+    /// moved by its answer, which is the question a measurement then settles (D832).
+    #[test]
+    fn an_unimplemented_function_is_trialled_answering_zero() {
+        /// A guest that gets further once `sceRetried` answers zero.
+        struct Retries;
+        impl crate::experiment::Trial for Retries {
+            fn run(
+                &mut self,
+                _experiment: Option<&crate::experiment::Experiment>,
+            ) -> Result<crate::experiment::Outcome, crate::Error> {
+                Ok(outcome(0, false, 10))
+            }
+            fn spawn_axes(
+                &mut self,
+                axes: &[crate::axis::Axis],
+            ) -> Result<crate::experiment::Outcome, crate::Error> {
+                let answered = axes.iter().any(|axis| {
+                    matches!(axis, crate::axis::Axis::Return { target, value: 0 } if target == "sceRetried")
+                });
+                Ok(outcome(0, false, if answered { 12 } else { 10 }))
+            }
+        }
+        let step = Step::TrialAnswer {
+            target: "libSceX::sceRetried".to_owned(),
+        };
+        let taken = take(&mut Retries, &step).expect("the trial runs");
+        assert_eq!(
+            taken,
+            Taken::Answered {
+                function: "libSceX::sceRetried".to_owned(),
+                reached: 12,
+                was: 10,
+            }
+        );
+        // After the structure it was handed is read, the same function is trialled.
+        let plan = [Step::ReadStructure {
+            address: 0x1000,
+            length: 0x40,
+            subject: "libSceX::sceRetried".to_owned(),
+        }];
+        let all = turn(&mut Retries, &plan).expect("the turn runs");
+        assert!(
+            all.iter()
+                .any(|t| matches!(t, Taken::Answered { reached: 12, .. })),
+            "{all:?}"
+        );
     }
 
     /// A dereferenced placeholder is traced to whichever call answered with it.

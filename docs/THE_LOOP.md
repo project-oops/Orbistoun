@@ -114,7 +114,10 @@ the file is shown absent from the place the run reads: the resolved data directo
     device played, a flipped buffer the window could not show, pad ports set to a gamepad
     nothing reads. They rank below every wall, since a silent title still runs, and are always
     printed, since nothing else names them.
-17. A person reads the top finding. `orbistoun-turn` has already run the mechanical sweeps
+17. A person reads the top finding. For an unimplemented function, `orbistoun-turn` reads the
+    structure it was handed and runs the title again with it answering zero: a run that gets
+    further says the answer is what holds the guest back, and the console's answer is the
+    measurement to request (D832). `orbistoun-turn` has already run the mechanical sweeps
     against it, and a thread waiting on one call has already been resolved to the call it waits
     on (see [the wait sub-loop](#the-wait-sub-loop)). If what is left is an unmeasured interface
     or structure, the next step is a hardware probe question rather than a guess, filed as a
