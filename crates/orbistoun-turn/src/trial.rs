@@ -102,28 +102,14 @@ impl GuestTrial {
             .map_err(|e| Error::Reply(format!("parsing {}: {e}", path.display())))
     }
 
-    /// The trace this run wrote.
-    ///
-    /// Newest by modification time. Traces are keyed by module, so a run overwrites its own and the
-    /// newest is the one just written while a sweep points at one title.
+    /// The trace this run wrote: the latest run of this title's own, in its run directory (D865).
     fn newest_trace(&self) -> Result<PathBuf, Error> {
-        let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-        let entries = std::fs::read_dir(&self.traces)
-            .map_err(|e| Error::Reply(format!("reading {}: {e}", self.traces.display())))?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            if best.as_ref().is_none_or(|(seen, _)| modified > *seen) {
-                best = Some((modified, path));
-            }
-        }
-        best.map(|(_, path)| path).ok_or_else(|| {
-            Error::Reply(format!("no trace was written to {}", self.traces.display()))
+        orbistoun_report::trace::latest_trace_path(&self.traces, &self.title).ok_or_else(|| {
+            Error::Reply(format!(
+                "no run of {} wrote a trace under {}",
+                self.title.display(),
+                self.traces.display()
+            ))
         })
     }
 }
@@ -296,6 +282,34 @@ pub fn traces_in(data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// A trial reads the trace its own title's latest run wrote, in that run's directory (D865),
+    /// not whichever trace file in the traces directory is newest: runs write no trace there any
+    /// more, so a file found there is another run's, and every trial read alike.
+    #[test]
+    fn a_trial_reads_its_own_runs_trace() {
+        let traces = tempfile::tempdir().expect("a directory");
+        std::fs::write(
+            traces.path().join("eboot-bin-STALE.json"),
+            r#"{"stale": true}"#,
+        )
+        .expect("a stale trace");
+        let title = std::path::Path::new("titles/TEST00001/eboot.bin");
+        let run = orbistoun_report::trace::run_dir(
+            traces.path(),
+            &title.to_string_lossy(),
+            &orbistoun_report::RunId::new(1_000, 1),
+        );
+        std::fs::create_dir_all(&run).expect("the run's directory");
+        std::fs::write(
+            run.join(orbistoun_report::trace::TRACE_FILE),
+            r#"{"this_run": true}"#,
+        )
+        .expect("the run's trace");
+        let trial = super::GuestTrial::new("orbistoun-cli", title, traces.path());
+        let read = trial.trace().expect("a trace");
+        assert_eq!(read.get("this_run"), Some(&serde_json::Value::Bool(true)));
+    }
+
     /// Every run a trial makes is given the time limit the turn was asked for, so a title that
     /// needs longer than the default to reach its wall is measured where its wall is; with none
     /// asked for, the run's own default holds.
