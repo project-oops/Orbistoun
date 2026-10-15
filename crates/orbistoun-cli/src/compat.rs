@@ -835,6 +835,10 @@ fn note_reproduction(
 /// How many of the last kept frames [`report_light`] reads.
 const LIGHT_FRAMES: usize = 4;
 
+/// How many kept frames, spread evenly over the run, [`report_light`] reads to say whether its
+/// picture moved, and since when it stands still.
+const LIGHT_SPREAD: usize = 12;
+
 /// Says how much of each of the last kept frames shows anything, and finds a run whose last frames
 /// are each one colour: what a title that presents yet draws nothing visible looks like.
 fn report_light(paths: &orbistoun_paths::Paths) -> Result<()> {
@@ -860,6 +864,22 @@ fn report_light(paths: &orbistoun_paths::Paths) -> Result<()> {
             }
         );
         lights.push(light);
+    }
+    let mut over = Vec::new();
+    for frame in crate::frames::spread(&kept, LIGHT_SPREAD) {
+        let bytes = std::fs::read(&frame.path)
+            .with_context(|| format!("reading {}", frame.path.display()))?;
+        over.push((frame.flip, crate::frames::light(&bytes)));
+    }
+    if let Some(since) = crate::frames::same_since(&over) {
+        let lit: Vec<String> = over
+            .iter()
+            .map(|(flip, light)| format!("{flip}: {}", light.lit))
+            .collect();
+        println!(
+            "  light over the run, pixels lit by flip: {}; the picture is as it ends from flip {since}",
+            lit.join(", ")
+        );
     }
     if !lights.is_empty() && lights.iter().all(crate::frames::dark) {
         let colours: std::collections::BTreeSet<String> = lights

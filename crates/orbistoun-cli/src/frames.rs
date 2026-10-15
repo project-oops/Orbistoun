@@ -73,6 +73,18 @@ pub(crate) const fn dark(light: &Light) -> bool {
     light.colours <= 1 || light.lit * 1000 < light.pixels
 }
 
+/// The flip from which every one of `lights` shows what the last does - as many pixels lit, as many
+/// colours: since when a run's picture has stood still. `None` for no frames.
+pub(crate) fn same_since(lights: &[(u64, Light)]) -> Option<u64> {
+    let (_, last) = lights.last()?;
+    lights
+        .iter()
+        .rev()
+        .take_while(|(_, light)| light.lit == last.lit && light.colours == last.colours)
+        .last()
+        .map(|&(flip, _)| flip)
+}
+
 /// The [`Light`] of a frame's `Rgba8` bytes.
 pub(crate) fn light(bytes: &[u8]) -> Light {
     let mut colours: std::collections::HashSet<[u8; 3]> = std::collections::HashSet::new();
@@ -443,6 +455,29 @@ mod tests {
         let mut sliver = [0, 0, 0, 0xff].repeat(2000);
         sliver[0] = 0xff;
         assert!(super::dark(&light(&sliver)));
+    }
+
+    /// A run's picture is unchanged from the first of its last frames that light as the last one
+    /// does: a run that moves past black says when it stopped moving, and one that never moves
+    /// says its first frame.
+    #[test]
+    fn a_run_says_since_when_its_picture_is_unchanged() {
+        let shows = |lit, colours| super::Light {
+            pixels: 100,
+            lit,
+            colours,
+            only: None,
+        };
+        let moving = [
+            (1, shows(0, 1)),
+            (40, shows(5, 3)),
+            (80, shows(9, 7)),
+            (120, shows(9, 7)),
+        ];
+        assert_eq!(super::same_since(&moving), Some(80));
+        let still = [(1, shows(0, 1)), (40, shows(0, 1))];
+        assert_eq!(super::same_since(&still), Some(1));
+        assert_eq!(super::same_since(&[]), None);
     }
 
     /// The difference picture is black where the frames agree and holds the per-channel distance
