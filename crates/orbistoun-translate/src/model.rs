@@ -751,6 +751,13 @@ pub trait Model {
     /// wavefront where one invocation simulates all of them.
     fn lanes(&self) -> u32;
 
+    /// Whether `lane` is known not to run, where the model knows its execution mask (a lane run,
+    /// D758): a compare writes zero for such a lane, so what the lane holds is not read. Answers
+    /// `false` wherever that is not known.
+    fn lane_known_idle(&self, _lane: u32) -> bool {
+        false
+    }
+
     /// How many of [`Self::lanes`] the per-lane loops run, from lane zero: all of them, but in a
     /// model that knows no lane past these is read (a lane run, D758), which leaves each skipped
     /// lane's registers and mask bits as they were.
@@ -5034,8 +5041,12 @@ fn compare<M: Model + ?Sized>(
 
     let zero = model.constant(0);
     let mut halves = (zero, zero);
-    // Every lane: the answer is a mask (see `carry_arithmetic`).
+    // Every lane: the answer is a mask (see `carry_arithmetic`). A lane known not to run answers
+    // zero whatever it holds, so it is not read.
     for lane in 0..model.modelled_lanes() {
+        if model.lane_known_idle(lane) {
+            continue;
+        }
         let left = model.read_source(instruction, first, lane)?;
         let right = model.read_source(instruction, second, lane)?;
         let (left, right) = if floats {
@@ -5046,6 +5057,7 @@ fn compare<M: Model + ?Sized>(
         let condition = model.compare(opcode, left, right);
         halves = model.set_lane_bit(halves, lane, condition);
     }
+    let halves = running_bits(model, halves)?;
 
     model.write_lane_mask(name, halves.0, halves.1)?;
     model.count();
@@ -7279,6 +7291,9 @@ fn sdwa_compare<M: Model + ?Sized>(
     let zero = model.constant(0);
     let mut halves = (zero, zero);
     for lane in 0..model.modelled_lanes() {
+        if model.lane_known_idle(lane) {
+            continue;
+        }
         let mut sides = [zero, zero];
         for (index, (side, operand)) in sides.iter_mut().zip(&sources).enumerate() {
             let value = model.read_source(instruction, operand, lane)?;
@@ -7288,6 +7303,7 @@ fn sdwa_compare<M: Model + ?Sized>(
         let condition = model.compare(opcode, sides[0], sides[1]);
         halves = model.set_lane_bit(halves, lane, condition);
     }
+    let halves = running_bits(model, halves)?;
     if bit(15) {
         let register = word >> 8 & 0x7f;
         let words = if model.lanes() > 32 { 2 } else { 1 };
@@ -7348,6 +7364,19 @@ fn sdwa_carry<M: Model + ?Sized>(
     plain.operands[3] = sdwa_operand(instruction, u32::from(*vsrc1), fields.src1_scalar)?;
     plain.second_word = None;
     carry_arithmetic(model, &plain, name)
+}
+
+/// A compare's answer with every lane that does not run zeroed, as the hardware writes it (AMD's
+/// published RDNA instruction set, VOPC): its two halves anded with the execution mask's.
+fn running_bits<M: Model + ?Sized>(
+    model: &mut M,
+    (low, high): (Id, Id),
+) -> Result<(Id, Id), TranslateError> {
+    let (running_low, running_high) = model.read_lane_mask(EXEC_LOW_HALF)?;
+    Ok((
+        model.binary(op::BITWISE_AND, low, running_low),
+        model.binary(op::BITWISE_AND, high, running_high),
+    ))
 }
 
 /// The long form a float short-form instruction's SDWA form is, for an `SDWA_FLOAT` one.
@@ -9489,6 +9518,9 @@ fn compare_long<M: Model + ?Sized>(
     let zero = model.constant(0);
     let mut halves = (zero, zero);
     for lane in 0..model.modelled_lanes() {
+        if model.lane_known_idle(lane) {
+            continue;
+        }
         let mut sides = [zero, zero];
         for (source, (side, operand)) in sides.iter_mut().zip([first, second]).enumerate() {
             let value = model.read_source(instruction, operand, lane)?;

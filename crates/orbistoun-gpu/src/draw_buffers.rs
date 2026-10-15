@@ -793,7 +793,9 @@ pub(crate) fn dispatch_global_range(
     ),
     memory: &impl GuestMemory,
 ) -> Result<(u64, u64), Refusal> {
-    use orbistoun_translate::evaluate::{WaveEntry, wave_lane_addresses};
+    use orbistoun_translate::evaluate::{
+        LOOPS_PAST_THE_BOUND, WaveEntry, long_wave_lane_addresses, wave_lane_addresses,
+    };
     let waves = inputs.waves(width);
     let runs = groups.iter().map(|&n| u64::from(n)).product::<u64>() * u64::from(waves);
     if runs > MOST_DISPATCH_WAVES {
@@ -810,7 +812,8 @@ pub(crate) fn dispatch_global_range(
         Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     };
     let [x_threads, y_threads, z_threads] = inputs.threads.map(|n| n.max(1));
-    let mut found = orbistoun_translate::evaluate::LaneAddresses::new();
+    // The span every wave reads, folded wave by wave: a long loop's addresses are many.
+    let mut span: Option<(u64, u64)> = None;
     for z in 0..groups[2] {
         for y in 0..groups[1] {
             for x in 0..groups[0] {
@@ -846,20 +849,48 @@ pub(crate) fn dispatch_global_range(
                         threads,
                         components: inputs.thread_id_components,
                     };
-                    let addresses = wave_lane_addresses(
+                    let addresses = match wave_lane_addresses(
                         &prepared.program,
                         encodings,
                         user_data,
                         (width, &entry),
                         &mut word,
-                    )
-                    .map_err(|why| format!("{why}; {}", wave_entry(user_data.len(), inputs)))?;
-                    found.extend(addresses);
+                    ) {
+                        Ok(addresses) => addresses,
+                        // A loop longer than the model follows is followed natively (D850).
+                        Err(why) if why == LOOPS_PAST_THE_BOUND => long_wave_lane_addresses(
+                            &prepared.program,
+                            user_data,
+                            (width, &entry),
+                            &mut word,
+                        )
+                        .map_err(|at| -> Refusal {
+                            let step = prepared.program.instruction_named(at);
+                            if prepared.program.runs_quickly() {
+                                format!("{why}; the native run stops at {step}").into()
+                            } else {
+                                format!("{why}; the native run does not carry out {step}").into()
+                            }
+                        })?,
+                        Err(why) => {
+                            return Err(
+                                format!("{why}; {}", wave_entry(user_data.len(), inputs)).into()
+                            );
+                        }
+                    };
+                    let (first, bytes) = span_of(global, addresses);
+                    if bytes > 0 {
+                        let end = first + bytes;
+                        span =
+                            Some(span.map_or((first, end), |(low, high)| {
+                                (low.min(first), high.max(end))
+                            }));
+                    }
                 }
             }
         }
     }
-    Ok(span_of(global, found))
+    Ok(span.map_or((0, 0), |(low, high)| (low, high - low)))
 }
 
 /// A buffer descriptor's fourth word for a draw with these user-data words - its format and
@@ -1569,6 +1600,68 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A dispatch whose global load loops longer than the model follows binds what every pass
+    /// reads, found natively (D850, D883): a wave narrows its mask a pass at a time and leaves
+    /// through `s_cbranch_execz`, as Grand Theft Auto V's copy loop does - here a hundred passes of
+    /// four bytes from `s0`.
+    #[test]
+    fn a_dispatchs_long_loop_binds_every_pass() {
+        use orbistoun_shader::EncodingTable;
+        use orbistoun_translate::draw_buffers::GlobalLoads;
+        use orbistoun_translate::wavefront::ComputeInputs;
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let short_form = |name: &str, dst: u32, src0: u32, vsrc1: u32| {
+            let (family, opcode) = encodings.find_by_name(name).expect(name);
+            let encoding = encodings
+                .encodings()
+                .iter()
+                .find(|encoding| encoding.name == family)
+                .expect("its family");
+            encoding.value | (opcode << encoding.opcode.shift) | (dst << 17) | (vsrc1 << 9) | src0
+        };
+        let (family, opcode) = encodings.find_by_name("s_andn2_b64").expect("andn2");
+        let sop2 = encodings
+            .encodings()
+            .iter()
+            .find(|encoding| encoding.name == family)
+            .map(|encoding| encoding.value | (opcode << encoding.opcode.shift))
+            .expect("its family");
+        let prefix = vec![
+            // v_mov_b32 v6, 0.
+            short_form("v_mov_b32_e32", 6, 128, 0),
+            // loop: v_cmp_le_u32 vcc, s1, v6; s_andn2_b64 exec, exec, vcc; s_cbranch_execz end.
+            short_form("v_cmp_le_u32_e32", 0, 1, 6),
+            sop2 | 0x7e << 16 | 0x6a << 8 | 0x7e,
+            0xbf88_0007,
+            // v_add_nc_u32 v1, s0, v6; v_mov_b32 v2, 0; global_load_dword v9, v[1:2], off.
+            short_form("v_add_nc_u32_e32", 1, 0, 6),
+            short_form("v_mov_b32_e32", 2, 128, 0),
+            0xdc30_8000,
+            0x097d_0001,
+            // v_add_nc_u32 v6, 4, v6; s_branch loop.
+            short_form("v_add_nc_u32_e32", 6, 128 + 4, 6),
+            0xbf82_fff7,
+        ];
+        let global = GlobalLoads {
+            prefix,
+            loads: vec![(24, 4)],
+            first_register: 0,
+            user_data: 2,
+            width: 64,
+        };
+        let inputs = ComputeInputs {
+            thread_id_components: 1,
+            threads: [1, 1, 1],
+            ..ComputeInputs::default()
+        };
+        let range = super::dispatch_global_range(
+            &global,
+            (&[0x7_0000, 400], inputs, [1, 1, 1], 64),
+            &At(0, Vec::new()),
+        );
+        assert_eq!(range, Ok((0x7_0000, 400)));
     }
 
     /// Guest memory at one address.

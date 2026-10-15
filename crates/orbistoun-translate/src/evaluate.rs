@@ -510,11 +510,7 @@ fn run_lanes(
             break;
         }
         if steps > 4 * decode.instructions.len() {
-            return Err(concat!(
-                "the program loops more steps than a lane run follows before its last global ",
-                "load, whose later passes would read past the addresses reached (D758)"
-            )
-            .into());
+            return Err(LOOPS_PAST_THE_BOUND.into());
         }
         steps += 1;
         let Some((family, name)) = named(encodings, instruction) else {
@@ -549,6 +545,10 @@ fn run_lanes(
                         return Err("a branch with no target (D758)".into());
                     };
                     let target = i64::from(instruction.offset) + 4 + 4 * simm16(*jump);
+                    // A jump past the run's end leaves every load behind it: the run is done.
+                    if target > i64::from(until) {
+                        break;
+                    }
                     at = decode
                         .instructions
                         .iter()
@@ -580,7 +580,7 @@ fn run_lanes(
                 model.catch_up();
             }
             // Any other access's destination is what memory held, unknown here.
-            _ => model.forget_vector(instruction.operands.first(), 4),
+            _ => model.forget_vector(instruction.operands.first(), written_vectors(name)),
         }
         causes.record(model, (instruction, name), &before, lanes);
     }
@@ -662,8 +662,40 @@ fn spirv_float_compare(opcode: u16, a: f32, b: f32) -> Option<bool> {
     })
 }
 
-/// The code of a scalar source's half unknown before a step, a pair's either; `None` where both are
-/// known.
+/// How many vector registers from its first operand a memory access writes: none for a store, its
+/// width for a global, buffer, flat or scratch load - a byte, half or dword one, the `x2` to `x4`
+/// forms two to four - and four for any other, whose width the name does not say.
+pub(crate) fn written_vectors(name: &str) -> u32 {
+    if name.contains("store") || name.starts_with("ds_write") {
+        return 0;
+    }
+    let loads = [
+        "global_load_",
+        "buffer_load_",
+        "flat_load_",
+        "scratch_load_",
+    ];
+    let Some(kind) = loads.iter().find_map(|load| name.strip_prefix(load)) else {
+        return 4;
+    };
+    match kind.strip_prefix("dwordx") {
+        Some(count) => count.parse().unwrap_or(4),
+        None if kind.starts_with("dword") || kind.contains("byte") || kind.contains("short") => 1,
+        None => 4,
+    }
+}
+
+/// The code of a scalar source unknown before a step, where it is.
+fn unknown_register(code: usize, before: &Scalars) -> Option<usize> {
+    before
+        .get(code)
+        .copied()
+        .flatten()
+        .is_none()
+        .then_some(code)
+}
+
+/// The code of a mask's half unknown before a step, either; `None` where both are known.
 fn unknown_half(code: usize, before: &Scalars) -> Option<usize> {
     (code..code + 2).find(|&c| before.get(c).copied().flatten().is_none())
 }
@@ -728,7 +760,7 @@ impl<'a> Causes<'a> {
             .filter_map(|operand| {
                 let (cause, spelled) = match operand {
                     Operand::Scalar(register) => (
-                        self.scalars[unknown_half(usize::from(*register), before)?].as_ref(),
+                        self.scalars[unknown_register(usize::from(*register), before)?].as_ref(),
                         format!("s{register}"),
                     ),
                     Operand::Named(named) => (
@@ -841,8 +873,8 @@ pub struct LaneProgram {
     /// Whether a kept instruction reads across lanes ([`crosses_lanes`]).
     crosses: bool,
     /// The program compiled for native runs, where every instruction a run reaches is one they
-    /// carry out exactly and no lane reads another's (D850).
-    quick: Option<crate::quick_lanes::Program>,
+    /// carry out exactly (D850); else the byte of the first that is not.
+    quick: Result<crate::quick_lanes::Program, u32>,
 }
 
 impl LaneProgram {
@@ -865,7 +897,34 @@ impl LaneProgram {
     /// Whether it runs natively as well as through the model (D850).
     #[must_use]
     pub const fn runs_quickly(&self) -> bool {
-        self.quick.is_some()
+        self.quick.is_ok()
+    }
+
+    /// The instruction at `at`, named with its byte, as a refusal quotes it; the native run's step
+    /// bound where `at` is [`u32::MAX`].
+    #[must_use]
+    pub fn instruction_named(&self, at: u32) -> String {
+        if at == u32::MAX {
+            return format!("its step bound, {MOST_NATIVE_STEPS} steps");
+        }
+        let name = self
+            .decode
+            .instructions
+            .iter()
+            .find(|instruction| instruction.offset == at)
+            .and_then(|instruction| {
+                named(&EncodingTable::builtin().ok()?, instruction).map(|(_, name)| name.to_owned())
+            })
+            .unwrap_or_else(|| "an instruction with no name".to_owned());
+        format!("`{name}` at {at:#x}")
+    }
+
+    /// The first instruction the native run does not carry out, named with its byte, where there
+    /// is one: what a refusal of a loop only the native run could follow quotes.
+    #[must_use]
+    pub fn native_declined(&self) -> Option<String> {
+        let at = *self.quick.as_ref().err()?;
+        Some(self.instruction_named(at))
     }
 }
 
@@ -877,8 +936,37 @@ pub fn quick_wave_lane_addresses(
     wave: (u32, &WaveEntry),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Option<LaneAddresses> {
-    crate::quick_lanes::run_wave(program.quick.as_ref()?, user_data, wave, read)
+    let bound = 4 * program.decode.instructions.len();
+    crate::quick_lanes::run_wave(program.quick.as_ref().ok()?, user_data, wave, (bound, read)).ok()
 }
+
+/// The most steps the native run follows a wave's loop for, where the model stops at its own bound
+/// ([`LOOPS_PAST_THE_BOUND`]): a resource limit, past which the loop is refused.
+pub const MOST_NATIVE_STEPS: usize = 1 << 26;
+
+/// [`wave_lane_addresses`] for a loop longer than the model follows: the native run, followed to
+/// [`MOST_NATIVE_STEPS`].
+///
+/// # Errors
+///
+/// The byte of the instruction the native run declines - the first it does not carry out, or the
+/// step that met a value it does not know - or [`u32::MAX`] where it ran out of steps.
+pub fn long_wave_lane_addresses(
+    program: &LaneProgram,
+    user_data: &[u32],
+    wave: (u32, &WaveEntry),
+    read: &mut dyn FnMut(u64) -> Option<u32>,
+) -> Result<LaneAddresses, u32> {
+    let compiled = program.quick.as_ref().map_err(|&at| at)?;
+    crate::quick_lanes::run_wave(compiled, user_data, wave, (MOST_NATIVE_STEPS, read))
+}
+
+/// The refusal a lane run gives a loop longer than it follows: what a caller with a longer run to
+/// hand ([`long_wave_lane_addresses`]) tries that on.
+pub const LOOPS_PAST_THE_BOUND: &str = concat!(
+    "the program loops more steps than a lane run follows before its last global ",
+    "load, whose later passes would read past the addresses reached (D758)"
+);
 
 /// [`lane_addresses`] found natively, where the program compiled for that and the run knows every
 /// value it needs (D850); `None` otherwise, and the model then decides.
@@ -888,7 +976,7 @@ pub fn quick_lane_addresses(
     lanes: (u32, u32),
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Option<LaneAddresses> {
-    crate::quick_lanes::run(program.quick.as_ref()?, user_data, lanes, read)
+    crate::quick_lanes::run(program.quick.as_ref().ok()?, user_data, lanes, read)
 }
 
 /// Which instructions a lane run must run for the addresses at `loads`: by index, every one but the
@@ -1798,6 +1886,10 @@ impl Model for Concrete<'_> {
         self.encodings
     }
 
+    fn lane_known_idle(&self, lane: u32) -> bool {
+        self.lanes && self.lane_runs(lane) == Some(false)
+    }
+
     fn program_address(&self) -> Option<u64> {
         self.program_address
     }
@@ -2626,6 +2718,9 @@ mod tests {
             1 | 8 << 8 | 1 << 15 | 6 << 16 | 1 << 23 | 6 << 24,
         ]);
         words.extend(vop3("v_cndmask_b32_e64", 7, [v(6), v(1), 8]));
+        // v_add_co_ci_u32_e64 v8, s[16:17], 0, v7, s[8:9], its carry-out in the word's 14:8.
+        let [first, second] = vop3("v_add_co_ci_u32_e64", 8, [128, v(7), 8]);
+        words.extend([first | 16 << 8, second]);
         words.push(sop2("s_and_b64", 10, 8, 126));
         words.push(sop2("s_andn2_b64", 12, 126, 8));
         words.push(short("v_add_nc_u32_e32", 1, 5, 7));
@@ -2661,6 +2756,127 @@ mod tests {
         let native = quick_wave_lane_addresses(&program, &[100, 7], (64, &wave), &mut |_| None);
         assert!(model.is_ok(), "{model:?}");
         assert_eq!(native, model.ok());
+    }
+
+    /// A program the native run cannot carry out names the first instruction it declines, which a
+    /// refusal then quotes: here a `v_xor_b32` the address goes through.
+    #[test]
+    fn the_native_run_names_what_it_declines() {
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            short_form(&encodings, "v_xor_b32_e32", 1, 128, 0),
+            short_form(&encodings, "v_mov_b32_e32", 2, 128, 0),
+            0xdc30_8000,
+            0x037d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let load = decode.instructions[2].offset;
+        let program = super::LaneProgram::new(decode, &encodings, &[load]);
+        assert!(!program.runs_quickly());
+        assert_eq!(
+            program.native_declined().as_deref(),
+            Some("`v_xor_b32_e32` at 0x0")
+        );
+        // One it compiles but meets a value it does not know in names the step: an address from a
+        // register a load left unknown.
+        let words = [
+            0xdc30_8000,
+            0x017d_0001,
+            short_form(&encodings, "v_mov_b32_e32", 2, 128, 0),
+            0xdc30_8000,
+            0x037d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let loads = [decode.instructions[0].offset, decode.instructions[2].offset];
+        let program = super::LaneProgram::new(decode, &encodings, &loads);
+        let wave = super::WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        assert_eq!(
+            super::long_wave_lane_addresses(&program, &[], (64, &wave), &mut |_| None)
+                .map_err(|at| program.instruction_named(at)),
+            Err("`global_load_dword` at 0xc".to_owned())
+        );
+    }
+
+    /// A load leaves unknown the registers it writes and no more: a byte load into `v0` keeps `v3`,
+    /// which the next address is formed from - as Grand Theft Auto V's copy loop forms its column.
+    /// Both runs agree.
+    #[test]
+    fn a_load_forgets_only_what_it_writes() {
+        use super::{WaveEntry, long_wave_lane_addresses, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            // global_load_ubyte v0, v[1:2], off; v_mov_b32 v1, v3; global_load_dword v9, v[1:2], off.
+            0xdc20_0000,
+            0x007d_0001,
+            short_form(&encodings, "v_mov_b32_e32", 1, 256 + 3, 0),
+            0xdc30_8000,
+            0x097d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let loads = [decode.instructions[0].offset, decode.instructions[2].offset];
+        let program = super::LaneProgram::new(decode, &encodings, &loads);
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0])],
+            components: 1,
+        };
+        let model = wave_lane_addresses(&program, &encodings, &[], (64, &wave), &mut |_| None);
+        assert_eq!(model, Ok(vec![(loads[0], vec![0]), (loads[1], vec![0])]));
+        assert_eq!(
+            long_wave_lane_addresses(&program, &[], (64, &wave), &mut |_| None).ok(),
+            model.ok()
+        );
+    }
+
+    /// A compare writes zero for a lane that does not run, so what that lane holds is not needed
+    /// (AMD's published RDNA instruction set, VOPC): an idle lane's unknown register leaves `vcc`
+    /// known, and the branch on it is followed. Both runs agree.
+    #[test]
+    fn a_compare_needs_no_idle_lane() {
+        use super::{WaveEntry, long_wave_lane_addresses, wave_lane_addresses};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        let words = [
+            // global_load_dword v3, v[1:2], off: v3 unknown in every lane.
+            0xdc30_8000,
+            0x037d_0001,
+            // v_mov_b32 v3, 5 in the running lane; v_cmp_le_u32 vcc, s0, v3.
+            short_form(&encodings, "v_mov_b32_e32", 3, 128 + 5, 0),
+            short_form(&encodings, "v_cmp_le_u32_e32", 0, 0, 3),
+            // s_cbranch_vccz past the second load; global_load_dword v9, v[1:2], off.
+            0xbf86_0002,
+            0xdc30_8000,
+            0x097d_0001,
+            0xbf81_0000,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decode = decode_program(&bytes, &encodings, &operands);
+        let loads = [decode.instructions[0].offset, decode.instructions[4].offset];
+        let program = super::LaneProgram::new(decode, &encodings, &loads);
+        // Lane 1 has no thread, and does not run.
+        let wave = WaveEntry {
+            group_ids: Vec::new(),
+            threads: vec![Some([0, 0, 0]), None],
+            components: 1,
+        };
+        let model = wave_lane_addresses(&program, &encodings, &[4], (64, &wave), &mut |_| None);
+        assert_eq!(model, Ok(vec![(loads[0], vec![0]), (loads[1], vec![0])]));
+        assert_eq!(
+            long_wave_lane_addresses(&program, &[4], (64, &wave), &mut |_| None).ok(),
+            model.ok()
+        );
     }
 
     /// A lane read is run where its lane is known: `v_readfirstlane_b32 s4, v0` takes the first

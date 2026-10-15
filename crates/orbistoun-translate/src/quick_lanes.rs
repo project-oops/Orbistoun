@@ -28,6 +28,8 @@ const EXEC: usize = 126;
 const SEEDED_IDS: [u32; 4] = [0, 1, 2, 5];
 /// A branch target outside the program's words.
 const OUTSIDE: usize = usize::MAX;
+/// A branch target past the run's end: every load is behind it, and a run taking it is done.
+const PAST: usize = usize::MAX - 1;
 /// The scalar offset field's "no offset" code.
 const SOFFSET_NULL: u32 = 0x7d;
 /// The vector registers a run keeps.
@@ -115,7 +117,7 @@ enum Step {
     },
     /// An access other than a global load: what it leaves in its first vector operand, `count`
     /// registers from it, is memory's, unknown here - as the model leaves it.
-    Forget { first: u32 },
+    Forget { first: u32, count: u32 },
     /// `v_lshlrev_b32`: `value` shifted left by `amount`'s low five bits.
     ShiftLeft {
         destination: u32,
@@ -161,7 +163,7 @@ enum Step {
         at: u32,
         pair: u32,
         offset: i64,
-        destination: Option<u32>,
+        destination: Option<(u32, u32)>,
     },
 }
 
@@ -360,16 +362,18 @@ fn modified(instruction: &Instruction, carry: bool) -> bool {
 }
 
 /// Compiles `decode` for runs that find the addresses of its global loads at `loads`, running only
-/// the instructions `kept` keeps of the vector ones. `None` where any instruction a run reaches is
-/// one it does not carry out exactly.
-#[must_use]
+/// the instructions `kept` keeps of the vector ones.
+///
+/// # Errors
+///
+/// The byte of the first instruction a run reaches that it does not carry out exactly.
 pub fn compile(
     decode: &Decode,
     encodings: &EncodingTable,
     loads: &[u32],
     (kept, crosses): (&[bool], bool),
-) -> Option<Program> {
-    loads.iter().copied().max()?;
+) -> Result<Program, u32> {
+    loads.iter().copied().max().ok_or(0_u32)?;
     let until = crate::evaluate::run_end(decode, encodings, loads);
     let mut steps = Vec::new();
     let mut offsets = Vec::new();
@@ -377,26 +381,29 @@ pub fn compile(
         if instruction.offset > until {
             break;
         }
-        let family = encodings
-            .encodings()
-            .get(usize::from(instruction.encoding?))?;
-        let name = encodings.mnemonic_for(&family.name, instruction.opcode)?;
+        let declined = instruction.offset;
+        let family = instruction
+            .encoding
+            .and_then(|index| encodings.encodings().get(usize::from(index)))
+            .ok_or(declined)?;
+        let name = encodings
+            .mnemonic_for(&family.name, instruction.opcode)
+            .ok_or(declined)?;
         let family = family.name.as_str();
         let vector = matches!(family, "VOP1" | "VOP2" | "VOP3" | "VOP3P" | "VOPC");
         let step = if loads.contains(&instruction.offset) {
-            load_step(instruction)
+            load_step(instruction, name)
         } else if vector && !kept.get(index).copied().unwrap_or(true) {
             Some(Step::Nothing)
         } else if vector {
             vector_step(family, name, instruction)
         } else {
-            scalar_step(family, name, instruction, decode)
+            scalar_step(family, name, instruction, (decode, until))
         };
-        let step = step?;
-        steps.push(step);
+        steps.push(step.ok_or(declined)?);
         offsets.push(instruction.offset);
     }
-    Some(Program {
+    Ok(Program {
         steps,
         offsets,
         until,
@@ -404,9 +411,23 @@ pub fn compile(
     })
 }
 
+/// The step a branch at `instruction` of `jump` words goes to: [`PAST`] where it leaves the run's
+/// end at `until` behind, a step's index, or [`OUTSIDE`] for a target no step starts at.
+fn branch_target(decode: &Decode, instruction: &Instruction, (jump, until): (i64, u32)) -> usize {
+    let to = i64::from(instruction.offset) + 4 + 4 * crate::evaluate::simm16(jump);
+    if to > i64::from(until) {
+        return PAST;
+    }
+    decode
+        .instructions
+        .iter()
+        .position(|i| i64::from(i.offset) == to)
+        .unwrap_or(OUTSIDE)
+}
+
 /// A global load whose addresses are found: one without a scalar base, which would add to every
 /// lane's address.
-fn load_step(instruction: &Instruction) -> Option<Step> {
+fn load_step(instruction: &Instruction, name: &str) -> Option<Step> {
     let operands = instruction.operands.as_slice();
     let Some(Operand::Vector(pair)) = operands.get(1) else {
         return None;
@@ -422,7 +443,8 @@ fn load_step(instruction: &Instruction) -> Option<Step> {
         at: instruction.offset,
         pair: u32::from(*pair),
         offset,
-        destination: vector_destination(operands.first()),
+        destination: vector_destination(operands.first())
+            .map(|first| (first, crate::evaluate::written_vectors(name))),
     })
 }
 
@@ -432,7 +454,7 @@ fn scalar_step(
     family: &str,
     name: &str,
     instruction: &Instruction,
-    decode: &Decode,
+    (decode, until): (&Decode, u32),
 ) -> Option<Step> {
     let operands = instruction.operands.as_slice();
     Some(match (family, name) {
@@ -441,14 +463,8 @@ fn scalar_step(
             let Some(Operand::Immediate(jump)) = operands.first() else {
                 return None;
             };
-            // A branch past the words kept - over the last load - has no step to go to; a run
-            // taking it declines, where the model refuses it.
-            let to = i64::from(instruction.offset) + 4 + 4 * crate::evaluate::simm16(*jump);
-            let target = decode
-                .instructions
-                .iter()
-                .position(|i| i64::from(i.offset) == to)
-                .unwrap_or(OUTSIDE);
+            // A branch past the run's end leaves every load behind it: a run taking it is done.
+            let target = branch_target(decode, instruction, (*jump, until));
             let on = match name {
                 "s_cbranch_scc0" => Some(false),
                 "s_cbranch_scc1" => Some(true),
@@ -463,12 +479,7 @@ fn scalar_step(
             let Some(Operand::Immediate(jump)) = operands.first() else {
                 return None;
             };
-            let to = i64::from(instruction.offset) + 4 + 4 * crate::evaluate::simm16(*jump);
-            let target = decode
-                .instructions
-                .iter()
-                .position(|i| i64::from(i.offset) == to)
-                .unwrap_or(OUTSIDE);
+            let target = branch_target(decode, instruction, (*jump, until));
             Step::MaskBranch {
                 target,
                 mask: if name.contains("exec") { EXEC } else { VCC },
@@ -529,6 +540,7 @@ fn scalar_step(
         ("MIMG" | "MUBUF" | "MTBUF" | "FLAT" | "DS", _) => match operands.first() {
             Some(Operand::Vector(first)) => Step::Forget {
                 first: u32::from(*first),
+                count: crate::evaluate::written_vectors(name),
             },
             _ => Step::Nothing,
         },
@@ -687,13 +699,15 @@ fn vector_step(family: &str, name: &str, instruction: &Instruction) -> Option<St
             a: at(2)?,
             b: at(3)?,
         },
-        ("VOP2", "v_add_co_ci_u32_e32") | ("VOP3", "v_add_co_ci_u32") => Step::AddWithCarry {
-            destination,
-            carry: mask(1)?,
-            a: at(2)?,
-            b: at(3)?,
-            carry_in: mask(4)?,
-        },
+        ("VOP2", "v_add_co_ci_u32_e32") | ("VOP3", "v_add_co_ci_u32" | "v_add_co_ci_u32_e64") => {
+            Step::AddWithCarry {
+                destination,
+                carry: mask(1)?,
+                a: at(2)?,
+                b: at(3)?,
+                carry_in: mask(4)?,
+            }
+        }
         _ => return None,
     })
 }
@@ -824,20 +838,30 @@ pub fn run(
     read: &mut dyn FnMut(u64) -> Option<u32>,
 ) -> Option<crate::evaluate::LaneAddresses> {
     let state = Lanes::start((first_register, user_data), (width, lanes), program.crosses);
-    run_from(state, program, lanes, read)
+    run_from(
+        state,
+        program,
+        (lanes, 4 * program.steps.len()),
+        (read, &mut 0),
+    )
 }
 
 /// The addresses each global load forms over one compute wave (D883), as
 /// [`crate::evaluate::wave_lane_addresses`] answers: the user data from `s0`, then the group ids;
 /// each lane with a thread its id components from `v0` and its execution-mask bit.
+///
+/// The run follows at most `bound` steps: a dispatch's loop can take far more than the model
+/// follows, and the native run is what follows it.
 pub fn run_wave(
     program: &Program,
     user_data: &[u32],
     (width, wave): (u32, &crate::evaluate::WaveEntry),
-    read: &mut dyn FnMut(u64) -> Option<u32>,
-) -> Option<crate::evaluate::LaneAddresses> {
+    (bound, read): (usize, &mut dyn FnMut(u64) -> Option<u32>),
+) -> Result<crate::evaluate::LaneAddresses, u32> {
     let width = width.clamp(1, 64);
-    let lanes = u32::try_from(wave.threads.len()).ok()?.min(width);
+    let lanes = u32::try_from(wave.threads.len())
+        .unwrap_or(u32::MAX)
+        .min(width);
     let modelled = if program.crosses {
         width
     } else {
@@ -866,15 +890,18 @@ pub fn run_wave(
     }
     state.scalars[EXEC] = Some(mask as u32);
     state.scalars[EXEC + 1] = Some((mask >> 32) as u32);
-    run_from(state, program, lanes, read)
+    let mut last = 0;
+    run_from(state, program, (lanes, bound), (read, &mut last)).ok_or(last)
 }
 
-/// The run [`run`] and [`run_wave`] share, from the wave's entry.
+/// The run [`run`] and [`run_wave`] share, from the wave's entry; `last` holds the byte of the step
+/// it took last, which is the one it declined at when it answers `None`, or [`u32::MAX`] where it
+/// ran out of steps.
 fn run_from(
     mut state: Lanes,
     program: &Program,
-    lanes: u32,
-    read: &mut dyn FnMut(u64) -> Option<u32>,
+    (lanes, bound): (u32, usize),
+    (read, last): (&mut dyn FnMut(u64) -> Option<u32>, &mut u32),
 ) -> Option<crate::evaluate::LaneAddresses> {
     let modelled = state.modelled;
     let mut found = Vec::new();
@@ -885,9 +912,11 @@ fn run_from(
             break;
         }
         // A run its bound cuts short is declined: the model refuses it by name.
-        if steps > 4 * program.steps.len() {
+        if steps > bound {
+            *last = u32::MAX;
             return None;
         }
+        *last = program.offsets[at];
         steps += 1;
         at += 1;
         match step {
@@ -947,8 +976,8 @@ fn run_from(
                 let addresses = state.addresses(pair, offset, lanes.min(modelled))?;
                 found.push((load, addresses));
                 // What it loads is memory's, unknown here.
-                if let Some(first) = destination {
-                    state.forget(first, 4);
+                if let Some((first, count)) = destination {
+                    state.forget(first, count);
                 }
             }
             vector => run_vector(&mut state, vector)?,
@@ -1016,8 +1045,10 @@ fn run_wave_step(state: &mut Lanes, step: Step, at: &mut usize) -> Option<()> {
             *state.scalars.get_mut(destination)? = Some(value);
         }
         Step::Compare32 { op, mask, a, b } => {
+            // A lane that does not run answers zero, and is not read (VOPC).
+            let running = u64::from(state.scalar(EXEC)?) | u64::from(state.scalar(EXEC + 1)?) << 32;
             let mut value = 0u64;
-            for lane in 0..state.modelled {
+            for lane in (0..state.modelled).filter(|&lane| running >> lane & 1 != 0) {
                 if op.holds(state.read(a, lane)?, state.read(b, lane)?) {
                     value |= 1 << lane;
                 }
@@ -1025,7 +1056,7 @@ fn run_wave_step(state: &mut Lanes, step: Step, at: &mut usize) -> Option<()> {
             *state.scalars.get_mut(mask)? = Some(value as u32);
             *state.scalars.get_mut(mask + 1)? = Some((value >> 32) as u32);
         }
-        Step::Forget { first } => state.forget(first, 4),
+        Step::Forget { first, count } => state.forget(first, count),
         _ => return None,
     }
     Some(())
