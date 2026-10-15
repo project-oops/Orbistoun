@@ -165,6 +165,10 @@ A round of making a title faster goes:
    A span that builds a frame-sized buffer and costs about a quarter of a microsecond per 4 KB
    page of it is paying for a fresh allocation, which a host gives a megabyte at a time page by
    page: keep the storage from one frame to the next rather than making it again.
+   A pool of spares that lets one go when full thrashes as a cache emptied whole does: give the
+   path that makes a new one its own span, and compare its count with how often the pool is asked
+   (`keep snapshot: new buffer` against `keep snapshot`). A spare that holds more than asked for
+   can serve a smaller ask.
 4. Where the spans run out, `perf --sample` samples the guest's main thread and the device thread
    (`ORBISTOUN_PROFILE`), naming host functions, and adds each thread's last sample to the report.
    Read a sampled name as "inside or near": a sample is named by the closest symbol, and a release

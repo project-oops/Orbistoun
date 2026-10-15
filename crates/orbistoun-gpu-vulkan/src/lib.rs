@@ -905,11 +905,21 @@ impl VulkanBackend {
             resident.extent()
         };
         let texel_bytes = framebuffer::texel_bytes(resident.encoding());
+        // The smallest spare that holds it: a guest drawing mip levels one by one keeps snapshots of
+        // many extents, and an exact match missed for nearly all of them (STKT00001, 4,440 of
+        // 5,064 made afresh).
         let spare = self
             .spare_snapshots
             .iter()
-            .position(|spare| spare.extent() == extent && spare.texel_bytes() == texel_bytes)
-            .map(|index| self.spare_snapshots.swap_remove(index));
+            .enumerate()
+            .filter(|(_, spare)| spare.fits(extent, texel_bytes))
+            .min_by_key(|(_, spare)| spare.capacity())
+            .map(|(index, _)| index)
+            .map(|index| {
+                self.spare_snapshots
+                    .swap_remove(index)
+                    .sized(extent, texel_bytes)
+            });
         let snapshot = match spare.map_or_else(
             || {
                 orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::SnapshotBuffer, || {
@@ -939,10 +949,18 @@ impl VulkanBackend {
 
     /// Keeps a released snapshot buffer for reuse, up to a few.
     fn release_snapshot(&mut self, snapshot: framebuffer::FrameSnapshot) {
-        if self.spare_snapshots.len() < SPARE_SNAPSHOTS {
-            self.spare_snapshots.push(snapshot);
-        } else {
-            snapshot.destroy();
+        self.spare_snapshots.push(snapshot);
+        if self.spare_snapshots.len() > SPARE_SNAPSHOTS {
+            // The smallest goes, cheapest to make again; a release waits for the device.
+            if let Some(smallest) = self
+                .spare_snapshots
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, spare)| spare.capacity())
+                .map(|(index, _)| index)
+            {
+                self.spare_snapshots.swap_remove(smallest).destroy();
+            }
         }
     }
 

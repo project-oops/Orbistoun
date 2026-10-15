@@ -1869,6 +1869,9 @@ fn read_host_memory(
 pub(crate) struct FrameSnapshot {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
+    /// The bytes the buffer holds: at least the frame's, and more where a larger frame's buffer is
+    /// reused for it.
+    capacity: vk::DeviceSize,
     width: u32,
     height: u32,
     /// The bytes a texel of the frame takes ([`texel_bytes`]).
@@ -1896,6 +1899,7 @@ impl FrameSnapshot {
         Ok(Self {
             buffer,
             memory,
+            capacity: size,
             width,
             height,
             texel_bytes,
@@ -1908,14 +1912,29 @@ impl FrameSnapshot {
         Self { encoding, ..self }
     }
 
-    /// The extent it holds a frame of.
-    pub(crate) const fn extent(&self) -> (u32, u32) {
-        (self.width, self.height)
+    /// The bytes its buffer holds.
+    pub(crate) const fn capacity(&self) -> vk::DeviceSize {
+        self.capacity
     }
 
-    /// The bytes a texel of the frame it holds takes.
-    pub(crate) const fn texel_bytes(&self) -> vk::DeviceSize {
-        self.texel_bytes
+    /// Whether its buffer can hold a `width` x `height` frame of `texel_bytes` a texel.
+    pub(crate) fn fits(&self, (width, height): (u32, u32), texel_bytes: vk::DeviceSize) -> bool {
+        vk::DeviceSize::from(width) * vk::DeviceSize::from(height) * texel_bytes <= self.capacity
+    }
+
+    /// The same buffer, holding a `width` x `height` frame of `texel_bytes` a texel from now on:
+    /// one that [`Self::fits`].
+    pub(crate) const fn sized(
+        self,
+        (width, height): (u32, u32),
+        texel_bytes: vk::DeviceSize,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            texel_bytes,
+            ..self
+        }
     }
 
     /// Its extent and its pixels as words, read straight out of its mapping: [`Self::read`]
