@@ -154,6 +154,9 @@ A round of making a title faster goes:
 3. Where that zone has nothing finer, add a span inside it - one line in the span table of
    `crates/orbistoun-gpu/src/perf.rs` and a `perf::span` around the work - and record again,
    rather than timing it by hand. A span kept is the next round's answer.
+   A span that builds a frame-sized buffer and costs about a quarter of a microsecond per 4 KB
+   page of it is paying for a fresh allocation, which a host gives a megabyte at a time page by
+   page: keep the storage from one frame to the next rather than making it again.
 4. Where the spans run out, `ORBISTOUN_PROFILE=<n>` samples the guest's main thread and the device
    thread, naming host functions; its report is in the run's log.
 5. Change one thing and compare it with `ab --against HEAD` - the commit before, built cleanly: a run
