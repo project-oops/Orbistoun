@@ -99,3 +99,30 @@ known_by = "measured"
 cites = "obSCEne REQ-20261015T1522Z-ai02, reports/hardware/20261015-164000-eboot.log lines 11337-11355."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"
+
+[[function]]
+name = "sceAjmBatchStart"
+arity = 6
+purpose = "Runs a batch of codec jobs: (ctx, &batch, priority, 0, &out, ...)."
+returns = "status"
+edge_cases = [
+    "ASSUMED (D889): a retail title's start answers 0x0 and writes the batch identifier, numbered from 1, to the first four bytes of out; orbistoun runs the batch's decode jobs to completion before answering. The census harness's start answered 0x80930005, refused for want of a codec privilege (REQ-ai02, 20261015-164000-eboot.log line 11348); REQ-gt02 asks for a retail title's shape.",
+    "GUEST-OBSERVED (D832 trial): answered 0x0 with nothing written, PPSA04263 went on to sceAjmBatchWait on the identifier out still held, 0xffffffff.",
+    "A batch never initialised or holding no job, and a null out, answer the placeholder.",
+]
+known_by = "assumed"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
+
+[[function]]
+name = "sceAjmBatchWait"
+arity = 6
+purpose = "Waits for a started batch: (ctx, id, timeout, &block, ...)."
+returns = "status"
+edge_cases = [
+    "ASSUMED (D889): 0x0 for an identifier sceAjmBatchStart handed back, the batch having run to completion when it started; the block is left as it was. The census harness's wait answered 0x80930004 on a batch whose start was refused (REQ-ai02, line 11350).",
+    "An identifier never handed back answers the placeholder.",
+]
+known_by = "assumed"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"

@@ -125,6 +125,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # in every process, where the launcher would take its port and be the one a capture reaches.
 tracy-client = { version = "0.19", default-features = false, features = ["enable", "ondemand", "broadcast", "manual-lifetime"] }
 
+# MPEG audio decoding, for the Ajm codec jobs a title hands its frames to (D889). Pure Rust and
+# MPL-2.0, which the licence list allows as file-level copyleft; the MP3 decoder only, not
+# symphonia's demuxers, since the title hands over bare frames.
+symphonia-core = "0.5.4"
+symphonia-bundle-mp3 = { version = "0.5.4", default-features = false, features = ["mp3"] }
+
 # Shared with the rest of the collection, rather than a fifth copy here. `oops-build` replaces
 # what `orbistoun-env::build` used to do itself; `oops-log` replaces the subscriber that was
 # hand-built in `orbistoun-cli` and absent from the other two binaries. `oops-paths` resolves

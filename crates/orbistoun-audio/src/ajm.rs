@@ -1,8 +1,8 @@
 //! `libSceAjm` - the platform's audio codec job manager: decode and encode work submitted as jobs.
 //!
 //! The names come from real import tables (D504); every arity is `6`, the trampoline's full
-//! capture, not a claim about the argument count. Context set-up and instances are implemented,
-//! as measured; the codec jobs themselves are not.
+//! capture, not a claim about the argument count. Context set-up, instances and a batch's set-up
+//! are implemented, as measured; a started batch decodes its MPEG audio jobs on the host (D889).
 
 use orbistoun_core::GUEST_ARG_REGISTERS;
 use orbistoun_hle::guest_module;
@@ -18,7 +18,9 @@ guest_module! {
         "sceAjmBatchJobDecode" => 6,
         "sceAjmBatchJobInitialize" => 6,
         "sceAjmBatchJobSetGaplessDecode" => 6,
+        // (ctx, &batch, priority, 0, &out, ...), as PPSA04263 calls it.
         "sceAjmBatchStart" => 6,
+        // (ctx, id, timeout, &block, ...), as PPSA04263 calls it.
         "sceAjmBatchWait" => 6,
         // (ctx).
         "sceAjmFinalize" => 1,
@@ -82,13 +84,20 @@ struct Registry {
     instances: std::collections::BTreeSet<(u32, u32)>,
     /// Batches by the buffer `sceAjmBatchInitialize` was given, with the jobs each holds.
     batches: std::collections::BTreeMap<u64, Vec<Job>>,
+    /// The last batch identifier `sceAjmBatchStart` handed back.
+    started: u32,
 }
 
-/// A decode job a batch holds, by the instance it names.
+/// A decode job a batch holds: the instance it names, and its input and output as guest
+/// `(address, size)` pairs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Job {
     /// The instance identifier the job was given.
     instance: u32,
+    /// The encoded frames to decode.
+    input: (u64, u64),
+    /// Where the decoded samples go.
+    output: (u64, u64),
 }
 
 /// The smallest batch buffer measured: PPSA04263's 0x40 bytes, which holds one job (REQ-ai02).
@@ -185,16 +194,34 @@ impl Registry {
     /// `sceAjmBatchJobDecode`'s answer: 0 for the first job on a batch, naming an instance some
     /// context holds; `None` for a batch never initialised, an instance not held, or a second
     /// job, none of which is measured.
-    fn job_decode(&mut self, buffer: u64, instance: u32) -> Option<u64> {
-        if !self.instances.iter().any(|&(_, id)| id == instance) {
+    fn job_decode(&mut self, buffer: u64, job: Job) -> Option<u64> {
+        if !self.instances.iter().any(|&(_, id)| id == job.instance) {
             return None;
         }
         let jobs = self.batches.get_mut(&buffer)?;
         if !jobs.is_empty() {
             return None;
         }
-        jobs.push(Job { instance });
+        jobs.push(job);
         Some(0)
+    }
+
+    /// Starts the batch at `buffer`: the identifier it is waited on by, one more than the last,
+    /// and the jobs to run, which leave the batch. `None` for a batch never initialised or one
+    /// holding no job (D889).
+    fn start(&mut self, buffer: u64) -> Option<(u32, Vec<Job>)> {
+        let jobs = std::mem::take(self.batches.get_mut(&buffer)?);
+        if jobs.is_empty() {
+            return None;
+        }
+        self.started += 1;
+        Some((self.started, jobs))
+    }
+
+    /// `sceAjmBatchWait`'s answer for a batch identifier `start` handed back: 0, since a batch
+    /// runs to completion when it is started (D889). `None` for an identifier never handed back.
+    fn wait(&self, id: u32) -> Option<u64> {
+        (1..=self.started).contains(&id).then_some(0)
     }
 
     /// `sceAjmInstanceDestroy`'s answer on a live context: 0 for an instance it holds, which it
@@ -304,13 +331,193 @@ pub(crate) fn ajm_batch_job_decode(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let Some(buffer) = (unsafe { orbistoun_mem::guest::read_u64(args[0]) }) else {
         return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
     };
-    with_registry(|r, _| r.job_decode(buffer, args[1] as u32))
+    let job = Job {
+        instance: args[1] as u32,
+        input: (args[2], args[3]),
+        output: (args[4], args[5]),
+    };
+    with_registry(|r, _| r.job_decode(buffer, job))
+}
+
+/// Layer III bitrates in kbit/s by header index, MPEG-1 then MPEG-2 and 2.5 (ISO/IEC 11172-3
+/// 2.4.2.3, 13818-3 2.4.2.3); index 0 is the free format and 15 is forbidden, so neither has a
+/// length.
+const LAYER3_KBITS: [[u32; 15]; 2] = [
+    [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ],
+    [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+];
+
+/// MPEG-1 sample rates by header index (11172-3 2.4.2.3); MPEG-2 halves them and 2.5 quarters
+/// them (13818-3 2.4.2.3).
+const MPEG1_RATES: [u32; 3] = [44_100, 48_000, 32_000];
+
+/// How long the Layer III frame a four-byte header begins is, in bytes: `None` for a header that
+/// is not one, or that names the free format or a reserved field.
+fn frame_length(header: [u8; 4]) -> Option<usize> {
+    let word = u32::from_be_bytes(header);
+    let sync = word >> 21 == 0x7ff;
+    let version = (word >> 19) & 3;
+    let layer = (word >> 17) & 3;
+    let bitrate = ((word >> 12) & 0xf) as usize;
+    let rate = ((word >> 10) & 3) as usize;
+    let padding = (word >> 9) & 1;
+    // Layer III is `01`; version `01` is reserved.
+    if !sync || layer != 1 || version == 1 || bitrate == 0 || bitrate == 15 || rate == 3 {
+        return None;
+    }
+    let (table, divisor, slots) = match version {
+        3 => (0, 1, 144),
+        2 => (1, 2, 72),
+        _ => (1, 4, 72),
+    };
+    let kbits = LAYER3_KBITS[table][bitrate];
+    let sample_rate = MPEG1_RATES[rate] / divisor;
+    usize::try_from(slots * kbits * 1000 / sample_rate + padding).ok()
+}
+
+/// Each instance's decoder, by instance identifier, kept across batches; see [`new_decoder`].
+static DECODERS: std::sync::Mutex<
+    std::collections::BTreeMap<u32, symphonia_bundle_mp3::MpaDecoder>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// A Layer III decoder, kept for each instance from one batch to the next: a frame may take its
+/// main data from the frames before it (11172-3 2.4.3.4, the bit reservoir), and those can be in
+/// the batch before.
+fn new_decoder() -> Option<symphonia_bundle_mp3::MpaDecoder> {
+    use symphonia_core::codecs::Decoder as _;
+    let mut params = symphonia_core::codecs::CodecParameters::new();
+    params.for_codec(symphonia_core::codecs::CODEC_TYPE_MP3);
+    symphonia_bundle_mp3::MpaDecoder::try_new(
+        &params,
+        &symphonia_core::codecs::DecoderOptions::default(),
+    )
+    .ok()
+}
+
+/// Decodes the Layer III frames in `input` with `decoder`, to interleaved 16-bit PCM, every frame
+/// in turn (D889); `None` if no frame decodes. A frame is found by its header and measured by
+/// [`frame_length`], and the bytes from one that does not parse to the next sync are skipped.
+fn decode_frames(decoder: &mut symphonia_bundle_mp3::MpaDecoder, input: &[u8]) -> Option<Vec<i16>> {
+    use symphonia_core::codecs::Decoder as _;
+
+    let mut samples = Vec::new();
+    let mut at = 0;
+    while let Some(header) = input.get(at..at + 4) {
+        let length = frame_length([header[0], header[1], header[2], header[3]]);
+        let Some(frame) = length.and_then(|length| input.get(at..at + length)) else {
+            at += 1;
+            continue;
+        };
+        at += frame.len();
+        let packet = symphonia_core::formats::Packet::new_from_slice(0, 0, 0, frame);
+        let Ok(pcm) = decoder.decode(&packet) else {
+            continue;
+        };
+        let mut buffer =
+            symphonia_core::audio::SampleBuffer::<i16>::new(pcm.capacity() as u64, *pcm.spec());
+        buffer.copy_interleaved_ref(pcm);
+        samples.extend_from_slice(buffer.samples());
+    }
+    (!samples.is_empty()).then_some(samples)
+}
+
+/// Runs one decode job: reads its input from guest memory, decodes it, and writes as much of the
+/// 16-bit PCM as fits in its output. A job whose input cannot be read, or holds no frame, leaves
+/// its output as it was (D889).
+fn run_job(job: &Job) {
+    let (Ok(input_size), Ok(output_size)) =
+        (usize::try_from(job.input.1), usize::try_from(job.output.1))
+    else {
+        return;
+    };
+    let mut input = vec![0_u8; input_size];
+    // SAFETY: the guest's input frames, `input_size` bytes by the job's contract; read through the
+    // checked accessor.
+    if !unsafe { orbistoun_mem::guest::read_into(job.input.0, &mut input) } {
+        return;
+    }
+    let samples = {
+        let mut decoders = DECODERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decoder = match decoders.entry(job.instance) {
+            std::collections::btree_map::Entry::Occupied(held) => held.into_mut(),
+            std::collections::btree_map::Entry::Vacant(slot) => match new_decoder() {
+                Some(decoder) => slot.insert(decoder),
+                None => return,
+            },
+        };
+        decode_frames(decoder, &input)
+    };
+    let Some(samples) = samples else {
+        return;
+    };
+    let pcm: Vec<u8> = samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .take(output_size)
+        .collect();
+    // SAFETY: the guest's output, `output_size` bytes by the job's contract, and no more written;
+    // through the checked accessor.
+    let _ = unsafe { orbistoun_mem::guest::write_bytes(job.output.0, &pcm) };
+}
+
+/// `sceAjmBatchStart(ctx, &batch, priority, 0, &out, ...)`: runs the batch's decode job to
+/// completion, writes the batch's identifier to the first four bytes of `out`, and answers 0
+/// (D889). PPSA04263 waits on what `out` holds after it. The console's answer for a retail title is
+/// not measured - the census harness was refused the start (REQ-ai02) - so the identifier's
+/// numbering, from 1, is assumed. A batch never initialised or holding no job, and a null `out`,
+/// answer the placeholder.
+pub(crate) fn ajm_batch_start(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    let placeholder = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    let out = args[4];
+    // SAFETY: the guest's batch slot, which `sceAjmBatchInitialize` wrote; read through the
+    // checked accessor.
+    let Some(buffer) = (unsafe { orbistoun_mem::guest::read_u64(args[1]) }) else {
+        return placeholder;
+    };
+    if out == 0 {
+        return placeholder;
+    }
+    let Some((id, jobs)) = REGISTRY
+        .lock()
+        .ok()
+        .and_then(|mut held| held.get_or_insert_with(Registry::default).start(buffer))
+    else {
+        return placeholder;
+    };
+    for job in &jobs {
+        run_job(job);
+    }
+    // SAFETY: the guest's out block, its first four bytes the batch identifier; written through
+    // the checked accessor.
+    if unsafe { orbistoun_mem::guest::write_u32(out, id) } {
+        0
+    } else {
+        placeholder
+    }
+}
+
+/// `sceAjmBatchWait(ctx, id, timeout, &block, ...)`: 0 for a batch `sceAjmBatchStart` started,
+/// which ran to completion as it started (D889); the block is left as it was. An identifier never
+/// handed back answers the placeholder.
+pub(crate) fn ajm_batch_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    with_registry(|r, _| r.wait(args[1] as u32))
 }
 
 /// `sceAjmInstanceDestroy(ctx, id)`: 0 for an instance the context holds, `0x80930003` once it is
 /// gone (REQ-ai01).
 pub(crate) fn ajm_instance_destroy(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
-    with_registry(|r, below| r.destroy(args[0] as u32, args[1] as u32, below))
+    let answer = with_registry(|r, below| r.destroy(args[0] as u32, args[1] as u32, below));
+    if answer == 0 {
+        DECODERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(args[1] as u32));
+    }
+    answer
 }
 
 #[cfg(test)]
@@ -346,6 +553,104 @@ mod tests {
         assert_eq!(registry.destroy(0x15, 1, 0x16), Some(INVALID_INSTANCE));
     }
 
+    /// A job naming `instance`, its input and output nowhere: the registry only keeps them.
+    fn job(instance: u32) -> super::Job {
+        super::Job {
+            instance,
+            input: (0x1_0000, 960),
+            output: (0x2_0000, 9216),
+        }
+    }
+
+    /// Four silent frames in PPSA04263's shape - MPEG-1 Layer III, mono, 48 kHz, 80 kbit/s, no
+    /// CRC, 240 bytes each, 960 in all - decode to 4 x 1152 samples of silence: 9216 bytes of
+    /// 16-bit PCM, the output size the title passes (D889).
+    #[test]
+    fn four_silent_frames_decode_to_the_titles_output_size() {
+        let mut input = Vec::new();
+        for _ in 0..4 {
+            let mut frame = vec![0_u8; 240];
+            frame[..4].copy_from_slice(&[0xff, 0xfb, 0x64, 0xc0]);
+            input.extend_from_slice(&frame);
+        }
+        let mut decoder = super::new_decoder().expect("a Layer III decoder");
+        let samples = super::decode_frames(&mut decoder, &input).expect("the frames decode");
+        assert_eq!(samples.len() * 2, 9216);
+        assert!(samples.iter().all(|&s| s == 0));
+        assert_eq!(
+            super::decode_frames(&mut decoder, &[0_u8; 960]),
+            None,
+            "no frame in it"
+        );
+    }
+
+    /// A frame's length comes from its header (ISO/IEC 11172-3 2.4.3.1, 13818-3 2.4.2.3): 144
+    /// x bitrate / sample rate for MPEG-1 Layer III, 72 x for MPEG-2, plus a padding byte when the
+    /// header asks for one; a header that is not Layer III, or names a free or bad bitrate or rate,
+    /// has none.
+    #[test]
+    fn a_frame_is_as_long_as_its_header_says() {
+        assert_eq!(super::frame_length([0xff, 0xfb, 0x64, 0xc0]), Some(240));
+        assert_eq!(
+            super::frame_length([0xff, 0xfa, 0x64, 0xc0]),
+            Some(240),
+            "with a CRC"
+        );
+        assert_eq!(
+            super::frame_length([0xff, 0xfb, 0x90, 0x00]),
+            Some(417),
+            "128k at 44.1k"
+        );
+        assert_eq!(
+            super::frame_length([0xff, 0xfb, 0x92, 0x00]),
+            Some(418),
+            "padded"
+        );
+        assert_eq!(
+            super::frame_length([0xff, 0xf3, 0x90, 0x00]),
+            Some(261),
+            "MPEG-2, 80k at 22.05k"
+        );
+        assert_eq!(
+            super::frame_length([0xff, 0xfb, 0x04, 0x00]),
+            None,
+            "free bitrate"
+        );
+        assert_eq!(
+            super::frame_length([0xff, 0xfd, 0x90, 0x00]),
+            None,
+            "Layer II"
+        );
+        assert_eq!(
+            super::frame_length([0x00, 0x00, 0x00, 0x00]),
+            None,
+            "no sync"
+        );
+    }
+
+    /// Starting a batch hands back an identifier and the jobs to run, once; waiting on the
+    /// identifier answers 0 once it has run, and an identifier never handed back is unmeasured
+    /// (D889).
+    #[test]
+    fn a_started_batch_is_waited_on_by_its_identifier() {
+        let mut registry = Registry::default();
+        assert_eq!(registry.register(0x15, 0, 0x16), Some(0));
+        assert_eq!(registry.create(0x15, 0, 1, 0x16), Some(Ok(1)));
+        assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));
+        assert_eq!(registry.start(0x9000), None, "nothing to run");
+        assert_eq!(registry.job_decode(0x9000, job(1)), Some(0));
+        let (id, jobs) = registry.start(0x9000).expect("one job to run");
+        assert_eq!(jobs, vec![job(1)]);
+        assert_eq!(registry.wait(id), Some(0));
+        assert_eq!(registry.wait(id + 1), None);
+        let (next, _) = {
+            assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));
+            assert_eq!(registry.job_decode(0x9000, job(1)), Some(0));
+            registry.start(0x9000).expect("a second batch")
+        };
+        assert_eq!(next, id + 1);
+    }
+
     /// A batch takes one decode job for an instance that exists and answers 0; a job for an
     /// instance never created, on a batch never initialised, or a second job on a batch, is
     /// unmeasured - the console faulted on the second - and answers nothing here (REQ-ai02,
@@ -356,13 +661,17 @@ mod tests {
         assert_eq!(registry.register(0x15, 0, 0x16), Some(0));
         assert_eq!(registry.create(0x15, 0, 1, 0x16), Some(Ok(1)));
         assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));
-        assert_eq!(registry.job_decode(0x9000, 2), None, "no such instance");
-        assert_eq!(registry.job_decode(0x9000, 1), Some(0));
-        assert_eq!(registry.job_decode(0x9000, 1), None, "a second job");
-        assert_eq!(registry.job_decode(0xa000, 1), None, "no such batch");
+        assert_eq!(
+            registry.job_decode(0x9000, job(2)),
+            None,
+            "no such instance"
+        );
+        assert_eq!(registry.job_decode(0x9000, job(1)), Some(0));
+        assert_eq!(registry.job_decode(0x9000, job(1)), None, "a second job");
+        assert_eq!(registry.job_decode(0xa000, job(1)), None, "no such batch");
         assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));
         assert_eq!(
-            registry.job_decode(0x9000, 1),
+            registry.job_decode(0x9000, job(1)),
             Some(0),
             "initialised afresh"
         );
