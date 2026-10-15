@@ -336,9 +336,14 @@ pub(crate) fn evaluate_computed(
         return answer;
     }
     let mut reads = Vec::new();
+    // The replay reads a table a word at a time, eight or sixteen together for one scalar load,
+    // and each read asks where guest memory lies and what is deferred over it: a line of words is
+    // read once and the rest served from it, guest memory standing still while the replay runs
+    // (PPSA04263, 27 reads an evaluation, 0.5 us each).
+    let mut line: Option<(u64, [u8; READ_LINE])> = None;
     let answer = span(Span::BufferEvaluate, || {
         evaluate_computed_now(computed, (user_data, system), &mut |address| {
-            let held = read(address)?;
+            let held = word_through_line(&mut line, address, memory).or_else(|| read(address))?;
             reads.push((address, held));
             Some(held)
         })
@@ -356,6 +361,34 @@ pub(crate) fn evaluate_computed(
         });
     }
     answer
+}
+
+/// The bytes of guest memory a replay reads at once, from an address a multiple of them.
+const READ_LINE: usize = 64;
+
+/// The word at `address` from `line`, the line holding it read into it first when it is another;
+/// `None` where the aligned line cannot be read whole, and the word is read on its own.
+fn word_through_line(
+    line: &mut Option<(u64, [u8; READ_LINE])>,
+    address: u64,
+    memory: &impl GuestMemory,
+) -> Option<u32> {
+    let base = address & !(READ_LINE as u64 - 1);
+    let offset = usize::try_from(address - base).ok()?;
+    if offset + 4 > READ_LINE {
+        return None;
+    }
+    if line.as_ref().is_none_or(|(at, _)| *at != base) {
+        let bytes: [u8; READ_LINE] = memory.read(base, READ_LINE)?.try_into().ok()?;
+        *line = Some((base, bytes));
+    }
+    let (_, bytes) = line.as_ref()?;
+    Some(u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ]))
 }
 
 /// What [`evaluate_computed`] answers.
