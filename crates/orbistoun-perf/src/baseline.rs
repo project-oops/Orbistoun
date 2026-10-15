@@ -125,7 +125,9 @@ fn build(within: &Path, revision: &str, files: &[PathBuf], dir: &Path) -> Result
     Ok(built)
 }
 
-/// Each of `files` as the working tree holds it, by its path within `repo`.
+/// Each of `files` as the working tree holds it, by its path within `repo`; a file named
+/// `place=source` lies at `place` with `source`'s contents, which may lie anywhere - a candidate
+/// measured from a scratch copy, the shared working tree left as it is.
 fn overlay(
     repo: &Path,
     within: &Path,
@@ -135,6 +137,10 @@ fn overlay(
     files
         .iter()
         .map(|file| {
+            let (file, source) = match file.to_str().and_then(|named| named.split_once('=')) {
+                Some((place, source)) => (PathBuf::from(place), Some(PathBuf::from(source))),
+                None => (file.clone(), None),
+            };
             let at = if file.is_absolute() {
                 file.clone()
             } else {
@@ -145,7 +151,9 @@ fn overlay(
                 .strip_prefix(&root)
                 .map_err(|_| format!("{} is not in {}", at.display(), root.display()))?
                 .to_path_buf();
-            let bytes = std::fs::read(&at).map_err(|e| format!("reading {}: {e}", at.display()))?;
+            let from = source.unwrap_or(at);
+            let bytes =
+                std::fs::read(&from).map_err(|e| format!("reading {}: {e}", from.display()))?;
             Ok((relative, bytes))
         })
         .collect()
@@ -226,6 +234,17 @@ mod tests {
         let changed = super::overlay(&repo, &repo, &[std::path::PathBuf::from("crates/lib.rs")])
             .expect("an overlay");
         assert_ne!(super::overlay_hash(&changed), super::overlay_hash(&laid));
+
+        let named = format!("crates/lib.rs={}", root.join("outside.rs").display());
+        let elsewhere = super::overlay(&repo, &repo, &[std::path::PathBuf::from(named)])
+            .expect("a file laid from elsewhere");
+        assert_eq!(
+            elsewhere,
+            vec![(
+                std::path::Path::new("crates").join("lib.rs"),
+                b"two".to_vec()
+            )]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -376,6 +376,7 @@ enum Command {
         against: Option<String>,
         /// Measure the `--against` revision with these working-tree files laid over it, rather than
         /// this build: the change alone, without whatever else a shared working tree holds.
+        /// `place=source` lays `source`'s contents at `place`, from a copy outside the tree.
         #[arg(long, num_args = 1.., requires = "against")]
         with: Vec<std::path::PathBuf>,
         /// Seconds of each run to record: the title's `perf_seconds` setting, else 30.
