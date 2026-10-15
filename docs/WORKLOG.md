@@ -392,3 +392,13 @@ One entry per milestone. Commit messages hold the rest.
 - A title's kept frames compare with the console's, flip for flip, and the result is recorded.
 - A reference emulator's answer enters only as a prediction in a hardware request (D818), and
   `orbistoun-cli census` ranks what no measurement covers across the corpus.
+
+## 2026-10-15 - A performance round is a routine
+
+- A `perf` report names how long the host waited for the device and how much of the run the
+  device itself worked, which caches emptied themselves whole, and which pools made buffers
+  afresh; `ab` measures a candidate laid over a clean export and checks it draws the frames the
+  baseline does.
+- Frame snapshots reuse any spare buffer that holds them: PPSA04263 runs 218 -> 240 fps and
+  STKT00001 57 -> 67.
+- Computed draw-buffer descriptors keep their answers oldest-first: PPSA04263 164 -> 265 fps.
