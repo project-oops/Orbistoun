@@ -1345,6 +1345,64 @@ fn bind_dispatch(
     }
 }
 
+/// The command pool, its one command buffer and the fence a guest dispatch records, submits and
+/// waits through, kept for the device's next dispatch: making and releasing them took some 70 us of
+/// each dispatch's 170 us on the host (PPSA03416, 8,305 dispatches in 30 s).
+#[derive(Clone, Copy)]
+struct DispatchCommand {
+    device: u64,
+    pool: vk::CommandPool,
+    command: vk::CommandBuffer,
+    fence: vk::Fence,
+}
+
+fn kept_dispatch_command() -> &'static std::sync::Mutex<Option<DispatchCommand>> {
+    static KEPT: std::sync::Mutex<Option<DispatchCommand>> = std::sync::Mutex::new(None);
+    &KEPT
+}
+
+/// `device`'s kept dispatch command, made on first use, its command buffer reset for recording and
+/// its fence unsignalled. Dispatches are made one at a time under the session, and each waits for
+/// its fence before the next asks, so nothing still uses either.
+fn dispatch_command(device: &ash::Device, family: u32) -> Result<DispatchCommand, DispatchError> {
+    let raw = vk::Handle::as_raw(device.handle());
+    let mut kept = kept_dispatch_command()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(command) = kept.filter(|command| command.device == raw) {
+        // SAFETY: the pool was made on this device, and its one buffer's last submission was
+        // waited for.
+        unsafe { device.reset_command_pool(command.pool, vk::CommandPoolResetFlags::empty()) }
+            .map_err(|e| DispatchError::Vulkan("reset_command_pool", e))?;
+        // SAFETY: the fence was made on this device and its last submission has completed.
+        unsafe { device.reset_fences(&[command.fence]) }
+            .map_err(|e| DispatchError::Vulkan("reset_fences", e))?;
+        return Ok(command);
+    }
+    let pool_create = vk::CommandPoolCreateInfo::default().queue_family_index(family);
+    // SAFETY: the family index is one this device was created with.
+    let pool = unsafe { device.create_command_pool(&pool_create, None) }
+        .map_err(|e| DispatchError::Vulkan("create_command_pool", e))?;
+    let allocate = vk::CommandBufferAllocateInfo::default()
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+    // SAFETY: the pool is live and was just created.
+    let command = unsafe { device.allocate_command_buffers(&allocate) }
+        .map_err(|e| DispatchError::Vulkan("allocate_command_buffers", e))?[0];
+    // SAFETY: the device is live and the create info outlives the call.
+    let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
+        .map_err(|e| DispatchError::Vulkan("create_fence", e))?;
+    let made = DispatchCommand {
+        device: raw,
+        pool,
+        command,
+        fence,
+    };
+    *kept = Some(made);
+    Ok(made)
+}
+
 /// Records and runs one compute dispatch against two caller-owned buffers, and reads both back.
 ///
 /// Releases everything it created except the buffers, which belong to the caller. On an error
@@ -1381,20 +1439,9 @@ fn dispatch_core(
     let pipeline_layout = bound.kept.layout;
     let sets = [bound.set];
 
-    // Record and submit.
-    let pool_create = vk::CommandPoolCreateInfo::default().queue_family_index(family);
-    // SAFETY: the family index is one this device was created with.
-    let command_pool = unsafe { device.create_command_pool(&pool_create, None) }
-        .map_err(|e| DispatchError::Vulkan("create_command_pool", e))?;
-
-    let command_allocate = vk::CommandBufferAllocateInfo::default()
-        .command_pool(command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(1);
-    // SAFETY: the pool is live and was just created.
-    let command_buffers = unsafe { device.allocate_command_buffers(&command_allocate) }
-        .map_err(|e| DispatchError::Vulkan("allocate_command_buffers", e))?;
-    let command = command_buffers[0];
+    // Record and submit, through the command buffer and fence every dispatch on this device reuses.
+    let DispatchCommand { command, fence, .. } = dispatch_command(device, family)?;
+    let command_buffers = [command];
 
     let begin =
         vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -1430,20 +1477,17 @@ fn dispatch_core(
     // A fence for this submission alone: a device wait also waited for whatever else the device
     // was doing, such as a frame being shown.
     //
-    // SAFETY: the device is live and the create info outlives the call.
-    let fence = unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) }
-        .map_err(|e| DispatchError::Vulkan("create_fence", e))?;
     // SAFETY: the command buffer has finished recording, the queue belongs to this device, and the
-    // fence is unsignalled and used by nothing else.
+    // fence was reset unsignalled for this dispatch and is used by nothing else.
     let waited = unsafe { device.queue_submit(queue, &submits, fence) }
         .map_err(|e| DispatchError::Vulkan("queue_submit", e))
         .and_then(|()| {
-            // SAFETY: the fence was submitted with the work just above.
-            unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
-                .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))
+            span(Span::DeviceRunWait, || {
+                // SAFETY: the fence was submitted with the work just above.
+                unsafe { device.wait_for_fences(&[fence], true, u64::MAX) }
+                    .map_err(|e| DispatchError::Vulkan("wait_for_fences", e))
+            })
         });
-    // SAFETY: the submission it fenced has completed, or was never made.
-    unsafe { device.destroy_fence(fence, None) };
     waited?;
     if let Some(clock) = clock {
         read_dispatch_clock(device, clock);
@@ -1458,10 +1502,8 @@ fn dispatch_core(
     // Release what was this dispatch's alone: the buffers are the caller's, and a kept pipeline
     // serves the next dispatch of its program.
     //
-    // SAFETY: every handle below was created here on this device, is not in use after the fence
-    // wait, and is destroyed exactly once.
-    unsafe { device.destroy_command_pool(command_pool, None) };
-    // SAFETY: as above.
+    // SAFETY: the descriptor pool was created for this dispatch on this device, is not in use after
+    // the fence wait, and is destroyed exactly once.
     unsafe { device.destroy_descriptor_pool(bound.descriptor_pool, None) };
     if !bound.held {
         bound.kept.release(device);

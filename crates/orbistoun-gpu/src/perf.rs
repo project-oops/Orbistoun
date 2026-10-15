@@ -126,6 +126,7 @@ macro_rules! span_labels {
             Span::DeviceSetupSettle => $as!("device: setup: settle"),
             Span::DevicePipeline => $as!("device: pipeline"),
             Span::DeviceRun => $as!("device: run"),
+            Span::DeviceRunWait => $as!("device: run: wait"),
             Span::DeviceReadBack => $as!("device: read back window"),
             Span::ReadBackImage => $as!("device: read back image"),
             Span::ReadBackBuffers => $as!("device: read back buffers"),
@@ -575,6 +576,9 @@ pub enum Span {
     DevicePipeline,
     /// Within [`Self::DispatchExecute`]: recorded, submitted and waited for.
     DeviceRun,
+    /// Within [`Self::DeviceRun`]: the host waiting on the dispatch's fence, from its submission to
+    /// the device finishing it - the device's time and the round trip to it.
+    DeviceRunWait,
     /// Within [`Self::DispatchExecute`]: its observation and guest-memory window read off the
     /// device.
     DeviceReadBack,
@@ -607,7 +611,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 103] = [
+    pub const ALL: [Self; 104] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -700,6 +704,7 @@ impl Span {
         Self::DeviceSetupSettle,
         Self::DevicePipeline,
         Self::DeviceRun,
+        Self::DeviceRunWait,
         Self::DeviceReadBack,
         Self::ReadBackImage,
         Self::ReadBackBuffers,
