@@ -319,10 +319,11 @@ pub(crate) fn evaluate_computed(
     };
     let kept = evaluated().lock().ok().and_then(|evaluated| {
         evaluated
+            .answers
             .get(&fingerprint)?
             .iter()
             .find(|kept| {
-                kept.computed == *computed
+                *kept.computed == *computed
                     && kept.user_data == user_data
                     && kept.system == system
                     && kept
@@ -348,17 +349,18 @@ pub(crate) fn evaluate_computed(
             Some(held)
         })
     });
+    let program = interned(computed);
     if let Ok(mut evaluated) = evaluated().lock() {
-        if evaluated.len() >= EVALUATED_KEPT {
-            evaluated.clear();
-        }
-        evaluated.entry(fingerprint).or_default().push(Evaluated {
-            computed: computed.clone(),
-            user_data: user_data.to_vec(),
-            system: system.to_vec(),
-            reads: runs_of(&reads),
-            answer: answer.clone(),
-        });
+        evaluated.keep(
+            fingerprint,
+            Evaluated {
+                computed: program,
+                user_data: user_data.to_vec(),
+                system: system.to_vec(),
+                reads: runs_of(&reads),
+                answer: answer.clone(),
+            },
+        );
     }
     answer
 }
@@ -400,7 +402,8 @@ pub(crate) type Evaluation = Result<Option<([u32; 4], u32)>, Refusal>;
 /// replaying the program for each was 30 us a draw (PPSA02664, a sixth of a run), half of them
 /// asked before.
 struct Evaluated {
-    computed: Computed,
+    /// The program and access, shared with every answer kept for them ([`interned`]).
+    computed: std::sync::Arc<Computed>,
     user_data: Vec<u32>,
     system: Vec<(u32, u32)>,
     /// The words the replay read, as runs of consecutive bytes, each checked again with one read.
@@ -430,16 +433,73 @@ fn runs_of(reads: &[(u64, u32)]) -> Vec<(u64, Vec<u8>)> {
     runs
 }
 
-/// The answers [`evaluate_computed`] keeps, by a hash of what each was asked.
-fn evaluated() -> &'static std::sync::Mutex<std::collections::HashMap<u64, Vec<Evaluated>>> {
-    static EVALUATED: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u64, Vec<Evaluated>>>,
-    > = std::sync::OnceLock::new();
+/// The answers [`evaluate_computed`] keeps, by a hash of what each was asked, and the order they
+/// were kept in.
+#[derive(Default)]
+struct EvaluatedAnswers {
+    answers: std::collections::HashMap<u64, Vec<Evaluated>>,
+    order: std::collections::VecDeque<u64>,
+}
+
+impl EvaluatedAnswers {
+    /// Keeps `answer` under `fingerprint`, letting the oldest answers go past [`EVALUATED_KEPT`]
+    /// rather than all of them: a title whose draws ask a few thousand questions more than the
+    /// limit lost every answer each time it filled, five times a second (PPSA04263, whose questions
+    /// repeat 92% of the time but missed 70%).
+    fn keep(&mut self, fingerprint: u64, answer: Evaluated) {
+        self.answers.entry(fingerprint).or_default().push(answer);
+        self.order.push_back(fingerprint);
+        while self.order.len() > EVALUATED_KEPT {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(kept) = self.answers.get_mut(&oldest) {
+                if !kept.is_empty() {
+                    kept.remove(0);
+                }
+                if kept.is_empty() {
+                    self.answers.remove(&oldest);
+                }
+            }
+        }
+    }
+}
+
+fn evaluated() -> &'static std::sync::Mutex<EvaluatedAnswers> {
+    static EVALUATED: std::sync::OnceLock<std::sync::Mutex<EvaluatedAnswers>> =
+        std::sync::OnceLock::new();
     EVALUATED.get_or_init(Default::default)
 }
 
-/// The most hashes of answers [`evaluated`] keeps before it lets them all go.
-const EVALUATED_KEPT: usize = 4096;
+/// The most answers [`evaluated`] keeps; past it, the oldest go first. Each holds its words and
+/// the runs it read, its program shared ([`interned`]).
+const EVALUATED_KEPT: usize = 16_384;
+
+/// `computed`, shared: every answer kept for one program and access holds the same one, rather than
+/// a copy of a prefix of hundreds of bytes each.
+fn interned(computed: &Computed) -> std::sync::Arc<Computed> {
+    type Interned = std::collections::HashMap<u64, Vec<std::sync::Arc<Computed>>>;
+    static INTERNED: std::sync::OnceLock<std::sync::Mutex<Interned>> = std::sync::OnceLock::new();
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        computed.hash(&mut hasher);
+        hasher.finish()
+    };
+    let Ok(mut interned) = INTERNED.get_or_init(Default::default).lock() else {
+        return std::sync::Arc::new(computed.clone());
+    };
+    if interned.len() >= PREFIXES_KEPT && !interned.contains_key(&key) {
+        interned.clear();
+    }
+    let kept = interned.entry(key).or_default();
+    if let Some(found) = kept.iter().find(|kept| ***kept == *computed) {
+        return std::sync::Arc::clone(found);
+    }
+    let shared = std::sync::Arc::new(computed.clone());
+    kept.push(std::sync::Arc::clone(&shared));
+    shared
+}
 
 /// [`evaluate_computed`], replayed: guest memory's words come through `read`.
 fn evaluate_computed_now(
@@ -1875,6 +1935,45 @@ mod tests {
         // A table the user data does not name leaves the descriptor unknown.
         user_data[0] = 0x9000;
         assert!(super::resolve_range(&source, (&user_data, 0, &[]), &memory).is_err());
+    }
+
+    /// Past the most answers kept, the oldest goes and every other stays, rather than all of
+    /// them going at once.
+    #[test]
+    fn past_the_most_answers_kept_the_oldest_goes() {
+        let computed = std::sync::Arc::new(orbistoun_translate::draw_buffers::Computed {
+            prefix: Vec::new(),
+            at: 0,
+            through: orbistoun_translate::draw_buffers::ComputedAccess::Pointer {
+                base: 4,
+                end: 16,
+            },
+            soffset: 125,
+            first_register: 4,
+            user_data: 2,
+            program_address: None,
+        });
+        let answer = |word: u32| super::Evaluated {
+            computed: std::sync::Arc::clone(&computed),
+            user_data: vec![word],
+            system: Vec::new(),
+            reads: Vec::new(),
+            answer: Ok(None),
+        };
+        let mut kept = super::EvaluatedAnswers::default();
+        let most = u32::try_from(super::EVALUATED_KEPT).expect("fits");
+        for word in 0..=most {
+            kept.keep(u64::from(word % 7), answer(word));
+        }
+        let held: Vec<u32> = kept
+            .answers
+            .values()
+            .flatten()
+            .map(|answer| answer.user_data[0])
+            .collect();
+        assert_eq!(held.len(), super::EVALUATED_KEPT);
+        assert!(!held.contains(&0), "the oldest went");
+        assert!(held.contains(&1) && held.contains(&most), "the rest stayed");
     }
 
     /// The words a replay read are kept as runs: a descriptor's four are one, a word elsewhere
