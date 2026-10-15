@@ -1757,17 +1757,28 @@ mod imp {
         {
             return CONTINUE_EXECUTION;
         }
+        // The access is noted with the frame it brings back, so a run can say what read a drawn
+        // target before its flip.
+        let touch = orbistoun_gpu::agc_driver::GuestTouch {
+            rip,
+            address: parameters[1] as u64,
+            write: parameters[0] == 1,
+        };
         if code == ACCESS_VIOLATION
             && count >= 2
             && parameters[0] == 1
-            && orbistoun_gpu::agc_driver::written_at(parameters[1] as u64)
+            && orbistoun_gpu::agc_driver::with_guest_touch(touch, || {
+                orbistoun_gpu::agc_driver::written_at(parameters[1] as u64)
+            })
         {
             return CONTINUE_EXECUTION;
         }
         if code == ACCESS_VIOLATION
             && count >= 2
             && matches!(parameters[0], 0 | 1)
-            && orbistoun_gpu::agc_driver::carry_out_at(parameters[1] as u64)
+            && orbistoun_gpu::agc_driver::with_guest_touch(touch, || {
+                orbistoun_gpu::agc_driver::carry_out_at(parameters[1] as u64)
+            })
         {
             return CONTINUE_EXECUTION;
         }

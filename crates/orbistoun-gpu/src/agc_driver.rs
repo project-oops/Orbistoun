@@ -2428,6 +2428,7 @@ fn write_back_pending(memory: &mut dyn cp::CpMemory) -> bool {
     };
     let written = write_target(memory, target, swap, &after);
     if written {
+        note_touched(target.base);
         let mut early = written_since_flip()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2482,13 +2483,84 @@ fn switch_held() -> &'static Mutex<Vec<(ColourTarget, bool)>> {
 /// How many targets [`switch_held`] remembers; the oldest is let go past it.
 const SWITCH_HELD_KEPT: usize = 16;
 
-/// Notes that a frame deferred onto `target` was carried out, for [`hold_pending`].
+/// Notes that a frame deferred onto `target` was carried out, for [`hold_pending`], and the guest
+/// access that carried it out when one did.
 fn note_carried_out(target: ColourTarget) {
+    note_touched(target.base);
     if let Ok(mut held) = switch_held().lock()
         && let Some(kept) = held.iter_mut().find(|(kept, _)| *kept == target)
     {
         kept.1 = true;
     }
+}
+
+/// A guest access that faulted on memory a drawn frame was held back from: the instruction's address,
+/// the address it touched, and whether it wrote. What brought a frame back before its flip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestTouch {
+    /// The faulting instruction's address.
+    pub rip: u64,
+    /// The address it read or wrote.
+    pub address: u64,
+    /// Whether it wrote; a read otherwise.
+    pub write: bool,
+}
+
+thread_local! {
+    /// The guest access the host's fault handler is answering on this thread, if it is.
+    static TOUCHING: std::cell::Cell<Option<GuestTouch>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `answer` - [`written_at`] or [`carry_out_at`] - as the answer to `touch`, so a frame it brings
+/// back is noted with the access that did ([`take_early_touch`]).
+pub fn with_guest_touch<R>(touch: GuestTouch, answer: impl FnOnce() -> R) -> R {
+    let before = TOUCHING.with(|touching| touching.replace(Some(touch)));
+    let out = answer();
+    TOUCHING.with(|touching| touching.set(before));
+    out
+}
+
+/// The targets whose frames a guest access brought back before their flips, each with the first
+/// such access, the oldest first.
+fn early_touches() -> &'static Mutex<Vec<(u64, GuestTouch)>> {
+    static TOUCHES: Mutex<Vec<(u64, GuestTouch)>> = Mutex::new(Vec::new());
+    &TOUCHES
+}
+
+/// How many targets [`early_touches`] remembers; the oldest is let go past it.
+const EARLY_TOUCHES_KEPT: usize = 16;
+
+/// Notes the guest access being answered on this thread, if one is, as what brought `base`'s frame
+/// back.
+fn note_touched(base: u64) {
+    let Some(touch) = TOUCHING.with(std::cell::Cell::get) else {
+        return;
+    };
+    let Ok(mut touches) = early_touches().lock() else {
+        return;
+    };
+    if touches.iter().any(|&(kept, _)| kept == base) {
+        return;
+    }
+    if touches.len() >= EARLY_TOUCHES_KEPT {
+        touches.remove(0);
+    }
+    touches.push((base, touch));
+}
+
+/// The guest access that brought the frame drawn into the target at `address` back before its flip,
+/// if one did; every access noted is forgotten, so the next flip asks afresh. Asked beside
+/// [`frame_drawn_into`].
+#[must_use]
+pub fn take_early_touch(address: u64) -> Option<GuestTouch> {
+    let touches = std::mem::take(
+        &mut *early_touches()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    touches
+        .into_iter()
+        .find_map(|(base, touch)| (base == address).then_some(touch))
 }
 
 /// The bases of the targets whose drawn frames were written back since a flip last asked
@@ -6488,6 +6560,38 @@ mod tests {
             "the write-back stays deferred"
         );
         super::drop_covered(base, span as u64);
+    }
+
+    /// A frame brought back while the fault handler answers a guest access is noted with that
+    /// access, once and first only; one brought back by anything else is not; and the note is
+    /// forgotten once taken.
+    #[test]
+    fn a_frame_brought_back_by_a_guest_access_names_the_access() {
+        let _guard = serial();
+        let _ = super::take_early_touch(0);
+        let read = super::GuestTouch {
+            rip: 0x4000_1234,
+            address: 0x7_0000_0040,
+            write: false,
+        };
+        let write = super::GuestTouch {
+            write: true,
+            ..read
+        };
+        super::with_guest_touch(read, || super::note_touched(0x7_0000_0000));
+        super::with_guest_touch(write, || super::note_touched(0x7_0000_0000));
+        super::note_touched(0x8_0000_0000);
+        assert_eq!(super::take_early_touch(0x7_0000_0000), Some(read));
+        assert_eq!(
+            super::take_early_touch(0x7_0000_0000),
+            None,
+            "forgotten once taken"
+        );
+        assert_eq!(
+            super::take_early_touch(0x8_0000_0000),
+            None,
+            "no guest access, no note"
+        );
     }
 
     /// Two targets read in turn, as a frame's display buffers alternate: the second read of the
