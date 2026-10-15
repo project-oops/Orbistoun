@@ -755,6 +755,16 @@ pub const EMPTIED: [Span; 3] = [
     Span::TwinsEmptied,
 ];
 
+/// Spans that are a pool making something afresh, each beside the span that asks the pool, which a
+/// report counts: a pool that makes afresh for most asks lets go of what it is asked for again
+/// (PPSA04263's snapshot buffers, 6,251 made in 6,459 asks, 17% of its run).
+pub const FRESH: [(Span, Span); 4] = [
+    (Span::SnapshotBuffer, Span::SnapshotOnDevice),
+    (Span::DispatchNewBuffer, Span::DeviceSetup),
+    (Span::DispatchNewHostBuffer, Span::DeviceSetup),
+    (Span::DispatchNewImage, Span::DeviceSetup),
+];
+
 const SPANS: usize = Span::ALL.len();
 static DETAIL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SPAN_SPENT: [AtomicU64; SPANS] = [const { AtomicU64::new(0) }; SPANS];

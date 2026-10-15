@@ -74,6 +74,10 @@ pub struct Report {
     /// `gpu ms` plot summed. `None` where the run plotted none.
     #[serde(default)]
     pub device_ms: Option<f64>,
+    /// Each pool [`Self::note_fresh`] was given that made something afresh: what it made, how
+    /// many, what asks it, and how often.
+    #[serde(default)]
+    pub fresh: Vec<(String, u64, String, u64)>,
 }
 
 /// The plot each guest flip adds its frame time to (D829).
@@ -117,6 +121,7 @@ impl Report {
             },
             device_waits: None,
             emptied: Vec::new(),
+            fresh: Vec::new(),
             device_ms: {
                 let gpu = parse_plot(
                     &export(&["--unwrap", "--plot", "--filter", GPU_PLOT])?,
@@ -184,6 +189,21 @@ impl Report {
                 caches.join(", ")
             );
         }
+        if !self.fresh.is_empty() {
+            let pools: Vec<String> = self
+                .fresh
+                .iter()
+                .map(|(made, times, asked, asks)| format!("{made} {times} in {asks} {asked}"))
+                .collect();
+            let _ = writeln!(
+                out,
+                concat!(
+                    "made afresh: {} - a pool making afresh for most asks lets go of what it is ",
+                    "asked for again"
+                ),
+                pools.join(", ")
+            );
+        }
         for (title, zones) in [
             ("by self time (what to make faster)", &self.by_self),
             ("by total time (where the time sits)", &self.by_total),
@@ -239,6 +259,24 @@ impl Report {
             .filter_map(|&cache| {
                 let zone = self.by_self.iter().find(|zone| zone.name == cache)?;
                 (zone.count > 0).then(|| (cache.to_owned(), zone.count))
+            })
+            .collect();
+    }
+
+    /// Notes, for each pool in `pools` - the zone that makes something afresh, and the zone that
+    /// asks the pool - how often each occurred, where the pool made anything.
+    pub fn note_fresh(&mut self, pools: &[(&str, &str)]) {
+        let count = |name: &str| {
+            self.by_self
+                .iter()
+                .find(|zone| zone.name == name)
+                .map_or(0, |zone| zone.count)
+        };
+        self.fresh = pools
+            .iter()
+            .filter_map(|&(made, asked)| {
+                let times = count(made);
+                (times > 0).then(|| (made.to_owned(), times, asked.to_owned(), count(asked)))
             })
             .collect();
     }
@@ -328,6 +366,7 @@ mod tests {
             device_waits: None,
             emptied: Vec::new(),
             device_ms: None,
+            fresh: Vec::new(),
         };
         report.waits_on("hand-off", "on device");
         let names: Vec<(&str, u64)> = report
@@ -361,6 +400,7 @@ mod tests {
             device_waits: None,
             emptied: Vec::new(),
             device_ms: None,
+            fresh: Vec::new(),
         };
         assert!(!report.render(5).contains("waiting on the device"));
         report.note_device_waits(&["draw room", "setup: settle", "never recorded"]);
@@ -369,6 +409,34 @@ mod tests {
             report
                 .render(5)
                 .contains("waiting on the device: 50.0% of the run")
+        );
+    }
+
+    /// A pool that made anything afresh is reported beside how often it was asked; one that made
+    /// nothing is left out, and with none the line is not written.
+    #[test]
+    fn pools_made_afresh_are_counted_against_their_asks() {
+        let zone = |name: &str, count| ZoneStat {
+            name: name.to_owned(),
+            total_ns: 10,
+            count,
+            max_ns: 10,
+        };
+        let mut report = Report {
+            by_self: sorted(vec![zone("snapshot: new", 90), zone("snapshot", 100)]),
+            ..Report::default()
+        };
+        report.note_fresh(&[("image: new", "dispatch")]);
+        assert!(!report.render(5).contains("made afresh"));
+        report.note_fresh(&[("snapshot: new", "snapshot"), ("image: new", "dispatch")]);
+        assert_eq!(
+            report.fresh,
+            [("snapshot: new".to_owned(), 90, "snapshot".to_owned(), 100)]
+        );
+        assert!(
+            report
+                .render(5)
+                .contains("made afresh: snapshot: new 90 in 100 snapshot")
         );
     }
 
