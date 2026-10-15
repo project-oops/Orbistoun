@@ -57,7 +57,7 @@ depend on how many hashes it looks for (D213).
 ## One turn, unattended
 
 ```bash
-./bin/orbistoun turn <title-id> [--record | --apply | --verify <file>]
+./bin/orbistoun turn <title-id> [--record | --apply | --verify <file>] [--limit <seconds>]
 ```
 
 Runs `orbistoun-cli turn` with the same resolution and symbol database as `run`: the guest,
@@ -69,6 +69,7 @@ the ranked findings, and every mechanical step the findings call for (see
 | `--record` | Print what the turn established as a `learn` command |
 | `--apply` | Write what the turn measured into `learned.toml` beside `config.toml`. Every entry a person wrote wins over it; deleting the file undoes it |
 | `--verify <file>` | Check a submitted learned file against what this machine measures |
+| `--limit <seconds>` | Seconds each of the turn's runs may take, for a title whose wall is past the run's default; every run of the turn gets the same |
 
 ## Every title
 

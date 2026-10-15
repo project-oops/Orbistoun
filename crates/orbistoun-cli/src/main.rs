@@ -236,6 +236,10 @@ enum Command {
         /// command (D297).
         #[arg(long, value_name = "FILE")]
         verify: Option<std::path::PathBuf>,
+        /// Seconds each run of the turn may take, for a title whose wall is past the run's
+        /// default; every run of a turn gets the same limit, so its comparisons hold.
+        #[arg(long, value_name = "SECONDS")]
+        limit: Option<u64>,
     },
     /// Survey a module, persist a run report, and show the delta from last time.
     Report {
@@ -1168,13 +1172,14 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             record,
             apply,
             ref verify,
+            limit,
         } => {
             cmd_turn(
                 path,
-                record,
-                apply,
+                (record, apply),
                 verify.as_deref(),
                 cli.symbols_db.as_deref(),
+                limit,
             )?;
         }
         Command::Run {

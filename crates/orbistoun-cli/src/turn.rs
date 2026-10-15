@@ -11,10 +11,10 @@ use anyhow::{Context, Result};
 /// runner, and prints (D034).
 pub(crate) fn cmd_turn(
     path: &std::path::Path,
-    record: bool,
-    apply: bool,
+    (record, apply): (bool, bool),
     verify: Option<&std::path::Path>,
     symbols_db: Option<&std::path::Path>,
+    limit: Option<u64>,
 ) -> Result<()> {
     use orbistoun_turn::{experiment::Finding, trial::GuestTrial, turn};
 
@@ -43,7 +43,8 @@ pub(crate) fn cmd_turn(
     // Spawns this binary as the guest runner, as worker mode does, so the runner is the same build.
     let binary = std::env::current_exe().context("finding this executable")?;
     let mut trial = GuestTrial::new(&binary, path, &traces)
-        .with_symbols(symbols_db.map(std::path::Path::to_path_buf));
+        .with_symbols(symbols_db.map(std::path::Path::to_path_buf))
+        .with_limit(limit);
     if let Some(dir) = &scratch {
         // The child reads its own learned file too, so the isolation reaches it.
         trial = trial.with_env(orbistoun_env::DATA_DIR.name, dir.path().to_string_lossy());

@@ -27,6 +27,8 @@ pub struct GuestTrial {
     /// The database decides which imports have names, and an unnamed import gets a stub, so a run
     /// without it is a different program from the one the loop measures.
     symbols: Option<PathBuf>,
+    /// The time limit every run is given, in seconds, or `None` for the run's own default.
+    limit: Option<u64>,
 }
 
 impl GuestTrial {
@@ -43,7 +45,27 @@ impl GuestTrial {
             traces: traces.into(),
             env: Vec::new(),
             symbols: None,
+            limit: None,
         }
+    }
+
+    /// Gives every run this time limit: a title whose wall is past the default is measured there.
+    #[must_use]
+    pub const fn with_limit(mut self, seconds: Option<u64>) -> Self {
+        self.limit = seconds;
+        self
+    }
+
+    /// The arguments every run is given after the global options: the subcommand, the title, and
+    /// the time limit where one was asked for.
+    #[must_use]
+    pub fn run_arguments(&self) -> Vec<String> {
+        let mut arguments = vec!["run".to_owned(), self.title.to_string_lossy().into_owned()];
+        if let Some(seconds) = self.limit {
+            arguments.push("--limit".to_owned());
+            arguments.push(seconds.to_string());
+        }
+        arguments
     }
 
     /// Gives every run the symbol database the caller was given.
@@ -131,7 +153,7 @@ impl GuestTrial {
         if let Some(symbols) = &self.symbols {
             command.arg("--symbols-db").arg(symbols);
         }
-        command.arg("run").arg(&self.title);
+        command.args(self.run_arguments());
         for (key, value) in &self.env {
             command.env(key, value);
         }
@@ -274,6 +296,21 @@ pub fn traces_in(data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    /// Every run a trial makes is given the time limit the turn was asked for, so a title that
+    /// needs longer than the default to reach its wall is measured where its wall is; with none
+    /// asked for, the run's own default holds.
+    #[test]
+    fn a_trial_runs_for_the_limit_it_was_given() {
+        let trial = super::GuestTrial::new("orbistoun-cli", "title/eboot.bin", "traces")
+            .with_limit(Some(150));
+        assert_eq!(
+            trial.run_arguments(),
+            vec!["run", "title/eboot.bin", "--limit", "150"]
+        );
+        let plain = super::GuestTrial::new("orbistoun-cli", "title/eboot.bin", "traces");
+        assert_eq!(plain.run_arguments(), vec!["run", "title/eboot.bin"]);
+    }
+
     use super::counts;
 
     /// The count is read out of the sentence the run writes.
