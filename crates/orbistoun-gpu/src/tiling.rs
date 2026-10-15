@@ -682,7 +682,12 @@ fn tile_mapped(
                 for (dy, line) in rows.chunks(w).enumerate() {
                     let r = row[dy] ^ xor;
                     for (x, &texel) in line.iter().enumerate() {
-                        blocks[(x / extent) * BLOCK_WORDS + (column[x % extent] ^ r)] = map(texel);
+                        // Past the end only where the words are a surface's first words alone.
+                        if let Some(word) =
+                            blocks.get_mut((x / extent) * BLOCK_WORDS + (column[x % extent] ^ r))
+                        {
+                            *word = map(texel);
+                        }
                     }
                 }
             });
@@ -710,6 +715,32 @@ pub fn tile_surface_64kb_rx_bpp4_mapped(
         return Err(DetileError::TiledDataTooShort {
             needed_words: needed_words.max(texels),
             got_words: tiled.len().min(linear.len()),
+        });
+    }
+    tile_mapped(linear, width, pipe_bank_xor, tiled, &map);
+    Ok(())
+}
+
+/// [`tile_surface_64kb_rx_bpp4_mapped`] into only the surface's first `tiled.len()` words: each texel
+/// whose word lies past them is not written. What a copy of a surface's first bytes holds of the
+/// frame, tiled where the copy lands rather than into a whole surface and cut short.
+///
+/// # Errors
+///
+/// [`DetileError::TiledDataTooShort`] when `linear` is not exactly `width * height` texels.
+pub fn tile_prefix_64kb_rx_bpp4_mapped(
+    linear: &[u32],
+    width: u32,
+    height: u32,
+    pipe_bank_xor: u8,
+    tiled: &mut [u32],
+    map: impl Fn(u32) -> u32 + Sync,
+) -> Result<(), DetileError> {
+    let texels = width as usize * height as usize;
+    if linear.len() != texels {
+        return Err(DetileError::TiledDataTooShort {
+            needed_words: texels,
+            got_words: linear.len(),
         });
     }
     tile_mapped(linear, width, pipe_bank_xor, tiled, &map);
@@ -1513,6 +1544,28 @@ impl SurfaceLayout {
         }
     }
 
+    /// [`Self::tile_mapped`] into only the surface's first `tiled.len()` words, for a layout whose
+    /// texels can be tiled into a prefix of it: `64KB_R_X`, the layout a GL context draws its colour
+    /// target in. `None` for any other, which is tiled into a whole surface instead.
+    pub fn tile_prefix_mapped(
+        self,
+        linear: &[u32],
+        (width, height): (u32, u32),
+        pipe_bank_xor: u8,
+        tiled: &mut [u32],
+        map: impl Fn(u32) -> u32 + Sync,
+    ) -> Option<Result<(), DetileError>> {
+        self.tiles_prefixes().then(|| {
+            tile_prefix_64kb_rx_bpp4_mapped(linear, width, height, pipe_bank_xor, tiled, map)
+        })
+    }
+
+    /// Whether [`Self::tile_prefix_mapped`] tiles into a prefix of this layout's surface.
+    #[must_use]
+    pub const fn tiles_prefixes(self) -> bool {
+        matches!(self, Self::Rx64Kb)
+    }
+
     /// Tiles a linear, row-major image into a whole surface, each texel through `map`, leaving
     /// the words the image does not cover as they were.
     ///
@@ -1651,6 +1704,35 @@ impl SurfaceLayout {
 
 #[cfg(test)]
 mod tests {
+    /// Tiling into a surface's first words writes exactly what tiling into the whole surface puts
+    /// there, across a block row's end and partway into a block, and nothing past them.
+    #[test]
+    fn a_prefix_tiles_as_the_whole_surface_cut_short() {
+        let (width, height) = (300, 200);
+        let linear: Vec<u32> = (0..width * height).collect();
+        let words = surface_words_64kb_rx_bpp4(width, height);
+        let mut whole = vec![u32::MAX; words];
+        super::tile_surface_64kb_rx_bpp4_mapped(&linear, width, height, 3, &mut whole, |w| w)
+            .expect("tiles");
+        for prefix in [
+            words - 1,
+            super::BLOCK_WORDS * 3 + 777,
+            (width * height) as usize,
+        ] {
+            let mut cut = vec![u32::MAX; prefix];
+            super::SurfaceLayout::Rx64Kb
+                .tile_prefix_mapped(&linear, (width, height), 3, &mut cut, |w| w)
+                .expect("a layout that tiles prefixes")
+                .expect("tiles");
+            assert_eq!(cut, whole[..prefix], "{prefix} words");
+        }
+        assert!(
+            super::SurfaceLayout::S64Kb
+                .tile_prefix_mapped(&linear, (width, height), 0, &mut [0; 4], |w| w)
+                .is_none()
+        );
+    }
+
     /// A 32-bpp `64KB_R_X` volume's slice XOR is the XOR of the terms addrlib gives for each bit
     /// of the slice index (`tools/addrlib/equation 64KB_R_X 4 32 3d`): slice 0 none, 1 `0x800`, 3
     /// `0xc00`, 31 `0xf00`; past slice 31 nothing was read.

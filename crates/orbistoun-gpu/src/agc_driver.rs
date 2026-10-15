@@ -3568,7 +3568,11 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
     };
     // Laid out in place: memory as the copy saw it goes down first, then the frame is tiled over it
     // in the destination itself - rather than into a copy of memory that is then written.
-    if copy.destination % 4 == 0 && length % 4 == 0 && length / 4 >= target.words() {
+    // A copy of the surface's first bytes alone (a GL context's readback) is tiled in place too
+    // where the layout tiles into a prefix: through a whole surface's copy of memory, it was an
+    // eight-megabyte allocation and a copy every frame (GLCB00001, 2 ms of a 12 ms frame).
+    let whole = length / 4 >= target.words();
+    if copy.destination % 4 == 0 && length % 4 == 0 && (whole || target.layout.tiles_prefixes()) {
         // A clear's word filled as words, not spelt out byte by byte first.
         let laid = crate::perf::span(crate::perf::Span::CarryOutWrite, || match memory_then {
             Contents::Uniform { word, .. } => fill_guest(copy.destination, copy.length, *word),
@@ -3581,12 +3585,24 @@ fn carry_out_now(copy: &Deferred, hooks: &LazyCopies) -> bool {
         }
         return crate::perf::span(crate::perf::Span::CarryOutTile, || {
             edit_guest_words(copy.destination, length / 4, |words| {
-                target
-                    .layout
-                    .tile_mapped(&frame, width, height, target.pipe_bank_xor, words, |w| {
-                        stored(w, target, swap)
-                    })
-                    .is_ok()
+                let map = |w| stored(w, target, swap);
+                if whole {
+                    target
+                        .layout
+                        .tile_mapped(&frame, width, height, target.pipe_bank_xor, words, map)
+                        .is_ok()
+                } else {
+                    target
+                        .layout
+                        .tile_prefix_mapped(
+                            &frame,
+                            (width, height),
+                            target.pipe_bank_xor,
+                            words,
+                            map,
+                        )
+                        .is_some_and(|tiled| tiled.is_ok())
+                }
             })
         });
     }
