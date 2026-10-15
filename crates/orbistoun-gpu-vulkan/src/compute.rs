@@ -798,6 +798,12 @@ impl Session {
             Self::create_device(&instance, physical, family)?;
         // SAFETY: the family index came from this device's own queue properties.
         let queue = unsafe { device.get_device_queue(family, 0) };
+        if let Some((dispatch_family, index)) = dispatch_family(&instance, physical, family) {
+            // SAFETY: the device was created with this queue (`create_device`).
+            let apart = unsafe { device.get_device_queue(dispatch_family, index) };
+            let _ =
+                DISPATCH_QUEUE.set((vk::Handle::as_raw(device.handle()), apart, dispatch_family));
+        }
         let properties = Self::properties(&instance, physical, &wanted_features, mesh_enabled);
         crate::pipeline_cache::open(&instance, physical, &device);
         // The global data share, zeroed once and kept for the process (D789).
@@ -905,10 +911,7 @@ impl Session {
         family: u32,
     ) -> Result<(ash::Device, vk::PhysicalDeviceFeatures, vk::Bool32), (&'static str, vk::Result)>
     {
-        let priorities = [1.0_f32];
-        let queue_info = [vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(family)
-            .queue_priorities(&priorities)];
+        let queue_info = queue_requests(instance, physical, family);
         // Only what emitted modules declare, and each only where the device offers it, so a device
         // that lacks one is refused by the code that needs it rather than at creation.
         // `shader_int16` and `shader_float16` serve modules that read a half-format buffer channel;
@@ -1186,6 +1189,78 @@ pub(crate) struct DispatchBuffer {
     pub offset: vk::DeviceSize,
 }
 
+/// The queue guest dispatches run on, apart from the one draws are recorded to, with the device it
+/// belongs to: a dispatch reads only what the host uploads for it and is read back to the host, so
+/// it never waits on the draws queued before it - a dispatch on the draws' queue waited for every
+/// one of them first (CRFT00001, a third of its run waiting on the device it kept busy a fifth of
+/// it). Unset where the queue family offers one queue.
+static DISPATCH_QUEUE: std::sync::OnceLock<(u64, vk::Queue, u32)> = std::sync::OnceLock::new();
+
+/// The queue a dispatch on `device` runs on, and its family, where it has one of its own.
+fn dispatch_queue(device: &ash::Device) -> Option<(vk::Queue, u32)> {
+    let raw = vk::Handle::as_raw(device.handle());
+    DISPATCH_QUEUE
+        .get()
+        .filter(|(on, _, _)| *on == raw)
+        .map(|&(_, queue, family)| (queue, family))
+}
+
+/// The queues a device is made with: the draws' `family`'s first, and the queue dispatches run on
+/// apart from it where the device has one (`dispatch_family`) - a second of the draws' family, or the
+/// first of a compute-only family.
+fn queue_requests(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    family: u32,
+) -> Vec<vk::DeviceQueueCreateInfo<'static>> {
+    static PRIORITIES: [f32; 2] = [1.0, 1.0];
+    match dispatch_family(instance, physical, family) {
+        Some((apart, _)) if apart == family => vec![
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(family)
+                .queue_priorities(&PRIORITIES),
+        ],
+        Some((apart, _)) => vec![
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(family)
+                .queue_priorities(&PRIORITIES[..1]),
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(apart)
+                .queue_priorities(&PRIORITIES[..1]),
+        ],
+        None => vec![
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(family)
+                .queue_priorities(&PRIORITIES[..1]),
+        ],
+    }
+}
+
+/// The family and queue index dispatches run on apart from the draws' `family`: a compute-only
+/// family's first queue, which a device runs beside its graphics work, else the draws' family's
+/// second queue. `None` where the device has neither. Every dispatch runs there, so what a dispatch
+/// binds is only ever used by that family.
+fn dispatch_family(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    family: u32,
+) -> Option<(u32, u32)> {
+    // SAFETY: the handle came from enumeration on this live instance.
+    let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+    let compute_only = families.iter().position(|properties| {
+        properties.queue_count > 0
+            && properties.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            && !properties.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+    });
+    if let Some(index) = compute_only.and_then(|index| u32::try_from(index).ok()) {
+        return Some((index, 0));
+    }
+    families
+        .get(family as usize)
+        .is_some_and(|properties| properties.queue_count >= 2)
+        .then_some((family, 1))
+}
+
 /// A timestamp pair a guest dispatch stamps its command buffer with, on the device it was made for,
 /// and the device's nanoseconds a tick: a dispatch's own time on the device joins the render passes'
 /// in the `gpu busy` phase, so a report's "device's own work" counts compute as well as draws.
@@ -1422,6 +1497,9 @@ fn dispatch_core(
     ),
 ) -> Result<(Vec<u32>, Vec<u32>), DispatchError> {
     use orbistoun_gpu::perf::{Span, SpanGuard, span};
+    // Every dispatch on the queue apart where there is one, so what dispatches share is only ever
+    // used by its family (`dispatch_family`).
+    let (queue, family) = dispatch_queue(device).unwrap_or((queue, family));
     let push_bytes = u32::try_from(push.len() * 4)
         .map_err(|_| DispatchError::Vulkan("push constants", vk::Result::ERROR_UNKNOWN))?;
     let bound = span(Span::DevicePipeline, || {
@@ -1759,8 +1837,13 @@ pub fn dispatch_guest_hashed(
 ) -> Result<GuestDispatch, DispatchError> {
     use orbistoun_gpu::perf::{Span, SpanGuard};
     let setting_up = SpanGuard::start(Span::DeviceSetup);
-    // Draws already queued finish first: the window was read from guest memory they write.
-    orbistoun_gpu::perf::span(Span::DeviceSetupSettle, crate::framebuffer::settle_session)?;
+    // On the draws' queue, the draws already queued finish first, since the dispatch's fence waits
+    // for them anyway. On its own queue it waits for none of them: it reads only what is uploaded
+    // for it, and nothing a draw writes on the device reaches guest memory but through a
+    // write-back the command processor has already made (`DISPATCH_QUEUE`).
+    if DISPATCH_QUEUE.get().is_none() {
+        orbistoun_gpu::perf::span(Span::DeviceSetupSettle, crate::framebuffer::settle_session)?;
+    }
     let session = session()?;
     let session = session
         .lock()
