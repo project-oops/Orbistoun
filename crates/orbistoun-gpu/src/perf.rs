@@ -755,6 +755,11 @@ pub const EMPTIED: [Span; 3] = [
     Span::TwinsEmptied,
 ];
 
+/// Spans that are one thread waiting for another's work, which is counted where it runs: a report
+/// marks them, so a ranking of costs does not send anyone to make a wait faster. What they wait on
+/// is the cost; [`DEVICE_WAITS`] are the waits on the device.
+pub const THREAD_WAITS: [Span; 2] = [Span::QueueFull, Span::SettleOver];
+
 /// Spans that are a pool making something afresh, each beside the span that asks the pool, which a
 /// report counts: a pool that makes afresh for most asks lets go of what it is asked for again
 /// (PPSA04263's snapshot buffers, 6,251 made in 6,459 asks, 17% of its run).

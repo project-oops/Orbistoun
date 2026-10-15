@@ -109,6 +109,7 @@ fn record(
         &orbistoun_gpu::perf::DEVICE_WAITS.map(orbistoun_gpu::perf::Span::label),
     );
     report.note_emptied(&orbistoun_gpu::perf::EMPTIED.map(orbistoun_gpu::perf::Span::label));
+    report.note_waits(&waits());
     report
         .note_fresh(&orbistoun_gpu::perf::FRESH.map(|(made, asked)| (made.label(), asked.label())));
     Ok(Recorded {
@@ -973,10 +974,28 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
         out,
         "\ncosts across titles, by self time as a share of each title's run (each weighed equally)"
     );
+    let waits = waits();
     for (name, share, titles) in ranked.into_iter().take(top) {
-        let _ = writeln!(out, "  {name:<28} {share:>6.1}%  in {titles} title(s)");
+        let mark = if waits.contains(&name) {
+            orbistoun_perf::WAIT_MARK
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "  {name:<28} {share:>6.1}%  in {titles} title(s){mark}"
+        );
     }
     out
+}
+
+/// The spans that are a wait - on another thread's work, or on the device - by their labels.
+fn waits() -> Vec<&'static str> {
+    orbistoun_gpu::perf::THREAD_WAITS
+        .iter()
+        .chain(&orbistoun_gpu::perf::DEVICE_WAITS)
+        .map(|span| span.label())
+        .collect()
 }
 
 #[cfg(test)]
@@ -1046,6 +1065,21 @@ mod tests {
             text.lines()
                 .find(|l| l.starts_with("BOUND"))
                 .is_some_and(|l| l.trim_end().ends_with("35.0")),
+            "{text}"
+        );
+
+        // A wait on another thread ranks marked as one, and work does not.
+        let waiting = entry("WAITING", 30.0, &[("queue full", 600), ("draw", 400)]);
+        let text = render_bench(&[waiting], None, 5);
+        assert!(
+            text.lines()
+                .any(|l| l.contains("queue full") && l.ends_with(orbistoun_perf::WAIT_MARK)),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .all(|l| !l.trim_start().starts_with("draw ")
+                    || !l.ends_with(orbistoun_perf::WAIT_MARK)),
             "{text}"
         );
 

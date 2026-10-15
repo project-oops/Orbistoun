@@ -11,7 +11,7 @@ pub mod baseline;
 mod report;
 mod tools;
 
-pub use report::{FrameTimes, Report, ZoneStat};
+pub use report::{FrameTimes, Report, WAIT_MARK, ZoneStat};
 
 /// A count or a span of nanoseconds as a float, for a mean, a share or a rate.
 #[must_use]

@@ -78,10 +78,17 @@ pub struct Report {
     /// many, what asks it, and how often.
     #[serde(default)]
     pub fresh: Vec<(String, u64, String, u64)>,
+    /// The zones [`Self::note_waits`] named as waits on another thread or the device, marked where
+    /// the report lists them.
+    #[serde(default)]
+    pub waits: Vec<String>,
 }
 
 /// The plot each guest flip adds its frame time to (D829).
 const FRAME_PLOT: &str = "frame ms";
+
+/// What a listed zone that is a wait is marked with: what it waits on is the cost, not the wait.
+pub const WAIT_MARK: &str = "  (a wait)";
 
 /// The plot the device's own time on render passes is added to, as each settle reads it.
 const GPU_PLOT: &str = "gpu ms";
@@ -122,6 +129,7 @@ impl Report {
             device_waits: None,
             emptied: Vec::new(),
             fresh: Vec::new(),
+            waits: Vec::new(),
             device_ms: {
                 let gpu = parse_plot(
                     &export(&["--unwrap", "--plot", "--filter", GPU_PLOT])?,
@@ -149,6 +157,74 @@ impl Report {
             ms(self.frames.percentile(99.0)),
             ms(self.frames.percentile(100.0)),
         );
+        self.render_notes(&mut out);
+        for (title, zones) in [
+            ("by self time (what to make faster)", &self.by_self),
+            ("by total time (where the time sits)", &self.by_total),
+        ] {
+            let whole: u64 = self.by_self.iter().map(|zone| zone.total_ns).sum();
+            let _ = writeln!(out, "\n{title}");
+            let _ = writeln!(
+                out,
+                "  {:<28} {:>10} {:>7} {:>10} {:>10} {:>10}",
+                "zone", "total ms", "share", "count", "mean us", "max us"
+            );
+            for zone in zones.iter().take(top) {
+                let share = if whole > 0 {
+                    as_f64(zone.total_ns) * 100.0 / as_f64(whole)
+                } else {
+                    0.0
+                };
+                let _ = writeln!(
+                    out,
+                    "  {:<28} {:>10.1} {:>6.1}% {:>10} {:>10.1} {:>10.0}{}",
+                    zone.name,
+                    as_f64(zone.total_ns) / 1e6,
+                    share,
+                    zone.count,
+                    as_f64(zone.mean_ns()) / 1e3,
+                    as_f64(zone.max_ns) / 1e3,
+                    if self.waits.contains(&zone.name) {
+                        WAIT_MARK
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
+        out
+    }
+}
+
+impl Report {
+    /// Notes how much of the run the zones named `waits` - each the host waiting for the device -
+    /// took together, as a share of every zone's own time.
+    pub fn note_device_waits(&mut self, waits: &[&str]) {
+        let whole: u64 = self.by_self.iter().map(|zone| zone.total_ns).sum();
+        let waited: u64 = self
+            .by_self
+            .iter()
+            .filter(|zone| waits.contains(&zone.name.as_str()))
+            .map(|zone| zone.total_ns)
+            .sum();
+        self.device_waits = (whole > 0).then(|| as_f64(waited) * 100.0 / as_f64(whole));
+    }
+
+    /// Notes how many times each of the zones named `caches` - each a cache let go whole because
+    /// it was full - occurred, those that did.
+    pub fn note_emptied(&mut self, caches: &[&str]) {
+        self.emptied = caches
+            .iter()
+            .filter_map(|&cache| {
+                let zone = self.by_self.iter().find(|zone| zone.name == cache)?;
+                (zone.count > 0).then(|| (cache.to_owned(), zone.count))
+            })
+            .collect();
+    }
+
+    /// The lines between the frame times and the zones: the device's waits and work, and the caches
+    /// and pools that let go of what they held.
+    fn render_notes(&self, out: &mut String) {
         if let Some(share) = self.device_waits {
             let _ = writeln!(
                 out,
@@ -204,63 +280,12 @@ impl Report {
                 pools.join(", ")
             );
         }
-        for (title, zones) in [
-            ("by self time (what to make faster)", &self.by_self),
-            ("by total time (where the time sits)", &self.by_total),
-        ] {
-            let whole: u64 = self.by_self.iter().map(|zone| zone.total_ns).sum();
-            let _ = writeln!(out, "\n{title}");
-            let _ = writeln!(
-                out,
-                "  {:<28} {:>10} {:>7} {:>10} {:>10} {:>10}",
-                "zone", "total ms", "share", "count", "mean us", "max us"
-            );
-            for zone in zones.iter().take(top) {
-                let share = if whole > 0 {
-                    as_f64(zone.total_ns) * 100.0 / as_f64(whole)
-                } else {
-                    0.0
-                };
-                let _ = writeln!(
-                    out,
-                    "  {:<28} {:>10.1} {:>6.1}% {:>10} {:>10.1} {:>10.0}",
-                    zone.name,
-                    as_f64(zone.total_ns) / 1e6,
-                    share,
-                    zone.count,
-                    as_f64(zone.mean_ns()) / 1e3,
-                    as_f64(zone.max_ns) / 1e3,
-                );
-            }
-        }
-        out
-    }
-}
-
-impl Report {
-    /// Notes how much of the run the zones named `waits` - each the host waiting for the device -
-    /// took together, as a share of every zone's own time.
-    pub fn note_device_waits(&mut self, waits: &[&str]) {
-        let whole: u64 = self.by_self.iter().map(|zone| zone.total_ns).sum();
-        let waited: u64 = self
-            .by_self
-            .iter()
-            .filter(|zone| waits.contains(&zone.name.as_str()))
-            .map(|zone| zone.total_ns)
-            .sum();
-        self.device_waits = (whole > 0).then(|| as_f64(waited) * 100.0 / as_f64(whole));
     }
 
-    /// Notes how many times each of the zones named `caches` - each a cache let go whole because
-    /// it was full - occurred, those that did.
-    pub fn note_emptied(&mut self, caches: &[&str]) {
-        self.emptied = caches
-            .iter()
-            .filter_map(|&cache| {
-                let zone = self.by_self.iter().find(|zone| zone.name == cache)?;
-                (zone.count > 0).then(|| (cache.to_owned(), zone.count))
-            })
-            .collect();
+    /// Notes `waits` - zones that are a thread waiting on another's work or on the device - so the
+    /// report marks them where it lists them.
+    pub fn note_waits(&mut self, waits: &[&str]) {
+        self.waits = waits.iter().map(|&wait| wait.to_owned()).collect();
     }
 
     /// Notes, for each pool in `pools` - the zone that makes something afresh, and the zone that
@@ -367,6 +392,7 @@ mod tests {
             emptied: Vec::new(),
             device_ms: None,
             fresh: Vec::new(),
+            waits: Vec::new(),
         };
         report.waits_on("hand-off", "on device");
         let names: Vec<(&str, u64)> = report
@@ -401,6 +427,7 @@ mod tests {
             emptied: Vec::new(),
             device_ms: None,
             fresh: Vec::new(),
+            waits: Vec::new(),
         };
         assert!(!report.render(5).contains("waiting on the device"));
         report.note_device_waits(&["draw room", "setup: settle", "never recorded"]);
@@ -409,6 +436,33 @@ mod tests {
             report
                 .render(5)
                 .contains("waiting on the device: 50.0% of the run")
+        );
+    }
+
+    /// A zone named a wait is marked where the report lists it, and no other.
+    #[test]
+    fn waits_are_marked_where_listed() {
+        let zone = |name: &str| ZoneStat {
+            name: name.to_owned(),
+            total_ns: 10,
+            count: 1,
+            max_ns: 10,
+        };
+        let mut report = Report {
+            by_self: sorted(vec![zone("queue full"), zone("draws")]),
+            ..Report::default()
+        };
+        report.note_waits(&["queue full"]);
+        let rendered = report.render(5);
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.contains("queue full") && line.ends_with(super::WAIT_MARK))
+        );
+        assert!(
+            rendered
+                .lines()
+                .all(|line| !line.contains("draws") || !line.ends_with(super::WAIT_MARK))
         );
     }
 
