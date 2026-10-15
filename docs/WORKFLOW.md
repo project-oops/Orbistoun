@@ -194,7 +194,9 @@ and reads as a slower build. A run that could not wait it out says so at the top
 A busy CPU is not waited for, since a virtual machine beside the run may last all day, but a run
 beside one says so the same way: a title bound by its guest thread loses a quarter of its frame
 rate beside ten busy cores, so compare its frame rate only with a run made beside the same load -
-`ab`, which alternates the builds, does.
+`ab`, which alternates the builds, does. `bench` measures a title again when it falls more than a
+fifth below its last benchmark and keeps the faster run, naming the first: load beside a run only
+ever slows it, so a regression shows in both.
 Change the build in a `git archive` export rather than the shared working tree: another session's
 uncommitted edits there go into whatever is built from it. `ab --against HEAD --with <file>...`
 does that: it measures `HEAD` against `HEAD` with only the named files taken from the working tree,

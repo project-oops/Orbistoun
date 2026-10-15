@@ -309,6 +309,45 @@ struct BenchEntry {
     /// read without it reads as a regression (PPSA25872: 72 fps beside 33%, 201 beside 15%).
     #[serde(default)]
     beside_cpu: Option<f64>,
+    /// The frame rate of a first run that fell more than a fifth below the title's last benchmark,
+    /// which was then measured again and the faster run kept: something else using the host is the
+    /// usual cause, and it only ever slows a run (NETT00001 108 fps beside 42% of the CPU, 252 on
+    /// its own).
+    #[serde(default)]
+    first_run: Option<f64>,
+}
+
+/// Refuses names in `only` that match no title in `library`: one would bench nothing and say
+/// nothing, and an option after `--` is read as a title's name.
+fn refuse_unknown(only: &[String], library: &[PathBuf]) -> Result<()> {
+    let unknown: Vec<&String> = only
+        .iter()
+        .filter(|name| {
+            !library
+                .iter()
+                .any(|module| crate::common::title_id(module).as_ref() == Some(*name))
+        })
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "no title in the library is named {}",
+            unknown
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// How far below its last benchmark a title's frame rate falls before it is measured again.
+const FELL_BELOW: f64 = 0.8;
+
+/// Whether a run at `fps` fell far enough below `was`, the title's last benchmark, to be measured
+/// again.
+fn fell_from(fps: Option<f64>, was: Option<f64>) -> bool {
+    matches!((fps, was), (Some(fps), Some(was)) if fps < was * FELL_BELOW)
 }
 
 impl BenchEntry {
@@ -327,6 +366,7 @@ impl BenchEntry {
                 .then(|| "no frames presented".to_owned()),
             device_waits: recorded.report.device_waits,
             beside_cpu: None,
+            first_run: None,
             by_self: recorded.report.by_self,
             seconds: Some(recorded.summary.seconds).filter(|&seconds| seconds > 0.0),
         }
@@ -792,26 +832,9 @@ pub(crate) fn cmd_bench(
     // working tree holds.
     let worker = at.map(build_revision).transpose()?;
     let library = library();
-    // A name matching no title would bench nothing and say nothing: an option after `--` is read
-    // as a title's name.
-    let unknown: Vec<&String> = only
-        .iter()
-        .filter(|name| {
-            !library
-                .iter()
-                .any(|module| crate::common::title_id(module).as_ref() == Some(*name))
-        })
-        .collect();
-    if !unknown.is_empty() {
-        anyhow::bail!(
-            "no title in the library is named {}",
-            unknown
-                .iter()
-                .map(|name| format!("\"{name}\""))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+    refuse_unknown(only, &library)?;
+    let dir = orbistoun_paths::Paths::resolve().data_root().join("bench");
+    let previous = latest_bench(&dir);
     let mut entries = Vec::new();
     for module in library {
         let id = crate::common::title_id(&module).unwrap_or_default();
@@ -829,35 +852,57 @@ pub(crate) fn cmd_bench(
             seconds: None,
             device_waits: None,
             beside_cpu: None,
+            first_run: None,
         };
         if let Some(busy) = gpu_still_busy() {
             println!("{title}: skipped - something else is using {busy:.0}% of the GPU");
             entries.push(skipped(format!("the GPU was {busy:.0}% busy")));
             continue;
         }
-        let beside_cpu = cpu_busy();
-        if let Some(busy) = beside_cpu {
-            println!("  measured beside something else using {busy:.0}% of the CPU");
-        }
         let input = pad_script(&id);
         let seconds = run_seconds(&id, every);
-        println!("{title}: recording {seconds} s");
-        match record(
-            &tools,
-            &module,
-            seconds,
-            input.as_deref(),
-            worker.as_deref(),
-        ) {
-            Ok(recorded) => entries.push(BenchEntry {
+        let measure = || -> Result<BenchEntry> {
+            let beside_cpu = cpu_busy();
+            if let Some(busy) = beside_cpu {
+                println!("  measured beside something else using {busy:.0}% of the CPU");
+            }
+            println!("{title}: recording {seconds} s");
+            let recorded = record(
+                &tools,
+                &module,
+                seconds,
+                input.as_deref(),
+                worker.as_deref(),
+            )?;
+            Ok(BenchEntry {
                 beside_cpu,
                 ..BenchEntry::of(title.clone(), recorded)
-            }),
+            })
+        };
+        let was = previous
+            .as_deref()
+            .and_then(|previous| previous.iter().find(|e| e.title == title))
+            .and_then(|e| e.fps);
+        match measure() {
+            Ok(first) if fell_from(first.fps, was) => {
+                println!(
+                    "  {:.1} fps against {:.1} last time - measured again",
+                    first.fps.unwrap_or_default(),
+                    was.unwrap_or_default()
+                );
+                let kept = match measure() {
+                    Ok(again) if again.fps > first.fps => again,
+                    _ => first.clone(),
+                };
+                entries.push(BenchEntry {
+                    first_run: first.fps,
+                    ..kept
+                });
+            }
+            Ok(entry) => entries.push(entry),
             Err(error) => entries.push(skipped(format!("{error:#}"))),
         }
     }
-    let dir = orbistoun_paths::Paths::resolve().data_root().join("bench");
-    let previous = latest_bench(&dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -933,6 +978,13 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
                 })
                 .unwrap_or_default(),
         );
+        if let Some(first) = entry.first_run {
+            let _ = writeln!(
+                out,
+                "{:<24} measured again: its first run was {first:.1}",
+                ""
+            );
+        }
     }
     // Each zone's self time as a share of its title's recording, so a long-running title does not
     // drown the rest - and an idle one, whose only zone is a few milliseconds of presenting in a run
@@ -1023,7 +1075,25 @@ mod tests {
             seconds: Some(1.0),
             device_waits: None,
             beside_cpu: None,
+            first_run: None,
         }
+    }
+
+    /// A run more than a fifth below the title's last benchmark is measured again; one within it,
+    /// or a title never benchmarked, is not.
+    #[test]
+    fn a_run_that_fell_far_is_measured_again() {
+        assert!(super::fell_from(Some(108.2), Some(239.0)));
+        assert!(!super::fell_from(Some(92.5), Some(97.7)));
+        assert!(!super::fell_from(Some(10.0), None));
+        assert!(!super::fell_from(None, Some(10.0)));
+        let mut again = entry("AGAIN", 252.3, &[("draw", 1_000)]);
+        again.first_run = Some(108.2);
+        let text = render_bench(&[again], None, 5);
+        assert!(
+            text.contains("measured again: its first run was 108.2"),
+            "{text}"
+        );
     }
 
     /// Each title weighs equally, a zone counting as the share of its title's run it took: half of
