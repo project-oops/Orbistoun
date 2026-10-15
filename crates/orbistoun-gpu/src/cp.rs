@@ -758,6 +758,46 @@ fn dma_prefetch(body: &[u32], memory: &dyn CpMemory) -> Option<Result<(), Stop>>
     })
 }
 
+/// What a `DMA_DATA` wrote where it landed: the address it copied from, or the word it filled with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DmaSource {
+    Copied(u64),
+    Filled(u32),
+}
+
+/// Each `DMA_DATA` carried out this run, by the address it landed at: where it ends and what it
+/// wrote. A later one landing at the same address replaces the earlier.
+type DmaLandings = std::collections::BTreeMap<u64, (u64, DmaSource)>;
+
+/// The run's [`DmaLandings`].
+fn dma_landings() -> &'static std::sync::Mutex<DmaLandings> {
+    static LANDINGS: std::sync::Mutex<DmaLandings> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    &LANDINGS
+}
+
+/// What filled `address`, where a `DMA_DATA` carried out this run landed over it: the word it
+/// filled with, or the address it copied from at the same distance in.
+#[must_use]
+pub fn dma_landed_at(address: u64) -> Option<String> {
+    let (start, (end, source)) = dma_landings()
+        .lock()
+        .ok()?
+        .range(..=address)
+        .next_back()
+        .map(|(&start, &landing)| (start, landing))?;
+    if address >= end {
+        return None;
+    }
+    Some(match source {
+        DmaSource::Filled(word) => format!("filled with {word:#010x} by a DMA_DATA"),
+        DmaSource::Copied(from) => format!(
+            "copied there by a DMA_DATA from {:#x}",
+            from + (address - start)
+        ),
+    })
+}
+
 fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -> Result<(), Stop> {
     if let Some(prefetched) = dma_prefetch(body, memory) {
         return prefetched;
@@ -800,6 +840,16 @@ fn dma_data(body: &[u32], memory: &mut dyn CpMemory, result: &mut CpExecution) -
             destination
         };
         return Err(Stop::OutOfBounds(missing));
+    }
+    if count > 0
+        && let Ok(mut landings) = dma_landings().lock()
+    {
+        let source = if src_sel == SRC_SEL_DATA {
+            DmaSource::Filled(src_low)
+        } else {
+            DmaSource::Copied(address(src_low, src_high))
+        };
+        landings.insert(destination, (destination + count as u64, source));
     }
     if src_sel == SRC_SEL_DATA {
         result.fills += 1;
@@ -1404,6 +1454,27 @@ mod tests {
                 "pixel {pixel}"
             );
         }
+    }
+
+    /// Where a `DMA_DATA` landed says what filled it: the word a fill repeated, or the address a
+    /// copy read, at the same distance in. Addresses no other test uses, as the store is shared.
+    #[test]
+    fn a_dma_data_landing_says_what_filled_it() {
+        let (filled, copied) = (0x8800_u64, 0x8c00_u64);
+        let mut stream = fill(filled, 0x1111_1111, 16);
+        stream.extend(copy(filled, copied, 16));
+        let mut memory = Fake::default();
+        let ran = execute(&bytes(&stream), &mut memory);
+        assert_eq!(ran.stopped, Stopped::Completed);
+        assert_eq!(
+            super::dma_landed_at(filled + 4).as_deref(),
+            Some("filled with 0x11111111 by a DMA_DATA")
+        );
+        assert_eq!(
+            super::dma_landed_at(copied + 8).as_deref(),
+            Some("copied there by a DMA_DATA from 0x8808")
+        );
+        assert_eq!(super::dma_landed_at(copied + 16), None, "past its end");
     }
 
     /// A draw before the fence stops execution, so no fence is written for work that did not run

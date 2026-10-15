@@ -1272,7 +1272,8 @@ fn undrawn_line(shown: u64) -> String {
 }
 
 /// How the memory at `base` was filled, where something orbistoun tracks filled it: a frame it
-/// drew into it, a file read, or a compute program's stores (`census`).
+/// drew into it, a file read, a `DMA_DATA` the command processor carried out, or a compute
+/// program's stores (`census`).
 fn filled_by(
     base: u64,
     census: &[(u64, orbistoun_gpu::agc_driver::DispatchWrites)],
@@ -1280,6 +1281,7 @@ fn filled_by(
     orbistoun_gpu::agc_driver::last_drawn_into(base)
         .map(|by| format!("drawn into as frame {}", by.frame))
         .or_else(|| orbistoun_kernel::apr::read_landed_at(base))
+        .or_else(|| orbistoun_gpu::cp::dma_landed_at(base))
         .or_else(|| stored_by(base, census))
 }
 
