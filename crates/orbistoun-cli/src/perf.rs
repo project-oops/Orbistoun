@@ -237,6 +237,11 @@ struct BenchEntry {
     /// of its run is bound by the device's work, not by anything a host-side change makes faster.
     #[serde(default)]
     device_waits: Option<f64>,
+    /// How busy something else kept the host's cores as it was recorded, when it was more than an
+    /// idle desktop does: a title bound by its guest thread is slower beside it, and a frame rate
+    /// read without it reads as a regression (PPSA25872: 72 fps beside 33%, 201 beside 15%).
+    #[serde(default)]
+    beside_cpu: Option<f64>,
 }
 
 impl BenchEntry {
@@ -254,6 +259,7 @@ impl BenchEntry {
                 .is_empty()
                 .then(|| "no frames presented".to_owned()),
             device_waits: recorded.report.device_waits,
+            beside_cpu: None,
             by_self: recorded.report.by_self,
             seconds: Some(recorded.summary.seconds).filter(|&seconds| seconds > 0.0),
         }
@@ -619,13 +625,15 @@ pub(crate) fn cmd_bench(
             skipped: Some(why),
             seconds: None,
             device_waits: None,
+            beside_cpu: None,
         };
         if let Some(busy) = gpu_still_busy() {
             println!("{title}: skipped - something else is using {busy:.0}% of the GPU");
             entries.push(skipped(format!("the GPU was {busy:.0}% busy")));
             continue;
         }
-        if let Some(busy) = cpu_busy() {
+        let beside_cpu = cpu_busy();
+        if let Some(busy) = beside_cpu {
             println!("  measured beside something else using {busy:.0}% of the CPU");
         }
         let input = pad_script(&id);
@@ -638,7 +646,10 @@ pub(crate) fn cmd_bench(
             input.as_deref(),
             worker.as_deref(),
         ) {
-            Ok(recorded) => entries.push(BenchEntry::of(title.clone(), recorded)),
+            Ok(recorded) => entries.push(BenchEntry {
+                beside_cpu,
+                ..BenchEntry::of(title.clone(), recorded)
+            }),
             Err(error) => entries.push(skipped(format!("{error:#}"))),
         }
     }
@@ -711,7 +722,13 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
             entry
                 .skipped
                 .as_deref()
-                .map_or_else(String::new, |why| format!("  ({why})")),
+                .map(|why| format!("  ({why})"))
+                .or_else(|| {
+                    entry
+                        .beside_cpu
+                        .map(|busy| format!("  (beside {busy:.0}% of the CPU in use)"))
+                })
+                .unwrap_or_default(),
         );
     }
     // Each zone's self time as a share of its title's recording, so a long-running title does not
@@ -784,6 +801,7 @@ mod tests {
             skipped: None,
             seconds: Some(1.0),
             device_waits: None,
+            beside_cpu: None,
         }
     }
 
@@ -826,6 +844,17 @@ mod tests {
             text.lines()
                 .find(|l| l.starts_with("BOUND"))
                 .is_some_and(|l| l.trim_end().ends_with("35.0")),
+            "{text}"
+        );
+
+        // A title recorded beside a busy host says so on its line.
+        let mut beside = entry("BESIDE", 30.0, &[("draw", 1_000)]);
+        beside.beside_cpu = Some(33.0);
+        let text = render_bench(&[beside], None, 5);
+        assert!(
+            text.lines()
+                .find(|l| l.starts_with("BESIDE"))
+                .is_some_and(|l| l.contains("(beside 33% of the CPU in use)")),
             "{text}"
         );
     }
