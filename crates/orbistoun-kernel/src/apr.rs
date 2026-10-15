@@ -280,6 +280,37 @@ pub fn queue_read(buffer: u64, read: Read) -> bool {
         .is_ok()
 }
 
+/// Reads carried out, by the address each landed at: where it ends, the file's identifier and the
+/// offset in it.
+type Landings = std::collections::BTreeMap<u64, (u64, u64, u64)>;
+
+/// Each read carried out this run, by the address it landed at. A later read landing at the same
+/// address replaces the earlier.
+fn landed() -> &'static Mutex<Landings> {
+    static LANDED: OnceLock<Mutex<Landings>> = OnceLock::new();
+    LANDED.get_or_init(|| Mutex::new(Landings::new()))
+}
+
+/// What filled `address`, where a read this run carried out landed over it: the file and the
+/// offset in it it was read from.
+#[must_use]
+pub fn read_landed_at(address: u64) -> Option<String> {
+    let (start, (end, id, offset)) = landed()
+        .lock()
+        .ok()?
+        .range(..=address)
+        .next_back()
+        .map(|(&start, &landing)| (start, landing))?;
+    if address >= end {
+        return None;
+    }
+    let path = path_of(id)?;
+    Some(format!(
+        "read from {path} at {:#x}",
+        offset + (address - start)
+    ))
+}
+
 /// Carries out every read the command buffer at `buffer` holds, in the order they were added, and
 /// empties it: how many it carried out, or [`None`] when it held none or one could not be read in
 /// full.
@@ -300,6 +331,9 @@ pub(crate) fn carry_out(buffer: u64) -> Option<usize> {
             return None;
         }
         count(CARRIED, 1);
+        if let Ok(mut landed) = landed().lock() {
+            landed.insert(read.into, (read.into + read.length, read.id, read.offset));
+        }
     }
     Some(reads.len())
 }
@@ -474,6 +508,17 @@ mod tests {
         assert_eq!(super::carry_out(0x7400_0020_62b0), Some(1));
         assert_eq!(into, [0x10, 0x11, 0x12, 0x13, 0xa5, 0xa5, 0xa5, 0xa5]);
         assert_eq!(super::carry_out(0x7400_0020_62b0), None, "emptied");
+        // Where it landed says what was read there.
+        assert_eq!(
+            super::read_landed_at(into.as_ptr() as u64 + 2).as_deref(),
+            Some("read from /app0/ps5/audio/audio_rel.rpf at 0x12"),
+            "two bytes into a read from 0x10"
+        );
+        assert_eq!(
+            super::read_landed_at(into.as_ptr() as u64 + 4),
+            None,
+            "past its end"
+        );
         assert!(!super::queue_read(
             1,
             super::Read {

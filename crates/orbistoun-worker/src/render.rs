@@ -1231,7 +1231,12 @@ fn log_flip_origins() {
         return;
     };
     let into = orbistoun_gpu::agc_driver::last_drawn_into;
-    let frame_into = |base: u64| into(base).map(|by| by.frame);
+    // How a texture's memory was filled: a frame orbistoun drew into it, or a file read.
+    let frame_into = |base: u64| {
+        into(base)
+            .map(|by| format!("drawn into as frame {}", by.frame))
+            .or_else(|| orbistoun_kernel::apr::read_landed_at(base))
+    };
     let Some(by) = into(shown) else {
         tracing::info!("{}", undrawn_line(shown));
         return;
@@ -1283,12 +1288,12 @@ fn sampled_targets(
 }
 
 /// What drew a frame, after `lead`: which frame drawn it was, its draws, each texture they bound
-/// with what it holds ([`texel_summary`]), and where each texture they sampled lies, with the frame
-/// `drawn` says orbistoun drew into it, where it drew one.
+/// with what it holds ([`texel_summary`]), and where each texture they sampled lies, with what
+/// `filled` says filled it - a frame orbistoun drew into it, or a file read - where it knows.
 fn drawn_by_line(
     lead: &str,
     by: &orbistoun_gpu::agc_driver::DrawnBy,
-    drawn: &dyn Fn(u64) -> Option<u64>,
+    filled: &dyn Fn(u64) -> Option<String>,
 ) -> String {
     let mut textures: Vec<String> = by
         .textures
@@ -1313,8 +1318,8 @@ fn drawn_by_line(
         .sampled
         .iter()
         .take(MOST_DRAWN_TEXTURES)
-        .map(|&(base, width, height)| match drawn(base) {
-            Some(frame) => format!("{base:#x} ({width}x{height}, drawn into as frame {frame})"),
+        .map(|&(base, width, height)| match filled(base) {
+            Some(how) => format!("{base:#x} ({width}x{height}, {how})"),
             None => format!("{base:#x} ({width}x{height})"),
         })
         .collect();
@@ -1863,7 +1868,7 @@ mod tests {
             textures: vec![(0, 2, 1, std::sync::Arc::from(vec![5_u32, 5]))],
             sampled: vec![(0x2000, 2, 1), (0x3000, 4, 4)],
         };
-        let drawn = |base: u64| (base == 0x2000).then_some(9);
+        let drawn = |base: u64| (base == 0x2000).then(|| "drawn into as frame 9".to_owned());
         assert_eq!(
             super::drawn_by_line("the last flip showed 0x1000, drawn into as", &by, &drawn),
             concat!(
