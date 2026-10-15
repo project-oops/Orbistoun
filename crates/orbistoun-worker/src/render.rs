@@ -1296,6 +1296,12 @@ fn consumed_by(
     {
         return format!("sampled by frame {}", frame.frame);
     }
+    if let Some(frame) = frames
+        .iter()
+        .find(|by| by.read.iter().any(|&range| overlaps(range)))
+    {
+        return format!("read as a buffer by the draws of frame {}", frame.frame);
+    }
     let reader = census.iter().find(|(_, writes)| {
         writes.fetched.is_some_and(overlaps)
             || writes
@@ -2099,6 +2105,7 @@ mod tests {
             draws: 3,
             textures: vec![(0, 2, 1, std::sync::Arc::from(vec![5_u32, 5]))],
             sampled: vec![(0x2000, 2, 1), (0x3000, 4, 4)],
+            read: Vec::new(),
         };
         let drawn = |base: u64| (base == 0x2000).then(|| "drawn into as frame 9".to_owned());
         assert_eq!(
@@ -2171,6 +2178,7 @@ mod tests {
             draws: 1,
             textures: Vec::new(),
             sampled: vec![(0x2000, 4, 4), (0x3000, 4, 4), (0x4000, 4, 4)],
+            read: Vec::new(),
         };
         let filled = |base: u64| (base == 0x2000).then(|| "drawn into as frame 1".to_owned());
         assert_eq!(super::first_unfilled(&by, &filled), Some(0x3000));
@@ -2198,6 +2206,7 @@ mod tests {
             draws: 1,
             textures: Vec::new(),
             sampled: vec![(0x2400, 8, 8)],
+            read: Vec::new(),
         };
         let reader = orbistoun_gpu::agc_driver::DispatchWrites {
             program: Some(0x7400_0000_9000),
@@ -2217,6 +2226,18 @@ mod tests {
         assert_eq!(
             super::consumed_by(0x5000, 0x100, &frames, &census),
             "nothing tracked read it"
+        );
+        // A draw that reads it as a buffer, not a texture, reads it too.
+        let reading = [orbistoun_gpu::agc_driver::DrawnBy {
+            frame: 14,
+            draws: 1,
+            textures: Vec::new(),
+            sampled: Vec::new(),
+            read: vec![(0x5080, 0x40)],
+        }];
+        assert_eq!(
+            super::consumed_by(0x5000, 0x100, &reading, &census),
+            "read as a buffer by the draws of frame 14"
         );
     }
 
@@ -2257,6 +2278,7 @@ mod tests {
                 draws: 1,
                 textures: Vec::new(),
                 sampled,
+                read: Vec::new(),
             };
         let shown = frame(9, vec![(0x2000, 4, 4), (0x3000, 4, 4)]);
         let into = |base: u64| match base {

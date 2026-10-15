@@ -2594,6 +2594,9 @@ pub struct DrawnBy {
     /// Where each texture they sampled lies, with its width and height: what traces a sampled
     /// render target to the frame drawn into it.
     pub sampled: Vec<(u64, u32, u32)>,
+    /// Each guest range its draws read as a buffer, rather than sampled: its first byte and its
+    /// length.
+    pub read: Vec<(u64, u64)>,
 }
 
 /// The frames drawn so far and the last drawn into each target, by the target's base.
@@ -2633,11 +2636,23 @@ pub fn note_drawn_by(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     store.0 += 1;
     let frame = store.0;
+    let mut read: Vec<(u64, u64)> = Vec::new();
+    for command in commands {
+        if let crate::RenderCommand::BindDrawBuffers { buffers, .. } = command {
+            for buffer in buffers.iter().filter(|buffer| buffer.base != 0) {
+                let range = (buffer.base, buffer.bytes.len() as u64);
+                if !read.contains(&range) {
+                    read.push(range);
+                }
+            }
+        }
+    }
     let by = DrawnBy {
         frame,
         draws,
         textures,
         sampled: sampled.to_vec(),
+        read,
     };
     for &target in targets {
         store.1.insert(target, by.clone());
@@ -5480,6 +5495,7 @@ mod tests {
         super::note_drawn_by(&[target], 3, &[bind.clone(), bind], &[(0x5000, 2, 2)]);
         let first = super::last_drawn_into(target).expect("kept");
         assert_eq!(first.draws, 3);
+        assert!(first.read.is_empty(), "no draw buffer bound");
         assert_eq!(
             first.sampled,
             vec![(0x5000, 2, 2)],
