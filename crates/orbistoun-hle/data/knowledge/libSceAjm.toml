@@ -40,3 +40,11 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne REQ-20261009T1430Z-aj01, reports/hardware/20261009-215800-eboot.log lines 4291-4297."
 found_on = "2026-10-09"
+
+[[function]]
+name = "sceAjmInstanceCreate"
+purpose = "Creates a codec instance on an audio codec job manager context: (ctx, codec, flags, &instance)."
+edge_cases = ["GUEST-OBSERVED (D832 trial, 2026-10-15): PPSA04263 calls it on context 0x15 with codec 0 and flags 1, retrying about 14 times a second while it answers the placeholder. Answered 0 under ORBISTOUN_RETURN, it stops after two calls and goes on to sceAjmBatchInitialize and sceAjmBatchJobDecode (37910 calls each in 150 s): the run is FURTHER. What the console writes to the instance slot is not observed; REQ-20261015T0017Z-ai01 asks for it."]
+known_by = "guest-observed"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
