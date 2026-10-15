@@ -74,7 +74,7 @@ fn call(name: &str, args: [u64; GUEST_ARG_REGISTERS]) -> u64 {
 fn the_wired_set_is_the_size_the_module_documentation_claims() {
     assert_eq!(
         agc::implementations().len(),
-        89,
+        90,
         concat!(
             "the wired builder count changed - this test is where the count lives, so update ",
             "this number"
@@ -266,6 +266,28 @@ fn the_eop_and_wait_reg_mem_patches_write_the_address() {
         "the header, dw1 with only MEM_SPACE set (pm4-pass0), the reference"
     );
     assert_eq!(w.written(), 56, "the patch amends in place");
+}
+
+/// The end-of-pipe data patch writes the value the action stores into the `RELEASE_MEM`'s dw5 and
+/// dw6, where radeonsi emits its immediate data (Mesa `ac_cmdbuf_cp.c:494-501`, D886), and leaves
+/// the rest of the packet as built. Grand Theft Auto V patches each frame's fence value this way.
+#[test]
+fn the_eop_data_patch_writes_the_value_the_action_stores() {
+    let w = Writer::new(0x400);
+    let packet = call("sceAgcCbReleaseMem", [w.handle(), 0x2b, 0, 1, 3, 0x10]);
+    let before = w.bytes().to_vec();
+    let mut patch = [0u64; GUEST_ARG_REGISTERS];
+    patch[0] = packet;
+    patch[1] = 0x0000_0002_0000_0007;
+    assert_eq!(call("sceAgcQueueEndOfPipeActionPatchData", patch), 0);
+    let after = w.bytes();
+    let dword =
+        |bytes: &[u8], i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+    assert_eq!((dword(after, 5), dword(after, 6)), (7, 2));
+    for i in [0, 1, 2, 3, 4, 7] {
+        assert_eq!(dword(after, i), dword(&before, i), "dw{i} is left as built");
+    }
+    assert_eq!(w.written(), 32, "the patch amends in place");
 }
 
 /// The skeleton measured by header and extent reserves its measured length with the measured

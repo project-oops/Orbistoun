@@ -110,6 +110,7 @@ guest_module! {
         "0x53bbd82b51d172db" => 2,
         "sceAgcInit" => 2,
         "sceAgcQueueEndOfPipeActionPatchAddress" => 6,
+        "sceAgcQueueEndOfPipeActionPatchData" => 6,
         "sceAgcSetCxRegIndirectPatchAddRegisters" => 6,
         "sceAgcSetCxRegIndirectPatchSetAddress" => 6,
         "sceAgcSetShRegIndirectPatchAddRegisters" => 6,
@@ -770,6 +771,20 @@ const RELEASE_MEM_ADDRESS_AT: u64 = 12;
 /// sweep 20260915-203058); the high half into dw4 is assumed, where radeonsi emits it.
 fn queue_eop_patch_address(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     patch_address(args[0], RELEASE_MEM_ADDRESS_AT, args[1]);
+    OK
+}
+
+/// Offset of a `RELEASE_MEM` packet's immediate data, dw5 and dw6: radeonsi's end-of-pipe write
+/// emits the value it stores there, after the destination address (Mesa
+/// `src/amd/common/ac_cmdbuf_cp.c:494-501`).
+const RELEASE_MEM_DATA_AT: u64 = 20;
+
+/// `sceAgcQueueEndOfPipeActionPatchData(packet, data)`: writes the value the end-of-pipe action
+/// stores into the `RELEASE_MEM`'s dw5 and dw6 and answers `0x0`, as the measured address patch
+/// does (D886, known by assumption: where the data goes is radeonsi's layout, and the answer is the
+/// address patch's).
+fn queue_eop_patch_data(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    patch_address(args[0], RELEASE_MEM_DATA_AT, args[1]);
     OK
 }
 
@@ -1636,6 +1651,7 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
         "sceAgcQueueEndOfPipeActionPatchAddress",
         queue_eop_patch_address,
     ),
+    ("sceAgcQueueEndOfPipeActionPatchData", queue_eop_patch_data),
     ("sceAgcCbSetShRegistersDirect", cb_set_sh_registers_direct),
     (
         "sceAgcCbSetShRegisterRangeDirect",

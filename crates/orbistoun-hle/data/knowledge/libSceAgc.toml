@@ -682,6 +682,14 @@ cites = "obSCEne 166-agc/patch-queue-eop-address, sweep 20260915-203058 (patch-r
 found_on = "2026-09-15"
 
 [[function]]
+name = "sceAgcQueueEndOfPipeActionPatchData"
+purpose = "Writes the value an end-of-pipe action (RELEASE_MEM) stores into the packet a builder reserved."
+edge_cases = ["ASSUMED (D886): writes arg1 into the RELEASE_MEM's dw5 (low) and dw6 (high), where radeonsi emits an end-of-pipe write's immediate data, after the destination address (Mesa src/amd/common/ac_cmdbuf_cp.c:494-501), and answers 0x0 as the measured address patch does. PPSA04263 calls it once per submission with values 1 and 2."]
+known_by = "assumed"
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
+
+[[function]]
 name = "sceAgcDcbDrawIndirect"
 purpose = "Writes an indirect draw (arguments fetched from a buffer) into a draw command buffer."
 edge_cases = ["MEASURED: 20 bytes, header 0xc0032400 - type 3, opcode 0x24 (DRAW_INDIRECT), count 3, so five dwords (obSCEne 166-agc/dcb-draw-indirect, sweep 20260915-203058). Wired as a reservation skeleton: header and extent measured, body zeroed (the one pass carried register offsets 0x280 the argument mapping does not pin). Hands the guest a real cursor where the placeholder walled it (commit a8b2d74)."]
