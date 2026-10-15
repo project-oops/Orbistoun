@@ -4856,6 +4856,7 @@ fn close_open_pass(session: &crate::compute::Session) -> Result<(), DispatchErro
     else {
         return Ok(());
     };
+    let _closing = orbistoun_gpu::perf::SpanGuard::start(orbistoun_gpu::perf::Span::ClosePass);
     let device = &session.device;
     // The batch still waiting is the pass's last work (D718).
     if let Some(batch) = &open.batch {

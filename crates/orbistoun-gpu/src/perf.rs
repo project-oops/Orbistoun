@@ -55,6 +55,9 @@ macro_rules! span_labels {
             Span::CopyGuard => $as!("guard: deferred copy"),
             Span::KeepSnapshot => $as!("keep snapshot"),
             Span::SnapshotOnDevice => $as!("keep snapshot: on device"),
+            Span::ClosePass => $as!("device: close pass"),
+            Span::SnapshotBuffer => $as!("keep snapshot: new buffer"),
+            Span::SnapshotCopy => $as!("keep snapshot: copy"),
             Span::ReadBand => $as!("read band"),
             Span::FoldBand => $as!("fold band"),
             Span::DiscardSnapshot => $as!("discard snapshot"),
@@ -400,6 +403,14 @@ pub enum Span {
     /// The snapshot [`Self::KeepSnapshot`] asks for, kept on the device thread: what it waits for there
     /// (D831) - behind that thread's queued work under async submission - stays the guest's own.
     SnapshotOnDevice,
+    /// The draws recorded into the open render pass ended and submitted, so device work that is not
+    /// a draw - a copy out of the target, a snapshot - follows them on the queue. The draws' own
+    /// submission, paid wherever the pass first closes.
+    ClosePass,
+    /// Within [`Self::SnapshotOnDevice`]: a buffer made for a snapshot, none kept spare fitting it.
+    SnapshotBuffer,
+    /// Within [`Self::SnapshotOnDevice`]: the copy into the snapshot recorded and submitted.
+    SnapshotCopy,
     /// Releasing a superseded snapshot.
     DiscardSnapshot,
     /// Every other command-processor memory step: fills, fences, waits.
@@ -563,7 +574,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 94] = [
+    pub const ALL: [Self; 97] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -585,6 +596,9 @@ impl Span {
         Self::CopyGuard,
         Self::KeepSnapshot,
         Self::SnapshotOnDevice,
+        Self::ClosePass,
+        Self::SnapshotBuffer,
+        Self::SnapshotCopy,
         Self::DiscardSnapshot,
         Self::OtherMemory,
         Self::FlipWriteBack,

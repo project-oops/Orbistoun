@@ -36,9 +36,11 @@ const DISPATCH_WORDS: usize = 64;
 const RENDER_WIDTH: u32 = 64;
 /// See [`RENDER_WIDTH`].
 const RENDER_HEIGHT: u32 = 64;
-/// Released snapshot buffers kept for reuse: one is in flight per deferred copy, and a few spare
-/// cover a guest with more than one copy destination.
-const SPARE_SNAPSHOTS: usize = 4;
+/// Released snapshot buffers kept for reuse: one is in flight per deferred copy, and the spares
+/// cover a guest with several copy destinations and the display's copies beside them. Four were too
+/// few for PPSA04263: 6,251 of its 6,459 snapshots in 30 s made a buffer afresh, 0.83 ms each, 17%
+/// of its run.
+const SPARE_SNAPSHOTS: usize = 16;
 /// The colour a `Draw` clears its attachment to before drawing - opaque black.
 const CLEAR_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
@@ -909,7 +911,11 @@ impl VulkanBackend {
             .position(|spare| spare.extent() == extent && spare.texel_bytes() == texel_bytes)
             .map(|index| self.spare_snapshots.swap_remove(index));
         let snapshot = match spare.map_or_else(
-            || framebuffer::FrameSnapshot::create(extent.0, extent.1, texel_bytes),
+            || {
+                orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::SnapshotBuffer, || {
+                    framebuffer::FrameSnapshot::create(extent.0, extent.1, texel_bytes)
+                })
+            },
             Ok,
         ) {
             Ok(snapshot) => snapshot.holding(resident.encoding()),
@@ -918,7 +924,9 @@ impl VulkanBackend {
                 return None;
             }
         };
-        if let Err(e) = resident.snapshot_into(&snapshot) {
+        if let Err(e) = orbistoun_gpu::perf::span(orbistoun_gpu::perf::Span::SnapshotCopy, || {
+            resident.snapshot_into(&snapshot)
+        }) {
             tracing::warn!("a resident frame could not be kept: {e:?}");
             self.release_snapshot(snapshot);
             return None;
