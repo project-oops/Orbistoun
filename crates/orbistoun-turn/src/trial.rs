@@ -29,6 +29,8 @@ pub struct GuestTrial {
     symbols: Option<PathBuf>,
     /// The time limit every run is given, in seconds, or `None` for the run's own default.
     limit: Option<u64>,
+    /// The call budget every run is given, zero for none, or `None` for the run's own default.
+    calls: Option<u64>,
 }
 
 impl GuestTrial {
@@ -46,7 +48,16 @@ impl GuestTrial {
             env: Vec::new(),
             symbols: None,
             limit: None,
+            calls: None,
         }
+    }
+
+    /// Gives every run this call budget, zero for none: a run's default budget ends it before a
+    /// long limit does.
+    #[must_use]
+    pub const fn with_calls(mut self, calls: Option<u64>) -> Self {
+        self.calls = calls;
+        self
     }
 
     /// Gives every run this time limit: a title whose wall is past the default is measured there.
@@ -64,6 +75,10 @@ impl GuestTrial {
         if let Some(seconds) = self.limit {
             arguments.push("--limit".to_owned());
             arguments.push(seconds.to_string());
+        }
+        if let Some(calls) = self.calls {
+            arguments.push("--calls".to_owned());
+            arguments.push(calls.to_string());
         }
         arguments
     }
@@ -323,6 +338,14 @@ mod tests {
         );
         let plain = super::GuestTrial::new("orbistoun-cli", "title/eboot.bin", "traces");
         assert_eq!(plain.run_arguments(), vec!["run", "title/eboot.bin"]);
+        // A call budget too, zero for none: a budget ends a run before its clock does.
+        let unbudgeted = super::GuestTrial::new("orbistoun-cli", "title/eboot.bin", "traces")
+            .with_limit(Some(150))
+            .with_calls(Some(0));
+        assert_eq!(
+            unbudgeted.run_arguments(),
+            vec!["run", "title/eboot.bin", "--limit", "150", "--calls", "0"]
+        );
     }
 
     use super::counts;

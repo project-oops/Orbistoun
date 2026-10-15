@@ -240,6 +240,10 @@ enum Command {
         /// default; every run of a turn gets the same limit, so its comparisons hold.
         #[arg(long, value_name = "SECONDS")]
         limit: Option<u64>,
+        /// The call budget each run of the turn is given, zero for none: a run's default budget
+        /// ends it before a long limit does.
+        #[arg(long, value_name = "CALLS")]
+        calls: Option<u64>,
     },
     /// Survey a module, persist a run report, and show the delta from last time.
     Report {
@@ -1173,13 +1177,14 @@ fn dispatch_guest(cli: Cli, service: &Service) -> Result<()> {
             apply,
             ref verify,
             limit,
+            calls,
         } => {
             cmd_turn(
                 path,
                 (record, apply),
                 verify.as_deref(),
                 cli.symbols_db.as_deref(),
-                limit,
+                (limit, calls),
             )?;
         }
         Command::Run {

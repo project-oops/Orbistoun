@@ -14,7 +14,7 @@ pub(crate) fn cmd_turn(
     (record, apply): (bool, bool),
     verify: Option<&std::path::Path>,
     symbols_db: Option<&std::path::Path>,
-    limit: Option<u64>,
+    (limit, calls): (Option<u64>, Option<u64>),
 ) -> Result<()> {
     use orbistoun_turn::{experiment::Finding, trial::GuestTrial, turn};
 
@@ -44,7 +44,8 @@ pub(crate) fn cmd_turn(
     let binary = std::env::current_exe().context("finding this executable")?;
     let mut trial = GuestTrial::new(&binary, path, &traces)
         .with_symbols(symbols_db.map(std::path::Path::to_path_buf))
-        .with_limit(limit);
+        .with_limit(limit)
+        .with_calls(calls);
     if let Some(dir) = &scratch {
         // The child reads its own learned file too, so the isolation reaches it.
         trial = trial.with_env(orbistoun_env::DATA_DIR.name, dir.path().to_string_lossy());
