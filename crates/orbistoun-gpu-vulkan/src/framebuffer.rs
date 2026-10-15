@@ -314,7 +314,8 @@ pub(crate) fn bind_device_local(
 /// and the external dependency makes it visible to the transfer stage; without it the copy may read
 /// before the store lands. With `loads`, the attachment is copied in first and arrives in
 /// `TRANSFER_DST_OPTIMAL`, which the pass takes as its initial layout and loads rather than clears;
-/// a second external dependency orders that copy before the pass writes.
+/// the external dependencies order that copy before the pass writes. Its dependencies are the
+/// resident pass's ([`colour_dependencies`]).
 fn create_render_pass(
     device: &ash::Device,
     loads: bool,
@@ -343,33 +344,11 @@ fn create_render_pass(
     let subpasses = [vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&references)];
-    let before_copy_out = vk::SubpassDependency::default()
-        .src_subpass(0)
-        .dst_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags::TRANSFER)
-        .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-    // The copy in, before the pass reads (loads) and writes the attachment.
-    let after_copy_in = vk::SubpassDependency::default()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::TRANSFER)
-        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_READ | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-        );
-    let dependencies = [before_copy_out, after_copy_in];
-    let dependencies = if loads {
-        &dependencies[..]
-    } else {
-        &dependencies[..1]
-    };
+    let dependencies = colour_dependencies();
     let info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(&subpasses)
-        .dependencies(dependencies);
+        .dependencies(&dependencies);
     // SAFETY: every slice above outlives the call and the device is live.
     unsafe { device.create_render_pass(&info, None) }
         .map_err(|e| DispatchError::Vulkan("create_render_pass", e))
@@ -381,6 +360,35 @@ fn create_render_pass(
 /// the transfers, since its destination stages include the copy.
 pub(crate) fn within_pass(uses: vk::AccessFlags) -> vk::AccessFlags {
     uses & !(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::TRANSFER_WRITE)
+}
+
+/// The external dependencies of every pass with one colour attachment: each pass after whatever last
+/// wrote the attachment - a draw or a copy in - and before whatever reads it next - a draw or the
+/// readback copy. One list for every such pass, since a pipeline built against one is recorded in
+/// another, and passes whose dependencies differ are not compatible
+/// (`VUID-vkCmdDraw-renderPass-02684`).
+fn colour_dependencies() -> [vk::SubpassDependency; 2] {
+    let writes = vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::TRANSFER_WRITE;
+    let uses = vk::AccessFlags::COLOR_ATTACHMENT_READ
+        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+        | vk::AccessFlags::TRANSFER_READ;
+    let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::TRANSFER;
+    [
+        vk::SubpassDependency::default()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(stages)
+            .src_access_mask(writes)
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(within_pass(uses)),
+        vk::SubpassDependency::default()
+            .src_subpass(0)
+            .dst_subpass(vk::SUBPASS_EXTERNAL)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(stages)
+            .dst_access_mask(uses),
+    ]
 }
 
 /// The render pass a [`ResidentAttachment`] is drawn with: loaded and stored, starting and ending
@@ -406,27 +414,7 @@ fn create_resident_render_pass(
     let subpasses = [vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
         .color_attachments(&references)];
-    let writes = vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::TRANSFER_WRITE;
-    let uses = vk::AccessFlags::COLOR_ATTACHMENT_READ
-        | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-        | vk::AccessFlags::TRANSFER_READ;
-    let stages = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::TRANSFER;
-    let dependencies = [
-        vk::SubpassDependency::default()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .dst_subpass(0)
-            .src_stage_mask(stages)
-            .src_access_mask(writes)
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(within_pass(uses)),
-        vk::SubpassDependency::default()
-            .src_subpass(0)
-            .dst_subpass(vk::SUBPASS_EXTERNAL)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(stages)
-            .dst_access_mask(uses),
-    ];
+    let dependencies = colour_dependencies();
     let info = vk::RenderPassCreateInfo::default()
         .attachments(&attachments)
         .subpasses(&subpasses)

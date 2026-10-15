@@ -533,9 +533,17 @@ fn make_pipeline(
     (images, global_share): (&[vk::DescriptorSetLayoutBinding<'static>], &GlobalShare),
     (buffers, push_bytes): (bool, u32),
 ) -> Result<KeptPipeline, DispatchError> {
+    // A module not laid out as SPIR-V is refused here rather than handed to the device, whose
+    // checking layer may walk past its end.
+    if !orbistoun_spirv::well_formed(module) {
+        return Err(DispatchError::Vulkan(
+            "create_shader_module",
+            vk::Result::ERROR_INVALID_SHADER_NV,
+        ));
+    }
     let shader_info = vk::ShaderModuleCreateInfo::default().code(module);
-    // SAFETY: the module words outlive the call; malformed SPIR-V is reported as an error, which
-    // makes this usable as a check.
+    // SAFETY: the module words outlive the call and are laid out as SPIR-V; what else is wrong
+    // with them is reported as an error, which makes this usable as a check.
     let shader = unsafe { device.create_shader_module(&shader_info, None) }
         .map_err(|e| DispatchError::Vulkan("create_shader_module", e))?;
 
@@ -578,6 +586,10 @@ fn make_pipeline(
         std::iter::once(set_layout).chain(buffers_layout).collect();
     // A module reading user data declares the push-constant block; one that reads none declares
     // none and gets no range.
+    // The block the module declares, which a dispatch may fill only in part: a translated module
+    // declares the whole user-data block whatever its stage takes.
+    let push_bytes = orbistoun_spirv::push_constant_bytes(module)
+        .map_or(push_bytes, |declared| push_bytes.max(declared));
     let push_ranges = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .offset(0)

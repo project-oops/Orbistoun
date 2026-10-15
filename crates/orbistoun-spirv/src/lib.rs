@@ -1939,6 +1939,81 @@ pub fn declares_binding(module: &[u32], binding: u32) -> bool {
     bound.iter().any(|target| in_set_zero.contains(target))
 }
 
+/// Whether `module` is laid out as SPIR-V: the magic number, a five-word header with a non-zero id
+/// bound and a zero schema, then instructions each at least one word long that end exactly at its
+/// end. A module that is not is refused before a device sees it: a driver may report it, but a
+/// layer checking the module walks it first, and malformed words can take that walk past the end.
+#[must_use]
+pub fn well_formed(module: &[u32]) -> bool {
+    if module.len() < 5 || module[0] != MAGIC || module[3] == 0 || module[4] != 0 {
+        return false;
+    }
+    let mut at = 5;
+    while at < module.len() {
+        let count = (module[at] >> 16) as usize;
+        if count == 0 {
+            return false;
+        }
+        at += count;
+    }
+    at == module.len()
+}
+
+/// The bytes `module`'s push-constant block declares: its largest `PushConstant` variable, made of
+/// 32-bit scalars, arrays of them and structures of those, laid end to end as every block here is.
+/// A pipeline's push-constant range must cover it, whatever a dispatch pushes into it. `None` where
+/// it declares none, or one of another shape.
+#[must_use]
+pub fn push_constant_bytes(module: &[u32]) -> Option<u32> {
+    use std::collections::HashMap;
+    let (mut constants, mut sizes, mut pointees) = (HashMap::new(), HashMap::new(), HashMap::new());
+    let mut largest = None;
+    let mut at = 5;
+    while at < module.len() {
+        let count = (module[at] >> 16) as usize;
+        let operands = module.get(at + 1..at + count.max(1))?;
+        if count == 0 {
+            return None;
+        }
+        let opcode = module[at] & 0xffff;
+        match (u16::try_from(opcode).ok(), operands) {
+            (Some(op::TYPE_INT | op::TYPE_FLOAT), &[id, 32, ..]) => {
+                sizes.insert(id, 4);
+            }
+            (Some(op::CONSTANT), &[_, id, value]) => {
+                constants.insert(id, value);
+            }
+            (Some(op::TYPE_ARRAY), &[id, element, length]) => {
+                if let (Some(&size), Some(&length)) = (sizes.get(&element), constants.get(&length))
+                {
+                    sizes.insert(id, size * length);
+                }
+            }
+            (Some(op::TYPE_STRUCT), &[id, ref members @ ..]) => {
+                if let Some(size) = members
+                    .iter()
+                    .map(|member| sizes.get(member))
+                    .sum::<Option<u32>>()
+                {
+                    sizes.insert(id, size);
+                }
+            }
+            (Some(op::TYPE_POINTER), &[id, storage::PUSH_CONSTANT, pointee]) => {
+                pointees.insert(id, pointee);
+            }
+            (Some(op::VARIABLE), &[pointer, _, storage::PUSH_CONSTANT]) => {
+                let size = pointees
+                    .get(&pointer)
+                    .and_then(|pointee| sizes.get(pointee))?;
+                largest = largest.max(Some(*size));
+            }
+            _ => {}
+        }
+        at += count;
+    }
+    largest
+}
+
 /// Which binding a mesh module reads its per-draw user data from: five (D718). One host dispatch
 /// carries a run of guest draws, one workgroup each, and each workgroup reads
 /// [`DRAW_DATA_STRIDE_WORDS`] words at `workgroup * stride`.
@@ -3245,6 +3320,34 @@ mod tests {
         Builder, Id, MAGIC, ModuleError, VERSION_1_0, decoration, minimal_compute_module, op,
         storage,
     };
+
+    /// A module's push-constant block is sized as declared: the compaction module's three words, and
+    /// none for a module that declares no block.
+    #[test]
+    fn a_push_constant_block_is_sized_as_declared() {
+        assert_eq!(
+            super::push_constant_bytes(&super::stored_word_compaction_module()),
+            Some(12)
+        );
+        assert_eq!(
+            super::push_constant_bytes(&minimal_compute_module([1, 1, 1])),
+            None
+        );
+    }
+
+    /// A module the builder makes is laid out as SPIR-V; the right magic word followed by words
+    /// that are no instructions is not, nor is a module cut short inside an instruction.
+    #[test]
+    fn only_a_module_laid_out_as_spir_v_is_well_formed() {
+        let made = minimal_compute_module([1, 1, 1]);
+        assert!(super::well_formed(&made));
+        let rubbish = [MAGIC, 0x0001_0300, 0, 1, 0, 0xDEAD_BEEF, 0xDEAD_BEEF];
+        assert!(!super::well_formed(&rubbish));
+        // Its first instruction, `OpCapability`, is two words: cut after the first of them.
+        assert_eq!(made[5] >> 16, 2);
+        assert!(!super::well_formed(&made[..6]));
+        assert!(!super::well_formed(&made[..4]));
+    }
 
     /// A stage binds the eleven buffers PPSA02664's vertex shaders trace (four descriptors in user
     /// data, a table, and six vertex streams its fetch forms), and a draw's stride holds every slot's
