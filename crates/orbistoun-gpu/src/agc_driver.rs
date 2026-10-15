@@ -2811,6 +2811,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
         .iter()
         .position(|copy| copy.destination == target.base && copy.length == span);
     let guard = superseded.map(|index| {
+        crate::perf::span(crate::perf::Span::DeferredSuperseded, || ());
         let old = list.remove(index);
         crate::perf::span(crate::perf::Span::DiscardSnapshot, || {
             old.release_snapshot(hooks);
@@ -2831,6 +2832,7 @@ fn defer_write_back(show: bool) -> Result<Option<ShownFrame>, CannotWait> {
             && copy.destination + copy.length <= target.base + span
     });
     for copy in &dropped {
+        crate::perf::span(crate::perf::Span::DeferredFillDropped, || ());
         (hooks.release)(copy.pages.0, copy.pages.1, copy.pages.2);
     }
     carry_out_all(&touched, hooks);
@@ -2911,6 +2913,7 @@ fn drop_covered(address: u64, length: u64) {
         });
     *list = kept;
     for copy in covered {
+        crate::perf::span(crate::perf::Span::DeferredCovered, || ());
         let (base, len, protection) = copy.pages;
         // Its pages come back as they were, and the fill that follows writes them. Pages that would
         // not come back are carried out instead, never left guarded with nothing to answer the

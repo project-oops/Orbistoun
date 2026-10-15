@@ -61,6 +61,9 @@ macro_rules! span_labels {
             Span::DispatchNewBuffer => $as!("dispatch: new buffer"),
             Span::DispatchNewHostBuffer => $as!("dispatch: new host buffer"),
             Span::DispatchNewImage => $as!("dispatch: new image"),
+            Span::DeferredSuperseded => $as!("deferred: superseded"),
+            Span::DeferredCovered => $as!("deferred: covered"),
+            Span::DeferredFillDropped => $as!("deferred: fill under a frame"),
             Span::ReadBand => $as!("read band"),
             Span::FoldBand => $as!("fold band"),
             Span::DiscardSnapshot => $as!("discard snapshot"),
@@ -432,6 +435,15 @@ pub enum Span {
     DispatchNewHostBuffer,
     /// A dispatch's image made afresh, no spare of its format and extent kept.
     DispatchNewImage,
+    /// A deferred write-back replaced, unread, by a later one of the same target at a flip, its
+    /// guard kept (D719). Counted.
+    DeferredSuperseded,
+    /// A deferred copy dropped, unread, by a fill or copy that overwrites it whole, its pages given
+    /// back (D719). Counted.
+    DeferredCovered,
+    /// A deferred fill dropped at a flip because the frame's write-back writes every byte of it,
+    /// its pages given back (D864). Counted.
+    DeferredFillDropped,
     /// Releasing a superseded snapshot.
     DiscardSnapshot,
     /// Every other command-processor memory step: fills, fences, waits.
@@ -595,7 +607,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 100] = [
+    pub const ALL: [Self; 103] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -623,6 +635,9 @@ impl Span {
         Self::DispatchNewBuffer,
         Self::DispatchNewHostBuffer,
         Self::DispatchNewImage,
+        Self::DeferredSuperseded,
+        Self::DeferredCovered,
+        Self::DeferredFillDropped,
         Self::DiscardSnapshot,
         Self::OtherMemory,
         Self::FlipWriteBack,
