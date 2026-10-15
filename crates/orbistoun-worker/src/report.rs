@@ -2666,12 +2666,23 @@ pub fn persist(trace: &CallTrace) {
         let _ = std::fs::create_dir_all(parent);
     }
     match serde_json::to_string_pretty(trace) {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(path, text) {
-                tracing::warn!("could not write the call trace to {}: {e}", path.display());
-            }
-        }
+        Ok(text) => write_whole(path, &text),
         Err(e) => tracing::warn!("could not serialise the call trace: {e}"),
+    }
+}
+
+/// Writes the trace `text` to `path` whole: one writer at a time, through a file beside it renamed
+/// into place, so a reader never sees a shorter document over a longer one's tail. A run can end
+/// on two threads at once - its clock and its call budget - and both write.
+fn write_whole(path: &std::path::Path, text: &str) {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one_at_a_time = WRITING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let partial = path.with_extension("json.part");
+    let written = std::fs::write(&partial, text).and_then(|()| std::fs::rename(&partial, path));
+    if let Err(e) = written {
+        tracing::warn!("could not write the call trace to {}: {e}", path.display());
     }
 }
 
@@ -3033,6 +3044,36 @@ const MOST_CALLED_REPORTED: usize = 20;
 /// status, and a caller should say so rather than imply a fault report is coming.
 pub fn install() -> bool {
     imp::install()
+}
+
+#[cfg(test)]
+mod persist_tests {
+    /// Two endings writing the trace at once leave one whole document, never one with the tail of
+    /// the other after it: a turn read a GTA V trace whose shorter write had landed over a longer
+    /// one, and could not parse it.
+    #[test]
+    fn two_writers_leave_one_whole_document() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let path = dir.path().join("trace.json");
+        let long = format!("{{\"long\": \"{}\"}}", "x".repeat(200_000));
+        let short = "{\"short\": true}".to_owned();
+        std::thread::scope(|scope| {
+            for text in [&long, &short] {
+                let path = &path;
+                scope.spawn(move || {
+                    for _ in 0..20 {
+                        super::write_whole(path, text);
+                    }
+                });
+            }
+        });
+        let left = std::fs::read_to_string(&path).expect("the trace");
+        assert!(
+            left == long || left == short,
+            "{} bytes, not either document",
+            left.len()
+        );
+    }
 }
 
 #[cfg(test)]
