@@ -2,7 +2,7 @@
 //!
 //! The names come from real import tables (D504); an unmeasured arity is `6`, the trampoline's
 //! full capture, not a claim about the argument count. `sceNpGetAccountCountryA`,
-//! `sceNpGetAccountIdA` and `sceNpCheckCallback` are implemented, as measured.
+//! `sceNpGetAccountIdA`, `sceNpGetState` and `sceNpCheckCallback` are implemented, as measured.
 
 use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 use orbistoun_hle::guest_module;
@@ -15,7 +15,8 @@ guest_module! {
         // (user, out)
         "sceNpGetAccountIdA" => 2,
         "sceNpGetNpReachabilityState" => 6,
-        "sceNpGetState" => 6,
+        // (user, out)
+        "sceNpGetState" => 2,
     }
 }
 
@@ -26,6 +27,7 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNpCheckCallback", check_callback),
         ("sceNpGetAccountCountryA", get_account_country_a),
         ("sceNpGetAccountIdA", get_account_id_a),
+        ("sceNpGetState", get_state),
     ]
 }
 
@@ -54,6 +56,22 @@ fn get_account_id_a(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // accessor.
     if args[1] != 0 && unsafe { orbistoun_mem::guest::write_u64(args[1], 0) } {
         NOT_SIGNED_IN
+    } else {
+        u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
+    }
+}
+
+/// The state `sceNpGetState` wrote on a console signed in to no account: 1, signed out (REQ-np05,
+/// `000-boot/np05-routes-calls`, `report-20261014-batch4.log` 2883-2884).
+const SIGNED_OUT: u32 = 1;
+
+/// `sceNpGetState(user, out)`: no account is signed in, so 0 with the signed-out state written as
+/// four bytes, as measured. A null `out` is unmeasured and answers the placeholder.
+fn get_state(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's 4-byte state, by the call's contract; written through the checked
+    // accessor.
+    if args[1] != 0 && unsafe { orbistoun_mem::guest::write_u32(args[1], SIGNED_OUT) } {
+        0
     } else {
         u64::from(orbistoun_core::GuestError::Unimplemented.as_raw())
     }

@@ -41,3 +41,17 @@ known_by = "measured"
 cites = "obSCEne REQ-20261011T1745Z-np03, reports/hardware/report-1791758178.txt lines 223-266."
 found_in = ["PPSA03416-app0"]
 found_on = "2026-10-12"
+
+[[function]]
+name = "sceNpGetState"
+arity = 2
+purpose = "(user, out): reads the user's network sign-in state into a 4-byte out value."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-np05, 000-boot/np05-routes-calls, bound through sysmodule 0x009d, a console signed in to no account): 0x0, and the four bytes of out became 01000000 - state 1, signed out.",
+    "orbistoun answers as the console did, no account being signed in; a null out, and bytes past the fourth, are unmeasured, and a null out answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261014T0745Z-np05, reports/hardware/report-20261014-batch4.log lines 2880-2884."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-15"
