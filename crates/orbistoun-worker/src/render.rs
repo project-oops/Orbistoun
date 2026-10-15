@@ -1278,6 +1278,18 @@ fn undrawn_line(shown: u64) -> String {
     format!("the last flip showed {shown:#x}, which no frame orbistoun drew went into")
 }
 
+/// A program's address as a report names it: with the region the run placed there and how far
+/// in, where `locate` knows one.
+fn program_named(at: Option<u64>, locate: &dyn Fn(u64) -> Option<(&'static str, u64)>) -> String {
+    let Some(at) = at else {
+        return "?".to_owned();
+    };
+    match locate(at) {
+        Some((region, into)) => format!("{at:#x} ({region}+{into:#x})"),
+        None => format!("{at:#x}"),
+    }
+}
+
 /// Who read the `bytes` at `at` a program stored: a drawn frame that sampled a texture starting
 /// inside them, or a program whose dispatches read a buffer or fetched an image overlapping them.
 fn consumed_by(
@@ -1986,9 +1998,7 @@ fn log_dispatch_writes() {
         };
         tracing::info!(
             "dispatch module {module:016x}, the program at {}: {} carried out, {} byte(s) written back, {}; fetches an image at {}, stores one at {}",
-            writes
-                .program
-                .map_or_else(|| "?".to_owned(), |at| format!("{at:#x}")),
+            program_named(writes.program, &crate::report::locate),
             writes.dispatches,
             writes.bytes,
             if writes.lit {
@@ -2194,6 +2204,19 @@ mod tests {
             super::texture_writers_line(0x3000, &[]),
             "the texture at 0x3000, which nothing tracked filled, was not written while watched"
         );
+    }
+
+    /// A program is named by where it lies and, where the run placed that memory, which region and
+    /// how far in: the title's own code reads apart from a library's.
+    #[test]
+    fn a_program_is_named_by_its_region() {
+        let locate = |at: u64| (at >= 0x4000_0000).then(|| ("image", at - 0x4000_0000));
+        assert_eq!(
+            super::program_named(Some(0x4000_1200), &locate),
+            "0x40001200 (image+0x1200)"
+        );
+        assert_eq!(super::program_named(Some(0x1000), &locate), "0x1000");
+        assert_eq!(super::program_named(None, &locate), "?");
     }
 
     /// What a program stored is followed to who read it: a drawn frame that sampled a texture
