@@ -152,9 +152,15 @@ pub fn current() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Unsupported, current, install, processor_supports_base_writes};
+    use super::{INSTALL_ATTEMPTS, Unsupported, current, install, processor_supports_base_writes};
 
     /// An install either reads back exactly or is refused.
+    ///
+    /// The test's read is a second read, made after `install`'s own read-back has returned, so a
+    /// host switch landing between the two resets the base to zero here too (seen once on a
+    /// Windows CI runner). A success is therefore installed and observed again, and only a reset
+    /// to zero excuses a miss: a success that is never observable, or that leaves any other base,
+    /// still fails. Losing a two-instruction window `INSTALL_ATTEMPTS` times running is no race.
     #[test]
     fn an_install_can_be_read_back_or_is_refused() {
         // Either it worked and the base reads back exactly, or it was refused; never a silent
@@ -163,30 +169,39 @@ mod tests {
         let address = block.as_mut_ptr() as usize as u64;
         let restore = current();
 
-        // SAFETY: `block` is a live, correctly aligned allocation that outlives this test, and
-        // nothing here reads through the segment base afterwards.
-        let outcome = unsafe { install(address) };
-
-        match outcome {
-            Ok(()) => {
-                assert_eq!(
-                    current(),
-                    Some(address),
-                    "an install that reports success must be observable"
-                );
-                if let Some(previous) = restore {
-                    // Put the host's base back: this thread belongs to the test harness.
-                    // SAFETY: restoring a value this thread was already using.
-                    unsafe { install(previous).expect("restoring a base that was in use") };
-                }
-            }
-            Err(e) => {
+        let mut lost = Vec::new();
+        for _ in 0..INSTALL_ATTEMPTS {
+            // Start on a fresh time slice, so a switch inside the window is the exception.
+            std::thread::yield_now();
+            // SAFETY: `block` is a live, correctly aligned allocation that outlives this test,
+            // and nothing here reads through the segment base afterwards.
+            if let Err(e) = unsafe { install(address) } {
                 assert!(
                     !processor_supports_base_writes()
                         || matches!(e, Unsupported::NoPlatformSupport | Unsupported::NotRetained),
                     "a refusal must have a reason: {e}"
                 );
+                return;
             }
+            let base = current();
+            if base == Some(address) {
+                break;
+            }
+            lost.push(base);
+        }
+
+        assert!(
+            lost.iter().all(|&base| base == Some(0)),
+            "a reported success may be lost only to the host's reset to zero: {lost:x?}"
+        );
+        assert!(
+            lost.len() < INSTALL_ATTEMPTS,
+            "an install that reports success must be observable: {lost:x?}"
+        );
+        if let Some(previous) = restore {
+            // Put the host's base back: this thread belongs to the test harness.
+            // SAFETY: restoring a value this thread was already using.
+            unsafe { install(previous).expect("restoring a base that was in use") };
         }
     }
 
