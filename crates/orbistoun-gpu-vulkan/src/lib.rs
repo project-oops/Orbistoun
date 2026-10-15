@@ -890,6 +890,8 @@ impl VulkanBackend {
 
     /// A snapshot of the last drawn frame at its guest extent, or its drawn one when `drawn`.
     fn snapshot_last_frame_at(&mut self, drawn: bool) -> Option<u64> {
+        let _keeping =
+            orbistoun_gpu::perf::SpanGuard::start(orbistoun_gpu::perf::Span::SnapshotOnDevice);
         let target = self.last_drawn?.0;
         if !self.unread.contains(&target) {
             return None;

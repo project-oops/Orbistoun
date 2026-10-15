@@ -47,6 +47,7 @@ macro_rules! span_labels {
             Span::Copy => $as!("dma copy"),
             Span::CopyGuard => $as!("guard: deferred copy"),
             Span::KeepSnapshot => $as!("keep snapshot"),
+            Span::SnapshotOnDevice => $as!("keep snapshot: on device"),
             Span::ReadBand => $as!("read band"),
             Span::FoldBand => $as!("fold band"),
             Span::DiscardSnapshot => $as!("discard snapshot"),
@@ -365,6 +366,9 @@ pub enum Span {
     CopyGuard,
     /// Keeping a frame snapshot for a deferred copy.
     KeepSnapshot,
+    /// The snapshot [`Self::KeepSnapshot`] asks for, kept on the device thread: what it waits for there
+    /// (D831) - behind that thread's queued work under async submission - stays the guest's own.
+    SnapshotOnDevice,
     /// Releasing a superseded snapshot.
     DiscardSnapshot,
     /// Every other command-processor memory step: fills, fences, waits.
@@ -519,7 +523,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 83] = [
+    pub const ALL: [Self; 84] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -533,6 +537,7 @@ impl Span {
         Self::Copy,
         Self::CopyGuard,
         Self::KeepSnapshot,
+        Self::SnapshotOnDevice,
         Self::DiscardSnapshot,
         Self::OtherMemory,
         Self::FlipWriteBack,
@@ -620,9 +625,10 @@ impl Span {
 /// Spans a thread spends waiting on another thread's span, each with the one it waits on: the
 /// profiler counts the wait as the waiting span's own time, since what it waits on runs on another
 /// thread, and a report subtracts it (D831).
-pub const WAITS_ON: [(Span, Span); 2] = [
+pub const WAITS_ON: [(Span, Span); 3] = [
     (Span::ExecuteHandOff, Span::ExecuteOnDevice),
     (Span::DispatchExecute, Span::DispatchOnDevice),
+    (Span::KeepSnapshot, Span::SnapshotOnDevice),
 ];
 
 /// Spans that are the host waiting for the device to finish work it was given, which a report
