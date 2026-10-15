@@ -1582,7 +1582,7 @@ pub fn dispatch_guest_hashed(
     use orbistoun_gpu::perf::{Span, SpanGuard};
     let setting_up = SpanGuard::start(Span::DeviceSetup);
     // Draws already queued finish first: the window was read from guest memory they write.
-    crate::framebuffer::settle_session()?;
+    orbistoun_gpu::perf::span(Span::DeviceSetupSettle, crate::framebuffer::settle_session)?;
     let session = session()?;
     let session = session
         .lock()

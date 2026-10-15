@@ -62,6 +62,10 @@ pub struct Report {
     pub by_total: Vec<ZoneStat>,
     /// Its frame times.
     pub frames: FrameTimes,
+    /// The share of the run its threads spent waiting for the device, over the spans
+    /// [`Self::note_device_waits`] was given; `None` until it is.
+    #[serde(default)]
+    pub device_waits: Option<f64>,
 }
 
 /// The plot each guest flip adds its frame time to (D829).
@@ -100,6 +104,7 @@ impl Report {
                     FRAME_PLOT,
                 ),
             },
+            device_waits: None,
         })
     }
 
@@ -120,6 +125,13 @@ impl Report {
             ms(self.frames.percentile(99.0)),
             ms(self.frames.percentile(100.0)),
         );
+        if let Some(share) = self.device_waits {
+            let _ = writeln!(
+                out,
+                "waiting on the device: {share:.1}% of the run - time taken out of one wait there \
+                 shows up in another while the device's own work is the bound"
+            );
+        }
         for (title, zones) in [
             ("by self time (what to make faster)", &self.by_self),
             ("by total time (where the time sits)", &self.by_total),
@@ -154,6 +166,19 @@ impl Report {
 }
 
 impl Report {
+    /// Notes how much of the run the zones named `waits` - each the host waiting for the device -
+    /// took together, as a share of every zone's own time.
+    pub fn note_device_waits(&mut self, waits: &[&str]) {
+        let whole: u64 = self.by_self.iter().map(|zone| zone.total_ns).sum();
+        let waited: u64 = self
+            .by_self
+            .iter()
+            .filter(|zone| waits.contains(&zone.name.as_str()))
+            .map(|zone| zone.total_ns)
+            .sum();
+        self.device_waits = (whole > 0).then(|| as_f64(waited) * 100.0 / as_f64(whole));
+    }
+
     /// Takes `done`'s whole time out of `waiting`'s own: `waiting` is a thread waiting on `done`,
     /// which runs on another thread, so the profiler counts it in both (D831). What is left is the
     /// hand-off itself.
@@ -236,6 +261,7 @@ mod tests {
             ]),
             by_total: vec![zone("on device", 800), zone("hand-off", 900)],
             frames: FrameTimes::default(),
+            device_waits: None,
         };
         report.waits_on("hand-off", "on device");
         let names: Vec<(&str, u64)> = report
@@ -246,6 +272,36 @@ mod tests {
         assert_eq!(names, [("draws", 500), ("other", 200), ("hand-off", 100)]);
         report.waits_on("hand-off", "not recorded");
         assert_eq!(report.by_self[2].total_ns, 100, "nothing to take");
+    }
+
+    /// The device waits named are summed as a share of every zone's own time, and the report
+    /// says so; a wait the run never recorded adds nothing.
+    #[test]
+    fn device_waits_are_their_share_of_the_run() {
+        let zone = |name: &str, total_ns| ZoneStat {
+            name: name.to_owned(),
+            total_ns,
+            count: 1,
+            max_ns: total_ns,
+        };
+        let mut report = Report {
+            by_self: sorted(vec![
+                zone("draw room", 300),
+                zone("setup: settle", 200),
+                zone("draws", 500),
+            ]),
+            by_total: Vec::new(),
+            frames: FrameTimes::default(),
+            device_waits: None,
+        };
+        assert!(!report.render(5).contains("waiting on the device"));
+        report.note_device_waits(&["draw room", "setup: settle", "never recorded"]);
+        assert_eq!(report.device_waits, Some(50.0));
+        assert!(
+            report
+                .render(5)
+                .contains("waiting on the device: 50.0% of the run")
+        );
     }
 
     /// The exporter's statistics, as `tracy-csvexport` 0.14.1 wrote them for a run of MDEM00001.

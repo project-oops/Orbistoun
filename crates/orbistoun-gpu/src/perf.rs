@@ -106,6 +106,7 @@ macro_rules! span_labels {
             Span::DispatchOnDevice => $as!("dispatch on device"),
             Span::DispatchWriteBack => $as!("dispatch: write back"),
             Span::DeviceSetup => $as!("device: setup"),
+            Span::DeviceSetupSettle => $as!("device: setup: settle"),
             Span::DevicePipeline => $as!("device: pipeline"),
             Span::DeviceRun => $as!("device: run"),
             Span::DeviceReadBack => $as!("device: read back window"),
@@ -487,6 +488,9 @@ pub enum Span {
     DispatchWriteBack,
     /// Within [`Self::DispatchExecute`]: its buffers and images made and filled.
     DeviceSetup,
+    /// Within [`Self::DeviceSetup`]: waiting for the draws already queued to finish, since the
+    /// dispatch's window was read from memory they write.
+    DeviceSetupSettle,
     /// Within [`Self::DispatchExecute`]: its pipeline built.
     DevicePipeline,
     /// Within [`Self::DispatchExecute`]: recorded, submitted and waited for.
@@ -514,7 +518,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 82] = [
+    pub const ALL: [Self; 83] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -587,6 +591,7 @@ impl Span {
         Self::DispatchOnDevice,
         Self::DispatchWriteBack,
         Self::DeviceSetup,
+        Self::DeviceSetupSettle,
         Self::DevicePipeline,
         Self::DeviceRun,
         Self::DeviceReadBack,
@@ -617,6 +622,17 @@ impl Span {
 pub const WAITS_ON: [(Span, Span); 2] = [
     (Span::ExecuteHandOff, Span::ExecuteOnDevice),
     (Span::DispatchExecute, Span::DispatchOnDevice),
+];
+
+/// Spans that are the host waiting for the device to finish work it was given, which a report
+/// sums: a run waiting on the device for much of its time is bound by the device's work, and a
+/// wait taken out of one of these reappears in another rather than leaving the frame (CRFT00001:
+/// a larger draw-data buffer took "execute: draw room" from 12% to nothing and "device: setup"
+/// from 5% to 17%, the frame rate unmoved).
+pub const DEVICE_WAITS: [Span; 3] = [
+    Span::DrawRoom,
+    Span::CarryOutSettle,
+    Span::DeviceSetupSettle,
 ];
 
 const SPANS: usize = Span::ALL.len();

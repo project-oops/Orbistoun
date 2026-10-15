@@ -105,6 +105,9 @@ fn record(
     for (waiting, done) in orbistoun_gpu::perf::WAITS_ON {
         report.waits_on(waiting.label(), done.label());
     }
+    report.note_device_waits(
+        &orbistoun_gpu::perf::DEVICE_WAITS.map(orbistoun_gpu::perf::Span::label),
+    );
     Ok(Recorded {
         trace,
         summary,
