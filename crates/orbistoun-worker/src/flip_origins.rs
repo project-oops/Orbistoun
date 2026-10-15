@@ -17,11 +17,14 @@ pub struct FlipOrigins {
     pub undrawn: u64,
     /// The last flip of the second kind: the buffer shown, and the one drawn into.
     pub last_elsewhere: Option<(u64, u64)>,
+    /// The buffer the last flip showed.
+    pub last: Option<u64>,
 }
 
 impl FlipOrigins {
     /// Counts a flip of `shown`, the frame before it drawn into `drawn_into` where one was.
     pub const fn note(&mut self, shown: u64, drawn_into: Option<u64>) {
+        self.last = Some(shown);
         match drawn_into {
             Some(drawn) if drawn == shown => self.drawn += 1,
             Some(drawn) => {
@@ -64,6 +67,7 @@ fn origins() -> &'static Mutex<FlipOrigins> {
         elsewhere: 0,
         undrawn: 0,
         last_elsewhere: None,
+        last: None,
     });
     &ORIGINS
 }
@@ -109,6 +113,11 @@ mod tests {
             "{line}"
         );
         assert!(!line.contains("no flip showed"), "{line}");
+        assert_eq!(
+            origins.last,
+            Some(0x2000),
+            "the buffer the last flip showed"
+        );
         let mut never = FlipOrigins::default();
         never.note(0x2000, None);
         assert!(

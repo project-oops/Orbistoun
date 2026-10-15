@@ -1220,6 +1220,51 @@ fn texel_summary(texels: &[u32]) -> String {
     format!("first {first:#010x}, {} distinct{bound}", distinct.len())
 }
 
+/// Where the presented frames came from - a frame orbistoun drew, or another writer's - and what
+/// drew the frame the last flip showed: its draws and what they sampled.
+fn log_flip_origins() {
+    let origins = crate::flip_origins::flip_origins();
+    if let Some(line) = origins.describe() {
+        tracing::info!("{line}");
+    }
+    if let Some(shown) = origins.last
+        && let Some(by) = orbistoun_gpu::agc_driver::last_drawn_into(shown)
+    {
+        tracing::info!("{}", drawn_by_line(shown, &by));
+    }
+}
+
+/// The most textures [`drawn_by_line`] lists.
+const MOST_DRAWN_TEXTURES: usize = 8;
+
+/// What drew the frame a flip of `shown` showed: which frame drawn it was, its draws, and each
+/// texture they bound with what it holds ([`texel_summary`]).
+fn drawn_by_line(shown: u64, by: &orbistoun_gpu::agc_driver::DrawnBy) -> String {
+    let mut textures: Vec<String> = by
+        .textures
+        .iter()
+        .take(MOST_DRAWN_TEXTURES)
+        .map(|(slot, width, height, texels)| {
+            format!("slot {slot} {width}x{height} ({})", texel_summary(texels))
+        })
+        .collect();
+    if by.textures.len() > MOST_DRAWN_TEXTURES {
+        textures.push(format!(
+            "and {} more",
+            by.textures.len() - MOST_DRAWN_TEXTURES
+        ));
+    }
+    let binding = if textures.is_empty() {
+        "no texture".to_owned()
+    } else {
+        textures.join("; ")
+    };
+    format!(
+        "the last flip showed {shown:#x}, drawn into as frame {} by {} draw(s), binding {binding}",
+        by.frame, by.draws
+    )
+}
+
 /// One command of a dumped submission. Addresses and resource ids read best in hexadecimal and
 /// sizes in decimal, so the commands that carry a size name it in pixels.
 fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
@@ -1657,10 +1702,7 @@ fn log_execution() {
     if let Some(why) = orbistoun_gpu::agc_driver::last_dispatch_refusal() {
         tracing::info!("a compute dispatch was not carried out - {why}");
     }
-    // Where the presented frames came from: a frame orbistoun drew, or another writer's.
-    if let Some(line) = crate::flip_origins::flip_origins().describe() {
-        tracing::info!("{line}");
-    }
+    log_flip_origins();
     // What each program's dispatches wrote: one that writes only zeros produces nothing.
     for (module, writes) in orbistoun_gpu::agc_driver::dispatch_writes_by_module() {
         let span = |span: Option<(u64, u64)>| {
@@ -1740,6 +1782,29 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// The frame a flip showed is named by what drew it: which frame drawn it was, its draws, and
+    /// each texture they bound with what it holds - a texture of one value reads as one distinct.
+    #[test]
+    fn the_last_flip_names_what_drew_it() {
+        let by = orbistoun_gpu::agc_driver::DrawnBy {
+            frame: 12,
+            draws: 3,
+            textures: vec![(0, 2, 1, std::sync::Arc::from(vec![5_u32, 5]))],
+        };
+        assert_eq!(
+            super::drawn_by_line(0x1000, &by),
+            concat!(
+                "the last flip showed 0x1000, drawn into as frame 12 by 3 draw(s), binding ",
+                "slot 0 2x1 (first 0x00000005, 1 distinct)"
+            )
+        );
+        let bare = orbistoun_gpu::agc_driver::DrawnBy {
+            textures: Vec::new(),
+            ..by
+        };
+        assert!(super::drawn_by_line(0x1000, &bare).ends_with("binding no texture"));
+    }
 
     /// A large texture's summary samples all of it, not its first row: one black above and grey
     /// below counts two values, where the first 4096 texels alone said one.

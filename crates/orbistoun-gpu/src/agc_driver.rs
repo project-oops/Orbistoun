@@ -969,6 +969,7 @@ impl GuestCp<'_> {
                     shader_failures(submission)
                 )
             })?;
+            note_drawn_by(target.base, submission.report.draws, &submission.commands);
             return self.write_back_more_targets(&more);
         }
         // Drawn and left on the device: the frame is written back when the guest flips, not after
@@ -998,6 +999,7 @@ impl GuestCp<'_> {
             ));
         }
         set_pending(Some((target, swap)));
+        note_drawn_by(target.base, submission.report.draws, &submission.commands);
         // The frame now pending was drawn over the one the deferred write-back holds, and writes
         // every byte it would: it is superseded, unread (D801).
         if matches!(before, TargetRead::HeldOverDeferred) {
@@ -2495,6 +2497,69 @@ fn note_carried_out(target: ColourTarget) {
 fn written_since_flip() -> &'static Mutex<Vec<u64>> {
     static EARLY: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     &EARLY
+}
+
+/// The frame last drawn into a colour target: what a run's report names behind a flip of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrawnBy {
+    /// Which frame drawn into a target it was, counted from the run's first.
+    pub frame: u64,
+    /// How many draws drew it.
+    pub draws: usize,
+    /// Each texture those draws bound, once: its slot, width, height and texels.
+    pub textures: Vec<(u32, u32, u32, Arc<[u32]>)>,
+}
+
+/// The frames drawn so far and the last drawn into each target, by the target's base.
+fn drawn_by() -> &'static Mutex<(u64, std::collections::BTreeMap<u64, DrawnBy>)> {
+    static DRAWN_BY: Mutex<(u64, std::collections::BTreeMap<u64, DrawnBy>)> =
+        Mutex::new((0, std::collections::BTreeMap::new()));
+    &DRAWN_BY
+}
+
+/// Notes a frame of `draws` draws, binding the textures `commands` bind, drawn into the colour
+/// target at `target`. The texels are held, not copied, so nothing frame-sized is made per frame.
+pub fn note_drawn_by(target: u64, draws: usize, commands: &[crate::RenderCommand]) {
+    let mut textures: Vec<(u32, u32, u32, Arc<[u32]>)> = Vec::new();
+    for command in commands {
+        if let crate::RenderCommand::BindTexture {
+            slot,
+            texels,
+            width,
+            height,
+            ..
+        } = command
+            && !textures
+                .iter()
+                .any(|(bound, _, _, held)| bound == slot && Arc::ptr_eq(held, texels))
+        {
+            textures.push((*slot, *width, *height, Arc::clone(texels)));
+        }
+    }
+    let mut store = drawn_by()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    store.0 += 1;
+    let frame = store.0;
+    store.1.insert(
+        target,
+        DrawnBy {
+            frame,
+            draws,
+            textures,
+        },
+    );
+}
+
+/// The frame last drawn into the colour target at `target`, where one was.
+#[must_use]
+pub fn last_drawn_into(target: u64) -> Option<DrawnBy> {
+    drawn_by()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .1
+        .get(&target)
+        .cloned()
 }
 
 /// The base of the buffer a frame orbistoun drew went into, asked as the guest flips `address`:
@@ -5207,6 +5272,38 @@ mod tests {
         GUEST_ARG_REGISTERS, SUBMIT_OK, create_queue, last_submission_report, set_guest_regions,
         submit_command_buffer, submit_dcb,
     };
+
+    /// The frame last drawn into a target is kept by the target: its draws and each texture they
+    /// bound, once however many draws bound it, its texels held rather than copied. A later frame
+    /// into another target leaves it as it was. Addresses far from any a guest run uses, as other
+    /// tests share the store.
+    #[test]
+    fn the_frame_last_drawn_into_a_target_is_kept() {
+        use crate::backend::{RenderCommand, TextureEncoding};
+        let texels: std::sync::Arc<[u32]> = std::sync::Arc::from(vec![1_u32, 2, 2, 3]);
+        let bind = RenderCommand::BindTexture {
+            slot: 1,
+            texels: texels.clone(),
+            hash: 7,
+            width: 2,
+            height: 2,
+            sampling: crate::registers::TextureSampling::CLAMPED_POINT,
+            encoding: TextureEncoding::Rgba8,
+            faces: 1,
+            levels: 1,
+        };
+        let (target, other) = (0x7fee_0000_0000_u64, 0x7fef_0000_0000_u64);
+        super::note_drawn_by(target, 3, &[bind.clone(), bind]);
+        let first = super::last_drawn_into(target).expect("kept");
+        assert_eq!(first.draws, 3);
+        assert_eq!(first.textures.len(), 1, "bound by two draws, kept once");
+        assert_eq!((first.textures[0].0, first.textures[0].1), (1, 2));
+        assert!(std::sync::Arc::ptr_eq(&first.textures[0].3, &texels));
+        super::note_drawn_by(other, 1, &[]);
+        assert_eq!(super::last_drawn_into(target), Some(first.clone()));
+        assert!(super::last_drawn_into(other).is_some_and(|by| by.frame > first.frame));
+        assert_eq!(super::last_drawn_into(0x7ff0_0000_0000), None);
+    }
     use crate::dispatch::{BufferAfter, BufferBefore};
     use std::sync::{Mutex, PoisonError};
 
