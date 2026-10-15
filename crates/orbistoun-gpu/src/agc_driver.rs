@@ -2671,6 +2671,21 @@ fn drawn_bases(
         .collect()
 }
 
+/// The frame last drawn into each colour target, each once.
+#[must_use]
+pub fn drawn_frames() -> Vec<DrawnBy> {
+    let mut frames: Vec<DrawnBy> = drawn_by()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .1
+        .values()
+        .cloned()
+        .collect();
+    frames.sort_by_key(|by| by.frame);
+    frames.dedup_by_key(|by| by.frame);
+    frames
+}
+
 /// The frame last drawn into the colour target at `target`, where one was.
 #[must_use]
 pub fn last_drawn_into(target: u64) -> Option<DrawnBy> {

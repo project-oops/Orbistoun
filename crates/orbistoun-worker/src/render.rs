@@ -1278,6 +1278,42 @@ fn undrawn_line(shown: u64) -> String {
     format!("the last flip showed {shown:#x}, which no frame orbistoun drew went into")
 }
 
+/// Who read the `bytes` at `at` a program stored: a drawn frame that sampled a texture starting
+/// inside them, or a program whose dispatches read a buffer or fetched an image overlapping them.
+fn consumed_by(
+    at: u64,
+    bytes: u64,
+    frames: &[orbistoun_gpu::agc_driver::DrawnBy],
+    census: &[(u64, orbistoun_gpu::agc_driver::DispatchWrites)],
+) -> String {
+    let inside = |base: u64| (at..at.saturating_add(bytes)).contains(&base);
+    let overlaps = |(from, length): (u64, u64)| {
+        from < at.saturating_add(bytes) && at < from.saturating_add(length)
+    };
+    if let Some(frame) = frames
+        .iter()
+        .find(|by| by.sampled.iter().any(|&(base, _, _)| inside(base)))
+    {
+        return format!("sampled by frame {}", frame.frame);
+    }
+    let reader = census.iter().find(|(_, writes)| {
+        writes.fetched.is_some_and(overlaps)
+            || writes
+                .buffers
+                .iter()
+                .any(|&(from, length, read)| read.is_some() && overlaps((from, length)))
+    });
+    match reader {
+        Some((_, writes)) => format!(
+            "read by the program at {}",
+            writes
+                .program
+                .map_or_else(|| "an unknown address".to_owned(), |p| format!("{p:#x}"))
+        ),
+        None => "nothing tracked read it".to_owned(),
+    }
+}
+
 /// How the memory at `base` was filled, where something orbistoun tracks filled it: a frame it
 /// drew into it, a file read, a `DMA_DATA` the command processor carried out, or a compute
 /// program's stores (`census`).
@@ -1928,6 +1964,57 @@ fn write_dispatch_listings() {
     }
 }
 
+/// What each compute program's dispatches wrote, and who read what they stored.
+fn log_dispatch_writes() {
+    // What each program's dispatches wrote: one that writes only zeros produces nothing, and what
+    // nothing reads is not seen.
+    let census = orbistoun_gpu::agc_driver::dispatch_writes_by_module();
+    let frames = orbistoun_gpu::agc_driver::drawn_frames();
+    for (module, writes) in &census {
+        let module = *module;
+        let span = |span: Option<(u64, u64)>| {
+            span.map_or_else(
+                || "none".to_owned(),
+                |(at, bytes)| format!("{at:#x} ({bytes} bytes)"),
+            )
+        };
+        tracing::info!(
+            "dispatch module {module:016x}, the program at {}: {} carried out, {} byte(s) written back, {}; fetches an image at {}, stores one at {}",
+            writes
+                .program
+                .map_or_else(|| "?".to_owned(), |at| format!("{at:#x}")),
+            writes.dispatches,
+            writes.bytes,
+            if writes.lit {
+                "some of them not zero"
+            } else {
+                "every one zero"
+            },
+            span(writes.fetched),
+            span(writes.stored)
+        );
+        if let Some((at, bytes)) = writes.stored {
+            tracing::info!(
+                "  the image it stores: {}",
+                consumed_by(at, bytes, &frames, &census)
+            );
+        }
+        for &(at, bytes, lit) in &writes.buffers {
+            tracing::info!(
+                "  it binds a buffer at {at:#x} ({bytes} bytes), {}",
+                match lit {
+                    Some(true) => "read, some of it not zero".to_owned(),
+                    Some(false) => "read, every word zero".to_owned(),
+                    None => format!(
+                        "only stored to; {}",
+                        consumed_by(at, bytes, &frames, &census)
+                    ),
+                }
+            );
+        }
+    }
+}
+
 /// completion, and where the last one stopped when it did not (D705).
 fn log_execution() {
     let record = orbistoun_gpu::agc_driver::execution();
@@ -1954,40 +2041,7 @@ fn log_execution() {
         tracing::info!("a compute dispatch was not carried out - {why}");
     }
     log_flip_origins();
-    // What each program's dispatches wrote: one that writes only zeros produces nothing.
-    for (module, writes) in orbistoun_gpu::agc_driver::dispatch_writes_by_module() {
-        let span = |span: Option<(u64, u64)>| {
-            span.map_or_else(
-                || "none".to_owned(),
-                |(at, bytes)| format!("{at:#x} ({bytes} bytes)"),
-            )
-        };
-        tracing::info!(
-            "dispatch module {module:016x}, the program at {}: {} carried out, {} byte(s) written back, {}; fetches an image at {}, stores one at {}",
-            writes
-                .program
-                .map_or_else(|| "?".to_owned(), |at| format!("{at:#x}")),
-            writes.dispatches,
-            writes.bytes,
-            if writes.lit {
-                "some of them not zero"
-            } else {
-                "every one zero"
-            },
-            span(writes.fetched),
-            span(writes.stored)
-        );
-        for &(at, bytes, lit) in &writes.buffers {
-            tracing::info!(
-                "  it binds a buffer at {at:#x} ({bytes} bytes), {}",
-                match lit {
-                    Some(true) => "read, some of it not zero",
-                    Some(false) => "read, every word zero",
-                    None => "only stored to",
-                }
-            );
-        }
-    }
+    log_dispatch_writes();
     // The program a refused dispatch runs, to read the refusal against.
     if let (Some((address, program)), Some(dir)) = (
         orbistoun_gpu::pipeline::last_refused_program(),
@@ -2131,6 +2185,38 @@ mod tests {
         assert_eq!(
             super::texture_writers_line(0x3000, &[]),
             "the texture at 0x3000, which nothing tracked filled, was not written while watched"
+        );
+    }
+
+    /// What a program stored is followed to who read it: a drawn frame that sampled a texture
+    /// starting inside it, or another program that read or fetched from it - and when neither did,
+    /// the report says so: output nothing consumes.
+    #[test]
+    fn what_a_program_stored_is_followed_to_its_readers() {
+        let frame = orbistoun_gpu::agc_driver::DrawnBy {
+            frame: 12,
+            draws: 1,
+            textures: Vec::new(),
+            sampled: vec![(0x2400, 8, 8)],
+        };
+        let reader = orbistoun_gpu::agc_driver::DispatchWrites {
+            program: Some(0x7400_0000_9000),
+            buffers: vec![(0x8100, 0x40, Some(true))],
+            ..Default::default()
+        };
+        let census = [(2, reader)];
+        let frames = [frame];
+        assert_eq!(
+            super::consumed_by(0x2000, 0x1000, &frames, &census),
+            "sampled by frame 12"
+        );
+        assert_eq!(
+            super::consumed_by(0x8000, 0x200, &frames, &census),
+            "read by the program at 0x740000009000"
+        );
+        assert_eq!(
+            super::consumed_by(0x5000, 0x100, &frames, &census),
+            "nothing tracked read it"
         );
     }
 
