@@ -70,10 +70,17 @@ pub struct Report {
     /// did; empty until it is given them.
     #[serde(default)]
     pub emptied: Vec<(String, u64)>,
+    /// Milliseconds the device spent on the run's render passes, from its own timestamps: the
+    /// `gpu ms` plot summed. `None` where the run plotted none.
+    #[serde(default)]
+    pub device_ms: Option<f64>,
 }
 
 /// The plot each guest flip adds its frame time to (D829).
 const FRAME_PLOT: &str = "frame ms";
+
+/// The plot the device's own time on render passes is added to, as each settle reads it.
+const GPU_PLOT: &str = "gpu ms";
 
 impl Report {
     /// Reads `trace` back with `tools`' exporter: zones by self time and by total time, and the
@@ -110,6 +117,13 @@ impl Report {
             },
             device_waits: None,
             emptied: Vec::new(),
+            device_ms: {
+                let gpu = parse_plot(
+                    &export(&["--unwrap", "--plot", "--filter", GPU_PLOT])?,
+                    GPU_PLOT,
+                );
+                (!gpu.is_empty()).then(|| gpu.iter().sum())
+            },
         })
     }
 
@@ -138,6 +152,21 @@ impl Report {
                     "shows up in another while the device's own work is the bound"
                 ),
                 share
+            );
+        }
+        let run_ms: f64 = self.frames.ms.iter().sum();
+        if let Some(device_ms) = self.device_ms
+            && run_ms > 0.0
+        {
+            let _ = writeln!(
+                out,
+                concat!(
+                    "the device's own work: {:.1}% of the run, {:.2} ms a frame, on render passes ",
+                    "by its timestamps - near 100% is a title bound by the device's work, not by ",
+                    "the host's waiting"
+                ),
+                device_ms * 100.0 / run_ms,
+                device_ms / as_f64(self.frames.ms.len() as u64).max(1.0),
             );
         }
         if !self.emptied.is_empty() {
@@ -298,6 +327,7 @@ mod tests {
             frames: FrameTimes::default(),
             device_waits: None,
             emptied: Vec::new(),
+            device_ms: None,
         };
         report.waits_on("hand-off", "on device");
         let names: Vec<(&str, u64)> = report
@@ -330,6 +360,7 @@ mod tests {
             frames: FrameTimes::default(),
             device_waits: None,
             emptied: Vec::new(),
+            device_ms: None,
         };
         assert!(!report.render(5).contains("waiting on the device"));
         report.note_device_waits(&["draw room", "setup: settle", "never recorded"]);
@@ -338,6 +369,25 @@ mod tests {
             report
                 .render(5)
                 .contains("waiting on the device: 50.0% of the run")
+        );
+    }
+
+    /// The device's own time is its share of the run and its mean a frame; a run that plotted none
+    /// says nothing of it.
+    #[test]
+    fn the_device_s_own_time_is_its_share_of_the_run() {
+        let mut report = Report {
+            frames: FrameTimes {
+                ms: vec![10.0, 10.0, 20.0, 20.0],
+            },
+            ..Report::default()
+        };
+        assert!(!report.render(5).contains("the device's own work"));
+        report.device_ms = Some(30.0);
+        assert!(
+            report
+                .render(5)
+                .contains("the device's own work: 50.0% of the run, 7.50 ms a frame")
         );
     }
 

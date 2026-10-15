@@ -262,6 +262,17 @@ pub fn measure<T>(phase: Phase, work: impl FnOnce() -> T) -> T {
 
 /// Adds `spent` to `phase`.
 pub fn add(phase: Phase, spent: std::time::Duration) {
+    // The device's own time is plotted, so a report says how much of the run the device was busy
+    // as well as how long the host waited for it.
+    #[cfg(feature = "tracy")]
+    if phase == Phase::Gpu
+        && let Some(client) = tracy_client::Client::running()
+    {
+        client.plot(
+            tracy_client::plot_name!("gpu ms"),
+            spent.as_secs_f64() * 1e3,
+        );
+    }
     let nanos = u64::try_from(spent.as_nanos()).unwrap_or(u64::MAX);
     SPENT[phase as usize].fetch_add(nanos, Ordering::Relaxed);
     if !FIRST_FLIPPED.load(Ordering::Relaxed) {

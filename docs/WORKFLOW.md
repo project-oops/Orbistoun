@@ -149,9 +149,13 @@ A round of making a title faster goes:
    ten seconds and build its fonts before it draws anything, so 30 seconds rather than 15. Read
    the run log's "its threads asked to sleep" first: a title that sleeps a fixed time a frame is
    paced by itself, and its frame rate is the hardware's too.
-2. Read the report's "waiting on the device" first: a run that spends a third of its time
-   waiting for the device is bound by the device's work, and a wait removed from one span
-   reappears in another (`DEVICE_WAITS` beside the span table). Then take the largest *self* time. A span that waits on another thread's - `execute hand-off`, a
+2. Read the report's "waiting on the device" first, beside "the device's own work": a run that
+   spends a third of its time waiting for the device is bound by the device, and a wait removed
+   from one span reappears in another (`DEVICE_WAITS` beside the span table). Where the device's
+   own work is near the wait, its work is the bound; where it is far below - CRFT00001 waits 42%
+   of its run on a device busy 19% - the host and the device take turns, and the answer is what
+   makes the host wait for the device to finish rather than less work for it. Then take the
+   largest *self* time. A span that waits on another thread's - `execute hand-off`, a
    guest thread waiting on the device thread - keeps only the hand-off as its own time; the work
    is ranked under the device thread's zones. A new such pair goes in `WAITS_ON` beside the span
    table in `crates/orbistoun-gpu/src/perf.rs`.
