@@ -128,8 +128,11 @@ impl Report {
         if let Some(share) = self.device_waits {
             let _ = writeln!(
                 out,
-                "waiting on the device: {share:.1}% of the run - time taken out of one wait there \
-                 shows up in another while the device's own work is the bound"
+                concat!(
+                    "waiting on the device: {:.1}% of the run - time taken out of one wait there ",
+                    "shows up in another while the device's own work is the bound"
+                ),
+                share
             );
         }
         for (title, zones) in [
