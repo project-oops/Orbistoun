@@ -233,6 +233,10 @@ struct BenchEntry {
     /// How long the recording ran, which each zone's self time is a share of.
     #[serde(default)]
     seconds: Option<f64>,
+    /// The share of the run spent waiting on the device (`DEVICE_WAITS`): a title waiting for much
+    /// of its run is bound by the device's work, not by anything a host-side change makes faster.
+    #[serde(default)]
+    device_waits: Option<f64>,
 }
 
 impl BenchEntry {
@@ -249,6 +253,7 @@ impl BenchEntry {
                 .ms
                 .is_empty()
                 .then(|| "no frames presented".to_owned()),
+            device_waits: recorded.report.device_waits,
             by_self: recorded.report.by_self,
             seconds: Some(recorded.summary.seconds).filter(|&seconds| seconds > 0.0),
         }
@@ -613,6 +618,7 @@ pub(crate) fn cmd_bench(
             by_self: Vec::new(),
             skipped: Some(why),
             seconds: None,
+            device_waits: None,
         };
         if let Some(busy) = gpu_still_busy() {
             println!("{title}: skipped - something else is using {busy:.0}% of the GPU");
@@ -685,8 +691,8 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<24} {:>8} {:>8} {:>10} {:>9}",
-        "title", "fps", "was", "median ms", "p99 ms"
+        "{:<24} {:>8} {:>8} {:>10} {:>9} {:>9}",
+        "title", "fps", "was", "median ms", "p99 ms", "device %"
     );
     let shown = |value: Option<f64>| value.map_or_else(|| "-".to_owned(), |v| format!("{v:.1}"));
     for entry in entries {
@@ -695,12 +701,13 @@ fn render_bench(entries: &[BenchEntry], previous: Option<&[BenchEntry]>, top: us
             .and_then(|e| e.fps);
         let _ = writeln!(
             out,
-            "{:<24} {:>8} {:>8} {:>10} {:>9}{}",
+            "{:<24} {:>8} {:>8} {:>10} {:>9} {:>9}{}",
             entry.title,
             shown(entry.fps),
             shown(was),
             shown(entry.median_ms),
             shown(entry.p99_ms),
+            shown(entry.device_waits),
             entry
                 .skipped
                 .as_deref()
@@ -776,6 +783,7 @@ mod tests {
                 .collect(),
             skipped: None,
             seconds: Some(1.0),
+            device_waits: None,
         }
     }
 
@@ -808,6 +816,18 @@ mod tests {
         let mut old = entry("OLD", 30.0, &[("draw", 1_000)]);
         old.seconds = None;
         assert!(render_bench(&[old], None, 5).contains("100.0%"));
+
+        // A title's share of its run spent waiting on the device stands beside its frame times.
+        let mut bound = entry("BOUND", 30.0, &[("draw", 1_000)]);
+        bound.device_waits = Some(35.0);
+        let text = render_bench(&[bound], None, 5);
+        assert!(text.contains("device %"), "{text}");
+        assert!(
+            text.lines()
+                .find(|l| l.starts_with("BOUND"))
+                .is_some_and(|l| l.trim_end().ends_with("35.0")),
+            "{text}"
+        );
     }
 
     /// An A/B report gives each build's mean rate, and ranks zones by how far their share of the
