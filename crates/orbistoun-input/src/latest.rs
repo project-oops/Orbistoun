@@ -95,11 +95,13 @@ pub(crate) use tests::exclusively;
 mod tests {
     use crate::pad::{Button, PadState};
 
-    /// Serialises the tests that touch the port table.
+    /// Serialises the tests that touch the controller: the port table, and everything that writes
+    /// it or reads through it - a pad read, the installed script, the system keyboard.
     ///
     /// The table is process-global because it describes one machine's controllers, and the harness
-    /// runs tests in parallel. Where the shared thing is what is under test, a lock is the fix
-    /// (D324).
+    /// runs tests in parallel. A pad read samples the installed script into the table, so a lock
+    /// per module still lets one module's pad land in another's test; one lock for the controller
+    /// is the fix (D324).
     pub(crate) fn exclusively() -> std::sync::MutexGuard<'static, ()> {
         static PORT_TABLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
         PORT_TABLE

@@ -596,13 +596,7 @@ mod tests {
 mod active_tests {
     use super::{Script, clear, install, poll};
     use crate::pad::Button;
-    use std::sync::{Mutex, PoisonError};
-
-    /// Serialises the tests that share the process-wide `ACTIVE` script.
-    ///
-    /// Each holds this from its first `clear` through its last assertion so no other test installs
-    /// in between; poisoning is recovered from so one panic does not strand the rest.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    use std::sync::Mutex;
 
     /// Reads and checks a script the way a caller would.
     fn script(text: &str) -> Script {
@@ -614,7 +608,7 @@ mod active_tests {
     /// An installed script is sampled, a second install replaces it, and a cleared one is not.
     #[test]
     fn an_installed_script_is_sampled_and_a_cleared_one_is_not() {
-        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = crate::latest::exclusively();
         clear();
         assert!(
             poll().is_none(),
@@ -652,7 +646,7 @@ mod active_tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static FLIP: AtomicU64 = AtomicU64::new(0);
         static WRITTEN: Mutex<Vec<super::Step>> = Mutex::new(Vec::new());
-        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = crate::latest::exclusively();
         super::install_flip_clock(|| FLIP.load(Ordering::SeqCst));
         FLIP.store(10, Ordering::SeqCst);
         WRITTEN.lock().expect("steps").clear();
@@ -700,7 +694,7 @@ mod active_tests {
     /// path so a lost start instant fails here.
     #[test]
     fn a_step_in_the_future_has_not_happened_yet() {
-        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = crate::latest::exclusively();
         clear();
         install(script("[[step]]\nat_ms = 3600000\nbuttons = [\"start\"]\n"));
         let sampled = poll().expect("an installed script samples");

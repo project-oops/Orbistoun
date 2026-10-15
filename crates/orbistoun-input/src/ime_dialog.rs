@@ -293,16 +293,11 @@ mod tests {
 
     use crate::pad::{Button, PadState};
 
-    /// The tests share the one dialog and the one pad, so they run one at a time.
-    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// The measured sequence: status none, result refused with the block untouched, abort and
     /// terminate refused, terminate again refused.
     #[test]
     fn a_dialog_that_never_opens_answers_as_measured() {
-        let _alone = ALONE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::latest::exclusively();
         let none = [0_u64; GUEST_ARG_REGISTERS];
         let block = [0xcc_u8; 0x40];
         let mut with = none;
@@ -322,9 +317,7 @@ mod tests {
     /// opens it.
     #[test]
     fn the_keyboard_is_typed_into_with_the_controller() {
-        let _alone = ALONE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = crate::latest::exclusively();
         // The common dialog initialised, as every title does before opening the keyboard.
         let (_, initialize) = orbistoun_systemservice::common_dialog::implementations()[0];
         let _ = initialize(&[0; GUEST_ARG_REGISTERS]);

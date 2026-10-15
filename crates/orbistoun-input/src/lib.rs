@@ -719,6 +719,7 @@ mod tests {
     /// A batched read writes what a state read writes.
     #[test]
     fn a_batched_read_writes_what_a_state_read_writes() {
+        let _guard = super::latest::exclusively();
         let handle = call("scePadOpen", &args3(1, 0, 0));
         let mut state = [0_u8; super::pad::STATE_BYTES];
         let mut batched = [0_u8; super::pad::STATE_BYTES];
