@@ -193,12 +193,81 @@ pub(crate) fn any_carried_out() -> bool {
     CARRIED_OUT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Reads queued, carried out, the bytes those brought, and reads that arrived short, this run.
+static READS: [std::sync::atomic::AtomicU64; 4] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+/// Indices into [`READS`].
+const QUEUED: usize = 0;
+const CARRIED: usize = 1;
+const BYTES: usize = 2;
+const SHORT: usize = 3;
+
+/// Adds `amount` to the [`READS`] counter at `index`.
+fn count(index: usize, amount: u64) {
+    READS[index].fetch_add(amount, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How a run's asynchronous file reads fared.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadSummary {
+    /// Reads command buffers were given.
+    pub queued: u64,
+    /// Reads a submit carried out.
+    pub carried: u64,
+    /// Bytes those brought.
+    pub bytes: u64,
+    /// Reads that arrived short, ending their buffer's submit.
+    pub short: u64,
+    /// Reads still held by command buffers no submit has carried out.
+    pub left: u64,
+    /// How many command buffers hold them.
+    pub left_buffers: u64,
+}
+
+impl ReadSummary {
+    /// The report's line, where the run queued any read.
+    #[must_use]
+    pub fn describe(&self) -> Option<String> {
+        (self.queued > 0).then(|| {
+            format!(
+                "asynchronous file reads: {} queued, {} carried out ({} bytes), {} arrived short, {} left in {} command buffer(s) never submitted",
+                self.queued, self.carried, self.bytes, self.short, self.left, self.left_buffers
+            )
+        })
+    }
+}
+
+/// How the run's asynchronous file reads have fared so far.
+#[must_use]
+pub fn read_summary() -> ReadSummary {
+    let load = |index: usize| READS[index].load(std::sync::atomic::Ordering::Relaxed);
+    let (left, left_buffers) = queued().lock().map_or((0, 0), |held| {
+        (
+            held.values().map(|reads| reads.len() as u64).sum(),
+            held.values().filter(|reads| !reads.is_empty()).count() as u64,
+        )
+    });
+    ReadSummary {
+        queued: load(QUEUED),
+        carried: load(CARRIED),
+        bytes: load(BYTES),
+        short: load(SHORT),
+        left,
+        left_buffers,
+    }
+}
+
 /// Adds a read to the command buffer at `buffer`; `false`, and nothing added, for an identifier
 /// no resolve gave.
 pub fn queue_read(buffer: u64, read: Read) -> bool {
     let Some(path) = path_of(read.id) else {
         return false;
     };
+    count(QUEUED, 1);
     tracing::debug!(
         "{buffer:#x} queues {:#x} byte(s) from {:#x} of {path} into {:#x}",
         read.length,
@@ -220,7 +289,9 @@ pub(crate) fn carry_out(buffer: u64) -> Option<usize> {
     for read in &reads {
         let path = path_of(read.id)?;
         let got = deliver(&path, read.offset, read.into, read.length)?;
+        count(BYTES, got as u64);
         if (got as u64) < read.length {
+            count(SHORT, 1);
             tracing::warn!(
                 "{path}: {got} of {} bytes from {:#x} arrived",
                 read.length,
@@ -228,6 +299,7 @@ pub(crate) fn carry_out(buffer: u64) -> Option<usize> {
             );
             return None;
         }
+        count(CARRIED, 1);
     }
     Some(reads.len())
 }
@@ -409,6 +481,43 @@ mod tests {
                 ..read
             }
         ));
+    }
+
+    /// A run says how its asynchronous file reads fared: how many were queued, carried out and
+    /// how many bytes they brought, how many arrived short, and how many are still held by command
+    /// buffers never submitted - reads a title waits on that never land.
+    #[test]
+    fn a_run_says_how_its_file_reads_fared() {
+        let summary = super::ReadSummary {
+            queued: 5,
+            carried: 3,
+            bytes: 0x300,
+            short: 1,
+            left: 1,
+            left_buffers: 1,
+        };
+        assert_eq!(
+            summary.describe().as_deref(),
+            Some(concat!(
+                "asynchronous file reads: 5 queued, 3 carried out (768 bytes), 1 arrived short, ",
+                "1 left in 1 command buffer(s) never submitted"
+            ))
+        );
+        assert_eq!(super::ReadSummary::default().describe(), None);
+        // A read queued and never submitted is counted as left.
+        super::remember(0xfa, "/app0/ps5/audio/audio_rel.rpf");
+        let before = super::read_summary();
+        assert!(super::queue_read(
+            0x7400_0020_7000,
+            super::Read {
+                id: 0xfa,
+                into: 0,
+                length: 4,
+                offset: 0,
+            }
+        ));
+        let after = super::read_summary();
+        assert!(after.queued > before.queued && after.left >= 1);
     }
 
     /// Writes one marker word where a stat was asked for, for the test below.

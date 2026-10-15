@@ -1491,6 +1491,10 @@ pub fn render_and_log_last_submission() -> Option<Event> {
     // The pipelines the run's last seconds compiled, kept for the next run (D744).
     on_device(orbistoun_gpu_vulkan::pipeline_cache::flush);
     log_execution();
+    // How the asynchronous file reads fared: a read held by a buffer never submitted never lands.
+    if let Some(line) = orbistoun_kernel::apr::read_summary().describe() {
+        tracing::info!("{line}");
+    }
     let submission = orbistoun_gpu::agc_driver::take_last_submission()?;
     write_submission(&submission, "last");
     if let Some(refused) = orbistoun_gpu::agc_driver::take_refused_submission() {
