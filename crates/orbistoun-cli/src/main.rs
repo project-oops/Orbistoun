@@ -393,6 +393,11 @@ enum Command {
         /// Count from the first run: no uncounted warm-up run of each build first.
         #[arg(long)]
         no_warm_up: bool,
+        /// Also check that this build draws what the baseline does: each run on the logical clock,
+        /// the baseline twice and this build once, their kept frames compared where the baseline's
+        /// two agree.
+        #[arg(long)]
+        check_frames: bool,
     },
     /// Record every title in the library in turn and rank the costs across them, beside the last
     /// benchmark (D831).
@@ -1082,11 +1087,12 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
             top,
             input,
             no_warm_up,
+            check_frames,
         } => perf::cmd_ab(
             &path,
             (baseline.as_deref(), against.as_deref(), &with),
             (seconds, rounds, top),
-            (input.as_deref(), !no_warm_up),
+            (input.as_deref(), !no_warm_up, check_frames),
         )?,
         Command::Turn { .. }
         | Command::Run { .. }

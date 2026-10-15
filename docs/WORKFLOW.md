@@ -169,7 +169,10 @@ A round of making a title faster goes:
    on the host clock varies by a few frames a second between runs of one build, and other work on
    the machine moves it more, so `ab` runs the two builds alternately for several rounds, after an
    uncounted warm-up run of each, since a fresh build's first run fills its caches. Judge by
-   the zone you changed as well as by the frame rate.
+   the zone you changed as well as by the frame rate. `--check-frames` adds whether the change
+   draws what the baseline does: on the logical clock, the baseline twice and the change once,
+   compared at every flip the baseline repeats. A large gain is suspect until it passes - a
+   prototype that ran PPSA02664 six times faster changed how its loop ran.
 
 `perf`, `ab` and `bench` wait up to a minute before each measured run for anything else using the
 GPU - another session's run on the same device slows the title's device time, not its host time,

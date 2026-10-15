@@ -355,7 +355,7 @@ pub(crate) fn cmd_ab(
     path: &Path,
     (baseline, against, with): (Option<&Path>, Option<&str>, &[PathBuf]),
     (seconds, rounds, top): (Option<u64>, usize, usize),
-    (input, warm_up): (Option<&Path>, bool),
+    (input, warm_up, check): (Option<&Path>, bool, bool),
 ) -> Result<()> {
     let built;
     let baseline = match (baseline, against) {
@@ -415,12 +415,19 @@ pub(crate) fn cmd_ab(
             }
         }
     }
+    let frames = if check {
+        println!("checking frames on the logical clock");
+        Some(check_frames(path, (seconds, input), (baseline, candidate))?)
+    } else {
+        None
+    };
     let text = format!(
-        "{} against {}\n{}\n{}",
+        "{} against {}\n{}\n{}{}",
         path.display(),
         baseline.display(),
         beside.concat(),
-        render_ab(&before, &after, top)
+        render_ab(&before, &after, top),
+        frames.map(|line| format!("\n{line}\n")).unwrap_or_default()
     );
     println!("\n{text}");
     // Kept beside the recordings, as a perf report is: a comparison of an hour's runs is worth more
@@ -465,6 +472,135 @@ fn build_revision_with(revision: &str, files: &[PathBuf]) -> Result<PathBuf> {
     )
     .map_err(anyhow::Error::msg)
 }
+
+/// Whether a build draws what the baseline does: each run on the logical clock with its submissions
+/// carried out as they are made, so a run repeats, keeping every [`FRAMES_KEPT_EVERY`]th flip - the
+/// baseline twice, and this build once. A flip the baseline's two runs disagree at drifts on its own
+/// and says nothing; the rest are compared with this build's. A change made for speed changes no
+/// frame (PPSA02664's late flips drift; a prototype that ran it six times faster was told apart from
+/// a broken one only this way).
+fn check_frames(
+    path: &Path,
+    (seconds, input): (u64, Option<&Path>),
+    (baseline, candidate): (&Path, Option<&Path>),
+) -> Result<String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let root = orbistoun_paths::Paths::resolve()
+        .data_root()
+        .join("ab")
+        .join("frames")
+        .join(stamp.to_string());
+    let runs = [
+        ("baseline-1", Some(baseline)),
+        ("baseline-2", Some(baseline)),
+        ("this-build", candidate),
+    ];
+    for (name, exe) in runs {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let every = FRAMES_KEPT_EVERY.to_string();
+        set_env(&[
+            (orbistoun_env::CLOCK.name, Some("logical".as_ref())),
+            (orbistoun_env::SUBMIT.name, None),
+            (orbistoun_env::FRAME_EVERY.name, Some(every.as_ref())),
+            (orbistoun_env::FRAME_DIR.name, Some(dir.as_os_str())),
+        ]);
+        println!("  {name}, {seconds} s");
+        let ran = run_worker(path, seconds, (input, exe), &dir.join("run.log"));
+        set_env(&[
+            (orbistoun_env::FRAME_EVERY.name, None),
+            (orbistoun_env::FRAME_DIR.name, None),
+        ]);
+        for (var, value) in orbistoun_env::AS_PLAYED {
+            set_env(&[(var.name, Some(value.as_ref()))]);
+        }
+        ran?;
+    }
+    let read = |name: &str| -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(root.join(name))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let flip = name.starts_with("flip-")
+                            && Path::new(&name)
+                                .extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("rgba"));
+                        flip.then(|| std::fs::read(entry.path()).ok().map(|bytes| (name, bytes)))
+                            .flatten()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Ok(frames_verdict(
+        &read("baseline-1"),
+        &read("baseline-2"),
+        &read("this-build"),
+        &root,
+    ))
+}
+
+/// What [`check_frames`] found: of the flips the baseline's two runs kept alike, how many this
+/// build kept alike too, and the first it did not.
+fn frames_verdict(
+    first: &std::collections::BTreeMap<String, Vec<u8>>,
+    second: &std::collections::BTreeMap<String, Vec<u8>>,
+    this: &std::collections::BTreeMap<String, Vec<u8>>,
+    root: &Path,
+) -> String {
+    let repeated: Vec<&String> = first
+        .iter()
+        .filter(|(name, bytes)| second.get(*name) == Some(bytes))
+        .map(|(name, _)| name)
+        .collect();
+    let compared: Vec<&String> = repeated
+        .iter()
+        .copied()
+        .filter(|name| this.contains_key(*name))
+        .collect();
+    let differing: Vec<&String> = compared
+        .iter()
+        .copied()
+        .filter(|name| this.get(*name) != first.get(*name))
+        .collect();
+    let verdict = if compared.is_empty() {
+        "nothing to compare".to_owned()
+    } else if differing.is_empty() {
+        format!("this build drew all {} alike", compared.len())
+    } else {
+        format!(
+            "this build drew {} of {} otherwise, first {}",
+            differing.len(),
+            compared.len(),
+            differing[0]
+        )
+    };
+    format!(
+        "frames: the baseline kept {} of {} flips alike across two runs; {verdict} ({})",
+        repeated.len(),
+        first.len(),
+        root.display()
+    )
+}
+
+/// Sets each variable, or removes it where `None`, for the workers spawned after.
+fn set_env(vars: &[(&str, Option<&std::ffi::OsStr>)]) {
+    for &(name, value) in vars {
+        match value {
+            // SAFETY: single-threaded here; the spawned worker inherits the variables at startup.
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            // SAFETY: as above.
+            None => unsafe { std::env::remove_var(name) },
+        }
+    }
+}
+
+/// Every how many flips a frame check keeps one.
+const FRAMES_KEPT_EVERY: u32 = 30;
 
 /// The longest a warm-up run of [`cmd_ab`] lasts: long enough to pass a title's start, where most
 /// of its shaders and pipelines are first made.
@@ -953,6 +1089,32 @@ mod tests {
         assert!(!kept.contains("old main"), "{kept}");
         assert!(!kept.contains("still running"), "{kept}");
         assert!(super::last_samples("nothing sampled").is_empty());
+    }
+
+    /// A frame check compares this build only where the baseline's two runs agree, and names the
+    /// first flip it drew otherwise.
+    #[test]
+    fn frames_are_compared_where_the_baseline_repeats() {
+        let frames = |pairs: &[(&str, u8)]| -> std::collections::BTreeMap<String, Vec<u8>> {
+            pairs
+                .iter()
+                .map(|&(name, byte)| (name.to_owned(), vec![byte; 4]))
+                .collect()
+        };
+        let first = frames(&[("flip-1", 1), ("flip-2", 2), ("flip-3", 3)]);
+        let second = frames(&[("flip-1", 1), ("flip-2", 2), ("flip-3", 9)]);
+        let root = std::path::Path::new("frames");
+        let alike = super::frames_verdict(&first, &second, &first, root);
+        assert!(
+            alike.contains("kept 2 of 3") && alike.contains("drew all 2 alike"),
+            "{alike}"
+        );
+        let other = frames(&[("flip-1", 1), ("flip-2", 7), ("flip-3", 5)]);
+        let differs = super::frames_verdict(&first, &second, &other, root);
+        assert!(
+            differs.contains("drew 1 of 2 otherwise, first flip-2"),
+            "{differs}"
+        );
     }
 
     /// An A/B report gives each build's mean rate, and ranks zones by how far their share of the
