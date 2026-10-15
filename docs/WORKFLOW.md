@@ -161,6 +161,10 @@ A round of making a title faster goes:
    page: keep the storage from one frame to the next rather than making it again.
 4. Where the spans run out, `perf --sample` samples the guest's main thread and the device thread
    (`ORBISTOUN_PROFILE`), naming host functions, and adds each thread's last sample to the report.
+   Read a sampled name as "inside or near": a sample is named by the closest symbol, and a release
+   build inlines a function's callees into it, so their time - and a system call they make - is
+   counted under its name. It also watches the threads that submit and carry out draws, which in a
+   title drawing from a thread of its own are not the thread that started it.
 5. Change one thing and compare it with `ab --against HEAD` - the commit before, built cleanly: a run
    on the host clock varies by a few frames a second between runs of one build, and other work on
    the machine moves it more, so `ab` runs the two builds alternately for several rounds, after an
