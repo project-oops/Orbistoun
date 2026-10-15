@@ -206,6 +206,11 @@ does that: it measures `HEAD` against `HEAD` with only the named files taken fro
 both built from exports. A file that also holds another session's hunks brings them with it - look
 at its diff first, or name it `<place>=<copy>`: the candidate is written to a copy outside the tree
 (`git show HEAD:<place>` and the change) and laid at its place, the working tree never touched.
+A change to what the device shares or orders - queues, pools, render passes, push constants,
+barriers - is not done until `cargo test -p orbistoun-gpu-vulkan` passes with
+`VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` (the SDK's layer directory on `VK_LAYER_PATH`)
+and the run prints no `VUID`: the device often forgives what the layer does not, and a frame check
+cannot see a race that happened not to bite (D888).
 
 ## Recording what a turn produced
 
