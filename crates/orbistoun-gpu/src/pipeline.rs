@@ -5822,8 +5822,19 @@ fn unbound_reason(
         Ok(bound) => bound,
     };
     if !shaped_for(&bound, source) {
+        // What a compare's sampler compares with: a never or an always answers alike whatever the
+        // image holds.
+        let compares = match sampler {
+            NamedSampler::Read(decoded) if source.compare => format!(
+                ", under a sampler that compares {}",
+                DEPTH_COMPARES
+                    .get(usize::from(decoded.depth_compare))
+                    .unwrap_or(&"by an unknown function")
+            ),
+            _ => String::new(),
+        };
         return format!(
-            "it reads as {}, where the module samples {}",
+            "it reads as {}, where the module samples {}{compares}",
             shape_read(&bound),
             shape_sampled(source)
         );
@@ -5838,6 +5849,19 @@ fn unbound_reason(
         _ => "it reads, and neither its shape, its sampler nor its clamp refuses it".to_owned(),
     }
 }
+
+/// `SQ_TEX_DEPTH_COMPARE`'s functions in its order, 0 to 7 (`gfx6.json:627-637`), as a report
+/// names them.
+const DEPTH_COMPARES: [&str; 8] = [
+    "never",
+    "less",
+    "equal",
+    "less or equal",
+    "greater",
+    "not equal",
+    "greater or equal",
+    "always",
+];
 
 /// The shape a texture read binds as, as [`unbound_reason`] names it.
 fn shape_read(bound: &RenderCommand) -> &'static str {
@@ -10342,7 +10366,41 @@ mod tests {
             saturated: [false; 2],
         };
         let cube = TextureSource { cube: true, ..flat };
+        let compared = TextureSource {
+            compare: true,
+            ..flat
+        };
         let mut cache = super::TexelCache::new();
+        // A compare of a colour image says what its sampler compares with: a never or an always
+        // answers alike whatever the image holds.
+        let never = crate::registers::TextureSampling::CLAMPED_POINT;
+        let always = crate::registers::TextureSampling {
+            depth_compare: 7,
+            ..never
+        };
+        assert_eq!(
+            unbound_reason(
+                Some(descriptor),
+                &compared,
+                NamedSampler::Read(never),
+                &memory,
+                &mut cache
+            ),
+            concat!(
+                "it reads as a flat image, where the module samples a compared depth texture, ",
+                "under a sampler that compares never"
+            )
+        );
+        assert!(
+            unbound_reason(
+                Some(descriptor),
+                &compared,
+                NamedSampler::Read(always),
+                &memory,
+                &mut cache
+            )
+            .ends_with("compares always")
+        );
         assert_eq!(
             unbound_reason(
                 Some(descriptor),
