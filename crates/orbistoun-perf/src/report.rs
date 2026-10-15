@@ -66,6 +66,10 @@ pub struct Report {
     /// [`Self::note_device_waits`] was given; `None` until it is.
     #[serde(default)]
     pub device_waits: Option<f64>,
+    /// How many times each cache [`Self::note_emptied`] was given emptied itself whole, those that
+    /// did; empty until it is given them.
+    #[serde(default)]
+    pub emptied: Vec<(String, u64)>,
 }
 
 /// The plot each guest flip adds its frame time to (D829).
@@ -105,6 +109,7 @@ impl Report {
                 ),
             },
             device_waits: None,
+            emptied: Vec::new(),
         })
     }
 
@@ -133,6 +138,21 @@ impl Report {
                     "shows up in another while the device's own work is the bound"
                 ),
                 share
+            );
+        }
+        if !self.emptied.is_empty() {
+            let caches: Vec<String> = self
+                .emptied
+                .iter()
+                .map(|(name, times)| format!("{name} {times}x"))
+                .collect();
+            let _ = writeln!(
+                out,
+                concat!(
+                    "caches emptied whole: {} - about once a frame or more is a working set ",
+                    "larger than the cache, every entry worked out again"
+                ),
+                caches.join(", ")
             );
         }
         for (title, zones) in [
@@ -180,6 +200,18 @@ impl Report {
             .map(|zone| zone.total_ns)
             .sum();
         self.device_waits = (whole > 0).then(|| as_f64(waited) * 100.0 / as_f64(whole));
+    }
+
+    /// Notes how many times each of the zones named `caches` - each a cache let go whole because
+    /// it was full - occurred, those that did.
+    pub fn note_emptied(&mut self, caches: &[&str]) {
+        self.emptied = caches
+            .iter()
+            .filter_map(|&cache| {
+                let zone = self.by_self.iter().find(|zone| zone.name == cache)?;
+                (zone.count > 0).then(|| (cache.to_owned(), zone.count))
+            })
+            .collect();
     }
 
     /// Takes `done`'s whole time out of `waiting`'s own: `waiting` is a thread waiting on `done`,
@@ -265,6 +297,7 @@ mod tests {
             by_total: vec![zone("on device", 800), zone("hand-off", 900)],
             frames: FrameTimes::default(),
             device_waits: None,
+            emptied: Vec::new(),
         };
         report.waits_on("hand-off", "on device");
         let names: Vec<(&str, u64)> = report
@@ -296,6 +329,7 @@ mod tests {
             by_total: Vec::new(),
             frames: FrameTimes::default(),
             device_waits: None,
+            emptied: Vec::new(),
         };
         assert!(!report.render(5).contains("waiting on the device"));
         report.note_device_waits(&["draw room", "setup: settle", "never recorded"]);
@@ -304,6 +338,31 @@ mod tests {
             report
                 .render(5)
                 .contains("waiting on the device: 50.0% of the run")
+        );
+    }
+
+    /// The caches named are counted where they emptied, and the report says how often; one that
+    /// never did is left out, and with none the line is not written.
+    #[test]
+    fn emptied_caches_are_counted() {
+        let zone = |name: &str, count| ZoneStat {
+            name: name.to_owned(),
+            total_ns: 10,
+            count,
+            max_ns: 10,
+        };
+        let mut report = Report {
+            by_self: sorted(vec![zone("emptied: textures", 12), zone("draws", 500)]),
+            ..Report::default()
+        };
+        report.note_emptied(&["emptied: buffers"]);
+        assert!(!report.render(5).contains("caches emptied"));
+        report.note_emptied(&["emptied: textures", "emptied: buffers"]);
+        assert_eq!(report.emptied, [("emptied: textures".to_owned(), 12)]);
+        assert!(
+            report
+                .render(5)
+                .contains("caches emptied whole: emptied: textures 12x")
         );
     }
 

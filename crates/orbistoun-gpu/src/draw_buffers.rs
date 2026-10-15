@@ -490,7 +490,7 @@ fn interned(computed: &Computed) -> std::sync::Arc<Computed> {
         return std::sync::Arc::new(computed.clone());
     };
     if interned.len() >= PREFIXES_KEPT && !interned.contains_key(&key) {
-        interned.clear();
+        span(Span::BuffersEmptied, || interned.clear());
     }
     let kept = interned.entry(key).or_default();
     if let Some(found) = kept.iter().find(|kept| ***kept == *computed) {
@@ -598,7 +598,7 @@ fn decoded_prefix(
     let decode = std::sync::Arc::new(decode);
     if let Ok(mut prefixes) = prefixes.lock() {
         if prefixes.len() >= PREFIXES_KEPT {
-            prefixes.clear();
+            span(Span::BuffersEmptied, || prefixes.clear());
         }
         prefixes.insert(prefix.to_vec(), std::sync::Arc::clone(&decode));
     }
@@ -725,7 +725,7 @@ fn global_range(
         .map(|found| span_of(global, found));
     if let Ok(mut runs) = runs.lock() {
         if runs.len() >= RUNS_KEPT {
-            runs.clear();
+            span(Span::BuffersEmptied, || runs.clear());
         }
         runs.insert(key, (reads, answer.clone()));
     }

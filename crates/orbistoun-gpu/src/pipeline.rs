@@ -3684,7 +3684,9 @@ impl Pipeline {
         }
         let twins = self.work_out_flat_twins(candidates);
         if self.flat_twins_kept.len() >= FLAT_TWINS_KEPT {
-            self.flat_twins_kept.clear();
+            crate::perf::span(crate::perf::Span::TwinsEmptied, || {
+                self.flat_twins_kept.clear();
+            });
         }
         self.flat_twins_kept.insert(pair, twins);
         twins
@@ -6344,7 +6346,7 @@ fn texel_texture(
         _ => row_words(rows, count),
     };
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        texels.clear();
+        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
     }
     texels.insert(
         key,
@@ -6445,7 +6447,7 @@ fn tiled_volume_texture(
         let hash = crate::content_hash(&read) ^ u64::from(encoding_tag(encoding));
         let shared: std::sync::Arc<[u32]> = read.into();
         if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-            texels.clear();
+            crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
         }
         texels.insert(
             key,
@@ -6720,7 +6722,7 @@ fn swizzled_texture(bound: RenderCommand, format: TexelFormat, selects: [u32; 4]
             let swizzled = swizzle_texels(&texels, format, selects);
             if let Ok(mut kept) = swizzled_kept().lock() {
                 if kept.len() >= TEXEL_CACHE_ENTRIES {
-                    kept.clear();
+                    crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
                 }
                 kept.insert(key, std::sync::Arc::clone(&swizzled));
             }
@@ -6993,7 +6995,7 @@ fn kept_chain(
             texels.extend(surface.detile_mapped(&words, |w| w));
         }
         if kept.len() >= LEVELS_KEPT && !kept.contains_key(&key) {
-            kept.clear();
+            crate::perf::span(crate::perf::Span::TexturesEmptied, || kept.clear());
         }
         let hash = crate::content_hash(&texels);
         kept.insert(
@@ -7122,7 +7124,7 @@ fn read_tiled_base(
         (hash, shared)
     };
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        texels.clear();
+        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
     }
     texels.insert(
         key,
@@ -7252,7 +7254,7 @@ fn read_block_texture(
     let hash = crate::content_hash(&blocks);
     let shared: std::sync::Arc<[u32]> = blocks.into();
     if texels.len() >= TEXEL_CACHE_ENTRIES && !texels.contains_key(&key) {
-        texels.clear();
+        crate::perf::span(crate::perf::Span::TexturesEmptied, || texels.clear());
     }
     texels.insert(
         key,

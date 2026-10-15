@@ -108,6 +108,7 @@ fn record(
     report.note_device_waits(
         &orbistoun_gpu::perf::DEVICE_WAITS.map(orbistoun_gpu::perf::Span::label),
     );
+    report.note_emptied(&orbistoun_gpu::perf::EMPTIED.map(orbistoun_gpu::perf::Span::label));
     Ok(Recorded {
         trace,
         summary,

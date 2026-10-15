@@ -153,6 +153,10 @@ A round of making a title faster goes:
    guest thread waiting on the device thread - keeps only the hand-off as its own time; the work
    is ranked under the device thread's zones. A new such pair goes in `WAITS_ON` beside the span
    table in `crates/orbistoun-gpu/src/perf.rs`.
+   A "caches emptied whole" line names caches that filled and were let go: about once a frame is
+   a working set larger than the cache, and every entry it kept is worked out again - let the
+   oldest go instead, or keep more. A cache that empties itself whole when full gets an
+   `emptied:` span and its place in `EMPTIED` beside the span table.
 3. Where that zone has nothing finer, add a span inside it - one line in the span table of
    `crates/orbistoun-gpu/src/perf.rs` and a `perf::span` around the work - and record again,
    rather than timing it by hand. A span kept is the next round's answer.

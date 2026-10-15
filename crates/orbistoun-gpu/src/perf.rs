@@ -118,6 +118,9 @@ macro_rules! span_labels {
             Span::WriteBackGuest => $as!("write back: guest"),
             Span::SettlePending => $as!("settle pending frame"),
             Span::ShadersUpFront => $as!("shaders: up front"),
+            Span::TexturesEmptied => $as!("emptied: texture caches"),
+            Span::BuffersEmptied => $as!("emptied: buffer caches"),
+            Span::TwinsEmptied => $as!("emptied: flat twins"),
         }
     };
 }
@@ -519,11 +522,20 @@ pub enum Span {
     /// Within [`Self::PrepareShaders`]: the reconciled shaders prepared and bound before any draw;
     /// the rest of it is each draw's own.
     ShadersUpFront,
+    /// A kept-texels, swizzle or levels cache full, and let go whole to keep a new entry. Counted:
+    /// a few a run is a title touching more than the cache holds once; one every frame or so is a
+    /// working set larger than the cache, every entry read afresh each time it comes back.
+    TexturesEmptied,
+    /// As [`Self::TexturesEmptied`], for the draw-buffer caches: a descriptor's runs, a program's
+    /// prefix, or the programs interned for computed descriptors (D753).
+    BuffersEmptied,
+    /// As [`Self::TexturesEmptied`], for the flat-twin answers a pipeline keeps.
+    TwinsEmptied,
 }
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 84] = [
+    pub const ALL: [Self; 87] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -608,6 +620,9 @@ impl Span {
         Self::WriteBackGuest,
         Self::SettlePending,
         Self::ShadersUpFront,
+        Self::TexturesEmptied,
+        Self::BuffersEmptied,
+        Self::TwinsEmptied,
     ];
 
     /// What to call it in the report.
@@ -640,6 +655,16 @@ pub const DEVICE_WAITS: [Span; 3] = [
     Span::DrawRoom,
     Span::CarryOutSettle,
     Span::DeviceSetupSettle,
+];
+
+/// Spans that are a cache let go whole because it was full, which a report counts: a cache
+/// emptied about once a frame holds less than the title comes back to, and every entry it kept is
+/// worked out again (PPSA04263's computed descriptors, emptied five times a second, missed 70% of
+/// questions that repeat 92% of the time).
+pub const EMPTIED: [Span; 3] = [
+    Span::TexturesEmptied,
+    Span::BuffersEmptied,
+    Span::TwinsEmptied,
 ];
 
 const SPANS: usize = Span::ALL.len();
