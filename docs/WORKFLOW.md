@@ -186,7 +186,10 @@ A round of making a title faster goes:
    the zone you changed as well as by the frame rate. `--check-frames` adds whether the change
    draws what the baseline does: on the logical clock, the baseline twice and the change once,
    compared at every flip the baseline repeats. A large gain is suspect until it passes - a
-   prototype that ran PPSA02664 six times faster changed how its loop ran.
+   prototype that ran PPSA02664 six times faster changed how its loop ran. A baseline that repeats
+   few of its own flips does not draw the same twice (PPSA03416 repeats about two thirds, and a
+   build of the baseline itself drew 11 of 53 otherwise): the check says so, and a change is judged
+   there against such a build, `--with <file>=<a copy of it as committed>`.
 
 `perf`, `ab` and `bench` wait up to a minute before each measured run for anything else using the
 GPU - another session's run on the same device slows the title's device time, not its host time,

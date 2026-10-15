@@ -623,13 +623,28 @@ fn frames_verdict(
             differing[0]
         )
     };
+    // A baseline that does not repeat itself draws differently from run to run on the logical
+    // clock, and so does any build of it: a few flips drawn otherwise are no evidence there.
+    let unsteady = !differing.is_empty() && repeated.len() * 10 < first.len() * REPEATS_ENOUGH;
     format!(
-        "frames: the baseline kept {} of {} flips alike across two runs; {verdict} ({})",
+        "frames: the baseline kept {} of {} flips alike across two runs; {verdict}{} ({})",
         repeated.len(),
         first.len(),
+        if unsteady {
+            concat!(
+                " - but the baseline does not repeat itself, so judge it against a build of the ",
+                "baseline checked the same way"
+            )
+        } else {
+            ""
+        },
         root.display()
     )
 }
+
+/// Tenths of its flips a baseline repeats across its two runs for a frame check to judge a build by
+/// it: PPSA03416 repeated 53 of 78, and a build of the baseline itself drew 11 of those otherwise.
+const REPEATS_ENOUGH: usize = 9;
 
 /// Sets each variable, or removes it where `None`, for the workers spawned after.
 fn set_env(vars: &[(&str, Option<&std::ffi::OsStr>)]) {
@@ -1221,6 +1236,26 @@ mod tests {
         assert!(
             differs.contains("drew 1 of 2 otherwise, first flip-2"),
             "{differs}"
+        );
+        assert!(differs.contains("does not repeat itself"), "{differs}");
+        let steady = frames(&[
+            ("flip-1", 1),
+            ("flip-2", 2),
+            ("flip-3", 3),
+            ("flip-4", 4),
+            ("flip-5", 5),
+            ("flip-6", 6),
+            ("flip-7", 7),
+            ("flip-8", 8),
+            ("flip-9", 9),
+            ("flip-a", 10),
+        ]);
+        let mut changed = steady.clone();
+        changed.insert("flip-1".to_owned(), vec![0; 4]);
+        let real = super::frames_verdict(&steady, &steady, &changed, root);
+        assert!(
+            real.contains("drew 1 of 10 otherwise") && !real.contains("does not repeat"),
+            "{real}"
         );
     }
 
