@@ -146,13 +146,19 @@ const UNMAPPED: &str = concat!(
 /// module never reads a word the range does not start - and hashed. Only to the word the held bytes
 /// end in, so a range cut at its mapping (D795) is not filled out with zeros the guest never wrote.
 fn padded_buffer(address: u64, bytes: &[u8]) -> DrawBuffer {
-    let mut padded = bytes.to_vec();
-    padded.resize(bytes.len().div_ceil(4) * 4, 0);
+    // Laid down in the shared slice itself, allocated once whole: made as a vector and then
+    // shared, a range was two fresh allocations and a copy between them, and an allocation of
+    // megabytes comes from the system a page at a time (MCUB00001, its ring re-read every frame).
+    let mut padded: std::sync::Arc<[u8]> =
+        std::iter::repeat_n(0_u8, bytes.len().div_ceil(4) * 4).collect();
+    if let Some(into) = std::sync::Arc::get_mut(&mut padded) {
+        into[..bytes.len()].copy_from_slice(bytes);
+    }
     let mut hasher = crate::ContentHasher::new(padded.len() / 4);
     hasher.bytes(&padded);
     DrawBuffer {
         hash: hasher.finish(),
-        bytes: padded.into(),
+        bytes: padded,
         base: address,
     }
 }
