@@ -22,6 +22,7 @@ pub(crate) fn report_progress(
             after.distinct, progress.fault
         );
         print_standing(after);
+        print_leaned_on(after);
         print_quiet(after);
         print_threads(after);
         print_waits(after);
@@ -56,6 +57,7 @@ pub(crate) fn report_progress(
         );
     }
     print_standing(after);
+    print_leaned_on(after);
     print_quiet(after);
     print_threads(after);
     print_waits(after);
@@ -315,6 +317,49 @@ fn print_standing(trace: &orbistoun_report::trace::CallTrace) {
             ),
             trace.conditions.default_return
         );
+    }
+}
+
+/// The implemented calls in `calls` whose answer `partial` says is assumed or partly modelled, by
+/// label, with their call counts and why, most-called first.
+fn leaned_on(
+    calls: &[orbistoun_report::trace::CalledImport],
+    partial: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, u64, String)> {
+    let mut leaned: Vec<(String, u64, String)> = calls
+        .iter()
+        .filter(|row| row.implemented)
+        .filter_map(|row| {
+            let name = row.label.rsplit("::").next().unwrap_or(&row.label);
+            partial(name).map(|why| (row.label.clone(), row.calls, why))
+        })
+        .collect();
+    leaned.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    leaned
+}
+
+/// The most partial answers [`print_leaned_on`] lists.
+const LEANED_ON_SHOWN: usize = 8;
+
+/// Names the implemented answers this run leaned on most that its knowledge records as assumed or
+/// partly modelled: the standing line counts them as answered, and a title whose picture is wrong
+/// is often reading one of them.
+fn print_leaned_on(trace: &orbistoun_report::trace::CallTrace) {
+    let knowledge = orbistoun_hle::knowledge::Knowledge::builtin();
+    let leaned = leaned_on(&trace.calls, |name| {
+        knowledge
+            .get(name)
+            .and_then(orbistoun_hle::knowledge::FunctionKnowledge::partial)
+    });
+    if leaned.is_empty() {
+        return;
+    }
+    println!(
+        "  leans on {} answer(s) recorded as assumed or partly modelled, most-called first:",
+        leaned.len()
+    );
+    for (label, calls, why) in leaned.iter().take(LEANED_ON_SHOWN) {
+        println!("           {calls:>9} calls  {label} - {why}");
     }
 }
 
@@ -674,6 +719,45 @@ fn print_wall(trace: &orbistoun_report::trace::CallTrace) {
 
 #[cfg(test)]
 mod tests {
+    /// The implemented calls a run leans on whose answer is assumed or partly modelled are named,
+    /// most-called first: GTA V called an interpolant builder 45584 times whose remap by the
+    /// shaders' semantics is "not modelled", and the standing line counted it as answered.
+    #[test]
+    fn a_run_names_the_partial_answers_it_leans_on() {
+        let row =
+            |label: &str, calls: u64, implemented: bool| orbistoun_report::trace::CalledImport {
+                index: 0,
+                label: label.to_owned(),
+                calls,
+                implemented,
+                shape: String::new(),
+            };
+        let calls = vec![
+            row("libSceAgc::0x71040c4df8235e1d", 45_584, true),
+            row("libc::memcpy", 3_000_000, true),
+            row("libSceX::sceAssumed", 12, true),
+            row("libSceX::sceStub", 99, false),
+        ];
+        let partial = |name: &str| match name {
+            "0x71040c4df8235e1d" => {
+                Some("not modelled: a remap by the shaders' interpolants".to_owned())
+            }
+            "sceAssumed" | "sceStub" => Some("assumed".to_owned()),
+            _ => None,
+        };
+        assert_eq!(
+            super::leaned_on(&calls, partial),
+            vec![
+                (
+                    "libSceAgc::0x71040c4df8235e1d".to_owned(),
+                    45_584,
+                    "not modelled: a remap by the shaders' interpolants".to_owned()
+                ),
+                ("libSceX::sceAssumed".to_owned(), 12, "assumed".to_owned()),
+            ]
+        );
+    }
+
     /// The lines a guest marked as errors itself are listed apart, each once with how often it was
     /// said, in the order first said: a guest's own error buried mid-log is not lost to the tail.
     #[test]

@@ -420,7 +420,31 @@ pub struct FunctionKnowledge {
     pub note: String,
 }
 
+/// The phrase an edge case uses to say part of a behaviour is left out.
+const NOT_MODELLED: &str = "not modelled";
+
 impl FunctionKnowledge {
+    /// Why this entry's answer is not the whole of what the console does, where it says so: `assumed`
+    /// for a behaviour recorded as assumed, or the edge case that names something as not modelled -
+    /// a measured answer can still leave part of the behaviour out, as the interpolant builders'
+    /// remap by the shaders' semantics is. `None` for an entry that admits neither.
+    #[must_use]
+    pub fn partial(&self) -> Option<String> {
+        if self.known_by == Some(Oracle::Assumed) {
+            return Some("assumed".to_owned());
+        }
+        let edge = self
+            .edge_cases
+            .iter()
+            .find(|edge| edge.contains(NOT_MODELLED))?;
+        // The clause that says it, not the whole edge case: the sentence holding the phrase.
+        let clause = edge
+            .split(['.', ';'])
+            .find(|clause| clause.contains(NOT_MODELLED))
+            .unwrap_or(edge);
+        Some(clause.trim().to_owned())
+    }
+
     /// Whether anything beyond the name is known; the count of bare entries is the size of the job.
     pub fn is_bare(&self) -> bool {
         self.arity.is_none()
@@ -1399,6 +1423,42 @@ mod tests {
         assert!(k.provenance_faults().is_empty(), "the entry is well formed");
         assert_eq!(k.open_questions(), 1, "and still admits one open question");
         assert_eq!(k.resting_on(Oracle::Published), 1);
+    }
+
+    /// An entry says why its answer is partial - assumed, or the clause naming what is not
+    /// modelled - and the shipped interpolant builder GTA V calls says so.
+    #[test]
+    fn an_entry_says_why_its_answer_is_partial() {
+        let assumed = super::FunctionKnowledge {
+            known_by: Some(Oracle::Assumed),
+            ..super::FunctionKnowledge::default()
+        };
+        assert_eq!(assumed.partial().as_deref(), Some("assumed"));
+        let measured = super::FunctionKnowledge {
+            known_by: Some(Oracle::Measured),
+            edge_cases: vec![
+                "MEASURED: rc 0. The table is written; a remap is not modelled.".to_owned(),
+            ],
+            ..super::FunctionKnowledge::default()
+        };
+        assert_eq!(
+            measured.partial().as_deref(),
+            Some("a remap is not modelled")
+        );
+        let whole = super::FunctionKnowledge {
+            known_by: Some(Oracle::Measured),
+            ..super::FunctionKnowledge::default()
+        };
+        assert_eq!(whole.partial(), None);
+        let shipped = Knowledge::builtin();
+        let builder = shipped
+            .get("0x71040c4df8235e1d")
+            .expect("GTA V's interpolant builder");
+        assert!(
+            builder.partial().is_some_and(|why| why.contains("remap")),
+            "{:?}",
+            builder.partial()
+        );
     }
 
     /// The shipped files account for everything they claim.
