@@ -302,6 +302,20 @@ pub const COMMIT: Var = Var {
     read_by: "orbistoun-service",
 };
 
+/// Let a guest socket bound to "any address" be reached from the network (D887).
+///
+/// Unset, the host binds such a socket to loopback: reachable from this machine, invisible to the
+/// network, and never a reason for the host firewall to ask about a new binary. A guest that names
+/// a specific address is bound to it either way.
+pub const GUEST_LAN: Var = Var {
+    name: "ORBISTOUN_GUEST_LAN",
+    kind: Kind::Setting,
+    summary: "1 binds a guest's any-address sockets on every host interface; unset, they bind loopback only",
+    example: "1",
+    effect: Effect::Observes,
+    read_by: "orbistoun-fs",
+};
+
 /// Credential for a hosted language-model provider.
 pub const LLM_API_KEY: Var = Var {
     name: "ORBISTOUN_LLM_API_KEY",
@@ -784,6 +798,7 @@ pub const REGISTRY: &[Var] = &[
     FRAME_DIR,
     LIMIT,
     COMMIT,
+    GUEST_LAN,
     LLM_API_KEY,
     DUMP,
     DLSYM_STUBS,
@@ -875,6 +890,7 @@ mod tests {
         super::FRAME_DIR,
         super::LIMIT,
         super::COMMIT,
+        super::GUEST_LAN,
         super::LLM_API_KEY,
         super::DUMP,
         super::DLSYM_STUBS,

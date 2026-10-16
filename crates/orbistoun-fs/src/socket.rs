@@ -188,6 +188,29 @@ pub(crate) fn bind_udp(wanted: SocketAddr, nonblocking: bool) -> Result<std::net
     Ok(sock.into())
 }
 
+/// Where the host binds for an address a guest named (D887).
+///
+/// A guest's "any address" becomes the host's loopback in the same family and port, unless
+/// `expose` says the guest may be reached from the network. A specific address is the guest's
+/// choice and is bound as named.
+pub(crate) fn host_address(wanted: SocketAddr, expose: bool) -> SocketAddr {
+    if expose || !wanted.ip().is_unspecified() {
+        return wanted;
+    }
+    let loopback = if wanted.is_ipv6() {
+        Ipv6Addr::LOCALHOST.into()
+    } else {
+        Ipv4Addr::LOCALHOST.into()
+    };
+    SocketAddr::new(loopback, wanted.port())
+}
+
+/// Whether guest sockets bound to "any address" are reachable from the network (D887).
+fn lan_exposed() -> bool {
+    static EXPOSED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *EXPOSED.get_or_init(|| orbistoun_env::GUEST_LAN.is_set())
+}
+
 /// Reads a `sockaddr_in` a guest passed.
 ///
 /// Answers [`None`] for anything that is not an internet address of the right length: a
@@ -356,7 +379,7 @@ pub fn bind(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
             nonblocking,
         } => {
             if *kind == sock_dgram() {
-                let udp = bind_udp(wanted, *nonblocking)?;
+                let udp = bind_udp(host_address(wanted, lan_exposed()), *nonblocking)?;
                 if let Ok(addr) = udp.local_addr() {
                     tracing::info!("guest listening on {addr}");
                     let line = format!("orbistoun: guest listening on {addr}");
@@ -397,7 +420,7 @@ pub fn listen(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
     let Some((wanted, nonblocking)) = wanted else {
         return Err(UNNAMED);
     };
-    let Ok(listener) = TcpListener::bind(wanted) else {
+    let Ok(listener) = TcpListener::bind(host_address(wanted, lan_exposed())) else {
         return Err(UNNAMED);
     };
     // The flag the guest set before there was a host socket, applied now.
@@ -506,12 +529,14 @@ pub fn connect(args: &[u64; GUEST_ARG_REGISTERS]) -> Answer {
         return Err(UNNAMED);
     };
     if kind == sock_dgram() {
-        let bind_addr = if wanted.is_ipv6() {
+        let any = if wanted.is_ipv6() {
             SocketAddr::from(([0u16; 8], 0))
         } else {
             SocketAddr::from(([0u8; 4], 0))
         };
-        let udp = bind_udp(bind_addr, nonblocking)?;
+        // A datagram to this host leaves from loopback; one to anywhere else needs an address
+        // that routes there (D887).
+        let udp = bind_udp(host_address(any, !wanted.ip().is_loopback()), nonblocking)?;
         if udp.connect(wanted).is_err() {
             return Err(UNNAMED);
         }
@@ -1221,6 +1246,21 @@ mod tests {
     #[test]
     fn an_unnameable_constant_matches_nothing() {
         assert_eq!(super::number("AF_NOSUCHTHING"), u64::MAX);
+    }
+
+    /// A guest's "any address" binds the host's loopback, keeping family and port (D887).
+    #[test]
+    fn any_address_binds_loopback_unless_exposed() {
+        use std::net::SocketAddr;
+        let host = |s: &str, expose| super::host_address(s.parse::<SocketAddr>().unwrap(), expose);
+        assert_eq!(host("0.0.0.0:9021", false), "127.0.0.1:9021".parse().unwrap());
+        assert_eq!(host("[::]:0", false), "[::1]:0".parse().unwrap());
+        assert_eq!(host("0.0.0.0:9021", true), "0.0.0.0:9021".parse().unwrap());
+        assert_eq!(
+            host("192.168.1.5:9021", false),
+            "192.168.1.5:9021".parse().unwrap(),
+            "a named address is the guest's choice"
+        );
     }
 
     use orbistoun_core::GUEST_ARG_REGISTERS;
