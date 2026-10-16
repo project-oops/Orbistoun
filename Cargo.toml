@@ -207,7 +207,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 # Listing raw `syscall` sites in a module's executable segments at link (D724). Decoder only:
 # nothing here encodes or formats instructions.
-iced-x86 = { version = "1", default-features = false, features = ["std", "decoder"] }
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "intel"] }
 # Used only by `orbistoun-gen`, to parse reference-assembler output: ten small patterns,
 # none needing anything the crate lacks. Hand-rolling them would be more code in more places
 # for a job a dependency does exactly.

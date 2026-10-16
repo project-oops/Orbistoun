@@ -32,6 +32,31 @@ pub(crate) fn cmd_symbols(service: &Service, filter: Option<&str>) {
 }
 
 /// `inspect` - a container's structure, without executing or fully parsing it.
+/// An image offset as a report spells it, `image+0x2b42a40`, or bare, `0x2b42a40`.
+fn image_offset(spelled: &str) -> Option<u64> {
+    let digits = spelled.trim().trim_start_matches("image+");
+    u64::from_str_radix(digits.trim_start_matches("0x"), 16).ok()
+}
+
+/// `disasm` - a module's instructions from an image offset, one a line.
+pub(crate) fn cmd_disasm(
+    service: &Service,
+    path: &std::path::Path,
+    from: &str,
+    len: usize,
+) -> Result<()> {
+    let offset = image_offset(from)
+        .with_context(|| format!("{from} is not an image offset such as image+0x2b42a40"))?;
+    let listed = service.disassemble_path(path, offset, len)?;
+    if listed.is_empty() {
+        println!("image+{offset:#x} lies in no executable segment");
+    }
+    for (at, text) in listed {
+        println!("image+{at:#x}  {text}");
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_inspect(service: &Service, path: &std::path::Path) -> Result<()> {
     let info = service.inspect_path(path)?;
     let wrapper = match info.wrapper {

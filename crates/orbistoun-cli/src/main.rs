@@ -39,8 +39,8 @@ use crate::corpus::{cmd_corpus_list, cmd_corpus_run, cmd_corpus_sync};
 use crate::lanes::cmd_lanes;
 use crate::learn::{cmd_knows, cmd_learn};
 use crate::module::{
-    cmd_exports, cmd_imports, cmd_inspect, cmd_load, cmd_module_tables, cmd_report, cmd_symbols,
-    cmd_title_modules, cmd_verify,
+    cmd_disasm, cmd_exports, cmd_imports, cmd_inspect, cmd_load, cmd_module_tables, cmd_report,
+    cmd_symbols, cmd_title_modules, cmd_verify,
 };
 use crate::names::{NameSearch, cmd_names};
 use crate::probe::{cmd_ask, cmd_probe, cmd_session};
@@ -116,6 +116,16 @@ enum Command {
         /// Only show entries whose library or symbol name contains this.
         #[arg(long)]
         filter: Option<String>,
+    },
+    /// List a module's instructions from an image offset - the `image+0x...` a report names.
+    Disasm {
+        /// Path to a guest executable or module.
+        path: std::path::PathBuf,
+        /// Where to start: an image offset, as `image+0x2b42a40` or `0x2b42a40`.
+        from: String,
+        /// How many bytes of code to list.
+        #[arg(long, default_value_t = 256)]
+        len: usize,
     },
     /// Print a default stub-policy file.
     Policy,
@@ -1047,7 +1057,8 @@ fn dispatch(cli: Cli, service: &Service) -> Result<()> {
         | Command::Lanes
         | Command::Verify { .. }
         | Command::Report { .. }
-        | Command::Load { .. } => dispatch_module(cli.command, service)?,
+        | Command::Load { .. }
+        | Command::Disasm { .. } => dispatch_module(cli.command, service)?,
         Command::Ask { .. } | Command::Session { .. } => dispatch_probe(cli.command)?,
         Command::Probe {
             path,
@@ -1134,6 +1145,7 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::Symbols { filter } => cmd_symbols(service, filter.as_deref()),
         Command::Policy => println!("{}", service.default_policy_toml()?),
         Command::Inspect { path } => cmd_inspect(service, &path)?,
+        Command::Disasm { path, from, len } => cmd_disasm(service, &path, &from, len)?,
         Command::Nid { names } => {
             for name in &names {
                 println!("{:#018x}  {name}", service.hash_name(name).as_raw());

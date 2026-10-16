@@ -1101,6 +1101,28 @@ impl Service {
         })
     }
 
+    /// The instructions of the module at `path` from image offset `from`, at most `len` bytes of
+    /// them, each at its image offset in Intel syntax: the code a report's `image+0x...` names.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or its container parsed.
+    pub fn disassemble_path(
+        &self,
+        path: &Path,
+        from: u64,
+        len: usize,
+    ) -> Result<Vec<(u64, String)>, ServiceError> {
+        let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let labels = orbistoun_loader::inventory::slot_labels(&bytes, &self.registry)?;
+        Ok(orbistoun_loader::inventory::disassemble(
+            &bytes, from, len, &labels,
+        )?)
+    }
+
     /// Reports a container's structure, from disk.
     pub fn inspect_path(&self, path: &Path) -> Result<ContainerInfo, ServiceError> {
         let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
