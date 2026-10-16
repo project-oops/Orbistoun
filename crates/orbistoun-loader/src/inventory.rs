@@ -37,6 +37,9 @@ pub struct Inventory {
     pub syscalls: Vec<u64>,
     /// Every AMD-only instruction, with its mnemonic.
     pub amd_only: Vec<(u64, String)>,
+    /// Every `rdtsc` and `rdtscp`: a read of the host's own time-stamp counter, which runs at the
+    /// host's rate, not the one `sceKernelGetTscFrequency` tells the guest.
+    pub counter_reads: Vec<u64>,
 }
 
 /// Every `syscall` and AMD-only instruction in the executable segments of `whole`, placed at
@@ -63,6 +66,7 @@ pub fn inventory(whole: &[u8], base: u64) -> Result<Inventory, LoadError> {
     }
     found.syscalls.sort_unstable();
     found.amd_only.sort_unstable();
+    found.counter_reads.sort_unstable();
     Ok(found)
 }
 
@@ -83,6 +87,8 @@ fn sweep(code: &[u8], at: u64, found: &mut Inventory) {
         let mnemonic = instruction.mnemonic();
         if mnemonic == Mnemonic::Syscall {
             found.syscalls.push(instruction.ip());
+        } else if matches!(mnemonic, Mnemonic::Rdtsc | Mnemonic::Rdtscp) {
+            found.counter_reads.push(instruction.ip());
         } else if AMD_ONLY.contains(&mnemonic) {
             found
                 .amd_only
@@ -144,6 +150,21 @@ mod tests {
         );
         assert_eq!(found.amd_only[0].0, 0x1000);
         assert!(found.syscalls.is_empty());
+    }
+
+    /// `rdtsc` and `rdtscp` are found where they start: each reads the host's own counter, which
+    /// runs at the host's rate rather than the one the guest is told.
+    #[test]
+    fn each_counter_read_is_found() {
+        let code = [
+            0x0f, 0x31, // rdtsc
+            0x48, 0xb8, 0x0f, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, imm64
+            0x0f, 0x01, 0xf9, // rdtscp
+            0xc3, // ret
+        ];
+        let mut found = super::Inventory::default();
+        super::sweep(&code, 0x1000, &mut found);
+        assert_eq!(found.counter_reads, [0x1000, 0x100c]);
     }
 
     /// Code with no `syscall` lists none.

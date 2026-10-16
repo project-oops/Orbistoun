@@ -493,6 +493,10 @@ pub struct LinkSummary {
     /// Instructions only an AMD processor executes, across every module (D725).
     #[serde(default)]
     pub amd_only: usize,
+    /// The modules' own `rdtsc` and `rdtscp` instructions: reads of the host's counter, at the host's
+    /// rate rather than the one the guest is told.
+    #[serde(default)]
+    pub counter_reads: usize,
     /// `new`, `match` or `mismatch` against the stored plan, or empty when none could be kept.
     pub stored: String,
     /// What differed from the stored plan, on a mismatch or a relink, in words.

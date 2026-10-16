@@ -52,6 +52,11 @@ pub struct ModulePlan {
     /// Every instruction only an AMD processor executes, by address, with its mnemonic (D725).
     #[serde(default)]
     pub amd_only: Vec<(u64, String)>,
+    /// Every `rdtsc` and `rdtscp` in the module's executable segments, by address: a read of the
+    /// host's own time-stamp counter, at the host's rate rather than the one the guest is told.
+    /// Reported, not part of the plan's identity, since linking changes nothing about them.
+    #[serde(default)]
+    pub counter_reads: Vec<u64>,
 }
 
 impl ModulePlan {
@@ -76,6 +81,7 @@ impl ModulePlan {
             writes,
             syscalls: Vec::new(),
             amd_only: Vec::new(),
+            counter_reads: Vec::new(),
         }
     }
 
@@ -84,6 +90,14 @@ impl ModulePlan {
     pub fn with_amd_only(mut self, mut sites: Vec<(u64, String)>) -> Self {
         sites.sort_unstable();
         self.amd_only = sites;
+        self
+    }
+
+    /// The same plan, with the module's own reads of the time-stamp counter listed.
+    #[must_use]
+    pub fn with_counter_reads(mut self, mut sites: Vec<u64>) -> Self {
+        sites.sort_unstable();
+        self.counter_reads = sites;
         self
     }
 
@@ -188,6 +202,12 @@ impl LinkPlan {
     #[must_use]
     pub fn amd_only_count(&self) -> usize {
         self.modules.iter().map(|m| m.amd_only.len()).sum()
+    }
+
+    /// The modules' own reads of the time-stamp counter, across every module.
+    #[must_use]
+    pub fn counter_read_count(&self) -> usize {
+        self.modules.iter().map(|m| m.counter_reads.len()).sum()
     }
 
     /// Total relocation writes across every module.
@@ -646,6 +666,7 @@ mod tests {
             writes,
             syscalls: Vec::new(),
             amd_only: Vec::new(),
+            counter_reads: Vec::new(),
         }
     }
 

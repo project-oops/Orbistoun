@@ -367,6 +367,7 @@ mod link_tests {
             writes: 564_184,
             syscalls: 1,
             amd_only: 0,
+            counter_reads: 0,
             stored: "mismatch".to_owned(),
             differs: vec!["libc::malloc at 0x10: stored 0x1, now 0x2".to_owned()],
         };

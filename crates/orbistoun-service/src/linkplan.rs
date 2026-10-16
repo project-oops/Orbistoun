@@ -60,7 +60,8 @@ pub fn module_plan(
     let found = orbistoun_loader::inventory::inventory(bytes, image.base())?;
     Ok(ModulePlan::of(library, image, writes)
         .with_syscalls(found.syscalls)
-        .with_amd_only(found.amd_only))
+        .with_amd_only(found.amd_only)
+        .with_counter_reads(found.counter_reads))
 }
 
 /// How many differing slots are named before the rest are only counted.
@@ -209,6 +210,7 @@ impl Service {
             writes: plan.write_count(),
             syscalls: plan.syscall_count(),
             amd_only: plan.amd_only_count(),
+            counter_reads: plan.counter_read_count(),
             ..LinkSummary::default()
         };
         let Some(file) = self.link_plan_file(path) else {

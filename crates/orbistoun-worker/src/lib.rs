@@ -757,13 +757,18 @@ fn record_link_plan(
     let relink = RUN_RELINK.load(std::sync::atomic::Ordering::Relaxed);
     let summary = service.settle_link_plan(executable, &plan, title, relink);
     tracing::info!(
-        "link plan {} ({}): {} modules, {} relocation writes, {} raw syscall sites, {} AMD-only instructions",
+        concat!(
+            "link plan {} ({}): {} modules, {} relocation writes, {} raw syscall sites, ",
+            "{} AMD-only instructions, {} reads of the time-stamp counter in the title's own code ",
+            "(each reads the host's counter, at the host's rate)"
+        ),
         summary.digest,
         summary.stored,
         summary.modules,
         summary.writes,
         summary.syscalls,
-        summary.amd_only
+        summary.amd_only,
+        summary.counter_reads
     );
     if relink {
         if summary.differs.is_empty() {
