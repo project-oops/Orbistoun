@@ -133,6 +133,12 @@ macro_rules! span_labels {
             Span::DeviceRelease => $as!("device: release"),
             Span::WriteBackChanges => $as!("write back: changes"),
             Span::WriteBackGuest => $as!("write back: guest"),
+            Span::WriteBackRelease => $as!("write back: release guards"),
+            Span::WriteBackCopy => $as!("write back: copy"),
+            Span::WriteBackFills => $as!("write back: fills"),
+            Span::FillDeferred => $as!("fill: deferred"),
+            Span::FillWritten => $as!("fill: written"),
+            Span::DeferredRefilled => $as!("deferred: refilled"),
             Span::SettlePending => $as!("settle pending frame"),
             Span::ShadersUpFront => $as!("shaders: up front"),
             Span::TexturesEmptied => $as!("emptied: texture caches"),
@@ -592,6 +598,20 @@ pub enum Span {
     WriteBackChanges,
     /// Within [`Self::DispatchWriteBack`]: the changed bytes and fills written into guest memory.
     WriteBackGuest,
+    /// Within [`Self::WriteBackGuest`]: the guards over a stretch written whole given back - a
+    /// protected target's and the write-watch's (D720, D824).
+    WriteBackRelease,
+    /// Within [`Self::WriteBackGuest`]: a stretch's runs copied into guest memory.
+    WriteBackCopy,
+    /// Within [`Self::WriteBackGuest`]: the buffer fills a dispatch's results are, written.
+    WriteBackFills,
+    /// A command-processor fill deferred (D719): its pages guarded, carried out at the first touch.
+    FillDeferred,
+    /// A command-processor fill written into guest memory now.
+    FillWritten,
+    /// A deferral a fill overwrites whole, over exactly its pages, turned into that fill with its
+    /// guard kept rather than given back and taken again. Counted.
+    DeferredRefilled,
     /// A frame still on the device written back because command-processor work touched its target
     /// before the flip (D714).
     SettlePending,
@@ -611,7 +631,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 104] = [
+    pub const ALL: [Self; 110] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -711,6 +731,12 @@ impl Span {
         Self::DeviceRelease,
         Self::WriteBackChanges,
         Self::WriteBackGuest,
+        Self::WriteBackRelease,
+        Self::WriteBackCopy,
+        Self::WriteBackFills,
+        Self::FillDeferred,
+        Self::FillWritten,
+        Self::DeferredRefilled,
         Self::SettlePending,
         Self::ShadersUpFront,
         Self::TexturesEmptied,

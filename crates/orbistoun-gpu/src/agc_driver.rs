@@ -2896,6 +2896,54 @@ fn drop_pending_covered(address: u64, length: u64) {
     }
 }
 
+/// Turns the one deferred copy or fill guarding exactly `[address, address + length)` into a
+/// deferred fill of `pattern` there, its pages left guarded (D719): a fill that overwrites it whole
+/// would drop it, giving the pages back, and guard them again at once - a dispatch filling the same
+/// buffer every time it runs did both, some 0.6 ms a dispatch (PPSA28061). `false`, changing
+/// nothing, where no single deferral guards exactly those pages or the fill would not be deferred.
+fn refill_guarded(address: u64, pattern: u32, length: u64) -> bool {
+    let Some(hooks) = lazy_copies().get() else {
+        return false;
+    };
+    if length < DEFERRED_FILL_MIN
+        || address % HOST_PAGE != 0
+        || length % HOST_PAGE != 0
+        || pending_target().is_some_and(|(target, _)| overlaps_target(target, address, length))
+    {
+        return false;
+    }
+    let Ok(mut list) = deferred().lock() else {
+        return false;
+    };
+    let mut over = list
+        .iter()
+        .enumerate()
+        .filter(|(_, copy)| ranges_overlap((copy.pages.0, copy.pages.1), (address, length)));
+    let (Some((index, copy)), None) = (over.next(), over.next()) else {
+        return false;
+    };
+    if (copy.pages.0, copy.pages.1) != (address, length)
+        || copy.destination < address
+        || copy.destination.saturating_add(copy.length) > address.saturating_add(length)
+    {
+        return false;
+    }
+    let pages = copy.pages;
+    let old = std::mem::replace(
+        &mut list[index],
+        Deferred {
+            destination: address,
+            length,
+            pages,
+            held: Held::Fill(pattern),
+        },
+    );
+    crate::perf::span(crate::perf::Span::DeferredRefilled, || {
+        old.release_snapshot(hooks);
+    });
+    true
+}
+
 /// Drops, unread, every deferred copy whose destination `[address, address + length)` overwrites
 /// completely (D719): nothing has observed its bytes, and nothing will. Its pages get their
 /// protection back and its snapshot is released.
@@ -4267,6 +4315,7 @@ impl GuestCp<'_> {
                 return Err("a write back into guest memory was refused".to_owned());
             }
         }
+        let _filling = crate::perf::SpanGuard::start(crate::perf::Span::WriteBackFills);
         for fill in fills {
             let count = usize::try_from(fill.count).map_err(|_| "a fill past this host's reach")?;
             if !cp::CpMemory::fill(self, fill.destination, fill.pattern, count) {
@@ -4327,9 +4376,12 @@ impl GuestCp<'_> {
                 .runs_in(runs)
                 .all(|(at, bytes)| write_guest(at, bytes));
         }
-        unprotect_overlapping(first, length);
-        // A write-watch guard (D824) is released rather than faulted through.
-        orbistoun_mem::watch::release_overlapping(first, length);
+        crate::perf::span(crate::perf::Span::WriteBackRelease, || {
+            unprotect_overlapping(first, length);
+            // A write-watch guard (D824) is released rather than faulted through.
+            orbistoun_mem::watch::release_overlapping(first, length);
+        });
+        let _copying = crate::perf::SpanGuard::start(crate::perf::Span::WriteBackCopy);
         for (at, bytes) in writes.runs_in(runs) {
             let Ok(dest) = usize::try_from(at) else {
                 return false;
@@ -4477,10 +4529,15 @@ impl cp::CpMemory for GuestCp<'_> {
             .get()
             .is_some_and(|allows| allows(address, count as u64))
         {
-            drop_covered(address, count as u64);
             drop_pending_covered(address, count as u64);
+            if refill_guarded(address, pattern, count as u64) {
+                return true;
+            }
+            drop_covered(address, count as u64);
         }
-        if defer_fill(address, pattern, count as u64) {
+        if crate::perf::span(crate::perf::Span::FillDeferred, || {
+            defer_fill(address, pattern, count as u64)
+        }) {
             return true;
         }
         if !carry_out_overlapping(address, count as u64)
@@ -4488,7 +4545,9 @@ impl cp::CpMemory for GuestCp<'_> {
         {
             return false;
         }
-        fill_guest(address, count as u64, pattern)
+        crate::perf::span(crate::perf::Span::FillWritten, || {
+            fill_guest(address, count as u64, pattern)
+        })
     }
 
     fn edit_words(&mut self, address: u64, count: usize, edit: &mut dyn FnMut(&mut [u32])) -> bool {
@@ -7195,6 +7254,8 @@ mod tests {
         pub(super) static TAKEN: AtomicU64 = AtomicU64::new(0);
         pub(super) static DISCARDED: AtomicU64 = AtomicU64::new(0);
         pub(super) static PROTECTED: AtomicU64 = AtomicU64::new(0);
+        pub(super) static GUARDS: AtomicU64 = AtomicU64::new(0);
+        pub(super) static RELEASES: AtomicU64 = AtomicU64::new(0);
 
         /// The frame every snapshot holds: a 16x8 ramp.
         pub(super) fn frame() -> Vec<u32> {
@@ -7216,12 +7277,18 @@ mod tests {
                     DISCARDED.fetch_add(1, Ordering::SeqCst);
                     Some(SNAPSHOTS.fetch_add(1, Ordering::SeqCst))
                 },
-                guard: |_, _| Some(0),
+                guard: |_, _| {
+                    GUARDS.fetch_add(1, Ordering::SeqCst);
+                    Some(0)
+                },
                 protect_writes: |_, _| {
                     PROTECTED.fetch_add(1, Ordering::SeqCst);
                     Some(4)
                 },
-                release: |_, _, _| true,
+                release: |_, _, _| {
+                    RELEASES.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
             });
         }
     }
@@ -7740,6 +7807,41 @@ mod tests {
         crate::tiling::tile_surface_64kb_rx_bpp4_mapped(&frame(), 16, 8, 0, &mut expected, |w| w)
             .expect("tiles");
         assert_eq!(memory, zerocopy::IntoBytes::as_bytes(expected.as_slice()));
+        super::forget_written();
+    }
+
+    /// A buffer filled again whole while its last fill is still deferred keeps the one guard: the
+    /// deferral becomes the new fill rather than giving its pages back to be guarded again, and
+    /// memory, once carried out, holds the second fill's word.
+    #[test]
+    fn a_buffer_filled_again_keeps_its_guard() {
+        use super::{GuestCp, MappedRegions, cp::CpMemory};
+        use fake::{GUARDS, RELEASES};
+        use std::sync::atomic::Ordering;
+        let _guard = serial();
+        let span = 0x2_0000;
+        let page = super::HOST_PAGE as usize;
+        let memory: &'static mut [u8] = Box::leak(vec![0xAAu8; span + page].into_boxed_slice());
+        let aligned = (page - memory.as_ptr() as usize % page) % page;
+        let memory = &mut memory[aligned..aligned + span];
+        let base = memory.as_ptr() as usize as u64;
+        allow_writes_to(base, span as u64);
+        set_guest_regions(vec![region_of(memory)]);
+        fake::install();
+        super::forget_written();
+        let cp = &mut GuestCp {
+            memory: MappedRegions::current(),
+            submission: None,
+        };
+        let changes = || GUARDS.load(Ordering::SeqCst) + RELEASES.load(Ordering::SeqCst);
+        let before = changes();
+        assert!(cp.fill(base, 0x1111_1111, span));
+        assert!(cp.fill(base, 0x2222_2222, span));
+        assert_eq!(changes(), before + 1, "guarded once, by the first fill");
+        assert_eq!(super::deferred().lock().expect("list").len(), 1);
+        assert!(memory.iter().all(|&b| b == 0xAA), "nothing written yet");
+        assert!(super::carry_out_before_reading(base, 4));
+        assert!(memory.iter().all(|&b| b == 0x22), "the second fill");
         super::forget_written();
     }
 
