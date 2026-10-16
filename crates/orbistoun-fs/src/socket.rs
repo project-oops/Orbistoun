@@ -1253,7 +1253,10 @@ mod tests {
     fn any_address_binds_loopback_unless_exposed() {
         use std::net::SocketAddr;
         let host = |s: &str, expose| super::host_address(s.parse::<SocketAddr>().unwrap(), expose);
-        assert_eq!(host("0.0.0.0:9021", false), "127.0.0.1:9021".parse().unwrap());
+        assert_eq!(
+            host("0.0.0.0:9021", false),
+            "127.0.0.1:9021".parse().unwrap()
+        );
         assert_eq!(host("[::]:0", false), "[::1]:0".parse().unwrap());
         assert_eq!(host("0.0.0.0:9021", true), "0.0.0.0:9021".parse().unwrap());
         assert_eq!(
