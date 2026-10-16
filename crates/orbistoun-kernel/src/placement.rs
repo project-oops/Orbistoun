@@ -53,12 +53,10 @@ fn first_cores(allowed: u64, cores: u32) -> u64 {
     taken
 }
 
-/// Holds the whole process to the first `cores` of the cores it may use now (D835).
+/// The cores the process may use now, a bit each.
 #[cfg(windows)]
-pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
-    use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask,
-    };
+fn allowed_cores() -> Result<u64, PlacementError> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
     // SAFETY: takes no arguments; the pseudo-handle needs no closing.
     let process = unsafe { GetCurrentProcess() };
     let (mut allowed, mut system) = (0usize, 0usize);
@@ -68,7 +66,32 @@ pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
             std::io::Error::last_os_error().to_string(),
         ));
     }
-    let mask = first_cores(allowed as u64, cores);
+    Ok(allowed as u64)
+}
+
+/// The cores the calling thread may use now, a bit each: a Linux process has no mask of its own.
+#[cfg(target_os = "linux")]
+fn allowed_cores() -> Result<u64, PlacementError> {
+    let current = rustix::thread::sched_getaffinity(None)
+        .map_err(|e| PlacementError::Refused(e.to_string()))?;
+    Ok((0..64)
+        .filter(|&core| current.is_set(core))
+        .fold(0u64, |mask, core| mask | (1 << core)))
+}
+
+/// No call says which cores a process may use on this host.
+#[cfg(all(test, not(any(windows, target_os = "linux"))))]
+fn allowed_cores() -> Result<u64, PlacementError> {
+    Err(PlacementError::Unsupported)
+}
+
+/// Holds the whole process to the first `cores` of the cores it may use now (D835).
+#[cfg(windows)]
+pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessAffinityMask};
+    // SAFETY: takes no arguments; the pseudo-handle needs no closing.
+    let process = unsafe { GetCurrentProcess() };
+    let mask = first_cores(allowed_cores()?, cores);
     let mask = usize::try_from(mask)
         .map_err(|_| PlacementError::Refused("the mask is wider than a pointer".to_owned()))?;
     // SAFETY: the pseudo-handle is valid for the call, and the mask a plain integer naming a subset
@@ -85,12 +108,7 @@ pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
 /// cores it may use: a Linux process has no mask of its own, and threads inherit their creator's.
 #[cfg(target_os = "linux")]
 pub(crate) fn limit_process_cores(cores: u32) -> Result<(), PlacementError> {
-    let current = rustix::thread::sched_getaffinity(None)
-        .map_err(|e| PlacementError::Refused(e.to_string()))?;
-    let allowed = (0..64)
-        .filter(|&core| current.is_set(core))
-        .fold(0u64, |mask, core| mask | (1 << core));
-    pin(first_cores(allowed, cores))
+    pin(first_cores(allowed_cores()?, cores))
 }
 
 /// No call holds a process to some cores on this host.
@@ -201,11 +219,14 @@ mod tests {
         assert_eq!(super::pin_current_thread(0), Ok(()));
     }
 
-    /// Pinning a thread to core 0, which every host has, takes effect where the host can place
-    /// threads, on a thread of its own so the test runner's thread is left alone.
+    /// Pinning a thread to the first core the process may use takes effect where the host can
+    /// place threads, on a thread of its own so the test runner's thread is left alone. Not core 0
+    /// as such: a process held to other cores - a build limited to some of a machine's - may not
+    /// use it.
     #[test]
-    fn a_thread_can_be_pinned_to_core_zero() {
-        let pinned = std::thread::spawn(|| super::pin_current_thread(1))
+    fn a_thread_can_be_pinned_to_its_first_allowed_core() {
+        let first = super::allowed_cores().map_or(1, |allowed| super::first_cores(allowed, 1));
+        let pinned = std::thread::spawn(move || super::pin_current_thread(first))
             .join()
             .expect("the thread ran");
         if cfg!(any(windows, target_os = "linux")) {
