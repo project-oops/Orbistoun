@@ -271,6 +271,68 @@ unsafe fn set_topology(sec_state: u64, topology: u32) {
     unsafe { guest::write_u32(field, (prev & !0x1f) | (topology & 0x1f)) };
 }
 
+/// How many shader pairs an interpolant builder's headers are reported for.
+const PAIRS_REPORTED: usize = 4;
+
+/// The bytes of a shader header reported: the measured object extent (`166-agc/create-shader`).
+const HEADER_BYTES: usize = 0x130;
+
+/// The bytes reported where they can be read: the sub-table at `+0x08` points past the measured
+/// extent, to arrays a header carries after it.
+const HEADER_AND_TABLES: usize = 0x200;
+
+/// The shader pairs whose headers were reported, by `(vs, ps)` address.
+static PAIRS_SEEN: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether `pair` is new to `seen` and there is room for it among `most`, keeping it if so.
+fn first_sight(seen: &mut Vec<(u64, u64)>, pair: (u64, u64), most: usize) -> bool {
+    if seen.contains(&pair) || seen.len() >= most {
+        return false;
+    }
+    seen.push(pair);
+    true
+}
+
+/// `bytes` set out sixteen a line, each line after its offset.
+fn hex_lines(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::new();
+    for (row, chunk) in bytes.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02x}")).collect();
+        let _ = writeln!(text, "  +{:#05x}  {}", row * 16, hex.join(" "));
+    }
+    text
+}
+
+/// Reports the vertex and pixel shader headers an interpolant builder was handed, the first time a
+/// pair is seen and for the first few pairs: the table the builder writes leaves out the remap by
+/// the shaders' semantics, and these bytes are where those semantics are (D010). It only reads.
+fn report_interpolant_pair(vs: u64, ps: u64) {
+    let new = PAIRS_SEEN
+        .lock()
+        .is_ok_and(|mut seen| first_sight(&mut seen, (vs, ps), PAIRS_REPORTED));
+    if !new {
+        return;
+    }
+    let header = |at: u64| {
+        [HEADER_AND_TABLES, HEADER_BYTES]
+            .into_iter()
+            .find_map(|len| {
+                let mut bytes = vec![0_u8; len];
+                // SAFETY: a shader object the guest made with `sceAgcCreateShader`, at least
+                // `HEADER_BYTES` long as measured; read through the checked accessor, which refuses
+                // a span it cannot read.
+                (at != 0 && unsafe { guest::read_into(at, &mut bytes) }).then(|| hex_lines(&bytes))
+            })
+            .unwrap_or_else(|| "  unreadable\n".to_owned())
+    };
+    tracing::info!(
+        "an interpolant builder was handed vertex shader {vs:#x} and pixel shader {ps:#x}; their headers, whose semantics the table it writes leaves out:\nvertex\n{}pixel\n{}",
+        header(vs),
+        header(ps)
+    );
+}
+
 /// `sceAgcCreateInterpolantMapping(mapping, vs, ps)`.
 ///
 /// Fills `mapping` (arg0) with the 32-quadword PS-input table and returns `0`. The only table the
@@ -297,6 +359,7 @@ fn create_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// it into an indirect register load; a remap by the shaders' interpolants is not modelled (D010).
 /// A null record is refused, as the census's zero-argument call faulted on hardware.
 fn interpolants_71040c4d(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    report_interpolant_pair(args[1], args[2]);
     create_interpolant_mapping(args)
 }
 
@@ -308,6 +371,7 @@ fn interpolants_71040c4d(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// answered `0x0` and the record's first 64 bytes read back as `(0x191 + i, i)`; `ptr` kept its
 /// fill and the zeroed register table stayed zero. Otherwise as [`interpolants_71040c4d`].
 fn interpolants_8a6f69da(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    report_interpolant_pair(args[1], args[2]);
     create_interpolant_mapping(args)
 }
 
@@ -1670,6 +1734,28 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shader pair handed to an interpolant builder is kept for the report the first time only,
+    /// a few pairs at most: GTA V hands its builder one per draw, and what is wanted is the headers'
+    /// bytes, from which the remap by semantics the table leaves out can be read.
+    #[test]
+    fn a_shader_pair_is_kept_once_while_there_is_room() {
+        let mut seen = Vec::new();
+        assert!(first_sight(&mut seen, (0x1000, 0x2000), 2));
+        assert!(!first_sight(&mut seen, (0x1000, 0x2000), 2), "seen before");
+        assert!(first_sight(&mut seen, (0x1000, 0x3000), 2));
+        assert!(!first_sight(&mut seen, (0x4000, 0x5000), 2), "no room");
+    }
+
+    /// A header is set out sixteen bytes a line, each with its offset.
+    #[test]
+    fn a_header_is_set_out_with_offsets() {
+        let bytes: Vec<u8> = (0..20).collect();
+        assert_eq!(
+            hex_lines(&bytes),
+            "  +0x000  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f\n  +0x010  10 11 12 13\n"
+        );
+    }
 
     /// `sceAgcDcbWriteData`'s packet for the four measured calls (`166-agc/dcb-write-data`,
     /// `20261010-115300-eboot.log` 13916-13946): the header counts the body, arg 2 picks the
