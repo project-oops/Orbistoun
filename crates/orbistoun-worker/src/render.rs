@@ -1201,6 +1201,37 @@ fn snapshot_frame(number: u64, frame: &Pixels) {
     }
 }
 
+/// A texture the last flip's frame sampled, as a file: its name - order, slot and size - and its
+/// texels as `Rgba8` bytes in memory order, as they were bound.
+fn sampled_dump(
+    number: usize,
+    texture: &(u32, u32, u32, std::sync::Arc<[u32]>),
+) -> (String, Vec<u8>) {
+    let (slot, width, height, texels) = texture;
+    let name = format!("sampled-{number:02}-slot{slot}-{width}x{height}.rgba");
+    (
+        name,
+        texels
+            .iter()
+            .flat_map(|texel| texel.to_le_bytes())
+            .collect(),
+    )
+}
+
+/// Keeps every texture `by` sampled in the run's frames directory, so what a frame shows nothing of
+/// can be looked at as orbistoun bound it.
+fn keep_sampled(by: &orbistoun_gpu::agc_driver::DrawnBy) {
+    let Some(dir) = frames_dir() else {
+        return;
+    };
+    for (number, texture) in by.textures.iter().enumerate() {
+        let (name, bytes) = sampled_dump(number, texture);
+        if let Err(e) = std::fs::write(dir.join(name), bytes) {
+            tracing::warn!("a sampled texture could not be kept: {e}");
+        }
+    }
+}
+
 /// Writes a submission whose drive failed on the device into the run's frames directory, one
 /// command per numbered line, with each shader module's SPIR-V beside it for a disassembler.
 fn write_failed_submission(submission: &Submission) {
@@ -1254,6 +1285,7 @@ fn log_flip_origins() {
     };
     let lead = format!("the last flip showed {shown:#x}, drawn into as");
     tracing::info!("{}", drawn_by_line(&lead, &by, &frame_into));
+    keep_sampled(&by);
     // Each render target it sampled, followed to the frame that drew it: what a black frame
     // composited from black targets is traced through.
     for (base, target) in sampled_targets(&by, MOST_TRACED_TARGETS, &into) {
@@ -2103,6 +2135,17 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// Each texture the last flip's frame sampled is kept as the texels orbistoun bound, named by
+    /// its order, slot and size, so a texture a frame shows nothing of can be looked at: GTA V's
+    /// title drew its "Continue" and not its logo.
+    #[test]
+    fn a_sampled_texture_is_kept_as_its_texels() {
+        let texels: std::sync::Arc<[u32]> = vec![0xff00_00ff, 0x0000_ff00].into();
+        let (name, bytes) = super::sampled_dump(3, &(1, 2, 1, texels));
+        assert_eq!(name, "sampled-03-slot1-2x1.rgba");
+        assert_eq!(bytes, [0xff, 0, 0, 0xff, 0, 0xff, 0, 0]);
+    }
 
     /// The frame a flip showed is named by what drew it: which frame drawn it was, its draws, each
     /// texture they bound with what it holds - a texture of one value reads as one distinct - and
