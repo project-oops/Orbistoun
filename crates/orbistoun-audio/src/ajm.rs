@@ -84,9 +84,15 @@ struct Registry {
     instances: std::collections::BTreeSet<(u32, u32)>,
     /// Batches by the buffer `sceAjmBatchInitialize` was given, with the jobs each holds.
     batches: std::collections::BTreeMap<u64, Vec<Job>>,
-    /// The last batch identifier `sceAjmBatchStart` handed back.
+    /// How many batches `sceAjmBatchStart` has handed back an identifier for: the next one's.
     started: u32,
+    /// Started batches not yet waited on, by identifier.
+    unwaited: std::collections::BTreeSet<u32>,
 }
+
+/// What a second `sceAjmBatchWait` on one batch answered: the first wait ended it (REQ-gt02,
+/// `20261016-000300-eboot.log` 4961).
+const BATCH_GONE: u64 = 0x8093_0004;
 
 /// A decode job a batch holds: the instance it names, and its input and output as guest
 /// `(address, size)` pairs.
@@ -206,22 +212,29 @@ impl Registry {
         Some(0)
     }
 
-    /// Starts the batch at `buffer`: the identifier it is waited on by, one more than the last,
-    /// and the jobs to run, which leave the batch. `None` for a batch never initialised or one
-    /// holding no job (D889).
+    /// Starts the batch at `buffer`: the identifier it is waited on by - 0 for the first, as
+    /// measured (REQ-gt02, line 4957), then one more each - and the jobs to run, which leave the
+    /// batch. `None` for a batch never initialised or one holding no job (D889).
     fn start(&mut self, buffer: u64) -> Option<(u32, Vec<Job>)> {
         let jobs = std::mem::take(self.batches.get_mut(&buffer)?);
         if jobs.is_empty() {
             return None;
         }
+        let id = self.started;
         self.started += 1;
-        Some((self.started, jobs))
+        self.unwaited.insert(id);
+        Some((id, jobs))
     }
 
-    /// `sceAjmBatchWait`'s answer for a batch identifier `start` handed back: 0, since a batch
-    /// runs to completion when it is started (D889). `None` for an identifier never handed back.
-    fn wait(&self, id: u32) -> Option<u64> {
-        (1..=self.started).contains(&id).then_some(0)
+    /// `sceAjmBatchWait`'s answer for a batch identifier `start` handed back: 0 the first time,
+    /// since a batch runs to completion when it is started (D889), and [`BATCH_GONE`] after, as
+    /// measured. `None` for an identifier never handed back.
+    fn wait(&mut self, id: u32) -> Option<u64> {
+        if self.unwaited.remove(&id) {
+            Some(0)
+        } else {
+            (id < self.started).then_some(BATCH_GONE)
+        }
     }
 
     /// `sceAjmInstanceDestroy`'s answer on a live context: 0 for an instance it holds, which it
@@ -465,11 +478,11 @@ fn run_job(job: &Job) {
 }
 
 /// `sceAjmBatchStart(ctx, &batch, priority, 0, &out, ...)`: runs the batch's decode job to
-/// completion, writes the batch's identifier to the first four bytes of `out`, and answers 0
-/// (D889). PPSA04263 waits on what `out` holds after it. The console's answer for a retail title is
-/// not measured - the census harness was refused the start (REQ-ai02) - so the identifier's
-/// numbering, from 1, is assumed. A batch never initialised or holding no job, and a null `out`,
-/// answer the placeholder.
+/// completion, writes the batch's identifier to the first four bytes of `out`, and answers 0, as
+/// the console did in PPSA04263's shape - identifier 0 for the first batch, the rest of `out` left
+/// (REQ-gt02, `20261016-000300-eboot.log` 4956-4957). Running the job at the start is D889's.
+/// PPSA04263 waits on what `out` holds after it. A batch never initialised or holding no job, and
+/// a null `out`, answer the placeholder.
 pub(crate) fn ajm_batch_start(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let placeholder = u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
     let out = args[4];
@@ -500,9 +513,10 @@ pub(crate) fn ajm_batch_start(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// `sceAjmBatchWait(ctx, id, timeout, &block, ...)`: 0 for a batch `sceAjmBatchStart` started,
-/// which ran to completion as it started (D889); the block is left as it was. An identifier never
-/// handed back answers the placeholder.
+/// `sceAjmBatchWait(ctx, id, timeout, &block, ...)`: 0 the first time for a batch
+/// `sceAjmBatchStart` started, which ran to completion as it started (D889), the block left as it
+/// was; `0x80930004` after, as the console answered a second wait (REQ-gt02, line 4961). An
+/// identifier never handed back answers the placeholder.
 pub(crate) fn ajm_batch_wait(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     with_registry(|r, _| r.wait(args[1] as u32))
 }
@@ -640,8 +654,14 @@ mod tests {
         assert_eq!(registry.start(0x9000), None, "nothing to run");
         assert_eq!(registry.job_decode(0x9000, job(1)), Some(0));
         let (id, jobs) = registry.start(0x9000).expect("one job to run");
+        assert_eq!(id, 0, "the first batch is 0 (REQ-gt02)");
         assert_eq!(jobs, vec![job(1)]);
         assert_eq!(registry.wait(id), Some(0));
+        assert_eq!(
+            registry.wait(id),
+            Some(0x8093_0004),
+            "a batch waited on is gone (REQ-gt02)"
+        );
         assert_eq!(registry.wait(id + 1), None);
         let (next, _) = {
             assert_eq!(registry.batch_initialize(0x9000, 0x40), Some(0));

@@ -27,7 +27,7 @@ pub struct DeclaredSymbol {
 ///
 /// The single list (D123): a second, hand-maintained registration path lets a function be listed,
 /// named in traces, and resolve to nothing.
-pub(crate) fn modules() -> [ModuleDesc; 58] {
+pub(crate) fn modules() -> [ModuleDesc; 59] {
     [
         orbistoun_kernel::MODULE,
         orbistoun_kernel::ult::MODULE,
@@ -52,6 +52,7 @@ pub(crate) fn modules() -> [ModuleDesc; 58] {
         orbistoun_audio::audio3d::MODULE,
         orbistoun_audio::audio_in::MODULE,
         orbistoun_audio::audio_out2::MODULE,
+        orbistoun_audio::voice::MODULE,
         orbistoun_gpu::ampr::MODULE,
         orbistoun_input::ime::MODULE,
         orbistoun_input::ime_dialog::MODULE,

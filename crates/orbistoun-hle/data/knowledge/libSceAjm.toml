@@ -106,11 +106,12 @@ arity = 6
 purpose = "Runs a batch of codec jobs: (ctx, &batch, priority, 0, &out, ...)."
 returns = "status"
 edge_cases = [
-    "ASSUMED (D889): a retail title's start answers 0x0 and writes the batch identifier, numbered from 1, to the first four bytes of out; orbistoun runs the batch's decode jobs to completion before answering. The census harness's start answered 0x80930005, refused for want of a codec privilege (REQ-ai02, 20261015-164000-eboot.log line 11348); REQ-gt02 asks for a retail title's shape.",
-    "GUEST-OBSERVED (D832 trial): answered 0x0 with nothing written, PPSA04263 went on to sceAjmBatchWait on the identifier out still held, 0xffffffff.",
+    "MEASURED (REQ-gt02, 000-boot/gt02-ajm-batch, PPSA04263's shape - priority 0x28, a 0x20-byte out filled 0xcc - on one MP3 decode job): 0x0, and the first four bytes of out became 00000000, batch identifier 0, the rest left. On a context never issued, 0x80930011 with out untouched. The three-argument call ai02 made answered 0x80930005.",
+    "ASSUMED (D889): orbistoun runs the batch's decode job to completion before answering, and counts identifiers up from 0.",
     "A batch never initialised or holding no job, and a null out, answer the placeholder.",
 ]
-known_by = "assumed"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T2025Z-gt02, reports/hardware/20261016-000300-eboot.log lines 4956-4957, 4965-4966."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"
 
@@ -120,9 +121,11 @@ arity = 6
 purpose = "Waits for a started batch: (ctx, id, timeout, &block, ...)."
 returns = "status"
 edge_cases = [
-    "ASSUMED (D889): 0x0 for an identifier sceAjmBatchStart handed back, the batch having run to completion when it started; the block is left as it was. The census harness's wait answered 0x80930004 on a batch whose start was refused (REQ-ai02, line 11350).",
+    "MEASURED (REQ-gt02, PPSA04263's shape): a second wait on a batch answered 0x80930004, the block untouched. The harness's first wait, timeout 0, on a job that failed answered 0x80930011 and filled the block with 0x80930016 and an address.",
+    "ASSUMED (D889): the first wait on a batch whose job decoded answers 0x0, the block left as it was - the batch having run to completion at its start.",
     "An identifier never handed back answers the placeholder.",
 ]
-known_by = "assumed"
+known_by = "measured"
+cites = "obSCEne REQ-20261015T2025Z-gt02, reports/hardware/20261016-000300-eboot.log lines 4958-4962."
 found_in = ["PPSA04263-app0"]
 found_on = "2026-10-15"

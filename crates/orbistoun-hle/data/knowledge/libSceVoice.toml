@@ -1,0 +1,16 @@
+library = "libSceVoice"
+
+[[function]]
+name = "sceVoiceInit"
+arity = 2
+purpose = "(param, version): initialises voice chat for the process."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt02, 000-boot/gt02-voice, bound by link, PPSA04263's shape - a 0x20-byte param holding u32 0x10000000 at +0, version 100): 0x0 the first time and 0x804e0802 the second, the param block left as it was both times.",
+    "MEASURED (REQ-gt01): a zeroed param with versions 1 and 0x01000000 answered 0x804e0805 each time.",
+    "orbistoun answers the PPSA04263 shape as measured; any other shape and a null block are unmeasured and answer the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261015T2025Z-gt02, reports/hardware/20261016-000300-eboot.log lines 4910-4917; REQ-20261015T1234Z-gt01, reports/hardware/20261015-164000-eboot.log lines 4862-4864."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-16"
