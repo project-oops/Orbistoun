@@ -189,7 +189,11 @@ A round of making a title faster goes:
    prototype that ran PPSA02664 six times faster changed how its loop ran. A baseline that repeats
    few of its own flips does not draw the same twice (PPSA03416 repeats about two thirds, and a
    build of the baseline itself drew 11 of 53 otherwise): the check says so, and a change is judged
-   there against such a build, `--with <file>=<a copy of it as committed>`.
+   there against such a build, `--with <file>=<a copy of it as committed>`. Its runs draw the same
+   scene with its animations at different points, and pinned to one host core they part sooner, not
+   later: a thread's logical time moves with its own readings and waits (D735), so where the host
+   preempts threads that wait on each other moves the title's clock, as the console's own
+   scheduling does.
 
 `perf`, `ab` and `bench` wait up to a minute before each measured run for anything else using the
 GPU - another session's run on the same device slows the title's device time, not its host time,
