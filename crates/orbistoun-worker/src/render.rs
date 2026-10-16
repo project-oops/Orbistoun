@@ -1295,6 +1295,44 @@ fn frame_change(before: &[u8], after: &[u8], width: usize) -> FrameChange {
     change
 }
 
+/// Where a capturing geometry stage writes the vertices and primitives it declared, in the
+/// observation buffer: `orbistoun_translate::wavefront::CAPTURED_COUNTS`, after its first vertices'
+/// positions.
+const CAPTURED_COUNTS: usize = 12;
+
+/// What a geometry stage captured in `words` (`ORBISTOUN_CAPTURE_POSITIONS`): the vertices and
+/// primitives it declared, then its first vertices' clip positions, four words each, with where
+/// each lands after the divide. A draw that changes nothing either rasterised no fragment, which
+/// these say - no vertex ran, no primitive was declared, or every one lies off screen - or wrote
+/// what was already there.
+fn positions_line(words: &[u32]) -> String {
+    // The buffer is zeroed before each drive, and no position a vertex writes is all zeros.
+    if words.iter().all(|&word| word == 0) {
+        return String::from("none - no vertex of it ran");
+    }
+    let (positions, counts) = words.split_at(CAPTURED_COUNTS.min(words.len()));
+    let declared = match counts {
+        [vertices, primitives, ..] => {
+            format!("{vertices} vertices and {primitives} primitives declared; ")
+        }
+        _ => String::new(),
+    };
+    let landed = positions
+        .chunks_exact(4)
+        .map(|vertex| {
+            let [x, y, z, w] = [0, 1, 2, 3].map(|at| f32::from_bits(vertex[at]));
+            let clip = format!("clip ({x}, {y}, {z}, {w})");
+            if w > 0.0 {
+                format!("{clip} at ({}, {})", x / w, y / w)
+            } else {
+                format!("{clip} behind the eye")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    declared + &landed
+}
+
 /// Whether `command` draws.
 const fn is_draw(command: &orbistoun_gpu::RenderCommand) -> bool {
     matches!(
@@ -1377,9 +1415,22 @@ fn log_draw_changes(submission: &Submission) {
     // Driven to a backend of its own, the submission carries every module it binds: the run's
     // backend holds the ones it was given before, and this one holds none.
     let whole = orbistoun_gpu::agc_driver::with_every_bound_module(submission);
+    let capturing = orbistoun_env::CAPTURE_POSITIONS.get().as_deref() == Some("1");
+    // Each drive ends with the draw measured, so the shared observation buffer holds its captured
+    // positions when the run asked for them.
+    let positions = || {
+        capturing
+            .then(orbistoun_gpu_vulkan::framebuffer::shared_observation)
+            .flatten()
+            .map(|words| positions_line(&words))
+    };
     let through = |end: usize| {
         let mut prefix = whole.clone();
         prefix.commands.truncate(end);
+        if capturing {
+            // Zero, so a draw that runs no vertex reads as zeros, not the draw before's.
+            orbistoun_gpu_vulkan::framebuffer::clear_shared_observation();
+        }
         let rendered = render(&prefix);
         rendered.frame_bytes.zip(rendered.outcome.frame)
     };
@@ -1388,15 +1439,16 @@ fn log_draw_changes(submission: &Submission) {
     let Some((first_frame, (width, _))) = through(first + 1) else {
         return;
     };
+    let first_positions = positions();
     let mut before = vec![0; first_frame.len()];
     let mut said = String::from(
         "what each draw of the last submission did to its frame (the first against black):",
     );
     for (number, &at) in draws.iter().enumerate() {
-        let after = if number == 0 {
-            first_frame.clone()
+        let (after, landed) = if number == 0 {
+            (first_frame.clone(), first_positions.clone())
         } else if let Some((after, _)) = through(at + 1) {
-            after
+            (after, positions())
         } else {
             break;
         };
@@ -1411,6 +1463,13 @@ fn log_draw_changes(submission: &Submission) {
                 );
             }
             _ => said.push_str("changed nothing"),
+        }
+        if let Some(landed) = landed {
+            let _ = write!(
+                said,
+                "
+    its first vertices: {landed}"
+            );
         }
         before = after;
     }
@@ -1984,7 +2043,9 @@ pub fn render_and_log_last_submission() -> Option<Event> {
     }
     let submission = orbistoun_gpu::agc_driver::take_last_submission()?;
     write_submission(&submission, "last");
-    log_draw_changes(&submission);
+    // On the device thread, as one job: a guest still running draws there too, and between two of
+    // the replay's drives its draws would write the observation buffer the replay reads.
+    on_device(|| log_draw_changes(&submission));
     if let Some(refused) = orbistoun_gpu::agc_driver::take_refused_submission() {
         write_submission(&refused, "refused");
     }
@@ -2361,6 +2422,41 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// A draw's capture reads as the counts it declared, then clip coordinates and where they land: a
+    /// vertex outside -1..1 after the divide, or with w at or below zero, draws nothing there; a
+    /// buffer still zero says no vertex ran.
+    #[test]
+    fn captured_positions_read_as_clip_and_screen() {
+        let mut words: Vec<u32> = [
+            [0.5_f32, -0.5, 0.0, 1.0],
+            [2.0, 4.0, 0.5, 2.0],
+            [1.0, 1.0, 0.0, 0.0],
+        ]
+        .iter()
+        .flatten()
+        .map(|component| component.to_bits())
+        .collect();
+        words.extend([30, 0, 0, 0]);
+        assert_eq!(
+            super::positions_line(&words),
+            concat!(
+                "30 vertices and 0 primitives declared; ",
+                "clip (0.5, -0.5, 0, 1) at (0.5, -0.5); ",
+                "clip (2, 4, 0.5, 2) at (1, 2); ",
+                "clip (1, 1, 0, 0) behind the eye"
+            )
+        );
+        assert_eq!(
+            super::positions_line(&[0; 16]),
+            "none - no vertex of it ran"
+        );
+        assert_eq!(
+            super::CAPTURED_COUNTS,
+            orbistoun_translate::wavefront::CAPTURED_COUNTS as usize,
+            "the translator's layout"
+        );
+    }
 
     /// What one draw did to a frame is the pixels that differ from the frame before it: how many,
     /// the rectangle they lie in, and the colour of the first - GTA V's title showed its

@@ -250,6 +250,20 @@ pub const FRAME_DIR: Var = Var {
     read_by: "orbistoun-worker",
 };
 
+/// Keep where each draw's first vertices land, as clip positions in the per-draw lines.
+///
+/// A draw that changes nothing either rasterised no fragments or wrote what was already there;
+/// its clip positions say which. Each geometry stage writes its first vertices' positions to the
+/// observation buffer, so translations made with this set differ from those made without it.
+pub const CAPTURE_POSITIONS: Var = Var {
+    name: "ORBISTOUN_CAPTURE_POSITIONS",
+    kind: Kind::Diagnostic,
+    summary: "1 prints the clip positions of each draw's first vertices beside the per-draw lines",
+    example: "1",
+    effect: Effect::Observes,
+    read_by: "orbistoun-worker",
+};
+
 /// Measure a submission's finer spans and print them once a second.
 ///
 /// The always-on phases say which part of a frame is slow; these say which part of a submission is,
@@ -796,6 +810,7 @@ pub const REGISTRY: &[Var] = &[
     FRAME_EVERY,
     FRAME_AT,
     FRAME_DIR,
+    CAPTURE_POSITIONS,
     LIMIT,
     COMMIT,
     GUEST_LAN,
@@ -888,6 +903,7 @@ mod tests {
         super::FRAME_EVERY,
         super::FRAME_AT,
         super::FRAME_DIR,
+        super::CAPTURE_POSITIONS,
         super::LIMIT,
         super::COMMIT,
         super::GUEST_LAN,

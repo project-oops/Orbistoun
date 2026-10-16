@@ -524,6 +524,12 @@ pub struct UserData {
     /// (`DX_RASTERIZATION_KILL`), which keeps only what it stores to the streamout buffers (D861).
     #[serde(default)]
     pub discard_vertex_exports: bool,
+    /// Whether a geometry stage also writes the clip-space position of its first
+    /// [`CAPTURED_VERTICES`] vertices into the observation buffer, four words each - where a draw's
+    /// vertices land, read back by a run that asks (`ORBISTOUN_CAPTURE_POSITIONS`). It only adds
+    /// stores; what the draw rasterises is unchanged.
+    #[serde(default)]
+    pub capture_positions: bool,
     /// The draw's `PA_CL_VS_OUT_CNTL`, which says what a primitive shader's `pos1` to `pos3`
     /// exports are (D867): the misc vector where `VS_OUT_MISC_VEC_ENA` is set, then clip and cull
     /// distances 0-3 and 4-7 where `VS_OUT_CCDIST0/1_VEC_ENA` are, in that order, and which
@@ -1840,6 +1846,16 @@ fn declare_local_share(
     b.declare(op::VARIABLE, &[local_array_ptr.0, local.0, WORKGROUP]);
 }
 
+/// How many vertices a geometry stage writes the positions of when asked
+/// ([`UserData::capture_positions`]), four words each: as many as the observation buffer holds
+/// beside [`CAPTURED_COUNTS`].
+pub const CAPTURED_VERTICES: u32 = (OBSERVED_WORDS - 4) / 4;
+
+/// Where in the observation buffer a capturing geometry stage writes the vertices and primitives
+/// it declared with `MSG_GS_ALLOC_REQ`, a word each: a draw whose vertices ran and that declared no
+/// primitive rasterises nothing.
+pub const CAPTURED_COUNTS: u32 = CAPTURED_VERTICES * 4;
+
 /// Where a stage's user data is read from at entry.
 #[derive(Debug, Clone, Copy)]
 enum UserDataSource {
@@ -2069,6 +2085,9 @@ pub struct Wavefront<'a> {
     flat_twins: Option<FlatTwins>,
     /// What the module does of a legacy vertex shader's streamout (D861, D881).
     streamout: StreamoutRole,
+    /// Whether the epilogue writes its first vertices' positions to the observation buffer
+    /// ([`UserData::capture_positions`]).
+    capture_positions: bool,
     /// The draw's position-vector routing ([`UserData::position_vectors`]).
     position_vectors: Option<u32>,
     /// The draw's point size register ([`UserData::point_size`]).
@@ -2968,6 +2987,7 @@ impl<'a> Wavefront<'a> {
             } else {
                 StreamoutRole::None
             },
+            capture_positions: user_data.capture_positions,
             position_vectors: user_data.position_vectors,
             point_size: user_data.point_size,
             integer_images: user_data.compute.unwrap_or_default().integer_images,
@@ -4309,6 +4329,11 @@ impl<'a> Wavefront<'a> {
         };
         self.builder
             .function(op::SET_MESH_OUTPUTS_EXT, &[declared[0].0, declared[1].0]);
+        if self.capture_positions {
+            let member = Self::constant(self, 0);
+            self.write_observation(member, CAPTURED_COUNTS, vertices);
+            self.write_observation(member, CAPTURED_COUNTS + 1, primitives);
+        }
         // A layered module keeps only the primitives in its pass's layer (D859): every lane's layer
         // written, and the layer this pass renders.
         let culling = mesh.layers.map(|layers| {
@@ -4335,6 +4360,9 @@ impl<'a> Wavefront<'a> {
             );
             self.builder.function(op::STORE, &[target.0, position.0]);
             let components = self.extract_vec4(position);
+            if self.capture_positions {
+                self.capture_position(member, slot, components);
+            }
             self.write_clip_distances(&mesh, slot, components);
             if let Some(words) = mesh.point_sizes {
                 self.copy_point_size(&mesh, words, slot);
@@ -4648,6 +4676,36 @@ impl<'a> Wavefront<'a> {
         self.builder
             .function(op::ACCESS_CHAIN, &[pointer.0, element.0, array.0, at.0]);
         self.builder.function(op::STORE, &[element.0, value.0]);
+    }
+
+    /// Writes vertex `slot`'s clip-space position into the observation buffer at words
+    /// `slot * 4 ..`, its components' bits as they are, where `slot` is one of the first
+    /// [`CAPTURED_VERTICES`] ([`UserData::capture_positions`]).
+    fn capture_position(&mut self, member: Id, slot: Id, components: [Id; 4]) {
+        let captured = Self::constant(self, CAPTURED_VERTICES);
+        let merge = self.open_below(slot, captured);
+        let four = Self::constant(self, 4);
+        let base = self.binary(op::IMUL, slot, four);
+        for (offset, component) in (0..).zip(components) {
+            let offset = Self::constant(self, offset);
+            let at = self.binary(op::IADD, base, offset);
+            let bits = self.builder.id();
+            self.builder
+                .function(op::BITCAST, &[self.u32_type.0, bits.0, component.0]);
+            let to = self.builder.id();
+            self.builder.function(
+                op::ACCESS_CHAIN,
+                &[
+                    self.buffer_element_ptr.0,
+                    to.0,
+                    self.buffer.0,
+                    member.0,
+                    at.0,
+                ],
+            );
+            self.builder.function(op::STORE, &[to.0, bits.0]);
+        }
+        self.close_below(merge);
     }
 
     fn write_observation(&mut self, member: Id, slot: u32, value: Id) {
@@ -7380,5 +7438,58 @@ mod assembly_tests {
         assert_eq!(first.vertices_of(5), [b, c, a]);
         assert_eq!(last.vertices_for(4), 6);
         assert_eq!(Assembly::List.vertices_for(4), 12);
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    /// A mesh module translated to capture its positions stores into the observation buffer, a store
+    /// a component for each lane it models, where one translated without does not: the store is the capture, and without it a draw's positions
+    /// read back as zeros (GTA V's title, every draw).
+    #[test]
+    fn capturing_positions_adds_the_observation_stores() {
+        use super::{
+            Assembly, GeometryInputs, MeshPrimitive, Stage, UserData, Window,
+            translate_with_user_data,
+        };
+        use crate::Width;
+        use orbistoun_shader::{EncodingTable, OperandTable, decode};
+        let encodings = EncodingTable::builtin().expect("encodings");
+        let operands = OperandTable::builtin().expect("operands");
+        // exp pos0 v0, v1, v2, v3 done; s_endpgm.
+        let words: [u32; 3] = [0xf800_08cf, 0x0302_0100, 0xbf81_0000];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let decoded = decode(&bytes, &encodings, &operands);
+        let translate = |capture_positions| {
+            let user_data = UserData {
+                first_register: 8,
+                geometry: Some(GeometryInputs {
+                    first_vertex: 0,
+                    vertices: 3,
+                    primitives: 1,
+                    assembly: Assembly::List,
+                    indices: None,
+                    passthrough: false,
+                    legacy: false,
+                    streamout: false,
+                }),
+                capture_positions,
+                ..UserData::default()
+            };
+            translate_with_user_data(
+                &decoded,
+                &encodings,
+                Width::Wave32,
+                (Stage::Mesh, MeshPrimitive::default()),
+                Window::default(),
+                user_data,
+            )
+            .expect("translates")
+            .0
+        };
+        // `OpStore`, opcode 62 (0x3e), three words.
+        let stores = |module: &[u32]| module.iter().filter(|&&w| w == (3 << 16) | 0x3e).count();
+        let (without, with) = (translate(false), translate(true));
+        assert!(stores(&with) > stores(&without), "the capture's stores");
     }
 }

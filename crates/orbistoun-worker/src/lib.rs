@@ -623,6 +623,10 @@ fn install_presentation() {
     }
     // A submission's finer spans, when asked for.
     orbistoun_gpu::perf::set_detail(orbistoun_env::PERF_DETAIL.get().as_deref() == Some("1"));
+    // Where each draw's first vertices land, when asked for.
+    orbistoun_gpu::pipeline::capture_positions(
+        orbistoun_env::CAPTURE_POSITIONS.get().as_deref() == Some("1"),
+    );
     // The Tracy client, when asked for (D829).
     if orbistoun_env::TRACY.get().as_deref() == Some("1") {
         if orbistoun_gpu::perf::start_profiler() {

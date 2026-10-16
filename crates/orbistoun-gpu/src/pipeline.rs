@@ -155,6 +155,20 @@ fn keep_dispatch_program(address: u64, program: &[u8]) {
     }
 }
 
+/// Whether draws' geometry stages capture their first vertices' positions (`ORBISTOUN_CAPTURE_POSITIONS`).
+static CAPTURE_POSITIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Has every geometry stage translated from now on also write where its first vertices land into
+/// the observation buffer (`capture_positions`): set by a run that asks, before its first draw.
+pub fn capture_positions(on: bool) {
+    CAPTURE_POSITIONS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`capture_positions`] is on.
+fn capturing_positions() -> bool {
+    CAPTURE_POSITIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How many draw shaders a run keeps for listing.
 const DRAW_PROGRAMS_KEPT: usize = 64;
 
@@ -722,6 +736,25 @@ const fn per_lane_salt(subgroup: Option<u32>) -> u64 {
 /// Distinguishes a module that reads its draw's bound buffers from one that reaches guest memory
 /// only through the window (D733), in the cache key.
 const DRAW_BUFFERS_SALT: u64 = 0x4452_4157_4255_4653;
+
+/// Distinguishes a geometry module that captures its first vertices' positions
+/// (`ORBISTOUN_CAPTURE_POSITIONS`) from one that does not, in the cache key: without it a run that
+/// asks reuses the translation an earlier run kept, and captures nothing.
+const CAPTURE_POSITIONS_SALT: u64 = 0x4341_5054_5552_4550;
+
+/// The cache key's part for the module's flags: whether it reads its draw's bound buffers, and
+/// whether it captures its positions.
+const fn flag_salts(user_data: &UserData) -> u64 {
+    (if user_data.draw_buffers {
+        DRAW_BUFFERS_SALT
+    } else {
+        0
+    }) ^ if user_data.capture_positions {
+        CAPTURE_POSITIONS_SALT
+    } else {
+        0
+    }
+}
 
 /// Distinguishes the same shader translated against different memory windows, in the cache key.
 ///
@@ -2285,6 +2318,7 @@ impl Pipeline {
             buffer_formats: formats,
             flat_twins: None,
             discard_vertex_exports: state.vertex_streamout,
+            capture_positions: false,
             position_vectors: None,
             point_size: None,
             saturated: UNSATURATED,
@@ -3994,6 +4028,13 @@ impl Pipeline {
             written.push(self.user_data[0].position_vectors);
             written.push(self.user_data[0].point_size);
         }
+        // Its pixel shader's attributes, routed as the stream links the two stages at this draw.
+        let controls = input_controls_at(sweep, at);
+        self.user_data[1].input_controls = controls;
+        written.extend(controls.map_or(
+            [None; orbistoun_translate::wavefront::INPUT_CONTROLS],
+            |controls| controls.0,
+        ));
         if with_words {
             let words = stage_user_data(sweep, at, 1);
             written.extend(words.iter().map(|&word| Some(word)));
@@ -4928,11 +4969,7 @@ impl Pipeline {
             ^ layout_salt(&user_data)
             ^ crate::pixel_inputs::salt(&user_data)
             ^ for_draw_salt(for_draw)
-            ^ if user_data.draw_buffers {
-                DRAW_BUFFERS_SALT
-            } else {
-                0
-            }
+            ^ flag_salts(&user_data)
             ^ per_lane_salt(user_data.per_invocation);
         if let Some(&cached) = self.cache.get(&key) {
             if cached.matches(shader) {
@@ -7568,6 +7605,16 @@ fn user_data_layouts(writes: &[RegisterWrite]) -> [UserData; 2] {
     })
 }
 
+/// Where each attribute of the pixel shader of the draw at byte `at` comes from: the
+/// `SPI_PS_INPUT_CNTL` in force at it, since a stream links each pair of stages it draws with
+/// afresh.
+fn input_controls_at(
+    sweep: &mut crate::registers::RegisterSweep<'_>,
+    at: u32,
+) -> Option<orbistoun_translate::wavefront::InputControls> {
+    crate::pixel_inputs::controls_by(|register| sweep.latest(at, register))
+}
+
 /// [`user_data_layouts`] as the registers stand at the draw at byte `at`: a stream that switches
 /// shaders switches their counts, and each draw's module reads the words its own `RSRC2` loads.
 fn user_data_layouts_at(sweep: &mut crate::registers::RegisterSweep<'_>, at: u32) -> [UserData; 2] {
@@ -7620,6 +7667,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             buffer_formats: None,
             flat_twins: None,
             discard_vertex_exports: false,
+            capture_positions: capturing_positions(),
             saturated: UNSATURATED,
             local_words,
             program_address: None,
@@ -7643,6 +7691,7 @@ fn user_data_layouts_by(mut last: impl FnMut(u32) -> Option<u32>) -> [UserData; 
             buffer_formats: None,
             flat_twins: None,
             discard_vertex_exports: false,
+            capture_positions: false,
             saturated: UNSATURATED,
             local_words: None,
             program_address: None,
@@ -10323,6 +10372,35 @@ mod tests {
             Some(0x2222_2222),
             "and traced as it stands"
         );
+    }
+
+    /// Each draw's pixel inputs are routed by the `SPI_PS_INPUT_CNTL` in force at it, not the
+    /// stream's last: GTA V's title draws its logo with attribute 0 read from output 1 and then its
+    /// text with another routing, and the logo's pixel shader, translated with the text's, read its
+    /// alpha from an output that held none and drew nothing.
+    #[test]
+    fn a_draws_input_controls_are_the_ones_in_force_at_it() {
+        use super::input_controls_at;
+        use crate::registers::{RegisterSweep, RegisterWrite};
+        const SPI_PS_INPUT_CNTL_0: u32 = 0xA191;
+        let write = |packet_offset, register, value| RegisterWrite {
+            packet_offset,
+            register,
+            value,
+        };
+        let writes = [
+            write(0x10, SPI_PS_INPUT_CNTL_0, 1),
+            write(0x10, SPI_PS_INPUT_CNTL_0 + 1, 2),
+            write(0x100, SPI_PS_INPUT_CNTL_0, 2),
+            write(0x100, SPI_PS_INPUT_CNTL_0 + 1, 0),
+        ];
+        let mut sweep = RegisterSweep::new(&writes);
+        let logo = input_controls_at(&mut sweep, 0x50).expect("the logo's");
+        assert_eq!((logo.0[0], logo.0[1], logo.0[2]), (Some(1), Some(2), None));
+        let text = input_controls_at(&mut sweep, 0x200).expect("the text's");
+        assert_eq!((text.0[0], text.0[1]), (Some(2), Some(0)));
+        let mut sweep = RegisterSweep::new(&[]);
+        assert_eq!(input_controls_at(&mut sweep, 0x50), None, "none written");
     }
 
     /// Each draw's user-data count is the one its `RSRC2` loads at that draw, not the stream's last:

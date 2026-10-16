@@ -38,16 +38,23 @@ const SPI_PS_INPUT_CNTL_0: u32 = 0xA191;
 /// Where each attribute the pixel shader interpolates comes from, as the stream last wrote each
 /// `SPI_PS_INPUT_CNTL`, or `None` when it wrote none of them.
 pub(crate) fn decode_controls(writes: &[RegisterWrite]) -> Option<InputControls> {
+    controls_by(|register| {
+        writes
+            .iter()
+            .rev()
+            .find(|write| write.register == register)
+            .map(|write| write.value)
+    })
+}
+
+/// Where each attribute the pixel shader interpolates comes from, as `last` answers each
+/// `SPI_PS_INPUT_CNTL`, or `None` when it answers none of them.
+pub(crate) fn controls_by(mut last: impl FnMut(u32) -> Option<u32>) -> Option<InputControls> {
     let mut controls = InputControls::default();
     let mut any = false;
-    for write in writes {
-        let Some(index) = write.register.checked_sub(SPI_PS_INPUT_CNTL_0) else {
-            continue;
-        };
-        if let Some(slot) = controls.0.get_mut(index as usize) {
-            *slot = Some(write.value);
-            any = true;
-        }
+    for (index, slot) in (0..).zip(controls.0.iter_mut()) {
+        *slot = last(SPI_PS_INPUT_CNTL_0 + index);
+        any |= slot.is_some();
     }
     any.then_some(controls)
 }

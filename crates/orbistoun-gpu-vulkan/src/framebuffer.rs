@@ -2541,15 +2541,89 @@ impl Outputs {
     }
 }
 
+/// The observation buffer and storage image every resident pipeline shares, once the first is made.
+static SHARED_RESIDENT_OUTPUTS: std::sync::Mutex<
+    Option<((vk::Buffer, vk::DeviceMemory), StorageImage)>,
+> = std::sync::Mutex::new(None);
+
+/// The observation buffer every resident pipeline shares, as the last resident draw to write it
+/// left it, or [`None`] before any resident pipeline made it or when it cannot be read.
+///
+/// A geometry stage translated to capture its positions writes its first vertices' clip positions
+/// there, so read after a drive that ends with a draw it holds that draw's.
+pub fn shared_observation() -> Option<Vec<u32>> {
+    let (buffer, memory) = SHARED_RESIDENT_OUTPUTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|(observation, _)| *observation)?;
+    let words = DEFAULT_WINDOWS[0];
+    read_buffer(&DispatchBuffer {
+        buffer,
+        memory,
+        size: words_to_bytes(words),
+        words,
+        offset: 0,
+    })
+    .inspect_err(|e| tracing::warn!("the shared observation buffer could not be read: {e:?}"))
+    .ok()
+}
+
+/// Zeroes the observation buffer every resident pipeline shares, once every draw that writes it
+/// has finished, so what [`shared_observation`] reads next was written after: a draw whose geometry
+/// stage runs no vertex leaves it zero rather than holding an earlier draw's. Nothing before any
+/// resident pipeline made it.
+pub fn clear_shared_observation() {
+    let Some((_, memory)) = SHARED_RESIDENT_OUTPUTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map(|(observation, _)| *observation)
+    else {
+        return;
+    };
+    let session = match crate::compute::session() {
+        Ok(session) => session,
+        Err(e) => {
+            tracing::warn!("the shared observation buffer could not be cleared: {e:?}");
+            return;
+        }
+    };
+    let session = session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Err(e) = settle(&session) {
+        tracing::warn!("the shared observation buffer could not be cleared: {e:?}");
+        return;
+    }
+    let size = words_to_bytes(DEFAULT_WINDOWS[0]);
+    // SAFETY: the allocation backs the host-visible observation buffer of this size, no draw is
+    // using it after the settle, nothing else holds a mapping of it, and the pointer is used only
+    // until it is unmapped below.
+    let mapped = match unsafe {
+        session
+            .device
+            .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
+    } {
+        Ok(mapped) => mapped,
+        Err(e) => {
+            tracing::warn!("the shared observation buffer could not be cleared: {e:?}");
+            return;
+        }
+    };
+    // SAFETY: `mapped` points at `size` bytes.
+    unsafe { std::ptr::write_bytes(mapped.cast::<u8>(), 0, usize::try_from(size).unwrap_or(0)) };
+    // SAFETY: the memory is mapped and no pointer into it is used after this.
+    unsafe { session.device.unmap_memory(memory) };
+}
+
 /// The observation buffer and storage image every resident pipeline binds, with whether the image
 /// is yet to be made writable. Nothing reads either back after a resident draw, so one of each
 /// serves them all, rather than five allocations per pipeline (D860).
 fn shared_resident_outputs(
     devices: Devices<'_>,
 ) -> Result<((vk::Buffer, vk::DeviceMemory), StorageImage, bool), DispatchError> {
-    type Outputs = ((vk::Buffer, vk::DeviceMemory), StorageImage);
-    static SHARED: std::sync::Mutex<Option<Outputs>> = std::sync::Mutex::new(None);
-    let mut shared = SHARED
+    let mut shared = SHARED_RESIDENT_OUTPUTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some((observation, storage)) = *shared {
