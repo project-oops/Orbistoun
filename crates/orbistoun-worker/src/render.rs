@@ -1738,6 +1738,18 @@ fn drawn_by_line(
 /// sizes in decimal, so the commands that carry a size name it in pixels.
 fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
     match command {
+        // Named by the guest shader it was made from, as its draw-program listing is, so a draw's
+        // code is found from its bind.
+        orbistoun_gpu::RenderCommand::BindShader { stage, shader } => {
+            orbistoun_gpu::pipeline::shader_name(*shader).map_or_else(
+                || format!("BindShader {{ stage: {stage:?}, shader: {shader:x?} }}"),
+                |name| {
+                    format!(
+                        "BindShader {{ stage: {stage:?}, shader: {shader:x?}, draw-program-{name} }}"
+                    )
+                },
+            )
+        }
         orbistoun_gpu::RenderCommand::BindTexture {
             slot,
             width,
@@ -2328,6 +2340,21 @@ mod tests {
                 "  +0x0000  00000000 00000001 00000002 00000003\n",
                 "  +0x0010  00000004\n",
             )
+        );
+    }
+
+    /// A shader bind with no draw shader behind it is listed as it was; the listing's own form is
+    /// unchanged for one (a test makes no draw shader).
+    #[test]
+    fn a_shader_bind_with_no_guest_shader_is_listed_as_it_was() {
+        use orbistoun_gpu::{RenderCommand, ResourceId, ShaderStage};
+        let line = super::command_line(&RenderCommand::BindShader {
+            stage: ShaderStage::Fragment,
+            shader: ResourceId(0xdead_0030),
+        });
+        assert_eq!(
+            line,
+            "BindShader { stage: Fragment, shader: ResourceId(dead0030) }"
         );
     }
 

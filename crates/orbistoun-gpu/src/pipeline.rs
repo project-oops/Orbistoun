@@ -181,6 +181,37 @@ fn keep_draw_program(stage: ShaderStage, address: u64, program: &[u8]) {
     }
 }
 
+/// The guest shader each module was prepared from, by module: its stage and address.
+fn shader_addresses() -> &'static std::sync::Mutex<BTreeMap<ResourceId, (&'static str, u64)>> {
+    static ADDRESSES: std::sync::Mutex<BTreeMap<ResourceId, (&'static str, u64)>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    &ADDRESSES
+}
+
+/// Records that `resource` was prepared from the `stage` shader at `address`.
+fn note_shader_address(resource: ResourceId, stage: ShaderStage, address: u64) {
+    let stage = match stage {
+        ShaderStage::Vertex => "vertex",
+        ShaderStage::Fragment => "fragment",
+        ShaderStage::Compute => "compute",
+    };
+    shader_addresses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(resource, (stage, address));
+}
+
+/// The guest shader `resource` was prepared from, named as its draw-program listing is
+/// (`vertex-74006000`); `None` for a module no draw shader made.
+#[must_use]
+pub fn shader_name(resource: ResourceId) -> Option<String> {
+    shader_addresses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&resource)
+        .map(|(stage, address)| format!("{stage}-{address:x}"))
+}
+
 /// Each shader the run's draws were prepared with, listed one instruction a line, named by its
 /// stage and address (`fragment-74005000`).
 #[must_use]
@@ -309,6 +340,16 @@ fn with_unnamed_census(
 #[cfg(test)]
 mod refusal_tests {
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+
+    /// A module is named by the guest shader it was prepared from: its stage and address, the name
+    /// a draw-program listing has. Ids far from any the live pipeline hands out.
+    #[test]
+    fn a_module_is_named_by_its_guest_shader() {
+        let id = crate::ResourceId(0xdead_0020);
+        assert_eq!(super::shader_name(id), None);
+        super::note_shader_address(id, crate::ShaderStage::Vertex, 0x7400_6000);
+        assert_eq!(super::shader_name(id).as_deref(), Some("vertex-74006000"));
+    }
 
     /// A draw's shader is kept by its stage and address the first time it is prepared, and listed
     /// as a dispatch's program is: GTA V's title drew its logo with shaders no dump showed.
@@ -4553,6 +4594,7 @@ impl Pipeline {
                         warnings,
                     } => {
                         submission.report.warnings.extend(warnings);
+                        note_shader_address(resource, candidate.stage, candidate.address);
                         submission.modules.insert(resource, module);
                         if indexed {
                             self.index_readers.insert(resource);
@@ -4564,6 +4606,7 @@ impl Pipeline {
                     }
                     Prepared::Cached { resource } => {
                         submission.report.cache_hits += 1;
+                        note_shader_address(resource, candidate.stage, candidate.address);
                         if indexed {
                             self.index_readers.insert(resource);
                         }
