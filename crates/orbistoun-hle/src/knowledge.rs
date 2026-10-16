@@ -1450,15 +1450,13 @@ mod tests {
             ..super::FunctionKnowledge::default()
         };
         assert_eq!(whole.partial(), None);
+        // GTA V's interpolant builder routes by semantic as measured (REQ-im01), so it no longer
+        // reads as partial.
         let shipped = Knowledge::builtin();
         let builder = shipped
             .get("0x71040c4df8235e1d")
             .expect("GTA V's interpolant builder");
-        assert!(
-            builder.partial().is_some_and(|why| why.contains("remap")),
-            "{:?}",
-            builder.partial()
-        );
+        assert_eq!(builder.partial(), None);
     }
 
     /// The shipped files account for everything they claim.

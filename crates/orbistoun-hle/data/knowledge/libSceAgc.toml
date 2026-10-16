@@ -165,10 +165,11 @@ name = "sceAgcCreateInterpolantMapping"
 purpose = "Fills the 32-entry interpolant mapping table that routes vertex-shader exports to pixel-shader inputs (SPI_PS_INPUT_CNTL_0..31)."
 edge_cases = [
     "MEASURED (obSCEne 9a41): with no vs/ps remap it writes 32 quadwords, entry i = ((i << 32) | (0x191 + i)). The first two came back 0x191 and 0x1_0000_0192, fixing both the base (0x191) and the per-entry stride.",
-    "Real arity is 3 (mapping, vs, ps); the declaration's 6 is the trampoline capture, so no arity is recorded here to disagree with it. When vs/ps are supplied the entries remap vs exports (vs+0x38) to ps inputs (ps+0x30); that remap is only partly specified, so orbistoun writes the measured default and leaves the rest as the guest prepared it (principle 3).",
+    "Real arity is 3 (mapping, vs, ps); the declaration's 6 is the trampoline capture, so no arity is recorded here to disagree with it.",
+    "MEASURED (REQ-20261016T1335Z-im01, 166-agc/interpolant-mapping): each pixel input is routed to the vertex output of its semantic. A permuted pair (ps inputs semantic 2 then 0; vs outputs 0, 1, 2 in slots 0, 1, 2) wrote entries 2, 0, then identity; a flat input wrote its slot | 0x420 and an input no output provides 0x20; a null pixel shader wrote the default. orbistoun routes so; a 16-bit, custom or default-valued input was not measured and keeps its own index. The semantic tables' places in a shader object (pointers at +0x30 and +0x38, counts at +0x50 and +0x56) are assumed, as GTA V's objects hold them.",
 ]
 known_by = "measured"
-cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (interpolant table)."
+cites = "obSCEne e4f1/9a41, sweep 20260912-003916, section 166-agc/link-shaders (interpolant table); REQ-20261016T1335Z-im01, 166-agc/interpolant-mapping rows as its resolution quotes them (no report log cited)."
 found_on = "2026-09-12"
 
 [[function]]
@@ -796,11 +797,11 @@ arity = 6
 purpose = "Builds the PS-input interpolant table for a shader pair: (record, vs, ps, 0, p4, p5), writing thirty-two SPI_PS_INPUT_CNTL (offset, value) pairs into record and answering 0."
 edge_cases = [
     "MEASURED (200-census/libSceAgc/0x71040c4df8235e1d, -real arms): over a record seeded with the prim-state words 0xd75, 0x262/0x4000, 0x242/4 and zeros, with header-only vertex and pixel shaders, and again with no pixel shader, rc 0x0 and the record's first 64 bytes read (0x191 + i, i); p4 and p5 kept their 0xcc fill.",
-    "orbistoun writes the full 32-entry default table sceAgcCreateInterpolantMapping writes; a remap by the shaders' interpolants is not modelled. PPSA02664 calls it on an uninitialised stack record and copies 0x100 bytes of it into a SET_CONTEXT_REG_INDIRECT table.",
+    "MEASURED (REQ-20261016T1335Z-im01, 166-agc/interpolant-mapping, the -7104 arms): each pixel input is routed to the vertex output of its semantic, as sceAgcCreateInterpolantMapping does, but a flat input writes its slot | 0x400, not 0x420. orbistoun routes so over the default table. PPSA02664 calls it on an uninitialised stack record and copies 0x100 bytes of it into a SET_CONTEXT_REG_INDIRECT table; GTA V calls it once a draw.",
     "MEASURED: the census's buffer and zero arguments fault (signals 10 and 11); orbistoun refuses a null record with the library's bad-argument code.",
 ]
 known_by = "measured"
-cites = "obSCEne REQ-cn04, reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAgc/0x71040c4df8235e1d; probe arm obscene src/probe/sections/census.c check_census_20."
+cites = "obSCEne REQ-cn04, reports/hardware/20261008-142306-eboot.obs.log, 200-census/libSceAgc/0x71040c4df8235e1d; probe arm obscene src/probe/sections/census.c check_census_20. REQ-20261016T1335Z-im01, 166-agc/interpolant-mapping rows as its resolution quotes them (no report log cited)."
 found_in = ["PPSA02664-app0", "PPSA03416", "PPSA21564"]
 found_on = "2026-10-09"
 

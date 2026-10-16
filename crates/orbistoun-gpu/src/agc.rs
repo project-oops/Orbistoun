@@ -333,18 +333,110 @@ fn report_interpolant_pair(vs: u64, ps: u64) {
     );
 }
 
+/// What a flat input's entry adds for `0x71040c4df8235e1d`: `FLAT_SHADE` alone (REQ-im01,
+/// `item2-flat-unmatched-7104`).
+const FLAT_0X7104: u32 = 0x400;
+
+/// What a flat input's entry adds for `sceAgcCreateInterpolantMapping`: `FLAT_SHADE` and bit 5
+/// (REQ-im01, `item2-flat-unmatched-create`).
+const FLAT_CREATE: u32 = 0x420;
+
+/// An input no vertex output provides: bit 5 alone (REQ-im01, both builders).
+const UNMATCHED: u32 = 0x20;
+
+/// The value of each `SPI_PS_INPUT_CNTL_i`, from the pixel shader's input semantic words and the
+/// vertex shader's output ones, as the console wrote it (REQ-im01, `166-agc/interpolant-mapping`):
+/// input `i` takes the hardware slot (bits 12:8) of the output whose semantic (bits 7:0) is its own,
+/// plus `flat` where the input is flat (bit 22); one no output provides is [`UNMATCHED`]; entries
+/// past the inputs keep their own index. An input that is 16-bit (bits 21:20), custom (bit 24) or
+/// carries default-value bits (31:28) was not measured and keeps its own index too.
+fn route_interpolants(inputs: &[u32], outputs: &[u32], flat: u32) -> [u32; 32] {
+    let mut table: [u32; 32] = core::array::from_fn(|i| i as u32);
+    for (entry, &input) in table.iter_mut().zip(inputs) {
+        let unmeasured = input >> 20 & 3 != 0 || input >> 24 & 1 != 0 || input >> 28 != 0;
+        if unmeasured {
+            continue;
+        }
+        *entry = match outputs
+            .iter()
+            .find(|&&output| output & 0xff == input & 0xff)
+        {
+            Some(&output) => (output >> 8 & 0x1f) | if input >> 22 & 1 != 0 { flat } else { 0 },
+            None => UNMATCHED,
+        };
+    }
+    table
+}
+
+/// A shader object's semantic words: the table its `table_at` field points at, as many as its
+/// `count` field holds (a `count_bytes`-wide integer at `count_at`). Empty for a null object or an
+/// unreadable or implausible table. The fields' places are assumed: they are where GTA V's own
+/// shader objects hold a pointer into themselves and a count that match its shaders' interpolants,
+/// and the tables obSCEne measured sat at `+0x140` of their objects (REQ-im01, `item3-semantics`).
+fn semantic_words(shader: u64, table_at: u64, (count_at, count_bytes): (u64, u32)) -> Vec<u32> {
+    if shader == 0 {
+        return Vec::new();
+    }
+    // SAFETY: fields of a shader object the guest made, read through the checked accessor.
+    let table = unsafe { guest::read_u64(shader.wrapping_add(table_at)) }.unwrap_or(0);
+    // SAFETY: as above.
+    let count = unsafe { guest::read_u32(shader.wrapping_add(count_at)) }.unwrap_or(0);
+    let count = if count_bytes == 2 {
+        count & 0xffff
+    } else {
+        count
+    };
+    if table == 0 || u64::from(count) > INTERPOLANT_ENTRIES {
+        return Vec::new();
+    }
+    (0..u64::from(count))
+        // SAFETY: entry `i` of the table the object points at, read through the checked accessor.
+        .filter_map(|i| unsafe { guest::read_u32(table.wrapping_add(i * 4)) })
+        .collect()
+}
+
+/// Writes the routed table for `vs` and `ps` into `mapping` over the default it holds, the entries
+/// a pixel shader's inputs name (REQ-im01). A null pixel shader, or one declaring no inputs, keeps
+/// the default, as measured.
+fn write_routed_interpolants(mapping: u64, vs: u64, ps: u64, flat: u32) {
+    let inputs = semantic_words(ps, 0x30, (0x50, 4));
+    if inputs.is_empty() {
+        return;
+    }
+    let outputs = semantic_words(vs, 0x38, (0x56, 2));
+    for (i, value) in route_interpolants(&inputs, &outputs, flat)
+        .iter()
+        .enumerate()
+        .take(inputs.len())
+    {
+        let entry = (u64::from(*value) << 32) | (0x191 + i as u64);
+        // SAFETY: entry `i` < 32 of the guest's 256-byte table.
+        unsafe { guest::write_u64(mapping.wrapping_add(i as u64 * 8), entry) };
+    }
+}
+
 /// `sceAgcCreateInterpolantMapping(mapping, vs, ps)`.
 ///
-/// Fills `mapping` (arg0) with the 32-quadword PS-input table and returns `0`. The only table the
-/// hardware was measured writing is the default, so the vs/ps-specific remap is not modelled and
-/// the default is written for every input (D010).
+/// Fills `mapping` (arg0) with the 32-quadword PS-input table and returns `0`: the default, then
+/// each pixel input routed to the vertex output of its semantic, a flat one with `0x420`
+/// (REQ-im01, [`route_interpolants`]).
 fn create_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    write_interpolant_mapping(args, Some(FLAT_CREATE))
+}
+
+/// Writes the default table into the record at `args[0]`, then, where `flat` says the builder's
+/// remap is measured, routes the pixel shader at `args[2]`'s inputs to the vertex shader at
+/// `args[1]`'s outputs over it (REQ-im01).
+fn write_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS], flat: Option<u32>) -> u64 {
     let mapping = args[0];
     if mapping == 0 {
         return BAD_ARGUMENT;
     }
     // SAFETY: `mapping` is the guest-owned 256-byte out-buffer the call fills.
     unsafe { write_default_interpolants(mapping) };
+    if let Some(flat) = flat {
+        write_routed_interpolants(mapping, args[1], args[2], flat);
+    }
     OK
 }
 
@@ -356,11 +448,12 @@ fn create_interpolant_mapping(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// shader, the call answered `0x0`, the record's first 64 bytes read back as `(0x191 + i, i)`, and
 /// neither `p4` nor `p5` changed. The table is taken to be the 32 entries
 /// `sceAgcCreateInterpolantMapping` writes, the shape of the 0x100 bytes PPSA02664 copies out of
-/// it into an indirect register load; a remap by the shaders' interpolants is not modelled (D010).
+/// it into an indirect register load. Each pixel input is then routed to the vertex output of its
+/// semantic, a flat one with `0x400` (REQ-im01, [`route_interpolants`]).
 /// A null record is refused, as the census's zero-argument call faulted on hardware.
 fn interpolants_71040c4d(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     report_interpolant_pair(args[1], args[2]);
-    create_interpolant_mapping(args)
+    write_interpolant_mapping(args, Some(FLAT_0X7104))
 }
 
 /// `0x8a6f69da59a5b375(record, vs, ps, ptr, registers, 4)`, unnamed: writes the default PS-input
@@ -372,7 +465,7 @@ fn interpolants_71040c4d(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
 /// fill and the zeroed register table stayed zero. Otherwise as [`interpolants_71040c4d`].
 fn interpolants_8a6f69da(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     report_interpolant_pair(args[1], args[2]);
-    create_interpolant_mapping(args)
+    write_interpolant_mapping(args, None)
 }
 
 /// `sceAgcUpdateInterpolantMapping(mapping, vs, ps)`.
@@ -1734,6 +1827,32 @@ const IMPLEMENTATIONS: &[(&str, GuestFn)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The interpolant table routes each pixel input to the vertex output of its semantic, as the
+    /// console wrote it for obSCEne's shader pairs (REQ-im01, `166-agc/interpolant-mapping`): a
+    /// permuted pair routes input 0 (semantic 2) to slot 2 and input 1 (semantic 0) to slot 0; a flat
+    /// input adds `0x400` - `0x420` from `sceAgcCreateInterpolantMapping` - and an input no output
+    /// provides is `0x20`; entries past the inputs keep their own index.
+    #[test]
+    fn inputs_are_routed_by_semantic_as_measured() {
+        let outputs = [0x0004_0000, 0x0004_0101, 0x0004_0202];
+        let permuted = route_interpolants(&[0x0004_0002, 0x0004_0100], &outputs, FLAT_0X7104);
+        assert_eq!(permuted[..4], [2, 0, 2, 3]);
+        assert_eq!(permuted[31], 31);
+        let flat = [0x0004_0002, 0x0044_0100, 0x0004_0263];
+        assert_eq!(
+            route_interpolants(&flat, &outputs, FLAT_0X7104)[..3],
+            [2, 0x400, 0x20]
+        );
+        assert_eq!(
+            route_interpolants(&flat, &outputs, FLAT_CREATE)[..3],
+            [2, 0x420, 0x20]
+        );
+        assert_eq!(
+            route_interpolants(&[], &outputs, FLAT_CREATE)[..3],
+            [0, 1, 2]
+        );
+    }
 
     /// A shader pair handed to an interpolant builder is kept for the report the first time only,
     /// a few pairs at most: GTA V hands its builder one per draw, and what is wanted is the headers'

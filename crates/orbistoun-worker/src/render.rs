@@ -1305,6 +1305,55 @@ const fn is_draw(command: &orbistoun_gpu::RenderCommand) -> bool {
     )
 }
 
+/// `submission` with blending off at every draw: what a draw's fragments write lands whatever
+/// their alpha.
+fn without_blending(submission: &Submission) -> Submission {
+    let mut opaque = submission.clone();
+    for command in &mut opaque.commands {
+        if let orbistoun_gpu::RenderCommand::SetBlend(blend) = command {
+            blend.enable = false;
+        }
+    }
+    opaque
+}
+
+/// The lines saying what each of `draws` did to the frame with blending off: a draw that changes
+/// nothing blended but something opaque wrote transparent fragments, and one that changes nothing
+/// either way drew no fragment at all - culled, clipped or outside the target. GTA V's logo draws
+/// change nothing either way.
+fn opaque_draw_changes(submission: &Submission, draws: &[usize], width: u32) -> String {
+    let opaque = without_blending(submission);
+    let through = |end: usize| {
+        let mut prefix = opaque.clone();
+        prefix.commands.truncate(end);
+        render(&prefix).frame_bytes
+    };
+    let mut said = String::from("\n  with blending off:");
+    let mut previous: Option<Vec<u8>> = None;
+    for (number, &at) in draws.iter().enumerate() {
+        let Some(after) = through(at + 1) else {
+            break;
+        };
+        let change = previous.as_ref().map_or_else(
+            || frame_change(&vec![0; after.len()], &after, width as usize),
+            |before| frame_change(before, &after, width as usize),
+        );
+        let _ = write!(said, "\n    draw {number}: ");
+        match (change.bounds, change.first) {
+            (Some((left, top, right, bottom)), Some(colour)) => {
+                let _ = write!(
+                    said,
+                    "{} pixel(s) in ({left},{top})-({right},{bottom}), the first {:02x}{:02x}{:02x}{:02x}",
+                    change.pixels, colour[0], colour[1], colour[2], colour[3]
+                );
+            }
+            _ => said.push_str("changed nothing"),
+        }
+        previous = Some(after);
+    }
+    said
+}
+
 /// The most draws [`log_draw_changes`] replays: each is a drive of the submission so far.
 const MOST_DRAWS_REPLAYED: usize = 32;
 
@@ -1365,6 +1414,7 @@ fn log_draw_changes(submission: &Submission) {
         }
         before = after;
     }
+    said.push_str(&opaque_draw_changes(&whole, &draws, width));
     // A draw that changed nothing may never have run: what the backend refused of the submission,
     // driven whole the same way, says which.
     let whole_outcome = render(&whole).outcome;
@@ -2372,6 +2422,30 @@ mod tests {
             line,
             "BindShader { stage: Fragment, shader: ResourceId(dead0030) }"
         );
+    }
+
+    /// With blending off every blend command of the submission is turned off, and nothing else
+    /// changes: what a draw writes then lands whatever its alpha.
+    #[test]
+    fn blending_is_turned_off_at_every_draw() {
+        use orbistoun_gpu::RenderCommand;
+        let blend = orbistoun_gpu::registers::target_blend_control(0x2006_1601 | 1 << 30, 0);
+        let submission = super::Submission {
+            commands: vec![
+                RenderCommand::SetBlend(blend),
+                RenderCommand::SetWriteMask(0xf),
+            ],
+            ..Default::default()
+        };
+        let opaque = super::without_blending(&submission);
+        assert!(matches!(
+            opaque.commands[0],
+            RenderCommand::SetBlend(off) if !off.enable && off.color_src == blend.color_src
+        ));
+        assert!(matches!(
+            opaque.commands[1],
+            RenderCommand::SetWriteMask(0xf)
+        ));
     }
 
     /// Only the three draw commands count as draws.
