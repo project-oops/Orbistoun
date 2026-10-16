@@ -868,6 +868,7 @@ fn execute_draws_here(submission: &Submission, before: Before<'_>) -> Option<()>
     if number < DUMPED_SUBMISSIONS {
         write_submission(submission, &format!("drawn-{number:02}"));
     }
+    keep_submission_before_named_flip(submission);
     let (&target, extent) = submission.targets.iter().next()?;
     let started = std::time::Instant::now();
     // One backend for the run, because the pipeline names each shader and resource to the backend
@@ -1120,28 +1121,91 @@ impl KeptFlips {
     }
 }
 
-/// Keeps the frame drawn before this flip when `ORBISTOUN_FRAME_EVERY` or `ORBISTOUN_FRAME_AT`
-/// asks, named by the guest's flip index: the index a console reports for the same flip, so a
-/// kept frame can be compared with the console's frame of that index.
-fn keep_frame_at_this_flip() {
+/// The flips `ORBISTOUN_FRAME_EVERY` and `ORBISTOUN_FRAME_AT` ask for, read once.
+fn kept_flips() -> &'static KeptFlips {
     static ASKED: OnceLock<KeptFlips> = OnceLock::new();
-    // `ORBISTOUN_FRAME_DIR` names a directory for the kept frames, such as the CLI's sheet
-    // directory; without it they go to the run's own frames directory (D865).
-    static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let asked = ASKED.get_or_init(|| {
+    ASKED.get_or_init(|| {
         KeptFlips::parse(
             orbistoun_env::FRAME_EVERY.get().as_deref(),
             orbistoun_env::FRAME_AT.get().as_deref(),
         )
-    });
+    })
+}
+
+/// Where kept frames, and the submissions kept with them, go: `ORBISTOUN_FRAME_DIR` names a
+/// directory, such as the CLI's sheet directory; without it they go to the run's own frames
+/// directory (D865).
+fn kept_frames_dir() -> Option<&'static Path> {
+    static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+    OWN.get_or_init(|| orbistoun_env::FRAME_DIR.get().map(PathBuf::from))
+        .as_deref()
+        .or_else(frames_dir)
+}
+
+/// The most submissions kept before one flip: a frame is several, and a bound keeps a flip that
+/// submits without end from filling the disk.
+const MOST_KEPT_PER_FLIP: usize = 64;
+
+/// The name a submission carried out after guest flip `last_flip` is kept under, when the next
+/// flip is one `ORBISTOUN_FRAME_AT` names: `flip-<next>-submission-<k>`, `k` counting the
+/// submissions before that flip in `seen` (the flip, and how many so far). Only the flips named
+/// exactly keep submissions; `ORBISTOUN_FRAME_EVERY` keeps frames alone.
+fn kept_submission_name(
+    asked: &KeptFlips,
+    last_flip: Option<u64>,
+    seen: &mut (u64, usize),
+) -> Option<String> {
+    let next = last_flip.unwrap_or(0) + 1;
+    if !asked.at.contains(&next) {
+        return None;
+    }
+    if seen.0 != next {
+        *seen = (next, 0);
+    }
+    if seen.1 >= MOST_KEPT_PER_FLIP {
+        return None;
+    }
+    let name = format!("flip-{next:06}-submission-{:02}", seen.1);
+    seen.1 += 1;
+    Some(name)
+}
+
+/// Keeps `submission` beside the frame of the flip after it, when that flip is one
+/// `ORBISTOUN_FRAME_AT` names: the per-draw lines see only the run's last submission, and this is
+/// what drew a frame mid-run.
+fn keep_submission_before_named_flip(submission: &Submission) {
+    static SEEN: Mutex<(u64, usize)> = Mutex::new((0, 0));
+    let asked = kept_flips();
+    if asked.at.is_empty() {
+        return;
+    }
+    let name = kept_submission_name(
+        asked,
+        orbistoun_video::last_flip_index(),
+        &mut SEEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if let (Some(name), Some(dir)) = (name, kept_frames_dir()) {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!("a kept submission could not be written: {e}");
+            return;
+        }
+        write_submission_to(dir, submission, &name);
+    }
+}
+
+/// Keeps the frame drawn before this flip when `ORBISTOUN_FRAME_EVERY` or `ORBISTOUN_FRAME_AT`
+/// asks, named by the guest's flip index: the index a console reports for the same flip, so a
+/// kept frame can be compared with the console's frame of that index.
+fn keep_frame_at_this_flip() {
     let Some(flip) = orbistoun_video::last_flip_index() else {
         return;
     };
-    if !asked.wants(flip) {
+    if !kept_flips().wants(flip) {
         return;
     }
-    let own = OWN.get_or_init(|| orbistoun_env::FRAME_DIR.get().map(PathBuf::from));
-    let Some(dir) = own.as_deref().or_else(frames_dir) else {
+    let Some(dir) = kept_frames_dir() else {
         return;
     };
     let Some((width, height, bytes)) = executed_frame() else {
@@ -2886,6 +2950,37 @@ mod tests {
             "tiling it does not read"
         );
         assert!(!super::window_can_show(at, shape(unknown, 1), Some(at)));
+    }
+
+    /// The submissions carried out before a flip `ORBISTOUN_FRAME_AT` names are kept beside its
+    /// frame, numbered from 0 and bounded: what drew a frame mid-run, where the per-draw lines see
+    /// only the run's last submission (GTA V's opening, which drew nothing but its title's logo).
+    #[test]
+    fn submissions_before_a_named_flip_are_kept_by_number() {
+        let asked = KeptFlips::parse(Some("2"), Some("3"));
+        let mut seen = (0, 0);
+        let mut name = |last_flip| super::kept_submission_name(&asked, last_flip, &mut seen);
+        assert_eq!(
+            name(Some(1)),
+            None,
+            "flip 2 is only every-N, which keeps no submission"
+        );
+        assert_eq!(name(Some(2)).as_deref(), Some("flip-000003-submission-00"));
+        assert_eq!(name(Some(2)).as_deref(), Some("flip-000003-submission-01"));
+        assert_eq!(name(Some(3)), None, "after the flip");
+        let first = KeptFlips::parse(None, Some("1"));
+        let mut seen = (0, 0);
+        assert_eq!(
+            super::kept_submission_name(&first, None, &mut seen).as_deref(),
+            Some("flip-000001-submission-00"),
+            "before any flip, the next is the first"
+        );
+        let mut seen = (3, super::MOST_KEPT_PER_FLIP);
+        assert_eq!(
+            super::kept_submission_name(&asked, Some(2), &mut seen),
+            None,
+            "bounded"
+        );
     }
 
     /// Every N keeps guest flips 1, 1+N, 1+2N; a list keeps exactly the flips it names; the two

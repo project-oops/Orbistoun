@@ -1432,7 +1432,7 @@ fn printable_text(bytes: &[u8]) -> Option<String> {
 /// The guest names the mounts it needs, so a mount added afterwards answers a request that was
 /// made. Read here rather than printed on the guest's stack (D381).
 pub(crate) fn paths_wanted() {
-    let wanted = orbistoun_fs::wanted::unanswered();
+    let wanted = orbistoun_fs::wanted::unanswered_by();
     if wanted.is_empty() {
         return;
     }
@@ -1441,9 +1441,16 @@ pub(crate) fn paths_wanted() {
         wanted.len(),
         if wanted.len() == 1 { "" } else { "s" }
     );
-    for path in &wanted {
+    for (path, by) in &wanted {
         said.push_str("\n  ");
         said.push_str(path);
+        // Which call asked: the same path through `fopen` and through a stat are different
+        // questions.
+        if let Some(label) = by.and_then(|index| label_of(index as usize)) {
+            said.push_str(" (asked by ");
+            said.push_str(label);
+            said.push(')');
+        }
         orbistoun_core::klog::note(&format!("orbistoun: no such path {path}"));
     }
     said.push_str(

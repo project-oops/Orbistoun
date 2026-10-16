@@ -226,11 +226,12 @@ pub const FRAME_EVERY: Var = Var {
 /// Keep the frames drawn before these guest flips, by the guest's own flip index.
 ///
 /// The index a console reports for the same flip, so a kept frame can be compared with a hardware
-/// frame of the same index. Kept beside whatever [`FRAME_EVERY`] keeps.
+/// frame of the same index. Kept beside whatever [`FRAME_EVERY`] keeps, with each submission
+/// carried out before the flip, as `flip-<n>-submission-<k>.txt`: what drew the frame.
 pub const FRAME_AT: Var = Var {
     name: "ORBISTOUN_FRAME_AT",
     kind: Kind::Diagnostic,
-    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba",
+    summary: "a comma-separated list of guest flip indices whose drawn frames are kept, as flip-<n>-<w>x<h>.rgba, with the submissions before each as flip-<n>-submission-<k>.txt",
     example: "1,30,60",
     effect: Effect::Observes,
     read_by: "orbistoun-worker",
