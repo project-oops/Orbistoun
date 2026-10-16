@@ -173,6 +173,10 @@ A round of making a title faster goes:
    report's "made afresh" line counts each pool's new ones against its asks. A new pool gets a span
    on the path that makes a new one and its place in `FRESH` beside the span table. A spare that
    holds more than asked for can serve a smaller ask.
+   A guard is the same churn in page protection: `deferred: covered` counted beside
+   `fill: deferred` or `guard: deferred copy` is pages given back and guarded again for one
+   overwrite. A deferral overwritten over exactly its pages hands its guard on
+   (`deferred: refilled`; PPSA28061 72 -> 80 fps).
 4. Where the spans run out, `perf --sample` samples the guest's main thread and the device thread
    (`ORBISTOUN_PROFILE`), naming host functions, and adds each thread's last sample to the report.
    Read a sampled name as "inside or near": a sample is named by the closest symbol, and a release
