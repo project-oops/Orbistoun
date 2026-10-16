@@ -1232,6 +1232,142 @@ fn keep_sampled(by: &orbistoun_gpu::agc_driver::DrawnBy) {
     }
 }
 
+/// Every buffer `commands` bind for their draws, whole: by command, stage, slot and guest address,
+/// four little-endian words a line after their offset.
+fn buffers_listing(commands: &[orbistoun_gpu::RenderCommand]) -> String {
+    let mut listing = String::new();
+    for (at, command) in commands.iter().enumerate() {
+        let orbistoun_gpu::RenderCommand::BindDrawBuffers { stage, buffers } = command else {
+            continue;
+        };
+        for (slot, buffer) in buffers.iter().enumerate() {
+            let _ = writeln!(
+                listing,
+                "command {at}, {stage:?} slot {slot}, {} bytes at {:#x}",
+                buffer.bytes.len(),
+                buffer.base
+            );
+            for (row, chunk) in buffer.bytes.chunks(16).enumerate() {
+                let words: Vec<String> = chunk
+                    .chunks(4)
+                    .map(|word| {
+                        let mut padded = [0_u8; 4];
+                        padded[..word.len()].copy_from_slice(word);
+                        format!("{:08x}", u32::from_le_bytes(padded))
+                    })
+                    .collect();
+                let _ = writeln!(listing, "  +{:#06x}  {}", row * 16, words.join(" "));
+            }
+        }
+    }
+    listing
+}
+
+/// What one draw did to a frame: the pixels that differ from the frame before it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FrameChange {
+    /// How many pixels differ.
+    pixels: usize,
+    /// The rectangle they lie in, `(left, top, right, bottom)`, inclusive.
+    bounds: Option<(usize, usize, usize, usize)>,
+    /// The first changed pixel's new `Rgba8` bytes.
+    first: Option<[u8; 4]>,
+}
+
+/// The pixels of `after` that differ from `before`, two `Rgba8` frames `width` pixels wide.
+fn frame_change(before: &[u8], after: &[u8], width: usize) -> FrameChange {
+    let mut change = FrameChange::default();
+    for (index, (old, new)) in before
+        .chunks_exact(4)
+        .zip(after.chunks_exact(4))
+        .enumerate()
+    {
+        if old == new {
+            continue;
+        }
+        let (x, y) = (index % width.max(1), index / width.max(1));
+        change.pixels += 1;
+        change.first.get_or_insert([new[0], new[1], new[2], new[3]]);
+        change.bounds = Some(change.bounds.map_or((x, y, x, y), |(l, t, r, b)| {
+            (l.min(x), t.min(y), r.max(x), b.max(y))
+        }));
+    }
+    change
+}
+
+/// Whether `command` draws.
+const fn is_draw(command: &orbistoun_gpu::RenderCommand) -> bool {
+    matches!(
+        command,
+        orbistoun_gpu::RenderCommand::Draw { .. }
+            | orbistoun_gpu::RenderCommand::DrawChunks { .. }
+            | orbistoun_gpu::RenderCommand::DrawIndexed { .. }
+    )
+}
+
+/// The most draws [`log_draw_changes`] replays: each is a drive of the submission so far.
+const MOST_DRAWS_REPLAYED: usize = 32;
+
+/// Says, for each draw of the last submission, what it did to the frame: the submission is driven
+/// once to just before its first draw and again through each draw, and each frame compared with the
+/// one before it. A draw that changes nothing drew nothing visible - culled, clipped, blended away
+/// or written where nothing shows - which no count of draws or texels can tell apart from one that
+/// drew (GTA V's title drew its "Continue" and not its logo).
+fn log_draw_changes(submission: &Submission) {
+    let draws: Vec<usize> = submission
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| is_draw(command))
+        .map(|(at, _)| at)
+        .take(MOST_DRAWS_REPLAYED)
+        .collect();
+    let Some(&first) = draws.first() else {
+        return;
+    };
+    // Driven to a backend of its own, the submission carries every module it binds: the run's
+    // backend holds the ones it was given before, and this one holds none.
+    let whole = orbistoun_gpu::agc_driver::with_every_bound_module(submission);
+    let through = |end: usize| {
+        let mut prefix = whole.clone();
+        prefix.commands.truncate(end);
+        let rendered = render(&prefix);
+        rendered.frame_bytes.zip(rendered.outcome.frame)
+    };
+    // A frame exists only once a draw has drawn it, so the first draw is measured against black:
+    // what it leaves lit.
+    let Some((first_frame, (width, _))) = through(first + 1) else {
+        return;
+    };
+    let mut before = vec![0; first_frame.len()];
+    let mut said = String::from(
+        "what each draw of the last submission did to its frame (the first against black):",
+    );
+    for (number, &at) in draws.iter().enumerate() {
+        let after = if number == 0 {
+            first_frame.clone()
+        } else if let Some((after, _)) = through(at + 1) {
+            after
+        } else {
+            break;
+        };
+        let change = frame_change(&before, &after, width as usize);
+        let _ = write!(said, "\n  draw {number} (command {at}): ");
+        match (change.bounds, change.first) {
+            (Some((left, top, right, bottom)), Some(colour)) => {
+                let _ = write!(
+                    said,
+                    "{} pixel(s) in ({left},{top})-({right},{bottom}), the first now {:02x}{:02x}{:02x}{:02x}",
+                    change.pixels, colour[0], colour[1], colour[2], colour[3]
+                );
+            }
+            _ => said.push_str("changed nothing"),
+        }
+        before = after;
+    }
+    tracing::info!("{said}");
+}
+
 /// Writes a submission whose drive failed on the device into the run's frames directory, one
 /// command per numbered line, with each shader module's SPIR-V beside it for a disassembler.
 fn write_failed_submission(submission: &Submission) {
@@ -1724,6 +1860,10 @@ fn write_submission_to(dir: &Path, submission: &Submission, name: &str) {
     let written = std::fs::create_dir_all(dir).and_then(|()| {
         std::fs::write(&listing, text)?;
         std::fs::write(dir.join(format!("{name}-window.bin")), &window)?;
+        std::fs::write(
+            dir.join(format!("{name}-buffers.txt")),
+            buffers_listing(&submission.commands),
+        )?;
         for (id, words) in &submission.modules {
             let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
             std::fs::write(dir.join(format!("{name}-module-{}.spv", id.0)), bytes)?;
@@ -1766,6 +1906,7 @@ pub fn render_and_log_last_submission() -> Option<Event> {
     }
     let submission = orbistoun_gpu::agc_driver::take_last_submission()?;
     write_submission(&submission, "last");
+    log_draw_changes(&submission);
     if let Some(refused) = orbistoun_gpu::agc_driver::take_refused_submission() {
         write_submission(&refused, "refused");
     }
@@ -2000,8 +2141,8 @@ fn refusal_lines(refusals: &[(&'static str, usize)]) -> String {
 const SUMMARY_LINES: usize = 12;
 
 /// Says what the command processor carried out at submit: how many submissions ran to
-/// Writes each program the dispatches ran, listed, beside the report: what a dispatch did is read
-/// against its code.
+/// Writes each program the dispatches ran, and each shader the draws ran, listed, beside the
+/// report: what a dispatch or a draw did is read against its code.
 fn write_dispatch_listings() {
     let Some(dir) = frames_dir() else {
         return;
@@ -2010,6 +2151,13 @@ fn write_dispatch_listings() {
         let path = dir.join(format!("dispatch-program-{address:x}.txt"));
         if let Err(e) = std::fs::write(&path, listing) {
             tracing::warn!("a dispatch program's listing could not be written: {e}");
+        }
+    }
+    // And each shader the draws ran, so what a draw drew is read against its code too.
+    for (name, listing) in orbistoun_gpu::pipeline::draw_program_listings() {
+        let path = dir.join(format!("draw-program-{name}.txt"));
+        if let Err(e) = std::fs::write(&path, listing) {
+            tracing::warn!("a draw program's listing could not be written: {e}");
         }
     }
 }
@@ -2135,6 +2283,65 @@ fn log_execution() {
 #[cfg(test)]
 mod tests {
     use super::{KeptFlips, RenderOutcome, holds_a_picture, render};
+
+    /// What one draw did to a frame is the pixels that differ from the frame before it: how many,
+    /// the rectangle they lie in, and the colour of the first - GTA V's title showed its
+    /// "Continue" and not its logo, and which draw drew what was not measured.
+    #[test]
+    fn a_draw_s_change_is_the_pixels_that_differ() {
+        // A 4x2 frame; the second has pixel (1,0) and (3,1) changed.
+        let before = vec![0_u8; 4 * 2 * 4];
+        let mut after = before.clone();
+        after[4..8].copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+        after[(4 + 3) * 4..(4 + 3) * 4 + 4].copy_from_slice(&[0x10, 0x20, 0x30, 0xff]);
+        let change = super::frame_change(&before, &after, 4);
+        assert_eq!(change.pixels, 2);
+        assert_eq!(change.bounds, Some((1, 0, 3, 1)));
+        assert_eq!(change.first, Some([0xff, 0xff, 0xff, 0xff]));
+        let none = super::frame_change(&before, &before, 4);
+        assert_eq!((none.pixels, none.bounds), (0, None));
+    }
+
+    /// Every buffer a submission's draws bind is listed whole, by command, stage, slot and guest
+    /// address, four words a line with their offset: what a draw computed its colour from is read
+    /// there, not guessed from the first four words.
+    #[test]
+    fn every_bound_buffer_is_listed_whole() {
+        use orbistoun_gpu::{DrawBuffer, RenderCommand, ShaderStage};
+        let words: Vec<u8> = (0_u32..5).flat_map(u32::to_le_bytes).collect();
+        let commands = vec![
+            RenderCommand::SetWriteMask(0xf),
+            RenderCommand::BindDrawBuffers {
+                stage: ShaderStage::Fragment,
+                buffers: vec![DrawBuffer {
+                    bytes: words.into(),
+                    hash: 0,
+                    base: 0x7400_1000,
+                }],
+            },
+        ];
+        let listing = super::buffers_listing(&commands);
+        assert_eq!(
+            listing,
+            concat!(
+                "command 1, Fragment slot 0, 20 bytes at 0x74001000\n",
+                "  +0x0000  00000000 00000001 00000002 00000003\n",
+                "  +0x0010  00000004\n",
+            )
+        );
+    }
+
+    /// Only the three draw commands count as draws.
+    #[test]
+    fn the_draw_commands_are_the_draws() {
+        use orbistoun_gpu::RenderCommand;
+        assert!(super::is_draw(&RenderCommand::Draw {
+            vertices: 3,
+            instances: 1,
+            first_vertex: 0,
+        }));
+        assert!(!super::is_draw(&RenderCommand::SetWriteMask(0xf)));
+    }
 
     /// Each texture the last flip's frame sampled is kept as the texels orbistoun bound, named by
     /// its order, slot and size, so a texture a frame shows nothing of can be looked at: GTA V's

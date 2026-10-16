@@ -4939,7 +4939,17 @@ fn with_bound_modules(submission: &Submission) -> std::borrow::Cow<'_, Submissio
     std::borrow::Cow::Owned(carrying)
 }
 
-/// Forgets the modules a drawn submission carried: the backend holds them now.
+/// Every module a drawn submission has carried to the backend, kept so a submission can be driven
+/// again to a backend of its own, which holds none of them (a draw's change, measured at the run's
+/// end).
+fn delivered_modules() -> &'static Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>> {
+    static DELIVERED: OnceLock<Mutex<std::collections::BTreeMap<crate::ResourceId, Vec<u32>>>> =
+        OnceLock::new();
+    DELIVERED.get_or_init(Default::default)
+}
+
+/// Moves the modules a drawn submission carried out of the undelivered store: the backend holds
+/// them now, and their words are kept among the delivered.
 fn note_delivered(submission: &Submission) {
     if submission.modules.is_empty() {
         return;
@@ -4947,9 +4957,32 @@ fn note_delivered(submission: &Submission) {
     let mut pending = undelivered_modules()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for id in submission.modules.keys() {
+    let mut delivered = delivered_modules()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (id, words) in &submission.modules {
         pending.remove(id);
+        delivered.entry(*id).or_insert_with(|| words.clone());
     }
+}
+
+/// `submission`, carrying every module it binds that the run made, delivered or not: what a
+/// backend that holds none of them needs to drive it.
+#[must_use]
+pub fn with_every_bound_module(submission: &Submission) -> Submission {
+    let mut whole = with_bound_modules(submission).into_owned();
+    let delivered = delivered_modules()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for command in &submission.commands {
+        if let crate::RenderCommand::BindShader { shader, .. } = command
+            && !whole.modules.contains_key(shader)
+            && let Some(words) = delivered.get(shader)
+        {
+            whole.modules.insert(*shader, words.clone());
+        }
+    }
+    whole
 }
 
 /// Reads one submit descriptor, walks the command buffer it names, and keeps the submission - the
@@ -5568,6 +5601,13 @@ mod tests {
                 std::borrow::Cow::Borrowed(_)
             ),
             "a drawn module is the backend's, and is not carried again"
+        );
+        // Asked for afresh - a submission driven again to a backend of its own - a drawn module's
+        // words are still there to carry.
+        let whole = super::with_every_bound_module(&binding);
+        assert_eq!(
+            whole.modules.get(&ResourceId(0xdead_0010)),
+            Some(&vec![0x0723_0203, 1])
         );
     }
 

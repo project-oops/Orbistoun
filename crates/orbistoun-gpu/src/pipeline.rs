@@ -155,6 +155,52 @@ fn keep_dispatch_program(address: u64, program: &[u8]) {
     }
 }
 
+/// How many draw shaders a run keeps for listing.
+const DRAW_PROGRAMS_KEPT: usize = 64;
+
+/// The shaders the run's draws were prepared with, by stage and address, at most
+/// [`DRAW_PROGRAMS_KEPT`]: what a draw drew is read against its code, as a dispatch's is.
+fn draw_programs() -> &'static std::sync::Mutex<BTreeMap<(&'static str, u64), Vec<u8>>> {
+    static PROGRAMS: std::sync::Mutex<BTreeMap<(&'static str, u64), Vec<u8>>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    &PROGRAMS
+}
+
+/// Keeps a draw's shader the first time it is prepared, while there is room.
+fn keep_draw_program(stage: ShaderStage, address: u64, program: &[u8]) {
+    let stage = match stage {
+        ShaderStage::Vertex => "vertex",
+        ShaderStage::Fragment => "fragment",
+        ShaderStage::Compute => return,
+    };
+    let mut kept = draw_programs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !kept.contains_key(&(stage, address)) && kept.len() < DRAW_PROGRAMS_KEPT {
+        kept.insert((stage, address), program.to_vec());
+    }
+}
+
+/// Each shader the run's draws were prepared with, listed one instruction a line, named by its
+/// stage and address (`fragment-74005000`).
+#[must_use]
+pub fn draw_program_listings() -> Vec<(String, String)> {
+    let (Ok(encodings), Ok(operands)) = (EncodingTable::builtin(), OperandTable::builtin()) else {
+        return Vec::new();
+    };
+    draw_programs()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|((stage, address), bytes)| {
+            (
+                format!("{stage}-{address:x}"),
+                program_listing(bytes, (&encodings, &operands)),
+            )
+        })
+        .collect()
+}
+
 /// Each program the run's dispatches ran, listed one instruction a line, with its address.
 #[must_use]
 pub fn dispatch_program_listings() -> Vec<(u64, String)> {
@@ -263,6 +309,24 @@ fn with_unnamed_census(
 #[cfg(test)]
 mod refusal_tests {
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+
+    /// A draw's shader is kept by its stage and address the first time it is prepared, and listed
+    /// as a dispatch's program is: GTA V's title drew its logo with shaders no dump showed.
+    #[test]
+    fn a_draw_shader_is_listed_by_stage_and_address() {
+        let program: Vec<u8> = [0xbf81_0000_u32]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        super::keep_draw_program(crate::ShaderStage::Fragment, 0x7400_5000, &program);
+        let listings = super::draw_program_listings();
+        let (name, listing) = listings
+            .iter()
+            .find(|(name, _)| name.contains("74005000"))
+            .expect("the fragment shader is kept");
+        assert_eq!(name, "fragment-74005000");
+        assert!(listing.contains("s_endpgm"), "{listing}");
+    }
 
     /// A dispatch refused for an instruction with no name lists every opcode of its program the
     /// tables lack, not the first alone: VOP1 opcodes 0xff and 0xfe are assigned to nothing.
@@ -4657,6 +4721,7 @@ impl Pipeline {
 
         let shader = &window[..decoded.consumed];
         self.decoded.insert(address, shader.to_vec());
+        keep_draw_program(stage, address, shader);
         self.prepare_decoded(
             address,
             stage,
