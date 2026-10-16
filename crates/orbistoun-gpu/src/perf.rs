@@ -139,6 +139,10 @@ macro_rules! span_labels {
             Span::FillDeferred => $as!("fill: deferred"),
             Span::FillWritten => $as!("fill: written"),
             Span::DeferredRefilled => $as!("deferred: refilled"),
+            Span::BuffersListed => $as!("read back buffers: listed"),
+            Span::BuffersOverflowed => $as!("read back buffers: overflowed"),
+            Span::BuffersWhole => $as!("read back buffers: whole"),
+            Span::BuffersGathered => $as!("read back buffers: gathered"),
             Span::SettlePending => $as!("settle pending frame"),
             Span::ShadersUpFront => $as!("shaders: up front"),
             Span::TexturesEmptied => $as!("emptied: texture caches"),
@@ -612,6 +616,15 @@ pub enum Span {
     /// A deferral a fill overwrites whole, over exactly its pages, turned into that fill with its
     /// guard kept rather than given back and taken again. Counted.
     DeferredRefilled,
+    /// Within [`Self::ReadBackBuffers`]: a slot's list of stored words read back, which answered it.
+    BuffersListed,
+    /// Within [`Self::ReadBackBuffers`]: a slot whose stores overflowed its list, its buffer and mask
+    /// copied back on the device and waited for.
+    BuffersOverflowed,
+    /// Within [`Self::ReadBackBuffers`]: a slot's buffer and mask read back whole.
+    BuffersWhole,
+    /// Within [`Self::BuffersListed`]: the list read back, sorted into the words stored.
+    BuffersGathered,
     /// A frame still on the device written back because command-processor work touched its target
     /// before the flip (D714).
     SettlePending,
@@ -631,7 +644,7 @@ pub enum Span {
 
 impl Span {
     /// Every span, in report order.
-    pub const ALL: [Self; 110] = [
+    pub const ALL: [Self; 114] = [
         Self::SubmitCall,
         Self::QueueFull,
         Self::QueuedWrites,
@@ -737,6 +750,10 @@ impl Span {
         Self::FillDeferred,
         Self::FillWritten,
         Self::DeferredRefilled,
+        Self::BuffersListed,
+        Self::BuffersOverflowed,
+        Self::BuffersWhole,
+        Self::BuffersGathered,
         Self::SettlePending,
         Self::ShadersUpFront,
         Self::TexturesEmptied,

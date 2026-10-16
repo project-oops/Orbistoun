@@ -664,7 +664,9 @@ impl BoundBuffers {
         self.slots
             .iter()
             .map(|slot| {
+                use orbistoun_gpu::perf::{Span, SpanGuard};
                 if let Some(list) = &slot.list {
+                    let listing = SpanGuard::start(Span::BuffersListed);
                     let held = read_back(device, &list.staging)?;
                     let answered = |stored, whole| BufferOut {
                         words: Vec::new(),
@@ -672,18 +674,23 @@ impl BoundBuffers {
                         stored,
                         whole,
                     };
-                    match gathered(&held, slot.staging.words)? {
+                    match orbistoun_gpu::perf::span(Span::BuffersGathered, || {
+                        gathered(&held, slot.staging.words)
+                    })? {
                         Gathered::Listed(stored) => return Ok(answered(Some(stored), None)),
                         Gathered::Whole(value) => return Ok(answered(None, Some(value))),
                         Gathered::Overflowed => {}
                     }
                     // More stores than the list holds: the buffer and its mask after all, and the
                     // next few of this size are read back whole from the start.
+                    drop(listing);
+                    let _overflowing = SpanGuard::start(Span::BuffersOverflowed);
                     note_overflow(slot.staging.words);
                     let mut copies = vec![(slot.bound.0, &slot.staging)];
                     copies.extend(slot.mask.as_ref().map(|mask| (mask.bound.0, &mask.staging)));
                     copy_back(device, queue, &copies)?;
                 }
+                let _whole = SpanGuard::start(Span::BuffersWhole);
                 let written = match &slot.mask {
                     Some(mask) => {
                         let mut written = read_back(device, &mask.staging)?;
@@ -996,6 +1003,45 @@ fn copy_back(
     recorded
 }
 
+/// `keyed` - each pair as one integer, its index above its value - in ascending order of index: a
+/// radix sort on the index's bits, eleven at a time and only as many as the largest index has,
+/// where a list is long enough for that to beat comparing. A list's indices are distinct, so the
+/// order is the one a plain sort gives; sorting thousands of pairs by comparison was a fifth of
+/// PPSA25872's run.
+fn by_index(mut keyed: Vec<u64>) -> Vec<u64> {
+    const DIGIT: u32 = 11;
+    const BUCKETS: usize = 1 << DIGIT;
+    if keyed.len() < BUCKETS {
+        keyed.sort_unstable();
+        return keyed;
+    }
+    let largest = keyed.iter().map(|&key| key >> 32).max().unwrap_or(0);
+    let bits = u64::BITS - largest.leading_zeros();
+    let mut spare = vec![0u64; keyed.len()];
+    let mut shift = 32;
+    while shift < 32 + bits {
+        let digit = |key: u64| ((key >> shift) as usize) & (BUCKETS - 1);
+        let mut starts = [0usize; BUCKETS];
+        for &key in &keyed {
+            starts[digit(key)] += 1;
+        }
+        let mut at = 0;
+        for start in &mut starts {
+            let count = *start;
+            *start = at;
+            at += count;
+        }
+        for &key in &keyed {
+            let bucket = &mut starts[digit(key)];
+            spare[*bucket] = key;
+            *bucket += 1;
+        }
+        std::mem::swap(&mut keyed, &mut spare);
+        shift += DIGIT;
+    }
+    keyed
+}
+
 /// What the gathering found in a buffer handed over unread.
 #[derive(Debug, PartialEq, Eq)]
 enum Gathered {
@@ -1025,11 +1071,12 @@ fn gathered(list: &[u32], words: usize) -> Result<Gathered, DispatchError> {
         return Ok(Gathered::Overflowed);
     }
     // Each pair as one integer, its index above its value, so a plain sort orders them by index.
-    let mut keyed: Vec<u64> = pairs[..count * 2]
-        .chunks_exact(2)
-        .map(|pair| u64::from(pair[0]) << 32 | u64::from(pair[1]))
-        .collect();
-    keyed.sort_unstable();
+    let keyed = by_index(
+        pairs[..count * 2]
+            .chunks_exact(2)
+            .map(|pair| u64::from(pair[0]) << 32 | u64::from(pair[1]))
+            .collect(),
+    );
     if keyed
         .last()
         .is_some_and(|&key| (key >> 32) as usize >= words)
@@ -1075,6 +1122,20 @@ fn memory_barrier(
 
 #[cfg(test)]
 mod tests {
+    /// The radix order is a plain sort's, short lists and long, indices high and low.
+    #[test]
+    fn pairs_order_by_index_as_a_plain_sort_does() {
+        for count in [0_u64, 5, 3000, 70_000] {
+            // Distinct indices, scattered: a multiplier coprime to the count's range.
+            let keyed: Vec<u64> = (0..count)
+                .map(|i| ((i * 2_654_435_761) % (count * 7 + 1)) << 32 | (i ^ 0x5a5a))
+                .collect();
+            let mut sorted = keyed.clone();
+            sorted.sort_unstable();
+            assert_eq!(super::by_index(keyed), sorted, "{count} pairs");
+        }
+    }
+
     use ash::vk;
 
     use super::BoundBuffers;
