@@ -2376,8 +2376,18 @@ impl Wavefront<'_> {
                 "this shader reads more than sixteen textures, and sixteen bindings exist (D690)",
             );
         }
-        let user_data = self.resident_descriptor(descriptor)?;
+        // Registers no load reached that still hold the user data they were seeded with read the
+        // user data's texture, whatever a later load puts there: GTA V's intro video shader samples
+        // its luma plane from `s[0:7]` and then loads a volume's descriptor into them.
+        let seeded = (reaching.is_none() && matches!(self.stage, Stage::Compute | Stage::Fragment))
+            .then(|| self.still_seeded(descriptor, model::IMAGE_DESCRIPTOR_REGISTERS))
+            .flatten();
+        let user_data = match seeded {
+            Some(word) => Some(word),
+            None => self.resident_descriptor(descriptor)?,
+        };
         let (table, table_offset) = match self.descriptor_loads.0.get(&descriptor) {
+            _ if seeded.is_some() => (TableBase::default(), None),
             // The load that reached this sample, where the registers took more than one.
             _ if reaching.is_some_and(|(table, _)| table.is_some()) => {
                 let (table, offset) = reaching.unwrap_or_default();

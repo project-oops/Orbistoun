@@ -289,7 +289,8 @@ arity = 1
 purpose = "Reads whether the title may skip its notice screen, as one byte: (flag)."
 edge_cases = [
     "MEASURED (070-user/oneshot-setup-calls arm 4): rc 0x0, and of a 0x40-byte buffer filled with 0xa5 only the first byte changed, to 0x01.",
-    "orbistoun writes the byte 1 and answers 0; a null flag is unmeasured and refused with the placeholder.",
+    "The byte is the system's per-title flag: the console's own NoticeScreenSkipGetFlag lines read 0 at a probe's first launch (20260915-125124-eboot.log 201, after a 120-second NoticeScreenSkipTimerThread started at 175) and 1 for probes launched before (20261006-223035-eboot.log 131, 20261007-102530-eboot.log 526); arm 4's 1 came from such a probe.",
+    "orbistoun writes 0, a first launch, and answers 0; a null flag is unmeasured and refused with the placeholder. Answered 1, PPSA04263 skipped the intro video and legal pages the console shows it (the user's capture).",
 ]
 known_by = "measured"
 cites = "obSCEne REQ-cn10, reports/hardware/20261009-151440-eboot.obs.log, 070-user/oneshot-setup-calls arm 4."

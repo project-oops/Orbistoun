@@ -1530,6 +1530,120 @@ mod tests {
         assert!(refused.contains("more than sixteen textures"), "{refused}");
     }
 
+    /// GTA V's intro video shader (`0x740043183c00`), as the title ships it.
+    const GTA_V_VIDEO_SHADER: [u32; 72] = [
+        0xbfa0_0003,
+        0xbefc_031e,
+        0xf408_080e,
+        0xfa00_0020,
+        0xbf8c_c07f,
+        0xf420_1a90,
+        0xfa00_0010,
+        0xbe9e_047e,
+        0xbefe_0a7e,
+        0xc810_0400,
+        0xc814_0500,
+        0xc808_0600,
+        0xc80c_0700,
+        0xc820_0000,
+        0xc811_0401,
+        0xc815_0501,
+        0xc809_0601,
+        0xc80d_0701,
+        0xc81c_0200,
+        0xc818_0100,
+        0xf080_0109,
+        0x00c0_0904,
+        0xc821_0001,
+        0xf080_0109,
+        0x00c2_0502,
+        0xf080_0109,
+        0x00c4_0402,
+        0xc81d_0201,
+        0xc819_0101,
+        0xbf8c_c07f,
+        0x7c09_00f9,
+        0x8686_006a,
+        0xbf8c_3f72,
+        0x1012_12ff,
+        0x3f95_0200,
+        0xbf8c_3f71,
+        0x4004_1305,
+        0xbf50_4000,
+        0x4006_1305,
+        0x3fcc_4300,
+        0xbf8c_3f70,
+        0x400a_1304,
+        0x4001_2400,
+        0x4004_0504,
+        0xbec8_6c00,
+        0x0606_06ff,
+        0xbf5e_e340,
+        0x0608_0aff,
+        0xbf8a_7420,
+        0x060a_04ff,
+        0x3f07_9ac0,
+        0x1004_0708,
+        0x100e_0907,
+        0x1006_0b06,
+        0x7e0a_0302,
+        0x7e08_0307,
+        0xbf86_0007,
+        0xf40c_000e,
+        0xfa00_0000,
+        0xbf8c_c07f,
+        0xf09c_0710,
+        0x00c0_0502,
+        0xbf8c_3f70,
+        0x7e06_0306,
+        0xc800_0300,
+        0x5e04_0705,
+        0xc801_0301,
+        0x5e00_0107,
+        0xbefe_041e,
+        0xf800_1c0f,
+        0x0000_0002,
+        0xbf81_0000,
+    ];
+
+    /// GTA V's intro video shader samples its luma, red and blue planes through descriptors in user
+    /// data `s[0:23]`, then loads a volume's descriptor from its table into `s[0:7]` and samples
+    /// that: the registers were filled by a load no texture before came from, so it is a second
+    /// texture, of its own shape, not the luma plane sampled again as a volume - which was refused,
+    /// and with it every draw of the intro.
+    #[test]
+    fn registers_a_table_load_refills_name_another_texture() {
+        use crate::wavefront::{MeshPrimitive, Stage, UserData};
+        let (table, operands) = tables();
+        let decoded = decode(&stream(&GTA_V_VIDEO_SHADER), &table, &operands);
+        let translated = super::translate_with_user_data(
+            &decoded,
+            &table,
+            Strategy::Predicated {
+                fidelity: Fidelity::Wavefront,
+                width: Width::default(),
+            },
+            (Stage::Fragment, MeshPrimitive::default()),
+            Window::default(),
+            UserData {
+                count: 31,
+                ..UserData::default()
+            },
+        )
+        .expect("the intro video's shader translates");
+        let volumes: Vec<bool> = translated.textures.iter().map(|t| t.volume).collect();
+        assert_eq!(
+            volumes,
+            [false, false, false, true],
+            "three planes, then the volume"
+        );
+        assert_eq!(
+            translated.textures[3].table_offset,
+            Some(0),
+            "loaded from its table"
+        );
+    }
+
     /// SuperTuxKart's compute image copy, as ACO compiled it for radeonsi in the guest: it fetches
     /// from the image whose descriptor is user data `s[8:15]`, and stores to the one it loads from
     /// `s[3] | 4 << 32` at `0x3c0`. It translates as a compute module, and says where each image's

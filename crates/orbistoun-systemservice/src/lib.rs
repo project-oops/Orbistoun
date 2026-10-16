@@ -627,12 +627,16 @@ fn accessibility_zoom_follow_focus(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     accessibility(ACCESSIBILITY[5].0, args)
 }
 
-/// `sceSystemServiceGetNoticeScreenSkipFlag(flag)`: writes one byte, 1, and answers 0 (REQ-cn10
-/// arm 4: of a buffer filled `0xa5`, only its first byte changed, to `01`). A null flag is
+/// `sceSystemServiceGetNoticeScreenSkipFlag(flag)`: writes one byte, the system's skip flag for
+/// this title, and answers 0 (REQ-cn10 arm 4: of a buffer filled `0xa5`, only its first byte
+/// changed). The system holds the flag per title: 0 at a first launch, set once a launch has run
+/// 120 seconds with auto-set on (the console's own `NoticeScreenSkipGetFlag` lines read 0 for a
+/// new probe and 1 for one run before, with a 120-second timer started at launch). A run is a
+/// first launch, so 0 - the 1 cn10 read came from a probe launched many times. A null flag is
 /// unmeasured and refused with the placeholder.
 fn system_service_get_notice_screen_skip_flag(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     // SAFETY: the guest's out-parameter, one byte by the measurement.
-    if args[0] != 0 && unsafe { orbistoun_mem::guest::write_bytes(args[0], &[1]) } {
+    if args[0] != 0 && unsafe { orbistoun_mem::guest::write_bytes(args[0], &[0]) } {
         OK
     } else {
         u64::from(GuestError::InvalidArgument.as_raw())
@@ -1083,6 +1087,21 @@ mod tests {
             super::disable_notice_screen_skip_flag_auto_set(&args),
             super::OK
         );
+    }
+
+    /// A run is the title's first launch, whose notice-screen skip flag the system holds at 0: it
+    /// is set only after a launch has run its 120 seconds with auto-set left on, or by the title.
+    /// GTA V, answered 1, skipped its intro video and legal pages, which the console shows it.
+    #[test]
+    fn the_notice_screen_skip_flag_is_clear_at_a_first_launch() {
+        let mut flag = [0xa5_u8; 4];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = flag.as_mut_ptr() as usize as u64;
+        assert_eq!(
+            super::system_service_get_notice_screen_skip_flag(&args),
+            super::OK
+        );
+        assert_eq!(flag, [0, 0xa5, 0xa5, 0xa5], "one byte, cleared");
     }
 
     #[test]

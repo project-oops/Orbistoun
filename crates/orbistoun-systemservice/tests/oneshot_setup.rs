@@ -13,11 +13,13 @@ fn call(name: &str, args: &[u64]) -> u64 {
     f(&regs)
 }
 
-/// Arm 4: the notice-screen skip flag answers 0 and writes one byte, 1. (Arm 6's accessibility
+/// Arm 4: the notice-screen skip flag answers 0 and writes one byte - 1 there, for a probe launched
+/// many times; 0 here, for a first launch, as the console's own flag lines read for a new probe
+/// (`20260915-125124-eboot.log` 201). (Arm 6's accessibility
 /// getters answered `0x80960002` in that process, whose `sceUserServiceInitialize` was not recorded;
 /// in a fresh process after it they answer their settings, `tests/age_level.rs`.)
 #[test]
-fn the_skip_flag_is_set() {
+fn the_skip_flag_is_one_byte_clear_at_a_first_launch() {
     let mut flag = [0xa5_u8; 0x40];
     assert_eq!(
         call(
@@ -26,7 +28,7 @@ fn the_skip_flag_is_set() {
         ),
         0
     );
-    assert_eq!(flag[0], 1);
+    assert_eq!(flag[0], 0);
     assert!(flag[1..].iter().all(|&b| b == 0xa5), "one byte written");
 }
 

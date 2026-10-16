@@ -6671,6 +6671,32 @@ fn tiled_volume_texture(
     if destination_selects(words[3]) != IDENTITY_SELECTS || descriptor.compression.is_some() {
         return None;
     }
+    // One texel lies at the surface's first bytes in every swizzle mode: each address bit is an
+    // exclusive-or of coordinate bits (`gfx10addrlib.cpp:4345`), all zero here, with no pipe and
+    // bank xor to add.
+    if (
+        descriptor.width,
+        descriptor.height,
+        words[4] & DEPTH_FIELD,
+        descriptor.levels,
+    ) == (1, 1, 0, 1)
+        && descriptor.pipe_bank_xor == 0
+    {
+        let texel = memory.read(descriptor.base, 4)?;
+        let texels: std::sync::Arc<[u32]> =
+            [u32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]])].into();
+        let encoding = texture_encoding(format);
+        return Some(RenderCommand::BindVolumeTexture {
+            slot,
+            hash: crate::content_hash(&texels) ^ u64::from(encoding_tag(encoding)),
+            texels,
+            width: 1,
+            height: 1,
+            depth: 1,
+            sampling: crate::registers::TextureSampling::default(),
+            encoding,
+        });
+    }
     let surface = tiled_surface(descriptor, words, format, true)?;
     let (width, height) = surface.extent();
     let depth = surface.depth();
@@ -9881,6 +9907,40 @@ mod tests {
         let mut tiled = vec![0_u8; volume.bytes()];
         volume.tile(&texels, &mut tiled).expect("tiled back");
         assert!(tiled == spanned, "tiled back to the same bytes");
+    }
+
+    /// A volume of one texel binds whatever its swizzle mode: every gfx10 equation forms each address
+    /// bit as an exclusive-or of coordinate bits (`gfx10addrlib.cpp:4345`,
+    /// `ComputeOffsetFromEquation`), so with no pipe and bank xor texel (0, 0, 0) is the surface's
+    /// first bytes. GTA V's intro video grades its colour through such a volume, in `4KB_S`
+    /// (`0xa0500fac`), and the draw was refused.
+    #[test]
+    fn a_one_texel_volume_binds_in_any_swizzle_mode() {
+        use super::{RenderCommand, texture_from_words};
+        struct Memory(Vec<u8>);
+        impl super::GuestMemory for Memory {
+            fn read(&self, address: u64, length: usize) -> Option<&[u8]> {
+                let start = usize::try_from(address.checked_sub(0x10_0000)?).ok()?;
+                self.0.get(start..start.checked_add(length)?)
+            }
+        }
+        let mut bytes = vec![0_u8; 0x1000];
+        bytes[..4].copy_from_slice(&0x8040_2010_u32.to_le_bytes());
+        let words = [0x10_0000 >> 8, 56 << 20, 0, 0xa050_0fac, 0, 0, 0, 0];
+        let bound = texture_from_words(words, 3, &Memory(bytes), &mut super::TexelCache::new())
+            .expect("a volume");
+        let RenderCommand::BindVolumeTexture {
+            slot: 3,
+            texels,
+            width: 1,
+            height: 1,
+            depth: 1,
+            ..
+        } = bound
+        else {
+            panic!("{bound:?}");
+        };
+        assert_eq!(&*texels, [0x8040_2010]);
     }
 
     /// A draw samples a tiled ten-bit volume as a dispatch reads it (D823): a `2_10_10_10_UNORM`
