@@ -1,0 +1,16 @@
+library = "libSceContentDelete"
+
+[[function]]
+name = "sceContentDeleteInitialize"
+arity = 1
+purpose = "(param): initialises content deletion for the process."
+returns = "status"
+edge_cases = [
+    "MEASURED (REQ-gt03, 000-boot/gt03-contentdelete, bound by link after sceSysmoduleLoadModule(0x00ee), PPSA04263's block - u64 4, u64 0x4000, u64 0x1c, a pointer): 0x0 the first time and 0x809d5003 the second, the block left as it was both times.",
+    "MEASURED (REQ-gt02): a null and a zeroed block answered 0x809d5001.",
+    "orbistoun answers the PPSA04263 block as measured; any other shape, a null block among them, is unmeasured here and answers the placeholder.",
+]
+known_by = "measured"
+cites = "obSCEne REQ-20261016T1156Z-gt03, reports/report-1792154079.txt lines 2636-2643; REQ-20261015T2025Z-gt02, reports/hardware/20261016-000300-eboot.log lines 4980-4984."
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-16"
