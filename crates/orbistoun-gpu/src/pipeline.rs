@@ -212,6 +212,84 @@ pub fn shader_name(resource: ResourceId) -> Option<String> {
         .map(|(stage, address)| format!("{stage}-{address:x}"))
 }
 
+/// The descriptor formats each vertex shader's format loads converted by at its latest draw, by
+/// shader address.
+fn vertex_formats()
+-> &'static std::sync::Mutex<BTreeMap<u64, orbistoun_translate::wavefront::BufferFormats>> {
+    static FORMATS: std::sync::Mutex<BTreeMap<u64, orbistoun_translate::wavefront::BufferFormats>> =
+        std::sync::Mutex::new(BTreeMap::new());
+    &FORMATS
+}
+
+/// Records the formats the vertex shader at `address` was prepared with for a draw.
+fn note_vertex_formats(
+    address: u64,
+    formats: Option<orbistoun_translate::wavefront::BufferFormats>,
+) {
+    if let Some(formats) = formats {
+        vertex_formats()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(address, formats);
+    }
+}
+
+/// What a vertex shader's format loads converted by at its latest draw, each resolved slot with its
+/// format's name (`orbistoun-shader/data/buffer-formats.toml`, codes measured against the reference
+/// disassembler) and its channel selects - `x`..`w`, or `0` and `1` - read from `SQ_BUF_RSRC_WORD3`'s
+/// `DST_SEL_X..W` and `FORMAT` fields (Mesa `src/amd/registers/gfx10-rsrc.json:329-335`), with the
+/// select codes the translator's typed loads read them by. `None` for a shader no draw resolved
+/// formats for.
+#[must_use]
+pub fn vertex_formats_line(address: u64) -> Option<String> {
+    let formats = *vertex_formats()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&address)?;
+    let table = orbistoun_shader::FormatTable::builtin().unwrap_or_default();
+    let select = |code: u32| match code {
+        0 => "0",
+        1 => "1",
+        4 => "x",
+        5 => "y",
+        6 => "z",
+        7 => "w",
+        _ => "?",
+    };
+    let parts: Vec<String> = formats
+        .slots()
+        .enumerate()
+        .filter_map(|(slot, word)| {
+            let word = word?;
+            let name = table.get(word >> 12 & 0x7f).map_or_else(
+                || format!("format {}", word >> 12 & 0x7f),
+                |f| f.name.clone(),
+            );
+            Some(format!(
+                "slot {slot} {name} ({} {} {} {})",
+                select(word & 7),
+                select(word >> 3 & 7),
+                select(word >> 6 & 7),
+                select(word >> 9 & 7)
+            ))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// [`vertex_formats_line`] for the vertex shader `resource` was prepared from; `None` for any other
+/// module.
+#[must_use]
+pub fn bound_vertex_formats(resource: ResourceId) -> Option<String> {
+    let (stage, address) = *shader_addresses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&resource)?;
+    (stage == "vertex")
+        .then(|| vertex_formats_line(address))
+        .flatten()
+}
+
 /// Each shader the run's draws were prepared with, listed one instruction a line, named by its
 /// stage and address (`fragment-74005000`).
 #[must_use]
@@ -340,6 +418,22 @@ fn with_unnamed_census(
 #[cfg(test)]
 mod refusal_tests {
     use orbistoun_shader::{EncodingTable, OperandTable, decode_program};
+
+    /// The format each of a vertex shader's format loads converts by at its latest draw is said by
+    /// slot, with the format's name and the channel selects: GTA V's logo vertices are packed
+    /// 16-bit pairs, and which format reads them decides where they land.
+    #[test]
+    fn a_vertex_shader_s_formats_are_named() {
+        let mut formats = orbistoun_translate::wavefront::BufferFormats::default();
+        // FORMAT 24 (`BUF_FMT_16_16_SNORM`) in bits 18:12, selects x, y, 0, 1.
+        formats.set(2, Some(24 << 12 | 1 << 9 | 5 << 3 | 4));
+        super::note_vertex_formats(0x7400_7000, Some(formats));
+        assert_eq!(
+            super::vertex_formats_line(0x7400_7000).as_deref(),
+            Some("slot 2 BUF_FMT_16_16_SNORM (x y 0 1)")
+        );
+        assert_eq!(super::vertex_formats_line(0x7400_7100), None);
+    }
 
     /// A module is named by the guest shader it was prepared from: its stage and address, the name
     /// a draw-program listing has. Ids far from any the live pipeline hands out.
@@ -4381,6 +4475,7 @@ impl Pipeline {
                 self.draw_buffer_formats(candidate.address, (words, &system), memory)
             })
             .flatten();
+        note_vertex_formats(candidate.address, buffer_formats);
         self.prepare_with_geometry(
             candidate,
             (memory, Some(geometry.clone()), needs, window_space),

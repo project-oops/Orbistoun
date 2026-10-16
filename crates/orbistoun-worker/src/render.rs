@@ -1365,6 +1365,17 @@ fn log_draw_changes(submission: &Submission) {
         }
         before = after;
     }
+    // A draw that changed nothing may never have run: what the backend refused of the submission,
+    // driven whole the same way, says which.
+    let whole_outcome = render(&whole).outcome;
+    let _ = write!(
+        said,
+        "\n  driven whole: {} command(s) carried out, {} refused",
+        whole_outcome.executed, whole_outcome.refused
+    );
+    for (why, count) in &whole_outcome.refusals {
+        let _ = write!(said, "\n    refused {count:>4}  {why}");
+    }
     tracing::info!("{said}");
 }
 
@@ -1741,14 +1752,19 @@ fn command_line(command: &orbistoun_gpu::RenderCommand) -> String {
         // Named by the guest shader it was made from, as its draw-program listing is, so a draw's
         // code is found from its bind.
         orbistoun_gpu::RenderCommand::BindShader { stage, shader } => {
-            orbistoun_gpu::pipeline::shader_name(*shader).map_or_else(
+            let line = orbistoun_gpu::pipeline::shader_name(*shader).map_or_else(
                 || format!("BindShader {{ stage: {stage:?}, shader: {shader:x?} }}"),
                 |name| {
                     format!(
                         "BindShader {{ stage: {stage:?}, shader: {shader:x?}, draw-program-{name} }}"
                     )
                 },
-            )
+            );
+            // What a vertex shader's format loads converted by: where its vertices land rests on it.
+            match orbistoun_gpu::pipeline::bound_vertex_formats(*shader) {
+                Some(formats) => format!("{line}, formats {formats}"),
+                None => line,
+            }
         }
         orbistoun_gpu::RenderCommand::BindTexture {
             slot,
