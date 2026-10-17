@@ -19,6 +19,8 @@ use orbistoun_core::{GUEST_ARG_REGISTERS, GuestFn};
 use orbistoun_hle::guest_module;
 use orbistoun_mem::guest;
 
+use crate::uds_stats::{Comparator, Event, Rules};
+
 guest_module! {
     "libSceNpTrophy2" {
         // (context *, user, service label, options)
@@ -121,13 +123,24 @@ pub struct Trophy {
     /// The value a progressive trophy counts up to.
     pub target: Option<u64>,
     /// The universal-data statistic whose value earns it, if one does.
-    pub stat: Option<u64>,
+    pub unlock: Option<Unlock>,
     /// Its name, in the set's language.
     pub name: String,
     /// What earns it.
     pub detail: String,
     /// The reward it brings.
     pub reward: String,
+}
+
+/// What earns a trophy: a universal-data statistic meeting a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unlock {
+    /// The statistic.
+    pub stat: u64,
+    /// How it compares to the target.
+    pub comparator: Comparator,
+    /// The target.
+    pub target: i64,
 }
 
 /// A title's trophy set, read from its trophy pack.
@@ -270,9 +283,14 @@ pub fn read_pack(pack: &[u8]) -> Option<Pack> {
                             .and_then(read_unsigned)
                     })
                     .flatten(),
-                stat: condition
-                    .and_then(|c| c.get("udsStatId"))
-                    .and_then(read_unsigned),
+                unlock: condition.and_then(|c| {
+                    Some(Unlock {
+                        stat: c.get("udsStatId").and_then(read_unsigned)?,
+                        comparator: Comparator::parse(c.get("comparator")?.as_str()?)?,
+                        target: i64::try_from(c.get("targetValue").and_then(read_unsigned)?)
+                            .ok()?,
+                    })
+                }),
                 name: String::new(),
                 detail: String::new(),
                 reward: String::new(),
@@ -293,11 +311,16 @@ pub fn read_pack(pack: &[u8]) -> Option<Pack> {
     Some(set)
 }
 
-/// One user's record of a trophy set: what they have earned, and when.
+/// One user's record of a trophy set: what they have earned, and when, and the statistics that
+/// earn the rest.
 #[derive(Debug, Clone)]
 struct Book {
     /// The set.
     pack: Arc<Pack>,
+    /// The title's extraction rules, where it ships a universal-data pack.
+    rules: Option<Arc<Rules>>,
+    /// Each statistic the user's events have moved, by identifier.
+    stats: BTreeMap<u64, i64>,
     /// Each trophy earned, with the tick it was earned at.
     earned: BTreeMap<i32, u64>,
     /// The guest path the record is kept at, or `None` for one kept only in memory.
@@ -364,28 +387,70 @@ impl Book {
         newly
     }
 
-    /// The record as kept: each earned trophy with its tick.
+    /// Folds `event` into the statistics by the title's rules, and earns, at `tick`, each trophy
+    /// whose statistic now meets its target. Answers what was newly earned.
+    fn post(&mut self, event: &Event, tick: u64) -> Vec<i32> {
+        let Some(rules) = self.rules.clone() else {
+            return Vec::new();
+        };
+        let changed = rules.apply(&mut self.stats, event);
+        let met: Vec<i32> = self
+            .pack
+            .trophies
+            .values()
+            .filter(|trophy| {
+                trophy.unlock.is_some_and(|unlock| {
+                    changed.contains(&unlock.stat)
+                        && self
+                            .stats
+                            .get(&unlock.stat)
+                            .is_some_and(|value| unlock.comparator.holds(value, &unlock.target))
+                })
+            })
+            .map(|trophy| trophy.id)
+            .collect();
+        met.into_iter()
+            .flat_map(|trophy| self.earn(trophy, tick))
+            .collect()
+    }
+
+    /// The record as kept: each earned trophy with its tick, and each statistic.
     fn to_json(&self) -> String {
         let earned: serde_json::Map<String, serde_json::Value> = self
             .earned
             .iter()
             .map(|(id, tick)| (id.to_string(), serde_json::Value::from(*tick)))
             .collect();
-        serde_json::json!({ "commId": self.pack.comm_id, "earned": earned }).to_string()
+        let stats: serde_json::Map<String, serde_json::Value> = self
+            .stats
+            .iter()
+            .map(|(id, value)| (id.to_string(), serde_json::Value::from(*value)))
+            .collect();
+        serde_json::json!({ "commId": self.pack.comm_id, "earned": earned, "stats": stats })
+            .to_string()
     }
 
-    /// The earned trophies a kept record holds.
-    fn earned_from_json(text: &str) -> BTreeMap<i32, u64> {
+    /// The earned trophies and the statistics a kept record holds.
+    fn kept_from_json(text: &str) -> (BTreeMap<i32, u64>, BTreeMap<u64, i64>) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-            return BTreeMap::new();
+            return (BTreeMap::new(), BTreeMap::new());
         };
-        value
-            .get("earned")
-            .and_then(serde_json::Value::as_object)
-            .into_iter()
-            .flatten()
+        let table = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default()
+        };
+        let earned = table("earned")
+            .iter()
             .filter_map(|(id, tick)| Some((id.parse().ok()?, tick.as_u64()?)))
-            .collect()
+            .collect();
+        let stats = table("stats")
+            .iter()
+            .filter_map(|(id, value)| Some((id.parse().ok()?, value.as_i64()?)))
+            .collect();
+        (earned, stats)
     }
 
     /// Writes the record where it is kept.
@@ -449,23 +514,35 @@ fn pack_path(label: u32) -> String {
     format!("/app0/sce_sys/trophy2/trophy{label:02}.ucp")
 }
 
+/// The guest path of the universal-data pack for `label`, whose rules turn events into the
+/// statistics trophies are earned by.
+fn rules_path(label: u32) -> String {
+    format!("/app0/sce_sys/uds/uds{label:02}.ucp")
+}
+
 /// The guest path `user`'s record of the set `comm_id` is kept at.
 fn record_path(comm_id: &str, user: u32) -> String {
     format!("/data/sce_trophy2/{comm_id}/user-{user}.json")
 }
 
-/// `user`'s record of the set for `label`, read from the title's pack and the record a previous run
-/// kept, or `None` when the title has no pack for it.
+/// `user`'s record of the set for `label`, read from the title's packs and the record a previous run
+/// kept, or `None` when the title has no trophy pack for it.
 fn load_book(user: u32, label: u32) -> Option<Book> {
     let host = orbistoun_fs::mount::resolve_existing(&pack_path(label))?;
     let pack = read_pack(&std::fs::read(host).ok()?)?;
+    let rules = orbistoun_fs::mount::resolve_existing(&rules_path(label))
+        .and_then(|host| std::fs::read(host).ok())
+        .and_then(|bytes| Rules::read(&bytes))
+        .map(Arc::new);
     let kept_at = record_path(&pack.comm_id, user);
-    let earned = orbistoun_fs::mount::resolve_existing(&kept_at)
+    let (earned, stats) = orbistoun_fs::mount::resolve_existing(&kept_at)
         .and_then(|host| std::fs::read_to_string(host).ok())
-        .map(|text| Book::earned_from_json(&text))
+        .map(|text| Book::kept_from_json(&text))
         .unwrap_or_default();
     Some(Book {
         pack: Arc::new(pack),
+        rules,
+        stats,
         earned,
         kept_at: Some(kept_at),
     })
@@ -772,18 +849,26 @@ fn destroy_context(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
-/// Records `trophy` earned by `user` in the set for `label`, now, with the platinum it completes,
-/// and keeps the record: what the universal data system earns a trophy through. Answers what was
-/// newly earned - nothing for a trophy earned before, or a set not open.
-pub fn earn(user: u32, label: u32, trophy: i32) -> Vec<i32> {
+/// Folds `event`, which `user` posted through the universal data system, into the statistics of
+/// the set for `label`, and earns now each trophy a statistic meets, with the platinum it
+/// completes; the record is kept when anything moved. The set is opened from the title's packs
+/// when no context has opened it. Answers what was newly earned.
+pub fn post_event(user: u32, label: u32, event: &Event) -> Vec<i32> {
     let (seconds, nanos) = orbistoun_hle::clocks::wall_clock();
     let tick = crate::rtc::tick_at(seconds, nanos);
     let mut state = trophies();
-    let Some(book) = state.books.get_mut(&(user, label)) else {
+    let key = (user, label);
+    if !state.books.contains_key(&key)
+        && let Some(opened) = load_book(user, label)
+    {
+        state.books.insert(key, opened);
+    }
+    let Some(book) = state.books.get_mut(&key) else {
         return Vec::new();
     };
-    let newly = book.earn(trophy, tick);
-    if !newly.is_empty() {
+    let before = book.stats.clone();
+    let newly = book.post(event, tick);
+    if !newly.is_empty() || book.stats != before {
         book.keep();
     }
     newly
@@ -810,11 +895,11 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A trophy pack holding `entries`, laid out as a title's is.
-    fn pack_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(crate) fn pack_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let table = PACK_HEADER_BYTES + entries.len() * 0x40;
         let mut pack = vec![0_u8; table];
         pack[..4].copy_from_slice(&PACK_MAGIC.to_be_bytes());
@@ -841,10 +926,11 @@ mod tests {
             "groups":[{"id":"0001"}],
             "trophies":[{"id":"0000","grade":"P"},
               {"id":"0001","grade":"B","hidden":true,"platinumTrophyId":"0000",
-               "unlockCondition":{"udsStatId":"19","targetValue":"1","progressive":false}},
-              {"id":"0002","grade":"B","platinumTrophyId":"0000"},
+               "unlockCondition":{"udsStatId":"19","comparator":"ge","targetValue":"1","progressive":false}},
+              {"id":"0002","grade":"B","platinumTrophyId":"0000",
+               "unlockCondition":{"udsStatId":"20","comparator":"ge","targetValue":"1","progressive":false}},
               {"id":"0003","grade":"G","groupId":"0001","hasReward":true,
-               "unlockCondition":{"udsStatId":"40","targetValue":"25","progressive":true}}]}"#;
+               "unlockCondition":{"udsStatId":"40","comparator":"ge","targetValue":"25","progressive":true}}]}"#;
         let meta = br#"{"metadata":{"titleMetadata":{"name":"A Title"},
             "groupMetadata":[{"id":"0001","name":"An Expansion"}],
             "trophyMetadata":[{"id":"0000","name":"All","detail":"Earn every trophy"},
@@ -885,10 +971,21 @@ mod tests {
                 first.group,
                 first.platinum,
                 first.hidden,
-                first.stat,
+                first.unlock,
                 first.target
             ),
-            (Grade::Bronze, BASE_GROUP, Some(0), true, Some(19), None)
+            (
+                Grade::Bronze,
+                BASE_GROUP,
+                Some(0),
+                true,
+                Some(Unlock {
+                    stat: 19,
+                    comparator: Comparator::AtLeast,
+                    target: 1
+                }),
+                None
+            )
         );
         let third = &set.trophies[&3];
         assert_eq!(
@@ -901,13 +998,70 @@ mod tests {
         );
     }
 
-    /// A book over the sample set, kept nowhere.
+    /// The sample set's rules: trophies 1 and 2 count `_UnlockTrophy` into statistics 19 and 20,
+    /// and trophy 3's progress is the greatest `_UpdateTrophyProgress` into statistic 40.
+    fn sample_rules() -> Rules {
+        let definitions = br#"{"statDefinitionArray":[
+            {"statId":19,"aggregation":"count","maxValue":"1","minValue":"0","initialValue":"0"},
+            {"statId":20,"aggregation":"count","maxValue":"1","minValue":"0","initialValue":"0"},
+            {"statId":40,"aggregation":"max","initialValue":"0"}]}"#;
+        let extraction = br#"{"statsExtractionRuleArray":[
+            {"condition":{"eventName":"_UnlockTrophy","property":{"path":"$._trophy_id","comparator":"==","value":"1"}},
+             "action":{"output":{"statId":19}}},
+            {"condition":{"eventName":"_UnlockTrophy","property":{"path":"$._trophy_id","comparator":"==","value":"2"}},
+             "action":{"output":{"statId":20}}},
+            {"condition":{"eventName":"_UpdateTrophyProgress","property":{"path":"$._trophy_id","comparator":"==","value":"3"}},
+             "action":{"input":"$._trophy_progress","output":{"statId":40}}}]}"#;
+        Rules::read(&pack_of(&[
+            ("stats_definition.json", definitions),
+            ("stats_extraction.json", extraction),
+        ]))
+        .expect("the sample rules read")
+    }
+
+    /// A book over the sample set and its rules, kept nowhere.
     fn sample_book() -> Book {
         Book {
             pack: Arc::new(read_pack(&sample_pack()).expect("the sample set reads")),
+            rules: Some(Arc::new(sample_rules())),
+            stats: BTreeMap::new(),
             earned: BTreeMap::new(),
             kept_at: None,
         }
+    }
+
+    /// An event of `name` with integer properties.
+    fn event(name: &str, properties: &[(&str, i64)]) -> Event {
+        Event {
+            name: name.to_owned(),
+            properties: properties
+                .iter()
+                .map(|(path, value)| ((*path).to_owned(), crate::uds_stats::Value::Int(*value)))
+                .collect(),
+        }
+    }
+
+    /// A trophy is earned when the event its statistic counts is posted, and a progressive one when
+    /// its progress reaches the target; what was posted is kept with what was earned.
+    #[test]
+    fn posted_events_earn_the_trophies_their_statistics_meet() {
+        let mut book = sample_book();
+        let unlock = |id| event("_UnlockTrophy", &[("$._trophy_id", id)]);
+        let progress = |value| {
+            event(
+                "_UpdateTrophyProgress",
+                &[("$._trophy_id", 3), ("$._trophy_progress", value)],
+            )
+        };
+        assert_eq!(book.post(&unlock(9), 1), Vec::<i32>::new());
+        assert_eq!(book.post(&unlock(1), 2), vec![1]);
+        assert_eq!(book.post(&unlock(1), 3), Vec::<i32>::new());
+        assert_eq!(book.post(&progress(24), 4), Vec::<i32>::new());
+        assert_eq!(book.post(&progress(25), 5), vec![3]);
+        assert_eq!(book.post(&unlock(2), 6), vec![2, 0]);
+        let (earned, stats) = Book::kept_from_json(&book.to_json());
+        assert_eq!(earned, BTreeMap::from([(0, 6), (1, 2), (2, 6), (3, 5)]));
+        assert_eq!(stats, BTreeMap::from([(19, 1), (20, 1), (40, 25)]));
     }
 
     /// Earning every trophy towards a platinum earns the platinum with the last; a platinum is not
@@ -920,7 +1074,7 @@ mod tests {
         assert_eq!(book.earn(1, 11), Vec::<i32>::new());
         assert_eq!(book.earn(2, 20), vec![2, 0]);
         assert_eq!(book.earned, BTreeMap::from([(0, 20), (1, 10), (2, 20)]));
-        let kept = Book::earned_from_json(&book.to_json());
+        let (kept, _) = Book::kept_from_json(&book.to_json());
         assert_eq!(kept, book.earned);
     }
 
@@ -1010,7 +1164,8 @@ mod tests {
         assert_eq!(get_game_info(&[made, 1, details_at, 0, 0, 0]), 0);
         assert_eq!(&details[24..32], b"A Title\0");
 
-        assert_eq!(earn(1, label as u32, 2), vec![2]);
+        let unlock = event("_UnlockTrophy", &[("$._trophy_id", 2)]);
+        assert_eq!(post_event(1, label as u32, &unlock), vec![2]);
         let mut data = [0_u8; TROPHY_DATA_BYTES];
         let data_at = data.as_mut_ptr() as u64;
         assert_eq!(get_trophy_info(&[made, 1, 2, 0, data_at, 0]), 0);
