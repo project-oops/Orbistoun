@@ -92,3 +92,35 @@ to = "D0E"
 [[substitution]]
 from = "D0E"
 to = "D1E"
+
+# A typed setter beside its siblings: the vendor names each setter of a property family by the
+# value type it takes, so a held `...SetString` is one substitution from the setter of every other
+# type. The types are the ones a title's own universal-data configuration declares for its event
+# properties (`int32`, `float32`, ... in `sce_sys/uds/uds00.ucp`).
+[[substitution]]
+from = "SetString"
+to = "SetInt32"
+
+[[substitution]]
+from = "SetString"
+to = "SetUInt32"
+
+[[substitution]]
+from = "SetString"
+to = "SetInt64"
+
+[[substitution]]
+from = "SetString"
+to = "SetUInt64"
+
+[[substitution]]
+from = "SetString"
+to = "SetFloat32"
+
+[[substitution]]
+from = "SetString"
+to = "SetFloat64"
+
+[[substitution]]
+from = "SetString"
+to = "SetBool"

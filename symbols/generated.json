@@ -26474,9 +26474,23 @@
     "sceNpUniversalDataSystemDestroyRecordArray",
     "sceNpUniversalDataSystemDestroyRecordData",
     "sceNpUniversalDataSystemDestroyRecordObject",
+    "sceNpUniversalDataSystemEventPropertyArraySetBool",
+    "sceNpUniversalDataSystemEventPropertyArraySetFloat32",
+    "sceNpUniversalDataSystemEventPropertyArraySetFloat64",
+    "sceNpUniversalDataSystemEventPropertyArraySetInt32",
+    "sceNpUniversalDataSystemEventPropertyArraySetInt64",
     "sceNpUniversalDataSystemEventPropertyArraySetString",
+    "sceNpUniversalDataSystemEventPropertyArraySetUInt32",
+    "sceNpUniversalDataSystemEventPropertyArraySetUInt64",
     "sceNpUniversalDataSystemEventPropertyObjectSetArray",
+    "sceNpUniversalDataSystemEventPropertyObjectSetBool",
+    "sceNpUniversalDataSystemEventPropertyObjectSetFloat32",
+    "sceNpUniversalDataSystemEventPropertyObjectSetFloat64",
+    "sceNpUniversalDataSystemEventPropertyObjectSetInt32",
+    "sceNpUniversalDataSystemEventPropertyObjectSetInt64",
     "sceNpUniversalDataSystemEventPropertyObjectSetString",
+    "sceNpUniversalDataSystemEventPropertyObjectSetUInt32",
+    "sceNpUniversalDataSystemEventPropertyObjectSetUInt64",
     "sceNpUniversalDataSystemGetMemoryStat",
     "sceNpUniversalDataSystemInitialize",
     "sceNpUniversalDataSystemIntAbortHandle",
@@ -188795,11 +188809,53 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceNpUniversalDataSystemEventPropertyArraySetBool": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetBool",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyArraySetFloat32": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetFloat32",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyArraySetFloat64": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetFloat64",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyArraySetInt32": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetInt32",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyArraySetInt64": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetInt64",
+      "on": "2026-10-17"
+    },
     "sceNpUniversalDataSystemEventPropertyArraySetString": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceNpUniversalDataSystemEventPropertyArraySetUInt32": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetUInt32",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyArraySetUInt64": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyArraySetString",
+      "rule": "SetString>SetUInt64",
+      "on": "2026-10-17"
     },
     "sceNpUniversalDataSystemEventPropertyObjectSetArray": {
       "found": "static",
@@ -188807,11 +188863,53 @@
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
     },
+    "sceNpUniversalDataSystemEventPropertyObjectSetBool": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetBool",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyObjectSetFloat32": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetFloat32",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyObjectSetFloat64": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetFloat64",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyObjectSetInt32": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetInt32",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyObjectSetInt64": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetInt64",
+      "on": "2026-10-17"
+    },
     "sceNpUniversalDataSystemEventPropertyObjectSetString": {
       "found": "static",
       "by": "module-strings",
       "from": "titles/obscene/eboot.bin",
       "on": "2026-08-25"
+    },
+    "sceNpUniversalDataSystemEventPropertyObjectSetUInt32": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetUInt32",
+      "on": "2026-10-17"
+    },
+    "sceNpUniversalDataSystemEventPropertyObjectSetUInt64": {
+      "found": "affixed",
+      "seed": "sceNpUniversalDataSystemEventPropertyObjectSetString",
+      "rule": "SetString>SetUInt64",
+      "on": "2026-10-17"
     },
     "sceNpUniversalDataSystemGetMemoryStat": {
       "found": "static",
