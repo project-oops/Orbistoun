@@ -104,6 +104,8 @@ guest_module! {
         // (object, op, value, uaddr, uaddr2): FreeBSD's futex and lock primitive.
         "_umtx_op" => 5,
         "sceKernelAllocateDirectMemory" => 6,
+        // (path): whether a path can be reached; its body is the file system's.
+        "sceKernelCheckReachability" => 1,
         // (start, len): the release that refuses a span not allocated, as the unchecked one already does.
         "sceKernelCheckedReleaseDirectMemory" => 2,
         // A module handle, a name, and where to put the address, measured from a guest's calls (D366).

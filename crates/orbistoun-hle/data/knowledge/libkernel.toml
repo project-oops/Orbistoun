@@ -2762,3 +2762,18 @@ edge_cases = [
 known_by = "measured"
 cites = "obSCEne REQ-20261012T1827Z-1a71, reports/report-1791833977.txt lines 696-723 (000-boot/hardware-queries), FW 12.40"
 found_on = "2026-10-13"
+
+[[function]]
+name = "sceKernelCheckReachability"
+arity = 1
+purpose = "(path): whether a path names a file or directory a process can reach."
+returns = "status"
+edge_cases = [
+    "orbistoun answers 0 when the path resolves, as sceKernelStat would find it, and ENOENT in the vendor 0x800200xx family when it does not; an unreadable path is EINVAL.",
+    "PPSA04263 checks its save directory with it, makes the directory with sceKernelMkdir when the answer is non-zero, and checks again (image+0x2b3e56b).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["Existence is what the reference emulators answer; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"

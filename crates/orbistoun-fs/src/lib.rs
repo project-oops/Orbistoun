@@ -429,6 +429,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         // The body is in `metadata` beside the POSIX form it shares its success path with; the
         // name is declared here (D525).
         ("sceKernelStat", metadata::kernel_stat),
+        (
+            "sceKernelCheckReachability",
+            metadata::kernel_check_reachability,
+        ),
         ("sceKernelFstat", metadata::kernel_fstat),
         ("sceKernelDebugOutText", kernel_debug_out_text),
     ]

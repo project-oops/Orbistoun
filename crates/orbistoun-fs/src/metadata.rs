@@ -253,6 +253,24 @@ pub(crate) fn kernel_stat(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// `sceKernelCheckReachability(path)`: 0 when `path` names a file or directory a guest can reach,
+/// and `ENOENT` in the vendor family when it does not - the existence `sceKernelStat` answers,
+/// without the record (assumed, as the reference emulators answer it). PPSA04263 checks its save
+/// directory with it, makes it when absent and checks again. An unreadable path is `EINVAL`.
+pub(crate) fn kernel_check_reachability(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    // SAFETY: the guest's path argument, a NUL-terminated string by the call's contract.
+    let Some(guest) = (unsafe { orbistoun_mem::guest::read_path(args[0]) }) else {
+        return u64::from(
+            orbistoun_core::GuestError::vendor(orbistoun_core::errno::INVALID).as_raw(),
+        );
+    };
+    if facts_of(&guest).is_some() {
+        OK
+    } else {
+        u64::from(orbistoun_core::GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw())
+    }
+}
+
 /// Writes the `struct stat` of `guest` at `at`, as `sceKernelStat` writes it, for a caller that
 /// names a file another way (the asynchronous file path's identifiers, D782). `false` for a path
 /// nothing answers or an address that cannot be written.
@@ -560,6 +578,23 @@ mod tests {
 
     fn path(text: &str) -> std::ffi::CString {
         std::ffi::CString::new(text).expect("a path")
+    }
+
+    /// A path that exists, file or directory, is reachable; one that does not is `ENOENT`.
+    #[test]
+    fn a_path_is_reachable_when_it_exists() {
+        let _guard = exclusively();
+        an_installation("reachability");
+        let reach = |text: &str| {
+            let guest = path(text);
+            super::kernel_check_reachability(&[guest.as_ptr() as usize as u64, 0, 0, 0, 0, 0])
+        };
+        assert_eq!(reach("/data/save.bin"), super::OK);
+        assert_eq!(reach("/data/sub"), super::OK);
+        assert_eq!(
+            reach("/data/missing"),
+            u64::from(orbistoun_core::GuestError::vendor(orbistoun_core::errno::NO_ENTRY).as_raw())
+        );
     }
 
     /// `sceKernelFstat` answers a vendor code, not POSIX -1, for a bad descriptor (D525).
