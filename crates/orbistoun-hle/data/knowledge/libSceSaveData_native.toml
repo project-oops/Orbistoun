@@ -154,7 +154,7 @@ purpose = "(mount point, param): prepares a mounted save for the transaction par
 returns = "status"
 edge_cases = [
     "param is { resource u32, mode u32, 32 reserved bytes }; PPSA04263 passes the mount point Mount3 gave and mode 0, then opens <mount point>/<file> for writing (image+0x2b3d678).",
-    "orbistoun answers 0 for the mounted save and a live resource, and the placeholder otherwise.",
+    "orbistoun answers 0 for the mounted save and a live resource, making the save writable until it is unmounted, and the placeholder otherwise. PPSA04263 mounts its save read-only (mode 1, or 5 to create it) and writes only after Prepare.",
 ]
 found_by = "generated"
 known_by = "assumed"

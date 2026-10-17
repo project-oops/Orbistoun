@@ -769,9 +769,11 @@ fn names_live_resource(param: u64) -> bool {
 }
 
 /// `sceSaveDataPrepare(mount point, param)`: prepares the save mounted at `mount point` for the
-/// transaction `param` names - `{ resource u32, mode u32 }` - and answers 0; a title then writes
-/// into the save and commits. PPSA04263 prepares the save it mounted, then opens
-/// `<mount point>/<file>` for writing (image+0x2b3d678). A mount point no save is mounted at, or a
+/// transaction `param` names - `{ resource u32, mode u32 }` - and answers 0: the save becomes
+/// writable until it is unmounted, and a title then writes into it and commits. PPSA04263 mounts
+/// its save read-only (mode 1, or 5 to create it, image+0x2b3b05c and +0x2b3b124) and writes only
+/// through a transaction: it prepares the save, then opens `<mount point>/<file>` for writing
+/// (image+0x2b3d678). A mount point no save is mounted at, or a
 /// resource not made, answers the placeholder (assumed, as the reference emulators answer it).
 pub(crate) fn prepare(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let refuse = u64::from(GuestError::Unimplemented.as_raw());
@@ -781,6 +783,7 @@ pub(crate) fn prepare(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     let mounted =
         point.as_deref() == Some(SAVE_MOUNT_POINT.as_bytes()) && MOUNTED.load(Ordering::Acquire);
     if mounted && names_live_resource(args[1]) {
+        orbistoun_fs::mount::allow_writes(SAVE_MOUNT_POINT);
         0
     } else {
         refuse
@@ -841,7 +844,8 @@ mod transaction_tests {
         let mut mount = [0_u8; 0x40];
         mount[..4].copy_from_slice(&crate::signed_in_user().to_le_bytes());
         mount[8..16].copy_from_slice(&(name.as_ptr() as u64).to_le_bytes());
-        mount[0x20..0x24].copy_from_slice(&(2_u32 | 4).to_le_bytes());
+        // Read-only and created, as PPSA04263 mounts it: only the transaction makes it writable.
+        mount[0x20..0x24].copy_from_slice(&(1_u32 | 4).to_le_bytes());
         let mut result = [0_u8; 0x40];
         let mount_args = [
             mount.as_ptr() as u64,
@@ -852,7 +856,15 @@ mod transaction_tests {
             0,
         ];
         assert_eq!(super::mount3(&mount_args), 0);
+        assert!(
+            !orbistoun_fs::mount::is_writable("/savedata0/profile"),
+            "read-only"
+        );
         assert_eq!(super::prepare(&prepare), 0);
+        assert!(
+            orbistoun_fs::mount::is_writable("/savedata0/profile"),
+            "prepared"
+        );
         assert_eq!(super::commit(&[param.as_ptr() as u64, 0, 0, 0, 0, 0]), 0);
         assert_eq!(
             super::delete_transaction_resource(&[resource, 0, 0, 0, 0, 0]),
