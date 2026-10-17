@@ -19,6 +19,8 @@ guest_module! {
         // (user, out)
         "sceNpGetState" => 2,
         // (function, userdata)
+        "sceNpRegisterPremiumEventCallback" => 2,
+        // (function, userdata)
         "sceNpRegisterStateCallbackA" => 2,
         // (id)
         "sceNpUnregisterStateCallbackA" => 1,
@@ -36,6 +38,10 @@ pub fn implementations() -> &'static [(&'static str, GuestFn)] {
         ("sceNpGetAccountIdA", get_account_id_a),
         ("sceNpGetState", get_state),
         ("sceNpRegisterStateCallbackA", register_state_callback_a),
+        (
+            "sceNpRegisterPremiumEventCallback",
+            register_premium_event_callback,
+        ),
         ("sceNpUnregisterStateCallbackA", unregister_state_callback_a),
         ("sceNpSetNpTitleId", set_np_title_id),
     ]
@@ -238,9 +244,37 @@ fn set_np_title_id(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     }
 }
 
+/// The callback a title asked to hear of premium (subscription) events through, and its user data.
+static PREMIUM_CALLBACK: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+
+/// `sceNpRegisterPremiumEventCallback(function, userdata)`: keeps the callback and answers 0. An
+/// offline console has no subscription to report on, so it is never called (assumed, as the
+/// reference emulators answer it). PPSA04263 takes its success path on 0 (`je` at
+/// image+0x25e93fb). A null function answers the placeholder.
+fn register_premium_event_callback(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
+    if args[0] == 0 {
+        return u64::from(orbistoun_core::GuestError::Unimplemented.as_raw());
+    }
+    *PREMIUM_CALLBACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((args[0], args[1]));
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::StateCallbacks;
+
+    /// A premium-event callback is kept and answered 0; a null one is refused.
+    #[test]
+    fn a_premium_event_callback_is_kept() {
+        assert_eq!(
+            super::register_premium_event_callback(&[0x4000, 7, 0, 0, 0, 0]),
+            0
+        );
+        assert_eq!(*super::PREMIUM_CALLBACK.lock().unwrap(), Some((0x4000, 7)));
+        assert_ne!(super::register_premium_event_callback(&[0; 6]), 0);
+    }
 
     /// A registration takes the lowest free slot and answers it plus one; a null function, a
     /// function already registered and a full table are refused with their codes; each registration

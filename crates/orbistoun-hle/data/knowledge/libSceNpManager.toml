@@ -97,3 +97,18 @@ edge_cases = [
 known_by = "assumed"
 assumptions = ["The reference emulators' reading of the shipped libSceNpManager module; obSCEne REQ-20261017T0230Z-gt06 asks the console to confirm."]
 found_on = "2026-10-17"
+
+[[function]]
+name = "sceNpRegisterPremiumEventCallback"
+arity = 2
+purpose = "(function, userdata): registers a callback for premium (subscription) events."
+returns = "status"
+edge_cases = [
+    "orbistoun keeps the callback and answers 0; an offline console has no subscription to report on, so it is never called. A null function answers the placeholder.",
+    "PPSA04263 takes its success path on 0 (`je` at image+0x25e93fb).",
+]
+found_by = "static"
+known_by = "assumed"
+assumptions = ["An offline console's answer, as the reference emulators give it; obSCEne has not measured the call."]
+found_in = ["PPSA04263-app0"]
+found_on = "2026-10-17"
