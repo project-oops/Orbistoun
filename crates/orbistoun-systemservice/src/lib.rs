@@ -471,12 +471,8 @@ fn get_hdr_tone_map_luminance(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     OK
 }
 
-/// `sceUserServiceGetLoginUserIdList(out)` - which users are signed in.
-///
-/// The length of the caller's structure is unmeasured. orbistoun signs in exactly one user, so
-/// this writes one identifier and leaves the rest as the caller had it: zero-filling a tail would
-/// invent a length. A caller that does not clear the structure reads its own stale bytes, a
-/// visible wrong answer rather than a hidden one.
+/// `sceUserServiceGetLoginUserIdList(out)` - which users are signed in: four identifiers, the
+/// signed-in user and three `-1`, as a console wrote them for one signed-in user.
 fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64 {
     if args[0] == 0 {
         return u64::from(GuestError::InvalidArgument.as_raw());
@@ -484,13 +480,13 @@ fn user_service_get_login_user_id_list(args: &[u64; GUEST_ARG_REGISTERS]) -> u64
     let Ok(at) = usize::try_from(args[0]) else {
         return u64::from(GuestError::InvalidArgument.as_raw());
     };
-    // SAFETY: a guest-supplied `int *` in identity-mapped guest memory, written at its declared
-    // four-byte width (D272).
+    // Four identifiers, the unused ones `-1`, as measured for one signed-in user
+    // (`20261011-1791715554-eboot.obs.log` 1930).
+    let list = [signed_in_user(), u32::MAX, u32::MAX, u32::MAX];
+    // SAFETY: a guest-supplied list in identity-mapped guest memory, written at the sixteen bytes
+    // the console was measured writing.
     unsafe {
-        std::ptr::write_unaligned(
-            std::ptr::with_exposed_provenance_mut::<u32>(at),
-            signed_in_user(),
-        );
+        std::ptr::write_unaligned(std::ptr::with_exposed_provenance_mut::<[u32; 4]>(at), list);
     }
     OK
 }
@@ -981,21 +977,6 @@ mod tests {
         assert_ne!(list[0], 0xCC, "and something was actually written");
     }
 
-    /// The login list writes exactly one four-byte identifier (D272) and leaves the tail alone.
-    #[test]
-    fn only_the_first_identifier_is_written() {
-        let mut list = [0xCCu32; 4];
-        let mut args = [0; GUEST_ARG_REGISTERS];
-        args[0] = list.as_mut_ptr() as u64;
-
-        assert_eq!(super::user_service_get_login_user_id_list(&args), 0);
-        assert_eq!(
-            &list[1..],
-            &[0xCCu32; 3],
-            "the tail is the caller's, because its length is not established"
-        );
-    }
-
     /// A null structure is refused rather than written through.
     #[test]
     fn a_null_login_list_is_refused() {
@@ -1102,6 +1083,22 @@ mod tests {
             super::OK
         );
         assert_eq!(flag, [0, 0xa5, 0xa5, 0xa5], "one byte, cleared");
+    }
+
+    /// The signed-in users are four identifiers, the unused ones `-1`, as a console wrote them for
+    /// one signed-in user (`20261011-1791715554-eboot.obs.log` 1930, `130-layout/user-service`:
+    /// `d9f4a21e ffffffff ffffffff ffffffff`).
+    #[test]
+    fn the_login_list_is_four_identifiers_the_unused_minus_one() {
+        let mut list = [0_u32; 5];
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = list.as_mut_ptr() as usize as u64;
+        assert_eq!(super::user_service_get_login_user_id_list(&args), super::OK);
+        assert_eq!(
+            list,
+            [super::signed_in_user(), u32::MAX, u32::MAX, u32::MAX, 0],
+            "four written, nothing past them"
+        );
     }
 
     #[test]

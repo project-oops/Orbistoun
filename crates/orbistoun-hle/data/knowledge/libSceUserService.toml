@@ -19,16 +19,13 @@ found_on = "2026-09-03"
 [[function]]
 name = "sceUserServiceGetLoginUserIdList"
 arity = 1
-purpose = "Reports which users are currently signed in."
+purpose = "Reports which users are currently signed in: four identifiers, the unused ones -1."
 edge_cases = [
-    "IMPLEMENTED as one identifier: orbistoun signs exactly one user in, so the list of signed-in users has exactly one entry, and writing it needs no guess about the structure. It answers the same identifier sceUserServiceGetInitialUser does, through one shared accessor, so the two cannot disagree about who is signed in.",
-    "WHAT IS NOT WRITTEN is the deliberate part. Anything past the first identifier is left as the caller had it, because zero-filling a tail would invent a length nothing has measured. A caller that does not clear the structure first reads its own stale bytes as extra users - a wrong answer that is visible, where a guessed length is a wrong answer that is not.",
+    "MEASURED (130-layout/user-service, 20261011-1791715554-eboot.obs.log 1930): rc 0x0, and the list's sixteen bytes d9f4a21e ffffffff ffffffff ffffffff - the signed-in user, then three -1.",
+    "orbistoun writes the signed-in user it answers for sceUserServiceGetInitialUser, through one shared accessor, then three -1, and nothing past the sixteen bytes.",
 ]
-known_by = "assumed"
-assumptions = [
-    "How many identifiers the structure holds. The symbol has never resolved on any leg obSCEne has run - 130-layout/user-service-layout skips with libSceUserService symbols not available in this context - so nothing has measured its length.",
-    "Whether a console reports more than one signed-in user at once, and if so whether unused slots carry a sentinel. orbistoun models a single signed-in user, so the question has not arisen here.",
-]
+known_by = "measured"
+cites = "obSCEne 130-layout/user-service, reports/hardware/20261011-1791715554-eboot.obs.log line 1930."
 found_in = ["PPSA02664-app0"]
 found_on = "2026-09-03"
 note = "Called 1 time(s) across the recorded corpus; nothing beyond the name and the library is established."
