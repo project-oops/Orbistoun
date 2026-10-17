@@ -1873,6 +1873,7 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
         return u64::from(GuestError::InvalidArgument.as_raw());
     }
     let align = orbistoun_mem::allocation_granularity().max(orbistoun_core::GUEST_PAGE_SIZE);
+    let asked = (base, len);
     let (Some(base), Some(len)) = (
         checked_next_multiple_of(base, align),
         checked_next_multiple_of(len, orbistoun_core::GUEST_PAGE_SIZE),
@@ -1886,17 +1887,50 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
     // Reserve-then-map, as for the named map: a range the guest already reserved is re-protected in
     // place (D460).
     let reserved_before = space.owns(base, len);
+    // A map placed at a fixed address replaces the maps it covers, wholly or in part.
+    let covered = if reserved_before {
+        Vec::new()
+    } else {
+        covered_maps(&space, (base, len))
+    };
     let placed = if reserved_before {
         space.protect(base, len, protection)
-    } else {
+    } else if covered.is_empty() {
         space.reserve(base, len, protection).map(|_| ())
+    } else {
+        drop(space);
+        let replaced = replace_covered(&covered, (base, len), protection);
+        let Ok(relocked) = mappings().lock() else {
+            return u64::from(GuestError::Unimplemented.as_raw());
+        };
+        space = relocked;
+        replaced
     };
-    if placed.is_err() {
+    if let Err(error) = placed {
+        // What was asked and where it went, so a refused map names itself in the run's log rather
+        // than leaving a title to trap on the placeholder (PPSA04263's streaming batch maps).
+        let end = base.saturating_add(len);
+        let overlapping: Vec<String> = space
+            .regions()
+            .filter(|region| region.base < end && base < region.base.saturating_add(region.len))
+            .map(|region| format!("{:#x}+{:#x}", region.base, region.len))
+            .collect();
+        tracing::warn!(
+            "a direct map of physical {physical:#x} at {:#x}+{:#x}, placed at {base:#x}+{len:#x}, \
+             could not be placed: {error}; it overlaps {}",
+            asked.0,
+            asked.1,
+            overlapping.join(", "),
+        );
         return u64::from(GuestError::NoMemory.as_raw());
     }
     drop(space);
-    // Recorded as the named map records its own, so an unmap can release it.
-    if !reserved_before && let Ok(mut whole) = placed_by_mmap().lock() {
+    // Recorded as the named map records its own, so an unmap can release it; a map over others
+    // recorded its own parts as it placed them.
+    if !reserved_before
+        && covered.is_empty()
+        && let Ok(mut whole) = placed_by_mmap().lock()
+    {
         whole.insert(base, len);
     }
     mapping_placed(base, len, protection, true);
@@ -1912,6 +1946,80 @@ fn map_direct_at(base: u64, physical: u64, len: u64, prot: u64) -> u64 {
         );
     }
     OK
+}
+
+/// A mapping a fixed map covers: where it is.
+struct Covered {
+    base: u64,
+    len: u64,
+}
+
+/// The mappings `(base, len)` overlaps.
+fn covered_maps(space: &orbistoun_mem::AddressSpace, (base, len): (u64, u64)) -> Vec<Covered> {
+    let end = base.saturating_add(len);
+    space
+        .regions()
+        .filter(|region| region.base < end && base < region.base.saturating_add(region.len))
+        .map(|region| Covered {
+            base: region.base,
+            len: region.len,
+        })
+        .collect()
+}
+
+/// Places a map at `(base, len)` over the maps it `covered`, as a map placed at a fixed address
+/// takes over what it covers: the parts it covers take its protection where they lie, and the rest
+/// of the range is mapped afresh. Nothing is released, so a part of a covered map outside the range
+/// stays mapped as it was, and another thread using it meanwhile never finds it gone. What the
+/// covered parts held stays: memory both maps view reads as before, and memory a new map views
+/// that orbistoun does not model holds what was there rather than zeroes. PPSA04263's streaming
+/// grows a map in place and maps over half of another.
+///
+/// Only maps are replaced: a range covering a module's image or a thread's stack is refused.
+fn replace_covered(
+    covered: &[Covered],
+    (base, len): (u64, u64),
+    protection: orbistoun_mem::Protection,
+) -> Result<(), orbistoun_mem::MemError> {
+    let refused = orbistoun_mem::MemError::Conflict { base, len };
+    let by_map = placed_by_mmap()
+        .lock()
+        .is_ok_and(|placed| covered.iter().all(|map| placed.contains_key(&map.base)));
+    if !by_map {
+        return Err(refused);
+    }
+    let end = base.saturating_add(len);
+    let Ok(mut space) = mappings().lock() else {
+        return Err(refused);
+    };
+    let mut gaps = Vec::new();
+    let mut at = base;
+    let mut ordered: Vec<&Covered> = covered.iter().collect();
+    ordered.sort_by_key(|map| map.base);
+    for map in ordered {
+        let (from, to) = (
+            map.base.max(base),
+            map.base.saturating_add(map.len).min(end),
+        );
+        if at < from {
+            gaps.push((at, from - at));
+        }
+        space.protect(from, to - from, protection)?;
+        at = at.max(to);
+    }
+    if at < end {
+        gaps.push((at, end - at));
+    }
+    for &(gap, size) in &gaps {
+        space.reserve(gap, size, protection)?;
+    }
+    drop(space);
+    if let Ok(mut placed) = placed_by_mmap().lock() {
+        for &(gap, size) in &gaps {
+            placed.insert(gap, size);
+        }
+    }
+    Ok(())
 }
 
 /// How many mappings this run filled.
@@ -8831,6 +8939,92 @@ mod tests {
     /// whole when the guest unmaps it: the address can be handed to the next buffer. SuperTuxKart
     /// on the host clock had Mesa reuse a retained range's address and every map of it refused,
     /// because nothing the batch placed was ever released.
+    /// A batch map over a range it already mapped replaces it, as a fixed map does, and memory it
+    /// viewed before reads as it did: PPSA04263's streaming grows `0x15508c0000+0x20000` to
+    /// `+0x30000` at the same base and physical offset, and trapped on the refusal.
+    #[test]
+    fn a_batch_map_over_its_own_mapping_replaces_it_and_keeps_its_memory() {
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let size = 0x3_0000_u64;
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = size;
+        args[1] = 0x1_0000;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+        let va = 0x6e70_0000_0000_u64;
+        let batch = |len: u64| {
+            let entry = [va, physical, len, 0x33];
+            let mut completed = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = entry.as_ptr() as usize as u64;
+            args[1] = 1;
+            args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+            super::batch_map(&args)
+        };
+        assert_eq!(batch(0x2_0000), 0, "the first map");
+        // SAFETY: the range was just mapped writable.
+        assert!(unsafe { super::guest::write_bytes(va + 0x1_0000, &[0xab; 16]) });
+        assert_eq!(batch(size), 0, "the larger map over it");
+        let whole = super::mappings().lock().is_ok_and(|space| {
+            (0..size)
+                .step_by(0x4000)
+                .all(|at| space.region_at(va + at).is_some())
+        });
+        assert!(whole, "the larger range is mapped");
+        // SAFETY: the range is mapped readable.
+        let kept = unsafe { super::guest::read_u64(va + 0x1_0000) };
+        assert_eq!(kept, Some(0xabab_abab_abab_abab), "what it held before");
+    }
+
+    /// A batch map over half of another replaces that half: the other half stays mapped with what
+    /// it held, and the half replaced, viewing the same memory, reads as before. PPSA04263 maps
+    /// `0x1552c00000+0x20000` over the first half of `0x1552c10000+0x20000`.
+    #[test]
+    fn a_batch_map_over_half_of_another_keeps_the_other_half() {
+        direct::configure(direct::Settings {
+            map_direct_memory: true,
+            ..direct::Settings::default()
+        });
+        let mut physical = 0_u64;
+        let mut args = [0_u64; GUEST_ARG_REGISTERS];
+        args[0] = 0x3_0000;
+        args[1] = 0x1_0000;
+        args[3] = std::ptr::addr_of_mut!(physical) as usize as u64;
+        assert_eq!(super::allocate_main_direct_memory(&args), 0, "allocated");
+        let va = 0x6e80_0000_0000_u64;
+        let batch = |at: u64, offset: u64, len: u64| {
+            let entry = [va + at, physical + offset, len, 0x33];
+            let mut completed = 0_u64;
+            let mut args = [0_u64; GUEST_ARG_REGISTERS];
+            args[0] = entry.as_ptr() as usize as u64;
+            args[1] = 1;
+            args[2] = std::ptr::addr_of_mut!(completed) as usize as u64;
+            super::batch_map(&args)
+        };
+        assert_eq!(batch(0x1_0000, 0x1_0000, 0x2_0000), 0, "the first map");
+        // SAFETY: the first half was just mapped writable.
+        assert!(unsafe { super::guest::write_bytes(va + 0x1_0000, &[0xab; 8]) });
+        // SAFETY: the second half was just mapped writable.
+        assert!(unsafe { super::guest::write_bytes(va + 0x2_0000, &[0xcd; 8]) });
+        assert_eq!(batch(0, 0, 0x2_0000), 0, "the map over its first half");
+        let mapped = super::mappings().lock().is_ok_and(|space| {
+            (0..0x3_0000)
+                .step_by(0x4000)
+                .all(|at| space.region_at(va + at).is_some())
+        });
+        assert!(mapped, "the new map and the other half");
+        // SAFETY: the replaced half is mapped readable.
+        let replaced = unsafe { super::guest::read_u64(va + 0x1_0000) };
+        // SAFETY: the half left alone is mapped readable.
+        let other = unsafe { super::guest::read_u64(va + 0x2_0000) };
+        assert_eq!(replaced, Some(0xabab_abab_abab_abab), "the same memory");
+        assert_eq!(other, Some(0xcdcd_cdcd_cdcd_cdcd), "the half left alone");
+    }
+
     #[test]
     fn an_unmapped_batch_map_leaves_its_address_free() {
         const PAGE: u64 = 0x4000;
