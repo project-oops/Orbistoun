@@ -1123,6 +1123,25 @@ impl Service {
         )?)
     }
 
+    /// The eight-byte words of the module at `path` from image offset `from`, at most `len` bytes of
+    /// them: a vtable or table in its data.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read or its container parsed.
+    pub fn data_words_path(
+        &self,
+        path: &Path,
+        from: u64,
+        len: usize,
+    ) -> Result<Vec<(u64, u64)>, ServiceError> {
+        let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Ok(orbistoun_loader::inventory::data_words(&bytes, from, len)?)
+    }
+
     /// Reports a container's structure, from disk.
     pub fn inspect_path(&self, path: &Path) -> Result<ContainerInfo, ServiceError> {
         let bytes = std::fs::read(path).map_err(|source| ServiceError::Io {

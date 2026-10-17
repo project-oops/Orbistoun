@@ -43,10 +43,22 @@ pub(crate) fn cmd_disasm(
     service: &Service,
     path: &std::path::Path,
     from: &str,
-    len: usize,
+    (len, words): (usize, bool),
 ) -> Result<()> {
     let offset = image_offset(from)
         .with_context(|| format!("{from} is not an image offset such as image+0x2b42a40"))?;
+    if words {
+        let listed = service.data_words_path(path, offset, len)?;
+        if listed.is_empty() {
+            println!(
+                "image+{offset:#x} lies in no loaded segment, or past the bytes the file holds"
+            );
+        }
+        for (at, word) in listed {
+            println!("image+{at:#x}  {word:#018x}");
+        }
+        return Ok(());
+    }
     let listed = service.disassemble_path(path, offset, len)?;
     if listed.is_empty() {
         println!("image+{offset:#x} lies in no executable segment");

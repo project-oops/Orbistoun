@@ -126,6 +126,9 @@ enum Command {
         /// How many bytes of code to list.
         #[arg(long, default_value_t = 256)]
         len: usize,
+        /// List eight-byte data words there instead of instructions: a vtable or a table.
+        #[arg(long)]
+        words: bool,
     },
     /// Print a default stub-policy file.
     Policy,
@@ -1145,7 +1148,12 @@ fn dispatch_module(command: Command, service: &Service) -> Result<()> {
         Command::Symbols { filter } => cmd_symbols(service, filter.as_deref()),
         Command::Policy => println!("{}", service.default_policy_toml()?),
         Command::Inspect { path } => cmd_inspect(service, &path)?,
-        Command::Disasm { path, from, len } => cmd_disasm(service, &path, &from, len)?,
+        Command::Disasm {
+            path,
+            from,
+            len,
+            words,
+        } => cmd_disasm(service, &path, &from, (len, words))?,
         Command::Nid { names } => {
             for name in &names {
                 println!("{:#018x}  {name}", service.hash_name(name).as_raw());

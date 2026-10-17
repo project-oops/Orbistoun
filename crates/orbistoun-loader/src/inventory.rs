@@ -158,6 +158,38 @@ pub fn disassemble(
     Ok(Vec::new())
 }
 
+/// The eight-byte words of the module `whole` from image offset `from`, at most `len` bytes of them,
+/// each at its image offset: a vtable or a table a report's `image+0x...` names in data. Empty when
+/// `from` lies in no loaded segment, and short where the file holds fewer bytes than the segment
+/// spans (the rest is zero-filled at load, and listed as nothing).
+///
+/// # Errors
+///
+/// When the container cannot be parsed.
+pub fn data_words(whole: &[u8], from: u64, len: usize) -> Result<Vec<(u64, u64)>, LoadError> {
+    let container = Container::parse(whole)?;
+    for (index, header) in container.program_headers()?.iter().enumerate() {
+        let (start, size) = (header.vaddr.get(), header.memsz.get());
+        if header.p_type.get() != PT_LOAD || from < start || from >= start.saturating_add(size) {
+            continue;
+        }
+        let Some(bytes) = container.segment_data(whole, index)? else {
+            continue;
+        };
+        let skip = usize::try_from(from - start).unwrap_or(usize::MAX);
+        let Some(rest) = bytes.get(skip..) else {
+            return Ok(Vec::new());
+        };
+        return Ok(rest
+            .chunks_exact(8)
+            .take(len.div_ceil(8))
+            .zip((from..).step_by(8))
+            .map(|(word, at)| (at, u64::from_le_bytes(word.try_into().unwrap_or_default())))
+            .collect());
+    }
+    Ok(Vec::new())
+}
+
 /// The slot a linkage stub at `target` jumps through - `jmp [rip+rel32]`, `ff 25` - where `target`
 /// lies in `segment`, which starts at `start`.
 fn stub_slot((segment, start): (&[u8], u64), target: u64) -> Option<u64> {
